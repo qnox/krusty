@@ -32499,8 +32499,8 @@ impl<'a> Checker<'a> {
                     && top_level_candidates.iter().any(|candidate| {
                         candidate.visibility == Visibility::Private
                             && candidate
-                                .source_key
-                                .is_some_and(|(source_file, _)| source_file != self.file_index)
+                                .source_file
+                                .is_none_or(|source_file| source_file != self.file_index)
                     })
                     && top_level_candidates
                         .iter()
@@ -51284,20 +51284,12 @@ impl<'a> Checker<'a> {
                     );
                     return None;
                 }
-                let accessible = match function.visibility {
-                    Visibility::Public => true,
-                    Visibility::Internal => {
-                        Self::is_current_module_callable(&function)
-                            || self
-                                .libraries
-                                .internal_accessible(function.callable.owner)
-                    }
-                    Visibility::Private => {
-                        self.module_callable_source_file(&function) == Some(self.file_index)
-                            || function.flags.inline.must_inline()
-                    }
-                    Visibility::PackagePrivate | Visibility::Protected => false,
-                };
+                let accessible = crate::callable_access::source_callable_accessible(
+                    function.visibility,
+                    function.source_file,
+                    Some(self.file_index),
+                    || self.libraries.internal_accessible(function.callable.owner),
+                );
                 if !accessible {
                     inaccessible = true;
                     return None;
@@ -52745,20 +52737,12 @@ impl<'a> Checker<'a> {
                 if function.callable.suspend && !expected.suspend {
                     return None;
                 }
-                let accessible = match function.visibility {
-                    Visibility::Public => true,
-                    Visibility::Internal => {
-                        Self::is_current_module_callable(&function)
-                            || self
-                                .libraries
-                                .internal_accessible(function.callable.owner)
-                    }
-                    Visibility::Private => {
-                        self.module_callable_source_file(&function) == Some(self.file_index)
-                            || function.flags.inline.must_inline()
-                    }
-                    Visibility::PackagePrivate | Visibility::Protected => false,
-                };
+                let accessible = crate::callable_access::source_callable_accessible(
+                    function.visibility,
+                    function.source_file,
+                    Some(self.file_index),
+                    || self.libraries.internal_accessible(function.callable.owner),
+                );
                 if !accessible {
                     inaccessible = true;
                     return None;
@@ -52788,25 +52772,24 @@ impl<'a> Checker<'a> {
                 }
                 let type_arguments = specialization.ok()?;
                 let plan = self.callable_ref_argument_plan(&function, expected)?;
-                if function
-                    .source_key
-                    .is_some_and(|(source_file, _)| source_file != self.file_index)
+                // A stable module identity owns its checked default expressions. The literal
+                // payload is required only for the identity-less cross-file source path.
+                if function.stable_declaration.is_none()
+                    && function
+                        .source_file
+                        .is_some_and(|source_file| source_file != self.file_index)
                 {
-                    let needs_materialized_default = function.stable_declaration.is_none();
                     if let Some(parameter) = plan.iter().enumerate().find_map(
                         |(parameter, argument)| {
                             matches!(argument, AdaptedRefArgument::Default)
                                 .then_some(parameter)
                                 .filter(|&parameter| {
                                     let semantic = function.callable.params[parameter];
-                                    let unavailable = !function
+                                    !function
                                         .default_values
                                         .get(parameter)
                                         .and_then(Option::as_ref)
-                                        .is_some_and(|value| value.fills_param_ty(semantic));
-                                    unavailable
-                                        && (needs_materialized_default
-                                            || self.ty_is_value_class(semantic))
+                                        .is_some_and(|value| value.fills_param_ty(semantic))
                                 })
                         },
                     ) {
@@ -56686,22 +56669,6 @@ impl<'a> Checker<'a> {
         })
     }
 
-    fn module_callable_source_file(
-        &self,
-        candidate: &crate::libraries::FunctionInfo,
-    ) -> Option<u32> {
-        candidate.source_key.map(|(file, _)| file).or_else(|| {
-            candidate
-                .stable_declaration
-                .and_then(|declaration| self.resolved_index?.declaration_anchor(declaration))
-                .map(|anchor| anchor.source.raw())
-        })
-    }
-
-    fn is_current_module_callable(candidate: &crate::libraries::FunctionInfo) -> bool {
-        candidate.stable_declaration.is_some() || candidate.source_key.is_some()
-    }
-
     fn source_callable_visible(&self, candidate: &crate::libraries::FunctionInfo) -> bool {
         if self.suppresses_diagnostic("INVISIBLE_REFERENCE")
             || self.suppresses_diagnostic("INVISIBLE_MEMBER")
@@ -56714,17 +56681,12 @@ impl<'a> Checker<'a> {
         ) {
             return true;
         }
-        match candidate.visibility {
-            Visibility::Public => true,
-            Visibility::Internal => {
-                Self::is_current_module_callable(candidate)
-                    || self.libraries.internal_accessible(candidate.callable.owner)
-            }
-            Visibility::Private => {
-                self.module_callable_source_file(candidate) == Some(self.file_index)
-            }
-            Visibility::PackagePrivate | Visibility::Protected => false,
-        }
+        crate::callable_access::source_callable_accessible(
+            candidate.visibility,
+            candidate.source_file,
+            Some(self.file_index),
+            || self.libraries.internal_accessible(candidate.callable.owner),
+        )
     }
 
     fn implicit_receivers(&self, scope: &CheckerScope<'_>) -> Vec<ImplicitReceiver> {
