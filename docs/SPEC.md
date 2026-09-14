@@ -5118,8 +5118,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameters first and the body's properties after them, so the two agree only when there are no
   constructor `val`s, and reading one as the other names a LATER property. In
   `class P(val n: Int) { val a = n * 2; val b = a + 1 }` every reference to `a` bound to `b`, so
-  `b` read an unwritten field and `p.a` answered with `b` — on both backends, since the wrong
-  identity is fixed before either sees the body (`tests/local_class_e2e.rs`).
+  `b` read an unwritten field and `p.a` answered with `b`. The regression runs both kotlinc-built
+  and krusty-built JVM classes and asserts their exact results (`tests/local_class_e2e.rs`).
 
   WHAT a local class captures is decided in that scope — the only place the enclosing bindings
   exist — and recorded as `TypeInfo::local_class_captures_by_class`. How a capture is represented is

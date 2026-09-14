@@ -127,8 +127,7 @@ fn a_local_class_body_properties_keep_their_own_identities() {
         "krusty must accept the same source without diagnostics",
     );
     assert_eq!(common::kotlinc_box_result(SRC), "OK");
-    // `expect_box_ok_with_stdlib` rather than a bare run: it is the one helper that also puts the
-    // same program through the NATIVE backend, where a wrong property identity has no verifier to
-    // catch it and simply answers with the wrong field.
+    // Run the krusty-built classes too: unlike a verifier failure, the wrong property identity
+    // merely reads the wrong valid field and is observable only in the returned value.
     common::expect_box_ok_with_stdlib(SRC, "LocalClassBodyPropertyIdentity");
 }

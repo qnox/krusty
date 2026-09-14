@@ -69399,19 +69399,17 @@ impl<'a> Checker<'a> {
                         owner: d.0,
                         property: (cl.props.len() + property_index) as u32,
                     };
-                    // Use the exact active class/body-property coordinate. `SourceMember` includes
-                    // constructor properties in its ordinal and cannot identify this declaration.
-                    let stable_declaration = self.active_declarations.and_then(|active| {
-                        active.class_body_property_declaration(
-                            d,
-                            u32::try_from(property_index).expect("too many class properties"),
-                        )
+                    // The active class/body coordinate is the production declaration identity.
+                    let stable_declaration = self.active_declarations.map(|active| {
+                        active
+                            .class_body_property_declaration(
+                                d,
+                                u32::try_from(property_index).expect("too many class properties"),
+                            )
+                            .expect("active local-class body property has no stable declaration")
                     });
-                    // An explicit or already-finalized property type does not need local
-                    // inference, but its declaration still belongs to this body-local classifier
-                    // and therefore is absent from the immutable provider used by member reads.
-                    // Publish that exact checked header into the same bounded overlay as inferred
-                    // properties before deciding whether an initializer must be forced.
+                    // Publish explicit/finalized headers into the same bounded body-local overlay
+                    // before deciding whether an initializer must be forced.
                     if let Some(checked) = props.iter().find(|candidate| {
                         candidate.source_member == Some(source_member)
                             && candidate.ty != Ty::Error
@@ -69422,7 +69420,7 @@ impl<'a> Checker<'a> {
                                 owner,
                                 property,
                                 source_member,
-                                self.active_source_member_declaration(source_member),
+                                stable_declaration,
                                 checked.ty,
                                 cl.is_interface(),
                             );
@@ -69539,7 +69537,7 @@ impl<'a> Checker<'a> {
                             owner,
                             property,
                             source_member,
-                            self.active_source_member_declaration(source_member),
+                            stable_declaration,
                             inferred,
                             cl.is_interface(),
                         );
@@ -69563,8 +69561,7 @@ impl<'a> Checker<'a> {
                             class_storage: None,
                             enum_entry_property: None,
                             source_member: Some(source_member),
-                            stable_declaration: self
-                                .active_source_member_declaration(source_member),
+                            stable_declaration,
                         });
                         let scoped = props.last().expect("a checked local property was appended");
                         self.declare_scoped_property(property_scope, scoped, false);
@@ -71154,11 +71151,13 @@ impl<'a> Checker<'a> {
                         property: source_property_index as u32,
                     };
                     // This is the body-property ordinal, not the constructor-prefixed source ordinal.
-                    let stable_property = self.active_declarations.and_then(|active| {
-                        active.class_body_property_declaration(
-                            d,
-                            u32::try_from(bp_index).expect("too many class properties"),
-                        )
+                    let stable_property = self.active_declarations.map(|active| {
+                        active
+                            .class_body_property_declaration(
+                                d,
+                                u32::try_from(bp_index).expect("too many class properties"),
+                            )
+                            .expect("active class body property has no stable declaration")
                     });
                     let extension_receiver = bp
                         .receiver
@@ -71188,16 +71187,15 @@ impl<'a> Checker<'a> {
                             let properties = callables.properties();
                             let property = properties
                                 .iter()
-                                .find(|property| {
-                                    stable_property.is_some_and(|stable| {
-                                        property.stable_declaration == Some(stable)
-                                    }) || property.source_member == Some(source_member)
+                                .find(|property| match stable_property {
+                                    Some(stable) => property.stable_declaration == Some(stable),
+                                    None => property.source_member == Some(source_member),
                                 })
                                 .or_else(|| {
-                                    // Anonymous/body-local members need not own a module-stable
-                                    // declaration ID. Their finalized classifier header is still the
-                                    // authority: Kotlin permits one ordinary property per name, while
-                                    // a member extension is identified by its semantic receiver.
+                                    // Retained legacy checkers have no active declaration inventory.
+                                    if stable_property.is_some() {
+                                        return None;
+                                    }
                                     let mut candidates =
                                         properties.iter().filter(
                                             |property| match extension_receiver {
