@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 mod arrays;
+mod defaults;
 mod functions;
 mod objects;
 mod scope;
@@ -172,13 +173,16 @@ pub fn lower_file(
         accessors: HashMap::new(),
         statics: Vec::new(),
         lambdas: HashMap::new(),
+        default_wrappers: HashMap::new(),
         holders: HashMap::new(),
     };
     lowering.declare_functions()?;
     lowering.declare_classes()?;
     lowering.declare_statics()?;
     lowering.declare_lambdas()?;
+    lowering.declare_default_wrappers()?;
     lowering.define_classes()?;
+    lowering.define_default_wrappers()?;
     let statics_init = lowering.define_statics_init()?;
     let mut defines_entry = false;
     for index in 0..ir.functions.len() {
@@ -231,6 +235,8 @@ struct FileLowering<'a> {
     statics: Vec<DataId>,
     /// The emitted pieces of each lambda, by the expression that creates it.
     lambdas: HashMap<u32, functions::LambdaItems>,
+    /// One wrapper per omission shape a call in this file uses.
+    default_wrappers: HashMap<defaults::Omission, FuncId>,
     /// The holder type for a captured `var` of each carrier, by the carrier's spelling.
     holders: HashMap<String, DataId>,
 }
@@ -1165,7 +1171,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 },
             },
             IrExpr::Call { callee, .. } => match callee {
-                Callee::Local(function) => self.file.ir.functions[*function as usize].ret,
+                Callee::Local(function)
+                | Callee::LocalWithDefaults { function, .. }
+                | Callee::ClassStaticWithDefaults { function, .. } => {
+                    self.file.ir.functions[*function as usize].ret
+                }
                 Callee::External { ret, .. }
                 | Callee::Intrinsic { ret, .. }
                 | Callee::Super { ret, .. } => *ret,
@@ -1642,6 +1652,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
         match callee {
+            // A call that leaves arguments out goes through the wrapper for its omission shape,
+            // which computes them in the callee's own frame — where a default that reads an
+            // earlier parameter can find it.
+            Callee::LocalWithDefaults { function, defaults } => {
+                self.defaulted_call(*function, defaults, dispatch_receiver, args)
+            }
+            Callee::ClassStaticWithDefaults {
+                function, defaults, ..
+            } => self.defaulted_call(*function, defaults, dispatch_receiver, args),
             Callee::Local(function) => {
                 if dispatch_receiver.is_some() {
                     return Err("a local call with a receiver".to_string());

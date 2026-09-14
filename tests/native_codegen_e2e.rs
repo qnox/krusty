@@ -1658,3 +1658,68 @@ fn an_inner_class_reaches_its_enclosing_instance() {
         "21\n40\ninner\n25\n25\n"
     );
 }
+
+#[test]
+fn a_call_may_leave_arguments_out() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A default is written in the CALLEE's frame and may read an earlier parameter, so it cannot
+    // be evaluated at the call site. Each omission shape gets a wrapper that declares the callee's
+    // whole frame, fills the missing slots in declaration order, and calls through. A defaulted
+    // call on an open member still dispatches on its receiver: filling arguments does not decide
+    // which implementation runs.
+    assert_eq!(
+        run("fun greet(name: String, greeting: String = \"hi \"): String = greeting + name\n\
+             fun span(a: Int, b: Int = a + 1): Int = b - a\n\
+             fun three(a: Int, b: Int = 2, c: Int = 3): Int = a * 100 + b * 10 + c\n\
+             open class Base(val mark: String) {\n\
+             \x20   open fun tag(text: String, suffix: String = mark): String = text + suffix\n\
+             }\n\
+             class Loud(mark: String) : Base(mark) {\n\
+             \x20   override fun tag(text: String, suffix: String): String = text + suffix + \"!\"\n\
+             }\n\
+             data class Point(val x: Int, val y: Int)\n\
+             fun main() {\n\
+             \x20   println(greet(\"k\"))\n\
+             \x20   println(greet(\"k\", \"yo \"))\n\
+             \x20   println(span(10))\n\
+             \x20   println(three(1))\n\
+             \x20   println(three(1, c = 9))\n\
+             \x20   val base: Base = Base(\".\")\n\
+             \x20   println(base.tag(\"a\"))\n\
+             \x20   val loud: Base = Loud(\".\")\n\
+             \x20   println(loud.tag(\"a\"))\n\
+             \x20   println(Point(1, 2).copy(y = 9))\n\
+             }\n"),
+        "hi k\nyo k\n1\n123\n129\na.\na.!\nPoint(x=1, y=9)\n"
+    );
+}
+
+#[test]
+fn an_override_the_tables_do_not_record_still_dispatches() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A member EXTENSION's override has no entry in the frontend's override tables. Left at that,
+    // it takes a slot of its own and a call through the base's type reaches the base's body — a
+    // wrong answer with nothing to signal it. The IR still says what is needed: a declaration
+    // WITHOUT `override` is listed as a fresh one, so a method absent from that list which matches
+    // an inherited member by name and machine signature is that member's override.
+    assert_eq!(
+        run("open class Base {\n\
+             \x20   open fun String.decorate(): String = \"base:\" + this\n\
+             }\n\
+             class Derived : Base() {\n\
+             \x20   override fun String.decorate(): String = \"derived:\" + this\n\
+             }\n\
+             fun render(base: Base): String { with(base) { return \"x\".decorate() } }\n\
+             fun main() {\n\
+             \x20   println(render(Base()))\n\
+             \x20   println(render(Derived()))\n\
+             }\n"),
+        "base:x\nderived:x\n"
+    );
+}

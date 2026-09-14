@@ -4364,6 +4364,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/native_codegen_e2e.rs::an_interface_dispatches_through_a_program_wide_slot`,
   `::an_override_that_needs_a_bridge_is_declined`).
 
+- **A default argument is evaluated in the CALLEE's frame.** `fun f(a: Int, b: Int = a + 1)` writes
+  its default in terms of a parameter, so the call site cannot compute it. Each omission shape gets
+  a wrapper taking exactly the supplied arguments, which declares the callee's whole frame, fills
+  the omitted slots in declaration order, and calls through — the JVM's `$default` synthetic
+  answers the same problem with a bitmask because its callers may be in another compilation unit.
+  A defaulted call on an open member still dispatches on its receiver: filling arguments does not
+  decide which implementation runs (`src/native/codegen/lower/defaults.rs`,
+  `tests/native_codegen_e2e.rs::a_call_may_leave_arguments_out`).
+
+- **A member extension's override is recorded nowhere, and still overrides.** The frontend's
+  override tables carry no edge for `override fun String.decorate()`, so a model reading only those
+  tables gives it a slot of its own — and a call through the base's type then reaches the base's
+  body, which is a wrong answer with nothing to signal it. The IR answers the question that name
+  matching alone cannot: a declaration written WITHOUT `override` is listed as a fresh one, so a
+  method absent from that list matching an inherited member by name and machine signature is that
+  member's override (`src/native/classes.rs`,
+  `tests/native_codegen_e2e.rs::an_override_the_tables_do_not_record_still_dispatches`).
+
 - **An `inner` class carries its outer instance in a field, written first.** `this@Outer` and an
   unqualified read of an outer member are both loads of that field, and one enclosing-instance edge
   is one load, so a doubly nested `inner` class follows one per level. The store runs BEFORE the

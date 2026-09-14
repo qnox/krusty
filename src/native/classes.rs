@@ -721,9 +721,23 @@ fn layout_class(
             })?;
             class_replaces = Some(slot);
         }
+        // A member EXTENSION's override is not in the override tables — the frontend records none
+        // for one — so an override of it would take a new slot and a call through the base's type
+        // would reach the base's body. The IR still says which it is: a method the source declares
+        // WITHOUT `override` is listed in `fresh_method_decls`, so one that is absent from that
+        // list and matches an inherited member by name and machine signature is that member's
+        // override. This is name matching, and it is sound only because the IR has already
+        // answered the question name matching cannot: whether this declaration is an override.
+        let inherited_replaces = match class_replaces {
+            Some(slot) => Some(slot),
+            None if !ir.fresh_method_decls.contains(&fid) => {
+                inherited_slot(ir, superclass, function, &slots)
+            }
+            None => None,
+        };
         let replaces = match replaces {
             Some(slot) => Some(slot),
-            None => match class_replaces {
+            None => match inherited_replaces {
                 Some(slot) => Some(slot),
                 None => match &own_key {
                     SlotKey::Getter(_, name) | SlotKey::Setter(_, name) => {
@@ -964,6 +978,42 @@ fn register_inherited_interface_members(
         }
     }
     Ok(())
+}
+
+/// The slot an inherited member of the same name and machine signature occupies, searched up the
+/// superclass chain. Used only for a method the IR has already identified as an override.
+fn inherited_slot(
+    ir: &IrFile,
+    superclass: Option<ClassId>,
+    function: &IrFunction,
+    slots: &HashMap<SlotKey, u32>,
+) -> Option<u32> {
+    let signature = |candidate: &IrFunction| {
+        (
+            candidate
+                .params
+                .iter()
+                .copied()
+                .map(c_kind)
+                .collect::<Vec<_>>(),
+            c_kind(candidate.ret),
+        )
+    };
+    let mine = signature(function);
+    let mut at = superclass;
+    while let Some(class) = at {
+        for &candidate in &ir.classes[class as usize].methods {
+            let other = &ir.functions[candidate as usize];
+            if other.name != function.name || signature(other) != mine {
+                continue;
+            }
+            if let Some(&slot) = slots.get(&function_key(ir, class, candidate)) {
+                return Some(slot);
+            }
+        }
+        at = ir.class_id_by_name(ir.classes[class as usize].superclass);
+    }
+    None
 }
 
 /// The slot key of a method of `owner`: a property accessor is keyed by its property.

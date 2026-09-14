@@ -922,11 +922,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let function = &self.file.ir.functions[fid as usize];
         let arguments: Option<Vec<u32>> = args.iter().copied().collect();
         let Some(arguments) = arguments else {
-            return Err(format!(
-                "a call with a defaulted argument (`{}.{}`)",
-                self.file.ir.classes[class as usize].fq_name(),
-                function.name
-            ));
+            // Arguments left out: the wrapper for this omission shape fills them, and dispatches
+            // on the receiver itself, so an open method still reaches its override.
+            let omitted: Vec<u32> = args
+                .iter()
+                .enumerate()
+                .filter(|(_, argument)| argument.is_none())
+                .map(|(ordinal, _)| ordinal as u32)
+                .collect();
+            let supplied: Vec<u32> = args.iter().flatten().copied().collect();
+            return self.defaulted_call(fid, &omitted, Some(receiver), &supplied);
         };
         if function.dispatch_receiver.is_none() {
             return Err(format!("a class-static call (`{}`)", function.name));

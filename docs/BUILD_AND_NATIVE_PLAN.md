@@ -1230,6 +1230,14 @@ before:**
    cases where an `inner` class also EXTENDS its outer, and krusty's JVM backend gets both wrong in
    its own way — one answers `this@Outer` with `this`, the other emits bytecode the verifier
    rejects — so both are listed with that evidence rather than chased in the generator.
+   Defaulted calls took the lane to **1644 pass**. A default belongs to the callee's frame — it may
+   read an earlier parameter — so each omission shape gets a wrapper that declares that frame, fills
+   the missing slots in declaration order and calls through; one wrapper per shape a program
+   actually uses, and no mask to decode at run time. Data-class `copy` came with it. Writing it
+   surfaced a live miscompile in code already pushed: a member extension's override is recorded in
+   no override table, so it took a slot of its own and a call through the base's type ran the base's
+   body. krusty's JVM backend gets that right, so it was the native model's alone; the IR's own
+   record of which declarations are FRESH is what makes resolving it by name sound.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 
