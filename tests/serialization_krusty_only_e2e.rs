@@ -123,6 +123,107 @@ fun box(): String {
 }
 
 #[test]
+fn generic_custom_serializer_element_round_trips_entirely_in_krusty() {
+    // A class-level `@Serializable(with = X::class)` names the serializer outright, and `X` may be
+    // GENERIC — `BoxSerializer<T>(inner: KSerializer<T>)`. The element path had no custom-serializer
+    // branch at all, so a field of such a type (and any collection over it) was underivable: the
+    // plugin left a residual placeholder and the whole FILE was declined with "this construct is not
+    // yet supported by the IR backend".
+    let src = r#"import kotlinx.serialization.Serializable
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.json.Json
+@Serializable(with = BoxSerializer::class)
+class Box<out T>(val item: T)
+class BoxSerializer<T>(private val inner: KSerializer<T>) : KSerializer<Box<T>> {
+    override val descriptor: SerialDescriptor = inner.descriptor
+    override fun serialize(encoder: Encoder, value: Box<T>) = inner.serialize(encoder, value.item)
+    override fun deserialize(decoder: Decoder): Box<T> = Box(inner.deserialize(decoder))
+}
+@Serializable
+data class Leaf(val v: String)
+@Serializable
+data class Holder(val direct: Box<Leaf>, val mapped: Map<String, Box<Leaf>>)
+fun box(): String {
+    val value = Holder(Box(Leaf("a")), mapOf("k" to Box(Leaf("b"))))
+    val j = Json.encodeToString(Holder.serializer(), value)
+    val back = Json.decodeFromString(Holder.serializer(), j)
+    return back.direct.item.v + back.mapped.getValue("k").item.v
+}
+"#;
+    let Some((stdout, stderr)) = run_box_in_krusty(src, "SerCustomGeneric") else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "ab",
+        "generic custom-serializer element round-trip wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+/// Compile `dep` to a directory with krusty, then compile and run `main` with that directory on the
+/// classpath — so the `@Serializable` type really is a CLASSPATH classifier, not a same-module one.
+fn run_box_over_krusty_dependency(dep: &str, main: &str, stem: &str) -> Option<(String, String)> {
+    let mut cp_jars = serialization_runtime_jars()?;
+    let dep_classes = common::compile_in_process(dep, "SerDep", &cp_jars, None)?;
+    let out = std::env::temp_dir().join(format!("krusty-ser-dep-{stem}"));
+    let _ = std::fs::remove_dir_all(&out);
+    std::fs::create_dir_all(&out).ok()?;
+    for (internal, bytes) in &dep_classes {
+        let path = out.join(format!("{internal}.class"));
+        std::fs::create_dir_all(path.parent()?).ok()?;
+        std::fs::write(&path, bytes).ok()?;
+    }
+    cp_jars.push(out);
+    let classes = common::compile_in_process(main, stem, &cp_jars, None).unwrap_or_else(|| {
+        let diagnostics = common::front_end_diagnostics(main, &cp_jars, None);
+        let backend = common::backend_outcome_in_process(main, stem, &cp_jars, None);
+        panic!(
+            "krusty failed to compile against a krusty-built dependency ({stem}); \
+             diagnostics: {diagnostics:?}; backend: {backend:?}"
+        )
+    });
+    let box_class = common::find_box_class(&classes)?;
+    common::run_box(&classes, &box_class, &cp_jars).map(|stdout| (stdout, String::new()))
+}
+
+#[test]
+fn reified_decode_of_a_classpath_serializable_type_round_trips() {
+    // Plugin planning asked whether the reified type argument carries `@Serializable`, reading only
+    // SOURCE declarations. A type from a DEPENDENCY therefore never got a plan, so the reified
+    // `decodeFromString` fell through to the bytecode splicer — whose body needs class reification —
+    // and the whole FILE bailed with "inline splice failed".
+    //
+    // The same code with the class in the SAME file always worked, which is what hid this: the
+    // discriminator is where the type is declared, not what the call looks like.
+    const DEP: &str = r#"package dep
+import kotlinx.serialization.Serializable
+@Serializable
+data class Cfg(val name: String = "")
+"#;
+    const MAIN: &str = r#"import dep.Cfg
+import kotlinx.serialization.json.Json
+private val json = Json { ignoreUnknownKeys = true }
+fun box(): String {
+    val text = json.encodeToString(Cfg.serializer(), Cfg("x"))
+    val back = json.decodeFromString<Cfg>(text)
+    return back.name
+}
+"#;
+    let Some((stdout, stderr)) = run_box_over_krusty_dependency(DEP, MAIN, "SerClasspathReified")
+    else {
+        eprintln!("skipping: serialization runtime / JAVA_HOME not located");
+        return;
+    };
+    assert!(
+        stdout == "x",
+        "reified decode of a classpath @Serializable type wrong.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+#[test]
 fn serial_name_overrides_json_key_entirely_in_krusty() {
     // `@SerialName("…")` on a constructor property renames its descriptor element (and thus its JSON
     // key) — including a const-folded value (`@SerialName("$prefix.bar")` with `const val prefix`).

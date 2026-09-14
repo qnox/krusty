@@ -2076,3 +2076,53 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   asserts krusty emitted the exact legal facade call, and compares the same consumer's `box()` result
   under kotlinc and krusty.
   `tests/non_reified_inline_splice_fallback_e2e.rs`.
+- **A receiver-function argument needs the source-aware unifier (fix).** A declared parameter and its
+  actual argument need not name the same classifier:
+  `operator fun <T> Collection<T>.plus(elements: Iterable<T>): List<T>` called on a `List` has to
+  project the argument to `Iterable` before `T` can read its element type. The receiver-function
+  selection path used the source-LESS unifier, which only matches equal owners, so the argument
+  contributed no constraint at all and `T` stayed pinned at the receiver's element type.
+  `servers + infra` over two branches of a sealed hierarchy then reported
+  `actual 'List<Infra>', but 'Iterable<Server>' was expected` — a type kotlinc never forms, since both
+  sides are lower bounds on `T` and the answer is their join. The named spelling `a.plus(b)` resolved
+  through the extension path and always worked, which is what isolated the operator path as the
+  culprit; declaration-site variance was already decoded correctly and was not the cause.
+  `tests/receiver_and_argument_join_e2e.rs::plus_joins_the_receiver_and_the_argument_without_an_expected_type`.
+  inline iteration at IR level, which is what lets a suspension inside the lambda join the CALLER's
+  state machine. `CompilerIntrinsic::ForEachIndexed` was already decoded by the provider, typed by
+  the resolver (`(Int, T) -> Unit`) and expanded by the legacy lowerer, but the checked-FIR path —
+  the production one — published a structural plan for `forEach` alone.
+  `forEachIndexed` is `forEach` plus a zero-based counter and nothing else, so the plan carries one
+  flag rather than a second loop shape. The counter is a loop-carried local declared before the
+  iterator, and its increment belongs in the loop's UPDATE, not at the end of the body: a
+  `return@forEachIndexed` lowers to a `continue`, which jumps to the update, and an increment written
+  after the body would be skipped by it — numbering every later element one short.
+  Without a plan the call keeps its lambda as a real function object, a suspend call inside it never
+  receives a continuation, and emission fails with "call arity mismatch" — which bails the whole
+  FILE, so one `forEachIndexed` cost a module every class it would have emitted.
+  `tests/foreach_indexed_inline_e2e.rs::for_each_indexed_hosts_a_suspension_in_its_lambda`,
+  `for_each_indexed_counts_from_zero_over_every_element`.
+- **A custom serializer can serialize an ELEMENT, and can be generic (fix).** A class-level
+  `@Serializable(with = X::class)` names the serializer outright, so it takes precedence over
+  anything derived from the type itself — exactly as it does for a property of that type. The element
+  path had no custom-serializer branch at all, so a field whose type carries one, and any collection
+  over that type, was underivable. The plugin then leaves a residual placeholder rather than emit a
+  silently incomplete serializer, and `jvm_can_emit` declines the whole FILE with "this construct is
+  not yet supported by the IR backend" — one such field cost a module every class it would have
+  emitted.
+  `X` may itself be generic (`class BoxSerializer<T>(inner: KSerializer<T>)`), so the plan carries one
+  argument serializer per type parameter, derived recursively — the same derivation the generic
+  `$serializer` branch already performed, now shared. A generic element whose serializer came from an
+  explicit `with =` is constructible directly (`X(<argument serializer>…)`) and needs none of the
+  companion ABI a GENERATED generic serializer would, which is why only the latter still declines.
+  `tests/serialization_krusty_only_e2e.rs::generic_custom_serializer_element_round_trips_entirely_in_krusty`.
+- **A classpath `@Serializable` type can be a reified argument (fix).** Plugin planning asked whether
+  a reified type argument carries an annotation by reading only SOURCE declarations, so a type from a
+  DEPENDENCY never got a plan. `fmt.decodeFromString<Dep>(s)` then fell through to the bytecode
+  splicer, whose body needs class reification, and the whole FILE bailed with "inline splice failed"
+  — one such call cost a module every class it would have emitted.
+  The same code with the class in the SAME file always worked, which is what hid this: the
+  discriminator is where the type is declared, not what the call looks like. The planning context now
+  also carries the classpath annotations of the classifiers those calls actually name, which keeps
+  the lookup bounded to what is being planned.
+  `tests/serialization_krusty_only_e2e.rs::reified_decode_of_a_classpath_serializable_type_round_trips`.

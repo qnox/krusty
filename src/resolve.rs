@@ -48675,6 +48675,43 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                 })
                 .collect()
         };
+        // A classifier the CLASSPATH marks with the annotation counts too. Plugin planning asks
+        // whether a type carries `@Serializable`, and reading only SOURCE declarations made
+        // `fmt.decodeFromString<Dep>(s)` unplannable whenever `Dep` came from a dependency — the
+        // reified call then fell through to the bytecode splicer, whose body needs class
+        // reification, and the file bailed with "inline splice failed".
+        // Only the classifiers these calls actually name are consulted, so this stays bounded.
+        let mut source_annotations: std::collections::HashMap<TypeName, Vec<TypeName>> =
+            source_annotations;
+        let referenced = calls
+            .iter()
+            .flat_map(|call| {
+                call.type_arguments
+                    .iter()
+                    .copied()
+                    .flatten()
+                    .chain(call.params.iter().copied())
+            })
+            .filter_map(Ty::kotlin_class_internal)
+            .collect::<std::collections::HashSet<_>>();
+        for classifier in referenced {
+            if source_annotations.contains_key(&classifier) {
+                continue;
+            }
+            let Some(shape) =
+                crate::symbol_source::SymbolSource::classifier(syms.libraries(), classifier)
+            else {
+                continue;
+            };
+            source_annotations.insert(
+                classifier,
+                shape
+                    .annotations
+                    .iter()
+                    .map(|annotation| annotation.annotation)
+                    .collect(),
+            );
+        }
         let context = crate::plugins::FrontendExpressionContext {
             calls,
             source_annotations,
