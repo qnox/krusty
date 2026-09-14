@@ -297,6 +297,19 @@ fn exact_inline_entry_prefix(instructions: &[Insn], scratch_slot: u16) -> bool {
         )
 }
 
+/// The older coroutines body enters directly after initializing its inline scratch local. This is
+/// a distinct complete template, not a shortened acceptance window for the branched form above.
+fn exact_direct_inline_entry_prefix(instructions: &[Insn], scratch_slot: u16) -> bool {
+    let [Insn::Plain {
+        op: 0x03,
+        operands: zero_operands,
+    }, store] = instructions
+    else {
+        return false;
+    };
+    zero_operands.is_empty() && stored_int_local(store) == Some(scratch_slot)
+}
+
 fn exact_loaded_operands(instructions: &[Insn], operands: &[u16]) -> bool {
     instructions.len() == operands.len()
         && instructions
@@ -362,6 +375,44 @@ fn exact_control_flow(
                     (index == entry_branch && *target == enter_start)
                         || (index == normal_branch && *target == normal_return)
                 }
+                Insn::Branch { .. }
+                | Insn::BranchW { .. }
+                | Insn::TableSwitch { .. }
+                | Insn::LookupSwitch { .. } => false,
+                Insn::Plain { .. } => true,
+            })
+}
+
+fn exact_direct_control_flow(
+    instructions: &[Insn],
+    normal_branch: usize,
+    normal_return: usize,
+) -> bool {
+    normal_return < instructions.len()
+        && matches!(
+            instructions.get(normal_branch),
+            Some(
+                Insn::Branch {
+                    op: 0xa7,
+                    target: inline::BranchTarget::Internal(target),
+                } | Insn::BranchW {
+                    op: 0xc8,
+                    target: inline::BranchTarget::Internal(target),
+                }
+            ) if *target == normal_return
+        )
+        && instructions
+            .iter()
+            .enumerate()
+            .all(|(index, instruction)| match instruction {
+                Insn::Branch {
+                    op: 0xa7,
+                    target: inline::BranchTarget::Internal(target),
+                }
+                | Insn::BranchW {
+                    op: 0xc8,
+                    target: inline::BranchTarget::Internal(target),
+                } => index == normal_branch && *target == normal_return,
                 Insn::Branch { .. }
                 | Insn::BranchW { .. }
                 | Insn::TableSwitch { .. }
@@ -817,27 +868,32 @@ impl JvmLibraries {
                     else {
                         return false;
                     };
-                    let Some(entry_branch) = enter_first_producer.checked_sub(1) else {
-                        return false;
-                    };
+                    let branched_entry =
+                        enter_first_producer
+                            .checked_sub(1)
+                            .is_some_and(|entry_branch| {
+                                exact_inline_entry_prefix(prefix, scratch_slot)
+                                    && exact_control_flow(
+                                        &instructions,
+                                        entry_branch,
+                                        enter_first_producer,
+                                        normal_branch,
+                                        normal_return,
+                                    )
+                            });
+                    let direct_entry = exact_direct_inline_entry_prefix(prefix, scratch_slot)
+                        && exact_direct_control_flow(&instructions, normal_branch, normal_return);
                     cleanup_boundaries_are_immediate(
                         *invoke,
                         normal_cleanup_start,
                         handler,
                         exceptional_cleanup_start,
-                    ) && exact_inline_entry_prefix(prefix, scratch_slot)
+                    ) && (branched_entry || direct_entry)
                         && exact_enter_operands(enter_producers, &body.source_cp, &enter_operands)
                         && exact_loaded_operands(normal_cleanup_producers, &normal_cleanup_operands)
                         && exact_loaded_operands(
                             repeated_cleanup_producers,
                             &repeated_cleanup_operands,
-                        )
-                        && exact_control_flow(
-                            &instructions,
-                            entry_branch,
-                            enter_first_producer,
-                            normal_branch,
-                            normal_return,
                         )
                         && has_only_template_effects(&instructions)
                 },
@@ -1133,6 +1189,45 @@ mod tests {
             target: inline::BranchTarget::Internal(4),
         };
         assert!(!exact_inline_entry_prefix(&wrong_target, 0));
+    }
+
+    #[test]
+    fn direct_inline_entry_prefix_requires_only_the_exact_scratch_initialization() {
+        let valid = vec![plain(0x03), plain(0x3b)];
+        assert!(exact_direct_inline_entry_prefix(&valid, 0));
+
+        for malformed in [
+            vec![plain(0x03), plain(0x4b)],
+            vec![plain(0x03), plain(0x3c)],
+            vec![plain(0x04), plain(0x3b)],
+            vec![plain(0x03), plain(0x3b), plain(0x00)],
+        ] {
+            assert!(!exact_direct_inline_entry_prefix(&malformed, 0));
+        }
+    }
+
+    #[test]
+    fn direct_inline_template_allows_only_the_final_cleanup_jump() {
+        let normal = Insn::Branch {
+            op: 0xa7,
+            target: inline::BranchTarget::Internal(2),
+        };
+        let valid = vec![plain(0x00), normal.clone(), plain(0x00)];
+        assert!(exact_direct_control_flow(&valid, 1, 2));
+
+        let mut extra = valid.clone();
+        extra[0] = Insn::Branch {
+            op: 0xa7,
+            target: inline::BranchTarget::Internal(1),
+        };
+        assert!(!exact_direct_control_flow(&extra, 1, 2));
+
+        let mut wrong_target = valid;
+        wrong_target[1] = Insn::Branch {
+            op: 0xa7,
+            target: inline::BranchTarget::Internal(1),
+        };
+        assert!(!exact_direct_control_flow(&wrong_target, 1, 2));
     }
 
     #[test]
