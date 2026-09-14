@@ -185,6 +185,13 @@ pub(super) fn is_range_until(owner: &str, name: &str, arity: usize) -> bool {
     facade_package(kotlin_owner(owner)) == Some("kotlin/ranges") && name == "until" && arity == 1
 }
 
+/// Whether a declaration's owner is the file facade `to` lives in. `kotlin.to` is a top-level
+/// extension, so it reaches a backend as a member of `kotlin/TuplesKt` — the `kotlin/io/ConsoleKt`
+/// situation again, normalized in the same place.
+pub(super) fn is_tuples_facade(owner: &str) -> bool {
+    kotlin_owner(owner) == "kotlin/TuplesKt"
+}
+
 /// Whether a declaration's owner is the collections file facade `listOf` and its neighbours live
 /// in. They are top-level functions of `kotlin.collections`, so they reach a backend as members of
 /// the facade class the stdlib declares them in — the `kotlin/io/ConsoleKt` situation again, and

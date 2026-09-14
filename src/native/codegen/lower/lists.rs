@@ -10,6 +10,10 @@
 //! `Set` and `Map` are not this type and decline by name, so a program using one is skipped rather
 //! than answered wrongly.
 //!
+//! `Pair` lives here too, for the same reasons in miniature: `a to b` is a heap object of a
+//! runtime-owned type holding two references, and the runtime answers its members so that the three
+//! `kotlin.Any` declares agree with what Kotlin's data class says. `Triple` is not one of these.
+//!
 //! Which call reaches the runtime is decided by the RECEIVER's type, never by the owner declaring
 //! the member: `iterator` is declared on `Iterable` and `hasNext` on `Iterator`, both of which a
 //! user class may implement, and keying on the owner would send a user's object into the runtime.
@@ -30,6 +34,25 @@ fn is_list(ty: Ty) -> bool {
     ty.non_null()
         .obj_internal()
         .is_some_and(super::super::super::intrinsics::is_list_type)
+}
+
+/// Whether a type is the runtime's `Pair`.
+fn is_pair(ty: Ty) -> bool {
+    ty.non_null()
+        .obj_internal()
+        .is_some_and(|internal| internal.matches("kotlin/Pair"))
+}
+
+/// The runtime function answering one member of a `Pair`.
+///
+/// `component1`/`component2` are what a destructuring reads, and are the same two questions under
+/// the names the convention uses.
+fn pair_symbol(name: &str, arity: usize) -> Option<(&'static str, Vec<Ty>, Ty)> {
+    Some(match (name, arity) {
+        ("getFirst" | "first" | "component1", 0) => ("kt_pair_first", vec![any()], any()),
+        ("getSecond" | "second" | "component2", 0) => ("kt_pair_second", vec![any()], any()),
+        _ => return None,
+    })
 }
 
 /// The runtime function answering one member through a receiver typed by an INTERFACE.
@@ -80,6 +103,7 @@ impl BodyLowering<'_, '_, '_> {
         &mut self,
         owner: &str,
         name: &str,
+        packs_a_vararg: bool,
         args: &[u32],
     ) -> Option<Result<Option<Value>, Unsupported>> {
         if !super::super::super::intrinsics::is_collections_facade(owner) {
@@ -89,21 +113,68 @@ impl BodyLowering<'_, '_, '_> {
             ("emptyList", []) | ("listOf", []) => {
                 Some(self.runtime_call("kt_list_empty", &[], any(), &[]))
             }
-            ("listOf", [elements]) => Some(self.list_of(*elements)),
+            // Kotlin declares `listOf` twice, and which one this is decides whether the argument
+            // IS the list's elements or is one OF them. Only the selected declaration's PHYSICAL
+            // parameter can say, because a vararg one is an array however its element type was
+            // substituted. The semantic parameter cannot: the single-element overload's is `T`, and
+            // `T` may itself be an array — `listOf(anArray)` takes that overload and answers a list
+            // of one array. Nor can the argument's node shape: `arrayOf(1, 2, 3)` lowers to the
+            // very vararg node a packed call would have, so the two arrive looking identical.
+            ("listOf", [argument]) if packs_a_vararg => Some(self.list_of(*argument)),
+            ("listOf", [element]) => Some(self.list_single(*element)),
             _ => None,
         }
     }
 
-    fn list_of(&mut self, elements: u32) -> Result<Option<Value>, Unsupported> {
-        // `listOf(single)` has its own overload taking the element itself rather than an array.
-        // Which one this is, is a question about the ARGUMENT: an array reaches the list as it is,
-        // and anything else is the one element of a new one.
-        let Some(ty) = self.type_of(elements).map(Ty::non_null) else {
-            return Err("`listOf` of an argument with no known type".to_string());
-        };
-        if !ty.is_reference_array() {
-            return Err("`listOf` of a single element".to_string());
+    /// `a to b`, or `None` when the declaration is something else.
+    ///
+    /// It is an extension of the tuples file facade rather than a member of anything, so it arrives
+    /// with its left operand as the receiver and its right as the one argument.
+    pub(super) fn pair_construction(
+        &mut self,
+        owner: &str,
+        name: &str,
+        receiver: u32,
+        args: &[u32],
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        if !super::super::super::intrinsics::is_tuples_facade(owner) || name != "to" {
+            return None;
         }
+        let [second] = args else { return None };
+        Some(self.pair_of(receiver, *second))
+    }
+
+    fn pair_of(&mut self, first: u32, second: u32) -> Result<Option<Value>, Unsupported> {
+        let first = self.reference(first)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let second = self.reference(second)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.runtime_call("kt_pair_of", &[any(), any()], any(), &[first, second])
+    }
+
+    /// `p.first` — a checked read of a dependency property the runtime answers.
+    ///
+    /// The RECEIVER is part of the question, not just the getter's name: a range declares `first`
+    /// too, and answering a range's bound out of a pair's header reads it as a pointer.
+    pub(super) fn pair_getter(
+        &self,
+        target: crate::fir::ExternalPropertyId,
+        receiver: u32,
+    ) -> Option<String> {
+        if !self.type_of(receiver).is_some_and(is_pair) {
+            return None;
+        }
+        let property = self.file.classpath.external_property(target)?;
+        let getter = self.file.classpath.external_callable(property.getter)?;
+        pair_symbol(&getter.callable.name, 0)?;
+        Some(getter.callable.name.clone())
+    }
+
+    fn list_of(&mut self, elements: u32) -> Result<Option<Value>, Unsupported> {
         let array = self.reference(elements)?;
         if self.terminated {
             return Ok(None);
@@ -111,12 +182,27 @@ impl BodyLowering<'_, '_, '_> {
         self.runtime_call("kt_list_of", &[any()], any(), &[array])
     }
 
+    /// `listOf(x)`: the one-element array the list needs, since this overload hands over no array.
+    fn list_single(&mut self, element: u32) -> Result<Option<Value>, Unsupported> {
+        let value = self.reference(element)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.runtime_call("kt_list_single", &[any()], any(), &[value])
+    }
+
     /// `values.size` — a checked read of a dependency property whose getter the runtime answers.
     ///
-    /// The getter's NAME is all this needs; which objects it may be asked of is settled by the
-    /// receiver, as it is for a call. Returns the getter's name, so the caller answers it exactly
-    /// as an explicit call to it would be.
-    pub(super) fn list_getter(&self, target: crate::fir::ExternalPropertyId) -> Option<String> {
+    /// The receiver settles which objects the getter may be asked of, exactly as it does for a
+    /// call. Returns the getter's name, so the caller answers it as an explicit call would.
+    pub(super) fn list_getter(
+        &self,
+        target: crate::fir::ExternalPropertyId,
+        receiver: u32,
+    ) -> Option<String> {
+        if !self.type_of(receiver).is_some_and(is_list) {
+            return None;
+        }
         let property = self.file.classpath.external_property(target)?;
         let getter = self.file.classpath.external_callable(property.getter)?;
         list_symbol(&getter.callable.name, 0)?;
@@ -134,6 +220,10 @@ impl BodyLowering<'_, '_, '_> {
         let ty = self.type_of(receiver)?;
         // Iteration first: a `List` is iterated through the same dispatch an `Iterable` is, so the
         // one member both spellings share is answered in one place.
+        if is_pair(ty) {
+            let (symbol, carried, answer) = pair_symbol(name, args.len())?;
+            return Some(self.list_call(symbol, &carried, answer, receiver, args, ret));
+        }
         let role = ty
             .non_null()
             .obj_internal()

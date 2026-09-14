@@ -1974,6 +1974,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   receiver typed by the interface has its element type erased.
   Tests: `tests/native_lists_e2e.rs`.
 
+- **Which `listOf` a call selected is a fact about the declaration, and only its PHYSICAL parameter
+  says so.** Kotlin declares `listOf` twice — over a vararg and over one element — and which one a
+  call took decides whether its argument IS the list's elements or is one OF them. Neither the
+  argument nor the semantic parameter can answer: the single-element overload's parameter is `T`,
+  and `T` may itself be an array, so `listOf(anArray)` takes that overload and answers a list of one
+  array; and `arrayOf(1, 2, 3)` lowers to the very vararg node a packed call would have, so the two
+  arrive looking identical. A vararg parameter is PHYSICALLY an array however its element type was
+  substituted, which is the one thing that separates them.
+  Tests: `tests/native_lists_e2e.rs`
+  (`a_single_element_list_is_not_a_vararg_call_of_length_one`).
+
+- **`a to b` is a runtime object, and a checked property read of one is decided by its receiver.**
+  A `Pair` is two references with the three `kotlin.Any` members answering componentwise, as
+  Kotlin's data class does; `component1`/`component2` are the same two questions under the names a
+  destructuring uses. `Triple` is not one of these. What the pair added to the rule that the
+  RECEIVER decides is a case where a name alone genuinely collides: a range declares `first` too,
+  and a getter guard that read only the name answered a range's bound out of a pair's header.
+  Tests: `tests/native_lists_e2e.rs` (`a_pair_carries_two_values_and_answers_by_them`,
+  `a_pair_destructures_through_its_components`), and `tests/native_ranges_e2e.rs`, which is what
+  caught the collision.
+
 - **A `Nothing`-typed producer that returns is a checked bottom value, and the completion mode is
   what says so.** `Nothing` promises there is no value, and most producers keep the promise by never
   coming back; two do not. A call whose generic result is SUBSTITUTED to `Nothing` really produces

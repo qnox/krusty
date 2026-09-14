@@ -480,6 +480,77 @@ KT_UNBOX(double, double_value, kt_double)
 
 #undef KT_UNBOX
 
+/* ---- pairs --------------------------------------------------------------------------------- */
+
+/* `a to b`. Two references and nothing else — Kotlin's `Pair` is a data class over two values, and
+   every one of its members is one of the three `kotlin.Any` declares plus the two components. */
+typedef struct KPair {
+    KObjectHeader header;
+    KRef first;
+    KRef second;
+} KPair;
+
+static const uint32_t kt_pair_offsets[] = {offsetof(KPair, first), offsetof(KPair, second)};
+
+static kt_boolean kt_pair_equals(KRef self, KRef other);
+static kt_int kt_pair_hash_code(KRef self);
+static KRef kt_pair_to_string(KRef self);
+
+static const kt_fn kt_pair_vtable[] = {(kt_fn)kt_pair_equals, (kt_fn)kt_pair_hash_code,
+                                       (kt_fn)kt_pair_to_string};
+
+const KType kt_type_pair = {"kotlin.Pair",
+                            sizeof("kotlin.Pair") - 1,
+                            sizeof(KPair),
+                            2,
+                            0,
+                            kt_pair_offsets,
+                            &kt_type_any,
+                            kt_pair_vtable,
+                            3,
+                            0};
+
+KRef kt_pair_of(KRef first, KRef second) {
+    /* Both components stay in these parameters across the allocation: they are its roots. */
+    KPair *pair = (KPair *)kt_gc_allocate(&kt_type_pair, sizeof(KPair));
+    pair->first = first;
+    pair->second = second;
+    return (KRef)pair;
+}
+
+KRef kt_pair_first(KRef pair) { return ((const KPair *)pair)->first; }
+
+KRef kt_pair_second(KRef pair) { return ((const KPair *)pair)->second; }
+
+/* A data class's `equals`: componentwise, and only against another `Pair`. */
+static kt_boolean kt_pair_equals(KRef self, KRef other) {
+    if (self == other) {
+        return true;
+    }
+    if (other == NULL || other->header.type != &kt_type_pair) {
+        return false;
+    }
+    const KPair *a = (const KPair *)self;
+    const KPair *b = (const KPair *)other;
+    return kt_equals(a->first, b->first) && kt_equals(a->second, b->second);
+}
+
+/* Kotlin's generated data-class hash: `first.hashCode() * 31 + second.hashCode()`, a null
+   component contributing 0. */
+static kt_int kt_pair_hash_code(KRef self) {
+    const KPair *pair = (const KPair *)self;
+    return (kt_int)(31u * (uint32_t)kt_hash_code(pair->first) + (uint32_t)kt_hash_code(pair->second));
+}
+
+/* `(first, second)` — `Pair` overrides the generated `toString` with this shape. */
+static KRef kt_pair_to_string(KRef self) {
+    const KPair *pair = (const KPair *)self;
+    KRef text = kt_string_plus(kt_string_utf8("(", 1), kt_to_string(pair->first));
+    text = kt_string_plus(text, kt_string_utf8(", ", 2));
+    text = kt_string_plus(text, kt_to_string(pair->second));
+    return kt_string_plus(text, kt_string_utf8(")", 1));
+}
+
 /* ---- ranges ---------------------------------------------------------------------------------- */
 
 /* `1..3` as a value. The three closed integral ranges share one struct and one set of methods; the
@@ -726,6 +797,16 @@ KRef kt_list_of(KRef elements) {
 }
 
 KRef kt_list_empty(void) { return kt_list_of(kt_array_new(&kt_type_array, 0)); }
+
+/* `listOf(x)` — Kotlin's own single-element overload, which is a DIFFERENT declaration from the
+   vararg one and not a vararg call of length one: `listOf(anArray)` selects it and answers a list
+   holding that array. There is no array yet, so this makes the one the list needs. `value` is a
+   root across the allocation the way every other local here is. */
+KRef kt_list_single(KRef value) {
+    KRef elements = kt_array_new(&kt_type_array, 1);
+    kt_elements_of(elements)[0] = value;
+    return kt_list_of(elements);
+}
 
 kt_int kt_list_size(KRef list) { return kt_length_of(((const KList *)list)->elements); }
 

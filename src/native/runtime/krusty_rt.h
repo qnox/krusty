@@ -178,6 +178,7 @@ extern const KType kt_type_list_iterator;
 
 KRef kt_list_of(KRef elements);
 KRef kt_list_empty(void);
+KRef kt_list_single(KRef value);
 kt_int kt_list_size(KRef list);
 kt_boolean kt_list_is_empty(KRef list);
 KRef kt_list_get(KRef list, kt_int index);
@@ -194,6 +195,16 @@ KRef kt_list_iterator_next(KRef iterator);
 KRef kt_iterable_iterator(KRef iterable);
 kt_boolean kt_iterator_has_next(KRef iterator);
 KRef kt_iterator_next(KRef iterator);
+
+/* ---- pairs --------------------------------------------------------------------------------- */
+
+/* `a to b`: two references, with the three `kotlin.Any` members answering componentwise the way
+   Kotlin's data class does. `Triple` is not one of these and is not realized. */
+extern const KType kt_type_pair;
+
+KRef kt_pair_of(KRef first, KRef second);
+KRef kt_pair_first(KRef pair);
+KRef kt_pair_second(KRef pair);
 
 /* ---- ranges ---------------------------------------------------------------------------------- */
 

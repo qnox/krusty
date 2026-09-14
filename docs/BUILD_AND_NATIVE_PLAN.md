@@ -1512,6 +1512,18 @@ before:**
    segfaulted. A receiver the generator can only type by the interface is now answered by a runtime
    dispatch on the descriptor instead — the honest place for a question no static type can settle.
 
+   **Two smaller ones finished the collections work, for 2452.** `listOf(x)` is a different
+   DECLARATION from `listOf(vararg)`, not a vararg call of length one, and finding what separates
+   them took three tries: the argument's type does not (the single-element overload's parameter is
+   `T`, which may itself be an array), the argument's node shape does not (`arrayOf(1, 2, 3)` lowers
+   to the very vararg node a packed call would have), and only the selected declaration's PHYSICAL
+   parameter does, because a vararg one is an array however its element type was substituted. `Pair`
+   came next and was a list in miniature — two references, the three `kotlin.Any` members answering
+   componentwise — except that it produced the first real collision of the receiver rule: a range
+   declares `first` too, and the getter guard read only the name, so `range.first` went to the pair
+   helper and read a bound as a pointer. The range tests caught it, which is the argument for having
+   written them.
+
 #### Decided: Kotlin/Native's memory model, not the JVM's
 
 The native target reproduces **Kotlin/Native's** concurrency contract, not the JVM's. That follows

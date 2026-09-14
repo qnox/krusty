@@ -125,3 +125,59 @@ fn a_list_holds_its_elements_against_the_collector() {
         "OK",
     );
 }
+
+#[test]
+fn a_single_element_list_is_not_a_vararg_call_of_length_one() {
+    // Kotlin declares `listOf` twice, and which one a call selects decides whether its argument IS
+    // the elements or is one OF them. `listOf(anArray)` takes the single-element overload and
+    // answers a list of one array — reading the argument's type instead of the declaration's would
+    // unpack it and answer a list of three `Int`s.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val one = listOf(\"only\")\n\
+         \x20   if (one.size != 1) return \"fail size: \" + one.size\n\
+         \x20   if (one[0] != \"only\") return \"fail element\"\n\
+         \x20   val held = listOf(arrayOf(1, 2, 3))\n\
+         \x20   if (held.size != 1) return \"fail array size: \" + held.size\n\
+         \x20   if (held[0].size != 3) return \"fail inner\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "SingleElementList",
+        "OK",
+    );
+}
+
+#[test]
+fn a_pair_carries_two_values_and_answers_by_them() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val p = \"a\" to 1\n\
+         \x20   if (p.first != \"a\") return \"fail first\"\n\
+         \x20   if (p.second != 1) return \"fail second\"\n\
+         \x20   if (p.toString() != \"(a, 1)\") return \"fail render: \" + p.toString()\n\
+         \x20   if (p != (\"a\" to 1)) return \"fail equal\"\n\
+         \x20   if (p == (\"a\" to 2)) return \"fail unequal\"\n\
+         \x20   if (p.hashCode() != (\"a\" to 1).hashCode()) return \"fail hash\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "PairMembers",
+        "OK",
+    );
+}
+
+#[test]
+fn a_pair_destructures_through_its_components() {
+    // `component1`/`component2` are the same two questions under the names the convention uses.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val (name, count) = \"x\" to 3\n\
+         \x20   if (name != \"x\") return \"fail name\"\n\
+         \x20   if (count != 3) return \"fail count\"\n\
+         \x20   var joined = \"\"\n\
+         \x20   for ((key, value) in listOf(\"a\" to 1, \"b\" to 2)) joined += key + value\n\
+         \x20   return if (joined == \"a1b2\") \"OK\" else \"fail: $joined\"\n\
+         }\n",
+        "PairDestructuring",
+        "OK",
+    );
+}

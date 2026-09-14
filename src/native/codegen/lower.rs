@@ -1201,14 +1201,30 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.range_member(&owner, &name, receiver, &[], ret)
                     .expect("a range member, by the guard")
             }
+            // `p.first`: the same runtime answer an explicit call to the getter would get.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.pair_getter(target, receiver).is_some() => {
+                let name = self
+                    .pair_getter(target, receiver)
+                    .expect("checked by the guard");
+                match self.list_member(&name, receiver, &[], any()) {
+                    Some(realized) => realized,
+                    None => Err(format!("`{name}` of a receiver that is not a pair")),
+                }
+            }
             // `values.size`: the same runtime answer an explicit call to the getter would get,
             // and reached the same way — by the receiver, not by the property's declaration.
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
                 target,
                 receiver: Some(receiver),
                 ..
-            }) if self.list_getter(target).is_some() => {
-                let name = self.list_getter(target).expect("checked by the guard");
+            }) if self.list_getter(target, receiver).is_some() => {
+                let name = self
+                    .list_getter(target, receiver)
+                    .expect("checked by the guard");
                 match self.list_member(&name, receiver, &[], Ty::Int) {
                     Some(realized) => realized,
                     None => Err(format!("`{name}` of a receiver that is not a list")),
@@ -1468,14 +1484,21 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             // `name` and `ordinal` belong to `kotlin.Enum`, a class no file declares, so the
             // checked property table has nothing to say about them; their types are the language's
             // and are stated where the read itself is recognized.
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead { target, .. }) => {
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target, receiver, ..
+            }) => {
                 match self.enum_member_name(*target) {
                     Some("name") => Ty::String,
                     Some(_) => Ty::Int,
-                    // A list's `size` is an `Int`; a range's own members answer at their element's
-                    // width.
-                    None if self.list_getter(*target).is_some() => Ty::Int,
-                    None => self.range_getter(*target)?.2,
+                    // A pair's components are references; a list's `size` is an `Int`; a range's
+                    // own members answer at their element's width. Which of the three this read is
+                    // depends on the receiver as much as on the getter — a range declares `first`
+                    // too — so the receiverless read is none of them.
+                    None => match receiver {
+                        Some(receiver) if self.pair_getter(*target, *receiver).is_some() => any(),
+                        Some(receiver) if self.list_getter(*target, *receiver).is_some() => Ty::Int,
+                        _ => self.range_getter(*target)?.2,
+                    },
                 }
             }
             // A constructed range is an object of the type the checker gave it, which is what makes
@@ -2120,6 +2143,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         if let Some(realized) = self.list_member(&name, receiver, args, *ret) {
                             return realized;
                         }
+                        // `a to b`: an extension of the tuples facade, so its left operand is the
+                        // receiver here rather than an argument.
+                        if let Some(realized) =
+                            self.pair_construction(&owner, &name, receiver, args)
+                        {
+                            return realized;
+                        }
                         // A member that asks about a NUMBER rather than an object, carried as one:
                         // `s[i]` must not box its index to reach the runtime.
                         if let Some((symbol, carried, answer)) =
@@ -2153,7 +2183,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         self.runtime_call(symbol, &signature, *ret, &arguments)
                     }
                     None => {
-                        if let Some(realized) = self.list_construction(&owner, &name, args) {
+                        // A vararg parameter is PHYSICALLY an array however its element type was
+                        // substituted, which is the one fact that separates `listOf`'s two
+                        // declarations; see `list_construction`.
+                        let packs_a_vararg = realization
+                            .callable
+                            .physical_params
+                            .first()
+                            .is_some_and(|ty| ty.non_null().is_reference_array());
+                        if let Some(realized) =
+                            self.list_construction(&owner, &name, packs_a_vararg, args)
+                        {
                             return realized;
                         }
                         let Some(symbol) =
