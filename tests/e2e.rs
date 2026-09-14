@@ -622,6 +622,8 @@ mod for_iterable_elvis_e2e;
 mod for_typed_loop_var_e2e;
 #[path = "foreach_convention_e2e.rs"]
 mod foreach_convention_e2e;
+#[path = "foreach_indexed_inline_e2e.rs"]
+mod foreach_indexed_inline_e2e;
 #[path = "fq_ctor_call_e2e.rs"]
 mod fq_ctor_call_e2e;
 #[path = "fq_generic_ctor_property_inference_e2e.rs"]

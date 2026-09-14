@@ -1,7 +1,9 @@
 //! Receiver-bound specialization of declared member signatures.
 
 use super::{ty_subst, ty_subst_keep_unbound, GSigBinds};
-use crate::libraries::{GenericSig, LibraryCallable, PropertyInfo};
+use crate::libraries::{
+    GenericSig, InlineIterationTraversal, LibraryCallable, LibraryMember, PropertyInfo,
+};
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
@@ -258,6 +260,76 @@ pub(crate) fn specialize_signature_receiver_type(
         TypePosition::Invariant,
         UnboundSpecialization::Preserve,
     )
+}
+
+/// Apply an already-selected provider member declaration to one concrete dispatch receiver.
+/// Unlike ordinary member resolution this performs no name lookup or overload selection: decoded
+/// inline-body plans use it to specialize the exact stable declaration named by their bytecode.
+fn specialize_fixed_member_receiver(
+    source: &dyn SymbolSource,
+    receiver: Ty,
+    member: &LibraryMember,
+) -> Option<LibraryMember> {
+    let owner = member.owner?;
+    let classifier = source.classifier(owner)?;
+    let applied_owner = super::applied_hierarchy(source, receiver)
+        .into_iter()
+        .find_map(|(candidate, applied, _)| (candidate == owner).then_some(applied))?;
+    let bindings = super::classifier_bindings(&classifier, applied_owner);
+    let mut specialized = member.clone();
+    // `params`/`ret` are the erased callable realization for classpath members. Kotlin metadata's
+    // generic signature is the semantic declaration and retains the owning classifier's type
+    // parameters (`Map<K, V>.entries: Set<Map.Entry<K, V>>`, `Iterator<T>.next(): T`). Apply the
+    // already-selected receiver to that declaration; using the erased fields here would turn the
+    // exact stable chain back into `Set`/`Iterator`/`Any` after resolution.
+    let (declared_params, declared_ret) = member
+        .generic_sig
+        .as_ref()
+        .map_or((member.params.as_slice(), member.ret), |signature| {
+            (signature.params.as_slice(), signature.ret)
+        });
+    specialized.params = declared_params
+        .iter()
+        .map(|parameter| specialize_signature_input_type(source, *parameter, &bindings))
+        .collect();
+    specialized.ret = specialize_signature_output_type(source, declared_ret, &bindings);
+    (!specialized
+        .params
+        .iter()
+        .any(|parameter| parameter.mentions_ty_param())
+        && !specialized.ret.mentions_ty_param())
+    .then_some(specialized)
+}
+
+/// Specialize the exact member chain decoded for an iteration body. The declaration identities are
+/// already fixed by the provider; this applies receiver type arguments only and never performs a
+/// spelling lookup or overload scan.
+pub(crate) fn specialize_inline_iteration_traversal(
+    source: &dyn SymbolSource,
+    receiver: Ty,
+    traversal: &mut InlineIterationTraversal,
+) -> Option<()> {
+    match traversal {
+        InlineIterationTraversal::Iterator {
+            prepare,
+            has_next,
+            next,
+        } => {
+            let mut current = receiver;
+            for member in prepare {
+                *member = specialize_fixed_member_receiver(source, current, member)?;
+                current = member.ret;
+            }
+            **has_next = specialize_fixed_member_receiver(source, current, has_next)?;
+            **next = specialize_fixed_member_receiver(source, current, next)?;
+        }
+        InlineIterationTraversal::Array => {}
+        InlineIterationTraversal::Counted { size, get } => {
+            **size = specialize_fixed_member_receiver(source, receiver, size)?;
+            **get = specialize_fixed_member_receiver(source, receiver, get)?;
+        }
+    }
+    Some(())
 }
 
 pub(super) fn specialize_callable(

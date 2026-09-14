@@ -693,8 +693,6 @@ pub(super) fn realize(
                 | crate::libraries::CompilerIntrinsic::SuspendCoroutine
                 | crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
                 | crate::libraries::CompilerIntrinsic::EnumValues
-                | crate::libraries::CompilerIntrinsic::ForEach
-                | crate::libraries::CompilerIntrinsic::ForEachIndexed
                 | crate::libraries::CompilerIntrinsic::Map
                 | crate::libraries::CompilerIntrinsic::FlatMap
                 | crate::libraries::CompilerIntrinsic::IsEmpty

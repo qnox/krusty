@@ -3,13 +3,16 @@
 //! Bytecode is used only to recognize the physical control-flow and exact call targets. Semantic
 //! member signatures come from the Kotlin classifier model built from metadata.
 
+mod dependencies;
+mod iteration;
+
 use super::inline_capability::metadata_inline;
 use super::{JvmLibraries, CONTINUATION_PARAM_DESCRIPTOR};
 use crate::jvm::classreader::{ExcEntry, C};
 use crate::jvm::inline::{self, Insn};
 use crate::libraries::{
     FnKind, InlineBodyCall, InlineBodyCallReceiver, InlineBodyDefault, InlineBodyPlan,
-    InlineBodyValue, LibraryCallable, LibraryMember,
+    InlineBodyValue, InlineIterationIndex, LibraryCallable, LibraryMember,
 };
 use crate::types::{type_name, Ty};
 
@@ -679,6 +682,57 @@ fn valid_finally_contract(contract: FinallyContract<'_>) -> bool {
 }
 
 impl JvmLibraries {
+    /// Assign stable external identities to every declaration referenced by an inline plan before
+    /// the plan crosses the provider boundary.
+    pub(super) fn register_inline_body_plan_dependencies(&self, plan: &mut InlineBodyPlan) {
+        match plan {
+            InlineBodyPlan::InvokeLambda {
+                prologue, cleanup, ..
+            } => {
+                for call in prologue.iter_mut().chain(cleanup) {
+                    let kind = match call.receiver {
+                        Some(InlineBodyCallReceiver::Dispatch(_)) => FnKind::Member,
+                        Some(InlineBodyCallReceiver::Extension(_)) => FnKind::Extension,
+                        None => FnKind::TopLevel,
+                    };
+                    self.register_external_callable(&mut call.callable, kind);
+                }
+            }
+            InlineBodyPlan::Iteration {
+                index, traversal, ..
+            } => {
+                if let Some(InlineIterationIndex::Checked { overflow }) = index {
+                    self.register_external_callable(&mut overflow.callable, FnKind::TopLevel);
+                }
+                match traversal {
+                    crate::libraries::InlineIterationTraversal::Iterator {
+                        prepare,
+                        has_next,
+                        next,
+                    } => {
+                        for member in prepare.iter_mut().chain([has_next.as_mut(), next.as_mut()]) {
+                            self.register_external_inline_member(member);
+                        }
+                    }
+                    crate::libraries::InlineIterationTraversal::Array => {}
+                    crate::libraries::InlineIterationTraversal::Counted { size, get } => {
+                        self.register_external_inline_member(size);
+                        self.register_external_inline_member(get);
+                    }
+                }
+            }
+            InlineBodyPlan::CollectionTransform {
+                factory, append, ..
+            } => {
+                let owner = factory
+                    .owner
+                    .expect("collection inline factory must name its classifier");
+                self.register_external_constructor(owner, factory);
+                self.register_external_inline_member(append);
+            }
+        }
+    }
+
     pub(super) fn inline_body_plan(&self, callable: &LibraryCallable) -> Option<InlineBodyPlan> {
         if !callable.inline.can_inline() {
             return None;
@@ -738,6 +792,14 @@ impl JvmLibraries {
         parameter_slots: &[u16],
         decode_unavailable: &mut bool,
     ) -> Option<InlineBodyPlan> {
+        if let Some(plan) = self.inline_iteration_body_plan(
+            callable,
+            body_descriptor,
+            parameter_slots,
+            decode_unavailable,
+        ) {
+            return Some(plan);
+        }
         let owner = callable.owner.render();
         let inline_name = format!("{}$$forInline", callable.name);
         let Some(body) = self
@@ -1113,129 +1175,6 @@ impl JvmLibraries {
                 .collect(),
             result: None,
         })
-    }
-
-    /// Match an invoked physical target to exactly one metadata-normalized Kotlin member. JVM
-    /// descriptors identify the realization only; they never supply semantic parameter/result types.
-    fn inline_plan_member(&self, target: MethodTarget<'_>) -> Option<LibraryMember> {
-        let (owner, name, descriptor, interface) = target;
-        let owner = type_name(owner);
-        // Decode the raw declaration directly. Going through `classifier_record` here can observe a
-        // recursively-building cache entry while the enclosing top-level inline declaration is being
-        // normalized; treating that transient partial view as "no plan" would then cache an ordinary
-        // call fallback for this declaration.
-        let classifier = self.build_library_type(owner)?;
-        let mut matches = classifier.members.iter().filter(|member| {
-            member
-                .physical_name
-                .as_deref()
-                .unwrap_or(member.name.as_str())
-                == name
-                && physical_descriptor(member) == descriptor
-        });
-        let mut member = matches.next()?.clone();
-        if matches.next().is_some() {
-            return None;
-        }
-        // Retain the invoked descriptor only as a physical realization. A suspend call's common
-        // shape excludes its CPS continuation; the suspend pass appends that operand exactly once.
-        let (mut physical_params, physical_ret) = super::parse_method_desc(descriptor)?;
-        if member.suspend()
-            && !physical_params.pop().is_some_and(|parameter| {
-                parameter
-                    .obj_internal()
-                    .is_some_and(|name| name.matches("kotlin/coroutines/Continuation"))
-            })
-        {
-            return None;
-        }
-        member.owner = Some(owner);
-        member.descriptor = if member.suspend() {
-            super::strip_continuation_param(descriptor)
-        } else {
-            descriptor.to_string()
-        };
-        member.physical_params = physical_params;
-        member.physical_ret = physical_ret;
-        member.set_is_interface(interface);
-        Some(member)
-    }
-
-    /// Normalize one physically static call that metadata declares as an extension. The descriptor
-    /// selects the declaration at this provider boundary; all semantic parameter/result facts come
-    /// from that exact Kotlin metadata declaration.
-    fn inline_plan_static_extension(
-        &self,
-        target: MethodTarget<'_>,
-    ) -> InlineDependency<LibraryCallable> {
-        let (owner, name, descriptor, interface) = target;
-        if interface {
-            return InlineDependency::Rejected;
-        }
-        let owner = type_name(owner);
-        let Some(candidate) = self.cp.facade_static(owner, name, descriptor) else {
-            return InlineDependency::Unavailable;
-        };
-        let Some((physical_params, physical_ret)) = super::parse_method_desc(descriptor) else {
-            return InlineDependency::Rejected;
-        };
-        let facts = self.cp.metadata_call_facts_name(
-            owner,
-            name,
-            &physical_params,
-            &physical_ret,
-            true,
-            &|name| self.metadata_value_class_underlying(name),
-        );
-        if facts.visibility.is_none()
-            || facts.deprecated_hidden
-            || facts.kept_params != Some(physical_params.len())
-            || facts.context_count != 0
-        {
-            return InlineDependency::Rejected;
-        }
-        let Some(signature) = facts.generic_sig else {
-            return InlineDependency::Rejected;
-        };
-        let Some(receiver) = signature.receiver else {
-            return InlineDependency::Rejected;
-        };
-        let params = facts.declared_params.unwrap_or_else(|| {
-            signature
-                .receiver
-                .into_iter()
-                .chain(signature.params.iter().copied())
-                .collect()
-        });
-        if params.len() != physical_params.len() {
-            return InlineDependency::Rejected;
-        }
-        let ret = facts.declared_ret.unwrap_or(signature.ret);
-        let mut callable = LibraryCallable {
-            inline: metadata_inline(
-                facts.is_inline,
-                facts.has_reified_type_params,
-                candidate.public,
-            ),
-            suspend: facts.suspend,
-            source_receiver: (!receiver.is_ty_param()).then_some(receiver),
-            declared_ret: facts.declared_ret,
-            context_count: facts.context_count,
-            contract: facts.contract,
-            generic_sig: Some(Box::new(signature.clone())),
-            declared_params: Some(params.clone().into_boxed_slice()),
-            signature: candidate.signature,
-            ..LibraryCallable::library(
-                owner,
-                name.to_owned(),
-                params,
-                ret,
-                physical_ret,
-                descriptor.to_owned(),
-            )
-        };
-        callable.physical_params = physical_params;
-        InlineDependency::Found(callable)
     }
 
     /// Whether the `$default` bridge's exact leading mask branch assigns `null` to `parameter`.
