@@ -7448,3 +7448,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and `::a_prefix_increment_of_a_context_property_re_reads_with_its_context_argument`, both run under
   the provisioned reference compiler as well. Corpus:
   `intrinsics/prefixIncDec.kt`, `statics/incInObject.kt`, `statics/incInClassObject.kt`.
+- **A shared-cell capture stays one cell however many callables it crosses, and is forwarded BY the
+  cell.** `var ok = "fail"; fun mk(): C = object : C { override fun i() = ok }` — the anonymous
+  object must see the write `ok = "OK"` that happens after `mk()` returns, so it has to hold the
+  same `Ref` the enclosing function holds. Two independent halves both got this wrong for an
+  anonymous object nested one callable deep (a local function, a lambda, or a local class), and a
+  lambda in the same position was already right:
+  - The checker decided `shared_cell` from the reassignment sets of the body being checked. Inside
+    a nested callable those sets are empty — the write lives in an enclosing frame — so a capture
+    whose source binding was ALREADY a shared cell was published as a plain value. A binding now
+    carries `shared_storage_cell`, set where a local classifier's capture fields are declared, and
+    a capture of such a binding stays shared without re-deriving the write.
+  - Lowering forwarded the capture with `captured_value`, which UNWRAPS the cell. That is right for
+    a read and wrong for a hand-off: it feeds the generated class's `Ref`-typed field a bare
+    element. The `Captured` capture source now uses `captured_value_holder` when the capture is a
+    shared cell.
+  The rule and the write analysis it rests on live in one place, `src/resolve/capture_storage.rs`:
+  four named facts about the binding (delegated, mutable, already a cell, written here) and the AST
+  walk that answers the last one. Named rather than positional, because three of the four are
+  booleans and swapping two of them is a silent miscompile rather than a type error.
+  Either half alone still fails, in opposite directions — `Ref` into a `String` parameter, or
+  `String` into a `Ref` parameter — and the JVM verifier names both. Tests:
+  `tests/anon_object_capture_e2e.rs::an_anonymous_object_in_a_local_function_forwards_the_shared_cell`,
+  `::an_anonymous_object_in_a_lambda_forwards_the_shared_cell`,
+  `::an_anonymous_object_in_a_local_class_forwards_the_shared_cell`, and
+  `::an_anonymous_object_two_callables_deep_writes_through_the_shared_cell` (the write direction).

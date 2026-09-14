@@ -280,6 +280,16 @@ impl BodyLowering<'_> {
                 FirLocalClassCaptureSource::Value(source) => {
                     self.ir.add_expr(IrExpr::GetValue(self.value_slot(*source)))
                 }
+                // A shared-cell capture is forwarded by its CELL, never by the element inside it:
+                // the generated class stores the same `Ref` the enclosing callable holds, so every
+                // reader sees later writes. `captured_value` unwraps the cell, which is right for a
+                // read and wrong here — it hands the class's `Ref`-typed field a bare element.
+                FirLocalClassCaptureSource::Captured {
+                    enclosing_depth,
+                    source,
+                } if capture.shared_cell => {
+                    self.captured_value_holder(*enclosing_depth, *source)?
+                }
                 FirLocalClassCaptureSource::Captured {
                     enclosing_depth,
                     source,
