@@ -24556,12 +24556,34 @@ impl<'a> Checker<'a> {
     /// itself. A receiver of class `C` remains a scoped `C` instance even though `C` also has a
     /// companion value.
     fn implicit_singleton_value(&self, ty: Ty, current: bool) -> Option<SingletonValue> {
-        if current {
+        // The NEAREST receiver is normally a real `this` in the frame, which lowering reads from
+        // its slot; naming a singleton there would be a longer way to the same value. A
+        // constructor-delegation argument is the exception: the receiver installed nearest for it
+        // is the TARGET's companion tower, and it is backed by no `this` slot at all, because the
+        // instance being constructed does not exist yet. Lowering has nothing to read, so the
+        // singleton has to be named — otherwise `constructor() : this(foo())` reaching a companion
+        // `foo` loads the half-built instance as the receiver, which is exactly what the JVM
+        // verifier rejects as `uninitializedThis`.
+        if current && !self.is_static_this(ty) {
             return None;
         }
         let classifier = ty.non_null().obj_internal()?;
         self.classifier_singleton_value(classifier)
             .filter(|singleton| singleton.classifier == classifier)
+    }
+
+    /// Is this receiver the object or companion standing in for `this` where there is no instance?
+    ///
+    /// The same two facts the explicit `this` spelling consults, asked of an implicitly selected
+    /// receiver, so the two spellings cannot disagree about what a receiver denotes.
+    fn is_static_this(&self, ty: Ty) -> bool {
+        self.static_singleton_this
+            .as_ref()
+            .is_some_and(|instance| ty == Ty::obj_name(instance.classifier))
+            || self
+                .static_companion_this
+                .as_ref()
+                .is_some_and(|instance| ty == Ty::obj_name(instance.companion))
     }
 
     /// The value a resolved classifier identity denotes in expression position. `None` means it is

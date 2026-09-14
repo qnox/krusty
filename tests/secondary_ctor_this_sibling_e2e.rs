@@ -210,3 +210,40 @@ fn ambiguous_this_delegation_is_diagnosed() {
         "expected constructor ambiguity diagnostic, got {diagnostics:?}"
     );
 }
+
+#[test]
+fn a_constructor_argument_reaches_the_companion_not_the_instance() {
+    // A delegation argument runs BEFORE the instance exists, so the receiver installed
+    // nearest for it is the target's companion tower — a rung backed by no `this` slot.
+    // Selecting it and then materializing "the current receiver" loads the half-built
+    // instance, which the JVM verifier rejects as `uninitializedThis`; the receiver has to
+    // be named as the singleton it is. An enclosing `object`, and a companion reached from
+    // an `inner` class's superclass argument, are the same rung under different spellings.
+    const SRC: &str =
+        "open class Base(val result: String)\n\
+         object Holder {\n\
+         \x20   fun tag(): String = \"T\"\n\
+         \x20   class Nested : Base(tag())\n\
+         }\n\
+         class Companioned(val result: Int) {\n\
+         \x20   companion object {\n\
+         \x20       fun foo(): Int = 1\n\
+         \x20       val prop = 2\n\
+         \x20       const val C = 3\n\
+         \x20   }\n\
+         \x20   constructor() : this(foo() + prop + C)\n\
+         }\n\
+         open class Outer(val fn: (() -> String)?) {\n\
+         \x20   companion object { val ok = \"OK\" }\n\
+         \x20   val ok = \"Fail: Outer.ok\"\n\
+         \x20   inner class Inner : Outer({ ok })\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   if (Companioned().result != 6) return \"fail: companion delegation ${Companioned().result}\"\n\
+         \x20   if (Holder.Nested().result != \"T\") return \"fail: enclosing object\"\n\
+         \x20   val captured = Outer(null).Inner().fn?.invoke()\n\
+         \x20   if (captured != \"OK\") return \"fail: captured ${captured}\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    assert_eq!(run(SRC).as_deref(), Some("OK"));
+}
