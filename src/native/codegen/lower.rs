@@ -1717,9 +1717,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             Callee::ClassStaticWithDefaults {
                 function, defaults, ..
             } => self.defaulted_call(*function, defaults, dispatch_receiver, args),
-            Callee::Local(function) => {
+            // A static method owned by a class is, to this generator, a function with a symbol —
+            // the owner is a JVM placement fact, and there is no flat facade here for it to be
+            // placed differently from. A local function declared inside a member is the shape that
+            // arrives this way.
+            Callee::Local(function) | Callee::ClassStatic { function, .. } => {
                 if dispatch_receiver.is_some() {
-                    return Err("a local call with a receiver".to_string());
+                    return Err("a static call with a receiver".to_string());
                 }
                 let params = functions::carried_parameters(
                     self.file.ir,

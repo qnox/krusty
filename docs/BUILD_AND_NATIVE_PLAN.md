@@ -1278,6 +1278,18 @@ before:**
    stands at **1968 pass**, with eight further corpus cases listed as known failures — anonymous
    objects passing captures to a superclass constructor, an `inner` class of a local class reaching
    two enclosing instances — each one krusty's JVM backend rejects or answers identically.
+   Three more declines were read off the backlog and probed rather than built for, and all three
+   were saying something about the JVM rather than about this generator, which took the lane to
+   **2003 pass**. A static method OWNED by a class is a JVM placement fact: there is no facade here
+   for it to be placed differently from, so it is a function with a symbol and a direct call (a
+   local function declared inside a member or an `init` block is what arrives that way). A
+   companion's `const val` is stored on the outer class there for the same kind of reason; here the
+   owner says nothing, and the one thing it could have said something about — when the initializer
+   runs — a `const` settles, because a compile-time constant cannot tell program start from the
+   companion's own initialization. A non-`const` property owned by a class still declines, since
+   its order IS observable. And a secondary constructor's `super()` reaching `kotlin.Any` needs
+   nothing emitted: the root declares no state and no constructor, which is already why a class
+   whose only supertype is `Any` calls no parent constructor.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

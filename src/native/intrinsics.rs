@@ -32,6 +32,15 @@ fn kotlin_owner(owner: &str) -> &str {
     }
 }
 
+/// Is this `kotlin.Any` — the root class, under either spelling the provider may hand over?
+///
+/// The root declares no state and no constructor to run, so a `super()` reaching it is nothing to
+/// emit. Both spellings are checked here for the reason [`kotlin_owner`] exists: `kotlin.Any`
+/// arrives as `java/lang/Object` when the signature came out of a JVM jar.
+pub(super) fn is_any(owner: crate::types::TypeName) -> bool {
+    matches!(kotlin_owner(&owner.render()), "kotlin/Any")
+}
+
 /// The Kotlin package a JVM file facade stands for: `kotlin/io/ConsoleKt` → `kotlin/io`.
 ///
 /// Returns `None` for a name that is not a facade, so a member function of a real class can never

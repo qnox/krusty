@@ -489,7 +489,7 @@ impl<'a> FileLowering<'a> {
         // here in either case: a `this(…)` delegation reaches a constructor that runs them, and a
         // `super(…)` one belongs to a class with no primary constructor, whose initializers common
         // lowering has already folded into this constructor's body.
-        let (target, target_params) = match &secondary.delegate {
+        let (target, target_params): (Option<FuncId>, Vec<Ty>) = match &secondary.delegate {
             crate::ir::CtorDelegateTarget::This {
                 target_params,
                 to_primary,
@@ -515,28 +515,37 @@ impl<'a> FileLowering<'a> {
                         })?;
                     self.classes[class as usize].secondaries[sibling]
                 };
-                (target, target_params.clone())
+                (Some(target), target_params.clone())
             }
             crate::ir::CtorDelegateTarget::Super {
                 owner,
                 target_params,
                 ..
-            } => {
-                let parent = self.ir.class_id_by_name(*owner).ok_or_else(|| {
-                    format!(
-                        "a secondary constructor delegating to a superclass outside this file (`{}`)",
-                        owner.render()
-                    )
-                })?;
-                let parent_constructor =
-                    self.classes[parent as usize].constructor.ok_or_else(|| {
-                        format!(
-                            "a delegation to a superclass with no primary constructor (`{}`)",
-                            owner.render()
-                        )
-                    })?;
-                (parent_constructor, target_params.clone())
-            }
+            } => match self.ir.class_id_by_name(*owner) {
+                Some(parent) => {
+                    let parent_constructor =
+                        self.classes[parent as usize].constructor.ok_or_else(|| {
+                            format!(
+                                "a delegation to a superclass with no primary constructor (`{}`)",
+                                owner.render()
+                            )
+                        })?;
+                    (Some(parent_constructor), target_params.clone())
+                }
+                // `kotlin.Any` is the root and declares no state, so `super()` reaching it has
+                // nothing to run — the same reason `define_constructor` calls no parent for a class
+                // whose only supertype is `Any`. Any OTHER superclass outside this file is a
+                // constructor this generator cannot see, and still declines.
+                None if super::super::super::intrinsics::is_any(*owner)
+                    && target_params.is_empty() =>
+                {
+                    (None, Vec::new())
+                }
+                None => return Err(format!(
+                    "a secondary constructor delegating to a superclass outside this file (`{}`)",
+                    owner.render()
+                )),
+            },
         };
         // A delegation argument may call a companion member (`constructor() : this(foo() + prop)`),
         // and those run before the primary constructor this delegates to would have created the
@@ -573,8 +582,10 @@ impl<'a> FileLowering<'a> {
                 };
                 operands.push(value);
             }
-            let func_ref = body.func_ref(target);
-            body.builder.ins().call(func_ref, &operands);
+            if let Some(target) = target {
+                let func_ref = body.func_ref(target);
+                body.builder.ins().call(func_ref, &operands);
+            }
             if let Some(own) = body_expression {
                 body.statement(own)?;
             }

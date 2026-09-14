@@ -1908,3 +1908,58 @@ fn a_local_classs_properties_keep_their_own_identities() {
         "3 6 7 8\n"
     );
 }
+
+#[test]
+fn a_function_declared_inside_a_member_is_called_where_it_was_declared() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A local function inside a member or an `init` block is lifted to a STATIC function owned by
+    // the class. That owner is a JVM placement fact — there is no facade here for the function to
+    // be placed differently from — so to this generator it is a function with a symbol, and the
+    // call is direct.
+    assert_eq!(
+        run(
+            "class Counted {\n             \x20   val value: Int\n             \x20   init {\n             \x20       fun ten(): Int = 10\n             \x20       value = ten()\n             \x20   }\n             \x20   fun doubled(): Int {\n             \x20       fun twice(n: Int) = n * 2\n             \x20       return twice(value)\n             \x20   }\n             }\n             fun main() {\n             \x20   println(Counted().value)\n             \x20   println(Counted().doubled())\n             }\n"
+        ),
+        "10\n20\n"
+    );
+}
+
+#[test]
+fn a_companion_constant_is_read_wherever_it_is_named() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A `const val` in a companion is stored on the OUTER class on the JVM, and the IR records
+    // that owner. Here the owner says nothing — a slot is a slot — and what it could have said
+    // something about, WHEN the initializer runs, a `const` settles: the initializer is a
+    // compile-time constant, so program-start initialization is indistinguishable from the
+    // companion's own.
+    assert_eq!(
+        run(
+            "class Limits {\n             \x20   companion object {\n             \x20       const val MAX = 42\n             \x20       const val NAME = \"limit\"\n             \x20   }\n             }\n             object Solo { const val ONE = 1 }\n             fun main() {\n             \x20   println(Limits.MAX)\n             \x20   println(Limits.NAME)\n             \x20   println(Solo.ONE)\n             }\n"
+        ),
+        "42\nlimit\n1\n"
+    );
+}
+
+#[test]
+fn a_secondary_constructor_may_delegate_to_the_root_class() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A class with no primary constructor whose secondary delegates to `super()` reaches
+    // `kotlin.Any`, which is not declared in any file — and needs nothing to be, because the root
+    // declares no state and no constructor to run. The class's own initializers still run, folded
+    // into this constructor's body by the checked lowering.
+    assert_eq!(
+        run(
+            "class Boxed {\n             \x20   val label: String\n             \x20   var seen = 0\n             \x20   init { seen = 1 }\n             \x20   constructor(text: String) { label = text }\n             \x20   constructor() : this(\"none\")\n             }\n             fun main() {\n             \x20   println(Boxed(\"here\").label)\n             \x20   println(Boxed().label)\n             \x20   println(Boxed().seen)\n             }\n"
+        ),
+        "here\nnone\n1\n"
+    );
+}

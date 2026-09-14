@@ -42,11 +42,20 @@ impl<'a> FileLowering<'a> {
     /// function may read a property declared after it.
     pub(super) fn declare_statics(&mut self) -> Result<(), Unsupported> {
         for (index, declaration) in self.ir.statics.iter().enumerate() {
+            // An owner is a PLACEMENT fact the JVM needs — a companion's `const val` becomes a
+            // field of the OUTER class there. There is no facade here for a slot to be placed
+            // differently from, so the owner says nothing about the slot; what it could say
+            // something about is WHEN the initializer runs, since a companion's runs with the
+            // companion rather than at program start. A `const val` settles that: its initializer
+            // is a compile-time constant, so running it at program start is indistinguishable.
+            // Anything else owned by a class still declines rather than guess at the order.
             if let Some(owner) = declaration.owner {
-                return Err(format!(
-                    "a property stored on `{}` (a companion's storage lives on its outer class)",
-                    owner.render()
-                ));
+                if !declaration.is_const {
+                    return Err(format!(
+                        "a non-`const` property stored on `{}`",
+                        owner.render()
+                    ));
+                }
             }
             check_carried(declaration.ty)?;
             if carrier(declaration.ty) == Carrier::Void {
