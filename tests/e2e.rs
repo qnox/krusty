@@ -830,6 +830,8 @@ mod krusty_roundtrip_class_metadata_e2e;
 mod ksp_apt_loop_e2e;
 #[path = "ksp_provision_e2e.rs"]
 mod ksp_provision_e2e;
+#[path = "labeled_lambda_return_expected_e2e.rs"]
+mod labeled_lambda_return_expected_e2e;
 #[path = "labeled_expression_e2e.rs"]
 mod labeled_expression_e2e;
 #[path = "labeled_lambda_return_e2e.rs"]

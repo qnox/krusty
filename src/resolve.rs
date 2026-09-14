@@ -35015,10 +35015,20 @@ impl<'a> Checker<'a> {
         };
         self.stmt_return_targets.insert(s, target);
         if label.is_some() && matches!(target, ReturnTarget::Lambda(_)) {
-            let returned = if let Some(ex) = e {
-                self.expr(scope, ex)
-            } else {
-                Ty::Unit
+            // A labelled return leaves the lambda through its RESULT position, exactly like the
+            // tail expression, so it is checked against the same expectation. Without it
+            // `return@run emptyList()` had no element type to infer from, and merging that with a
+            // concrete tail collapsed the lambda's result to `Any`.
+            let expected = match target {
+                ReturnTarget::Lambda(lambda) => {
+                    self.lambda_expected_returns.get(&lambda).copied()
+                }
+                ReturnTarget::Function => None,
+            };
+            let returned = match (e, expected) {
+                (Some(ex), Some(expected)) => self.expr_expected(scope, ex, expected),
+                (Some(ex), None) => self.expr(scope, ex),
+                (None, _) => Ty::Unit,
             };
             if let ReturnTarget::Lambda(lambda) = target {
                 self.record_lambda_return_type(lambda, returned);
@@ -46213,6 +46223,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         lambda_return_labels: Vec::new(),
         function_return_label: None,
         lambda_return_types: HashMap::new(),
+        lambda_expected_returns: HashMap::new(),
         bare_return_target: ReturnTarget::Function,
     }
 }
@@ -49652,6 +49663,10 @@ struct Checker<'a> {
     /// This is separate from control-flow targets: a lambda ending in a labeled return has body type
     /// `Nothing`, while its function result is the returned value's type.
     lambda_return_types: HashMap<ExprId, Ty>,
+    /// Result type the call site expects of a lambda, keyed by the lambda, while its body is being
+    /// checked. A labelled return is the same result position as the tail expression, so it is
+    /// judged against this exact expectation rather than with none at all.
+    lambda_expected_returns: HashMap<ExprId, Ty>,
     /// Owner of an unlabelled return in the current return scope. Plain lambdas leave this as the
     /// enclosing function; anonymous functions temporarily install their own lambda identity.
     bare_return_target: ReturnTarget,
@@ -77192,10 +77207,22 @@ impl<'a> Checker<'a> {
                 };
                 self.expr_return_targets.insert(e, target);
                 if let Some(v) = value {
+                    // A labelled return leaves the lambda through its RESULT position, so it is
+                    // judged against the lambda's expected result exactly as its tail expression
+                    // is. `xs ?: return@let emptyList()` otherwise had no element type to infer
+                    // from and collapsed the lambda's result to `Any`.
                     let returned = if label.is_none() || matches!(target, ReturnTarget::Function) {
                         self.expr_expected(scope, v, self.ret_ty)
                     } else {
-                        self.expr(scope, v)
+                        match target {
+                            ReturnTarget::Lambda(lambda) => {
+                                match self.lambda_expected_returns.get(&lambda).copied() {
+                                    Some(expected) => self.expr_expected(scope, v, expected),
+                                    None => self.expr(scope, v),
+                                }
+                            }
+                            ReturnTarget::Function => self.expr(scope, v),
+                        }
                     };
                     if let ReturnTarget::Lambda(lambda) = target {
                         self.record_lambda_return_type(lambda, returned);
@@ -77665,7 +77692,9 @@ impl<'a> Checker<'a> {
                         .unwrap_or_else(|| Ty::obj("kotlin/Any"));
                     self.declare(scope, name, pty, false);
                 }
-                self.with_lambda_return_scope(scope, e, implicit_label, |c| c.expr(scope, body))
+                self.with_lambda_return_scope(scope, e, implicit_label, None, |c| {
+                    c.expr(scope, body)
+                })
             };
             // Parameter types: an explicit annotation (`{ x: Int -> … }`) drives the function type so a
             // direct call (`f(3)`) type-checks; an unannotated parameter erases to `Object`. The return
@@ -85435,6 +85464,7 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         e: ExprId,
         implicit_label: Option<&str>,
+        expected_return: Option<Ty>,
         check: impl FnOnce(&mut Self) -> R,
     ) -> R {
         let label = self
@@ -85453,6 +85483,10 @@ impl<'a> Checker<'a> {
         if let Some(label) = &label {
             self.lambda_return_labels.push((label.clone(), e));
         }
+        let outer_expected_return = match expected_return {
+            Some(expected) => self.lambda_expected_returns.insert(e, expected),
+            None => self.lambda_expected_returns.remove(&e),
+        };
         self.active_lambda_chain.push(e);
         self.lambda_return_types.remove(&e);
         let anonymous = self.file.anon_fun_lambdas.contains(&e.0);
@@ -85493,6 +85527,10 @@ impl<'a> Checker<'a> {
         }
         self.loop_labels = outer_loop_labels;
         self.loop_depth = outer_loop_depth;
+        match outer_expected_return {
+            Some(outer) => self.lambda_expected_returns.insert(e, outer),
+            None => self.lambda_expected_returns.remove(&e),
+        };
         self.lambda_return_labels.truncate(label_depth);
         self.active_lambda_chain.truncate(lambda_depth);
         crate::trace_compiler!(
@@ -85741,7 +85779,7 @@ impl<'a> Checker<'a> {
                 }
                 let coerce = mode.coerce_return_to_unit;
                 let expected_return = mode.expected_return;
-                self.with_lambda_return_scope(scope, e, receiver_label, |c| {
+                self.with_lambda_return_scope(scope, e, receiver_label, expected_return, |c| {
                     c.check_lambda_body(scope, body, coerce, expected_return)
                 })
             };

@@ -2128,3 +2128,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `the_proof_survives_several_nested_foreign_receivers`,
   `a_mutable_member_still_declines_inside_a_foreign_receiver_lambda`,
   `a_custom_getter_still_declines_inside_a_foreign_receiver_lambda`.
+- **A `return@label` carries its lambda's expected result type (fix).** An inline lambda's TAIL
+  expression is checked against the result type the call site expects; a labelled return out of the
+  same lambda was checked with no expectation at all. `return@run emptyList()` therefore had no
+  element type to infer from, and merging it with a concrete tail produced `Any` —
+  `type mismatch: inferred type is Any but List<Long> was expected`, rejecting a declaration against
+  its own declared type. Both exits of a lambda are the same result position and are now judged
+  against the same expectation, at BOTH sites: the statement form and the expression form
+  (`xs ?: return@let emptyList()`). The discriminator that isolated it: swapping the two exits —
+  a concrete labelled return with an `emptyList()` TAIL always worked, because only the tail had the
+  expectation.
+  `tests/labeled_lambda_return_expected_e2e.rs::a_labeled_return_infers_from_the_lambdas_expected_result`,
+  `a_labeled_return_from_a_receiver_lambda_infers_the_same_way`,
+  `the_other_lambda_exit_spellings_still_infer`, `a_labeled_return_of_the_wrong_type_is_still_rejected`.
