@@ -2491,3 +2491,20 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `a_simple_name_may_begin_with_a_dollar`, `the_shortcut_is_taken_only_when_it_round_trips`,
   `tests/serializer_metadata_class_id_e2e.rs::a_generated_serializer_records_kotlincs_class_id`,
   `the_serializable_class_itself_still_records_its_own_class_id`.
+- **Every single-operand node hoists its suspension, not a subset (fix).** The suspend hoister
+  recurses through one IR node kind per arm, and two nodes had none: an enum lookup's name
+  (`enumValueOf<Level>(pickName())`) and the construction of the `Ref` holder that boxes a captured
+  mutable local (`var total = count()` where a closure captures `total`). Either left the suspension
+  where the state-machine flattener cannot split it, so the backend declined the whole function with
+  `this suspend-function shape is not yet supported by the IR backend` — a per-FILE verdict. The
+  second shape is ordinary Kotlin: a `var` initialized from a suspend call and captured by any lambda.
+  Both operands evaluate unconditionally before the node they feed, so both hoist to a preceding temp
+  exactly as the neighbouring arms do. Assigning the same captured local from a suspension LATER
+  needed nothing: that is a holder write, which already had its arm, and it is the control that
+  isolates the holder's construction as the gap. Found by listing every `IrExpr` variant, diffing it
+  against the arms the hoister handles, and compiling one fixture per variant that can carry a
+  sub-expression.
+  `tests/suspend_single_operand_hoist_e2e.rs::an_enum_lookup_hoists_a_suspending_name`,
+  `a_captured_local_hoists_a_suspending_initializer`,
+  `a_captured_local_assigned_from_a_suspension_later_still_works`,
+  `an_enum_lookup_with_no_suspension_still_works`.

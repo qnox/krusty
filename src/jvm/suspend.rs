@@ -2425,6 +2425,23 @@ fn hoist_expr(
             ir.exprs[e as usize] = IrExpr::Throw { operand };
             e
         }
+        // `enumValueOf<Level>(pickName())` — the looked-up name evaluates unconditionally before the
+        // lookup, so a suspension in it hoists like any other single operand.
+        IrExpr::EnumValueOf { classifier, arg } => {
+            let arg = hoist_expr(ir, arg, suspend_set, orig_rets, value_types, prelude);
+            ir.exprs[e as usize] = IrExpr::EnumValueOf { classifier, arg };
+            e
+        }
+        // `var total = count()` where a closure captures `total`: the capture boxes the local into a
+        // `Ref` holder, and the suspension ends up in the HOLDER'S construction rather than in an
+        // ordinary variable initializer. The boxed value is computed before the holder exists, so it
+        // hoists to a preceding temp. Assigning the same local from a suspension later needs nothing
+        // here — that is a `RefSet`, which already has its own arm.
+        IrExpr::RefNew { elem, init } => {
+            let init = hoist_expr(ir, init, suspend_set, orig_rets, value_types, prelude);
+            ir.exprs[e as usize] = IrExpr::RefNew { elem, init };
+            e
+        }
         IrExpr::NotNullAssert { operand, message } => {
             let operand = hoist_expr(ir, operand, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::NotNullAssert { operand, message };
