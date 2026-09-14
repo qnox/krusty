@@ -1212,7 +1212,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             }
             IrExpr::StringConcat(_) => Ty::String,
             IrExpr::PrimitiveNeg { ty, .. } => *ty,
-            IrExpr::PrimitiveBinOp { op, lhs, .. } => match op {
+            IrExpr::PrimitiveBinOp { op, lhs, rhs, .. } => match op {
                 IrBinOp::Lt
                 | IrBinOp::Le
                 | IrBinOp::Gt
@@ -1223,16 +1223,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 | IrBinOp::RefNe
                 | IrBinOp::And
                 | IrBinOp::Or => Ty::Boolean,
-                // Kotlin has no `Byte.plus(Byte): Byte`: arithmetic on the narrow integer types
-                // produces `Int`, and a result typed `Byte` here would pick the wrong carrier. An
-                // operand of a bounded type parameter is read through its bound for the same
-                // reason: the operator unboxes it, so the RESULT is that primitive and not the
-                // reference the declaration spells — a caller told otherwise would skip the boxing
-                // the next parameter needs, and the mismatch reaches the verifier, or worse.
-                _ => match scalar_bound(self.type_of(*lhs)?)? {
-                    Ty::Byte | Ty::Short | Ty::Char => Ty::Int,
-                    other => other,
-                },
+                // An operand of a bounded type parameter is read through its bound: the operator
+                // unboxes it, so the RESULT is that primitive and not the reference the
+                // declaration spells — a caller told otherwise would skip the boxing the next
+                // parameter needs, and the mismatch reaches the verifier, or worse.
+                _ => arithmetic_result(
+                    *op,
+                    scalar_bound(self.type_of(*lhs)?)?,
+                    self.type_of(*rhs).and_then(scalar_bound),
+                ),
             },
             IrExpr::Call { callee, .. } => match callee {
                 Callee::Local(function)
@@ -1663,7 +1662,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             (left, right, ty)
         };
 
-        Ok(Some(match op {
+        // `Char + Int` is `Char`, and the arithmetic above ran at `Int` width, so the result is
+        // narrowed back — the same `i2c` kotlinc emits after the `iadd`. Everything else keeps the
+        // width it was computed at.
+        let narrow_to_char =
+            arithmetic_result(op, lhs_ty.map_or(Ty::Int, |ty| ty.non_null()), rhs_ty) == Ty::Char
+                && lhs_ty.map(Ty::non_null) == Some(Ty::Char);
+
+        let value = match op {
             // `iadd`/`isub`/`imul` wrap, which is Kotlin's rule; there is nothing to guard.
             IrBinOp::Add => self.builder.ins().iadd(left, right),
             IrBinOp::Sub => self.builder.ins().isub(left, right),
@@ -1695,6 +1701,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrBinOp::RefEq | IrBinOp::RefNe | IrBinOp::Shl | IrBinOp::Shr | IrBinOp::Ushr => {
                 unreachable!("handled above")
             }
+        };
+        Ok(Some(if narrow_to_char {
+            self.builder.ins().ireduce(types::I16, value)
+        } else {
+            value
         }))
     }
 
@@ -1849,6 +1860,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         {
                             return realized;
                         }
+                        // `x.isNaN()` and its two siblings are one comparison each. Realizing them
+                        // here rather than in the runtime keeps the operand unboxed — the member
+                        // path below crosses everything as a reference, which for a `Double` would
+                        // mean allocating a box to ask a question about its bits.
+                        if let Some(predicate) =
+                            super::super::intrinsics::float_predicate(&owner, &name)
+                        {
+                            return self.float_predicate(predicate, receiver);
+                        }
                         let Some(symbol) =
                             super::super::intrinsics::runtime_member(&owner, &name, params)
                         else {
@@ -1883,6 +1903,47 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             }
             other => Err(format!("a {} call", callee_kind(other))),
         }
+    }
+
+    /// `isNaN`, `isInfinite`, `isFinite` — each one comparison on the unboxed value.
+    ///
+    /// `NaN` is the only value not equal to itself, and `|x| < +infinity` is false for both an
+    /// infinity and a `NaN`, which is exactly what "finite" excludes. Neither needs a bit pattern
+    /// written down here.
+    fn float_predicate(
+        &mut self,
+        predicate: super::super::intrinsics::FloatPredicate,
+        receiver: u32,
+    ) -> Result<Option<Value>, Unsupported> {
+        use super::super::intrinsics::FloatPredicate;
+        let ty = match self.type_of(receiver).map(Ty::non_null) {
+            Some(Ty::Double) => Ty::Double,
+            Some(Ty::Float) => Ty::Float,
+            _ => return Err("a floating-point question about a value of another type".to_string()),
+        };
+        let Some(value) = self.coerce(receiver, ty)? else {
+            return Err("a floating-point question about `Unit`".to_string());
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        Ok(Some(match predicate {
+            FloatPredicate::IsNaN => self.builder.ins().fcmp(FloatCC::NotEqual, value, value),
+            other => {
+                let magnitude = self.builder.ins().fabs(value);
+                let infinity = if ty == Ty::Float {
+                    self.builder.ins().f32const(f32::INFINITY)
+                } else {
+                    self.builder.ins().f64const(f64::INFINITY)
+                };
+                let condition = if other == FloatPredicate::IsFinite {
+                    FloatCC::LessThan
+                } else {
+                    FloatCC::Equal
+                };
+                self.builder.ins().fcmp(condition, magnitude, infinity)
+            }
+        }))
     }
 
     /// A compiler-selected operation on built-in types, realized by the runtime.
@@ -2223,6 +2284,22 @@ fn target_ty_of(carrier: Carrier) -> Option<Ty> {
             _ => return None,
         }),
         _ => None,
+    }
+}
+
+/// The Kotlin type an arithmetic operator produces, which is not always its operands'.
+///
+/// Arithmetic on the narrow integer types is `Int` arithmetic — Kotlin has no
+/// `Byte.plus(Byte): Byte`, and a result typed `Byte` would pick the wrong carrier. `Char` is the
+/// exception that makes the others a rule: `Char.plus(Int)` and `Char.minus(Int)` are declared to
+/// return `Char`, and only `Char.minus(Char)` returns `Int`. So `val c: Any = 'A' + 1` boxes a
+/// `Char` holding `'B'`, not an `Int` holding `66`.
+fn arithmetic_result(op: IrBinOp, lhs: Ty, rhs: Option<Ty>) -> Ty {
+    match (lhs, op) {
+        (Ty::Char, IrBinOp::Add) => Ty::Char,
+        (Ty::Char, IrBinOp::Sub) if rhs.map(Ty::non_null) != Some(Ty::Char) => Ty::Char,
+        (Ty::Byte | Ty::Short | Ty::Char, _) => Ty::Int,
+        (other, _) => other,
     }
 }
 

@@ -2221,3 +2221,42 @@ fn floating_point_values_render_as_kotlin_renders_them() {
         "0.0\n-0.0\n0.1\n0.30000000000000004\n0.3333333333333333\n9999999.0\n1.0E7\n0.001\n1.0E-4\n4.9E-324\n1.7976931348623157E308\nInfinity\nNaN\n0.33333334\n1.4E-45\n2.5\nx=1.5 y=2.5\n"
     );
 }
+
+#[test]
+fn what_kotlin_asks_of_a_value_directly() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // Two questions Kotlin asks of a value directly. `is Double` needs the runtime's own type for
+    // one, which it has now that a floating-point value has a box; `isNaN` and its siblings are
+    // one comparison each, emitted here rather than called into the runtime so the operand is
+    // never boxed to ask about its bits.
+    //
+    // `'A' + 1` is here because those two made it reachable: Kotlin declares `Char.plus(Int): Char`
+    // and only `Char.minus(Char): Int`, so the boxed result is a `Char` holding `'B'` — where the
+    // rule for the OTHER narrow types, that arithmetic on them is `Int` arithmetic, would have
+    // boxed an `Int` holding 66.
+    assert_eq!(
+        run("fun main() {\n\
+             \x20   val boxed: Any = 'A' + 1\n\
+             \x20   println(boxed)\n\
+             \x20   println(boxed is Char)\n\
+             \x20   println(boxed == 'B')\n\
+             \x20   val gap: Any = 'B' - 'A'\n\
+             \x20   println(gap is Int)\n\
+             \x20   println(('z' - 1).toString())\n\
+             \x20   val d: Any = 1.0\n\
+             \x20   val f: Any = 1.0f\n\
+             \x20   println(d is Double)\n\
+             \x20   println(f is Float)\n\
+             \x20   println(d is Float)\n\
+             \x20   println((0.0 / 0.0).isNaN())\n\
+             \x20   println((1.0 / 0.0).isInfinite())\n\
+             \x20   println(1.0.isFinite())\n\
+             \x20   println((1.0 / 0.0).isFinite())\n\
+             \x20   println((0.0f / 0.0f).isNaN())\n\
+             }\n"),
+        "B\ntrue\ntrue\ntrue\ny\ntrue\ntrue\nfalse\ntrue\ntrue\ntrue\nfalse\ntrue\n"
+    );
+}

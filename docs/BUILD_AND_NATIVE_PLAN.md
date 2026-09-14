@@ -1346,6 +1346,15 @@ before:**
    remainder truncated toward zero, no instruction provides it on every target, and it is computed
    on the significands with a shift-and-subtract loop — exactly, so `1.0E16 % 3.0` and a pair of
    subnormals come out right where anything reaching for division would not.
+   Two more questions Kotlin asks of a value directly took the lane to **2177 pass**: `is Double`,
+   which needed only the runtime's own type now that a floating-point value has a box, and `isNaN`
+   with its two siblings, which are one comparison each and are emitted here rather than called
+   into the runtime so the operand is never boxed to ask about its bits. Between them they made a
+   third thing reachable and wrong: `val c: Any = 'A' + 1` boxed an `Int` holding 66. Arithmetic on
+   the narrow integer types IS `Int` arithmetic — Kotlin has no `Byte.plus(Byte): Byte` — but
+   `Char` is the exception that makes the others a rule, since `Char.plus(Int)` and
+   `Char.minus(Int)` are declared to return `Char` and only `Char.minus(Char)` returns `Int`. The
+   result is now narrowed back to `Char`, the same `i2c` kotlinc emits after its `iadd`.
 
 #### Decided: Kotlin/Native's memory model, not the JVM's
 

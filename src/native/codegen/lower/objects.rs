@@ -135,6 +135,9 @@ impl<'a> FileLowering<'a> {
             Ty::Int => "kt_type_int",
             Ty::Long => "kt_type_long",
             Ty::Char => "kt_type_char",
+            Ty::Float => "kt_type_float",
+            Ty::Double => "kt_type_double",
+            Ty::Unit => "kt_type_unit",
             _ => return Ok(None),
         };
         self.import_data(symbol).map(Some)

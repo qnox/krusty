@@ -87,6 +87,35 @@ pub(super) fn runtime_function(owner: &str, name: &str, params: &[Ty]) -> Option
     }
 }
 
+/// A question Kotlin lets a program ask of a floating-point value directly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum FloatPredicate {
+    /// `Double.isNaN()` / `Float.isNaN()`.
+    IsNaN,
+    /// `isInfinite()`, true for either infinity and false for `NaN`.
+    IsInfinite,
+    /// `isFinite()`, the negation of both of the above.
+    IsFinite,
+}
+
+/// Which of those a selected dependency member is, or `None` for anything else.
+///
+/// They are extensions on the primitive, so they reach a backend as members of the file facade the
+/// stdlib declares them in — `kotlin/NumbersKt` here, which is the `kotlin/io/ConsoleKt` situation
+/// again and is normalized in the same place. Each is one comparison, so naming them lets the
+/// generator emit that rather than call into the runtime with a boxed operand.
+pub(super) fn float_predicate(owner: &str, name: &str) -> Option<FloatPredicate> {
+    if facade_package(kotlin_owner(owner))? != "kotlin" {
+        return None;
+    }
+    match name {
+        "isNaN" => Some(FloatPredicate::IsNaN),
+        "isInfinite" => Some(FloatPredicate::IsInfinite),
+        "isFinite" => Some(FloatPredicate::IsFinite),
+        _ => None,
+    }
+}
+
 /// Which member of `kotlin.Enum` an accessor names, or `None` for anything else.
 ///
 /// Every enum constant answers `name` and `ordinal` from the storage its base contributes, and the
