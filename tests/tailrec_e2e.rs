@@ -319,3 +319,30 @@ fun box(): String {\n\
     assert_eq!(krusty, reference, "krusty and kotlinc disagree");
     assert_eq!(krusty, "OK");
 }
+
+/// A `tailrec` OVERRIDE in a final class is looped, not merely accepted.
+///
+/// The soundness gate refuses an overridable member, and overridable is the member AND its owner: a
+/// bare `override` stays open, but only while something can subclass the class holding it. Reading
+/// the member's flag alone would decline this program — which kotlinc accepts and loops — so this
+/// is the test that keeps the gate from being over-broad. A million deep is the observable: a
+/// declined rewrite answers `StackOverflowError` here, not a slower number.
+#[test]
+fn a_tailrec_override_in_a_final_class_runs_flat() {
+    const SRC: &str = "open class Base {\n\
+    open fun count(n: Int, acc: Int): Int = acc\n\
+}\n\
+class Final : Base() {\n\
+    tailrec override fun count(n: Int, acc: Int): Int =\n\
+        if (n == 0) acc else count(n - 1, acc + 1)\n\
+}\n\
+fun box(): String {\n\
+    if (Final().count(1000000, 0) != 1000000) return \"fail override\"\n\
+    if (Base().count(1000000, 0) != 0) return \"fail base\"\n\
+    return \"OK\"\n\
+}\n";
+    let reference = common::kotlinc_box_result(SRC);
+    let krusty = run(SRC);
+    assert_eq!(krusty, reference, "krusty and kotlinc disagree");
+    assert_eq!(krusty, "OK");
+}
