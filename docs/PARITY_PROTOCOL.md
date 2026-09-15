@@ -2548,3 +2548,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `an_ordinary_parameter_of_the_same_shape_still_shapes_its_lambda`,
   `a_concrete_receiver_extension_still_shapes_its_lambda`,
   `a_member_the_shaped_receiver_lacks_is_still_rejected`.
+- **An inline member no longer crashes its siblings' annotation checking (fix).** Preparing a class's
+  inline members re-enters the class and walks the members it did NOT select, purely to rebuild their
+  lexical scopes. Those members' annotation ARGUMENT expressions belong to a source fragment that pass
+  no longer retains, and the checker asserted that only Pass-1 default checking could ever observe
+  released syntax. Any argument-bearing annotation on an ordinary member therefore CRASHED the
+  compiler as soon as the same class also declared an `inline` member — `@Suppress("UNCHECKED_CAST")`
+  beside an `inline fun` is the everyday case, and five lines reproduce it with no classpath. Two
+  passes are restricted this way, not one: Pass-1 default checking and inline preparation, which
+  selects only the inline declarations it must expand. Skipping released syntax is correct in each,
+  and the assertion now says so; an UNRESTRICTED pass, which has every expression, still trips it.
+  `tests/inline_preparation_sibling_annotation_e2e.rs::an_inline_member_does_not_crash_an_annotated_sibling`,
+  `any_argument_bearing_annotation_on_the_sibling_behaves_the_same`,
+  `a_class_with_no_inline_member_still_compiles`,
+  `a_bad_annotation_argument_is_still_rejected_beside_an_inline_member`.
