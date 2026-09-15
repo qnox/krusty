@@ -1985,6 +1985,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_lists_e2e.rs`
   (`a_single_element_list_is_not_a_vararg_call_of_length_one`).
 
+- **`::foo.name` is a compile-time constant on the native target.** A callable reference is a
+  lambda object there: it carries the code, not the declaration, so nothing in the emitted object
+  knows what the source called it — and it does not have to. The one place a program can ask is
+  `KCallable.name` on a reference written right at the read, where the node itself names the
+  declaration, so the name is folded at compile time and no reflection metadata has to exist for
+  it. A constructor reference answers `<init>`, which is the name Kotlin gives it. A reference
+  reaching the read through a variable still declines: there the node is a read, not a reference,
+  and the declaration is no longer in hand.
+  The receiver is still EVALUATED — `x::foo.name` runs `x` and then answers the constant — because
+  the constant is the answer, not the expression.
+  Tests: `tests/native_callable_name_e2e.rs`
+  (`a_top_level_function_reference_answers_its_name`, `a_constructor_reference_is_called_init`,
+  `the_bound_receiver_is_still_evaluated`,
+  `a_reference_reaching_the_read_through_a_variable_declines`).
+
 - **`x in a..b` builds no range.** The checker leaves the membership test as its BOUNDS rather than
   as a range object, so the whole of it is two comparisons — and each form puts them somewhere
   different: `..<` excludes its high end, and `downTo` writes its ends the other way round, so the

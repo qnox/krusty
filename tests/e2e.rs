@@ -1590,3 +1590,6 @@ mod reified_value_class_splice_e2e;
 
 #[path = "file_private_extension_scope_e2e.rs"]
 mod file_private_extension_scope_e2e;
+
+#[path = "native_callable_name_e2e.rs"]
+mod native_callable_name_e2e;

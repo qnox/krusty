@@ -1566,6 +1566,14 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **`KCallable.name`, for 2503.** A callable reference is a lambda object on this target, and a
+   lambda does not know its own name. It does not need to: the only question a program can ask is
+   `::foo.name`, and there the reference is written at the read, so the declaration is in hand and
+   the name folds to a constant. Getting it right was a matter of finding where the source name
+   survives — the emitted adapter's is mangled (`$fir_callable_ref_1_2`), while
+   `ir.referenced_module_callables` keeps the Kotlin name precisely so a reference's identity does
+   not depend on what the adapter ended up being called.
+
    **Range membership, for 2501.** `x in a..b` had been declining although ranges were built long
    ago, because the checker does not hand it a range at all — it hands the bounds, so the answer is
    two comparisons and no object. Writing the effect-order test taught me something I had wrong:

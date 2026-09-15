@@ -185,6 +185,20 @@ pub(super) fn is_range_until(owner: &str, name: &str, arity: usize) -> bool {
     facade_package(kotlin_owner(owner)) == Some("kotlin/ranges") && name == "until" && arity == 1
 }
 
+/// Whether a getter is `KCallable.name` — the one member of the reflection surface whose answer a
+/// program can have without any reflection metadata existing, because the declaration it names is
+/// written in the same file.
+pub(super) fn is_callable_name(owner: crate::types::TypeName, name: &str) -> bool {
+    name == "getName"
+        && [
+            "kotlin/reflect/KCallable",
+            "kotlin/reflect/KFunction",
+            "kotlin/reflect/KProperty",
+        ]
+        .iter()
+        .any(|candidate| owner.matches(candidate))
+}
+
 /// Whether a declaration's owner is the file facade `lazy` and `Lazy.getValue` live in. Both are
 /// top-level declarations of `kotlin`, so they reach a backend as members of `kotlin/LazyKt`.
 pub(super) fn is_lazy_facade(owner: &str) -> bool {

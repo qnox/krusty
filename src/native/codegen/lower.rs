@@ -1237,6 +1237,18 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     None => Err(format!("`{name}` of a receiver that is not a list")),
                 }
             }
+            // `::foo.name` — `KCallable.name` of a reference written right here, which is the
+            // DECLARATION's own name and therefore known already.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.callable_reference_name(target, receiver).is_some() => {
+                let name = self
+                    .callable_reference_name(target, receiver)
+                    .expect("checked by the guard");
+                self.callable_name(receiver, &name)
+            }
             IrExpr::Checked(IrCheckedOperation::PropertyRead {
                 target,
                 dispatch_receiver,

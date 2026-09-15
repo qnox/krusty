@@ -666,6 +666,57 @@ impl BodyLowering<'_, '_, '_> {
         Ok(self.builder.inst_results(call).first().copied())
     }
 
+    /// `::foo.name`, for a reference the program wrote HERE.
+    ///
+    /// `KCallable.name` answers the declaration's own name, and a reference node names its
+    /// declaration — so the answer is known at compile time and no reflection metadata has to
+    /// exist for it. Returns `None` unless the property really is `KCallable.name` and the receiver
+    /// really is such a reference; anything else is somebody else's read.
+    pub(super) fn callable_reference_name(
+        &self,
+        target: crate::fir::ExternalPropertyId,
+        receiver: u32,
+    ) -> Option<String> {
+        let IrExpr::CallableReference(reference) = self.file.ir.expr(receiver) else {
+            return None;
+        };
+        let property = self.file.classpath.external_property(target)?;
+        let getter = self.file.classpath.external_callable(property.getter)?;
+        if !super::super::super::intrinsics::is_callable_name(
+            getter.callable.owner,
+            &getter.callable.name,
+        ) {
+            return None;
+        }
+        match &reference.target {
+            crate::ir::IrCallableReferenceTarget::Local { name, .. } => Some(name.to_string()),
+            // Kotlin calls a constructor reference `<init>`, which is the name it answers too.
+            crate::ir::IrCallableReferenceTarget::Constructor { .. } => Some("<init>".to_string()),
+            // The declaration name is kept beside the call precisely so a reference's identity does
+            // not depend on whatever the emitted method ended up being called.
+            crate::ir::IrCallableReferenceTarget::Module(id) => self
+                .file
+                .ir
+                .referenced_module_callables
+                .get(id)
+                .map(|callable| callable.name.to_string()),
+        }
+    }
+
+    /// The name, with the receiver still EVALUATED: `(state++)::toString.name` answers a constant
+    /// and increments, and a program can see the second part.
+    pub(super) fn callable_name(
+        &mut self,
+        receiver: u32,
+        name: &str,
+    ) -> Result<Option<Value>, Unsupported> {
+        self.expression(receiver)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        Ok(Some(self.string_literal(name.as_bytes())?))
+    }
+
     /// `p.name` — a checked read of a dependency property whose receiver is a reference.
     ///
     /// Returns `None` when the receiver is not one, so the caller falls through; the name is
