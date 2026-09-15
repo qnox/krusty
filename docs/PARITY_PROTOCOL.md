@@ -2297,3 +2297,24 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `src/resolve/type_join.rs::tests::an_exact_platform_pair_keeps_the_flexible_operand_in_both_orders`,
   `nested_platform_and_genuine_nullable_differences_are_not_outer_pairs`,
   `tests/try_expected_type_join_e2e.rs::a_try_expression_joins_its_branches_against_the_expected_type`.
+- **An absent type-parameter bound is `Any?`, not `Any` (fix).** The member call path copied a
+  declaration's `GenericSig` into a second `GenericMethod` shape, flattened its bounds, and filled
+  each ABSENT type-parameter bound with a non-null `Any`.
+  Return-binding inference legitimately narrows a nullable candidate when the nullable form violates
+  the bound and the non-null form satisfies it — and a spurious `Any` manufactures exactly that
+  condition, so every unbounded result variable was pinned to its non-null form. `fun pick(): Status?
+  = wrap { source() }`, with `wrap` a generic MEMBER and `source()` returning `Status?`, therefore
+  reported `type mismatch: inferred type is Status? but Status was expected` at the lambda body: `R`
+  was fixed to `Status`, which became the lambda's expected result. `GenericMethod` now carries the
+  declaration-owned `GenericSig` directly; source and provider members preserve the same empty or
+  intersection bound list, and the one `GenericSig::primary_formal_bound` boundary supplies Kotlin's
+  implicit `Any?` only when a concrete fallback is actually required. An explicit type argument
+  bypassed inference entirely and the TOP-LEVEL path already used the declared bounds directly,
+  which is why only members failed and why the defect survived so long. A DECLARED `R : Any` still
+  rejects a nullable result: the narrowing rule is correct, only the fabricated bound was wrong.
+  `src/libraries/generic_signature.rs::tests::an_absent_bound_is_nullable_any_but_a_declared_bound_is_preserved`,
+  `tests/member_generic_nullable_result_e2e.rs::a_generic_member_binds_its_result_to_a_nullable_type`,
+  `a_suspend_crossinline_member_admits_a_nullable_binding`,
+  `a_classpath_generic_member_uses_the_same_implicit_bound`,
+  `a_top_level_generic_of_the_same_shape_still_works`, `an_explicit_type_argument_still_works`,
+  `a_declared_non_null_bound_still_rejects_a_nullable_result`.
