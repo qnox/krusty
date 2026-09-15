@@ -53,8 +53,11 @@ impl JvmLibraries {
                     .physical_name
                     .as_deref()
                     .unwrap_or(member.name.as_str());
-                (crate::jvm::names::mapped_builtin_virtual_name(physical_owner_text, declared_name)
-                    == name
+                (crate::jvm::names::mapped_builtin_virtual_name(
+                    physical_owner_text,
+                    declared_name,
+                    descriptor,
+                ) == name
                     && physical_descriptor(member) == descriptor)
                     .then(|| (*owner, member.clone()))
             }));

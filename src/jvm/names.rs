@@ -85,33 +85,18 @@ pub fn classfile_internal_name(internal: &str) -> String {
     }
 }
 
-/// The `java.util` method name a mapped `kotlin.collections` interface declares for a Kotlin *property*
-/// member (`Map.keys` → `keySet()`, `Collection.size` → `size()`), from `JavaToKotlinClassMap`'s
-/// SpecialBuiltinMembers. `None` for a property with no special stub (its interface method is the plain
-/// `get<Name>` getter). A class implementing such an interface must emit this method as a bridge that
-/// forwards to the Kotlin getter, or the `java.util` abstract stays unimplemented. The READ direction of
-/// this same mapping lives in `Classpath::member` (the classpath member-name resolution).
-pub fn collection_property_stub_name(prop: &str) -> Option<&'static str> {
-    collection_property_stub(prop).map(|(name, _)| name)
-}
-
-pub fn collection_property_stub(prop: &str) -> Option<(&'static str, crate::types::Ty)> {
-    use crate::types::Ty;
-    match prop {
-        "size" => Some(("size", Ty::Int)),
-        "values" => Some(("values", Ty::obj("kotlin/collections/Collection"))),
-        "keys" => Some(("keySet", Ty::obj("kotlin/collections/Set"))),
-        "entries" => Some(("entrySet", Ty::obj("kotlin/collections/Set"))),
-        _ => None,
-    }
-}
-
 pub use crate::names::property_setter_name;
 
 /// Physical JVM name for a mapped Kotlin virtual member.
-pub fn mapped_builtin_virtual_name<'a>(owner: &str, name: &'a str) -> &'a str {
+pub fn mapped_builtin_virtual_name<'a>(owner: &str, name: &'a str, descriptor: &str) -> &'a str {
+    if let Some(owner) = crate::types::existing_type_name(owner) {
+        if let Some(physical) =
+            super::mapped_builtin_declarations::physical_name_for_call(owner, name, descriptor)
+        {
+            return physical;
+        }
+    }
     match (owner, name) {
-        ("java/lang/CharSequence" | "kotlin/CharSequence", "get") => "charAt",
         ("java/lang/String", "get") | ("kotlin/String", "get") => "charAt",
         ("java/lang/StringBuilder", "get") | ("kotlin/text/StringBuilder", "get") => "charAt",
         (
@@ -122,13 +107,6 @@ pub fn mapped_builtin_virtual_name<'a>(owner: &str, name: &'a str) -> &'a str {
             "kotlin/ranges/IntRange" | "kotlin/ranges/LongRange" | "kotlin/ranges/CharRange",
             "endInclusive",
         ) => "getLast",
-        ("java/util/Map" | "kotlin/collections/Map" | "kotlin/collections/MutableMap", "keys") => {
-            "keySet"
-        }
-        (
-            "java/util/Map" | "kotlin/collections/Map" | "kotlin/collections/MutableMap",
-            "entries",
-        ) => "entrySet",
         (
             "kotlin/reflect/KCallable"
             | "kotlin/reflect/KProperty"
@@ -138,11 +116,6 @@ pub fn mapped_builtin_virtual_name<'a>(owner: &str, name: &'a str) -> &'a str {
             | "kotlin/reflect/KMutableProperty1",
             "name",
         ) => "getName",
-        // `MutableList.removeAt(Int)` is `java.util.List.remove(int)` — kotlinc's
-        // `BuiltinMethodsWithDifferentJvmName`, the same table as `CharSequence.get`/`Number.toInt`.
-        // The read-only `List` has no `removeAt`, so only the mutable Kotlin name and the erased JVM
-        // owner a `MutableList` call carries need an entry.
-        ("java/util/List" | "kotlin/collections/MutableList", "removeAt") => "remove",
         ("java/lang/Number", "toByte") => "byteValue",
         ("java/lang/Number", "toShort") => "shortValue",
         ("java/lang/Number", "toInt") => "intValue",
@@ -154,8 +127,14 @@ pub fn mapped_builtin_virtual_name<'a>(owner: &str, name: &'a str) -> &'a str {
 }
 
 /// Whether two semantic member spellings address one mapped JVM method.
-pub(super) fn same_mapped_virtual_name(owner: &str, left: &str, right: &str) -> bool {
-    mapped_builtin_virtual_name(owner, left) == mapped_builtin_virtual_name(owner, right)
+pub(super) fn same_mapped_virtual_name(
+    owner: &str,
+    left: &str,
+    right: &str,
+    descriptor: &str,
+) -> bool {
+    mapped_builtin_virtual_name(owner, left, descriptor)
+        == mapped_builtin_virtual_name(owner, right, descriptor)
 }
 
 pub fn mapped_builtin_virtual_source_name<'a>(owner: &str, name: &'a str) -> &'a str {

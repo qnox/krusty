@@ -166,6 +166,11 @@ fun ar(a: Array<String>): Int = a.size
 fun ia(a: IntArray): Int = a.size
 "#;
     let jars = [stdlib];
+    assert_eq!(
+        common::front_end_diagnostics(src, &jars, Some(&jdk)),
+        Vec::<String>::new(),
+        "the mapped-builtin matrix must pass the frontend with the JDK present"
+    );
     let with_jdk = common::compile_in_process(src, "cmp", &jars, Some(&jdk))
         .expect("must compile with a JDK on the classpath");
     let no_jdk = common::compile_in_process(src, "cmp", &jars, None)

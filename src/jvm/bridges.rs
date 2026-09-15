@@ -45,8 +45,12 @@ fn external_method_name(
         || fallback.to_owned(),
         |realization| {
             let callable = realization.callable;
-            crate::jvm::names::mapped_builtin_virtual_name(&callable.owner.render(), &callable.name)
-                .to_owned()
+            crate::jvm::names::mapped_builtin_virtual_name(
+                &callable.owner.render(),
+                &callable.name,
+                &callable.descriptor,
+            )
+            .to_owned()
         },
     )
 }
