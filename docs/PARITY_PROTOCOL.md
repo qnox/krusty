@@ -2390,3 +2390,21 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `ordinary_packed_vararg_stays_byte_identical_to_kotlinc`,
   `the_same_calls_in_a_fixed_arity_call_still_work`,
   `a_straight_line_inline_body_still_works_as_a_vararg_element`.
+- **An operator's shared formal is seeded from the call's expected result (fix).**
+  `Iterable<T>.plus(Iterable<T>): List<T>` shares one `T` between the receiver, the argument and the
+  result. The argument expectation was derived from the RECEIVER alone, so
+  `fun pick(): List<P> = listOf(A()) + listOf(B())` committed the receiver call to `List<A>` and then
+  judged the argument against `Iterable<A>`. Kotlin solves receiver, argument and expected result
+  together. Selection is untouched — the same candidate wins — and only what the arguments are
+  CHECKED AGAINST is re-derived, with the expected result seeded before the receiver so the receiver
+  still fixes whatever it leaves open and an explicit type argument still wins. This does not let an
+  ARGUMENT widen a receiver-fixed formal: that rule is what keeps `Comparable<T>.compareTo` sound and
+  is unchanged. Every other operator convention passes no expectation, since a comparison's result is
+  `Boolean` and a range's is a range — neither says anything about the operand formals.
+  KNOWN LIMIT: a chained `a + b + c` still fixes the inner operator from its own receiver, because the
+  inner call sits in receiver position and receives no expectation; the corpus shape is a `fold`
+  accumulator, which this covers.
+  `tests/operator_expected_result_seeding_e2e.rs::a_declared_result_seeds_a_plus_over_two_inferred_operands`,
+  `a_fold_accumulator_seeds_its_operator`, `an_explicit_type_argument_on_the_receiver_still_works`,
+  `a_declared_receiver_val_still_works`,
+  `an_operand_that_does_not_fit_the_expectation_is_still_rejected`.

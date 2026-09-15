@@ -34650,7 +34650,7 @@ impl<'a> Checker<'a> {
                 let mut arguments = indices.clone();
                 arguments.push(value);
                 match self
-                    .selected_operator_params(scope, at, "set", &arguments)
+                    .selected_operator_params(scope, at, "set", &arguments, None)
                     .and_then(|params| params.last().copied())
                 {
                     Some(expected) => {
@@ -34679,7 +34679,7 @@ impl<'a> Checker<'a> {
         // Resolve `set` as a member, same-module extension, or library member. A single-index Map
         // store may resolve to `put`. Record the selected target so lowering does not choose again.
         let set_selected = self
-            .operator_call_ret(scope, array, at, "set", &set_args, &set_exprs, span)
+            .operator_call_ret(scope, array, at, "set", &set_args, &set_exprs, span, None)
             .map(|(_, call)| (SyntheticOperatorCall::Set, call));
         if self.indexed_operator_ambiguous {
             return;
@@ -34687,7 +34687,9 @@ impl<'a> Checker<'a> {
         let selected = set_selected.or_else(|| {
             single_index
                 .then(|| {
-                    self.operator_call_ret(scope, array, at, "put", &set_args, &set_exprs, span)
+                    self.operator_call_ret(
+                        scope, array, at, "put", &set_args, &set_exprs, span, None,
+                    )
                 })
                 .flatten()
                 .map(|(_, call)| (SyntheticOperatorCall::Put, call))
@@ -34871,6 +34873,7 @@ impl<'a> Checker<'a> {
                 &[et],
                 &[range.end],
                 span,
+                None,
             ) {
                 Some((range_ty, range_call)) if range_ty != Ty::Error => {
                     match self.iterator_protocol_target(
@@ -57061,6 +57064,7 @@ impl<'a> Checker<'a> {
         arg_tys: &[Ty],
         arg_exprs: &[ExprId],
         span: Span,
+        expected_result: Option<Ty>,
     ) -> Option<(Ty, ResolvedCall)> {
         // `downTo` and the legacy `until` range spellings are represented by RangeKind in the AST,
         // but their Kotlin declarations are `infix`, not `operator`. They still go through the same
@@ -57313,6 +57317,23 @@ impl<'a> Checker<'a> {
             self.reject_if_inaccessible(selected.visibility, name, selected.callable.owner, span);
             return None;
         }
+        // Selection is settled. What the ARGUMENTS are checked against is decided here, and a formal
+        // shared between the result and the operands has to see the call's expected result:
+        // `Iterable<T>.plus(Iterable<T>): List<T>` otherwise fixes `T` from the receiver alone, so
+        // `fun pick(): List<P> = listOf(A()) + listOf(B())` judges the argument against
+        // `Iterable<A>`. The receiver still fixes whatever the expectation leaves open, and an
+        // explicit type argument still wins — this only adds an input that was being dropped.
+        let params = match expected_result {
+            Some(expected) => crate::symbol_resolver::selected_call_params_with_expected(
+                resolver.source(),
+                &selected,
+                receiver,
+                &arg_kinds,
+                &[],
+                expected,
+            ),
+            None => params,
+        };
         self.expect_call_args(scope, &params, false, arg_exprs, arg_tys);
         let target = if selected.kind == crate::libraries::FnKind::Member {
             let mut member = selected.member_with_return(ret);
@@ -57362,6 +57383,7 @@ impl<'a> Checker<'a> {
         receiver: Ty,
         name: &str,
         args: &[ExprId],
+        expected_result: Option<Ty>,
     ) -> Option<Vec<Ty>> {
         let argument_kinds = self.call_arg_kinds(scope, args);
         let (mut functions, _) = self.stable_receiver_callables(receiver, name).into_parts();
@@ -57396,7 +57418,24 @@ impl<'a> Checker<'a> {
                     &[],
                     &callables,
                 )
-                .map(|(_, params)| params)
+                .map(|(selected, params)| {
+                    // Selection is settled; what remains is what the ARGUMENTS are checked against.
+                    // A formal shared between the result and the operands is decided here, so the
+                    // call's expected result has to take part: `Iterable<T>.plus(Iterable<T>):
+                    // List<T>` otherwise fixes `T` from the receiver alone and judges the argument
+                    // against the receiver's own element type.
+                    let Some(expected) = expected_result else {
+                        return params;
+                    };
+                    crate::symbol_resolver::selected_call_params_with_expected(
+                        resolver.source(),
+                        &selected,
+                        receiver,
+                        &argument_kinds,
+                        &[],
+                        expected,
+                    )
+                })
         }
     }
     /// Resolve each context-parameter type to one semantic scope value. The implicit-receiver tower is
@@ -76473,7 +76512,7 @@ impl<'a> Checker<'a> {
                     crate::ast::RangeKind::DownTo => "downTo",
                 };
                 if let Some((range_ty, range_call)) =
-                    self.operator_call_ret(scope, e, lt, name, &[rt], &[hi], self.span(e))
+                    self.operator_call_ret(scope, e, lt, name, &[rt], &[hi], self.span(e), None)
                 {
                     if let Some(key) = SyntheticOperatorCall::from_name(name) {
                         self.resolved_operator_calls.insert((e, key), range_call);
@@ -76707,7 +76746,7 @@ impl<'a> Checker<'a> {
                 lhs,
                 rhs,
                 operator_span,
-            } => return self.expr_inner_binary(scope, e, op, lhs, rhs, operator_span),
+            } => return self.expr_inner_binary(scope, e, op, lhs, rhs, operator_span, expected),
             Expr::Member { receiver, name } => {
                 return self.expr_inner_member(scope, e, receiver, name)
             }
@@ -77647,9 +77686,16 @@ impl<'a> Checker<'a> {
                 // `a.rangeTo(b).contains(x)`. This includes reference operators AND mixed unsigned
                 // membership (`UByte in UIntRange`, `UInt in ULongRange`), whose `contains` overloads
                 // live in stdlib metadata. Scalar storage is irrelevant to source applicability.
-                if let Some((range_ty, range_call)) =
-                    self.operator_call_ret(scope, e, st, "rangeTo", &[et], &[end], self.span(e))
-                {
+                if let Some((range_ty, range_call)) = self.operator_call_ret(
+                    scope,
+                    e,
+                    st,
+                    "rangeTo",
+                    &[et],
+                    &[end],
+                    self.span(e),
+                    None,
+                ) {
                     if let Some((Ty::Boolean, contains_call)) = self.operator_call_ret(
                         scope,
                         e,
@@ -77658,6 +77704,7 @@ impl<'a> Checker<'a> {
                         &[vt],
                         &[value],
                         self.span(e),
+                        None,
                     ) {
                         self.resolved_operator_calls
                             .insert((e, SyntheticOperatorCall::RangeTo), range_call);
@@ -79266,6 +79313,7 @@ impl<'a> Checker<'a> {
         lhs: ExprId,
         rhs: ExprId,
         operator_span: Span,
+        expected: Option<Ty>,
     ) -> Ty {
         let t = {
             if matches!(op, BinOp::And | BinOp::Or) {
@@ -79344,9 +79392,16 @@ impl<'a> Checker<'a> {
             // exact callable and may still realize it with primitive operations where appropriate.
             if lt.is_unsigned() {
                 if let Some(name) = op.arith_operator_name() {
-                    if let Some((ret, target)) =
-                        self.operator_call_ret(scope, e, lt, name, &[rt], &[rhs], self.span(e))
-                    {
+                    if let Some((ret, target)) = self.operator_call_ret(
+                        scope,
+                        e,
+                        lt,
+                        name,
+                        &[rt],
+                        &[rhs],
+                        self.span(e),
+                        expected,
+                    ) {
                         self.resolved_operator_calls.insert(
                             (
                                 e,
@@ -79408,9 +79463,16 @@ impl<'a> Checker<'a> {
                         Err(()) => return self.set(e, Ty::Error),
                         Ok(None) => {}
                     }
-                    if let Some((ret, target)) =
-                        self.operator_call_ret(scope, e, lt, fname, &[rt], &[rhs], self.span(e))
-                    {
+                    if let Some((ret, target)) = self.operator_call_ret(
+                        scope,
+                        e,
+                        lt,
+                        fname,
+                        &[rt],
+                        &[rhs],
+                        self.span(e),
+                        expected,
+                    ) {
                         self.resolved_operator_calls.insert(
                             (
                                 e,
@@ -79439,9 +79501,16 @@ impl<'a> Checker<'a> {
             if lt.is_reference() && lt.scalar_value_repr().is_none() {
                 let op_name = op.arith_operator_name();
                 if let Some(fname) = op_name {
-                    if let Some((ret, target)) =
-                        self.operator_call_ret(scope, e, lt, fname, &[rt], &[rhs], self.span(e))
-                    {
+                    if let Some((ret, target)) = self.operator_call_ret(
+                        scope,
+                        e,
+                        lt,
+                        fname,
+                        &[rt],
+                        &[rhs],
+                        self.span(e),
+                        expected,
+                    ) {
                         self.resolved_operator_calls.insert(
                             (
                                 e,
@@ -79524,9 +79593,16 @@ impl<'a> Checker<'a> {
                 && lt != Ty::Error
                 && rt != Ty::Error
             {
-                if let Some((ret, target)) =
-                    self.operator_call_ret(scope, e, lt, "compareTo", &[rt], &[rhs], self.span(e))
-                {
+                if let Some((ret, target)) = self.operator_call_ret(
+                    scope,
+                    e,
+                    lt,
+                    "compareTo",
+                    &[rt],
+                    &[rhs],
+                    self.span(e),
+                    None,
+                ) {
                     if ret == Ty::Int {
                         self.resolved_operator_calls
                             .insert((e, SyntheticOperatorCall::CompareTo), target);

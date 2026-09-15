@@ -1921,6 +1921,13 @@ pub(crate) enum ErrorReceiverSelection<T> {
 }
 
 impl<'a> SymbolResolver<'a> {
+    /// The aggregated resolution source this resolver reads. Exposed so a caller that holds a call's
+    /// expected result can re-instantiate the selected callable's parameters against the same source
+    /// selection used, rather than assembling a second one.
+    pub(crate) fn source(&self) -> &dyn SymbolSource {
+        &self.src
+    }
+
     /// Specialize one already-identified constructor declaration for contextual argument checking.
     /// The caller owns source-to-parameter argument mapping; this operation only applies the
     /// constructor's semantic generic signature and deliberately preserves formals owned by
@@ -2525,8 +2532,14 @@ impl<'a> SymbolResolver<'a> {
             })
             .unwrap_or(receiver);
         if selected.call_sig.vararg_index.is_none() {
-            let params =
-                logical_call_params(&self.src, &selected, binding_receiver, args, type_args);
+            let params = logical_call_params(
+                &self.src,
+                &selected,
+                binding_receiver,
+                args,
+                type_args,
+                None,
+            );
             let resolved = if selected.is_extension() {
                 let arg_tys = args.iter().map(CallArgKind::ty).collect::<Vec<_>>();
                 selected.generic_sig.as_ref().map_or(
@@ -2620,8 +2633,14 @@ impl<'a> SymbolResolver<'a> {
             })
             .unwrap_or(receiver);
         if selected.call_sig.vararg_index.is_none() {
-            let params =
-                logical_call_params(&self.src, &selected, binding_receiver, args, type_args);
+            let params = logical_call_params(
+                &self.src,
+                &selected,
+                binding_receiver,
+                args,
+                type_args,
+                None,
+            );
             let arg_tys = args.iter().map(CallArgKind::ty).collect::<Vec<_>>();
             let inferred_ret = selected
                 .generic_sig
@@ -2697,8 +2716,14 @@ impl<'a> SymbolResolver<'a> {
                         ReceiverMro::new(&self.src, receiver).binding_receiver(&self.src, declared)
                     })
                     .unwrap_or(receiver);
-                let parameters =
-                    logical_call_params(&self.src, candidate, binding_receiver, args, type_args);
+                let parameters = logical_call_params(
+                    &self.src,
+                    candidate,
+                    binding_receiver,
+                    args,
+                    type_args,
+                    None,
+                );
                 (parameters.len() == args.len()).then_some(parameters)
             })
             .collect()
@@ -4408,8 +4433,14 @@ impl<'a> SymbolResolver<'a> {
                 })
             })
             .collect::<Vec<_>>();
-        let vparams =
-            logical_call_params(&self.src, o, binding_receiver, &slot_arguments, type_args);
+        let vparams = logical_call_params(
+            &self.src,
+            o,
+            binding_receiver,
+            &slot_arguments,
+            type_args,
+            None,
+        );
         if vparams.len() != slots.len() {
             return None;
         }
@@ -6194,7 +6225,7 @@ fn select_overload_tracking_with_functions(
                 );
                 continue;
             }
-            logical_call_params(src, o, binding_receiver, args, type_args)
+            logical_call_params(src, o, binding_receiver, args, type_args, None)
         };
         let lp = apply_platform_call_parameter_nullability(
             lp,
@@ -6532,15 +6563,54 @@ fn logical_value_params(
 /// Logical value parameters specialized by the complete call constraint set. Extension receivers and
 /// arguments constrain the same declaration formals, so shaping them in separate passes can freeze a
 /// bottom receiver result (`() -> Nothing`) before a concrete lambda supplies `String`.
+/// The parameter types a selected callable presents, with the call's EXPECTED RESULT seeded into
+/// inference alongside the receiver.
+///
+/// Selection is unchanged — the winner is chosen exactly as before. This only decides what the
+/// arguments are then checked AGAINST, which is where a formal shared between the result and the
+/// operands has to be settled: `Iterable<T>.plus(Iterable<T>): List<T>` fixed `T` from the receiver
+/// alone, so `listOf(A()) + listOf(B())` judged the argument against `Iterable<A>` even when the
+/// declared result was `List<P>`.
+pub(crate) fn selected_call_params_with_expected(
+    source: &dyn SymbolSource,
+    overload: &FunctionInfo,
+    receiver: Ty,
+    arguments: &[CallArgKind],
+    type_arguments: &[Ty],
+    expected_result: Ty,
+) -> Vec<Ty> {
+    logical_call_params(
+        source,
+        overload,
+        receiver,
+        arguments,
+        type_arguments,
+        Some(expected_result),
+    )
+}
+
 fn logical_call_params(
     source: &dyn SymbolSource,
     overload: &FunctionInfo,
     receiver: Ty,
     arguments: &[CallArgKind],
     type_arguments: &[Ty],
+    expected_result: Option<Ty>,
 ) -> Vec<Ty> {
     let signature = overload.semantic_signature();
     let mut bindings = seeded_gsig_binds(&signature, type_arguments);
+    // The EXPECTED RESULT is an input to inference, like the receiver and the arguments. A formal
+    // shared between the result and the operands — `Iterable<T>.plus(Iterable<T>): List<T>` — is
+    // fixed by the declared result before the receiver narrows it to its own element type, so
+    // `val xs: List<P> = listOf(A()) + listOf(B())` binds `T = P` and both operands fit.
+    //
+    // Seeded FIRST, and only where the caller actually has an expectation: an explicit type argument
+    // still wins (it is already in `bindings`), and the receiver still fixes anything the result
+    // leaves open. This does not let an ARGUMENT widen a receiver-fixed formal — that remains
+    // forbidden below, and is why `Comparable<T>.compareTo` cannot be rewritten by a later operand.
+    if let Some(expected) = expected_result {
+        unify_ty(signature.ret, expected, &mut bindings);
+    }
     if let Some(declared_receiver) = signature.receiver {
         unify_ty(declared_receiver, receiver, &mut bindings);
     }
