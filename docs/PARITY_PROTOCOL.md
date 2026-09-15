@@ -2241,13 +2241,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `a_cross_package_qualified_call_binds_its_lambda_receiver`,
   `the_other_call_spellings_still_shape_their_lambdas`,
   `an_unknown_member_in_the_lambda_is_still_rejected`.
-- **A named lambda argument binds the parameter it NAMES (fix).** Reshaping a selected call's lambdas
-  walked source positions and read the parameter at the same index. A named argument names its
-  parameter, so two reordered function-typed parameters were checked against each other's receivers
-  and `two(second = { onlyBeta() }, first = { onlyAlpha() })` was rejected where the reference
-  compiler accepts it — a defect that predates the shaping loop, which inherited the assumption. The
-  loop now resolves each named argument through `call_sig.param_names`.
-  `tests/qualified_call_receiver_lambda_e2e.rs::reordered_named_receiver_lambdas_bind_their_own_receivers`.
+- **A qualified lambda uses the common selected-argument mapping (fix).** The first repair added a
+  second positional lambda-shaping loop to the qualified path. That loop could not represent named,
+  default, context, or many-to-one vararg mapping. It is deleted: after selection, the existing
+  origin-neutral commit maps every source argument and rechecks its lambda under the specialized
+  parameter exactly once. This accepts both reordered named receiver lambdas and a trailing receiver
+  lambda after positional vararg elements, matching the reference compiler at runtime.
+  `tests/qualified_call_receiver_lambda_e2e.rs::reordered_named_receiver_lambdas_bind_their_own_receivers`,
+  `a_trailing_lambda_after_a_vararg_uses_the_selected_parameter_slot`.
 - **Only the lambda probe's diagnostics are retired (fix).** Arguments are typed before a candidate
   is known, so a lambda is judged with no shape; those diagnostics are held aside and the selected
   call rechecks each lambda. Discarding the WHOLE captured batch also discarded authoritative errors

@@ -18,19 +18,24 @@
 
 use super::common;
 
+fn both_compilers_box(sources: &[(&str, &str)], stem: &str, reference_main: &str) {
+    let reference = common::kotlinc_box_files_result(sources, reference_main);
+    common::expect_box_ok_files_with_stdlib(sources, stem);
+    assert_eq!(reference, "OK", "{stem}: reference runtime");
+}
+
 /// Compare the COMPLETE diagnostic set of both compilers — count, file, line, column, message and
 /// order. A nonzero-exit or substring assertion passes on an unrelated rejection, which is how a
 /// "both compilers agree" claim goes stale.
 fn expect_identical_rejection(result: &common::CompilerDiagnosticResult, tag: &str) {
-    let rendered = format!("{}{}", result.krusty_stdout, result.krusty_stderr);
-    let krusty = common::compiler_errors(&rendered);
+    let krusty = common::compiler_errors(&result.krusty_stderr);
     let reference = common::compiler_errors(&result.reference_stderr);
-    assert_ne!(
-        result.reference_code, 0,
-        "{tag}: kotlinc accepted the fixture: {}",
-        result.reference_stderr
+    assert_eq!(
+        (result.krusty_code, result.reference_code),
+        (1, 1),
+        "{tag}: unexpected compiler exit status"
     );
-    assert_ne!(result.krusty_code, 0, "{tag}: krusty accepted: {rendered}");
+    assert_eq!(common::compiler_errors(&result.krusty_stdout), []);
     assert!(
         !reference.is_empty(),
         "{tag}: kotlinc rejected with no parseable diagnostic: {}",
@@ -64,7 +69,11 @@ fun box(): String {\n\
 \x20   if (!b.flag || b.name != \"b\") return \"FAIL: bare\"\n\
 \x20   return \"OK\"\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "qualified_call_receiver_lambda");
+    both_compilers_box(
+        &[("Main.kt", MAIN)],
+        "qualified_call_receiver_lambda",
+        "a.b.MainKt",
+    );
 }
 
 /// The same spelling reaching a callable in ANOTHER package, and one nested a package deeper — the
@@ -82,9 +91,10 @@ fun build(block: Builder.() -> Unit): Builder = Builder().apply(block)\n";
 \x20   val built = dep.deeper.build { size = 7 }\n\
 \x20   return if (built.size == 7) \"OK\" else \"FAIL: \" + built.size\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(
+    both_compilers_box(
         &[("Dep.kt", DEP), ("Main.kt", MAIN)],
         "cross_package_qualified_receiver_lambda",
+        "MainKt",
     );
 }
 
@@ -107,7 +117,7 @@ fun box(): String {\n\
 \x20   if (twice(2) { it * 3 } != 6) return \"FAIL: bare value lambda\"\n\
 \x20   return \"OK\"\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "other_call_spellings");
+    both_compilers_box(&[("Main.kt", MAIN)], "other_call_spellings", "a.b.MainKt");
 }
 
 /// A member that does not exist on the receiver is still unresolved — binding the receiver must not
@@ -159,9 +169,8 @@ fun make(seed: Any, shape: Builder.() -> Unit): String {\n\
 /// Two function-typed parameters, passed by NAME in the opposite order.
 ///
 /// A named argument names its parameter; its source position says nothing about which one it fills.
-/// Checking the lambdas by position therefore judged each against the OTHER's receiver and rejected a
-/// call the reference compiler accepts. This shape fails on master too — the shaping loop introduced
-/// here inherited the assumption rather than inventing it.
+/// A second shaping loop that checks lambdas by source position judges each against the OTHER's
+/// receiver. The shared selected-call mapper instead commits each argument at its named slot.
 #[test]
 fn reordered_named_receiver_lambdas_bind_their_own_receivers() {
     const LIB: &str = "package app.dsl\n\
@@ -180,5 +189,30 @@ fun two(first: Alpha.() -> String, second: Beta.() -> String): String =\n\
 \x20   val swapped = app.dsl.two(second = { onlyBeta() }, first = { onlyAlpha() })\n\
 \x20   return if (swapped == \"ab\") \"OK\" else \"FAIL: \" + swapped\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Lib.kt", LIB), ("Main.kt", MAIN)], "swapped_named");
+    both_compilers_box(
+        &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+        "swapped_named",
+        "MainKt",
+    );
+}
+
+/// A trailing lambda after positional vararg elements must be mapped to the final FUNCTION
+/// parameter, not to its source index. The selected-call mapper owns that many-to-one mapping.
+#[test]
+fn a_trailing_lambda_after_a_vararg_uses_the_selected_parameter_slot() {
+    const LIB: &str = "package app.dsl\n\
+\n\
+class Builder {\n\
+\x20   fun onlyBuilder(): String = \"OK\"\n\
+}\n\
+\n\
+fun <T> shape(seed: T, vararg numbers: Int, block: T.() -> String): String =\n\
+\x20   seed.block() + if (numbers.sum() == 3) \"\" else \"FAIL: vararg\"\n";
+    const MAIN: &str = "fun box(): String =\n\
+\x20   app.dsl.shape(app.dsl.Builder(), 1, 2) { onlyBuilder() }\n";
+    both_compilers_box(
+        &[("Lib.kt", LIB), ("Main.kt", MAIN)],
+        "qualified_trailing_lambda_after_vararg",
+        "MainKt",
+    );
 }
