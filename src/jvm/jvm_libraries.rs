@@ -3362,6 +3362,10 @@ pub(crate) fn descriptor_narrowing(desc: &str) -> usize {
 
 /// Parse a JVM field/return descriptor to a `Ty`, normalizing a JVM built-in name to its Kotlin
 /// identity (`java/lang/Object` → `kotlin/Any`) so the front end compares types in Kotlin terms.
+///
+/// This is the STACK reading: `B` and `S` answer `Int`, because that is the slot the JVM holds one
+/// in. It is the right answer to a physical question and the wrong one for a declaration's type,
+/// which is what [`field_desc_to_ty`] is for — see the note there.
 pub fn desc_to_ty(d: &str) -> Ty {
     match d {
         "I" | "B" | "S" => Ty::Int,
@@ -3381,6 +3385,15 @@ pub fn desc_to_ty(d: &str) -> Ty {
     }
 }
 
+/// The SEMANTIC reading of the same descriptor: `B` is `Byte` and `S` is `Short`, because that is
+/// what the declaration says, whatever slot the JVM carries one in.
+///
+/// A method’s RESULT is read this way too. `java.lang.Number.byteValue()B` declares `Byte`, and
+/// reading it the stack’s way made Kotlin’s `Number.toByte()` a `kotlin.Int` — invisible on the JVM
+/// backend, where a byte and an int share a slot, and wrong everywhere the result is asked as a
+/// TYPE: `wide.toByte()::class.simpleName` answered `Int` where kotlinc answers `Byte`. Parameters
+/// still take the stack reading in [`parse_method_desc`]; widening the semantic reading to them is
+/// a separate question about overload selection, not this one.
 pub(super) fn field_desc_to_ty(d: &str) -> Ty {
     match d {
         "B" => Ty::Byte,
@@ -3678,7 +3691,7 @@ pub(crate) fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
     let (params, ret) = crate::jvm::names::parse_method_descriptor(desc)?;
     Some((
         params.into_iter().map(desc_to_ty).collect(),
-        desc_to_ty(ret),
+        field_desc_to_ty(ret),
     ))
 }
 
@@ -3686,7 +3699,7 @@ fn parse_method_desc_with_field_params(desc: &str) -> Option<(Vec<Ty>, Ty)> {
     let (params, ret) = crate::jvm::names::parse_method_descriptor(desc)?;
     Some((
         params.into_iter().map(field_desc_to_ty).collect(),
-        desc_to_ty(ret),
+        field_desc_to_ty(ret),
     ))
 }
 
