@@ -6844,29 +6844,29 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
                 // (kotlinc's shape), not the array's identity `Object.hashCode`. An UNSIGNED array
                 // is a stdlib value class over the signed carrier — kotlinc routes its hash through
                 // the class's own static `hashCode-impl(<carrier>)I` instead of `Arrays`.
-                let internal = ty.non_null().obj_internal();
-                if let Some(n) = internal {
-                    let unsigned = if n.matches("kotlin/UIntArray") {
-                        Some(("kotlin/UIntArray", "([I)I"))
-                    } else if n.matches("kotlin/ULongArray") {
-                        Some(("kotlin/ULongArray", "([J)I"))
-                    } else if n.matches("kotlin/UByteArray") {
-                        Some(("kotlin/UByteArray", "([B)I"))
-                    } else if n.matches("kotlin/UShortArray") {
-                        Some(("kotlin/UShortArray", "([S)I"))
-                    } else {
-                        None
-                    };
-                    if let Some((owner, desc)) = unsigned {
-                        return callable(
-                            owner,
-                            "hashCode-impl",
-                            vec![ty],
-                            Ty::Int,
-                            Ty::Int,
-                            desc.to_string(),
-                        );
-                    }
+                // Which unsigned array this is, and the carrier its `hashCode-impl` takes, both read
+                // off the element rather than off another list of the same four names.
+                if let Some(element) = ty
+                    .non_null()
+                    .obj_internal()
+                    .and_then(crate::types::prim_array_element)
+                    .filter(|element| element.is_unsigned())
+                {
+                    let owner = ty
+                        .non_null()
+                        .obj_internal()
+                        .expect("checked in the condition")
+                        .render();
+                    let carrier =
+                        crate::jvm::names::type_descriptor(crate::types::Ty::array(element));
+                    return callable(
+                        &owner,
+                        "hashCode-impl",
+                        vec![ty],
+                        Ty::Int,
+                        Ty::Int,
+                        format!("({carrier})I"),
+                    );
                 }
                 let desc = match array_kotlin_fq(ty.non_null())? {
                     "kotlin/BooleanArray" => "([Z)I",

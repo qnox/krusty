@@ -13,10 +13,43 @@
 
 use super::common;
 
-/// Run `body` under krusty AND under the reference compiler, and require the same output.
+/// Run `body` under krusty AND under the reference compiler, and require `OK` from each.
+///
+/// Both halves: equality alone would pass if both compilers agreed on the same wrong answer, and an
+/// expectation alone would pin my reading rather than Kotlin's.
 fn agrees_with_kotlinc(stem: &str, body: &str) {
     let krusty = common::expect_box_run_with_stdlib(body, stem);
-    assert_eq!(krusty, common::kotlinc_box_result(body), "{stem}");
+    assert_eq!(krusty, "OK", "{stem}: krusty");
+    assert_eq!(common::kotlinc_box_result(body), "OK", "{stem}: kotlinc");
+}
+
+/// krusty's disassembly of `body`'s `box()`, so an ABI or opcode claim is read off the bytecode
+/// rather than inferred from what the program printed.
+fn disassembled_box(stem: &str, body: &str) -> String {
+    let classes = common::expect_compile_in_process(
+        body,
+        stem,
+        &[common::stdlib_jar()],
+        Some(common::jdk_modules().as_path()),
+    );
+    let work = common::scratch_dir().expect("scratch dir");
+    for (internal, bytes) in &classes {
+        let path = work.join(format!("{internal}.class"));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&path, bytes).expect("write class");
+    }
+    let dumped = common::javap(&[
+        "-c",
+        "-p",
+        "-cp",
+        &work.to_string_lossy(),
+        &format!("{stem}Kt"),
+    ])
+    .expect("javap unavailable");
+    let _ = std::fs::remove_dir_all(&work);
+    dumped
 }
 
 #[test]
@@ -84,6 +117,106 @@ fn an_unsigned_array_walks_its_elements_unsigned() {
          \x20   var text = \"\"\n\
          \x20   for (value in values) text += \"$value \"\n\
          \x20   return if (text == \"255 7 \") \"OK\" else \"fail: $text\"\n\
+         }\n",
+    );
+}
+
+#[test]
+fn each_width_allocates_loads_and_stores_through_its_own_opcodes() {
+    // The claim this change makes is about BYTECODE, and a program that prints the right number
+    // cannot prove which opcodes produced it — `int[]` holds a 255 perfectly well. So the four
+    // shapes are read off the disassembly: the `newarray` operand, the store, the load, and the
+    // local's descriptor.
+    for (kind, atype, store, load, returned) in [
+        ("UByteArray", "byte", "bastore", "baload", "byte[] box()"),
+        ("UShortArray", "short", "sastore", "saload", "short[] box()"),
+        ("UIntArray", "int", "iastore", "iaload", "int[] box()"),
+        ("ULongArray", "long", "lastore", "laload", "long[] box()"),
+    ] {
+        let stem = format!("Opcodes{kind}");
+        let dumped = disassembled_box(
+            &stem,
+            &format!(
+                "fun box(): {kind} {{\n\
+                 \x20   val values = {kind}(1)\n\
+                 \x20   values[0] = values[0]\n\
+                 \x20   return values\n\
+                 }}\n"
+            ),
+        );
+        for expected in [
+            format!("newarray       {atype}"),
+            store.into(),
+            load.into(),
+            returned.into(),
+        ] {
+            assert!(
+                dumped.contains(&expected),
+                "{kind}: {expected:?} missing from\n{dumped}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_nullable_unsigned_array_is_the_boxed_value_class() {
+    // A nullable value class cannot be the bare carrier — `null` has to be representable — so this
+    // is the one place the array type does NOT erase to its signed array, and the erasure must not
+    // be applied blindly.
+    agrees_with_kotlinc(
+        "NullableUnsignedArray",
+        "fun box(): String {\n\
+         \x20   val present: UIntArray? = UIntArray(1)\n\
+         \x20   val absent: UIntArray? = null\n\
+         \x20   if (absent != null) return \"fail: null became a value\"\n\
+         \x20   val size = present?.size ?: -1\n\
+         \x20   return if (size == 1) \"OK\" else \"fail: $size\"\n\
+         }\n",
+    );
+}
+
+#[test]
+fn an_unsigned_array_through_a_generic_keeps_its_elements() {
+    // A type parameter erases to a reference, so the array crosses into the boxed form and back.
+    agrees_with_kotlinc(
+        "GenericUnsignedArray",
+        "fun <T> identity(value: T): T = value\n\
+         fun box(): String {\n\
+         \x20   val values = identity(ubyteArrayOf(1u, 255u))\n\
+         \x20   val text = \"${values[0]} ${values[1]} ${values.size}\"\n\
+         \x20   return if (text == \"1 255 2\") \"OK\" else \"fail: $text\"\n\
+         }\n",
+    );
+}
+
+#[test]
+fn an_array_of_unsigned_is_not_an_unsigned_array() {
+    // `Array<UInt>` is a REFERENCE array of boxed `UInt`s; `UIntArray` is an `int[]`. Two different
+    // types that the element type alone would conflate, which is exactly what the width rule must
+    // not do.
+    agrees_with_kotlinc(
+        "ArrayOfUnsignedVersusUnsignedArray",
+        "fun box(): String {\n\
+         \x20   val boxed: Array<UInt> = arrayOf(1u, 4294967295u)\n\
+         \x20   val packed: UIntArray = uintArrayOf(1u, 4294967295u)\n\
+         \x20   val text = \"${boxed[1]} ${packed[1]} ${boxed.size} ${packed.size}\"\n\
+         \x20   return if (text == \"4294967295 4294967295 2 2\") \"OK\" else \"fail: $text\"\n\
+         }\n",
+    );
+}
+
+#[test]
+fn a_user_value_class_over_an_array_keeps_its_own_carrier() {
+    // The unsigned arrays are stdlib value classes over arrays, and nothing about the rule is
+    // special to the stdlib: a user's own value class over an array carries the same way.
+    agrees_with_kotlinc(
+        "UserValueClassOverArray",
+        "@JvmInline\n\
+         value class Packed(val storage: ByteArray)\n\
+         fun box(): String {\n\
+         \x20   val packed = Packed(byteArrayOf(1, -1))\n\
+         \x20   val text = \"${packed.storage[0]} ${packed.storage[1]} ${packed.storage.size}\"\n\
+         \x20   return if (text == \"1 -1 2\") \"OK\" else \"fail: $text\"\n\
          }\n",
     );
 }

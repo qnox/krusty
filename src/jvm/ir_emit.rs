@@ -20229,8 +20229,8 @@ fn array_load_op(elem: Ty, reference_array: bool) -> (u8, i32) {
         return (0x32, 1);
     }
     // An unsigned array IS the signed array it is an inline class over, so the element's width —
-    // and therefore the opcode — comes from the signed primitive it is stored as.
-    match crate::jvm::names::unsigned_storage(elem) {
+    // and therefore the opcode — is the one `scalar_value_repr` already assigns it.
+    match scalar_element(elem, "load") {
         Ty::Int => (0x2e, 1),
         Ty::Long => (0x2f, 2),
         Ty::Float => (0x30, 1),
@@ -20238,7 +20238,7 @@ fn array_load_op(elem: Ty, reference_array: bool) -> (u8, i32) {
         Ty::Boolean | Ty::Byte => (0x33, 1),
         Ty::Char => (0x34, 1),
         Ty::Short => (0x35, 1),
-        _ => (0x32, 1), // aaload
+        other => unreachable!("a primitive array element carried as {other:?} (load)"),
     }
 }
 
@@ -20298,7 +20298,7 @@ fn array_store_op(elem: Ty, reference_array: bool) -> (u8, i32) {
     if reference_array {
         return (0x53, 1);
     }
-    match crate::jvm::names::unsigned_storage(elem) {
+    match scalar_element(elem, "store") {
         Ty::Int => (0x4f, 1),
         Ty::Long => (0x50, 2),
         Ty::Float => (0x51, 1),
@@ -20306,22 +20306,36 @@ fn array_store_op(elem: Ty, reference_array: bool) -> (u8, i32) {
         Ty::Boolean | Ty::Byte => (0x54, 1),
         Ty::Char => (0x55, 1),
         Ty::Short => (0x56, 1),
-        _ => (0x53, 1), // aastore
+        other => unreachable!("a primitive array element carried as {other:?} (store)"),
     }
 }
 
 /// `newarray` atype for a primitive element (JVMS Table 6.5.newarray-A).
 fn prim_newarray_atype(elem: Ty) -> u8 {
-    match crate::jvm::names::unsigned_storage(elem) {
+    match scalar_element(elem, "newarray") {
         Ty::Boolean => 4,
         Ty::Char => 5,
         Ty::Float => 6,
         Ty::Double => 7,
         Ty::Byte => 8,
         Ty::Short => 9,
+        Ty::Int => 10,
         Ty::Long => 11,
-        _ => 10, // int
+        other => unreachable!("a primitive array element carried as {other:?} (newarray)"),
     }
+}
+
+/// The primitive an element of a PRIMITIVE array is carried as, which is what decides its width.
+///
+/// `Ty::scalar_value_repr` owns the rule, unsigned erasure included: a `UByteArray`'s element is a
+/// `UByte` and is carried as a `Byte`. Reaching here with anything else means a reference array was
+/// routed to a primitive opcode, which is an invariant failure rather than a shape to encode — the
+/// silent `aaload`/`aastore`/`int` fallbacks these replaced are exactly how `UByte` and `UShort`
+/// came to be stored as references without anything saying so.
+fn scalar_element(elem: Ty, what: &str) -> Ty {
+    elem.scalar_value_repr().unwrap_or_else(|| {
+        unreachable!("a primitive array element that is not a scalar: {elem:?} ({what})")
+    })
 }
 
 /// Normalize a call's return JVM-type: a Kotlin `Nothing` is carried as an object whose JVM mapping is
@@ -20458,19 +20472,17 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
             _ if fq_name.matches("kotlin/Float") => Ty::Float,
             _ if fq_name.matches("kotlin/String") => Ty::String,
             // Arrays are regular class types the JVM backend lowers to JVM array types here.
-            _ if fq_name.matches("kotlin/IntArray") => Ty::array(Ty::Int),
-            _ if fq_name.matches("kotlin/LongArray") => Ty::array(Ty::Long),
-            _ if fq_name.matches("kotlin/DoubleArray") => Ty::array(Ty::Double),
-            _ if fq_name.matches("kotlin/FloatArray") => Ty::array(Ty::Float),
-            _ if fq_name.matches("kotlin/BooleanArray") => Ty::array(Ty::Boolean),
-            _ if fq_name.matches("kotlin/CharArray") => Ty::array(Ty::Char),
-            _ if fq_name.matches("kotlin/ByteArray") => Ty::array(Ty::Byte),
-            _ if fq_name.matches("kotlin/ShortArray") => Ty::array(Ty::Short),
-            // Unsigned arrays are `inline class`es over the signed primitive array; at the JVM level they
-            // ARE that array (`UIntArray` = `[I`). The unsigned element semantics are a source/checker
-            // concern already resolved before emit, so collapse to the physical signed array here.
-            _ if fq_name.matches("kotlin/UIntArray") => Ty::array(Ty::Int),
-            _ if fq_name.matches("kotlin/ULongArray") => Ty::array(Ty::Long),
+            // Every primitive specialized array, signed and unsigned alike, through the one table
+            // that identifies them. An unsigned array is an `inline class` over the signed primitive
+            // array and at the JVM level IS that array (`UIntArray` = `[I`), which is the same
+            // erasure the scalar arm above applies — so the element is carried by
+            // `scalar_value_repr` rather than by a second list of names. The list this replaced
+            // named `UIntArray` and `ULongArray` only, so a `UByteArray` reached emission carried as
+            // a reference array.
+            _ if crate::types::prim_array_element(fq_name).is_some() => Ty::array(scalar_element(
+                crate::types::prim_array_element(fq_name).expect("checked in the guard"),
+                "carrier",
+            )),
             // A `kotlin/Array<T>` is a JVM reference array: a primitive element `T` is BOXED
             // (`Array<Int>` = `[Ljava/lang/Integer;`, distinct from the unboxed `IntArray` = `[I`).
             _ if fq_name.matches("kotlin/Array") => Ty::array(

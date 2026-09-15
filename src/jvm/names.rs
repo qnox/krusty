@@ -209,45 +209,17 @@ pub fn params_descriptor(params: &[Ty]) -> String {
 }
 
 /// The JVM array descriptor for a primitive-array class name (`kotlin/IntArray` → `[I`), or `None`.
-/// The signed primitive an unsigned type is stored as, and every other type unchanged.
-///
-/// Kotlin's unsigned types are inline classes over signed primitives, so `UByteArray` is a `byte[]`
-/// and a `UInt` element loads with `iaload`. The rule is one line; what it replaces is the same
-/// four names written out again in every table that decides a WIDTH, which is how two of the four
-/// came to be missing from three of them at once.
-///
-/// Narrow on purpose: a type parameter is left alone here even when its bound is scalar, because an
-/// array element's width is a question about the array, not about what the bound permits.
-pub(crate) fn unsigned_storage(ty: Ty) -> Ty {
-    match ty {
-        Ty::UByte => Ty::Byte,
-        Ty::UShort => Ty::Short,
-        Ty::UInt => Ty::Int,
-        Ty::ULong => Ty::Long,
-        other => other,
-    }
-}
-
 /// The JVM array descriptor for a primitive specialized array class name (`kotlin/IntArray` → `[I`).
 ///
-/// One lookup rather than a hand-maintained list. [`crate::types::prim_array_element`] already
-/// documents itself as "the single canonical table", and this was the copy that made that untrue:
-/// it named `UIntArray` and `ULongArray` and not `UByteArray` or `UShortArray`, so those two
-/// descriptored as `Lkotlin/UByteArray;` and the class would not load at all.
-fn primitive_array_descriptor(internal: impl InternalName) -> Option<&'static str> {
-    Some(
-        match unsigned_storage(crate::types::prim_array_element(internal)?) {
-            Ty::Int => "[I",
-            Ty::Long => "[J",
-            Ty::Short => "[S",
-            Ty::Byte => "[B",
-            Ty::Boolean => "[Z",
-            Ty::Char => "[C",
-            Ty::Float => "[F",
-            Ty::Double => "[D",
-            _ => return None,
-        },
-    )
+/// Two existing operations composed, and no table of its own: [`crate::types::prim_array_element`]
+/// identifies the element — it documents itself as "the single canonical table" that "the backend
+/// descriptor logic" routes through — and [`type_descriptor`] already erases an unsigned element to
+/// the signed primitive it is an inline class over. The hand-written list this replaced was the copy
+/// that made that documentation untrue: it named `UIntArray` and `ULongArray` and not `UByteArray`
+/// or `UShortArray`, so those two descriptored as `Lkotlin/UByteArray;` and would not load at all.
+fn primitive_array_descriptor(internal: impl InternalName) -> Option<String> {
+    let element = crate::types::prim_array_element(internal)?;
+    Some(format!("[{}", type_descriptor(element)))
 }
 
 /// JVM class-constant spelling for a Kotlin array classifier. Array classes use their descriptor as
@@ -257,7 +229,7 @@ pub fn array_class_descriptor(internal: impl InternalName) -> Option<String> {
     if internal.internal_matches("kotlin/Array") {
         Some("[Ljava/lang/Object;".to_string())
     } else {
-        primitive_array_descriptor(internal).map(str::to_string)
+        primitive_array_descriptor(internal)
     }
 }
 
@@ -301,8 +273,8 @@ pub fn type_descriptor(ty: Ty) -> String {
                 .unwrap_or_else(|| Ty::obj("kotlin/Any"));
             format!("[{}", type_descriptor(reference_array_element(e)))
         }
-        Ty::Obj(n, _) if primitive_array_descriptor(n).is_some() => {
-            primitive_array_descriptor(n).unwrap().into()
+        Ty::Obj(n, _) if crate::types::prim_array_element(n).is_some() => {
+            primitive_array_descriptor(n).expect("checked in the guard")
         }
         Ty::Obj(n, _) => obj_desc(&n.render()),
         // `Nothing` is uninhabited, so no value ever has this descriptor — but it IS written into

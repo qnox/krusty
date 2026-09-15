@@ -105,7 +105,7 @@ struct MetaNameIds {
     /// descriptor while `@Metadata` keeps the primitive's own name, and the alignment path compares
     /// the two — keyed by `TypeName` so the comparison stays a pointer compare.
     prim_wrapper: crate::name_tree::FxHashMap<crate::types::TypeName, crate::types::TypeName>,
-    prim_array: crate::name_tree::FxHashMap<crate::types::TypeName, &'static str>,
+    prim_array: crate::name_tree::FxHashMap<crate::types::TypeName, String>,
     array: crate::types::TypeName,
     any: crate::types::TypeName,
     object: crate::types::TypeName,
@@ -158,20 +158,33 @@ fn meta_ids() -> &'static MetaNameIds {
             ))
         })
         .collect();
+        // Each primitive specialized array's descriptor, derived rather than listed: the names come
+        // from the one table that identifies them and the descriptor from the one operation that
+        // erases an element, unsigned included. The list this replaced named `UIntArray` and
+        // `ULongArray` only, so `UByteArray` and `UShortArray` had no descriptor at this boundary.
         let prim_array = [
-            ("kotlin/BooleanArray", "[Z"),
-            ("kotlin/ByteArray", "[B"),
-            ("kotlin/ShortArray", "[S"),
-            ("kotlin/IntArray", "[I"),
-            ("kotlin/LongArray", "[J"),
-            ("kotlin/ULongArray", "[J"),
-            ("kotlin/CharArray", "[C"),
-            ("kotlin/FloatArray", "[F"),
-            ("kotlin/DoubleArray", "[D"),
-            ("kotlin/UIntArray", "[I"),
+            "kotlin/BooleanArray",
+            "kotlin/ByteArray",
+            "kotlin/ShortArray",
+            "kotlin/IntArray",
+            "kotlin/LongArray",
+            "kotlin/CharArray",
+            "kotlin/FloatArray",
+            "kotlin/DoubleArray",
+            "kotlin/UByteArray",
+            "kotlin/UShortArray",
+            "kotlin/UIntArray",
+            "kotlin/ULongArray",
         ]
         .into_iter()
-        .map(|(name, desc)| (tn(name), desc))
+        .map(|name| {
+            let element = crate::types::prim_array_element(name)
+                .expect("every name here is a primitive specialized array");
+            (
+                tn(name),
+                crate::jvm::names::type_descriptor(crate::types::Ty::array(element)),
+            )
+        })
         .collect();
         MetaNameIds {
             prim,
@@ -189,7 +202,10 @@ fn meta_ids() -> &'static MetaNameIds {
 }
 
 fn primitive_array_descriptor_name(internal: TypeName) -> Option<&'static str> {
-    meta_ids().prim_array.get(&internal).copied()
+    meta_ids()
+        .prim_array
+        .get(&internal)
+        .map(|descriptor| descriptor.as_str())
 }
 
 fn ty_erases_to_object(desc: Ty) -> bool {
