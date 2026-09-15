@@ -15,6 +15,19 @@
 
 use super::common;
 
+/// Run one fixture under BOTH compilers and require the same `box()` value.
+///
+/// `expect_box_ok_files_with_stdlib` alone only proves krusty agrees with itself. These shapes are
+/// about matching the reference compiler, so it must run the identical source.
+fn both_compilers_box(main: &str, stem: &str) {
+    let reference = common::kotlinc_box_result(main);
+    assert_eq!(
+        reference, "OK",
+        "{stem}: the reference compiler disagrees: {reference}"
+    );
+    common::expect_box_ok_files_with_stdlib(&[("Main.kt", main)], stem);
+}
+
 const DECLARATIONS: &str = "fun sink(vararg items: String?): String {\n\
 \x20   var out = \"\"\n\
 \x20   for (item in items) {\n\
@@ -37,7 +50,7 @@ fun box(): String {{\n\
 \x20   return if (filled == \"A\") \"OK\" else \"FAIL: filled \" + filled\n\
 }}\n"
     );
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", &main)], "vararg_inline_single");
+    both_compilers_box(&main, "vararg_inline_single");
 }
 
 /// The corpus spelling: several such elements in one vararg call.
@@ -57,7 +70,7 @@ fun box(): String {{\n\
 \x20   return if (filled == \"A-\") \"OK\" else \"FAIL: filled \" + filled\n\
 }}\n"
     );
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", &main)], "vararg_inline_several");
+    both_compilers_box(&main, "vararg_inline_several");
 }
 
 /// The control that isolates the vararg: the identical calls in a FIXED-ARITY parameter list always
@@ -79,7 +92,7 @@ fun box(): String {{\n\
 \x20   return if (filled == \"A-\") \"OK\" else \"FAIL: filled \" + filled\n\
 }}\n"
     );
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", &main)], "fixed_arity_inline");
+    both_compilers_box(&main, "fixed_arity_inline");
 }
 
 /// The control that isolates the BRANCH: a straight-line inline body was always accepted as a vararg
@@ -102,5 +115,5 @@ fun box(): String {\n\
 \x20   val total = probe(listOf(\"x\"))\n\
 \x20   return if (total == 3) \"OK\" else \"FAIL: \" + total\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "straight_line_vararg");
+    both_compilers_box(MAIN, "straight_line_vararg");
 }
