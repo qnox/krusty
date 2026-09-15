@@ -281,25 +281,19 @@ pub(super) struct Frame {
 }
 
 impl Frame {
-    /// A static function — a top-level `fun`, an extension, or a file facade's.
-    pub(super) fn of_static(function: FunId, count: usize) -> Self {
+    /// The frame a body reported, for the function it lowers and its parameter count.
+    ///
+    /// The slots come from [`super::BodySlots`] and are NOT recomputed here. Deriving them a second
+    /// time is what this constructor exists to prevent: a static frame is not always slot zero and a
+    /// member's parameters are not always `this + 1` — captures, a local class's constructor
+    /// captures and its context values all take slots first, and only the lowering knows how many.
+    pub(super) fn of_body(function: FunId, slots: super::BodySlots, count: usize) -> Self {
         Self {
             function,
-            first_parameter: 0,
+            first_parameter: slots.first_parameter,
             count,
-            receiver: None,
-            this_slots: std::collections::HashSet::new(),
-        }
-    }
-
-    /// A member, whose `this` occupies `receiver` and whose parameters follow it.
-    pub(super) fn of_member(function: FunId, receiver: u32, count: usize) -> Self {
-        Self {
-            function,
-            first_parameter: receiver + 1,
-            count,
-            receiver: Some(receiver),
-            this_slots: std::collections::HashSet::from([receiver]),
+            receiver: slots.dispatch_receiver,
+            this_slots: slots.dispatch_receiver.into_iter().collect(),
         }
     }
 }
@@ -509,7 +503,14 @@ mod tests {
         finish_tailrec_body(
             ir,
             roots,
-            Frame::of_static(FUNCTION, 1),
+            Frame::of_body(
+                FUNCTION,
+                crate::fir_lower::BodySlots {
+                    dispatch_receiver: None,
+                    first_parameter: 0,
+                },
+                1,
+            ),
             OriginId::from_raw(0),
         )
         .expect("the body has a tail");
@@ -554,7 +555,14 @@ mod tests {
         finish_tailrec_body(
             ir,
             roots,
-            Frame::of_member(FUNCTION, 0, 1),
+            Frame::of_body(
+                FUNCTION,
+                crate::fir_lower::BodySlots {
+                    dispatch_receiver: Some(0),
+                    first_parameter: 1,
+                },
+                1,
+            ),
             OriginId::from_raw(0),
         )
         .expect("the body has a tail");
@@ -612,6 +620,76 @@ mod tests {
         assert!(
             !steps(&ir),
             "a reassigned slot is not followed, so the call stays a call"
+        );
+    }
+
+    /// The loop writes the slots the BODY reported, not slots derived from the receiver.
+    ///
+    /// `first_parameter` is not always `0` and not always `this + 1`. Captures, a local class's
+    /// constructor captures and its context values all take slots before the parameters, so a body
+    /// can put `this` at 3 and its first parameter at 7. Re-deriving the layout here — the thing
+    /// `BodySlots` exists to stop — would write slot 4 and shift every argument by three, which is
+    /// a miscompile no source-level test in this file would show, because the shapes that produce a
+    /// prefix are the ones that decline for other reasons today.
+    ///
+    /// So this asserts on the store the step emits: reported slot in, same slot out.
+    #[test]
+    fn the_loop_step_writes_the_reported_parameter_slots() {
+        const RECEIVER: u32 = 3;
+        const FIRST_PARAMETER: u32 = 7;
+
+        let mut ir = member_file();
+        let this = ir.add_expr(IrExpr::GetValue(RECEIVER));
+        let binding = ir.add_expr(IrExpr::Variable {
+            index: 11,
+            ty: Ty::Obj(crate::types::type_name("C"), &[]),
+            init: Some(this),
+            named: false,
+        });
+        let read = ir.add_expr(IrExpr::GetValue(11));
+        let argument = ir.add_expr(IrExpr::GetValue(FIRST_PARAMETER));
+        let call = ir.add_expr(IrExpr::MethodCall {
+            class: 0,
+            index: 0,
+            receiver: read,
+            args: vec![Some(argument)],
+        });
+        let block = ir.add_expr(IrExpr::Block {
+            stmts: vec![binding],
+            value: Some(call),
+        });
+        let returned = ir.add_expr(IrExpr::Return(Some(block)));
+        ir.checked_return_depths.insert(returned, 0);
+        let tail = ir.add_expr(IrExpr::Return(None));
+
+        finish_tailrec_body(
+            &mut ir,
+            vec![returned, tail],
+            Frame::of_body(
+                FUNCTION,
+                crate::fir_lower::BodySlots {
+                    dispatch_receiver: Some(RECEIVER),
+                    first_parameter: FIRST_PARAMETER,
+                },
+                1,
+            ),
+            OriginId::from_raw(0),
+        )
+        .expect("the body has a tail");
+
+        assert!(steps(&ir), "the spilled receiver is still this frame");
+        let written: Vec<u32> = ir
+            .exprs
+            .iter()
+            .filter_map(|expression| match expression {
+                IrExpr::SetValue { var, .. } => Some(*var),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            written,
+            vec![FIRST_PARAMETER],
+            "the step must write the reported first-parameter slot, and must not write the receiver"
         );
     }
 

@@ -3288,6 +3288,19 @@ impl<'a> Parser<'a> {
                     .map(|token| token.span)
                     .expect("an operator modifier must retain its source token")
             });
+        // `tailrec` keeps its own span for the same reason `operator` does: the diagnostic that
+        // rejects it points at the modifier, not at the function's name.
+        let tailrec_span = modifiers
+            .iter()
+            .any(|modifier| modifier == "tailrec")
+            .then(|| {
+                self.t[..self.i]
+                    .iter()
+                    .rev()
+                    .find(|token| self.token_keyword_text(**token, "tailrec"))
+                    .map(|token| token.span)
+                    .expect("a tailrec modifier must retain its source token")
+            });
         self.bump(); // 'fun'
         let (type_params, non_null_type_params, reified_type_params, type_param_bounds, _) =
             if self.at(TokenKind::Lt) {
@@ -3359,6 +3372,7 @@ impl<'a> Parser<'a> {
             signature_span: Span::new(start.lo, signature_end),
             override_span,
             operator_span,
+            tailrec_span,
             flags: function_flags(modifiers),
             visibility: visibility_of(modifiers),
             annotations,

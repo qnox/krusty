@@ -1964,3 +1964,51 @@ fn classpath_catch_types_follow_the_declared_hierarchy() {
     assert_eq!(krusty_errors, expected);
     assert_eq!(kotlinc_errors, expected);
 }
+
+/// `tailrec` on an OVERRIDABLE member, rejected identically by both compilers.
+///
+/// The modifier promises a loop, and a loop is sound only when the self-call cannot dispatch
+/// elsewhere. In an open member `f(n - 1)` on `this` is a virtual call a subclass may answer, so
+/// rewriting it would devirtualize into the base frame and silently run the wrong body. kotlinc
+/// rejects the declaration rather than quietly skipping the rewrite; so does krusty, at the same
+/// line and column and with the same text — the modifier's own span, not the function's name.
+#[test]
+fn tailrec_on_an_open_member_is_rejected_by_both_frontends() {
+    let source = "open class C {\n\
+                  \x20   tailrec open fun f(n: Int, acc: Int): Int =\n\
+                  \x20       if (n == 0) acc else f(n - 1, acc + 1)\n\
+                  }\n";
+    let result = common::compiler_diagnostics(&[("Open.kt", source)], &[common::stdlib_jar()]);
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+
+    let expected = vec![ObservedError {
+        file: "Open.kt".to_string(),
+        line: 2,
+        column: 5,
+        message: "tailrec is prohibited on open members.".to_string(),
+    }];
+    let mut krusty = errors(&result.krusty_stderr);
+    krusty.extend(errors(&result.krusty_stdout));
+    assert_eq!(krusty, expected);
+    assert_eq!(errors(&result.reference_stderr), expected);
+}
+
+/// The other side of the same rule, so the check above cannot be "reject every `tailrec` member".
+///
+/// Overridability is a property of the member AND its owner. A bare `override` stays open, but only
+/// while something can subclass the class holding it — so kotlinc ACCEPTS this exact member in a
+/// final class and rejects it once the class is `open`. Both compilers take the same program.
+#[test]
+fn tailrec_overriding_in_a_final_class_is_accepted_by_both_frontends() {
+    let source = "open class B { open fun f(n: Int, acc: Int): Int = acc }\n\
+                  class D : B() {\n\
+                  \x20   tailrec override fun f(n: Int, acc: Int): Int =\n\
+                  \x20       if (n == 0) acc else f(n - 1, acc + 1)\n\
+                  }\n";
+    let (code, stderr) = common::kotlinc_source_result("FinalOverride", source);
+    assert_eq!(
+        code, 0,
+        "kotlinc rejected a final overriding tailrec: {stderr}"
+    );
+    common::expect_front_end_ok_files_with_stdlib(&[source], "final overriding tailrec parity");
+}

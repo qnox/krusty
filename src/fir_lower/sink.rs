@@ -1277,16 +1277,27 @@ impl<'a> CommonIrBodySink<'a> {
         //
         // A context parameter is still left recursing: it takes slots between the receiver and the
         // parameters, and nothing here tests that layout.
+        //
+        // An OPEN member is never rewritten, and that is a soundness gate rather than a limitation.
+        // A self-call on `this` in an overridable member is a VIRTUAL call: a subclass override must
+        // win, and a loop step would devirtualize it into this frame and silently run the base
+        // body. kotlinc rejects the declaration outright (`tailrec is prohibited on open members.`),
+        // which krusty now reports too — this gate is what keeps the lowering safe if that
+        // diagnostic is ever incomplete, because the cost of being wrong here is a miscompile
+        // rather than a missed optimization.
         let tailrec = declaration_header
             .flags
             .has(crate::fir::DeclarationFlags::TAILREC)
-            && callable.shape.context_parameter_count == 0;
+            && callable.shape.context_parameter_count == 0
+            && !declaration_header
+                .flags
+                .has(crate::fir::DeclarationFlags::OPEN)
+            && !declaration_header
+                .flags
+                .has(crate::fir::DeclarationFlags::ABSTRACT);
         let parameter_count = self.ir.functions[function as usize].params.len();
-        let frame = match lowered.slots.dispatch_receiver {
-            _ if !tailrec => None,
-            Some(receiver) => Some(TailrecFrame::of_member(function, receiver, parameter_count)),
-            None => Some(TailrecFrame::of_static(function, parameter_count)),
-        };
+        let frame =
+            tailrec.then(|| TailrecFrame::of_body(function, lowered.slots, parameter_count));
         let body = if let Some(frame) = frame {
             finish_tailrec_body(self.ir, roots, frame, origin)
                 .map_err(FirFileLoweringFailure::Body)?
