@@ -1985,6 +1985,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_lists_e2e.rs`
   (`a_single_element_list_is_not_a_vararg_call_of_length_one`).
 
+- **A class's initializers are bodies too.** The native generator declares a type for every
+  property reference and every local delegated property's metadata in a pass over the file, and
+  those passes have to finish before the FIRST body is defined — not before the first top-level
+  function is. A class's property initializers and `init` blocks are lowered as part of its
+  constructor, so `class A { val r = C::z }` reaches a reference site while the classes are being
+  defined; declaring afterwards left exactly those sites unrealized and the program declined.
+  Tests: `tests/native_property_reference_e2e.rs`
+  (`a_reference_written_in_a_class_body_is_realized`, `a_reference_in_an_init_block_is_realized`,
+  `a_local_delegated_property_of_a_class_body_is_realized`).
+
 - **`::foo.name` is a compile-time constant on the native target.** A callable reference is a
   lambda object there: it carries the code, not the declaration, so nothing in the emitted object
   knows what the source called it — and it does not have to. The one place a program can ask is

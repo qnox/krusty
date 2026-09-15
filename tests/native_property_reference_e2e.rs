@@ -343,3 +343,62 @@ fn a_top_level_delegated_property_asks_its_delegate_through_a_reference() {
         "OK",
     );
 }
+
+#[test]
+fn a_reference_written_in_a_class_body_is_realized() {
+    // A class's property initializer is lowered as part of its CONSTRUCTOR, so a reference written
+    // there is reached before any top-level function's body is. It must already be declared.
+    expect_native_box(
+        "class Cell(val value: Int)\n\
+         class Holder {\n\
+         \x20   val unbound = Cell::value\n\
+         \x20   val bound = Cell(7)::value\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val holder = Holder()\n\
+         \x20   if (holder.unbound.get(Cell(3)) != 3) return \"fail unbound: ${holder.unbound.get(Cell(3))}\"\n\
+         \x20   if (holder.bound.get() != 7) return \"fail bound: ${holder.bound.get()}\"\n\
+         \x20   return if (holder.unbound.name == \"value\") \"OK\" else \"fail name: ${holder.unbound.name}\"\n\
+         }\n",
+        "ReferenceInAClassBody",
+        "OK",
+    );
+}
+
+#[test]
+fn a_reference_in_an_init_block_is_realized() {
+    expect_native_box(
+        "val top = \"OK\"\n\
+         class Holder {\n\
+         \x20   var seen = \"fail\"\n\
+         \x20   init {\n\
+         \x20       seen = ::top.get()\n\
+         \x20   }\n\
+         }\n\
+         fun box(): String = Holder().seen\n",
+        "ReferenceInAnInitBlock",
+        "OK",
+    );
+}
+
+#[test]
+fn a_local_delegated_property_of_a_class_body_is_realized() {
+    // The same ordering question for the other declaration pass: a local delegated property's
+    // `KProperty` metadata, in a body a class defines.
+    expect_native_box(
+        "import kotlin.reflect.KProperty\n\
+         class Named {\n\
+         \x20   operator fun getValue(owner: Any?, property: KProperty<*>): String = property.name\n\
+         }\n\
+         class Holder {\n\
+         \x20   val asked: String\n\
+         \x20   init {\n\
+         \x20       val inner by Named()\n\
+         \x20       asked = inner\n\
+         \x20   }\n\
+         }\n\
+         fun box(): String = if (Holder().asked == \"inner\") \"OK\" else \"fail: ${Holder().asked}\"\n",
+        "LocalDelegateInAClassBody",
+        "OK",
+    );
+}

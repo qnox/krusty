@@ -190,12 +190,15 @@ pub fn lower_file(
     lowering.declare_default_wrappers()?;
     lowering.declare_default_constructors()?;
     lowering.declare_enum_entries()?;
+    // Before any body is DEFINED, not after: a constructor is a body too, and a property
+    // reference written in a class's initializer (`class A { val r = C::z }`) is lowered while
+    // `define_classes` runs. Declaring these afterwards left exactly those sites unrealized.
+    lowering.declare_property_references()?;
+    lowering.declare_local_property_references()?;
     lowering.define_classes()?;
     lowering.define_default_wrappers()?;
     lowering.define_default_constructors()?;
     lowering.define_enum_entries()?;
-    lowering.declare_property_references()?;
-    lowering.declare_local_property_references()?;
     let statics_init = lowering.define_statics_init()?;
     let mut defines_entry = false;
     for index in 0..ir.functions.len() {

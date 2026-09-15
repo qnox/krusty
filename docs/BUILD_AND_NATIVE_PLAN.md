@@ -1566,6 +1566,12 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **Declaration order, for 2508.** `class A { val r = C::z }` was declining on a construct the
+   generator has realized for a long time. The reference passes ran between `define_classes` and
+   the top-level function loop, which reads as "after the declarations, before the bodies" and is
+   not: a constructor is a body, and a class's property initializers are lowered into it. Five
+   corpus cases came back from moving two lines.
+
    **`KCallable.name`, for 2503.** A callable reference is a lambda object on this target, and a
    lambda does not know its own name. It does not need to: the only question a program can ask is
    `::foo.name`, and there the reference is written at the read, so the declaration is in hand and
