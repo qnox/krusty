@@ -25,10 +25,10 @@ pub(super) fn collect_body_var_types(
         if !seen.insert(expression) {
             continue;
         }
+        if let IrExpr::Variable { index, ty, .. } = ir.expr(expression) {
+            declarations.insert(*index, ir_ty_to_jvm(ty));
+        }
         match ir.expr(expression) {
-            IrExpr::Variable { index, ty, .. } => {
-                declarations.insert(*index, ir_ty_to_jvm(ty));
-            }
             IrExpr::Lambda { captures, .. } => pending.extend(captures.iter().copied()),
             _ => crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child)),
         }
@@ -105,6 +105,32 @@ mod tests {
             collect_body_var_types(&ir, [nested_body]).get(&0),
             Some(&Ty::String),
             "the nested body owns its same-numbered declaration"
+        );
+    }
+
+    #[test]
+    fn declarations_inside_a_variable_initializer_stay_in_the_current_body() {
+        let mut ir = IrFile::default();
+        let inner = ir.add_expr(IrExpr::Variable {
+            index: 1,
+            ty: Ty::String,
+            init: None,
+            named: false,
+        });
+        let initializer = ir.add_expr(IrExpr::Block {
+            stmts: vec![inner],
+            value: None,
+        });
+        let outer = ir.add_expr(IrExpr::Variable {
+            index: 0,
+            ty: Ty::Int,
+            init: Some(initializer),
+            named: false,
+        });
+
+        assert_eq!(
+            collect_body_var_types(&ir, [outer]),
+            HashMap::from([(0, Ty::Int), (1, Ty::String)])
         );
     }
 }
