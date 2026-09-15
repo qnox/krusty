@@ -2969,7 +2969,7 @@ fn parse_gsig_type_args(s: &str, for_field: bool) -> Option<(Vec<Ty>, bool, bool
     let mut field_inexact = false;
     while !rest.starts_with('>') {
         if let Some(tail) = rest.strip_prefix('*') {
-            args.push(Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any"))));
+            args.push(Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))));
             field_inexact = true;
             rest = tail;
             continue;
@@ -8289,7 +8289,7 @@ mod tests {
             method.ret,
             Ty::obj_args(
                 "kotlin/collections/List",
-                &[Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any")))]
+                &[Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))]
             )
         );
 
