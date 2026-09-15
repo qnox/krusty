@@ -250,7 +250,6 @@ fn lower_file_at_reporting_impl(
         inline_lambda_ret: Vec::new(),
         closure_return_target: None,
         captured_implicit_receivers: Vec::new(),
-        foreach_splice: Vec::new(),
         fn_body_tail: None,
     };
     lo.ir.source_line_count = file.source_line_count;
@@ -5890,15 +5889,6 @@ struct TailrecCtx {
     label: String,
 }
 
-/// Options for the iterator-protocol for-each lowering: the `forEachIndexed` index-counter name,
-/// the loop label, and whether the loop is a spliced stdlib HOF (`forEach`/`forEachIndexed`) —
-/// which binds kotlinc's inline `$iv` locals (receiver, element, parameter) into the spill scope.
-struct ForeachOpts<'a> {
-    index: Option<&'a str>,
-    label: Option<String>,
-    hof_splice: bool,
-}
-
 /// How the common checker-slot consumer fills a parameter that has no source argument. Keeping the
 /// policy explicit lets module/source/classpath call sites share argument evaluation and vararg
 /// packing without confusing three different ABI meanings of an empty slot: unsupported, a
@@ -6146,11 +6136,6 @@ pub(crate) struct Lower<'a> {
     /// lowered. Each frame contains `(semantic receiver depth, captured value slot, receiver type)`;
     /// consuming a selection is a direct coordinate lookup, never a member/type/name search.
     captured_implicit_receivers: Vec<Vec<(usize, u32, Ty)>>,
-    /// Active `forEach` lambda splices, innermost last: `(source label, IR loop label)`. `forEach` is
-    /// spliced into a for-each LOOP rather than through a result-slot frame, so a `return@<label>` in
-    /// its body is the loop's `continue`, not a break to a result slot. The source label is the
-    /// lambda's explicit one (`forEach inner@{ … }`) or the implicit `forEach`.
-    foreach_splice: Vec<(String, String)>,
     /// The enclosing function's TAIL expression (an expression body, a block's trailing value, or the
     /// value of a final `return`), if any — the expression whose value is the function's result.
     /// Consulted by tail-position splice gates (`fn_tail` above).
@@ -9205,6 +9190,9 @@ impl<'a> Lower<'a> {
         e: AstExprId,
     ) -> Option<u32> {
         let selected = self.info.resolved_top_level_call(e).cloned()?;
+        if selected.callable.inline_body_plan.is_some() {
+            return self.lower_selected_top_level_special(e, &selected.callable, args);
+        }
         if let Some(lowered) = self.lower_selected_top_level_special(e, &selected.callable, args) {
             return Some(lowered);
         }
@@ -10704,7 +10692,6 @@ impl<'a> Lower<'a> {
         // function must not capture a `return`/`return@label` lowered inside it (a non-local return
         // across a non-inline boundary is illegal Kotlin anyway; don't let one silently bind).
         let saved_lam_frames = std::mem::take(&mut self.inline_lambda_ret);
-        let saved_foreach = std::mem::take(&mut self.foreach_splice);
         // A real closure has no direct accessor frame: an enclosing backing field must be captured
         // explicitly, which is not lowered yet. Clear the realization while lowering its method so
         // the checker-recorded target reaches the clean boundary below instead of treating the
@@ -10718,7 +10705,6 @@ impl<'a> Lower<'a> {
             self.cur_field = field;
             self.cur_static_field = static_field;
         }
-        self.foreach_splice = saved_foreach;
         self.inline_lambda_ret = saved_lam_frames;
         self.closure_return_target = saved_closure_return_target;
         self.shared_cell_vars = saved_cells;
@@ -11585,11 +11571,9 @@ impl<'a> Lower<'a> {
             // The suspend-lambda machine is its own return scope — don't let an enclosing splice's
             // return frame capture a `return` lowered inside it (illegal across the boundary anyway).
             let saved_lam_frames = std::mem::take(&mut self.inline_lambda_ret);
-            let saved_foreach = std::mem::take(&mut self.foreach_splice);
             // Evaluate WITHOUT `?` so the `cur_fn_suspend` / `scope` state is always restored, even when the
             // body bails (an early `?` here would leak `cur_fn_suspend = true` into the enclosing method).
             let body_val = self.expr(body);
-            self.foreach_splice = saved_foreach;
             self.inline_lambda_ret = saved_lam_frames;
             self.cur_fn_suspend = saved_cur_suspend;
             self.in_suspend_lambda_body = saved_in_sl;
@@ -15991,13 +15975,8 @@ impl<'a> Lower<'a> {
         iterable: AstExprId,
         body: AstExprId,
         it_ty: Ty,
-        opts: ForeachOpts<'_>,
+        label: Option<String>,
     ) -> Option<u32> {
-        let ForeachOpts {
-            index,
-            label,
-            hof_splice,
-        } = opts;
         let protocol = self.info.iterator_protocol(iterable).cloned()?;
         let iter_dispatch = *protocol.iterator;
         let iter_ty = protocol.iter_ty;
@@ -16005,32 +15984,8 @@ impl<'a> Lower<'a> {
         let next = *protocol.next;
         let elem = protocol.elem_ty;
         let depth = self.scope.len();
-        // `forEachIndexed`: an `Int` index counter, declared before the loop and bound to the lambda's
-        // first parameter, incremented at the end of each iteration.
-        let (idx_v, var_idx) = if let Some(iname) = index {
-            let v = self.fresh_value();
-            self.scope.push((iname.to_string(), v, Ty::Int));
-            let zero = self.emit_const(IrConst::Int(0));
-            (
-                Some(v),
-                Some(self.emit_named_variable(v, ty_to_ir(Ty::Int), Some(zero))),
-            )
-        } else {
-            (None, None)
-        };
-
         // it = iterable.iterator()  (member virtual call, or the extension's static call)
         let recv = self.expr(iterable)?;
-        // A spliced stdlib HOF (`forEach`/`forEachIndexed`): kotlinc binds the receiver to the named
-        // inline local `$this$forEach$iv` before iterating — in scope (spilled) at every suspension
-        // in the body. A plain `for` loop has no such local.
-        let (recv, var_recv) = if hof_splice {
-            let rv = self.fresh_value();
-            let vr = self.emit_named_variable(rv, ty_to_ir(it_ty), Some(recv));
-            (self.emit_get_value(rv), Some(vr))
-        } else {
-            (recv, None)
-        };
         let iter_call = self.lower_iterator_protocol_call(recv, it_ty, iter_dispatch)?;
         let it_v = self.fresh_value();
         let var_it = self.emit_named_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
@@ -16050,58 +16005,25 @@ impl<'a> Lower<'a> {
             next_call
         };
         let x_v = self.fresh_value();
-        // A spliced stdlib HOF binds the loop ELEMENT (`item$iv$iv`) and the lambda PARAMETER (`it`)
-        // as SEPARATE named locals, exactly as kotlinc's inline expansion does — both join the
-        // suspend spill scope. A plain `for` loop binds only the loop variable.
-        let (var_x, var_param) = if hof_splice {
-            let vi = self.emit_named_variable(x_v, ty_to_ir(elem), Some(x_init));
-            let p_v = self.fresh_value();
-            self.scope.push((name.to_string(), p_v, elem));
-            let g = self.emit_get_value(x_v);
-            let vp = self.emit_named_variable(p_v, ty_to_ir(elem), Some(g));
-            (vi, Some(vp))
+        self.scope.push((name.to_string(), x_v, elem));
+        // A destructuring loop (`for ((a, b) in …)`) binds a parser-synthesized `$dest$…` entry
+        // that the prepended `Stmt::Destructure` consumes immediately — kotlinc never materializes
+        // it as a named local, so it must stay an unnamed temp (out of the suspend spill scope).
+        let var_x = if name.starts_with("$dest$") {
+            self.emit_variable(x_v, ty_to_ir(elem), Some(x_init))
         } else {
-            self.scope.push((name.to_string(), x_v, elem));
-            // A destructuring loop (`for ((a, b) in …)`) binds a parser-synthesized `$dest$…` entry
-            // that the prepended `Stmt::Destructure` consumes immediately — kotlinc never
-            // materializes it as a named local, so it must stay an unnamed temp (out of the suspend
-            // spill scope).
-            let vx = if name.starts_with("$dest$") {
-                self.emit_variable(x_v, ty_to_ir(elem), Some(x_init))
-            } else {
-                self.emit_source_local(name, x_v, ty_to_ir(elem), Some(x_init))
-            };
-            (vx, None)
+            self.emit_source_local(name, x_v, ty_to_ir(elem), Some(x_init))
         };
 
         let mut out = vec![var_x];
-        if let Some(vp) = var_param {
-            out.push(vp);
-        }
         if self.append_body_stmts(body, &mut out).is_none() {
             self.scope.truncate(depth);
             return None;
         }
-        // index += 1 (forEachIndexed)
-        let update = idx_v.map(|iv| {
-            let g = self.emit_get_value(iv);
-            let one = self.emit_const(IrConst::Int(1));
-            let inc = self.emit_primitive_bin_op(IrBinOp::Add, g, one);
-            self.emit_set_value(iv, inc)
-        });
         let wbody = self.emit_block(out, None);
-        let wh = self.emit_while(cond, wbody, update, false, label);
+        let wh = self.emit_while(cond, wbody, None, false, label);
         self.scope.truncate(depth);
-        let mut stmts = Vec::new();
-        if let Some(vr) = var_recv {
-            stmts.push(vr);
-        }
-        if let Some(vi) = var_idx {
-            stmts.push(vi);
-        }
-        stmts.push(var_it);
-        stmts.push(wh);
-        Some(self.emit_block(stmts, None))
+        Some(self.emit_block(vec![var_it, wh], None))
     }
 
     fn lower_iterator_protocol_call(
@@ -18958,16 +18880,6 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// The IR loop label a `return@<label>` should `continue`, when `label` names an active `forEach`
-    /// lambda splice (innermost first). `None` when no such splice is active for that label.
-    fn foreach_splice_loop_label(&self, label: &str) -> Option<String> {
-        self.foreach_splice
-            .iter()
-            .rev()
-            .find(|(source, _)| source == label)
-            .map(|(_, loop_label)| loop_label.clone())
-    }
-
     fn classpath_ty_ref(&self, r: &ast::TypeRef) -> Option<Ty> {
         self.ty_ref(r)
             .map(Ty::non_null)
@@ -19547,23 +19459,6 @@ impl<'a> Lower<'a> {
                             return None;
                         }
                     }
-                }
-                // A `return@label` naming a `forEach` lambda spliced into a for-each LOOP is a local
-                // return from that lambda — i.e. the next iteration: `continue` the loop it spliced to.
-                // Before this, it fell through to the real-function-return path and emitted a bare
-                // `return` inside a value-returning method (a verifier error at class-load time).
-                if let Some(loop_label) = ret_label
-                    .as_deref()
-                    .and_then(|lbl| self.foreach_splice_loop_label(lbl))
-                {
-                    if e.is_none() {
-                        return Some(self.emit_continue(Some(loop_label)));
-                    }
-                    // `forEach`'s lambda returns `Unit`, so the only value a `return@forEach` can
-                    // carry is `Unit` itself — there is no result slot to store it in. Falling through
-                    // would emit a real return inside a value-returning method (a verifier error at
-                    // class load), so skip.
-                    return self.bail("valued return through a forEach splice");
                 }
                 // A `return@label` matching an active spliced-lambda frame is a LOCAL return from that
                 // lambda: break to the lambda's end label (`Unit` result — run any value for effect). A
@@ -20559,7 +20454,7 @@ impl<'a> Lower<'a> {
                 iterable,
                 body,
                 label,
-            } => self.lower_for_each(&name, iterable, body, label, false),
+            } => self.lower_for_each(&name, iterable, body, label),
             // A local-function declaration emits no code here — its body is lifted to a separate static
             // method (pass 2'); a call to it routes to that method.
             Stmt::LocalFun(_) => Some(self.emit_block(vec![], None)),
@@ -20800,7 +20695,6 @@ impl<'a> Lower<'a> {
         iterable: AstExprId,
         body: AstExprId,
         label: Option<String>,
-        hof_splice: bool,
     ) -> Option<u32> {
         let it_ty = self.info.ty(iterable);
         // A platform range/progression value may expose a counted-loop shape. The platform owns the
@@ -20824,17 +20718,7 @@ impl<'a> Lower<'a> {
             it_ty.array_elem()
         };
         let Some(elem) = elem else {
-            return self.lower_foreach_iterator(
-                name,
-                iterable,
-                body,
-                it_ty,
-                ForeachOpts {
-                    index: None,
-                    label,
-                    hof_splice,
-                },
-            );
+            return self.lower_foreach_iterator(name, iterable, body, it_ty, label);
         };
         let depth = self.scope.len();
         // Evaluate the array once. When the iterable is ALREADY a plain (non-boxed) local, iterate on
@@ -22609,14 +22493,6 @@ impl<'a> Lower<'a> {
                     return None;
                 }
                 if let Some(lbl) = &label {
-                    // A `return@label` naming a `forEach` lambda spliced into a loop continues that
-                    // loop (see the statement form). `forEach`'s lambda is `Unit`, so it carries no
-                    // value.
-                    if let Some(loop_label) = self.foreach_splice_loop_label(lbl) {
-                        if value.is_none() {
-                            return Some(self.emit_continue(Some(loop_label)));
-                        }
-                    }
                     // A label naming an active splice frame needs the statement-return handling; an
                     // EXPLICIT lambda label with no frame names a lambda this route does not model, and
                     // emitting a real function return for it would be a miscompile. Skip both.
@@ -26216,6 +26092,9 @@ impl<'a> Lower<'a> {
                 // result unboxes instead of landing boxed in a primitive slot.
                 let (call_inline, call_log, call_phys) =
                     (c.inline.can_inline(), c.ret, c.physical_ret);
+                if c.inline_body_plan.is_some() {
+                    return self.lower_selected_top_level_special(e, &c, &args);
+                }
                 if let Some(intrinsic) = self.lower_selected_top_level_special(e, &c, &args) {
                     return Some(intrinsic);
                 }
@@ -26920,11 +26799,9 @@ impl<'a> Lower<'a> {
                     return Some(r);
                 }
                 let member = resolved.member;
-                if let Some((lambda_parameter, argument_parameters, return_parameter)) = member
-                    .inline_body_plan
-                    .as_deref()
-                    .and_then(inline_body_legacy_bridge::plain_invoke_lambda)
-                {
+                if let Some(plan) = member.inline_body_plan.as_deref() {
+                    let (lambda_parameter, argument_parameters, return_parameter) =
+                        inline_body_legacy_bridge::plain_invoke_lambda(plan)?;
                     let parameters = std::iter::once(Some(receiver))
                         .chain(args.iter().copied().map(Some))
                         .collect::<Vec<_>>();
@@ -27117,12 +26994,11 @@ impl<'a> Lower<'a> {
                 };
                 self.coerce_to_static(call, m.ret, m.physical_ret)
             } else if let Some(c) = self.info.resolved_extension(e).cloned() {
-                if let Some(plan) = c.inline_body_plan.as_deref().filter(|plan| {
-                    !matches!(
-                        plan,
-                        crate::libraries::InlineBodyPlan::CollectionTransform { .. }
-                    )
-                }) {
+                if let Some(plan) = c.inline_body_plan.as_deref() {
+                    // A provider plan is an obligation attached to the selected declaration. The
+                    // parser-era adapter understands only its original lambda-only subset; failure
+                    // to adapt any generalized plan rejects this legacy path instead of retrying the
+                    // same declaration as an ordinary dependency call.
                     return self
                         .lower_extension_inline_body_plan(e, receiver, &args, &c, plan, &name);
                 }
