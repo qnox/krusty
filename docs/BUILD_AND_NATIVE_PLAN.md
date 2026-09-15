@@ -1566,6 +1566,12 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **A stale decline, for 2595.** A data class holding a `Double` had been declined with a reason
+   that had stopped being true: "the runtime cannot render the value". It can — `krusty_fp.c`
+   landed since, and `"${1.5}"` had been answering `1.5` for a while. The whole increment was
+   deleting a guard and writing the two lines it was standing in for. Worth remembering that a
+   decline carries a REASON, and a reason can go out of date while the decline stays.
+
    **`super` on a property, for 2590.** The decline read "a `super` call to an unknown method",
    and the method really was unknown — because it does not exist. A property with default accessors
    contributes no method to its class, so the search had nothing to find, and the eighteen corpus

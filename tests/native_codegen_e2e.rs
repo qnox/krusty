@@ -1486,8 +1486,7 @@ fn a_data_class_gets_kotlins_equality_hashing_and_rendering() {
     // checked lowering writes those members; what the generator supplies is the per-field hash and
     // comparison they are written in terms of, and each is Kotlin's own answer rather than the
     // machine's: a `Long` folds its halves so the high word survives the truncation to `Int`, a
-    // `Boolean` is 1231 or 1237, and a `String` field compares by content. A floating-point field
-    // is declined for now — the `toString` synthesized beside `equals` would have to render it.
+    // `Boolean` is 1231 or 1237, and a `String` field compares by content.
     assert_eq!(
         run("data class Point(val x: Int, val y: Int)\n\
              data class Tagged(val name: String, val big: Long, val flag: Boolean)\n\
@@ -1504,6 +1503,35 @@ fn a_data_class_gets_kotlins_equality_hashing_and_rendering() {
              \x20   println(Tagged(\"ab\", 1L, true).hashCode() == Tagged(\"ab\", 1L, true).hashCode())\n\
              }\n"),
         "true\nfalse\ntrue\nfalse\nPoint(x=1, y=2)\n7\ntrue\nfalse\ntrue\n"
+    );
+}
+
+#[test]
+fn a_floating_point_data_class_field_compares_by_its_bits() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `Double.equals` is not `==`, and it disagrees with it in BOTH directions: `NaN` equals
+    // itself, and the two zeroes are distinct. Comparing the reinterpreted bits is exactly Kotlin's
+    // rule, where the comparison instruction answers the other way round on both of those values.
+    // The hash follows from the same bits, which is what makes `NaN`'s hash a number at all.
+    assert_eq!(
+        run("data class Wide(val x: Double)\n\
+             data class Narrow(val y: Float)\n\
+             fun main() {\n\
+             \x20   println(Wide(1.5) == Wide(1.5))\n\
+             \x20   println(Wide(1.5) == Wide(2.5))\n\
+             \x20   println(Wide(Double.NaN) == Wide(Double.NaN))\n\
+             \x20   println(Wide(0.0) == Wide(-0.0))\n\
+             \x20   println(Wide(Double.NaN).hashCode() == Wide(Double.NaN).hashCode())\n\
+             \x20   println(Wide(0.0).hashCode() == Wide(-0.0).hashCode())\n\
+             \x20   println(Narrow(Float.NaN) == Narrow(Float.NaN))\n\
+             \x20   println(Narrow(0.0f) == Narrow(-0.0f))\n\
+             \x20   println(Wide(1.5))\n\
+             \x20   println(Narrow(2.5f))\n\
+             }\n"),
+        "true\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\nWide(x=1.5)\nNarrow(y=2.5)\n"
     );
 }
 

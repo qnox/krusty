@@ -2506,17 +2506,34 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             Ty::Char => self.builder.ins().uextend(types::I32, operand),
             Ty::Int => operand,
             Ty::Long => self.fold_to_int(operand),
-            // A floating-point field hashes by its BITS, with `Float` giving them directly and
-            // `Double` folding them as `Long` does. Not emitted yet, and deliberately: a data
-            // class holding one cannot compile at all today, because the `toString` synthesized
-            // beside this `hashCode` has to render the value and the runtime cannot. Writing the
-            // hash before the rendering would mean shipping a line no test can reach.
-            Ty::Float | Ty::Double => {
-                return Err("a data-class field holding a floating-point value".to_string())
+            // A floating-point value hashes by its BITS, which is what makes `NaN`'s hash a
+            // number at all: `Float` gives its 32 directly, and `Double` folds its 64 exactly as
+            // `Long` does. Reading the bits is a reinterpretation, not a conversion — a
+            // conversion would round `NaN` to something and lose the very distinction the rule
+            // exists for.
+            Ty::Float => self.bits_of(operand, types::I32),
+            Ty::Double => {
+                let bits = self.bits_of(operand, types::I64);
+                self.fold_to_int(bits)
             }
             other => return Err(format!("a data-class field of type `{other:?}`")),
         };
         Ok(hash)
+    }
+
+    /// A floating-point value's BITS as an integer of the same width.
+    ///
+    /// A reinterpretation, not a conversion: a conversion would round, and rounding `NaN` loses the
+    /// very distinction the rules that ask for these bits exist to preserve. Cranelift's `bitcast`
+    /// takes an endianness rather than the ordinary memory flags — the two widths are the same
+    /// register here, so `little` names a reinterpretation with no swap on every target krusty
+    /// emits for.
+    fn bits_of(&mut self, value: Value, clif: Type) -> Value {
+        // ONLY the endianness: `bitcast` rejects every other flag, and the alignment and
+        // non-trapping bits `trusted` carries are a memory access's business, which this is not.
+        let flags = cranelift_codegen::ir::MemFlagsData::new()
+            .with_endianness(cranelift_codegen::ir::Endianness::Little);
+        self.builder.ins().bitcast(clif, flags, value)
     }
 
     /// `(value xor (value ushr 32)).toInt()` — how Kotlin folds 64 bits into a hash.
@@ -2530,19 +2547,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// Whether two data-class fields are equal, which is `equals`, not `==` on the machine.
     ///
     /// A reference field is the runtime's null-safe `equals`, which is Kotlin's. A floating-point
-    /// field would compare by its BITS — so that `NaN` equals `NaN` and `0.0` does not equal
-    /// `-0.0`, the opposite of what the comparison instruction answers — and is declined for the
-    /// same reason the hash above is: the `toString` synthesized beside this `equals` cannot
-    /// render the value, so no data class holding one compiles today.
+    /// field compares by its BITS, which is the opposite of what the comparison instruction
+    /// answers in both directions: `NaN` equals `NaN`, and `0.0` does not equal `-0.0`.
     fn field_equals(
         &mut self,
         left: u32,
         right: u32,
         ty: Ty,
     ) -> Result<Option<Value>, Unsupported> {
-        if !ty.is_nullable() && matches!(ty.non_null(), Ty::Float | Ty::Double) {
-            return Err("a data-class field holding a floating-point value".to_string());
-        }
         if carrier(ty) != Carrier::Ref {
             let left = self.coerce(left, ty)?;
             let right = self.coerce(right, ty)?;
@@ -2569,10 +2581,21 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         right: Value,
         ty: Ty,
     ) -> Result<Value, Unsupported> {
-        if !ty.is_nullable() && matches!(ty.non_null(), Ty::Float | Ty::Double) {
-            return Err("a field holding a floating-point value".to_string());
-        }
         if carrier(ty) != Carrier::Ref {
+            // `Double.equals` is not `==`: it reads the bits, so `NaN` equals itself and the two
+            // zeroes are distinct. Comparing the reinterpreted integers is exactly that rule, and
+            // it is the rule Kotlin's own `equals` states — `==` on the machine answers the other
+            // way round on both of those values.
+            if matches!(ty.non_null(), Ty::Float | Ty::Double) {
+                let clif = if ty.non_null() == Ty::Float {
+                    types::I32
+                } else {
+                    types::I64
+                };
+                let left = self.bits_of(left, clif);
+                let right = self.bits_of(right, clif);
+                return Ok(self.builder.ins().icmp(IntCC::Equal, left, right));
+            }
             return Ok(self.builder.ins().icmp(IntCC::Equal, left, right));
         }
         Ok(self

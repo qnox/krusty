@@ -1985,6 +1985,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_lists_e2e.rs`
   (`a_single_element_list_is_not_a_vararg_call_of_length_one`).
 
+- **A floating-point field compares and hashes by its BITS.** Kotlin's `Double.equals` is not
+  `==`, and it disagrees with it in both directions: `NaN` equals itself, and `0.0` does not equal
+  `-0.0`. A data class holding one therefore reinterprets the value as an integer of the same width
+  and compares that — a reinterpretation and never a conversion, since converting would round and
+  rounding `NaN` loses the distinction the rule exists for. The hash comes off the same bits, which
+  is what makes `NaN`'s hash a number at all: `Float` gives its 32 directly and `Double` folds its
+  64 exactly as `Long` does. Both answers were pinned against krusty's JVM backend.
+  Test: `tests/native_codegen_e2e.rs` (`a_floating_point_data_class_field_compares_by_its_bits`).
+
 - **`super.p` on a property is the base class's own realization, reached without dispatch.** A
   `super` access on a PROPERTY names the property and not an accessor, and a class whose accessors
   are the default ones declares no method for it at all — so the method search the native generator
