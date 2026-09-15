@@ -492,3 +492,47 @@ fn an_arrays_iterator_answers_through_the_narrow_protocol_too() {
         "OK",
     );
 }
+
+#[test]
+fn a_primitive_arrays_iterator_answers_its_own_narrow_spellings() {
+    // `ByteArray.iterator()` is a `ByteIterator`, a concrete stdlib class rather than an interface,
+    // and it declares `nextByte` beside the inherited `next`. Both reach the same object; what
+    // differs is only the type the call site expects. The runtime boxes by the ARRAY's own element
+    // descriptor, so whichever spelling is used the unboxing reads the bits that were written.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val a = byteArrayOf(1, 2, 3)\n\
+         \x20   val walk = a.iterator()\n\
+         \x20   var i = 0\n\
+         \x20   while (walk.hasNext()) {\n\
+         \x20       if (a[i] != walk.next()) return \"fail at $i\"\n\
+         \x20       i++\n\
+         \x20   }\n\
+         \x20   if (i != 3) return \"fail count: $i\"\n\
+         \x20   val narrow = a.iterator()\n\
+         \x20   return if (narrow.nextByte() == 1.toByte()) \"OK\" else \"fail narrow\"\n\
+         }\n",
+        "PrimitiveArrayIterator",
+        "OK",
+    );
+}
+
+#[test]
+fn every_primitive_arrays_iterator_answers_at_its_own_width() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val d = doubleArrayOf(1.5, 2.5).iterator()\n\
+         \x20   if (d.next() != 1.5 || d.next() != 2.5) return \"fail double\"\n\
+         \x20   val f = floatArrayOf(0.5f).iterator()\n\
+         \x20   if (f.next() != 0.5f) return \"fail float\"\n\
+         \x20   val b = booleanArrayOf(true, false).iterator()\n\
+         \x20   if (!b.next() || b.next()) return \"fail boolean\"\n\
+         \x20   val s = shortArrayOf(7).iterator()\n\
+         \x20   if (s.next() != 7.toShort()) return \"fail short\"\n\
+         \x20   val l = longArrayOf(1L shl 40).iterator()\n\
+         \x20   return if (l.next() == 1L shl 40) \"OK\" else \"fail long\"\n\
+         }\n",
+        "PrimitiveArrayIteratorWidths",
+        "OK",
+    );
+}

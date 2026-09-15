@@ -94,7 +94,15 @@ fn interface_symbol(
         (IterationRole::Iterator, "hasNext", 0) => {
             ("kt_iterator_has_next", vec![any()], Ty::Boolean)
         }
-        (IterationRole::Iterator, "next", 0) => ("kt_iterator_next", vec![any()], any()),
+        // `next`, and the narrow spellings a primitive iterator declares beside it. Each answers
+        // the same object; what differs is only the type the CALL SITE expects, which the caller
+        // converts to — the runtime boxes by the array's own element descriptor, so the unboxing
+        // reads the bits that were written.
+        (
+            IterationRole::Iterator,
+            "next" | "nextByte" | "nextShort" | "nextBoolean" | "nextFloat" | "nextDouble",
+            0,
+        ) => ("kt_iterator_next", vec![any()], any()),
         // The two walks a program hands a function value. Kotlin declares both on `Iterable`, and
         // a receiver typed by it may hold either of the two iterables this runtime has — so they
         // go through the same descriptor dispatch iteration itself does, and a range is walked as

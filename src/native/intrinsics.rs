@@ -276,6 +276,20 @@ pub(super) fn iteration_role(internal: crate::types::TypeName) -> Option<Iterati
         ("kotlin/ranges/CharRange", IterationRole::Iterable),
         ("kotlin/collections/Iterator", IterationRole::Iterator),
         ("java/util/Iterator", IterationRole::Iterator),
+        // The primitive iterators an array hands out. Each is a concrete stdlib class rather than
+        // an interface, and naming them is safe for the reason the interfaces are: the only objects
+        // wearing one here are the runtime's own walks, and a file declaring its own subclass of
+        // one overrides a dependency method and is declined whole. `IntIterator`, `LongIterator`
+        // and `CharIterator` are deliberately ABSENT — a range's iterator wears those, and they are
+        // read by the narrow protocol before this is consulted at all.
+        ("kotlin/collections/ByteIterator", IterationRole::Iterator),
+        ("kotlin/collections/ShortIterator", IterationRole::Iterator),
+        (
+            "kotlin/collections/BooleanIterator",
+            IterationRole::Iterator,
+        ),
+        ("kotlin/collections/FloatIterator", IterationRole::Iterator),
+        ("kotlin/collections/DoubleIterator", IterationRole::Iterator),
     ]
     .into_iter()
     .find_map(|(candidate, role)| internal.matches(candidate).then_some(role))

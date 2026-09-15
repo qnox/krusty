@@ -1994,6 +1994,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the bytes.
   Giving them an iterator is not about one member: every `Iterable` member reaches them through the
   same dispatch once they have one, so `joinToString`, `map` and `forEach` came with it.
+  A primitive array's iterator is also a concrete stdlib CLASS — `ByteArray.iterator()` is a
+  `ByteIterator`, which declares `nextByte` beside the inherited `next`. Every spelling reaches the
+  same object; what differs is the type the call site expects, and the runtime having boxed by the
+  array's own element descriptor is what makes the unboxing read the bits that were written.
+  Naming those concrete classes is safe for the reason the interfaces are: the only objects wearing
+  one here are the runtime's own walks, and a file declaring its own subclass of one overrides a
+  dependency method and is declined whole. `IntIterator`, `LongIterator` and `CharIterator` are
+  deliberately absent from that list — a range's iterator wears those, and the narrow protocol below
+  reads them first.
+
   A primitive array's iterator answers through TWO protocols. `IntArray.iterator()` has the static
   type `IntIterator`, whose `next` carries a number rather than a reference — the same narrow
   protocol a range's iterator uses — so the walk answers there as well, and the receiver's own
@@ -2001,7 +2011,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Iterator<T>` and never reaches that path, which is why a pointer is never returned as a number.
   Tests: `tests/native_lists_e2e.rs` (`an_array_is_walked_at_its_elements_own_width`,
   `a_string_is_walked_by_utf16_unit`, `an_arrays_iterable_members_reach_the_same_runtime_walk`,
-  `an_arrays_iterator_answers_through_the_narrow_protocol_too`).
+  `an_arrays_iterator_answers_through_the_narrow_protocol_too`,
+  `a_primitive_arrays_iterator_answers_its_own_narrow_spellings`,
+  `every_primitive_arrays_iterator_answers_at_its_own_width`).
 
 - **`withIndex()` is lazy, and yields a data class.** It answers an ITERABLE rather than a list:
   Kotlin's is lazy, and the loop consuming it may stop early. The object it makes keeps the source

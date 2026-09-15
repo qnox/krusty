@@ -1566,6 +1566,13 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **The primitive iterators, for 2615.** Six more that the walk above made reachable and did not
+   finish: `ByteArray.iterator()` is a `ByteIterator`, a concrete class the role table did not know,
+   so `hasNext` on it declined. Adding the five that have no range — Byte, Short, Boolean, Float,
+   Double — and the narrow `nextX` spellings beside `next` was the whole of it. The three that DO
+   have a range stay out of that table on purpose: a range's iterator wears them and is read by the
+   narrow protocol first.
+
    **Walking an array or a string, for 2609.** Ten more, and only three of them were `withIndex`:
    giving these two an iterator means every `Iterable` member reaches them through the dispatch
    that was already there. The element read is the one thing that cannot be shared — an array's
