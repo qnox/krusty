@@ -7,6 +7,40 @@ fn run(src: &str) -> Option<String> {
     common::compile_and_run_box(src, "Main", &[sl, jdk.clone()], Some(jdk.as_path()))
 }
 
+fn assert_byte_equal(tag: &str, source: &str, class: &str) {
+    let Some(result) =
+        common::byte_diff_against_kotlinc_cp(tag, source, class, &[common::stdlib_jar()])
+    else {
+        eprintln!("skip: kotlinc unavailable for {tag}");
+        return;
+    };
+    assert_eq!(result, Ok(()), "{tag} must be byte-identical to kotlinc");
+}
+
+#[test]
+fn mapped_builtin_property_and_function_calls_match_kotlinc_bytes() {
+    assert_byte_equal(
+        "MappedBuiltinCallBytes",
+        "fun collectionSize(value: Collection<String>): Int = value.size\n",
+        "MappedBuiltinCallBytesKt",
+    );
+    assert_byte_equal(
+        "MappedMapKeysCallBytes",
+        "fun mapKeys(value: Map<String, Int>): Set<String> = value.keys\n",
+        "MappedMapKeysCallBytesKt",
+    );
+    assert_byte_equal(
+        "MappedMapEntriesCallBytes",
+        "fun mapEntries(value: Map<String, Int>): Set<*> = value.entries\n",
+        "MappedMapEntriesCallBytesKt",
+    );
+    assert_byte_equal(
+        "MappedRemoveAtCallBytes",
+        "fun removeAt(value: MutableList<Any?>): Any? = value.removeAt(0)\n",
+        "MappedRemoveAtCallBytesKt",
+    );
+}
+
 #[test]
 fn collection_size_reachable_through_interface() {
     const SRC: &str = "class C : Collection<String> {\n\
