@@ -345,6 +345,45 @@ fn emit_in_process<B: krusty::compiler::Backend>(
     }
 }
 
+/// Capture common IR at the real backend boundary. Tests that inspect or deliberately mutate IR
+/// use this backend instead of reconstructing semantics from the retained inspection AST.
+pub fn capture_common_ir(
+    src: &str,
+    stem: &str,
+    platform: Box<dyn krusty::libraries::SemanticPlatform>,
+) -> (Vec<krusty::ir::IrFile>, Vec<String>) {
+    #[derive(Clone)]
+    struct CaptureBackend(std::rc::Rc<std::cell::RefCell<Vec<krusty::ir::IrFile>>>);
+
+    impl krusty::compiler::Backend for CaptureBackend {
+        type State = ();
+
+        fn lower_ir_file(
+            &self,
+            file: krusty::compiler::CheckedIrFile<'_>,
+            _state: &mut Self::State,
+            _diags: &mut krusty::diag::DiagSink,
+        ) -> Vec<krusty::compiler::Artifact> {
+            self.0.borrow_mut().push(file.ir);
+            Vec::new()
+        }
+
+        fn finalize(
+            &self,
+            _state: Self::State,
+            _module_name: &str,
+        ) -> Vec<krusty::compiler::Artifact> {
+            Vec::new()
+        }
+    }
+
+    let captured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let backend = CaptureBackend(captured.clone());
+    let report = emit_in_process(src, stem, platform, &backend);
+    let files = std::mem::take(&mut *captured.borrow_mut());
+    (files, report.diagnostics)
+}
+
 struct InProcessCompileReport {
     classes: Vec<(String, Vec<u8>)>,
     diagnostics: Vec<String>,

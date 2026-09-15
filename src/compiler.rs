@@ -1,12 +1,13 @@
 //! Compiler orchestration.
 
+mod declaration_metadata;
 mod diagnostic_recovery;
 mod metadata_handoff;
 #[cfg(test)]
 mod streaming_tests;
 
 use crate::ast::File;
-pub use crate::backend::{Artifact, Backend};
+pub use crate::backend::{Artifact, Backend, CheckedIrFile};
 use crate::diag::{DiagSink, Span};
 use crate::frontend::StreamingSourceSetAnalysis;
 use diagnostic_recovery::recover_pass_two_diagnostics;

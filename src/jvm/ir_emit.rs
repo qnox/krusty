@@ -20249,7 +20249,7 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         // `null` has its own JVM verification type. Preserve it through slot lowering so loop and
         // resume frames describe an always-null local as `Null`, not as the unusable `Top` type.
         Ty::Null => Ty::Null,
-        // Bare scalar/`String` variants are already JVM types — pass through. (Front-end/`ir_lower` types
+        // Bare scalar/`String` variants are already JVM types — pass through. (Checked/common-IR types
         // can arrive either as these variants or as their `Obj("kotlin/…")` spelling; both must map here.)
         Ty::Int => Ty::Int,
         Ty::Long => Ty::Long,
@@ -20262,7 +20262,7 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         Ty::String => Ty::String,
         // Unsigned scalars are inline classes over the signed primitive; unboxed they ARE that primitive
         // (`UInt` = `int`, `ULong` = `long`) — same JVM slots and `istore`/`iload`/arithmetic. Unsigned
-        // semantics live in the intrinsic calls (`Integer.compareUnsigned`, …) ir_lower already inserted.
+        // semantics live in the intrinsic calls (`Integer.compareUnsigned`, …) common lowering inserted.
         Ty::UByte => Ty::Byte,
         Ty::UShort => Ty::Short,
         Ty::UInt => Ty::Int,

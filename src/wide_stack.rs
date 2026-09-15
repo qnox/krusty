@@ -10,7 +10,7 @@
 //! stack-pointer check. The explicit depth guard — not an embedder's incidental thread-stack size
 //! or one segment's capacity — remains the limit in tests, the CLI, and the LSP.
 
-/// Shared semantic expression-nesting contract for the checker and IR lowering.
+/// Shared semantic expression-nesting contract for the checker and common lowering.
 ///
 /// The parser counts `parse_bp` entries rather than AST nesting and may spend two entries on one
 /// semantic level, so it derives its compatible parse bound from this value instead of copying a
@@ -18,10 +18,8 @@
 /// recursive passes from silently drifting to mutually incompatible acceptance limits.
 pub(crate) const MAX_SEMANTIC_EXPR_DEPTH: u32 = 500;
 
-/// The largest measured unoptimized recursive frame is approximately 21 KiB (`ir_lower`'s
-/// `expr_inner`, which grew as contract and inline-facade handling moved into the dispatcher),
-/// and a `&&`/`||` chain level stacks `expr` + `expr_inner` + the binary-op helper, over 32 KiB
-/// per level in an unoptimized build. The 500-level guard can therefore consume more than 16 MiB.
+/// Recursive expression dispatch can stack more than 32 KiB per semantic level in an unoptimized
+/// build. The 500-level guard can therefore consume more than 16 MiB.
 /// Treat 24 MiB as a LOW-WATER MARK and grow by 32 MiB: pass-entry calls establish the first roomy
 /// segment, while per-recursion-level calls chain another segment before a large path exhausts the
 /// current one. A 16 MiB segment was measured to SIGBUS ~15 levels short of the guard on the

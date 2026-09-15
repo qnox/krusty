@@ -1190,9 +1190,6 @@ fn render_dump_request(
         platform,
         &features,
     );
-    // A second handle over the same `Rc<Classpath>`: the semantic platform was moved into the
-    // analysis as a `Box<dyn SemanticPlatform>`, which cannot be re-borrowed as a `TargetRuntime`.
-    let runtime = JvmLibraries::new(classpath.clone());
     let response = render_analyzed_dump(
         &analysis,
         &sources[request.target],
@@ -1200,7 +1197,6 @@ fn render_dump_request(
         &request.label,
         &request.cache_key,
         &request.cache_root,
-        &runtime,
     );
     if stub_overlay_set {
         classpath.clear_stub_overlay();
@@ -1210,9 +1206,8 @@ fn render_dump_request(
 
 /// Render the analyzed target file's document and store it under `cache_root`.
 ///
-/// Everything the document needs — including driving the lowering that fills its IR section — is
-/// the dump renderer's own business; the worker only picks the file out of its analysis and decides
-/// where the result is written.
+/// Inspection retains syntax and checked editor facts, but executable common IR exists only while
+/// the production streaming compiler consumes checked FIR. Do not reconstruct it from this AST.
 fn render_analyzed_dump(
     analysis: &compiler_analysis::SourceSetAnalysis,
     source: &str,
@@ -1220,7 +1215,6 @@ fn render_analyzed_dump(
     label: &str,
     cache_key: &str,
     cache_root: &Path,
-    runtime: &JvmLibraries,
 ) -> Option<DumpResponse> {
     let file_analysis = analysis.files.get(target)?;
     let text = krusty::dump::render_file_dump_with_limit(
@@ -1228,11 +1222,9 @@ fn render_analyzed_dump(
             label,
             source,
             file: &file_analysis.file,
-            file_index: target,
             info: file_analysis.types.as_ref(),
-            symbols: &analysis.symbols,
-            runtime,
             diagnostics: &file_analysis.diagnostics,
+            ir: Err("common IR was not captured during streaming compilation"),
         },
         crate::dump_cache::MAX_DUMP_BYTES,
     );
@@ -1617,7 +1609,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_protocol_dumps_a_target_file_to_a_markdown_path() {
+    fn worker_protocol_reports_that_streaming_ir_was_not_retained() {
         let root = std::env::temp_dir().join(format!("krusty-worker-dump-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
 
@@ -1653,8 +1645,8 @@ mod tests {
             "the dumped file must carry its checker result: {text}"
         );
         assert!(
-            !text.contains("not lowered:"),
-            "the dumped file must carry lowered IR: {text}"
+            text.contains("not lowered: common IR was not captured during streaming compilation"),
+            "the dump must not reconstruct IR from its retained inspection AST: {text}"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1843,7 +1835,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_protocol_dumps_the_lowering_bail_reason() {
+    fn worker_protocol_does_not_rerun_lowering_to_recover_a_bail_reason() {
         let root =
             std::env::temp_dir().join(format!("krusty-worker-dump-bail-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1868,8 +1860,10 @@ mod tests {
 
         let text = std::fs::read_to_string(read_dump_path(output)).unwrap();
         assert!(
-            text.contains("not lowered: gate:tailrec-member"),
-            "the bail reason must survive into the document: {text}"
+            text.contains(
+                "not lowered: common IR was not captured during streaming compilation"
+            ),
+            "the dump must report unavailable streamed IR instead of invoking another lowerer: {text}"
         );
         assert!(
             text.contains("no diagnostics"),
