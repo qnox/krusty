@@ -14,8 +14,8 @@ use crate::jvm::classfile::{
 use crate::jvm::classreader::{MethodCode, C};
 use crate::jvm::inline::MethodBodies;
 use crate::jvm::names::{
-    method_descriptor, property_getter_name, property_setter_name, reference_array_element,
-    type_descriptor,
+    mapped_builtin_virtual_name, method_descriptor, property_getter_name, property_setter_name,
+    reference_array_element, type_descriptor,
 };
 use crate::kt_string::{KtString, KtStringBuf};
 use crate::symbol_source::CompositeSource;
@@ -7910,7 +7910,7 @@ fn emit_func_ref_class(
             reflection_name
         }
         FrDispatch::VirtualUnbound | FrDispatch::VirtualBound => {
-            crate::jvm::names::mapped_builtin_virtual_name(&call_owner, reflection_name)
+            mapped_builtin_virtual_name(&call_owner, reflection_name, &signature_desc)
         }
     };
     let signature = format!("{signature_name}{signature_desc}");
@@ -8197,12 +8197,12 @@ fn emit_func_ref_class(
         // A bound reference to a mapped-builtin member (`"KOTLIN"::get`) invokes the same PHYSICAL JVM
         // method a direct call would (`String.get` → `charAt`) — apply the backend's name mapping here too.
         _ if fr.call_interface => {
-            let vn = crate::jvm::names::mapped_builtin_virtual_name(&call_owner, &fr.call_name);
+            let vn = mapped_builtin_virtual_name(&call_owner, &fr.call_name, &call_desc);
             let m = cw.interface_methodref(&call_owner, vn, &call_desc);
             inv.invokeinterface(m, call_arg_words, ret_words);
         }
         _ => {
-            let vn = crate::jvm::names::mapped_builtin_virtual_name(&call_owner, &fr.call_name);
+            let vn = mapped_builtin_virtual_name(&call_owner, &fr.call_name, &call_desc);
             let m = cw.methodref(&call_owner, vn, &call_desc);
             inv.invokevirtual(m, call_arg_words, ret_words);
         }
@@ -16860,7 +16860,7 @@ impl<'a> Emitter<'a> {
                     );
                     let aw: i32 = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
                     let ret = ty_from_descriptor_ret(&descriptor);
-                    let jvm_name = crate::jvm::names::mapped_builtin_virtual_name(&owner, &name);
+                    let jvm_name = mapped_builtin_virtual_name(&owner, &name, &descriptor);
                     if interface {
                         let m = self.cw.interface_methodref(&owner, jvm_name, &descriptor);
                         code.invokeinterface(m, aw, slot_words(ret) as i32);

@@ -2904,11 +2904,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   supertypes, replacing the JVM class's rather than joining them — the supertypes too, or `java/util/List`
   re-enters one rung up the receiver walk and re-supplies everything. The class file still states the kind
   and constructors. Nothing physical changes: the builtins decode to the same erased descriptors and the
-  same JVM owner, member names stay in SOURCE terms, and the Kotlin → JVM rename happens where it always
-  did, at emit (`names::mapped_builtin_virtual_name`, `removeAt` → `remove`). No filter subtracts from the
-  Java scope and no reverse table exists — the correct set is simply the declared one. The OVERRIDE
-  direction is unchanged: a class realizing `MutableList` writes `removeAt`, and `mapped_interface_members`
-  emits the `remove(int)` bridge. Tests: `tests/mapped_collection_scope_e2e.rs`, corpus
+  same JVM owner, and member names stay in SOURCE terms while the provider attaches the exact physical
+  owner/name/descriptor realization (`removeAt` → `remove`). No filter subtracts from the Java scope and
+  no reverse table exists — the correct set is simply the declared one. The OVERRIDE direction is
+  unchanged: a class realizing `MutableList` writes `removeAt`, and the resolved override edge carries
+  the external declaration's `remove(int)` realization into bridge derivation. Tests:
+  `tests/mapped_collection_scope_e2e.rs`, corpus
   `specialBuiltins/irrelevantRemoveAtOverride.kt`.
 
   A CONCRETE `java.util` class (`ArrayList`, `AbstractList`) is the other half, and needs the other
@@ -2916,8 +2917,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   including its own `remove(int)`. kotlinc handles exactly this in `LazyJavaClassMemberScope`
   (`isVisibleAsFunction` / `doesOverrideRenamedBuiltins` / `createRenamedCopy`): a Java method whose
   signature matches a renamed builtin is hidden under its JVM name and re-exposed under the Kotlin one.
-  krusty derives this read-side rename from the same `mapped_interface_members` semantic handoff used
-  for bridge emission. The selected mapping must match the JVM name AND full erased descriptor (only
+  krusty derives this read-side rename from the same provider-normalized builtin declaration used by
+  bridge emission. The selected mapping must match the JVM name AND full erased descriptor (only
   `remove(int)` is renamed, not `remove(Object)`) and its declaring mapped interface must occur in the
   concrete receiver's hierarchy. There is therefore no second reverse table to drift, and an unrelated
   class declaring `remove(index: Int): Any` is untouched. Verified against kotlinc:
@@ -3748,8 +3749,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     owner's declared accessor; with no class file that returned `None` and the backend invented the
     JavaBean getter (`getSize`, `getEntries`). `Classpath::property_read_access` now falls back to
     `builtin_property_read_access`, which walks the builtins supertype closure and answers with the
-    mapped `java.util` spelling (`size`, `keySet`, `entrySet`) from the same
-    `builtin_property_jvm_name` mapping the member table uses — one definition, so a call and a
+    mapped `java.util` spelling (`size`, `keySet`, `entrySet`) from the same exact, declaration-owned
+    mapped-builtin realization policy the member table uses — one definition, so a call and a
     property read of the same builtin cannot disagree.
   - **Return erasure.** That fallback also supplies the member's OWN (already erased) descriptor, so a
     type-parameter-typed property emits `getKey:()Ljava/lang/Object;` + `checkcast`, not a descriptor
@@ -3777,12 +3778,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `metadata::builtin_class_access_tests` for the flag-word mapping.
 - **`MutableList.removeAt(Int)` IS `java.util.List.remove(int)`** — the function half of kotlinc's
   `BuiltinMethodsWithDifferentJvmName`/special-builtin renaming whose property half is
-  `size`/`keys`/`values`/`entries`. A call through a `MutableList` receiver emits the JVM name
-  (`names::mapped_builtin_virtual_name`), and a class implementing `MutableList` gets a `remove(int)`
-  bridge forwarding to its `removeAt` override (`mapped_interface_members` →
-  `bridges::mapped_interface_bridges`) — needed when the override is inherited from a NON-collection
-  supertype, which is the only place the two names can diverge. Unlike the `size` entry beside it, this
-  one is keyed on the KOTLIN name `kotlin/collections/MutableList`, not the erased `java/util/List`:
+  `size`/`keys`/`values`/`entries`. The builtin provider records the source name and exact JVM
+  realization separately, so a call through a `MutableList` receiver invokes `remove(I)Object`, and a
+  class implementing `MutableList` gets the same bridge from its resolved override edge — needed when
+  the override is inherited from a NON-collection supertype, which is the only place the two names can
+  diverge. Unlike the `size` entry beside it, this
+  one is keyed on the KOTLIN declaration identity `kotlin/collections/MutableList` plus its full erased
+  descriptor, not merely the erased `java/util/List` owner:
   the renaming exists only on the mutable side, so a READ-ONLY `List` implementation that happens to
   declare an unrelated `removeAt` must not acquire a `remove(int)` bridge. Tests: box corpus
   `codegen/box/specialBuiltins/irrelevantRemoveAtOverride.kt`, and

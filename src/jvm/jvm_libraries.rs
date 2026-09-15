@@ -7,6 +7,7 @@ mod inline_body_plan;
 mod inline_capability;
 mod mapped_builtin_member_status;
 
+use super::mapped_builtin_declarations::MappedBuiltinMember;
 use inline_capability::{metadata_inline, property_accessor_inline};
 use mapped_builtin_member_status::mapped_builtin_member_status;
 
@@ -593,7 +594,7 @@ impl JvmLibraries {
         &self,
         internal: TypeName,
         classifier: &LibraryType,
-        mapped_members: &[crate::libraries::MappedInterfaceMember],
+        mapped_members: &[MappedBuiltinMember],
     ) -> Vec<String> {
         let mut names = Vec::new();
         let mut push = |name: String| {
@@ -1360,15 +1361,10 @@ impl JvmLibraries {
         self.cp.builtin_members_name(kotlin)
     }
 
-    /// Members declared by the mapped collection interfaces a concrete JVM class realizes. This is
-    /// the read-side counterpart of [`SymbolSource::mapped_interface_members`], which already owns
-    /// the source name, physical name, erased callable shape, and property/function distinction used
-    /// for bridge emission. Deriving both callable names and concrete property realizations from that
-    /// semantic handoff avoids a second reverse mapping table in the classpath provider.
-    fn mapped_collection_members(
-        &self,
-        internal: TypeName,
-    ) -> Vec<crate::libraries::MappedInterfaceMember> {
+    /// Metadata declarations realized by the mapped collection interfaces in a concrete JVM class's
+    /// hierarchy. The provider walks the physical hierarchy only to discover applied interfaces; the
+    /// member set and Kotlin inheritance come from `.kotlin_builtins`.
+    fn mapped_collection_members(&self, internal: TypeName) -> Vec<MappedBuiltinMember> {
         let mut mappings = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let mut pending = std::collections::VecDeque::new();
@@ -1380,19 +1376,11 @@ impl JvmLibraries {
             if let Some(kotlin) =
                 super::jvm_class_map::jvm_collection_to_kotlin_mutable_type_name(owner)
             {
-                for mapping in
-                    <Self as SemanticPlatform>::mapped_interface_members(self, Ty::obj_name(kotlin))
-                {
-                    if !mappings
-                        .iter()
-                        .any(|existing: &crate::libraries::MappedInterfaceMember| {
-                            existing.source_name == mapping.source_name
-                                && existing.physical_name == mapping.physical_name
-                                && existing.params == mapping.params
-                                && existing.ret == mapping.ret
-                                && existing.is_property == mapping.is_property
-                        })
-                    {
+                for mapping in self.cp.mapped_builtin_members_name(kotlin) {
+                    if mapping.physical_owner != owner {
+                        continue;
+                    }
+                    if !mappings.contains(&mapping) {
                         mappings.push(mapping);
                     }
                 }
@@ -1407,13 +1395,12 @@ impl JvmLibraries {
     /// Kotlin source renames for function members only. Property mappings are consumed separately
     /// by `declared_callables_for`, where they become `PropertyInfo` declarations backed by the
     /// concrete class's physical zero-argument method.
-    fn mapped_collection_function_renames(
-        &self,
-        internal: TypeName,
-    ) -> Vec<crate::libraries::MappedInterfaceMember> {
+    fn mapped_collection_function_renames(&self, internal: TypeName) -> Vec<MappedBuiltinMember> {
         self.mapped_collection_members(internal)
             .into_iter()
-            .filter(|mapping| !mapping.is_property && mapping.source_name != mapping.physical_name)
+            .filter(|mapping| {
+                !mapping.is_property() && mapping.source_name != mapping.physical_name
+            })
             .collect()
     }
 
@@ -2168,8 +2155,8 @@ impl JvmLibraries {
             // `java/util/List` as a supertype. That is what let `list.remove(10)` bind remove-BY-INDEX,
             // and what let `"abcdef".split("c")` bind `java.lang.String.split`, which splits on a REGEX
             // and returns an array. The builtins decode to the same erased descriptors and the same JVM
-            // owner, so nothing physical changes: names stay in source terms and the Kotlin → JVM rename
-            // happens at emit (`names::mapped_builtin_virtual_name`), as for every other mapped member.
+            // owner, so nothing physical changes: the provider keeps the source name and exact physical
+            // name as separate facts on the normalized member.
             //
             // NOT the remaining mapped builtins, and not for want of anything here: kotlinc does not
             // hide every Java method on a mapped type either. `JvmBuiltInsCustomizer` re-admits an
@@ -2644,9 +2631,8 @@ impl JvmLibraries {
             // name `removeAt`. The `.kotlin_builtins` declaration IS the Kotlin API, and it decodes to
             // the same erased descriptors and JVM owner — so for a mapped name it REPLACES the JVM
             // class's members rather than being unioned with them. The class file still supplies the
-            // kind and constructors. Names stay in source terms; the Kotlin → JVM
-            // rename happens at emit (`names::mapped_builtin_virtual_name`), as it does for every
-            // other mapped member.
+            // kind and constructors. The normalized member retains its Kotlin source name and exact JVM
+            // realization separately.
             // The members half of the same decision (see the supertype block below): for a mapped
             // collection the builtins REPLACE the JVM class's members; every other mapped builtin still
             // joins them, with anything the class file already states under a physical name dropped.
@@ -2669,8 +2655,12 @@ impl JvmLibraries {
                             .physical_name
                             .as_deref()
                             .unwrap_or(builtin.name.as_str());
-                        same_mapped_virtual_name(internal, member_physical, builtin_physical)
-                            && member.descriptor == builtin.descriptor
+                        same_mapped_virtual_name(
+                            internal,
+                            member_physical,
+                            builtin_physical,
+                            &member.descriptor,
+                        ) && member.descriptor == builtin.descriptor
                     })
                 });
             }
@@ -4077,8 +4067,8 @@ impl JvmLibraries {
         &self,
         recv: Ty,
         name: &str,
-        mapped_members: &[crate::libraries::MappedInterfaceMember],
-        function_renames: &[crate::libraries::MappedInterfaceMember],
+        mapped_members: &[MappedBuiltinMember],
+        function_renames: &[MappedBuiltinMember],
     ) -> crate::libraries::Callables {
         let functions = self.member_functions_with_renames(recv, name, function_renames);
         // Exact declarations on this classifier. The resolver owns the one inheritance walk.
@@ -4089,7 +4079,7 @@ impl JvmLibraries {
         let cn = internal;
         let mapped_property = mapped_members
             .iter()
-            .find(|mapping| mapping.is_property && mapping.source_name == name);
+            .find(|mapping| mapping.is_property() && mapping.source_name == name);
         if let Some(ci) = self.cp.find_name(cn) {
             for mp in metadata::class_properties(&ci) {
                 if mp.name != name {
@@ -4487,8 +4477,7 @@ impl JvmLibraries {
                 function.callable.params.is_empty()
                     && mapped_property.as_ref().is_none_or(|mapping| {
                         function.callable.name == mapping.physical_name
-                            && function.callable.descriptor
-                                == method_descriptor(&mapping.params, mapping.ret)
+                            && function.callable.descriptor == mapping.descriptor
                     })
             }) {
                 let mut getter = function.callable.clone();
@@ -4663,7 +4652,7 @@ impl JvmLibraries {
                     let function_renames = mapped_members
                         .iter()
                         .filter(|mapping| {
-                            !mapping.is_property && mapping.source_name != mapping.physical_name
+                            !mapping.is_property() && mapping.source_name != mapping.physical_name
                         })
                         .cloned()
                         .collect::<Vec<_>>();
@@ -5587,7 +5576,7 @@ impl JvmLibraries {
         &self,
         receiver: Ty,
         name: &str,
-        function_renames: &[crate::libraries::MappedInterfaceMember],
+        function_renames: &[MappedBuiltinMember],
     ) -> FunctionSet {
         // Exact declarations on this classifier. The resolver assigns inheritance distance.
         let mut overloads = Vec::new();
@@ -5622,19 +5611,13 @@ impl JvmLibraries {
                                 .iter()
                                 .find(|mapping| {
                                     mapping.physical_name == m.name
-                                        && method_descriptor(&mapping.params, mapping.ret)
-                                            == m.descriptor
+                                        && mapping.descriptor == m.descriptor
                                 })
                                 .map_or(m.name.as_str(), |mapping| mapping.source_name.as_str())
                         },
                         |_| m.name.as_str(),
                     );
-                    if scope_name == name
-                        || matches!(
-                            (scope_name, name),
-                            ("keySet", "keys") | ("entrySet", "entries")
-                        )
-                    {
+                    if scope_name == name {
                         let cn_rendered = cn.render();
                         crate::trace_compiler!(
                             "resolve",
@@ -6431,72 +6414,6 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         // stays in Kotlin names (the emitter re-maps at its boundary).
         let internal = crate::jvm::jvm_class_map::kotlin_builtin_to_internal(simple_name)?;
         Some(crate::jvm::jvm_class_map::to_kotlin_internal(internal).to_string())
-    }
-
-    fn mapped_interface_members(
-        &self,
-        supertype: Ty,
-    ) -> Vec<crate::libraries::MappedInterfaceMember> {
-        let Some(internal) = supertype.obj_internal() else {
-            return Vec::new();
-        };
-        let mut members = Vec::new();
-        let jvm_internal = crate::jvm::jvm_class_map::to_jvm_type_name(internal);
-        let collection_properties: &[&str] = if jvm_internal.matches("java/util/Map") {
-            &["size", "values", "keys", "entries"]
-        } else if jvm_internal.matches("java/util/Collection")
-            || jvm_internal.matches("java/util/List")
-            || jvm_internal.matches("java/util/Set")
-        {
-            &["size"]
-        } else {
-            &[]
-        };
-        for &property in collection_properties {
-            let Some((physical, ret)) = crate::jvm::names::collection_property_stub(property)
-            else {
-                continue;
-            };
-            members.push(crate::libraries::MappedInterfaceMember {
-                source_name: property.to_string(),
-                physical_name: physical.to_string(),
-                params: Vec::new(),
-                ret,
-                is_property: true,
-            });
-        }
-        // `MutableList.removeAt(Int): E` IS `java.util.List.remove(int)` — the function half of the
-        // same special-builtin renaming the properties above cover, so a class implementing
-        // `MutableList` must expose its `removeAt` override under the JVM name too. Keyed on the
-        // KOTLIN name, not the erased `java/util/List`: unlike `size`, this member exists only on the
-        // MUTABLE side, so a read-only `List` implementation that happens to declare an unrelated
-        // `removeAt` must not acquire a `remove(int)` bridge kotlinc would never emit.
-        if internal.matches("kotlin/collections/MutableList") {
-            members.push(crate::libraries::MappedInterfaceMember {
-                source_name: "removeAt".to_string(),
-                physical_name: "remove".to_string(),
-                params: vec![Ty::Int],
-                ret: Ty::obj("kotlin/Any"),
-                is_property: false,
-            });
-        }
-        if internal.matches("kotlin/CharSequence") || internal.matches("java/lang/CharSequence") {
-            members.push(crate::libraries::MappedInterfaceMember {
-                source_name: "length".to_string(),
-                physical_name: "length".to_string(),
-                params: Vec::new(),
-                ret: Ty::Int,
-                is_property: true,
-            });
-            members.push(crate::libraries::MappedInterfaceMember {
-                source_name: "get".to_string(),
-                physical_name: "charAt".to_string(),
-                params: vec![Ty::Int],
-                ret: Ty::Char,
-                is_property: false,
-            });
-        }
-        members
     }
 
     fn signature_formal_names(&self, signature: &str) -> Vec<String> {

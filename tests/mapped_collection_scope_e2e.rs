@@ -156,6 +156,60 @@ fn same_shaped_java_method_outside_the_collection_hierarchy_keeps_its_name() {
 }
 
 #[test]
+fn concrete_java_map_gets_only_declaration_owned_kotlin_property_aliases() {
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let java = [
+        (
+            "NamedMap.java".to_string(),
+            r#"
+                package fixtures;
+                public final class NamedMap extends java.util.HashMap<String, Integer> {}
+            "#
+            .to_string(),
+        ),
+        (
+            "UnrelatedKeys.java".to_string(),
+            r#"
+                package fixtures;
+                public final class UnrelatedKeys {
+                    public java.util.Set<String> keySet() {
+                        return java.util.Collections.singleton("plain");
+                    }
+                }
+            "#
+            .to_string(),
+        ),
+    ];
+    let Some((classes, _)) = common::javac_compile(&java, &[]) else {
+        return;
+    };
+    let root = classes.parent().map(std::path::Path::to_path_buf);
+    let classpath = vec![classes, stdlib];
+    let output = common::compile_and_run_box(
+        r#"
+            import fixtures.NamedMap
+            import fixtures.UnrelatedKeys
+
+            fun box(): String {
+                val map = NamedMap()
+                map.put("mapped", 1)
+                val mapped = map.keys.single()
+                val ordinary = UnrelatedKeys().keySet().single()
+                return "$mapped:$ordinary"
+            }
+        "#,
+        "Main",
+        &classpath,
+        Some(&jdk),
+    );
+    if let Some(root) = root {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    assert_eq!(output.as_deref(), Some("mapped:plain"));
+}
+
+#[test]
 fn remove_at_reaches_the_index_overload_on_both_shapes() {
     // The renamed member stays reachable under its Kotlin name on either receiver, and still emits
     // `remove(I)`.
