@@ -107,14 +107,35 @@ fun box(): String {{\n\
 fn an_operand_that_does_not_fit_the_expectation_is_still_rejected() {
     let main = format!("{DECLARATIONS}fun pick(): List<P> = listOf(A()) + listOf(1)\n");
     let result = common::compiler_diagnostics(&[("Main.kt", &main)], &[]);
-    assert_ne!(
-        result.reference_code, 0,
-        "kotlinc must reject an Int element against a List<P> result: {}",
-        result.reference_stderr
+    // Both compilers reject. They place the blame differently, and the reason is the rule under
+    // test: krusty pins `T = P` from the declared result and reports the operand that cannot meet
+    // it, while kotlinc lets inference widen to `List<Any>` and reports the RETURN that no longer
+    // matches. Recorded exactly rather than as a rejection check — a nonzero exit passes on an
+    // unrelated rejection. The divergence is not introduced here: without the expectation krusty
+    // reported the same argument mismatch against `Iterable<A>`, the receiver's element type.
+    assert_eq!(
+        common::compiler_errors(&result.krusty_stdout),
+        [],
+        "krusty writes diagnostics to stderr"
     );
-    assert_ne!(
-        result.krusty_code, 0,
-        "krusty accepted an operand that cannot fit the expectation: {}{}",
-        result.krusty_stdout, result.krusty_stderr
+    assert_eq!(
+        common::compiler_errors(&result.krusty_stderr),
+        [common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: 13,
+            column: 37,
+            message: "argument type mismatch: actual type is 'List<Int>', but 'Iterable<P>' was \
+                      expected."
+                .to_string(),
+        }]
+    );
+    assert_eq!(
+        common::compiler_errors(&result.reference_stderr),
+        [common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: 13,
+            column: 23,
+            message: "return type mismatch: expected 'List<P>', actual 'List<Any>'.".to_string(),
+        }]
     );
 }

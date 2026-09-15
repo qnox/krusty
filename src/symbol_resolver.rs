@@ -26,6 +26,7 @@ mod member_hierarchy;
 mod member_specialization;
 mod qualified_classifiers;
 mod sam;
+mod selected_call_instantiation;
 pub(crate) use call_argument::CallArgKind;
 pub(crate) use callable_shapes::{
     classifier_callable_signature, classifier_callable_signatures, declared_function_type,
@@ -1921,13 +1922,6 @@ pub(crate) enum ErrorReceiverSelection<T> {
 }
 
 impl<'a> SymbolResolver<'a> {
-    /// The aggregated resolution source this resolver reads. Exposed so a caller that holds a call's
-    /// expected result can re-instantiate the selected callable's parameters against the same source
-    /// selection used, rather than assembling a second one.
-    pub(crate) fn source(&self) -> &dyn SymbolSource {
-        &self.src
-    }
-
     /// Specialize one already-identified constructor declaration for contextual argument checking.
     /// The caller owns source-to-parameter argument mapping; this operation only applies the
     /// constructor's semantic generic signature and deliberately preserves formals owned by
@@ -2532,14 +2526,8 @@ impl<'a> SymbolResolver<'a> {
             })
             .unwrap_or(receiver);
         if selected.call_sig.vararg_index.is_none() {
-            let params = logical_call_params(
-                &self.src,
-                &selected,
-                binding_receiver,
-                args,
-                type_args,
-                None,
-            );
+            let params =
+                logical_call_params(&self.src, &selected, binding_receiver, args, type_args);
             let resolved = if selected.is_extension() {
                 let arg_tys = args.iter().map(CallArgKind::ty).collect::<Vec<_>>();
                 selected.generic_sig.as_ref().map_or(
@@ -2633,14 +2621,8 @@ impl<'a> SymbolResolver<'a> {
             })
             .unwrap_or(receiver);
         if selected.call_sig.vararg_index.is_none() {
-            let params = logical_call_params(
-                &self.src,
-                &selected,
-                binding_receiver,
-                args,
-                type_args,
-                None,
-            );
+            let params =
+                logical_call_params(&self.src, &selected, binding_receiver, args, type_args);
             let arg_tys = args.iter().map(CallArgKind::ty).collect::<Vec<_>>();
             let inferred_ret = selected
                 .generic_sig
@@ -2688,7 +2670,7 @@ impl<'a> SymbolResolver<'a> {
         callables: &Callables,
     ) -> Option<(FunctionInfo, Vec<Ty>)> {
         match self.select_receiver_function_with_params_tracking(
-            receiver, name, args, type_args, callables,
+            receiver, name, args, type_args, callables, None,
         ) {
             CandidateSelection::Selected((selected, params, _)) => Some((selected, params)),
             CandidateSelection::None | CandidateSelection::Ambiguous => None,
@@ -2716,14 +2698,8 @@ impl<'a> SymbolResolver<'a> {
                         ReceiverMro::new(&self.src, receiver).binding_receiver(&self.src, declared)
                     })
                     .unwrap_or(receiver);
-                let parameters = logical_call_params(
-                    &self.src,
-                    candidate,
-                    binding_receiver,
-                    args,
-                    type_args,
-                    None,
-                );
+                let parameters =
+                    logical_call_params(&self.src, candidate, binding_receiver, args, type_args);
                 (parameters.len() == args.len()).then_some(parameters)
             })
             .collect()
@@ -2739,9 +2715,15 @@ impl<'a> SymbolResolver<'a> {
         args: &[CallArgKind],
         type_args: &[Ty],
         callables: &Callables,
+        expected_result: Option<Ty>,
     ) -> CandidateSelection<(FunctionInfo, Vec<Ty>, Ty)> {
         match self.select_receiver_function_with_applied_receiver_tracking(
-            receiver, name, args, type_args, callables,
+            receiver,
+            name,
+            args,
+            type_args,
+            callables,
+            expected_result,
         ) {
             CandidateSelection::Selected((selected, params, ret, _)) => {
                 CandidateSelection::Selected((selected, params, ret))
@@ -2749,145 +2731,6 @@ impl<'a> SymbolResolver<'a> {
             CandidateSelection::None => CandidateSelection::None,
             CandidateSelection::Ambiguous => CandidateSelection::Ambiguous,
         }
-    }
-
-    /// Delegate conventions additionally need the receiver application inferred by their ordinary
-    /// value arguments. For example, `D("K")` may initially have the raw type `D<>`, while
-    /// `getValue(thisRef: R, ...)` fixes the owning `D<R>` to `D<String>`. Keep that application
-    /// beside the selected declaration so the delegate initializer can be checked authoritatively
-    /// against it; FIR must never reconstruct the inference.
-    pub(crate) fn select_receiver_function_with_applied_receiver_tracking(
-        &self,
-        receiver: Ty,
-        name: &str,
-        args: &[CallArgKind],
-        type_args: &[Ty],
-        callables: &Callables,
-    ) -> CandidateSelection<(FunctionInfo, Vec<Ty>, Ty, Ty)> {
-        let selected = match select_receiver_overload_from_functions_tracking(
-            self.lib,
-            receiver,
-            name,
-            args,
-            type_args,
-            ExtCtx {
-                fn_scope: self.fn_scope,
-                source: &self.src,
-            },
-            callables.functions(),
-            IndexedConvention::Ordinary,
-        ) {
-            CandidateSelection::Selected(selected) => selected,
-            CandidateSelection::None => return CandidateSelection::None,
-            CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
-        };
-        let binding_receiver = selected
-            .semantic_receiver()
-            .and_then(|declared| {
-                ReceiverMro::new(&self.src, receiver).binding_receiver(&self.src, declared)
-            })
-            .unwrap_or(receiver);
-        let semantic = selected.semantic_signature();
-        let mut bindings = seeded_gsig_binds(&semantic, type_args);
-        if let Some(declared_receiver) = semantic.receiver {
-            unify_ty(declared_receiver, binding_receiver, &mut bindings);
-        }
-        let receiver_bindings = bindings.clone();
-        let value_params = &semantic.params[selected.context_count.min(semantic.params.len())..];
-        let mut argument_bindings = GSigBinds::new();
-        for (&parameter, argument) in value_params.iter().zip(args) {
-            if !argument.is_lambda_literal()
-                && !argument.is_expected_type_callable()
-                && !argument.is_omitted_default()
-            {
-                unify_inferred_ty(
-                    parameter,
-                    argument.type_for(parameter),
-                    &mut argument_bindings,
-                );
-            }
-        }
-        let owner_argument_bindings = argument_bindings.clone();
-        merge_call_argument_bindings(
-            &self.src,
-            &semantic,
-            type_args,
-            &receiver_bindings,
-            &mut bindings,
-            argument_bindings,
-        );
-        // A raw owning classifier has no receiver arguments to seed its declaration parameters.
-        // They are nevertheless ordinary inference variables when a convention parameter mentions
-        // them (`D<in R>.getValue(thisRef: R, ...)`). Method generic signatures intentionally list
-        // only method-owned formals, so retain the argument constraints for the owner's distinct
-        // stable formals here.
-        if let Ty::Obj(owner, arguments) = receiver.non_null() {
-            if arguments.is_empty() {
-                if let Some(classifier) = self.src.classifier(owner) {
-                    for formal in &classifier.type_params {
-                        if let Some(inferred) = owner_argument_bindings.get(formal).copied() {
-                            bindings.entry(formal.clone()).or_insert(inferred);
-                        }
-                    }
-                }
-            }
-        }
-        crate::trace_compiler!(
-            "fir",
-            "receiver call application receiver={receiver:?} name={name} semantic={semantic:?} bindings={bindings:?}",
-        );
-        let params = value_params
-            .iter()
-            .map(|parameter| ty_subst_keep_unbound(*parameter, &bindings))
-            .collect::<Vec<_>>();
-        let applied_receiver = match receiver.non_null() {
-            Ty::Obj(owner, arguments) => self
-                .src
-                .classifier(owner)
-                .and_then(|classifier| {
-                    let applied = if arguments.len() == classifier.type_params.len() {
-                        arguments
-                            .iter()
-                            .map(|argument| ty_subst_keep_unbound(*argument, &bindings))
-                            .collect::<Vec<_>>()
-                    } else if arguments.is_empty() {
-                        classifier
-                            .type_params
-                            .iter()
-                            .map(|formal| bindings.get(formal).copied())
-                            .collect::<Option<Vec<_>>>()?
-                    } else {
-                        return None;
-                    };
-                    Some(Ty::obj_args_name(owner, &applied))
-                })
-                .unwrap_or(receiver),
-            _ => receiver,
-        };
-        let ret = if selected.is_extension() {
-            let inferred = bind_ext_ret_from_call_arguments(
-                &self.src,
-                &semantic,
-                &selected.call_sig,
-                binding_receiver,
-                selected.context_count,
-                args,
-                type_args,
-            );
-            specialized_extension_return(self.lib, &selected, inferred)
-        } else {
-            let provider = resolved_member_from_info(
-                self.lib,
-                &self.src,
-                receiver,
-                args,
-                type_args,
-                selected.clone(),
-            )
-            .ret;
-            merge_specialized_return(provider, ty_subst_keep_unbound(semantic.ret, &bindings))
-        };
-        CandidateSelection::Selected((selected, params, ret, applied_receiver))
     }
 
     /// Apply a convention constraint expressed on a selected supertype back to a raw concrete
@@ -3471,7 +3314,7 @@ impl<'a> SymbolResolver<'a> {
         );
         let CandidateSelection::Selected((selected, _, result)) = self
             .select_receiver_function_with_params_tracking(
-                receiver, name, args, type_args, &callables,
+                receiver, name, args, type_args, &callables, None,
             )
         else {
             return None;
@@ -4433,14 +4276,8 @@ impl<'a> SymbolResolver<'a> {
                 })
             })
             .collect::<Vec<_>>();
-        let vparams = logical_call_params(
-            &self.src,
-            o,
-            binding_receiver,
-            &slot_arguments,
-            type_args,
-            None,
-        );
+        let vparams =
+            logical_call_params(&self.src, o, binding_receiver, &slot_arguments, type_args);
         if vparams.len() != slots.len() {
             return None;
         }
@@ -6225,7 +6062,7 @@ fn select_overload_tracking_with_functions(
                 );
                 continue;
             }
-            logical_call_params(src, o, binding_receiver, args, type_args, None)
+            logical_call_params(src, o, binding_receiver, args, type_args)
         };
         let lp = apply_platform_call_parameter_nullability(
             lp,
@@ -6563,54 +6400,15 @@ fn logical_value_params(
 /// Logical value parameters specialized by the complete call constraint set. Extension receivers and
 /// arguments constrain the same declaration formals, so shaping them in separate passes can freeze a
 /// bottom receiver result (`() -> Nothing`) before a concrete lambda supplies `String`.
-/// The parameter types a selected callable presents, with the call's EXPECTED RESULT seeded into
-/// inference alongside the receiver.
-///
-/// Selection is unchanged — the winner is chosen exactly as before. This only decides what the
-/// arguments are then checked AGAINST, which is where a formal shared between the result and the
-/// operands has to be settled: `Iterable<T>.plus(Iterable<T>): List<T>` fixed `T` from the receiver
-/// alone, so `listOf(A()) + listOf(B())` judged the argument against `Iterable<A>` even when the
-/// declared result was `List<P>`.
-pub(crate) fn selected_call_params_with_expected(
-    source: &dyn SymbolSource,
-    overload: &FunctionInfo,
-    receiver: Ty,
-    arguments: &[CallArgKind],
-    type_arguments: &[Ty],
-    expected_result: Ty,
-) -> Vec<Ty> {
-    logical_call_params(
-        source,
-        overload,
-        receiver,
-        arguments,
-        type_arguments,
-        Some(expected_result),
-    )
-}
-
 fn logical_call_params(
     source: &dyn SymbolSource,
     overload: &FunctionInfo,
     receiver: Ty,
     arguments: &[CallArgKind],
     type_arguments: &[Ty],
-    expected_result: Option<Ty>,
 ) -> Vec<Ty> {
     let signature = overload.semantic_signature();
     let mut bindings = seeded_gsig_binds(&signature, type_arguments);
-    // The EXPECTED RESULT is an input to inference, like the receiver and the arguments. A formal
-    // shared between the result and the operands — `Iterable<T>.plus(Iterable<T>): List<T>` — is
-    // fixed by the declared result before the receiver narrows it to its own element type, so
-    // `val xs: List<P> = listOf(A()) + listOf(B())` binds `T = P` and both operands fit.
-    //
-    // Seeded FIRST, and only where the caller actually has an expectation: an explicit type argument
-    // still wins (it is already in `bindings`), and the receiver still fixes anything the result
-    // leaves open. This does not let an ARGUMENT widen a receiver-fixed formal — that remains
-    // forbidden below, and is why `Comparable<T>.compareTo` cannot be rewritten by a later operand.
-    if let Some(expected) = expected_result {
-        unify_ty(signature.ret, expected, &mut bindings);
-    }
     if let Some(declared_receiver) = signature.receiver {
         unify_ty(declared_receiver, receiver, &mut bindings);
     }
