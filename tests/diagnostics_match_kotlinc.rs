@@ -1087,6 +1087,80 @@ fn java_package_private_member_diagnostics_match_kotlinc() {
 }
 
 #[test]
+fn java_unbounded_wildcard_diagnostic_is_a_star_projection() {
+    let (java_dir, _) = common::javac_compile(
+        &[
+            (
+                "fixtures/W.java".to_string(),
+                "package fixtures; public final class W<T> {}".to_string(),
+            ),
+            (
+                "fixtures/Pair.java".to_string(),
+                "package fixtures; public final class Pair<A, B> {}".to_string(),
+            ),
+            (
+                "fixtures/Wildcards.java".to_string(),
+                "package fixtures; import java.lang.CharSequence; public final class Wildcards {\n\
+                     public static W<?> unbounded() { return null; }\n\
+                     public static W<? extends CharSequence> covariant() { return null; }\n\
+                     public static W<? super Integer> contravariant() { return null; }\n\
+                     public static Pair<String, ?> nested() { return null; }\n\
+                 }"
+                .to_string(),
+            ),
+        ],
+        &[],
+    )
+    .expect("JDK javac must compile the wildcard fixture");
+    let source = "import fixtures.Wildcards\n\
+                  fun unbounded(): String = Wildcards.unbounded()\n\
+                  fun covariant(): String = Wildcards.covariant()\n\
+                  fun contravariant(): String = Wildcards.contravariant()\n\
+                  fun nested(): String = Wildcards.nested()\n";
+    let result = common::compiler_diagnostics(
+        &[("JavaWildcardDiagnostics.kt", source)],
+        std::slice::from_ref(&java_dir),
+    );
+    if let Some(root) = java_dir.parent() {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+    let mut krusty = errors(&result.krusty_stderr);
+    krusty.extend(errors(&result.krusty_stdout));
+    let reference = errors(&result.reference_stderr);
+    let expected = vec![
+        ObservedError {
+            file: "JavaWildcardDiagnostics.kt".to_string(),
+            line: 2,
+            column: 27,
+            message: "return type mismatch: expected 'String', actual 'W<*>!'.".to_string(),
+        },
+        ObservedError {
+            file: "JavaWildcardDiagnostics.kt".to_string(),
+            line: 3,
+            column: 27,
+            message: "return type mismatch: expected 'String', actual 'W<out CharSequence!>!'."
+                .to_string(),
+        },
+        ObservedError {
+            file: "JavaWildcardDiagnostics.kt".to_string(),
+            line: 4,
+            column: 31,
+            message: "return type mismatch: expected 'String', actual 'W<in Int!>!'.".to_string(),
+        },
+        ObservedError {
+            file: "JavaWildcardDiagnostics.kt".to_string(),
+            line: 5,
+            column: 24,
+            message: "return type mismatch: expected 'String', actual 'Pair<String!, *>!'."
+                .to_string(),
+        },
+    ];
+    assert_eq!(krusty, expected);
+    assert_eq!(reference, expected);
+}
+
+#[test]
 fn protected_java_member_receiver_diagnostics_match_kotlinc() {
     let Some((java_dir, _)) = common::javac_compile(
         &[(
