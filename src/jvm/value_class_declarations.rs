@@ -24,7 +24,7 @@ pub(super) fn from_class_info(class: &ClassInfo) -> Option<ValueClassDeclaration
             .find(|method| method.name == "box-impl")
             .and_then(|method| crate::jvm::names::parse_method_descriptor(&method.descriptor))
             .and_then(|(parameters, _)| parameters.first().copied())
-            .map(crate::jvm::jvm_libraries::field_desc_to_ty)
+            .map(crate::jvm::jvm_libraries::declared_desc_to_ty)
             .unwrap_or_else(|| Ty::obj("kotlin/Any")),
     };
     let underlying = if metadata.underlying_nullable == Some(false) {
