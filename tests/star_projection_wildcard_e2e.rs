@@ -1,5 +1,5 @@
-//! A star projection and an `out` projection of the same readable bound denote one type argument:
-//! `Resp<*>` is `Resp<out Any?>`, and a Java wildcard `Resp<?>` reaches Kotlin as `Resp<out Any!>`.
+//! A Kotlin star projection and a Java unbounded wildcard normalize to the same semantic star,
+//! retaining its readable bound without turning it into an explicitly written `out` projection.
 //! Inside an INVARIANT outer argument (`Pub<Resp<*>>` against the Java `Pub<Resp<?>>`) the two
 //! spellings must therefore compare equal, in both directions; krusty compared projection kinds
 //! literally and rejected `Publisher<MutableHttpResponse<*>>` against a Java
