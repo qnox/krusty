@@ -6,6 +6,25 @@ parameters.
 ## Agent Quick Reference
 
 - Use `./run-tests.sh` for the full suite; it provisions kotlinc and the Kotlin codegen/box corpus.
+- **Without `just`, provision kotlinc by hand — do not proceed without it.** `run-tests.sh` reaches
+  the reference compiler through `just kotlinc <ver>`, so in an environment that has no `just` every
+  differential test fails with `reference compiler unavailable` and a run of them proves nothing. The
+  recipe is a plain download, so do what it does:
+
+  ```sh
+  ver=2.4.10
+  dest="$PWD/target/cache/kotlinc/$ver"
+  mkdir -p "$dest"
+  curl -fsSL "https://github.com/JetBrains/kotlin/releases/download/v${ver}/kotlin-compiler-${ver}.zip" -o /tmp/kotlinc.zip
+  python3 -c "import zipfile; zipfile.ZipFile('/tmp/kotlinc.zip').extractall('$dest')"
+  chmod +x "$dest/kotlinc/bin/"*
+  export KRUSTY_KOTLINC="$dest/kotlinc/bin/kotlinc"
+  ```
+
+  `KRUSTY_KOTLINC` is what the harness reads, so exporting it is the whole of the setup. This matters
+  more than it looks: kotlinc is the correctness oracle (`docs/SPEC.md` §6), so a change validated
+  without it has been checked against an expectation rather than against the reference — which is
+  exactly the mistake the differential harness exists to prevent.
 - Use focused harness runs, not raw `cargo test`, while iterating. Standalone suites still use `./run-tests.sh --test <name> -- --nocapture`; grouped e2e tests use a test-name filter, e.g. `./run-tests.sh --test e2e lambda_e2e::lambdas_run -- --nocapture`.
 - Use `./run-tests.sh --survey --parse-only --report /tmp/krusty-parse.tsv` for the syntax-only
   conformance gate. It parses every Kotlin block independently, ignores Java fixture blocks, checks
