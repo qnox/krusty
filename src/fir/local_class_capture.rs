@@ -21,6 +21,8 @@ pub enum FirLocalClassCaptureSource {
     ConstructorCapture {
         owner: DeclarationId,
         field: u32,
+        /// Where the value is: the prefix parameter itself, or this body's capture of it.
+        site: super::FirConstructorCaptureSite,
     },
     CapturedClassStorage {
         owner: DeclarationId,

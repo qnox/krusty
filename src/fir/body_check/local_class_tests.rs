@@ -193,6 +193,73 @@ fn local_class_declaration_keeps_stable_identity_and_ordered_capture_sources() {
     ));
 }
 
+/// The read's coordinate says which of the two lookups lowering must perform, and it has to survive
+/// every frame between the constructor prefix and the body that reads it. A read in the constructor
+/// body itself is the parameter; inside a lambda there it is that frame's capture, registered at the
+/// depth of the body that supplies it — which GROWS with the nesting, so the depth is not a constant
+/// a lookup may leave out. Getting this wrong is silent: every spelling produces a value of the
+/// right type, and all but one of them is another declaration's.
+#[test]
+fn a_constructor_prefix_read_carries_its_frame_in_fir() {
+    for (frames, source, expected) in [
+        (
+            "in the constructor body itself",
+            "open class Base(val text: String)\n\
+             fun box(): String {\n\
+             val o = \"O\"\n\
+             class Local(k: String) : Base(o + k)\n\
+             return Local(\"K\").text }\n",
+            crate::fir::FirConstructorCaptureSite::Parameter,
+        ),
+        (
+            "one lambda deep",
+            "open class Base(val fn: () -> String)\n\
+             fun box(): String {\n\
+             val o = \"O\"\n\
+             class Local(k: String) : Base({ o + k })\n\
+             return Local(\"K\").fn() }\n",
+            crate::fir::FirConstructorCaptureSite::Captured { enclosing_depth: 0 },
+        ),
+        (
+            "two lambdas deep",
+            "open class Base(val fn: () -> String)\n\
+             fun box(): String {\n\
+             val o = \"O\"\n\
+             class Local(k: String) : Base({ { o + k }() })\n\
+             return Local(\"K\").fn() }\n",
+            crate::fir::FirConstructorCaptureSite::Captured { enclosing_depth: 1 },
+        ),
+    ] {
+        let (_, bodies) = checked_streamed_bodies(source);
+        // A lambda's body is its own arena hanging off the expression that creates it, so a walk of
+        // the outer bodies alone would see a prefix read only in the constructor body — which is
+        // the one case out of three where the coordinate is `Parameter`.
+        fn sites_in(body: &FirBody, into: &mut Vec<crate::fir::FirConstructorCaptureSite>) {
+            for raw in 0..body.expression_count() {
+                let Some(expression) = body.expr(FirExprId::from_raw(raw as u32)) else {
+                    continue;
+                };
+                match &expression.kind {
+                    FirExprKind::ConstructorCaptureRead { site, .. } => into.push(*site),
+                    // Lambdas are the only frames worth descending into: every other nested body
+                    // clears the prefix rule, so a prefix read cannot appear below one.
+                    FirExprKind::Lambda { body: nested, .. } => sites_in(nested, into),
+                    _ => {}
+                }
+            }
+        }
+        let mut sites = Vec::new();
+        for body in &bodies {
+            sites_in(body, &mut sites);
+        }
+        assert_eq!(
+            sites.as_slice(),
+            &[expected],
+            "a prefix read {frames} must carry that coordinate"
+        );
+    }
+}
+
 #[test]
 fn anonymous_super_argument_carries_the_constructor_prefix_capture_in_fir() {
     let (index, bodies) = checked_streamed_bodies(
@@ -220,9 +287,14 @@ fn anonymous_super_argument_carries_the_constructor_prefix_capture_in_fir() {
     let [(body, capture)] = captures.as_slice() else {
         panic!("one anonymous super-argument capture expected: {captures:?}")
     };
-    let FirLocalClassCaptureSource::ConstructorCapture { owner, field } = &capture.source else {
+    let FirLocalClassCaptureSource::ConstructorCapture { owner, field, site } = &capture.source
+    else {
         panic!("constructor-prefix capture expected: {capture:?}")
     };
+    // The construction happens in the constructor body itself, so the prefix parameter is in
+    // scope and the coordinate says so — a capture coordinate here would send lowering looking
+    // for a slot that does not exist.
+    assert_eq!(*site, crate::fir::FirConstructorCaptureSite::Parameter);
     let constructor = DeclarationId::from_raw(body.owner().raw());
     let anchor = index
         .declaration_anchor(constructor)

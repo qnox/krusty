@@ -299,8 +299,8 @@ impl BodyLowering<'_> {
                     enclosing_depth,
                     field,
                 } => self.enclosing_class_storage_read(*owner, *enclosing_depth, *field)?,
-                FirLocalClassCaptureSource::ConstructorCapture { owner, field } => {
-                    self.constructor_capture_parameter(*owner, *field)?
+                FirLocalClassCaptureSource::ConstructorCapture { owner, field, site } => {
+                    self.constructor_capture_parameter(*owner, *field, *site)?
                 }
                 FirLocalClassCaptureSource::CapturedClassStorage {
                     owner,

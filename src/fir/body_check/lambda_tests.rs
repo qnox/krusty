@@ -156,7 +156,10 @@ fn lambda_capture_uses_an_identity_path_instead_of_a_source_name() {
         panic!("lambda must publish one capture")
     };
     assert_eq!(capture.enclosing_depth, 0);
-    assert_eq!(capture.source, source_parameter.value);
+    assert_eq!(
+        capture.source,
+        crate::fir::FirCaptureSource::Value(source_parameter.value)
+    );
 }
 
 #[test]
