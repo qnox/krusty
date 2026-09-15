@@ -852,6 +852,54 @@ fn a_not_null_assertion_passes_a_value_through_and_fails_on_null() {
 }
 
 #[test]
+fn a_slice_between_the_halves_of_one_character_fails_loudly() {
+    let Some(target) = host() else {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    };
+    // Kotlin lets a program cut a surrogate pair in half and answers with an unpaired surrogate.
+    // UTF-8 has no encoding for one, so this runtime has no string to hand back — and handing back
+    // a different text would be the worst of the three answers available.
+    let (artifacts, diagnostics) = compile(
+        &[(
+            "Main",
+            "fun main() {\n\
+             \x20   val wide = \"a\\uD834\\uDD1Eb\"\n\
+             \x20   println(\"before\")\n\
+             \x20   println(wide.substring(0, 2))\n\
+             }\n",
+        )],
+        target,
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let objects = artifacts
+        .iter()
+        .map(|(_, bytes)| bytes.as_slice())
+        .collect::<Vec<_>>();
+    let image = krusty::native::link_program(&objects, target).expect("link");
+    let scratch = Scratch::new("surrogate");
+    let executable = scratch.path().join("program");
+    std::fs::write(&executable, &image).expect("write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let output = common::run_freshly_written(std::process::Command::new(&executable).env_clear())
+        .expect("run");
+    assert!(
+        !output.status.success(),
+        "a half-character slice must not continue"
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "before\n");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("inside a surrogate pair"),
+        "stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn a_lambda_is_an_object_that_can_be_passed_called_and_returned() {
     if host().is_none() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");

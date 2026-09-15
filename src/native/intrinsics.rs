@@ -295,9 +295,39 @@ pub(super) fn scalar_member(
     params: &[Ty],
 ) -> Option<(&'static str, Vec<Ty>, Ty)> {
     let reference = Ty::nullable(Ty::obj("kotlin/Any"));
+    // `kotlin.text`'s top-level extensions on `String`, which reach a backend as members of that
+    // package's file facade — the `kotlin/io/ConsoleKt` situation, read through the same helper so
+    // a facade kotlinc split in two (`StringsKt__StringsKt`) is the same answer.
+    if facade_package(kotlin_owner(owner)) == Some("kotlin/text") {
+        return match (name, params) {
+            ("substring", [Ty::Int, Ty::Int]) => Some((
+                "kt_string_substring",
+                vec![reference, Ty::Int, Ty::Int],
+                Ty::obj("kotlin/String"),
+            )),
+            ("substring", [Ty::Int]) => Some((
+                "kt_string_substring_from",
+                vec![reference, Ty::Int],
+                Ty::obj("kotlin/String"),
+            )),
+            _ => None,
+        };
+    }
     match (kotlin_owner(owner), name, params) {
         ("kotlin/String" | "kotlin/CharSequence", "get", [Ty::Int]) => {
             Some(("kt_string_get", vec![reference, Ty::Int], Ty::Char))
+        }
+        // `s.subSequence(a, b)` is `s.substring(a, b)`; the return type only says less about the
+        // result, which the call site already knows.
+        ("kotlin/String" | "kotlin/CharSequence", "subSequence", [Ty::Int, Ty::Int]) => Some((
+            "kt_string_substring",
+            vec![reference, Ty::Int, Ty::Int],
+            Ty::obj("kotlin/String"),
+        )),
+        // The ANSWER is an `Int`, so this cannot go through the reference-carried member path
+        // below: `a < b` would box the very comparison it is asking about.
+        ("kotlin/String", "compareTo", [_]) => {
+            Some(("kt_string_compare_to", vec![reference, reference], Ty::Int))
         }
         // `kotlin.Number`'s six conversions. A site that could type its value only as a `Number`
         // hands over a box, and which primitive is inside is the descriptor's answer — so the
@@ -362,6 +392,22 @@ pub(super) fn unsigned_owner(owner: &str) -> Option<Ty> {
     })
 }
 
+/// Whether an accessor is `CharSequence.length`.
+///
+/// Every `CharSequence` this target can produce is a string — `subSequence` answers one, and
+/// nothing in the runtime makes another — which is the same position `scalar_member` already takes
+/// for `CharSequence.get`. A user class implementing `kotlin.CharSequence` is not one of these and
+/// keeps its own member, which the receiver's own type routes elsewhere long before this.
+pub(super) fn is_char_sequence_length(owner: crate::types::TypeName, name: &str) -> bool {
+    // The provider presents it under the Kotlin name of the property, not the JVM accessor's:
+    // `length`, where `kotlin.Enum`'s two arrive as `getName`/`getOrdinal`. Both spellings are
+    // taken because which one a provider uses is the provider's business, not this table's.
+    matches!(name, "length" | "getLength")
+        && ["kotlin/CharSequence", "java/lang/CharSequence"]
+            .iter()
+            .any(|candidate| owner.matches(candidate))
+}
+
 /// The Kotlin name of a value-class member, with kotlinc's mangling removed.
 ///
 /// A member whose signature mentions a value class is emitted as `name-<suffix>`: `-impl` for the
@@ -373,8 +419,17 @@ pub(super) fn value_class_member(name: &str) -> &str {
 }
 
 pub(super) fn runtime_member(owner: &str, name: &str, params: &[Ty]) -> Option<&'static str> {
+    // `removeSuffix` is a top-level extension of `kotlin.text`, so it arrives as a member of that
+    // package's file facade; everything it takes and answers is a reference, which is this path.
+    if facade_package(kotlin_owner(owner)) == Some("kotlin/text")
+        && name == "removeSuffix"
+        && params.len() == 1
+    {
+        return Some("kt_string_remove_suffix");
+    }
     match (kotlin_owner(owner), name, params) {
         ("kotlin/String", "plus", [_]) => Some("kt_string_plus"),
+
         (_, "toString", []) => Some("kt_to_string"),
         // `kotlin.Any`'s other two members, dispatched through the receiver's vtable.
         (_, "hashCode", []) => Some("kt_hash_code"),

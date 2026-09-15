@@ -24,6 +24,7 @@ mod ranges;
 mod references;
 mod scope;
 mod statics;
+mod strings;
 mod unsigned;
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -1191,6 +1192,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             }) if self.reference_property(target, receiver).is_some() => self
                 .reference_property(target, receiver)
                 .expect("checked by the guard"),
+            // `cs.length` where the receiver is typed `CharSequence`: a string, on this target.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.is_char_sequence_length(target) => self.char_sequence_length(receiver),
             // `x.indices` is `0..size - 1` of the receiver, so it needs the receiver's own size
             // rather than anything the property declaration says.
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
@@ -1519,6 +1526,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
                 target, receiver, ..
             }) => {
+                // `cs.length` is an `Int`, and `::foo.name` a `String`: both are the language's
+                // own types, stated here for the same reason `kotlin.Enum`'s two are.
+                if self.is_char_sequence_length(*target) {
+                    return Some(Ty::Int);
+                }
+                if let Some(receiver) = receiver {
+                    if self.callable_reference_name(*target, *receiver).is_some() {
+                        return Some(Ty::String);
+                    }
+                }
                 match self.enum_member_name(*target) {
                     Some("name") => Ty::String,
                     Some(_) => Ty::Int,

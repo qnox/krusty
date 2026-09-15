@@ -254,6 +254,139 @@ kt_char kt_string_get(KRef self, kt_int index) {
     return 0;
 }
 
+/* A UTF-16 walk over UTF-8 storage, which is what every question Kotlin asks about a string's
+   CONTENT needs: the unit is the unit Kotlin counts, and a character above U+FFFF is two of them.
+   `pending` holds the trailing surrogate of a pair whose leading half has already been handed out;
+   zero is not a valid trailing surrogate, so it doubles as "none". */
+typedef struct KUnits {
+    const char *bytes;
+    kt_int byte_length;
+    kt_int at;
+    uint32_t pending;
+} KUnits;
+
+static KUnits kt_units_of(KRef self) {
+    KUnits units = {self->as.string.bytes, self->as.string.byte_length, 0, 0};
+    return units;
+}
+
+/* The next unit, or zero when the text is exhausted. */
+static kt_boolean kt_units_next(KUnits *units, kt_char *out) {
+    if (units->pending != 0) {
+        *out = (kt_char)units->pending;
+        units->pending = 0;
+        return 1;
+    }
+    if (units->at >= units->byte_length) {
+        return 0;
+    }
+    const char *bytes = units->bytes;
+    kt_int at = units->at;
+    unsigned char lead = (unsigned char)bytes[at];
+    kt_int width = lead < 0x80u ? 1 : lead < 0xE0u ? 2 : lead < 0xF0u ? 3 : 4;
+    uint32_t code = lead;
+    if (width == 2) {
+        code = ((uint32_t)(lead & 0x1Fu) << 6) | ((unsigned char)bytes[at + 1] & 0x3Fu);
+    } else if (width == 3) {
+        code = ((uint32_t)(lead & 0x0Fu) << 12)
+               | (((uint32_t)(unsigned char)bytes[at + 1] & 0x3Fu) << 6)
+               | ((unsigned char)bytes[at + 2] & 0x3Fu);
+    } else if (width == 4) {
+        uint32_t rest = (((uint32_t)(lead & 0x07u) << 18)
+                         | (((uint32_t)(unsigned char)bytes[at + 1] & 0x3Fu) << 12)
+                         | (((uint32_t)(unsigned char)bytes[at + 2] & 0x3Fu) << 6)
+                         | ((unsigned char)bytes[at + 3] & 0x3Fu))
+                        - 0x10000u;
+        units->pending = 0xDC00u + (rest & 0x3FFu);
+        code = 0xD800u + (rest >> 10);
+    }
+    units->at = at + width;
+    *out = (kt_char)code;
+    return 1;
+}
+
+kt_int kt_string_compare_to(KRef a, KRef b) {
+    KUnits left = kt_units_of(a);
+    KUnits right = kt_units_of(b);
+    for (;;) {
+        kt_char x = 0;
+        kt_char y = 0;
+        kt_boolean has_left = kt_units_next(&left, &x);
+        kt_boolean has_right = kt_units_next(&right, &y);
+        if (!has_left || !has_right) {
+            /* One is a prefix of the other, or they are equal: the length difference, which is the
+               magnitude Java's own `compareTo` answers and a program may print. */
+            return kt_string_length(a) - kt_string_length(b);
+        }
+        if (x != y) {
+            return (kt_int)x - (kt_int)y;
+        }
+    }
+}
+
+/* The BYTE offset at which UTF-16 unit `index` begins; `index` equal to the length answers the end
+   of the text. */
+static kt_int kt_string_offset(KRef self, kt_int index) {
+    const char *bytes = self->as.string.bytes;
+    kt_int byte_length = self->as.string.byte_length;
+    kt_int unit = 0;
+    kt_int at = 0;
+    while (at < byte_length) {
+        if (unit == index) {
+            return at;
+        }
+        unsigned char lead = (unsigned char)bytes[at];
+        kt_int width = lead < 0x80u ? 1 : lead < 0xE0u ? 2 : lead < 0xF0u ? 3 : 4;
+        kt_int units = width == 4 ? 2 : 1;
+        if (index < unit + units) {
+            /* Between the halves of one character. Kotlin lets a program ask for this and answers
+               with an unpaired surrogate; UTF-8 has no encoding for one, so there is no string to
+               hand back and saying so is better than handing back a different text. */
+            KT_FAIL("krusty: a string index inside a surrogate pair\n");
+        }
+        unit += units;
+        at += width;
+    }
+    if (unit == index) {
+        return at;
+    }
+    kt_index_out_of_bounds(index, unit);
+    return 0;
+}
+
+KRef kt_string_substring(KRef self, kt_int start, kt_int end) {
+    if (start < 0 || end < start) {
+        kt_index_out_of_bounds(start, end);
+    }
+    kt_int from = kt_string_offset(self, start);
+    kt_int to = kt_string_offset(self, end);
+    /* The storage is shared, not copied: the receiver's own text already holds these bytes, and
+       the collector keeps it alive through the field the new string names. */
+    return kt_string_of(self->as.string.storage, self->as.string.bytes + from, to - from);
+}
+
+KRef kt_string_substring_from(KRef self, kt_int start) {
+    kt_int from = kt_string_offset(self, start);
+    kt_int length = self->as.string.byte_length;
+    return kt_string_of(self->as.string.storage, self->as.string.bytes + from, length - from);
+}
+
+KRef kt_string_remove_suffix(KRef self, KRef suffix) {
+    kt_int length = self->as.string.byte_length;
+    kt_int tail = suffix->as.string.byte_length;
+    if (tail > length) {
+        return self;
+    }
+    const char *bytes = self->as.string.bytes;
+    const char *wanted = suffix->as.string.bytes;
+    for (kt_int index = 0; index < tail; index++) {
+        if (bytes[length - tail + index] != wanted[index]) {
+            return self;
+        }
+    }
+    return kt_string_of(self->as.string.storage, bytes, length - tail);
+}
+
 static kt_int kt_render_ulong(uint64_t value, char *buffer);
 
 /* Render a signed 64-bit value into `buffer` (at least 20 bytes); returns the length written. */

@@ -336,6 +336,24 @@ kt_int kt_string_length(KRef self);
 /* `s[index]` — the UTF-16 code unit at `index`, walking the UTF-8 bytes to find it. */
 kt_char kt_string_get(KRef self, kt_int index);
 
+/* `s.substring(start, end)` and `s.subSequence(start, end)`, both by UTF-16 unit as Kotlin indexes.
+   The result SHARES the receiver's storage — a substring is a view, and the text it names is
+   already there. Slicing BETWEEN the halves of a surrogate pair is a loud failure: UTF-8 has no
+   encoding for half a character, so there is no string to hand back. */
+KRef kt_string_substring(KRef self, kt_int start, kt_int end);
+
+/* `s.substring(start)`: from there to the end. */
+KRef kt_string_substring_from(KRef self, kt_int start);
+
+/* `a.compareTo(b)`, by UTF-16 code unit and with Java's magnitude: the difference of the first
+   units that differ, or of the lengths when one string is a prefix of the other. */
+kt_int kt_string_compare_to(KRef a, KRef b);
+
+/* `s.removeSuffix(suffix)`: the receiver without it, or the receiver itself when it does not end
+   there. Bytes settle it — UTF-8 is a prefix code, so two texts end the same way exactly when
+   their trailing bytes do. */
+KRef kt_string_remove_suffix(KRef self, KRef suffix);
+
 /* `Any?.toString()` — also what a string template calls on each interpolated value. */
 KRef kt_to_string(KRef value);
 

@@ -1985,6 +1985,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_lists_e2e.rs`
   (`a_single_element_list_is_not_a_vararg_call_of_length_one`).
 
+- **Slicing and ordering a string on the native target are by UTF-16 unit.** A krusty string holds
+  UTF-8 and Kotlin indexes by UTF-16 code unit, so `substring`, `subSequence` and `compareTo` all
+  walk the text rather than its bytes: `é` is two bytes and one unit, `𝄞` four bytes and two.
+  A slice SHARES the receiver's storage — a substring is a view, and the text it names is already
+  there. Slicing between the halves of one character is a loud failure: Kotlin answers that with an
+  unpaired surrogate and UTF-8 has no encoding for one, so there is no string to hand back and
+  saying so beats handing back a different text.
+  `compareTo` answers Java's magnitude and not just a sign — the difference of the first units that
+  differ, or of the lengths when one string is a prefix — because a program may print it.
+  `removeSuffix` is settled by BYTES, which is sound because UTF-8 is a prefix code: two texts end
+  the same way exactly when their trailing bytes do.
+  `CharSequence.length` is a string's length here. Every `CharSequence` this target can produce is
+  a string, which is the position the member table already took for `CharSequence.get`.
+  Tests: `tests/native_strings_e2e.rs`
+  (`a_substring_of_text_outside_ascii_counts_the_units_kotlin_counts`,
+  `a_subsequence_is_the_same_slice_and_answers_its_length`, `strings_order_by_their_units`,
+  `a_suffix_is_removed_only_when_the_string_ends_there`,
+  `the_comparison_magnitude_agrees_with_the_jvm_backend`), `tests/native_codegen_e2e.rs`
+  (`a_slice_between_the_halves_of_one_character_fails_loudly`).
+
 - **A primitive's member, asked of a value that arrived as an object.** Two shapes on the native
   target, and what separates them is who knows which primitive is in the box.
   `n.toInt()` where `n` is a `Number`: the site could type it only as `Number`, so the DESCRIPTOR

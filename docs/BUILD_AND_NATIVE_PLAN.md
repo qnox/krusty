@@ -1566,6 +1566,13 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **Slicing and ordering a string, for 2551.** All of it is a walk, because the storage is UTF-8
+   and the index is a UTF-16 unit — the same walk `length` and `get` already pay for. The one thing
+   that is not a walk is `removeSuffix`, where bytes settle it outright. Two spellings caught me
+   here: these extensions arrive as members of the `kotlin/text` FACADE rather than of
+   `kotlin.String`, and the provider presents a property's accessor under the property's Kotlin
+   name (`length`) rather than the JVM one (`getLength`).
+
    **A primitive reached as an object, for 2538.** `Number.toInt()` and `x++` on an `Int?` look
    like one problem and are two: the first has to read the descriptor because the site knows only
    `Number`, the second must not, because the owner the member was selected on already says. The
