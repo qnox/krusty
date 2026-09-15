@@ -1609,7 +1609,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_protocol_dumps_a_target_file_to_a_markdown_path() {
+    fn worker_protocol_reports_that_streaming_ir_was_not_retained() {
         let root = std::env::temp_dir().join(format!("krusty-worker-dump-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
 
@@ -1645,8 +1645,8 @@ mod tests {
             "the dumped file must carry its checker result: {text}"
         );
         assert!(
-            !text.contains("not lowered:"),
-            "the dumped file must carry lowered IR: {text}"
+            text.contains("not lowered: common IR was not captured during streaming compilation"),
+            "the dump must not reconstruct IR from its retained inspection AST: {text}"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1835,7 +1835,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_protocol_dumps_the_lowering_bail_reason() {
+    fn worker_protocol_does_not_rerun_lowering_to_recover_a_bail_reason() {
         let root =
             std::env::temp_dir().join(format!("krusty-worker-dump-bail-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1860,8 +1860,10 @@ mod tests {
 
         let text = std::fs::read_to_string(read_dump_path(output)).unwrap();
         assert!(
-            text.contains("not lowered: gate:tailrec-member"),
-            "the bail reason must survive into the document: {text}"
+            text.contains(
+                "not lowered: common IR was not captured during streaming compilation"
+            ),
+            "the dump must report unavailable streamed IR instead of invoking another lowerer: {text}"
         );
         assert!(
             text.contains("no diagnostics"),

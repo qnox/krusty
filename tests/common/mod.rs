@@ -360,7 +360,7 @@ pub fn capture_common_ir(
 
         fn lower_ir_file(
             &self,
-            file: krusty::backend::CheckedIrFile<'_>,
+            file: krusty::compiler::CheckedIrFile<'_>,
             _state: &mut Self::State,
             _diags: &mut krusty::diag::DiagSink,
         ) -> Vec<krusty::compiler::Artifact> {
