@@ -1,7 +1,20 @@
 use std::collections::HashMap;
 
-use crate::ast::ExprId;
+use crate::ast::{Expr, ExprId, File};
 use crate::types::Ty;
+
+/// The lexical label contributed by call syntax to an unlabelled lambda argument. This is source
+/// spelling because Kotlin labels the expression as written; callable identity and shape remain
+/// resolver-owned and must not be reconstructed from this label.
+pub(super) fn call_implicit_lambda_label(file: &File, call: ExprId) -> Option<&str> {
+    let Expr::Call { callee, .. } = file.expr(call) else {
+        return None;
+    };
+    match file.expr(*callee) {
+        Expr::Name(name) | Expr::Member { name, .. } => Some(name.as_str()),
+        _ => None,
+    }
+}
 
 /// The declaration a checked return leaves. This is the frontend-owned control-flow identity
 /// consumed by checked FIR and common lowering; later phases must not recover it from a label.

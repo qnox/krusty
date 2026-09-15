@@ -2171,3 +2171,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   name + descriptor`, preserving declaration order and retaining genuine overloads and distinct
   owners. No library or member spelling participates in the decision.
   `tests/classpath_candidate_union_e2e.rs::copied_classpath_entry_keeps_indexed_iteration_unambiguous`.
+- **A SAM constructor's lambda carries the interface name as its implicit label (fix).**
+  `Runnable { … return@Runnable … }` converts a lambda through a SAM constructor, and Kotlin labels
+  that lambda with the interface's own name — the same rule that labels `forEach { … }`'s lambda
+  `forEach`. The constructor-argument path passed a hardcoded `None` for that label, so the return
+  had nothing to denote: `return label 'Runnable' does not denote an enclosing lambda`. Because that
+  is the FIRST check of the body, its verdict is the one that stands — which is why removing the SAM
+  path's own reuse shortcut, so its labelled recheck always ran, changed nothing. A Kotlin
+  `fun interface` and a Java functional interface fail and are fixed alike, since both reach the same
+  conversion. A label that denotes nothing is still rejected.
+  `tests/sam_constructor_lambda_label_e2e.rs::a_kotlin_fun_interface_constructor_labels_its_lambda`,
+  `a_java_functional_interface_constructor_labels_its_lambda`,
+  `a_labeled_return_through_a_sam_constructor_carries_its_value`,
+  `an_unknown_label_is_still_rejected`.
