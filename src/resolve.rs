@@ -59,6 +59,7 @@ mod stable_path_legacy_bridge;
 mod streaming_signature_bridge;
 #[cfg(test)]
 mod streaming_signature_tests;
+mod tailrec_declarations;
 mod type_join;
 
 // The capture storage-kind contract and the write analysis behind it. Imported by name so the call
@@ -67829,6 +67830,7 @@ impl<'a> Checker<'a> {
                 ),
             );
         }
+        tailrec_declarations::check_members(&mut self.diags, cl);
         let current_owner = self.active_classifier_internal(d, cl);
         // A retained default may make an `inner` classifier the bounded Pass-1 checker root. Its
         // enclosing class parser node is then intentionally not reopened, but the enclosing class
