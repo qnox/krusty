@@ -1625,6 +1625,27 @@ pub fn expect_box_run_with_stdlib(src: &str, stem: &str) -> String {
     answer
 }
 
+/// [`expect_box_run_with_stdlib`] for a program the two backends answer DIFFERENTLY on purpose.
+///
+/// The ordinary helper asserts the backends agree, which is the right default and the reason it is
+/// the default. A handful of programs sit on a defect one backend has and the other does not, and
+/// for those "the backends agree" is the wrong claim: it would be satisfied only by making the
+/// correct backend wrong.
+///
+/// So both answers are named. The JVM's is returned as usual for the caller to assert; the native
+/// one is asserted here. A test reaching for this has to write down what each backend says, which
+/// is what keeps a deliberate divergence from quietly becoming a regression in either direction —
+/// if the JVM defect is fixed and the answers converge, this call fails and the test comes back to
+/// the ordinary helper.
+#[allow(dead_code)]
+pub fn expect_box_run_with_stdlib_diverging(src: &str, stem: &str, native: &str) -> String {
+    let stdlib = stdlib_jar();
+    let jdk = jdk_modules();
+    let answer = expect_box_run(src, stem, &[stdlib], Some(jdk.as_path()));
+    cross_check_backends(src, stem, native);
+    answer
+}
+
 /// [`expect_box_run`] for a compile-only consumer: the emitted classes, or a panic naming why the
 /// source was rejected. Same contract — the caller must have resolved the toolchain first.
 #[allow(dead_code)]
