@@ -66,8 +66,8 @@ pub enum InlineIterationIndex {
 pub enum InlineIterationTraversal {
     Iterator {
         /// Zero-argument calls applied left-to-right, beginning with the inline receiver and ending
-        /// in the iterator consumed by `has_next`/`next`. `Map.entries.iterator()` therefore needs
-        /// two steps while `Iterable.iterator()` needs one.
+        /// in the iterator consumed by `has_next`/`next`. Declarations whose receiver must first
+        /// expose an intermediate traversal view therefore carry more than one exact step.
         prepare: Vec<LibraryMember>,
         has_next: Box<LibraryMember>,
         next: Box<LibraryMember>,
@@ -77,6 +77,21 @@ pub enum InlineIterationTraversal {
         size: Box<LibraryMember>,
         get: Box<LibraryMember>,
     },
+}
+
+#[derive(Clone, Debug)]
+pub enum InlineCollectionCapacity {
+    Member(Box<LibraryMember>),
+    Extension {
+        callable: Box<LibraryCallable>,
+        default: i32,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub enum InlineCollectionAppend {
+    Member(Box<LibraryMember>),
+    Extension(Box<LibraryCallable>),
 }
 
 /// A declaration-defined inline body whose source-independent control-flow shape must be expanded
@@ -111,16 +126,20 @@ pub enum InlineBodyPlan {
     },
     /// Iterate the extension receiver, invoke one lambda for each element, and append its result to
     /// a fresh collection. The provider owns the exact factory and append declarations; consumers
-    /// see only their stable identities after selection. `flatten` chooses one-element append versus
-    /// append-all, matching the selected declaration's compiled inline body.
+    /// see only their stable identities after selection. The append operation itself distinguishes
+    /// a member append from an extension append-all; there is no separate name-derived mode.
     CollectionTransform {
         lambda_parameter: usize,
-        flatten: bool,
+        /// Exact traversal declarations read from the selected declaration's compiled body. The
+        /// resolver specializes their metadata signatures to the selected receiver before FIR
+        /// publication; callers' scopes and same-spelled operators never participate.
+        traversal: InlineIterationTraversal,
         /// Source-local names retained from the selected declaration's inline body. These are
         /// provider facts, not target formatting; common lowering carries them as debug provenance.
         local_names: InlineCollectionLocalNames,
         factory: Box<LibraryMember>,
-        append: Box<LibraryMember>,
+        capacity: Option<InlineCollectionCapacity>,
+        append: InlineCollectionAppend,
     },
 }
 

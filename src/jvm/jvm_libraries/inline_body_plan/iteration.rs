@@ -110,7 +110,12 @@ impl JvmLibraries {
                 )
             }
         };
-        let traversal = self.normalize_iteration_traversal(traversal)?;
+        let Some(traversal) = self.normalize_iteration_traversal(traversal) else {
+            // A dependency may be temporarily unavailable while another provider record is being
+            // assembled. Do not turn that state into a process-global negative plan cache entry.
+            *decode_unavailable = true;
+            return None;
+        };
         Some(InlineBodyPlan::Iteration {
             lambda_parameter,
             index,
@@ -118,7 +123,7 @@ impl JvmLibraries {
         })
     }
 
-    fn normalize_iteration_traversal(
+    pub(super) fn normalize_iteration_traversal(
         &self,
         traversal: RecognizedTraversal<'_>,
     ) -> Option<InlineIterationTraversal> {
@@ -165,6 +170,81 @@ impl JvmLibraries {
             }
         })
     }
+}
+
+pub(super) fn recognize_collection_transform_traversal<'a>(
+    instructions: &[Insn],
+    source_cp: &'a [C],
+    invoke: usize,
+) -> Option<RecognizedTraversal<'a>> {
+    let calls = instructions
+        .get(..invoke)?
+        .iter()
+        .enumerate()
+        .filter_map(|(index, instruction)| {
+            let target = inline::invoked_method(instruction, source_cp)?;
+            let (parameters, result) = crate::jvm::names::parse_method_descriptor(target.2)?;
+            (parameters.is_empty() && result != "V").then_some((index, target, result))
+        })
+        .collect::<Vec<_>>();
+    let has_next_position = calls
+        .iter()
+        .enumerate()
+        .filter_map(|(position, (_, _, result))| (*result == "Z").then_some(position))
+        .collect::<Vec<_>>();
+    let [has_next_position] = has_next_position.as_slice() else {
+        return None;
+    };
+    let (before_has_next, rest) = calls.split_at(*has_next_position);
+    let [(_, has_next, "Z"), (next_index, next, next_result)] = rest else {
+        return None;
+    };
+    let prepare_start = before_has_next
+        .iter()
+        .rposition(|(_, _, result)| !result.starts_with('L'))
+        .map_or(0, |position| position + 1);
+    let prepare = &before_has_next[prepare_start..];
+    if prepare.is_empty() || !next_result.starts_with('L') {
+        return None;
+    }
+    let (prepare_index, _, _) = prepare.last()?;
+    let has_next_index = calls.get(*has_next_position)?.0;
+    let iterator_slot = instructions
+        .get(prepare_index + 1)
+        .and_then(stored_reference_local)?;
+    if instructions
+        .get(has_next_index.checked_sub(1)?)
+        .and_then(loaded_reference_local)
+        != Some(iterator_slot)
+        || instructions
+            .get(next_index.checked_sub(1)?)
+            .and_then(loaded_reference_local)
+            != Some(iterator_slot)
+        || !matches!(
+            instructions.get(has_next_index + 1),
+            Some(Insn::Branch { op: 0x99, .. })
+        )
+    {
+        return None;
+    }
+    let element_store = next_index
+        + 1
+        + usize::from(class_name(instructions.get(next_index + 1)?, source_cp, 0xc0).is_some());
+    let element_slot = instructions
+        .get(element_store)
+        .and_then(stored_reference_local)?;
+    if instructions
+        .get(invoke.checked_sub(1)?)
+        .and_then(loaded_reference_local)
+        != Some(element_slot)
+    {
+        return None;
+    }
+    Some(RecognizedTraversal::Iterator {
+        prepare: prepare.iter().map(|(_, target, _)| *target).collect(),
+        has_next: *has_next,
+        next: *next,
+    })
 }
 
 pub(super) fn recognize<'a>(
@@ -380,7 +460,7 @@ fn call_is(
         )
 }
 
-fn class_name<'a>(instruction: &Insn, source_cp: &'a [C], op: u8) -> Option<&'a str> {
+pub(super) fn class_name<'a>(instruction: &Insn, source_cp: &'a [C], op: u8) -> Option<&'a str> {
     let Insn::Plain {
         op: actual,
         operands,
@@ -1126,7 +1206,7 @@ mod tests {
         Counted,
     }
 
-    fn callable(
+    pub(super) fn callable(
         libraries: &JvmLibraries,
         package: &str,
         name: &str,
@@ -1194,6 +1274,159 @@ mod tests {
             _ => {
                 panic!("{package}.{name}{descriptor} published the wrong traversal: {traversal:?}")
             }
+        }
+    }
+
+    #[test]
+    fn collection_transforms_publish_exact_bytecode_owned_traversal_identities() {
+        let stdlib = crate::toolchain::stdlib_jar()
+            .expect("collection-transform provider test requires the repository Kotlin stdlib");
+        let jdk = crate::toolchain::jdk_modules()
+            .expect("collection-transform provider test requires the repository JDK modules");
+        let libraries = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+            vec![stdlib, jdk],
+        )));
+        for (
+            name,
+            descriptor,
+            prepare_members,
+            factory_descriptor,
+            capacity_descriptor,
+            append_descriptor,
+            expected_local_names,
+        ) in [
+            (
+                "map",
+                "(Ljava/lang/Iterable;Lkotlin/jvm/functions/Function1;)Ljava/util/List;",
+                &[("iterator", "()Ljava/util/Iterator;")][..],
+                "(I)V",
+                Some("(Ljava/lang/Iterable;I)I"),
+                "(Ljava/lang/Object;)Z",
+                ("map", "mapTo", "destination", "item"),
+            ),
+            (
+                "flatMap",
+                "(Ljava/lang/Iterable;Lkotlin/jvm/functions/Function1;)Ljava/util/List;",
+                &[("iterator", "()Ljava/util/Iterator;")][..],
+                "()V",
+                None,
+                "(Ljava/util/Collection;Ljava/lang/Iterable;)Z",
+                ("flatMap", "flatMapTo", "destination", "element"),
+            ),
+            (
+                "map",
+                "(Ljava/util/Map;Lkotlin/jvm/functions/Function1;)Ljava/util/List;",
+                &[
+                    ("entrySet", "()Ljava/util/Set;"),
+                    ("iterator", "()Ljava/util/Iterator;"),
+                ][..],
+                "(I)V",
+                Some("()I"),
+                "(Ljava/lang/Object;)Z",
+                ("map", "mapTo", "destination", "item"),
+            ),
+        ] {
+            let callable = callable(&libraries, "kotlin/collections", name, descriptor);
+            let Some(InlineBodyPlan::CollectionTransform {
+                traversal:
+                    InlineIterationTraversal::Iterator {
+                        prepare,
+                        has_next,
+                        next,
+                    },
+                factory,
+                capacity,
+                append,
+                local_names,
+                ..
+            }) = callable.inline_body_plan.as_deref()
+            else {
+                panic!("{name}{descriptor} must publish its collection-transform identities")
+            };
+            assert_eq!(
+                prepare
+                    .iter()
+                    .map(|member| (member.name.as_str(), member.descriptor.as_str()))
+                    .collect::<Vec<_>>(),
+                prepare_members
+            );
+            assert_eq!(
+                (
+                    has_next.name.as_str(),
+                    has_next.descriptor.as_str(),
+                    next.name.as_str(),
+                    next.descriptor.as_str(),
+                ),
+                ("hasNext", "()Z", "next", "()Ljava/lang/Object;",)
+            );
+            assert_eq!(
+                (factory.name.as_str(), factory.descriptor.as_str()),
+                ("<init>", factory_descriptor)
+            );
+            assert_eq!(
+                (
+                    local_names.outer_receiver.as_ref(),
+                    local_names.inner_receiver.as_ref(),
+                    local_names.destination.as_ref(),
+                    local_names.element.as_ref(),
+                ),
+                expected_local_names,
+                "local names must come from the exact declaration body LVT"
+            );
+            let capacity_identity = match (capacity_descriptor, capacity) {
+                (
+                    Some(expected),
+                    Some(crate::libraries::InlineCollectionCapacity::Member(member)),
+                ) => {
+                    assert_eq!(member.descriptor, expected);
+                    member.external_identity
+                }
+                (
+                    Some(expected),
+                    Some(crate::libraries::InlineCollectionCapacity::Extension {
+                        callable,
+                        default,
+                    }),
+                ) => {
+                    assert_eq!((callable.descriptor.as_str(), *default), (expected, 10));
+                    callable.external_identity
+                }
+                (None, None) => None,
+                _ => panic!("{name}{descriptor} published the wrong capacity dependency"),
+            };
+            let append_identity = match append {
+                crate::libraries::InlineCollectionAppend::Member(member) => {
+                    assert_eq!(member.descriptor, append_descriptor);
+                    member.external_identity
+                }
+                crate::libraries::InlineCollectionAppend::Extension(callable) => {
+                    assert_eq!(callable.descriptor, append_descriptor);
+                    callable.external_identity
+                }
+            };
+            let mut identities = prepare
+                .iter()
+                .map(|member| member.external_identity)
+                .chain([
+                    has_next.external_identity,
+                    next.external_identity,
+                    factory.external_identity,
+                    append_identity,
+                ])
+                .collect::<Vec<_>>();
+            if capacity_descriptor.is_some() {
+                identities.push(capacity_identity);
+            }
+            assert!(identities.iter().all(Option::is_some));
+            assert_eq!(
+                identities
+                    .iter()
+                    .copied()
+                    .flatten()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len(),
+                identities.len()
+            );
         }
     }
 

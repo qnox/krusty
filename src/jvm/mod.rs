@@ -6,7 +6,6 @@ pub mod bridges;
 pub mod classfile;
 pub mod classpath;
 pub mod classreader;
-mod collection_inline_plan;
 mod common_metadata;
 pub mod companion;
 mod constructor_debug;

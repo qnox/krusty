@@ -2184,3 +2184,31 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `a_java_functional_interface_constructor_labels_its_lambda`,
   `a_labeled_return_through_a_sam_constructor_carries_its_value`,
   `an_unknown_label_is_still_rejected`.
+- **A safe call to an inline collection transform keeps its iteration plan (fix).** `map`/`flatMap`
+  are expanded structurally: resolution records the declaration-scoped iterator protocol for the
+  call, and checked FIR embeds it in the call's inline plan. Both sides key that protocol by the
+  RECEIVER expression, but resolution read the receiver out of an `Expr::Call`'s `Member` callee
+  only — and a safe call is its own AST node that owns its receiver directly. `xs?.map { … }`
+  therefore filed the protocol under the CALL expression while the checker looked under `xs`; the
+  lookup missed, and since a transform with a lambda argument is a hard failure once its protocol is
+  absent, the whole FILE died with
+  `internal error: checked FIR construction failed … MissingStableCallTarget`.
+  `?.forEach` was unaffected — its plan comes from the declaration body, not from this protocol —
+  which is what kept the gap narrow enough to miss.
+  `tests/safe_call_collection_transform_e2e.rs::a_safe_call_to_a_collection_transform_compiles`,
+  `a_suspension_inside_a_safe_call_transform_runs`, `the_other_receiver_spellings_still_transform`.
+- **Safe calls and inline collection transforms use declaration-owned traversal identities (fix).**
+  Collection transforms are expanded only when one strict JVM-provider decoder recognizes the
+  selected declaration body's complete allocation/traversal/lambda/append/loop/result dataflow.
+  The decoder publishes exact stable identities for every prepare step, `hasNext`, `next`, the
+  collection constructor, optional capacity operation, and member/extension append operation; it
+  also validates the source local names against their exact LocalVariableTable descriptors and
+  live ranges. Resolution specializes those fixed declarations to the selected receiver and result;
+  checked FIR consumes the closed plan for ordinary, safe, and implicit receivers alike. The old
+  `Map`/`FlatMap` name-derived intrinsics, hardcoded ArrayList/add/addAll plan, and checker bridge that
+  re-resolved iterator spellings are deleted. A changed body fails the structural decoder closed.
+  `tests/safe_call_collection_transform_e2e.rs::a_safe_call_to_a_collection_transform_compiles`,
+  `a_suspension_inside_a_safe_call_transform_runs`,
+  `a_suspending_safe_map_receiver_threads_every_traversal_identity`,
+  `receiver_spellings_and_iterator_shadow_keep_the_declaration_plan`,
+  `a_user_defined_same_named_call_remains_an_ordinary_call`.
