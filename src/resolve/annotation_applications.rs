@@ -38,9 +38,11 @@ impl Checker<'_> {
             .resolved_index
             .is_none()
             .then(|| {
-                self.module
-                    .legacy_symbols()?
-                    .resolved_annotation(self.file_index, annotation)
+                super::annotation_legacy_bridge::resolved_annotation(
+                    &self.module,
+                    self.file_index,
+                    annotation,
+                )
             })
             .flatten();
         let internal = if let Some(internal) = legacy_prebound {

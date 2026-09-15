@@ -29,6 +29,7 @@ use crate::types::{
 use scope::{ContextReceiver, ContextValue, FlowExclusion, NarrowPath, Ns, ScopeKind};
 
 mod annotation_applications;
+mod annotation_legacy_bridge;
 mod call_result_constraint;
 mod callable_reference_selection;
 mod capture_analysis;
