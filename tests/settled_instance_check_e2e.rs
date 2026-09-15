@@ -21,7 +21,9 @@ use super::common;
 /// confidently wrong, so the reference compiler has to be the one supplying it.
 fn agrees_with_kotlinc(stem: &str, body: &str) {
     let krusty = common::expect_box_run_with_stdlib(body, stem);
-    assert_eq!(krusty, common::kotlinc_box_result(body), "{stem}");
+    let reference = common::kotlinc_box_result(body);
+    assert_eq!(reference, "OK", "{stem}: unexpected kotlinc result");
+    assert_eq!(krusty, reference, "{stem}: krusty and kotlinc disagree");
 }
 
 #[test]
