@@ -21,11 +21,13 @@ pub(super) struct PlanKey {
     generic_signature: Option<(Option<Ty>, Ty)>,
     default_target: Option<(TypeName, String, String)>,
 }
-type PlanMap = HashMap<PlanKey, Option<Box<crate::libraries::InlineBodyPlan>>>;
-pub(super) type PlanCache = std::sync::Arc<std::sync::RwLock<PlanMap>>;
+type SharedPlanMap = HashMap<PlanKey, Box<crate::libraries::InlineBodyPlan>>;
+pub(super) type PlanCache = std::sync::Arc<std::sync::RwLock<SharedPlanMap>>;
 
-/// Process-global plans keyed by the complete archive/jimage composition. A decoded facade plan
-/// can read a body from another entry, so an entry-local cache would be unsound under shadowing.
+/// Process-global successful plans keyed by the complete archive/jimage composition. A decoded
+/// facade plan can read a body from another entry, so an entry-local cache would be unsound under
+/// shadowing. Negative results stay on the originating `Classpath`: dependency availability can be
+/// transient while a provider instance is warming, so absence is not safe to publish process-wide.
 pub(super) fn global_plan_cache(key: &[EntryKey]) -> PlanCache {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Vec<EntryKey>, PlanCache>>> =
         std::sync::OnceLock::new();
@@ -79,9 +81,11 @@ impl Classpath {
         }
         if let Some(global) = self.shared_inline_plans.as_ref() {
             if let Some(hit) = global.read().unwrap().get(&key).cloned() {
-                self.inline_plans.borrow_mut().insert(key, hit.clone());
+                self.inline_plans
+                    .borrow_mut()
+                    .insert(key, Some(hit.clone()));
                 cache_stat!(inline_plans, true);
-                return Some(hit);
+                return Some(Some(hit));
             }
         }
         cache_stat!(inline_plans, false);
@@ -120,7 +124,7 @@ impl Classpath {
             generic_signature,
             default_target,
         );
-        if let Some(global) = self.shared_inline_plans.as_ref() {
+        if let (Some(global), Some(plan)) = (self.shared_inline_plans.as_ref(), plan.as_ref()) {
             global.write().unwrap().insert(key.clone(), plan.clone());
         }
         self.inline_plans.borrow_mut().insert(key, plan);
@@ -284,5 +288,67 @@ mod tests {
             )
             .is_none());
         assert!(cached(&cp, owner, 0, Ty::Unit, false, Some((None, Ty::Unit)), None,).is_some());
+    }
+
+    #[test]
+    fn negative_plan_memo_stays_instance_local_while_success_is_shared() {
+        let owner = type_name("p/TransientInlinePlan");
+        let left = Classpath::new(vec![]);
+        let right = Classpath::new(vec![]);
+
+        left.memoize_inline_plan(
+            owner,
+            "run",
+            "()V",
+            &[0],
+            0,
+            None,
+            &[],
+            Ty::Unit,
+            false,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            matches!(
+                cached(&left, owner, 0, Ty::Unit, false, None, None),
+                Some(None)
+            ),
+            "one provider instance still memoizes its stable rejection"
+        );
+        assert!(
+            cached(&right, owner, 0, Ty::Unit, false, None, None).is_none(),
+            "a negative decode must not poison another provider instance"
+        );
+
+        let plan = crate::libraries::InlineBodyPlan::InvokeLambda {
+            lambda_parameter: 0,
+            arguments: Vec::new(),
+            prologue: Vec::new(),
+            cleanup: Vec::new(),
+            cause: None,
+            recovery: None,
+            defaults: Vec::new(),
+            result: None,
+        };
+        left.memoize_inline_plan(
+            owner,
+            "run",
+            "()V",
+            &[0],
+            0,
+            None,
+            &[],
+            Ty::Unit,
+            false,
+            None,
+            None,
+            Some(Box::new(plan)),
+        );
+        assert!(matches!(
+            cached(&right, owner, 0, Ty::Unit, false, None, None),
+            Some(Some(_))
+        ));
     }
 }

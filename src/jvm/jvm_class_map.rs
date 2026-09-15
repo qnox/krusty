@@ -733,9 +733,9 @@ mod tests {
         is_kotlin_collection_type_name, is_mapped_collection_face,
         jvm_collection_to_kotlin_type_name, jvm_to_kotlin_builtin_metadata_declarations,
         jvm_to_kotlin_builtin_metadata_name, kotlin_prim_to_wrapper,
-        mapped_builtin_has_authoritative_kotlin_scope,
-        platform_flexible_upper_bound, to_jvm_internal, to_jvm_type_name, to_kotlin_internal,
-        wrapper_internal, wrapper_to_kotlin_prim_name,
+        mapped_builtin_has_authoritative_kotlin_scope, platform_flexible_upper_bound,
+        to_jvm_internal, to_jvm_type_name, to_kotlin_internal, wrapper_internal,
+        wrapper_to_kotlin_prim_name,
     };
     use crate::types::{type_name, Ty};
 
