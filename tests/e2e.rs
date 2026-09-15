@@ -732,6 +732,8 @@ mod inline_deep_coverage_e2e;
 mod inline_e2e;
 #[path = "inline_end_branch_e2e.rs"]
 mod inline_end_branch_e2e;
+#[path = "inline_lambda_result_boxing_e2e.rs"]
+mod inline_lambda_result_boxing_e2e;
 #[path = "inline_lambda_value_return_e2e.rs"]
 mod inline_lambda_value_return_e2e;
 #[path = "inline_return_bound_context_e2e.rs"]
