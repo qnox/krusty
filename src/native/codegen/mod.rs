@@ -23,7 +23,6 @@ use std::rc::Rc;
 
 use crate::backend::{Artifact, Backend, CheckedIrFile};
 use crate::diag::DiagSink;
-use crate::frontend::CheckedFile;
 use crate::jvm::classpath::Classpath;
 
 use super::target::NativeTarget;
@@ -76,20 +75,6 @@ pub struct CodegenModule {
 
 impl Backend for CraneliftBackend {
     type State = CodegenModule;
-
-    fn lower_file(
-        &self,
-        _checked: CheckedFile<'_>,
-        _stem: &str,
-        _state: &mut Self::State,
-        diags: &mut DiagSink,
-    ) -> Vec<Artifact> {
-        diags.error(
-            crate::diag::Span::new(0, 0),
-            "krusty: the native backend requires the checked common-IR pipeline".to_string(),
-        );
-        Vec::new()
-    }
 
     fn lower_ir_file(
         &self,
