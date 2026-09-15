@@ -20,14 +20,56 @@
 use super::common;
 use std::path::PathBuf;
 
-fn run_box(main: &str) -> String {
-    let classpath: Vec<PathBuf> = vec![
+fn classpath() -> Vec<PathBuf> {
+    vec![
         common::stdlib_jar(),
         common::coroutines_jar(),
         common::jdk_modules(),
-    ];
+    ]
+}
+
+/// Compile and run the fixture with the REFERENCE compiler, on the same classpath.
+///
+/// `kotlinc_box_result` cannot serve here: it builds a stdlib-only classpath and these fixtures need
+/// the coroutines runtime for `runBlocking`.
+fn reference_box(tag: &str, main: &str) -> String {
+    let work = common::scratch_dir()
+        .unwrap_or_else(|| panic!("{tag}: cannot allocate a scratch directory"))
+        .join(tag);
+    std::fs::create_dir_all(&work).expect("create reference fixture directory");
+    let source = work.join("Main.kt");
+    std::fs::write(&source, main).expect("write reference fixture");
+    let out = work.join("reference-classes");
+    let joined = std::env::join_paths(classpath()).expect("join reference classpath");
+    let (code, diagnostics) = common::kotlinc_compile(&[
+        "-cp".to_string(),
+        joined.to_string_lossy().into_owned(),
+        "-d".to_string(),
+        out.display().to_string(),
+        source.display().to_string(),
+    ])
+    .unwrap_or_else(|| panic!("{tag}: the reference compiler could not be invoked"));
+    assert_eq!(
+        code, 0,
+        "{tag}: kotlinc rejected the fixture: {diagnostics}"
+    );
+    let mut run_cp = vec![out];
+    run_cp.extend(classpath());
+    common::run_box(&[], "MainKt", &run_cp)
+        .unwrap_or_else(|| panic!("{tag}: the reference-built box() failed to run"))
+}
+
+/// Run one fixture under BOTH compilers and require the same `box()` value. Asserting only that
+/// krusty returns `OK` proves krusty agrees with itself; these shapes are about matching the
+/// reference compiler's hoisting of a suspension in an operand position.
+fn run_box_with(tag: &str, main: &str) -> String {
+    let reference = reference_box(tag, main);
+    assert_eq!(
+        reference, "OK",
+        "{tag}: the reference compiler disagrees: {reference}"
+    );
     let jdk = common::jdk_modules();
-    common::expect_box_run(main, "Main", &classpath, Some(jdk.as_path()))
+    common::expect_box_run(main, "Main", &classpath(), Some(jdk.as_path()))
 }
 
 const DECLARATIONS: &str = "import kotlinx.coroutines.runBlocking\n\
@@ -50,7 +92,10 @@ fun box(): String {{\n\
 \x20   return if (level == Level.HIGH) \"OK\" else \"FAIL: \" + level\n\
 }}\n"
     );
-    assert_eq!(run_box(&main), "OK");
+    assert_eq!(
+        run_box_with("an_enum_lookup_hoists_a_suspending_name", &main),
+        "OK"
+    );
 }
 
 /// A captured mutable local whose INITIALIZER suspends. The capture is what turns the local into a
@@ -70,7 +115,10 @@ fun box(): String {{\n\
 \x20   return if (total == 5) \"OK\" else \"FAIL: \" + total\n\
 }}\n"
     );
-    assert_eq!(run_box(&main), "OK");
+    assert_eq!(
+        run_box_with("a_captured_local_hoists_a_suspending_initializer", &main),
+        "OK"
+    );
 }
 
 /// The control that isolates the initializer: the same captured local assigned from a suspension
@@ -92,7 +140,13 @@ fun box(): String {{\n\
 \x20   return if (total == 5) \"OK\" else \"FAIL: \" + total\n\
 }}\n"
     );
-    assert_eq!(run_box(&main), "OK");
+    assert_eq!(
+        run_box_with(
+            "a_captured_local_assigned_from_a_suspension_later_still_works",
+            &main
+        ),
+        "OK"
+    );
 }
 
 /// The control for the enum shape: an UNcaptured local and a non-suspending lookup name, so neither
@@ -111,5 +165,8 @@ fun box(): String {{\n\
 \x20   return if (level == Level.LOW) \"OK\" else \"FAIL: \" + level\n\
 }}\n"
     );
-    assert_eq!(run_box(&main), "OK");
+    assert_eq!(
+        run_box_with("an_enum_lookup_with_no_suspension_still_works", &main),
+        "OK"
+    );
 }
