@@ -910,22 +910,32 @@ fn value_class_underlying(ir: &IrFile, ty: &Ty) -> Option<Ty> {
 fn inline_prim_methods(
     ty: &Ty,
 ) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
-    Some(match element_serializer::builtin_element_key(ty)? {
-        "kotlin/Int" => ("encodeInt", "(I)V", "decodeInt", "()I"),
-        "kotlin/Long" => ("encodeLong", "(J)V", "decodeLong", "()J"),
-        "kotlin/Boolean" => ("encodeBoolean", "(Z)V", "decodeBoolean", "()Z"),
-        "kotlin/Double" => ("encodeDouble", "(D)V", "decodeDouble", "()D"),
-        "kotlin/Float" => ("encodeFloat", "(F)V", "decodeFloat", "()F"),
-        "kotlin/Char" => ("encodeChar", "(C)V", "decodeChar", "()C"),
-        "kotlin/Byte" => ("encodeByte", "(B)V", "decodeByte", "()B"),
-        "kotlin/Short" => ("encodeShort", "(S)V", "decodeShort", "()S"),
-        "kotlin/String" => (
+    let classifier = element_serializer::builtin_element_key(ty)?;
+    Some(if classifier == type_name("kotlin/Int") {
+        ("encodeInt", "(I)V", "decodeInt", "()I")
+    } else if classifier == type_name("kotlin/Long") {
+        ("encodeLong", "(J)V", "decodeLong", "()J")
+    } else if classifier == type_name("kotlin/Boolean") {
+        ("encodeBoolean", "(Z)V", "decodeBoolean", "()Z")
+    } else if classifier == type_name("kotlin/Double") {
+        ("encodeDouble", "(D)V", "decodeDouble", "()D")
+    } else if classifier == type_name("kotlin/Float") {
+        ("encodeFloat", "(F)V", "decodeFloat", "()F")
+    } else if classifier == type_name("kotlin/Char") {
+        ("encodeChar", "(C)V", "decodeChar", "()C")
+    } else if classifier == type_name("kotlin/Byte") {
+        ("encodeByte", "(B)V", "decodeByte", "()B")
+    } else if classifier == type_name("kotlin/Short") {
+        ("encodeShort", "(S)V", "decodeShort", "()S")
+    } else if classifier == type_name("kotlin/String") {
+        (
             "encodeString",
             "(Ljava/lang/String;)V",
             "decodeString",
             "()Ljava/lang/String;",
-        ),
-        _ => return None,
+        )
+    } else {
+        return None;
     })
 }
 
@@ -1737,9 +1747,13 @@ impl IrPlugin for SerializationPlugin {
                 let name = ir.add_expr(IrExpr::Const(IrConst::String(serial_name(ir, class_id))));
                 let under_ser = foo_fields
                     .first()
-                    .and_then(|(_, t)| element_serializer::builtin_element_serializer(t));
+                    .and_then(|(_, t)| element_serializer::always_available_builtin_serializer(t));
                 let ser_inst = match under_ser {
-                    Some(s) => ir.external_static_instance(s, s, "INSTANCE"),
+                    Some(serializer) => ir.add_expr(IrExpr::ExternalStaticInstance {
+                        owner: serializer,
+                        ty: serializer,
+                        field: "INSTANCE".to_string(),
+                    }),
                     // Unsupported underlying (e.g. a nested @Serializable) — leave the default below.
                     None => ir.add_expr(IrExpr::Const(IrConst::Null)),
                 };
@@ -2595,6 +2609,26 @@ mod tests {
             None,
             "plugins must not recover Kotlin semantics from a JVM carrier name"
         );
+    }
+
+    #[test]
+    fn runtime_dependent_builtin_requires_the_active_declaration() {
+        let ir = IrFile::default();
+        let instant = Ty::obj("kotlin/time/Instant");
+        assert!(element_serializer::element_serializer_plan(
+            &ir,
+            &PluginContext::default(),
+            &instant
+        )
+        .is_none());
+
+        let serializer = type_name("kotlinx/serialization/internal/InstantSerializer");
+        let ctx = PluginContext::default()
+            .with_runtime_serializers(std::collections::HashSet::from([serializer]));
+        assert!(matches!(
+            element_serializer::element_serializer_plan(&ir, &ctx, &instant),
+            Some(element_serializer::ElementSerializerPlan::Builtin(found)) if found == serializer
+        ));
     }
 
     #[test]

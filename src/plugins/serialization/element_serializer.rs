@@ -25,20 +25,101 @@ pub(super) enum ElementSerializerPlan {
     Polymorphic(TypeName),
     LocalSingleton(ClassId),
     ExternalSingleton(TypeName),
-    Builtin(&'static str),
+    Builtin(TypeName),
+}
+
+#[derive(Clone, Copy)]
+struct BuiltinSerializer {
+    classifier: TypeName,
+    serializer: TypeName,
+    requires_runtime_declaration: bool,
+}
+
+fn builtin_serializers() -> &'static [BuiltinSerializer] {
+    static SERIALIZERS: std::sync::OnceLock<Box<[BuiltinSerializer]>> = std::sync::OnceLock::new();
+    SERIALIZERS.get_or_init(|| {
+        [
+            (
+                "kotlin/String",
+                "kotlinx/serialization/internal/StringSerializer",
+                false,
+            ),
+            (
+                "kotlin/Int",
+                "kotlinx/serialization/internal/IntSerializer",
+                false,
+            ),
+            (
+                "kotlin/Long",
+                "kotlinx/serialization/internal/LongSerializer",
+                false,
+            ),
+            (
+                "kotlin/Boolean",
+                "kotlinx/serialization/internal/BooleanSerializer",
+                false,
+            ),
+            (
+                "kotlin/Double",
+                "kotlinx/serialization/internal/DoubleSerializer",
+                false,
+            ),
+            (
+                "kotlin/Float",
+                "kotlinx/serialization/internal/FloatSerializer",
+                false,
+            ),
+            (
+                "kotlin/Char",
+                "kotlinx/serialization/internal/CharSerializer",
+                false,
+            ),
+            (
+                "kotlin/Byte",
+                "kotlinx/serialization/internal/ByteSerializer",
+                false,
+            ),
+            (
+                "kotlin/Short",
+                "kotlinx/serialization/internal/ShortSerializer",
+                false,
+            ),
+            (
+                "kotlin/uuid/Uuid",
+                "kotlinx/serialization/internal/UuidSerializer",
+                true,
+            ),
+            (
+                "kotlin/time/Instant",
+                "kotlinx/serialization/internal/InstantSerializer",
+                true,
+            ),
+        ]
+        .into_iter()
+        .map(
+            |(classifier, serializer, requires_runtime_declaration)| BuiltinSerializer {
+                classifier: type_name(classifier),
+                serializer: type_name(serializer),
+                requires_runtime_declaration,
+            },
+        )
+        .collect::<Vec<_>>()
+        .into_boxed_slice()
+    })
 }
 
 /// Builtin serializers that are NOT in every supported kotlinx.serialization artifact. The plugin
-/// context probes these against the active classpath; a mapping to one of them is only usable when
-/// the probe found it. The long-standing primitive serializers are omitted on purpose — they are in
-/// every supported version, so probing them would cost lookups that can only answer yes.
-pub(crate) const RUNTIME_DEPENDENT_SERIALIZERS: &[&str] = &[
-    "kotlinx/serialization/internal/InstantSerializer",
-    "kotlinx/serialization/internal/UuidSerializer",
-];
+/// context probes these stable identities against the active classpath; a mapping to one of them is
+/// only usable when the probe found it.
+pub(crate) fn runtime_dependent_serializers() -> impl Iterator<Item = TypeName> {
+    builtin_serializers()
+        .iter()
+        .filter(|entry| entry.requires_runtime_declaration)
+        .map(|entry| entry.serializer)
+}
 
-pub(super) fn builtin_element_key(ty: &Ty) -> Option<&'static str> {
-    let fq = match ty.non_null() {
+pub(super) fn builtin_element_key(ty: &Ty) -> Option<TypeName> {
+    let classifier = match ty.non_null() {
         Ty::Int => type_name("kotlin/Int"),
         Ty::Long => type_name("kotlin/Long"),
         Ty::Boolean => type_name("kotlin/Boolean"),
@@ -50,48 +131,26 @@ pub(super) fn builtin_element_key(ty: &Ty) -> Option<&'static str> {
         Ty::String => type_name("kotlin/String"),
         semantic => semantic.kotlin_class_internal()?,
     };
-    Some(if fq.matches("kotlin/Int") {
-        "kotlin/Int"
-    } else if fq.matches("kotlin/Long") {
-        "kotlin/Long"
-    } else if fq.matches("kotlin/Boolean") {
-        "kotlin/Boolean"
-    } else if fq.matches("kotlin/Double") {
-        "kotlin/Double"
-    } else if fq.matches("kotlin/Float") {
-        "kotlin/Float"
-    } else if fq.matches("kotlin/Char") {
-        "kotlin/Char"
-    } else if fq.matches("kotlin/Byte") {
-        "kotlin/Byte"
-    } else if fq.matches("kotlin/Short") {
-        "kotlin/Short"
-    } else if fq.matches("kotlin/String") {
-        "kotlin/String"
-    } else if fq.matches("kotlin/uuid/Uuid") {
-        "kotlin/uuid/Uuid"
-    } else if fq.matches("kotlin/time/Instant") {
-        "kotlin/time/Instant"
-    } else {
-        return None;
-    })
+    builtin_serializers()
+        .iter()
+        .any(|entry| entry.classifier == classifier)
+        .then_some(classifier)
 }
 
-pub(super) fn builtin_element_serializer(ty: &Ty) -> Option<&'static str> {
-    Some(match builtin_element_key(ty)? {
-        "kotlin/String" => "kotlinx/serialization/internal/StringSerializer",
-        "kotlin/Int" => "kotlinx/serialization/internal/IntSerializer",
-        "kotlin/Long" => "kotlinx/serialization/internal/LongSerializer",
-        "kotlin/Boolean" => "kotlinx/serialization/internal/BooleanSerializer",
-        "kotlin/Double" => "kotlinx/serialization/internal/DoubleSerializer",
-        "kotlin/Float" => "kotlinx/serialization/internal/FloatSerializer",
-        "kotlin/Char" => "kotlinx/serialization/internal/CharSerializer",
-        "kotlin/Byte" => "kotlinx/serialization/internal/ByteSerializer",
-        "kotlin/Short" => "kotlinx/serialization/internal/ShortSerializer",
-        "kotlin/uuid/Uuid" => "kotlinx/serialization/internal/UuidSerializer",
-        "kotlin/time/Instant" => "kotlinx/serialization/internal/InstantSerializer",
-        _ => return None,
-    })
+fn builtin_element_serializer(ty: &Ty) -> Option<BuiltinSerializer> {
+    let classifier = builtin_element_key(ty)?;
+    builtin_serializers()
+        .iter()
+        .find(|entry| entry.classifier == classifier)
+        .copied()
+}
+
+/// Serializer identity for a builtin whose declaration is guaranteed by every supported runtime.
+/// Runtime-dependent entries deliberately cannot escape through this helper; they must go through
+/// [`element_serializer_plan`], which verifies the active classpath first.
+pub(super) fn always_available_builtin_serializer(ty: &Ty) -> Option<TypeName> {
+    let builtin = builtin_element_serializer(ty)?;
+    (!builtin.requires_runtime_declaration).then_some(builtin.serializer)
 }
 
 /// If `ty` names a `@JvmInline value class` defined in this IR, its TERMINAL underlying type — how
@@ -248,17 +307,16 @@ pub(super) fn element_serializer_plan(
             return Some(ElementSerializerPlan::ExternalSingleton(serializer));
         }
     }
-    if let Some(ser) = builtin_element_serializer(ty) {
+    if let Some(builtin) = builtin_element_serializer(ty) {
         // A builtin mapping is only usable when the ACTIVE runtime carries that class. The
         // long-standing primitive serializers always exist; the newer ones do not ship in every
         // supported kotlinx.serialization artifact, and emitting a reference to a class that is
         // absent would fail at class-load rather than here. Declining leaves the caller to bail
         // with a diagnostic, which is the same answer as any other underivable element.
-        let serializer = crate::types::type_name(ser);
-        if RUNTIME_DEPENDENT_SERIALIZERS.contains(&ser) && !ctx.runtime_provides(serializer) {
+        if builtin.requires_runtime_declaration && !ctx.runtime_provides(builtin.serializer) {
             return None;
         }
-        return Some(ElementSerializerPlan::Builtin(ser));
+        return Some(ElementSerializerPlan::Builtin(builtin.serializer));
     }
     None
 }
@@ -322,9 +380,11 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
                 field: "INSTANCE".to_string(),
             })
         }
-        ElementSerializerPlan::Builtin(serializer) => {
-            ir.external_static_instance(serializer, serializer, "INSTANCE")
-        }
+        ElementSerializerPlan::Builtin(serializer) => ir.add_expr(IrExpr::ExternalStaticInstance {
+            owner: serializer,
+            ty: serializer,
+            field: "INSTANCE".to_string(),
+        }),
     }
 }
 

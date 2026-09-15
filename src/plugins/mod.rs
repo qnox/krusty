@@ -159,7 +159,7 @@ impl PluginContext {
     }
 
     /// Record which serializer classes the active runtime provides.
-    pub fn with_runtime_serializers(
+    pub(crate) fn with_runtime_serializers(
         mut self,
         serializers: std::collections::HashSet<TypeName>,
     ) -> Self {
@@ -170,7 +170,7 @@ impl PluginContext {
     /// Whether the active runtime provides `serializer`. A builtin mapping must consult this before
     /// emitting a reference: a class absent from the artifact on the classpath would only fail when
     /// the JVM tried to load it.
-    pub fn runtime_provides(&self, serializer: TypeName) -> bool {
+    pub(crate) fn runtime_provides(&self, serializer: TypeName) -> bool {
         self.runtime_serializers.contains(&serializer)
     }
 
@@ -427,9 +427,7 @@ pub fn run_enabled(
 fn runtime_serializers(
     classifiers: &dyn crate::types::ClassifierAnnotationSource,
 ) -> std::collections::HashSet<TypeName> {
-    serialization::element_serializer::RUNTIME_DEPENDENT_SERIALIZERS
-        .iter()
-        .map(|name| crate::types::type_name(name))
+    serialization::element_serializer::runtime_dependent_serializers()
         .filter(|&serializer| classifiers.classifier_annotations(serializer).is_some())
         .collect()
 }
