@@ -1516,6 +1516,11 @@ pub struct File {
     /// Labels written on declaration statements (`label@ val …`, `label@ fun …`), keyed by the
     /// declaration statement. The value retains both spelling and exact label-token span.
     pub statement_labels: std::collections::HashMap<StmtId, (String, Span)>,
+    /// The `@` token span of a `return@label`, for the statement and expression forms respectively.
+    /// The reference compiler reports an unresolvable label AT the `@`, not at the `return` keyword,
+    /// and the label itself is a bare `String` on the node, so the span cannot be recovered later.
+    pub return_label_spans: std::collections::HashMap<StmtId, Span>,
+    pub return_label_expr_spans: std::collections::HashMap<ExprId, Span>,
     /// Parser-desugared member/index inc/dec value blocks whose access operands are deliberately
     /// shared between the read and write. Lowering spills the operands that semantic resolution
     /// proved are runtime values; package/classifier/`super` qualifiers have no value type and stay

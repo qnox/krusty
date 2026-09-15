@@ -40,6 +40,71 @@ pub fn expect_true_e2e(tag: &str, src: &str, extra_cp: &[PathBuf]) {
     }
 }
 
+/// One rendered `path:line:column: error: message` record, with the path reduced to its basename:
+/// both compilers receive the same path, but their renderers canonicalize the prefix independently.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ObservedDiagnostic {
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub message: String,
+}
+
+/// Parse every error record out of one compiler's rendered output, in emission ORDER.
+pub fn observed_errors(output: &str) -> Vec<ObservedDiagnostic> {
+    output
+        .lines()
+        .filter_map(|rendered| {
+            let (location, message) = rendered.split_once("error:")?;
+            let location = location.trim().trim_end_matches(':');
+            let mut fields = location.rsplitn(3, ':');
+            let column = fields.next()?.trim().parse().ok()?;
+            let line = fields.next()?.trim().parse().ok()?;
+            let path = fields.next()?.trim();
+            let file = std::path::Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(path)
+                .to_string();
+            Some(ObservedDiagnostic {
+                file,
+                line,
+                column,
+                message: message.trim().to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Assert that both compilers REJECT the fixture with the identical diagnostic set: same count, and
+/// the same file, line, column, message and order.
+///
+/// A nonzero-exit assertion is not enough on its own — it passes when krusty rejects the fixture for
+/// an unrelated reason, which is exactly how a "both compilers agree" claim goes stale.
+pub fn expect_identical_rejection(result: &CompilerDiagnosticResult, tag: &str) {
+    let krusty_rendered = format!("{}{}", result.krusty_stdout, result.krusty_stderr);
+    let krusty = observed_errors(&krusty_rendered);
+    let reference = observed_errors(&result.reference_stderr);
+    assert_ne!(
+        result.reference_code, 0,
+        "{tag}: kotlinc accepted the fixture, so there is no rejection to match: {}",
+        result.reference_stderr
+    );
+    assert_ne!(
+        result.krusty_code, 0,
+        "{tag}: krusty accepted a fixture kotlinc rejects: {krusty_rendered}"
+    );
+    assert!(
+        !reference.is_empty(),
+        "{tag}: kotlinc rejected without a parseable diagnostic: {}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        krusty, reference,
+        "{tag}: diagnostics differ.\nkrusty:    {krusty:#?}\nkotlinc:   {reference:#?}"
+    );
+}
+
 pub struct CompilerDiagnosticResult {
     pub krusty_code: i32,
     pub krusty_stdout: String,
