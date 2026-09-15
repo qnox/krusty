@@ -57,7 +57,7 @@ pub fn render_file_dump(input: &FileDumpInput<'_>) -> String {
 /// does not bound debug expansion: a long resolved type name may be repeated for many expressions.
 pub fn render_file_dump_with_limit(input: &FileDumpInput<'_>, max_bytes: usize) -> String {
     let bail = std::cell::RefCell::new(String::new());
-    // The compile pipeline only lowers files whose check produced no errors (`emit_checked`), so
+    // The compile pipeline only lowers files whose streaming analysis produced no errors, so
     // lowering's internal asserts assume an error-free handoff — an unresolved type, for example,
     // records no resolved `Ty` for its reference. Uphold the same precondition here.
     let has_errors = input

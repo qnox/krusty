@@ -1629,3 +1629,6 @@ mod native_builtin_supertypes_e2e;
 
 #[path = "native_class_literals_e2e.rs"]
 mod native_class_literals_e2e;
+
+#[path = "unsigned_arrays_e2e.rs"]
+mod unsigned_arrays_e2e;

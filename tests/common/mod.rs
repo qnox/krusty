@@ -501,7 +501,7 @@ pub fn compile_to_dir(
     let classes = compile_in_process(src, stem, cp_jars, jdk_modules)?;
     // The facade's internal name gives the package → facade mapping for the module index below.
     // (`emit_all` outputs only classes; the `META-INF/<module>.kotlin_module` is a whole-module
-    // artifact `compiler::compile` writes, so this dir-shaped helper reconstructs it — the real
+    // artifact the production compiler writes, so this dir-shaped helper reconstructs it — the real
     // kotlinc DISCOVERS a package's top-level declarations exclusively through that index, so a
     // classpath dir without one makes every facade `@Metadata` record invisible to it.)
     let facade =
@@ -587,7 +587,7 @@ pub fn backend_outcome_in_process(
 #[allow(dead_code)]
 pub fn compile_js_in_process(src: &str, stem: &str) -> Result<String, Vec<String>> {
     let platform = Box::new(krusty::libraries::EmptySymbolSource);
-    let backend = krusty::js::JsBackend::new(krusty::libraries::EmptySymbolSource);
+    let backend = krusty::js::JsBackend::new();
     let report = emit_in_process(src, stem, platform, &backend);
     if !report.diagnostics.is_empty() {
         return Err(report.diagnostics);

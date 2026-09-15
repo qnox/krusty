@@ -157,6 +157,43 @@ Correctness/compat layers, strongest first (1–2 are the **primary gate** for l
    (e.g., concat strategy). Not a gate — shape may legitimately differ.
 5. **Verifier (always).** Every `.class` must pass `java -Xverify:all`; non-verifying = fail.
 
+**kotlinc is the oracle, INCLUDING where it is wrong.** Where the reference compiler's behaviour
+departs from the language specification, krusty matches the reference compiler, not the
+specification. A consumer links against what kotlinc actually emits and a program runs against what
+kotlinc actually does, so a krusty that were "more correct" would be less compatible — and
+compatibility is the goal. The differential harness already encodes this: the expectation is
+kotlinc's answer, never a reading of the spec.
+
+Such a divergence is never followed silently. Each one is:
+
+- **written down** as an entry in §7 saying what the specification implies, what kotlinc does
+  instead, and that krusty follows kotlinc;
+- **pinned by a test** that runs the shape under both compilers and asserts the EXACT answer rather
+  than only that the two agree — equality alone would keep passing if krusty and kotlinc drifted
+  together, and it records nothing a reader can see;
+- **revisited when the reference version moves**, since a bug fixed upstream becomes a behaviour
+  change krusty has to follow in the same direction.
+
+The same rule decides an unspecified case: whatever kotlinc does is the answer, recorded the same
+way, rather than a choice krusty is free to make. Kotlin's own box corpus is a lower bound on this
+and not a substitute for it — it is upstream's regression suite, so a behaviour it never observes
+can still be one consumers depend on (`typeMapping/nothing.kt` asks `"" is Nothing` and never reads
+the result).
+
+This is already how the §7 entries are written where the question has come up — see the cross-file
+`suspend` extension entry, which follows kotlinc's emitted CPS pair and splice boundary rather than
+reasoning about what an `inline suspend` declaration ought to produce. The rule above states the
+practice so it is a requirement rather than a habit.
+
+A caution that costs real time: what looks like a kotlinc divergence is usually krusty's own defect,
+so establish the reference answer before concluding anything about it. `(UIntArray(1) as Any) is
+IntArray` looked like a free choice — the box corpus never asks it, and Kotlin/Native answers the
+opposite — but `kotlin.UIntArray` carries `box-impl`/`unbox-impl`, so the value class boxes at the
+`Any` boundary and kotlinc answers `false true false` for `is IntArray`/`is UIntArray`/`is
+LongArray`. krusty answers `true` there because it does not box; that is krusty's bug to fix, not a
+kotlinc bug to match. Running the reference compiler is what separated the two, which is why
+`docs/TEST_HARNESS.md` now insists on provisioning it.
+
 The harness (`harness/`) is a Rust integration test shelling out to the reference compiler,
 `javap`/a class-file parser, and `java`. Edge-case suite (§7) lives in `tests/cases/`.
 
