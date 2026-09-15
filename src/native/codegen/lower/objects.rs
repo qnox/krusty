@@ -150,6 +150,14 @@ impl<'a> FileLowering<'a> {
             // the element WIDTH, which is Kotlin's own erasure: `Array<String>` and `Array<Foo>`
             // are one type here, and `IntArray` is neither of them. An element the runtime lays
             // out no array for has no descriptor to name, which is what the `None` says.
+            // `Unit` reaches a type check spelled as the object it is rather than as the carrier
+            // `Ty::Unit` names, and it is one type either way.
+            _ if target
+                .obj_internal()
+                .is_some_and(|name| name.matches("kotlin/Unit")) =>
+            {
+                "kt_type_unit"
+            }
             _ if target.is_array() => match super::arrays::array_type(target) {
                 Ok((symbol, _)) => symbol,
                 Err(_) => return Ok(None),
@@ -1122,6 +1130,19 @@ impl<'a> FileLowering<'a> {
     }
 }
 
+/// What an `is` against a type Kotlin settles by itself answers.
+#[derive(Clone, Copy)]
+enum Settled {
+    /// True of every value.
+    Always,
+    /// True of no value.
+    Never,
+    /// True of `null` only.
+    Null,
+    /// True of everything but `null`.
+    NotNull,
+}
+
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// `value == null`, as a Boolean.
     pub(super) fn is_null(&mut self, value: Value) -> Value {
@@ -1634,6 +1655,56 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         self.file.type_descriptor(target)
     }
 
+    /// The `is` checks Kotlin settles by the type alone — `Nothing`, which has no instances, and
+    /// `Any`, which every non-`null` value is one of.
+    ///
+    /// `Some(answer)` when this is one of them, and `None` when the question really is about the
+    /// object. The receiver is evaluated either way: the constant is the answer, not the
+    /// expression, and a receiver may have effects.
+    #[allow(clippy::type_complexity)]
+    fn language_instance_check(
+        &mut self,
+        op: IrTypeOp,
+        arg: u32,
+        type_operand: Ty,
+    ) -> Result<Option<Option<Value>>, Unsupported> {
+        let target = type_operand.non_null();
+        let nullable = type_operand.is_nullable();
+        let any = target
+            .obj_internal()
+            .is_some_and(super::super::super::intrinsics::is_any);
+        let settled = match (target, any) {
+            // `x is Nothing` is false; `x is Nothing?` admits only `null`.
+            (Ty::Nothing, _) => Settled::Null,
+            // `x is Any` is "not null"; `x is Any?` is true of everything.
+            (_, true) if nullable => Settled::Always,
+            (_, true) => Settled::NotNull,
+            _ => return Ok(None),
+        };
+        let settled = match (settled, nullable) {
+            (Settled::Null, false) => Settled::Never,
+            (other, _) => other,
+        };
+        let Some(object) = self.receiver(arg)? else {
+            return Ok(Some(None));
+        };
+        let mut answer = match settled {
+            Settled::Always => self.builder.ins().iconst(types::I8, 1),
+            Settled::Never => self.builder.ins().iconst(types::I8, 0),
+            Settled::Null => self.is_null(object),
+            Settled::NotNull => {
+                let is_null = self.is_null(object);
+                let one = self.builder.ins().iconst(types::I8, 1);
+                self.builder.ins().bxor(is_null, one)
+            }
+        };
+        if op == IrTypeOp::NotInstanceOf {
+            let one = self.builder.ins().iconst(types::I8, 1);
+            answer = self.builder.ins().bxor(answer, one);
+        }
+        Ok(Some(Some(answer)))
+    }
+
     /// `is`, `as`, `as?` and the coercions the frontend inserts.
     pub(super) fn type_operation(
         &mut self,
@@ -1643,6 +1714,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     ) -> Result<Option<Value>, Unsupported> {
         match op {
             IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf => {
+                // Two of Kotlin's types answer without asking the object anything, because their
+                // membership is settled by the language rather than by a descriptor. `Nothing` has
+                // no instances at all, and everything that is not `null` is an `Any`. The
+                // nullability of the operand carries the rest: `is Nothing?` is exactly `== null`,
+                // and `is Any?` is true of everything. The receiver is still evaluated — the
+                // constant is the answer, not the expression.
+                if let Some(constant) = self.language_instance_check(op, arg, type_operand)? {
+                    return Ok(constant);
+                }
                 let Some(descriptor) = self.file.type_descriptor(type_operand)? else {
                     return Err(format!(
                         "an `is` check against `{}`",

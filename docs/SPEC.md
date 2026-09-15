@@ -6396,6 +6396,20 @@ and behavior is checked by RUNNING the emitted program.
   the common lowering rather than a second copy of Kotlin's rule.)
   Tests: `tests/native_annotations_e2e.rs`.
 
+- **Two `is` checks are settled by the type alone, and one more is the runtime's `Unit`.** `Nothing`
+  has no instances, so `x is Nothing` is false and `x is Nothing?` is exactly `x == null`; every
+  non-`null` value is an `Any`, so `x is Any` is `x != null` and `x is Any?` is true of everything.
+  The receiver is still evaluated: the constant is the answer, not the expression. `Unit` reaches a
+  check spelled as the object it is rather than as the carrier the generator names, and answers
+  through the one descriptor either way.
+  krusty's JVM backend answers `is Nothing` and `is Unit` with `true` for every non-`null` value —
+  `ref_internal` has no arm for either, so it emits `instanceof java/lang/Object`. That is a defect
+  in shared code, fixed on its own branch; the native tests for these two shapes assert this backend
+  only until it lands, rather than pinning the wrong answer.
+  Tests: `tests/native_type_checks_e2e.rs` (`nothing_is_a_type_no_value_is_an_instance_of`,
+  `any_is_the_question_of_whether_there_is_a_value_at_all`,
+  `a_settled_check_still_evaluates_its_receiver`, `unit_is_asked_about_as_the_object_it_is`).
+
 - **A top-level property is a global slot, initialized before the entry function, and rooted in the
   collector if it holds a reference.** The JVM realizes a top-level property as a private static
   field plus a `getX`/`setX` pair (and an `access$get<X>$p` bridge when a sibling class reads a

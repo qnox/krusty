@@ -1566,6 +1566,21 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **The checks a type settles by itself, for 2646.** `Nothing` has no instances and every
+   non-`null` value is an `Any`, so neither question needs to reach the object — only its
+   nullability, which turns `is Nothing?` into `== null` and `is Any?` into a constant. The receiver
+   is still evaluated, because the constant is the answer and not the expression, and that is what
+   the third test pins. `Unit` came along for a duller reason: it arrives at a check spelled as the
+   object it is rather than as the carrier the generator names, and the descriptor table only knew
+   the carrier.
+   Writing the tests found a defect in SHARED code rather than in this backend. krusty's JVM backend
+   answers `"a" is Nothing` and `"a" is Unit` with `true`: `ref_internal` has no arm for either
+   `Ty::Nothing` or `Ty::Unit`, so it falls through to `java/lang/Object` and emits an `instanceof`
+   every non-null value passes. The native answers are Kotlin's; those two tests therefore assert
+   this backend alone, saying why, until the core fix lands on its own branch. Cross-checking there
+   would have pinned the wrong answer as the expectation, which is the failure mode the cross-check
+   exists to prevent and would have caused here.
+
    **Annotations are metadata nothing here keeps, for 2641.** A file declined WHOLE on the mere
    declaration of an annotation class — forty-four corpus cases, most of which only declare one and
    apply it. Nothing emitted for this target can be asked what annotations a declaration carries, so
