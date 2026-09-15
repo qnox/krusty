@@ -1606,10 +1606,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// The descriptor a CAST to `ty` must be checked against, or `None` when the cast is a
     /// representation change rather than a question about an object.
     ///
-    /// A class and an array both name an object wearing a descriptor, so `as` and `as?` can ask
-    /// the runtime the same question `is` does. A scalar or a `String` does not belong here even
-    /// though [`FileLowering::type_descriptor`] names one for it: `x as Int` is an unboxing, whose
-    /// realization is the coercion the fall-through performs, and routing it through `kt_cast`
+    /// Anything the target holds as a REFERENCE and the runtime names is a question about an
+    /// object, so `as` and `as?` ask it exactly as `is` does — a class of this file, an array, a
+    /// `String`. A SCALAR target is excluded although
+    /// [`FileLowering::type_descriptor`] names one for it: `x as Int` is an unboxing, whose whole
+    /// realization is the coercion the caller falls through to, and routing it through `kt_cast`
     /// would hand back the box where the site expects the number.
     fn checked_cast_target(&mut self, ty: Ty) -> Result<Option<DataId>, Unsupported> {
         let target = ty.non_null();
@@ -1619,10 +1620,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         {
             return Ok(Some(self.file.classes[class as usize].descriptor));
         }
-        if target.is_array() {
-            return self.file.type_descriptor(target);
+        if carrier(target) != Carrier::Ref {
+            return Ok(None);
         }
-        Ok(None)
+        self.file.type_descriptor(target)
     }
 
     /// `is`, `as`, `as?` and the coercions the frontend inserts.

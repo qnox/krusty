@@ -6368,6 +6368,19 @@ and behavior is checked by RUNNING the emitted program.
   Tests: `tests/native_type_checks_e2e.rs`, and `tests/native_classes_e2e.rs`
   (`a_failed_cast_to_an_array_fails_loudly_too`).
 
+- **A cast is CHECKED whenever its target is held as a reference and the runtime names it; a scalar
+  target is a representation change.** The rule is not about arrays: a cast with no descriptor to
+  check against fell through to a coercion, and a coercion changes nothing about a reference — so
+  `(1 as Any) as String` handed the box back typed `String` and `length` read a field off the wrong
+  object. `String` and an array are the runtime's types rather than the program's, and both are now
+  asked about exactly as a declared class is. `x as Int` stays a coercion, and deliberately: it is
+  an unboxing, and routing it through the object check would answer with the box where the site
+  wants the number. A target the runtime does not name — a dependency's interface, a type parameter
+  — still coerces, which is Kotlin's own erasure.
+  Tests: `tests/native_type_checks_e2e.rs` (`a_string_is_asked_about_the_same_way_a_class_is`,
+  `an_unboxing_cast_stays_a_representation_change`), `tests/native_classes_e2e.rs`
+  (`a_failed_cast_to_a_string_fails_loudly_too`).
+
 - **A top-level property is a global slot, initialized before the entry function, and rooted in the
   collector if it holds a reference.** The JVM realizes a top-level property as a private static
   field plus a `getX`/`setX` pair (and an `access$get<X>$p` bridge when a sibling class reads a

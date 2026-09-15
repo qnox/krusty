@@ -1581,6 +1581,17 @@ before:**
    write, and `IntArray` is neither of them. An unsigned array still declines — the runtime lays out
    no array for one, so there is no descriptor to name, which is the honest answer rather than a
    near-enough one.
+   qnox asked why any of this was native-specific, which is the question that found the rest of it.
+   The SEMANTICS are not: every new program is asserted against krusty's JVM backend and passes
+   there unchanged, and the portable half — is this `Ty` an array, what is its element — was already
+   in `src/types.rs` and is read rather than copied. What is native is only that this runtime is
+   krusty's, so a check is a comparison against a descriptor the generator has to NAME, where the
+   JVM's `instanceof` takes a constant-pool entry and array types are ordinary entries there.
+   And the defect was not "arrays are missing" but "a cast with no descriptor coerces". `String` is
+   the runtime's type too, and `(1 as Any) as String` handed the box straight back: `length` then
+   read a field off the wrong object and answered 0. So the check is now on the CARRIER — every
+   reference target the runtime names is asked about, and a scalar target stays a coercion because
+   `as Int` is an unboxing rather than a question about an object.
 
    **Merging #920, and a claim of mine that was wrong.** I had said the tailrec core fix was worth
    about eighteen native cases. It is worth none of them: the native decline counts by FUNCTION

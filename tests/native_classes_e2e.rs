@@ -337,6 +337,36 @@ fn a_failed_cast_to_an_array_fails_loudly_too() {
 }
 
 #[test]
+fn a_failed_cast_to_a_string_fails_loudly_too() {
+    if !available() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `String` is not a class the program declares either, and it had the same hole an array did:
+    // with no descriptor to check against, `as` fell through to a coercion and a boxed `Int` was
+    // handed back typed `String`. `length` then read a field off the wrong object and answered 0.
+    // Every reference the runtime names is now checked, so this is one rule and not two.
+    let output = execute(
+        "fun main() {\n\
+         \x20   println(\"before\")\n\
+         \x20   val value: Any = 1\n\
+         \x20   val text = value as String\n\
+         \x20   println(text.length)\n\
+         }\n",
+    );
+    assert!(
+        !output.status.success(),
+        "a failed cast must not let the program continue"
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "before\n");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot be cast to") && stderr.contains("kotlin.String"),
+        "the failure must name the type asked for: {stderr:?}"
+    );
+}
+
+#[test]
 fn a_user_to_string_is_reached_through_println_templates_and_explicit_calls() {
     if !available() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");

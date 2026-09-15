@@ -10,6 +10,11 @@
 //! What an array's descriptor distinguishes is the element WIDTH, not the element type a program
 //! wrote, which is exactly Kotlin's own erasure: `is Array<String>` is not something a program may
 //! write, `is Array<*>` is, and `IntArray` and `Array<Int>` are different types on both sides.
+//!
+//! The same is true of every other type the runtime names rather than the program: a cast is
+//! CHECKED whenever its target is held as a reference and there is a descriptor to check against.
+//! A scalar target is the one exclusion, and not an oversight — `x as Int` is an unboxing, whose
+//! realization is a representation change rather than a question about an object.
 
 use super::common::{expect_box_ok_with_stdlib, expect_native_box};
 
@@ -117,4 +122,34 @@ fn a_safe_cast_to_an_array_answers_null_rather_than_the_wrong_array() {
                }\n";
     expect_box_ok_with_stdlib(src, "SafeCastToArray");
     expect_native_box(src, "SafeCastToArray", "OK");
+}
+
+#[test]
+fn a_string_is_asked_about_the_same_way_a_class_is() {
+    // `String` is the runtime's type, not the program's, so it had the array's gap too.
+    let src = "fun box(): String {\n\
+               \x20   val text: Any = \"a\"\n\
+               \x20   val number: Any = 1\n\
+               \x20   if (text !is String) return \"fail: not a String\"\n\
+               \x20   if (number is String) return \"fail: a number is a String\"\n\
+               \x20   if ((number as? String) != null) return \"fail: became a String\"\n\
+               \x20   val back = text as? String ?: return \"fail: lost its own type\"\n\
+               \x20   return if (back == \"a\") \"OK\" else \"fail: $back\"\n\
+               }\n";
+    expect_box_ok_with_stdlib(src, "StringIsAskedLikeAClass");
+    expect_native_box(src, "StringIsAskedLikeAClass", "OK");
+}
+
+#[test]
+fn an_unboxing_cast_stays_a_representation_change() {
+    // The exclusion, stated as a program: `as Int` reads the number out of the box, and routing it
+    // through the object check would hand the box back where the site wants the value.
+    let src = "fun box(): String {\n\
+               \x20   val boxed: Any = 7\n\
+               \x20   val n = boxed as Int\n\
+               \x20   val doubled = n * 2\n\
+               \x20   return if (doubled == 14) \"OK\" else \"fail: $doubled\"\n\
+               }\n";
+    expect_box_ok_with_stdlib(src, "UnboxingCastStaysACoercion");
+    expect_native_box(src, "UnboxingCastStaysACoercion", "OK");
 }
