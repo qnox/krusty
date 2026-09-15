@@ -1985,6 +1985,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_lists_e2e.rs`
   (`a_single_element_list_is_not_a_vararg_call_of_length_one`).
 
+- **`x in a..b` builds no range.** The checker leaves the membership test as its BOUNDS rather than
+  as a range object, so the whole of it is two comparisons — and each form puts them somewhere
+  different: `..<` excludes its high end, and `downTo` writes its ends the other way round, so the
+  low one is the second. `Char` and the unsigned integers compare unsigned, `Char` because its own
+  carrier is narrow enough that a signed comparison would call its upper half negative.
+  Both ends are still EVALUATED, and before the subject: `x in a..b` is `(a..b).contains(x)`, and a
+  receiver is evaluated before an argument. Comparing without building a range must not change
+  that, which is why all three operands are evaluated before any comparison rather than as each one
+  is needed.
+  Tests: `tests/native_ranges_e2e.rs` (`a_range_membership_test_builds_no_range`,
+  `a_range_membership_test_reads_its_counter_the_right_way`,
+  `a_range_membership_test_evaluates_its_bounds_before_its_subject`).
+
 - **A spread makes a vararg array whose length only run time knows.** A `vararg` call normally
   builds its array from elements the generator can count, so each has a constant offset. `f(a, *xs,
   b)` is as long as `xs` is: the length is summed at run time from the non-spread count plus each

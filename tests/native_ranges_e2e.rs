@@ -242,3 +242,79 @@ fn a_strings_indices_count_its_characters() {
         "OK",
     );
 }
+
+#[test]
+fn a_range_membership_test_builds_no_range() {
+    // `x in a..b` reaches the generator as its BOUNDS, not as a range, so the whole of it is two
+    // comparisons. Each form puts them in a different place: `..<` excludes its high end, and
+    // `downTo` writes its ends the other way round, so the low one is the second.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   if (5 !in 1..10) return \"fail inside\"\n\
+         \x20   if (1 !in 1..10) return \"fail low end\"\n\
+         \x20   if (10 !in 1..10) return \"fail high end\"\n\
+         \x20   if (0 in 1..10) return \"fail below\"\n\
+         \x20   if (11 in 1..10) return \"fail above\"\n\
+         \x20   if (10 !in 1..<11) return \"fail open inside\"\n\
+         \x20   if (11 in 1..<11) return \"fail open end\"\n\
+         \x20   if (5 !in 10 downTo 1) return \"fail downTo inside\"\n\
+         \x20   if (0 in 10 downTo 1) return \"fail downTo below\"\n\
+         \x20   if (11 in 10 downTo 1) return \"fail downTo above\"\n\
+         \x20   if (3 in 10..1) return \"fail empty\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "RangeMembership",
+        "OK",
+    );
+}
+
+#[test]
+fn a_range_membership_test_reads_its_counter_the_right_way() {
+    // `Char` and the unsigned integers read their top bit as a value. A `Char`'s carrier is narrow
+    // enough that a signed comparison would call its upper half negative, and `ULong.MAX_VALUE` is
+    // `-1` read as a sign.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   if ('c' !in 'a'..'z') return \"fail char\"\n\
+         \x20   if ('A' in 'a'..'z') return \"fail char below\"\n\
+         \x20   if ('\\uFFFE' !in '\\uFFF0'..'\\uFFFF') return \"fail high char\"\n\
+         \x20   val big: ULong = 18446744073709551615uL\n\
+         \x20   if (big !in 1uL..big) return \"fail ulong\"\n\
+         \x20   if (1uL in 2uL..big) return \"fail ulong below\"\n\
+         \x20   val mid: UInt = 3000000000u\n\
+         \x20   if (mid !in 1u..4000000000u) return \"fail uint\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "RangeMembershipCounters",
+        "OK",
+    );
+}
+
+#[test]
+fn a_range_membership_test_evaluates_its_bounds_before_its_subject() {
+    // `x in a..b` is `(a..b).contains(x)`, and a receiver is evaluated before an argument — so both
+    // ends run before the subject does, and both run even though the first comparison settles this
+    // answer on its own. Comparing without building a range must not change either fact.
+    expect_native_box(
+        "var trail = \"\"\n\
+         fun low(): Int {\n\
+         \x20   trail += \"l\"\n\
+         \x20   return 10\n\
+         }\n\
+         fun high(): Int {\n\
+         \x20   trail += \"h\"\n\
+         \x20   return 20\n\
+         }\n\
+         fun subject(): Int {\n\
+         \x20   trail += \"s\"\n\
+         \x20   return 0\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val inside = subject() in low()..high()\n\
+         \x20   if (inside) return \"fail answer\"\n\
+         \x20   return if (trail == \"lhs\") \"OK\" else \"fail order: $trail\"\n\
+         }\n",
+        "RangeMembershipEffects",
+        "OK",
+    );
+}

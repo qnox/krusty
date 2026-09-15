@@ -1566,6 +1566,13 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **Range membership, for 2501.** `x in a..b` had been declining although ranges were built long
+   ago, because the checker does not hand it a range at all — it hands the bounds, so the answer is
+   two comparisons and no object. Writing the effect-order test taught me something I had wrong:
+   the subject is evaluated LAST, not first, because `x in a..b` is `(a..b).contains(x)` and a
+   receiver precedes an argument. The test asserted my guess, failed, and the cross-check against
+   the JVM settled which of us was right.
+
 #### Decided: Kotlin/Native's memory model, not the JVM's
 
 The native target reproduces **Kotlin/Native's** concurrency contract, not the JVM's. That follows

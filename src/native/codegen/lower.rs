@@ -1274,6 +1274,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 end_type,
                 result,
             }) => self.range_construction(operation, start, start_type, end, end_type, result),
+            // `x in a..b`: the checker kept the bounds rather than a range, so nothing is built.
+            IrExpr::Checked(IrCheckedOperation::RangeContains {
+                operation,
+                value,
+                start,
+                end,
+                negated,
+                counter,
+            }) => self.range_contains(operation, value, start, end, negated, counter),
             IrExpr::Return(_)
             | IrExpr::Variable { .. }
             | IrExpr::SetValue { .. }

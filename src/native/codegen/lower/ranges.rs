@@ -188,6 +188,82 @@ impl BodyLowering<'_, '_, '_> {
         Some(self.range_call(symbol, carried, element, receiver, args, ret))
     }
 
+    /// `x in a..b` — a membership test the checker left as its BOUNDS rather than as a range.
+    ///
+    /// Nothing is constructed: the node carries the value and the two ends separately, so the whole
+    /// of it is two comparisons. The bounds are still both EVALUATED, in source order after the
+    /// value, because `a..b` builds a range before anything asks it a question and a program can
+    /// see that — short-circuiting the second comparison would be an answer, but skipping the
+    /// expression that produces it would be a missing effect.
+    ///
+    /// `downTo` descends, so its ends arrive the other way round: `x in a downTo b` is `b <= x <= a`.
+    pub(super) fn range_contains(
+        &mut self,
+        operation: FirRangeOperation,
+        value: u32,
+        start: u32,
+        end: u32,
+        negated: bool,
+        counter: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let counter = counter.non_null();
+        if carrier(counter).clif().is_none() {
+            return Err(format!("a range membership test over `{counter:?}`"));
+        }
+        let Some(value) = self.coerce(value, counter)? else {
+            return Err("a `Unit` value in a range test".to_string());
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let Some(start) = self.coerce(start, counter)? else {
+            return Err("a `Unit` range bound".to_string());
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let Some(end) = self.coerce(end, counter)? else {
+            return Err("a `Unit` range bound".to_string());
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        // `Char` and the unsigned integers read their top bit as a value; every other counter is a
+        // signed number, and `Char`'s own carrier is narrow enough that a signed compare would read
+        // its upper half as negative.
+        let signed = !counter.is_unsigned() && counter != Ty::Char;
+        let (low, high, high_is_exclusive) = match operation {
+            FirRangeOperation::Through => (start, end, false),
+            FirRangeOperation::OpenEnd | FirRangeOperation::Until => (start, end, true),
+            // The ends are written in descending order, so the low one is the second.
+            FirRangeOperation::DownTo => (end, start, false),
+        };
+        let above = self.builder.ins().icmp(
+            if signed {
+                IntCC::SignedLessThanOrEqual
+            } else {
+                IntCC::UnsignedLessThanOrEqual
+            },
+            low,
+            value,
+        );
+        let below = self.builder.ins().icmp(
+            match (signed, high_is_exclusive) {
+                (true, false) => IntCC::SignedLessThanOrEqual,
+                (true, true) => IntCC::SignedLessThan,
+                (false, false) => IntCC::UnsignedLessThanOrEqual,
+                (false, true) => IntCC::UnsignedLessThan,
+            },
+            value,
+            high,
+        );
+        let inside = self.builder.ins().band(above, below);
+        Ok(Some(match negated {
+            false => inside,
+            true => self.builder.ins().bxor_imm_u(inside, 1),
+        }))
+    }
+
     /// Whether a checked dependency property read names the `indices` extension.
     pub(super) fn external_getter_is_indices(
         &self,
