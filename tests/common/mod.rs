@@ -3271,7 +3271,8 @@ fn hex(bytes: &[u8]) -> String {
 /// form, and the packed form is precisely what a byte-identity comparison needs — so this walks the
 /// constant pool and the class-level `RuntimeVisibleAnnotations` itself. `None` when the class
 /// carries no `@Metadata`.
-fn raw_kotlin_metadata(bytes: &[u8]) -> Option<(Vec<u8>, Vec<String>)> {
+#[allow(dead_code)]
+pub fn raw_kotlin_metadata(bytes: &[u8]) -> Option<(Vec<u8>, Vec<String>)> {
     struct Reader<'a> {
         bytes: &'a [u8],
         at: usize,

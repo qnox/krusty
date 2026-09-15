@@ -97,15 +97,32 @@ impl StringTable {
         if let Some(predefined) = predefined_index(classifier) {
             return self.builtin(predefined);
         }
-        let mut record = Pb::new();
-        record.field_varint(3, 2); // DESC_TO_CLASS_ID
-        self.intern(format!("L{};", classifier.render()), record)
+        self.class_id_from_internal(&classifier.render())
     }
 
     pub(crate) fn class_id_from_desc(&mut self, descriptor: &str) -> u32 {
-        let mut record = Pb::new();
-        record.field_varint(3, 2); // DESC_TO_CLASS_ID
-        self.intern(descriptor.to_owned(), record)
+        let internal = descriptor
+            .strip_prefix('L')
+            .and_then(|rest| rest.strip_suffix(';'))
+            .unwrap_or(descriptor);
+        self.class_id_from_internal(internal)
+    }
+
+    /// Intern a class id for the JVM internal name `internal`.
+    ///
+    /// `DESC_TO_CLASS_ID` is a SHORTCUT, not a synonym: a reader expands it by stripping `L`/`;` and
+    /// replacing EVERY `$` with `.`. That reproduces the class id only while no simple name contains
+    /// a `$` of its own. A generated `$serializer` breaks it — `LOwner$$serializer;` expands to
+    /// `Owner..serializer`, naming nothing — so take the shortcut only when it round-trips, and
+    /// otherwise write the class id literally, exactly as kotlinc does.
+    pub(crate) fn class_id_from_internal(&mut self, internal: &str) -> u32 {
+        let class_id = class_id_of(internal);
+        if internal.replace('$', ".") == class_id {
+            let mut record = Pb::new();
+            record.field_varint(3, 2); // DESC_TO_CLASS_ID
+            return self.intern(format!("L{internal};"), record);
+        }
+        self.intern(class_id, Pb::new())
     }
 
     pub(crate) fn serialize_types(&self) -> Pb {
@@ -772,5 +789,76 @@ mod tests {
         .unwrap();
         assert!(encoded.as_bytes().starts_with(&[0x20]));
         assert!(encoded.as_bytes().contains(&0x30));
+    }
+}
+
+/// The Kotlin class id for a JVM internal name: nesting levels separated by `.`.
+///
+/// A `$` separates nesting levels, but a simple name may itself BEGIN with `$` (the serialization
+/// plugin's `$serializer`), which surfaces as an empty segment between two separators. Re-attach it
+/// to the name that follows rather than treating it as another level.
+fn class_id_of(internal: &str) -> String {
+    let (package, name) = match internal.rfind('/') {
+        Some(at) => (&internal[..=at], &internal[at + 1..]),
+        None => ("", internal),
+    };
+    let mut levels: Vec<String> = Vec::new();
+    for segment in name.split('$') {
+        match levels.last_mut() {
+            // An empty segment means the NEXT name starts with `$`: keep one separator for it.
+            Some(last) if last.is_empty() || last.ends_with('$') => last.push('$'),
+            _ => levels.push(String::new()),
+        }
+        if let Some(last) = levels.last_mut() {
+            if last.is_empty() || last.ends_with('$') {
+                last.push_str(segment);
+            }
+        }
+    }
+    let joined = levels
+        .into_iter()
+        .filter(|level| !level.is_empty())
+        .collect::<Vec<_>>()
+        .join(".");
+    format!("{package}{joined}")
+}
+
+#[cfg(test)]
+mod class_id_tests {
+    use super::class_id_of;
+
+    /// A reader expands `DESC_TO_CLASS_ID` by replacing every `$`; the shortcut is only usable when
+    /// that reproduces the class id. These are the cases on both sides of that line.
+    #[test]
+    fn a_nesting_separator_becomes_a_dot() {
+        assert_eq!(class_id_of("Plain"), "Plain");
+        assert_eq!(class_id_of("pkg/Plain"), "pkg/Plain");
+        assert_eq!(class_id_of("Outer$Inner"), "Outer.Inner");
+        assert_eq!(class_id_of("pkg/Outer$Inner"), "pkg/Outer.Inner");
+        assert_eq!(class_id_of("pkg/A$B$C"), "pkg/A.B.C");
+    }
+
+    /// A simple name that itself begins with `$` — the serialization plugin's `$serializer` — keeps
+    /// that `$` instead of turning it into a second separator.
+    #[test]
+    fn a_simple_name_may_begin_with_a_dollar() {
+        assert_eq!(class_id_of("Retention$$serializer"), "Retention.$serializer");
+        assert_eq!(
+            class_id_of("pkg/Retention$$serializer"),
+            "pkg/Retention.$serializer"
+        );
+        assert_eq!(class_id_of("pkg/A$B$$serializer"), "pkg/A.B.$serializer");
+    }
+
+    /// The round-trip property the encoder decides on: the descriptor shortcut is usable exactly
+    /// when replacing every `$` reproduces the class id.
+    #[test]
+    fn the_shortcut_is_taken_only_when_it_round_trips() {
+        for internal in ["Plain", "pkg/Outer$Inner", "pkg/A$B$C"] {
+            assert_eq!(internal.replace('$', "."), class_id_of(internal));
+        }
+        for internal in ["Retention$$serializer", "pkg/A$B$$serializer"] {
+            assert_ne!(internal.replace('$', "."), class_id_of(internal));
+        }
     }
 }
