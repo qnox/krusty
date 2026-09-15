@@ -2226,3 +2226,35 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `tests/receiver_property_path_smartcast_e2e.rs::a_receiver_property_path_narrows_for_a_dereference`,
   `a_receiver_property_path_narrows_for_an_argument`, `a_parameter_rooted_path_still_narrows`,
   `a_mutable_property_in_the_path_is_still_refused`, `a_custom_getter_in_the_path_is_still_refused`.
+- **A package-qualified call shapes its lambda argument (fix).** `Json { prettyPrint = true }` binds
+  the lambda's receiver from the selected callable's parameter; spelled with its package —
+  `kotlinx.serialization.json.Json { … }` — the receiver never reached the lambda and every member
+  read inside it failed. It is not only the receiver: a qualified call shaped NO lambda argument, so
+  an ordinary value lambda's parameters arrived as `Any` too. The qualified path types its arguments
+  BEFORE a candidate is known, which judges a lambda with no expected shape; the bare-name path holds
+  that probe's diagnostics aside, rechecks each lambda once a callable is selected, and discards the
+  superseded probe. The qualified path did none of the three. All three are needed and each alone
+  changes nothing: capture without discard commits the diagnostics later anyway, and rechecking
+  without capture leaves the probe's errors standing. A call that never resolves still commits them,
+  so an unknown member inside the lambda is still rejected.
+  `tests/qualified_call_receiver_lambda_e2e.rs::a_package_qualified_call_binds_its_lambda_receiver`,
+  `a_cross_package_qualified_call_binds_its_lambda_receiver`,
+  `the_other_call_spellings_still_shape_their_lambdas`,
+  `an_unknown_member_in_the_lambda_is_still_rejected`.
+- **A qualified lambda uses the common selected-argument mapping (fix).** The first repair added a
+  second positional lambda-shaping loop to the qualified path. That loop could not represent named,
+  default, context, or many-to-one vararg mapping. It is deleted: after selection, the existing
+  origin-neutral commit maps every source argument and rechecks its lambda under the specialized
+  parameter exactly once. This accepts both reordered named receiver lambdas and a trailing receiver
+  lambda after positional vararg elements, matching the reference compiler at runtime.
+  `tests/qualified_call_receiver_lambda_e2e.rs::reordered_named_receiver_lambdas_bind_their_own_receivers`,
+  `a_trailing_lambda_after_a_vararg_uses_the_selected_parameter_slot`.
+- **Only the lambda probe's diagnostics are retired (fix).** Arguments are typed before a candidate
+  is known, so a lambda is judged with no shape; those diagnostics are held aside and the selected
+  call rechecks each lambda. Discarding the WHOLE captured batch also discarded authoritative errors
+  from ordinary arguments: `app.dsl.make(missingArgument) { add("x") }` lost its unresolved-reference
+  diagnostic, selected through `Ty::Error`, and reported only an internal checked-FIR failure where
+  the reference compiler names the unresolved argument. `discard_within` now drops only the
+  diagnostics inside the lambda argument spans and returns the rest to the sink at the capture mark,
+  preserving source order.
+  `tests/qualified_call_receiver_lambda_e2e.rs::an_unresolved_ordinary_argument_survives_lambda_shaping`.

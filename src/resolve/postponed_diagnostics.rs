@@ -31,6 +31,48 @@ impl PostponedDiagnostics {
         self.entries.push((key, diagnostics));
     }
 
+    /// Drop only the captured diagnostics that lie INSIDE one of `spans`, and return the rest to the
+    /// sink at `mark` — the position they were taken from, so source order is preserved.
+    ///
+    /// A probe judges every argument, but only the lambda bodies were judged without their shape.
+    /// An ordinary argument's error is authoritative: discarding the whole batch loses it, and a
+    /// call that then selects through `Ty::Error` reports nothing at all.
+    pub(super) fn discard_within(
+        &mut self,
+        key: ExprId,
+        sink: &mut DiagSink,
+        mark: usize,
+        spans: &[Span],
+    ) {
+        let Some(index) = self
+            .entries
+            .iter()
+            .position(|(candidate, _)| *candidate == key)
+        else {
+            return;
+        };
+        let (_, diagnostics) = self.entries.remove(index);
+        let retained: Vec<Diagnostic> = diagnostics
+            .into_iter()
+            .filter(|diagnostic| {
+                !spans
+                    .iter()
+                    .any(|span| diagnostic.span.lo >= span.lo && diagnostic.span.hi <= span.hi)
+            })
+            .collect();
+        if retained.is_empty() {
+            return;
+        }
+        if !retained
+            .iter()
+            .any(|diagnostic| diagnostic.severity == Severity::Error)
+        {
+            self.captured.remove(&key);
+        }
+        let mark = mark.min(sink.diags.len());
+        sink.diags.splice(mark..mark, retained);
+    }
+
     pub(super) fn discard(&mut self, key: ExprId) {
         if let Some(index) = self
             .entries
