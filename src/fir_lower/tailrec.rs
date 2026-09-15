@@ -15,21 +15,22 @@ const LOOP_LABEL: &str = "$tailrec";
 pub(super) fn finish_tailrec_body(
     ir: &mut IrFile,
     mut roots: Vec<ExprId>,
-    function: FunId,
-    parameter_count: usize,
+    mut frame: Frame,
     origin: OriginId,
 ) -> Result<ExprId, FirLoweringFailure> {
-    let result = ir.functions[function as usize].ret;
+    let result = ir.functions[frame.function as usize].ret;
+    collect_this_slots(ir, &roots, &mut frame);
+    let frame = &frame;
     let tail = roots
         .pop()
         .ok_or(FirLoweringFailure::MissingBodyResult { origin })?;
-    let tail = tail_value(ir, tail, function, parameter_count, result, origin)?;
+    let tail = tail_value(ir, tail, frame, result, origin)?;
     roots.push(tail);
     // The body's tail is one tail position; a `return` is another, wherever it stands, because
     // nothing of this function runs after one. `tail_value` reads the first off the body's shape,
     // and this sweeps the rest out of the whole body — after the rebuild above, so a tail the
     // rebuild already turned into a loop step is not visited a second time.
-    rewrite_returned_tail_calls(ir, &roots, function, parameter_count, result, origin)?;
+    rewrite_returned_tail_calls(ir, &roots, frame, result, origin)?;
     let loop_body = generated(
         ir,
         IrExpr::Block {
@@ -58,6 +59,67 @@ pub(super) fn finish_tailrec_body(
         },
         origin,
     ))
+}
+
+/// Find every value slot that holds THIS frame's instance.
+///
+/// A member call does not read `this` at the call node. The lowering spills the receiver and each
+/// argument into a generated temporary first, so the shape reaching the rewrite is
+/// `{ t0 = this; t1 = n - 1; t2 = acc; this.f(t0, t1, t2) }` with the call reading `GetValue(t0)` —
+/// evaluation order being the point of the spill. A receiver test that demanded the literal
+/// receiver slot would therefore answer "different instance" for every member self-call.
+///
+/// So the aliases are followed: a generated, unnamed `Variable` initialized from a slot already
+/// known to hold this instance holds it too, to a fixed point. Only `named: false` temporaries
+/// qualify — a source `val` is the programmer's and the rewrite has no business assuming what stays
+/// in it — and a slot the body ever reassigns is dropped, so an alias that is true at one point in
+/// the body cannot be relied on at another.
+///
+/// Being conservative here costs nothing but a missed rewrite: a self-call this does not recognize
+/// stays an ordinary call, which is what the program did before.
+fn collect_this_slots(ir: &IrFile, roots: &[ExprId], frame: &mut Frame) {
+    if frame.receiver.is_none() {
+        return;
+    }
+    let mut bindings: Vec<(u32, ExprId)> = Vec::new();
+    let mut assigned: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut pending: Vec<ExprId> = roots.to_vec();
+    let mut seen = std::collections::HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        match ir.expr(expression) {
+            IrExpr::Variable {
+                index,
+                init: Some(init),
+                named: false,
+                ..
+            } => bindings.push((*index, *init)),
+            IrExpr::SetValue { var, .. } => {
+                assigned.insert(*var);
+            }
+            _ => {}
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    loop {
+        let mut grew = false;
+        for &(slot, init) in &bindings {
+            if frame.this_slots.contains(&slot) || assigned.contains(&slot) {
+                continue;
+            }
+            if matches!(ir.expr(init), IrExpr::GetValue(source) if frame.this_slots.contains(source))
+            {
+                frame.this_slots.insert(slot);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    frame.this_slots.retain(|slot| !assigned.contains(slot));
 }
 
 /// Whether one or several root-to-node paths reach each node in the body.
@@ -154,8 +216,7 @@ fn returns_from_here(ir: &IrFile, expression: ExprId) -> bool {
 fn rewrite_returned_tail_calls(
     ir: &mut IrFile,
     roots: &[ExprId],
-    function: FunId,
-    parameter_count: usize,
+    frame: &Frame,
     result: Ty,
     origin: OriginId,
 ) -> Result<(), FirLoweringFailure> {
@@ -181,8 +242,7 @@ fn rewrite_returned_tail_calls(
                 // instead: it is a tail position too, so whatever it makes of the body's last
                 // expression it makes of this one. The answer replaces the `return` where it
                 // stands, and a `return` it left a `return` is walked into like anything else.
-                let rebuilt =
-                    tail_value(ir, expression, function, parameter_count, result, origin)?;
+                let rebuilt = tail_value(ir, expression, frame, result, origin)?;
                 let node = ir.expr(rebuilt).clone();
                 let stepped = !matches!(node, IrExpr::Return(_));
                 if stepped {
@@ -200,33 +260,107 @@ fn rewrite_returned_tail_calls(
     Ok(())
 }
 
+/// The frame a `tailrec` loop steps: which function a self-call must name, and which value slots
+/// hold the parameters it reassigns.
+///
+/// The slots are not always `0..count`. A body's dispatch receiver sits at `capture_count` with the
+/// parameters after it, so a MEMBER's first parameter is one above its `this` — reassigning from
+/// zero there would write the receiver and shift every argument by one.
+pub(super) struct Frame {
+    function: FunId,
+    /// Value slot of the first parameter.
+    first_parameter: u32,
+    count: usize,
+    /// A member's `this` slot. `None` for a static function, including an extension: an extension
+    /// receiver is an ordinary parameter inside `first_parameter..count`, which is what lets a
+    /// self-call re-bind it by stepping.
+    receiver: Option<u32>,
+    /// Slots that hold this frame's own instance — `receiver` plus the generated temporaries a call
+    /// spills it into. Empty for a static frame. Filled by [`finish_tailrec_body`].
+    this_slots: std::collections::HashSet<u32>,
+}
+
+impl Frame {
+    /// The frame a body reported, for the function it lowers and its parameter count.
+    ///
+    /// The slots come from [`super::BodySlots`] and are NOT recomputed here. Deriving them a second
+    /// time is what this constructor exists to prevent: a static frame is not always slot zero and a
+    /// member's parameters are not always `this + 1` — captures, a local class's constructor
+    /// captures and its context values all take slots first, and only the lowering knows how many.
+    pub(super) fn of_body(function: FunId, slots: super::BodySlots, count: usize) -> Self {
+        Self {
+            function,
+            first_parameter: slots.first_parameter,
+            count,
+            receiver: slots.dispatch_receiver,
+            this_slots: slots.dispatch_receiver.into_iter().collect(),
+        }
+    }
+}
+
 /// Whether `call` is this function calling itself with its whole parameter list — the only shape
-/// the loop can step. A partial list is somebody else's overload, and a call with a receiver to
-/// re-bind is not the same frame.
-fn is_self_call(ir: &IrFile, call: ExprId, function: FunId, parameter_count: usize) -> bool {
-    matches!(
-        ir.expr(call),
+/// the loop can step. A partial list is somebody else's overload, or a call that leaves a defaulted
+/// argument for the callee to fill, and neither reassigns everything the next turn reads.
+///
+/// For a MEMBER the frame is the instance too: `count(n - 1)` on `this` is the same frame and steps,
+/// while `Other().count(n - 1)` is a different one and has to stay a call.
+fn is_self_call(ir: &IrFile, call: ExprId, frame: &Frame) -> bool {
+    match ir.expr(call) {
         IrExpr::Call {
             callee: Callee::Local(target),
             dispatch_receiver: None,
             args,
-        } if *target == function && args.len() == parameter_count
-    )
+        } => frame.receiver.is_none() && *target == frame.function && args.len() == frame.count,
+        IrExpr::MethodCall {
+            class,
+            index,
+            receiver,
+            args,
+        } => {
+            if frame.receiver.is_none() {
+                return false;
+            }
+            ir.classes
+                .get(*class as usize)
+                .and_then(|class| class.methods.get(*index as usize))
+                == Some(&frame.function)
+                && matches!(ir.expr(*receiver), IrExpr::GetValue(slot) if frame.this_slots.contains(slot))
+                && args.len() == frame.count
+                && args.iter().all(Option::is_some)
+        }
+        _ => false,
+    }
+}
+
+/// The arguments a self-call passes, in parameter order. `call` must satisfy [`is_self_call`],
+/// which is what makes the `MethodCall` unwrap total.
+fn self_call_arguments(ir: &IrFile, call: ExprId) -> Vec<ExprId> {
+    match ir.expr(call) {
+        IrExpr::Call { args, .. } => args.clone(),
+        IrExpr::MethodCall { args, .. } => args
+            .iter()
+            .map(|argument| argument.expect("a self call passes every parameter"))
+            .collect(),
+        _ => unreachable!("a self call is a call"),
+    }
 }
 
 /// The loop step a self-call becomes: every parameter reassigned, then `continue` to the synthetic
 /// loop. `call` must satisfy [`is_self_call`].
-fn loop_step(ir: &mut IrFile, call: ExprId, parameter_count: usize, origin: OriginId) -> IrExpr {
-    let IrExpr::Call { args, .. } = ir.expr(call).clone() else {
-        unreachable!("a self call is a call")
-    };
-    let mut updates = Vec::with_capacity(parameter_count + 1);
+///
+/// The receiver is deliberately NOT reassigned. A static frame has none, and a member self-call is
+/// the same frame only when it already dispatches on `this` — so the slot holding it is already
+/// correct, and writing it would be a store with nothing to store.
+fn loop_step(ir: &mut IrFile, call: ExprId, frame: &Frame, origin: OriginId) -> IrExpr {
+    let args = self_call_arguments(ir, call);
+    let mut updates = Vec::with_capacity(frame.count + 1);
     for (parameter, value) in args.into_iter().enumerate() {
+        let parameter =
+            u32::try_from(parameter).expect("tailrec parameter count exceeds packed value ids");
         updates.push(generated(
             ir,
             IrExpr::SetValue {
-                var: u32::try_from(parameter)
-                    .expect("tailrec parameter count exceeds packed value ids"),
+                var: frame.first_parameter + parameter,
                 value,
             },
             origin,
@@ -278,14 +412,13 @@ pub(super) fn recurses_into_itself(ir: &IrFile, body: ExprId, function: FunId) -
 fn tail_value(
     ir: &mut IrFile,
     expression: ExprId,
-    function: FunId,
-    parameter_count: usize,
+    frame: &Frame,
     result: Ty,
     origin: OriginId,
 ) -> Result<ExprId, FirLoweringFailure> {
     match ir.expr(expression).clone() {
-        IrExpr::Call { .. } if is_self_call(ir, expression, function, parameter_count) => {
-            let step = loop_step(ir, expression, parameter_count, origin);
+        IrExpr::Call { .. } | IrExpr::MethodCall { .. } if is_self_call(ir, expression, frame) => {
+            let step = loop_step(ir, expression, frame, origin);
             Ok(generated(ir, step, origin))
         }
         IrExpr::Block {
@@ -297,14 +430,7 @@ fn tail_value(
             // tail position. This is the shape produced by a Unit-returning `if`/`when` whose
             // recursive call occupies one arm.
             if let Some(tail) = stmts.pop() {
-                stmts.push(tail_value(
-                    ir,
-                    tail,
-                    function,
-                    parameter_count,
-                    result,
-                    origin,
-                )?);
+                stmts.push(tail_value(ir, tail, frame, result, origin)?);
             } else {
                 stmts.push(generated(ir, IrExpr::Return(None), origin));
             }
@@ -329,40 +455,19 @@ fn tail_value(
             let tail = stmts
                 .pop()
                 .expect("checked for a second statement just above");
-            stmts.push(tail_value(
-                ir,
-                tail,
-                function,
-                parameter_count,
-                result,
-                origin,
-            )?);
+            stmts.push(tail_value(ir, tail, frame, result, origin)?);
             stmts.push(returned);
             Ok(generated(ir, IrExpr::Block { stmts, value: None }, origin))
         }
         IrExpr::Block { mut stmts, value } => {
             if let Some(value) = value {
-                stmts.push(tail_value(
-                    ir,
-                    value,
-                    function,
-                    parameter_count,
-                    result,
-                    origin,
-                )?);
+                stmts.push(tail_value(ir, value, frame, result, origin)?);
             } else if let Some(tail) = stmts.pop() {
                 // A block-bodied function carries its explicit `return` (or Unit tail statement)
                 // as the final statement rather than as the block value. It is still the sole tail
                 // position of this block. The statements before it are tail positions only
                 // where they `return`.
-                stmts.push(tail_value(
-                    ir,
-                    tail,
-                    function,
-                    parameter_count,
-                    result,
-                    origin,
-                )?);
+                stmts.push(tail_value(ir, tail, frame, result, origin)?);
             } else if result == Ty::Unit {
                 stmts.push(generated(ir, IrExpr::Return(None), origin));
             } else {
@@ -370,9 +475,7 @@ fn tail_value(
             }
             Ok(generated(ir, IrExpr::Block { stmts, value: None }, origin))
         }
-        IrExpr::Return(Some(value)) => {
-            tail_value(ir, value, function, parameter_count, result, origin)
-        }
+        IrExpr::Return(Some(value)) => tail_value(ir, value, frame, result, origin),
         // A LOOP is not a value and has no tail position of its own: what leaves the function from
         // inside one is a `return`, which the sweep reaches wherever it stands. Wrapping the loop
         // in a `return` instead would return the loop — which is what a body ending in
@@ -383,10 +486,7 @@ fn tail_value(
             let branches = branches
                 .into_iter()
                 .map(|(condition, branch)| {
-                    Ok((
-                        condition,
-                        tail_value(ir, branch, function, parameter_count, result, origin)?,
-                    ))
+                    Ok((condition, tail_value(ir, branch, frame, result, origin)?))
                 })
                 .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
             Ok(generated(ir, IrExpr::When { branches }, origin))
@@ -453,8 +553,217 @@ mod tests {
     }
 
     fn finish(ir: &mut IrFile, roots: Vec<ExprId>) {
-        finish_tailrec_body(ir, roots, FUNCTION, 1, OriginId::from_raw(0))
-            .expect("the body has a tail");
+        finish_tailrec_body(
+            ir,
+            roots,
+            Frame::of_body(
+                FUNCTION,
+                crate::fir_lower::BodySlots {
+                    dispatch_receiver: None,
+                    first_parameter: 0,
+                },
+                1,
+            ),
+            OriginId::from_raw(0),
+        )
+        .expect("the body has a tail");
+    }
+
+    /// A one-parameter MEMBER `tailrec fun step(n: Int): Int` on a class that declares it, with
+    /// `this` in slot 0 and the parameter in slot 1 — the layout a member body is lowered with.
+    fn member_file() -> IrFile {
+        let mut ir = file();
+        ir.functions[FUNCTION as usize].is_static = false;
+        ir.functions[FUNCTION as usize].dispatch_receiver = Some(crate::types::type_name("C"));
+        let class = ir.add_class(crate::ir::IrClass::synthetic(crate::types::type_name("C")));
+        ir.classes[class as usize].methods.push(FUNCTION);
+        ir
+    }
+
+    /// `{ t = <receiver>; this.step(n) }` returned — the shape a member call is lowered into, with
+    /// the receiver spilled into temporary slot `temp`.
+    fn returned_member_call(ir: &mut IrFile, receiver: ExprId, temp: u32) -> ExprId {
+        let binding = ir.add_expr(IrExpr::Variable {
+            index: temp,
+            ty: Ty::Obj(crate::types::type_name("C"), &[]),
+            init: Some(receiver),
+            named: false,
+        });
+        let read = ir.add_expr(IrExpr::GetValue(temp));
+        let argument = ir.add_expr(IrExpr::GetValue(1));
+        let call = ir.add_expr(IrExpr::MethodCall {
+            class: 0,
+            index: 0,
+            receiver: read,
+            args: vec![Some(argument)],
+        });
+        let block = ir.add_expr(IrExpr::Block {
+            stmts: vec![binding],
+            value: Some(call),
+        });
+        ir.add_expr(IrExpr::Return(Some(block)))
+    }
+
+    fn finish_member(ir: &mut IrFile, roots: Vec<ExprId>) {
+        finish_tailrec_body(
+            ir,
+            roots,
+            Frame::of_body(
+                FUNCTION,
+                crate::fir_lower::BodySlots {
+                    dispatch_receiver: Some(0),
+                    first_parameter: 1,
+                },
+                1,
+            ),
+            OriginId::from_raw(0),
+        )
+        .expect("the body has a tail");
+    }
+
+    /// Whether the rewrite produced a LOOP STEP anywhere in the body.
+    ///
+    /// The node a `return` leaves behind is not the signal: `rewrite_returned_tail_calls` replaces a
+    /// block-shaped `return` with the rebuilt block whether or not anything stepped, so "still a
+    /// `Return`" answers a question about shape rather than about the rewrite. A `continue` carrying
+    /// the synthetic loop's label is written by `loop_step` and by nothing else.
+    fn steps(ir: &IrFile) -> bool {
+        ir.exprs.iter().any(|expression| {
+            matches!(expression, IrExpr::Continue { label: Some(label) } if label == LOOP_LABEL)
+        })
+    }
+
+    /// The control for the two member tests below: a receiver spilled from `this` is still `this`,
+    /// so the call is the same frame and steps. No Kotlin source reaches the rewrite WITHOUT this
+    /// spill, so a member rewrite that did not follow the alias would never fire at all.
+    #[test]
+    fn a_receiver_spilled_from_this_is_still_this() {
+        let mut ir = member_file();
+        let this = ir.add_expr(IrExpr::GetValue(0));
+        let returned = returned_member_call(&mut ir, this, 2);
+        ir.checked_return_depths.insert(returned, 0);
+        // A trailing statement keeps `returned` off the body's last root, so what rewrites it is
+        // the SWEEP, in place — the same path the static control above takes.
+        let tail = ir.add_expr(IrExpr::Return(None));
+        finish_member(&mut ir, vec![returned, tail]);
+
+        assert!(
+            steps(&ir),
+            "a self call on a temporary holding `this` is the loop step"
+        );
+    }
+
+    /// A temporary the body REASSIGNS is not a reliable alias: what it held where the alias was
+    /// established is not what it holds at the call. The slot is dropped and the call keeps
+    /// recursing, which is the answer the program had before.
+    #[test]
+    fn a_reassigned_temporary_is_not_an_alias_for_this() {
+        let mut ir = member_file();
+        let this = ir.add_expr(IrExpr::GetValue(0));
+        let returned = returned_member_call(&mut ir, this, 2);
+        ir.checked_return_depths.insert(returned, 0);
+        let other = ir.add_expr(IrExpr::GetValue(1));
+        let overwrite = ir.add_expr(IrExpr::SetValue {
+            var: 2,
+            value: other,
+        });
+        let tail = ir.add_expr(IrExpr::Return(None));
+        finish_member(&mut ir, vec![overwrite, returned, tail]);
+
+        assert!(
+            !steps(&ir),
+            "a reassigned slot is not followed, so the call stays a call"
+        );
+    }
+
+    /// The loop writes the slots the BODY reported, not slots derived from the receiver.
+    ///
+    /// `first_parameter` is not always `0` and not always `this + 1`. Captures, a local class's
+    /// constructor captures and its context values all take slots before the parameters, so a body
+    /// can put `this` at 3 and its first parameter at 7. Re-deriving the layout here — the thing
+    /// `BodySlots` exists to stop — would write slot 4 and shift every argument by three, which is
+    /// a miscompile no source-level test in this file would show, because the shapes that produce a
+    /// prefix are the ones that decline for other reasons today.
+    ///
+    /// So this asserts on the store the step emits: reported slot in, same slot out.
+    #[test]
+    fn the_loop_step_writes_the_reported_parameter_slots() {
+        const RECEIVER: u32 = 3;
+        const FIRST_PARAMETER: u32 = 7;
+
+        let mut ir = member_file();
+        let this = ir.add_expr(IrExpr::GetValue(RECEIVER));
+        let binding = ir.add_expr(IrExpr::Variable {
+            index: 11,
+            ty: Ty::Obj(crate::types::type_name("C"), &[]),
+            init: Some(this),
+            named: false,
+        });
+        let read = ir.add_expr(IrExpr::GetValue(11));
+        let argument = ir.add_expr(IrExpr::GetValue(FIRST_PARAMETER));
+        let call = ir.add_expr(IrExpr::MethodCall {
+            class: 0,
+            index: 0,
+            receiver: read,
+            args: vec![Some(argument)],
+        });
+        let block = ir.add_expr(IrExpr::Block {
+            stmts: vec![binding],
+            value: Some(call),
+        });
+        let returned = ir.add_expr(IrExpr::Return(Some(block)));
+        ir.checked_return_depths.insert(returned, 0);
+        let tail = ir.add_expr(IrExpr::Return(None));
+
+        finish_tailrec_body(
+            &mut ir,
+            vec![returned, tail],
+            Frame::of_body(
+                FUNCTION,
+                crate::fir_lower::BodySlots {
+                    dispatch_receiver: Some(RECEIVER),
+                    first_parameter: FIRST_PARAMETER,
+                },
+                1,
+            ),
+            OriginId::from_raw(0),
+        )
+        .expect("the body has a tail");
+
+        assert!(steps(&ir), "the spilled receiver is still this frame");
+        let written: Vec<u32> = ir
+            .exprs
+            .iter()
+            .filter_map(|expression| match expression {
+                IrExpr::SetValue { var, .. } => Some(*var),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            written,
+            vec![FIRST_PARAMETER],
+            "the step must write the reported first-parameter slot, and must not write the receiver"
+        );
+    }
+
+    /// A call on an instance the frame did not supply is a different frame however it was reached,
+    /// so it stays a call — this is what stops `Other().step(n)` from being stepped as if it were
+    /// `this`.
+    #[test]
+    fn a_receiver_that_is_not_this_is_a_different_frame() {
+        let mut ir = member_file();
+        let other = ir.add_expr(IrExpr::GetValue(1));
+        let returned = returned_member_call(&mut ir, other, 2);
+        ir.checked_return_depths.insert(returned, 0);
+        // A trailing statement keeps `returned` off the body's last root, so what rewrites it is
+        // the SWEEP, in place — the same path the static control above takes.
+        let tail = ir.add_expr(IrExpr::Return(None));
+        finish_member(&mut ir, vec![returned, tail]);
+
+        assert!(
+            !steps(&ir),
+            "a self call on another instance is not this frame"
+        );
     }
 
     /// Every node carrying a checked return depth is still a `Return`, which is the side table's

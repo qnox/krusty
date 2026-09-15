@@ -1,9 +1,10 @@
 //! Checked generation of a serializer's `deserialize` body.
 
+use super::element_serializer::always_available_builtin_serializer;
 use super::{
-    builtin_element_serializer, class_ty, collection_serializer_builder, contextual_serializer_for,
-    decode_element_method, element_serializer_expr, element_serializer_plan, inline_prim_methods,
-    is_nullable, property_is_contextual, slot_width, value_class_underlying, virtual_iface,
+    class_ty, collection_serializer_builder, contextual_serializer_for, decode_element_method,
+    element_serializer_expr, element_serializer_plan, inline_prim_methods, is_nullable,
+    property_is_contextual, slot_width, value_class_underlying, virtual_iface,
 };
 use crate::ir::{ClassId, ExprId, IrConst, IrExpr, IrFile, IrTypeOp};
 use crate::kt_string::KtString;
@@ -375,8 +376,12 @@ impl DeserializeBody<'_> {
                 } else if is_nullable(ty) {
                     // f_k = (T) c.decodeNullableSerializableElement(desc, k,
                     // <Elem>Serializer.INSTANCE, null) — yields the element or null.
-                    let ser = builtin_element_serializer(ty).unwrap();
-                    let inst = ir.external_static_instance(ser, ser, "INSTANCE");
+                    let serializer = always_available_builtin_serializer(ty).unwrap();
+                    let inst = ir.add_expr(IrExpr::ExternalStaticInstance {
+                        owner: serializer,
+                        ty: serializer,
+                        field: "INSTANCE".to_string(),
+                    });
                     let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
                     let raw = ir.add_expr(IrExpr::Call {
                         callee: virtual_iface(

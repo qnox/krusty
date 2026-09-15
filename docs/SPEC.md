@@ -4846,14 +4846,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`src/fir_lower/tailrec.rs`,
   `tests/native_codegen_e2e.rs::a_unit_tail_call_before_a_bare_return_becomes_a_loop`).
 
-- **A `tailrec` that is not rewritten into a loop is declined, not compiled.** Only a top-level,
-  non-extension, non-context `tailrec` has its tail self-calls turned into a loop; a member, an
-  extension and a local one still recurse. `tailrec` is a promise about stack, and the sources that
-  use it recurse past any stack, so emitting the recursion means emitting a program that dies on a
-  guard page where it should print its answer — and whether it dies depends on the machine's stack
-  limit, which makes a gate that accepts it unreproducible. The checked lowering records these
-  functions in `IrFile::unlooped_tailrec` and the native backend declines them; the JVM lane
-  reaches the same conclusion by skipping the file in `ir_lower`
+- **A `tailrec` the rewrite declines is declined by the backend too, not compiled.** `tailrec` is a
+  promise about stack, and the sources that use it recurse past any stack, so emitting the recursion
+  means emitting a program that dies on a guard page where it should print its answer — and whether
+  it dies depends on the machine's stack limit, which makes a gate that accepts it unreproducible.
+  Since the rewrite became a question about the FRAME rather than about where a function was
+  declared (see "What `tailrec` loops is a FRAME" below), a member and an extension are rewritten
+  like any top-level function, and what remains recursive is narrower: a context parameter, a local
+  `tailrec`, an OVERRIDABLE member — which the frontend rejects outright, because looping it would
+  devirtualize a virtual call — and a self-call in a position the rewrite does not descend into,
+  such as under a `try`. The checked lowering records every one of them in
+  `IrFile::unlooped_tailrec` and the native backend declines the file
   (`src/fir_lower/sink.rs`, `src/native/codegen/lower.rs`,
   `tests/native_codegen_e2e.rs::a_tailrec_the_checked_lowering_leaves_recursive_is_declined`).
 
@@ -5020,6 +5023,43 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stays available, and a capture-free lambda is one object
   (`src/native/codegen/lower.rs`,
   `tests/native_codegen_e2e.rs::comparing_two_function_values_is_declined`).
+
+- **What `tailrec` loops is a FRAME, not a top-level function.** A tail self-call can be stepped
+  whenever the next turn reads only slots the step reassigns. That is true of more than a top-level
+  `fun` called by name, and the three shapes differ only in where the caller's values sit:
+
+  **An extension** steps its receiver like any other parameter. The receiver is inserted into the
+  function's parameter list at its own position and passed as an ordinary argument, so
+  `tailrec fun Int.down(acc: Int): Int = if (this == 0) acc else (this - 1).down(acc + 1)` re-binds
+  it by assigning that slot. A self-call to a *different* receiver is therefore a loop step rather
+  than a shape to decline — the opposite of the member rule below, because here the receiver is part
+  of the frame rather than the identity of it.
+
+  **A member** steps when the call dispatches on `this`: the instance does not change, so only the
+  parameters are reassigned and the receiver slot is left alone. `Other().f(n - 1)` is a different
+  frame, stays an ordinary call, and keeps recursing.
+
+  **The parameters are not always slots `0..n`.** A body's dispatch receiver sits below them, so a
+  member's first parameter is one above its `this`; captures and a local class's constructor values
+  take slots before that. The lowering is the authority (`BodyLowering::value_slot`) and reports the
+  layout it used, rather than the rewrite deriving it a second time and being wrong when the two
+  disagree.
+
+  **A member call does not read `this` at the call node.** The lowering spills the receiver and each
+  argument into generated temporaries first — evaluation order being the point — so the shape
+  reaching the rewrite is `{ t0 = this; t1 = n - 1; this.f(t0, t1) }` with the call reading `t0`. The
+  rewrite follows those aliases to a fixed point through unnamed temporaries only, and drops any slot
+  the body reassigns. A source `val` is never followed: what stays in it is the programmer's
+  business. Being conservative costs only a missed rewrite, and a missed rewrite is the program that
+  was compiled before.
+
+  A CONTEXT PARAMETER is still left recursing: it takes slots between the receiver and the
+  parameters, and nothing here tests that layout.
+  Tests: `tests/tailrec_e2e.rs` (`a_member_tailrec_runs_flat`, `an_extension_tailrec_runs_flat`,
+  `a_member_call_on_another_instance_still_recurses`, and
+  `member_and_extension_tailrec_agree_with_kotlinc`, which asks the reference compiler the same
+  questions — a `StackOverflowError` on one side and an answer on the other is the divergence it
+  reports).
 
 - **A `return` is a tail position wherever it stands.** `tailrec` rewrites a tail self-call into a
   loop step, and the tail positions of a function are not only its last expression: nothing of the
