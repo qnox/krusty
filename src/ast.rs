@@ -1,11 +1,13 @@
 //! Index-based arena AST (data-oriented: no `Box`/`Rc` graph, all edges are `u32` ids into
 //! parallel `Vec`s, so a file's whole AST is one bulk-freeable allocation block).
 
-pub mod retained_defaults;
-use retained_defaults::{retain_class_default_spans, retain_param_default_spans};
+mod retained_defaults;
+mod return_labels;
 use crate::diag::Span;
 use crate::kt_string::{KtString, KtStringBuf};
 use crate::types::Visibility;
+use retained_defaults::{retain_class_default_spans, retain_param_default_spans};
+pub(crate) use return_labels::ReturnLabelSpans;
 
 mod call_shape;
 pub(crate) use call_shape::explicit_call_receiver;
@@ -1518,8 +1520,8 @@ pub struct File {
     /// Labels written on declaration statements (`label@ val …`, `label@ fun …`), keyed by the
     /// declaration statement. The value retains both spelling and exact label-token span.
     pub statement_labels: std::collections::HashMap<StmtId, (String, Span)>,
-    /// `@` token spans of this file's `return@label`s — see [`crate::parser::return_labels`].
-    pub return_label_spans: crate::parser::return_labels::ReturnLabelSpans,
+    /// `@` token spans of this file's `return@label`s.
+    pub(crate) return_label_spans: ReturnLabelSpans,
     /// Parser-desugared member/index inc/dec value blocks whose access operands are deliberately
     /// shared between the read and write. Lowering spills the operands that semantic resolution
     /// proved are runtime values; package/classifier/`super` qualifiers have no value type and stay

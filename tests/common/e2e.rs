@@ -46,8 +46,8 @@ pub fn expect_true_e2e(tag: &str, src: &str, extra_cp: &[PathBuf]) {
 /// A nonzero-exit assertion is not enough on its own — it passes when krusty rejects the fixture for
 /// an unrelated reason, which is exactly how a "both compilers agree" claim goes stale.
 pub fn expect_identical_rejection(result: &CompilerDiagnosticResult, tag: &str) {
-    let krusty_rendered = format!("{}{}", result.krusty_stdout, result.krusty_stderr);
-    let krusty = compiler_errors(&krusty_rendered);
+    let stdout_errors = compiler_errors(&result.krusty_stdout);
+    let krusty = compiler_errors(&result.krusty_stderr);
     let reference = compiler_errors(&result.reference_stderr);
     assert_ne!(
         result.reference_code, 0,
@@ -56,7 +56,13 @@ pub fn expect_identical_rejection(result: &CompilerDiagnosticResult, tag: &str) 
     );
     assert_ne!(
         result.krusty_code, 0,
-        "{tag}: krusty accepted a fixture kotlinc rejects: {krusty_rendered}"
+        "{tag}: krusty accepted a fixture kotlinc rejects: {}{}",
+        result.krusty_stdout, result.krusty_stderr
+    );
+    assert_eq!(
+        stdout_errors,
+        [],
+        "{tag}: krusty emitted errors on stdout instead of stderr"
     );
     assert!(
         !reference.is_empty(),

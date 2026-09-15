@@ -2521,10 +2521,10 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   lambda does not enclose the return alike. The label survives on the node only as a bare `String`,
   so the span cannot be recovered afterwards: the parser now records the `@` span for the statement
   and expression forms, and both report sites read it. Shared test helpers
-  (`common::observed_errors`, `common::expect_identical_rejection`) compare the COMPLETE diagnostic
+  (`common::expect_identical_rejection`) compares the COMPLETE diagnostic
   set of both compilers — count, file, line, column, message and order — since a nonzero-exit
   assertion passes on an unrelated rejection, which is how a "both compilers agree" claim goes stale.
   `tests/unresolved_label_diagnostic_e2e.rs::an_unknown_return_label_matches_the_reference_diagnostic`,
-  `a_non_enclosing_return_label_matches_the_reference_diagnostic`,
+  `a_declared_but_non_enclosing_return_label_matches_the_reference_diagnostic`,
   `an_unresolved_label_in_expression_position_matches_the_reference_diagnostic`,
   `a_resolvable_return_label_still_works`.

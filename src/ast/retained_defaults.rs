@@ -5,11 +5,11 @@
 //! collect exactly those spans before the arenas are dropped, so nothing else has to keep the whole
 //! arena alive to answer for one default.
 
-use crate::ast::{ClassDecl, Decl, ExprId, File, Param};
+use crate::ast::{ClassDecl, ExprId, Param};
 use crate::diag::Span;
 use std::collections::HashMap;
 
-pub(crate) fn retain_default_span(
+pub(super) fn retain_default_span(
     default: Option<ExprId>,
     expr_spans: &[Span],
     retained: &mut HashMap<ExprId, Span>,
@@ -22,7 +22,7 @@ pub(crate) fn retain_default_span(
     }
 }
 
-pub(crate) fn retain_param_default_spans(
+pub(super) fn retain_param_default_spans(
     params: &[Param],
     expr_spans: &[Span],
     retained: &mut HashMap<ExprId, Span>,
@@ -32,7 +32,7 @@ pub(crate) fn retain_param_default_spans(
     }
 }
 
-pub(crate) fn retain_class_default_spans(
+pub(super) fn retain_class_default_spans(
     class: &ClassDecl,
     expr_spans: &[Span],
     retained: &mut HashMap<ExprId, Span>,

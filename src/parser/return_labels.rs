@@ -1,88 +1,6 @@
-//! Where a `return@label`'s `@` token is, and which node it belongs to.
-//!
-//! The reference compiler reports an unresolvable label AT the `@`, not at the `return` keyword. The
-//! label survives on the node only as a bare name, so the span cannot be recovered after parsing and
-//! has to be recorded while the token is in hand. Both spellings need it — `return@l` is a statement
-//! in one position and an expression in another — so the two tables live together here rather than
-//! as separate facts spread across the AST root.
-
 use crate::ast::{ExprId, StmtId};
 use crate::diag::Span;
 use crate::token::TokenKind;
-use std::collections::HashMap;
-
-/// The `@` token spans of the `return@label`s in one file, by the node that carries the label.
-#[derive(Default, Clone)]
-pub struct ReturnLabelSpans {
-    statements: HashMap<StmtId, Span>,
-    expressions: HashMap<ExprId, Span>,
-}
-
-impl ReturnLabelSpans {
-    pub fn record_statement(&mut self, statement: StmtId, span: Option<Span>) {
-        if let Some(span) = span {
-            self.statements.insert(statement, span);
-        }
-    }
-
-    pub fn record_expression(&mut self, expression: ExprId, span: Option<Span>) {
-        if let Some(span) = span {
-            self.expressions.insert(expression, span);
-        }
-    }
-
-    pub fn statement(&self, statement: StmtId) -> Option<Span> {
-        self.statements.get(&statement).copied()
-    }
-
-    pub fn expression(&self, expression: ExprId) -> Option<Span> {
-        self.expressions.get(&expression).copied()
-    }
-
-    /// Move both tables onto the compacted arenas. They are arena-keyed like every other side table,
-    /// so a body retained past Pass-1 behind discarded syntax would otherwise read a stale id.
-    pub fn remap(
-        &mut self,
-        statements: &HashMap<StmtId, StmtId>,
-        expressions: &HashMap<ExprId, ExprId>,
-    ) {
-        self.statements = std::mem::take(&mut self.statements)
-            .into_iter()
-            .filter_map(|(old, span)| statements.get(&old).map(|new| (*new, span)))
-            .collect();
-        self.expressions = std::mem::take(&mut self.expressions)
-            .into_iter()
-            .filter_map(|(old, span)| expressions.get(&old).map(|new| (*new, span)))
-            .collect();
-    }
-
-    /// Both tables are keyed by the arenas released with the bodies, so they go with them.
-    pub fn clear(&mut self) {
-        self.statements.clear();
-        self.expressions.clear();
-    }
-
-    /// Every key must still name a live arena slot, and every span must lie inside the source.
-    pub fn integrity_error(&self, statements: usize, expressions: usize, source: usize) -> Option<String> {
-        for (statement, span) in &self.statements {
-            if statement.0 as usize >= statements {
-                return Some(format!("return-label span keyed by dangling statement {}", statement.0));
-            }
-            if span.hi as usize > source || span.lo > span.hi {
-                return Some(format!("return-label statement span {}..{} outside the source", span.lo, span.hi));
-            }
-        }
-        for (expression, span) in &self.expressions {
-            if expression.0 as usize >= expressions {
-                return Some(format!("return-label span keyed by dangling expression {}", expression.0));
-            }
-            if span.hi as usize > source || span.lo > span.hi {
-                return Some(format!("return-label expression span {}..{} outside the source", span.lo, span.hi));
-            }
-        }
-        None
-    }
-}
 
 impl crate::parser::Parser<'_> {
     /// `return`, `return expr`, `return@label`, `return@label expr`.
@@ -93,14 +11,13 @@ impl crate::parser::Parser<'_> {
     pub(super) fn parse_return_statement(&mut self, start: crate::diag::Span) -> StmtId {
         self.bump();
         let (label, label_span) = self.parse_return_label();
-        let value = if self.at(TokenKind::Newline)
-            || self.at(TokenKind::RBrace)
-            || self.at(TokenKind::Eof)
-        {
-            None
-        } else {
-            Some(self.parse_expr())
-        };
+        let value =
+            if self.at(TokenKind::Newline) || self.at(TokenKind::RBrace) || self.at(TokenKind::Eof)
+            {
+                None
+            } else {
+                Some(self.parse_expr())
+            };
         let statement = self.finish_stmt(crate::ast::Stmt::Return(value, label), start);
         self.file
             .return_label_spans

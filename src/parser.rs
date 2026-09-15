@@ -17,7 +17,7 @@ mod expressions;
 mod incdec;
 mod lexical_type_parameters;
 mod nesting;
-pub mod return_labels;
+mod return_labels;
 pub(crate) use declaration_stream::visit_declaration_units_with_features;
 use lexical_type_parameters::LexicalTypeParameters;
 
