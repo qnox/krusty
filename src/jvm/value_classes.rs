@@ -377,8 +377,7 @@ pub fn lower_value_classes(
         if under.contains_key(&fq) || is_native_unsigned(fq) {
             continue;
         }
-        let rendered = fq.render();
-        if crate::types::prim_array_element(&rendered).is_some() {
+        if crate::types::prim_array_element(fq).is_some() {
             continue;
         }
         let dependency = classpath.value_class_declaration(fq);

@@ -209,30 +209,17 @@ pub fn params_descriptor(params: &[Ty]) -> String {
 }
 
 /// The JVM array descriptor for a primitive-array class name (`kotlin/IntArray` → `[I`), or `None`.
-fn primitive_array_descriptor(internal: impl InternalName) -> Option<&'static str> {
-    if internal.internal_matches("kotlin/IntArray") {
-        Some("[I")
-    } else if internal.internal_matches("kotlin/LongArray")
-        || internal.internal_matches("kotlin/ULongArray")
-    {
-        Some("[J")
-    } else if internal.internal_matches("kotlin/ShortArray") {
-        Some("[S")
-    } else if internal.internal_matches("kotlin/ByteArray") {
-        Some("[B")
-    } else if internal.internal_matches("kotlin/BooleanArray") {
-        Some("[Z")
-    } else if internal.internal_matches("kotlin/CharArray") {
-        Some("[C")
-    } else if internal.internal_matches("kotlin/FloatArray") {
-        Some("[F")
-    } else if internal.internal_matches("kotlin/DoubleArray") {
-        Some("[D")
-    } else if internal.internal_matches("kotlin/UIntArray") {
-        Some("[I")
-    } else {
-        None
-    }
+/// The JVM array descriptor for a primitive specialized array class name (`kotlin/IntArray` → `[I`).
+///
+/// Two existing operations composed, and no table of its own: [`crate::types::prim_array_element`]
+/// identifies the element — it documents itself as "the single canonical table" that "the backend
+/// descriptor logic" routes through — and [`type_descriptor`] already erases an unsigned element to
+/// the signed primitive it is an inline class over. The hand-written list this replaced was the copy
+/// that made that documentation untrue: it named `UIntArray` and `ULongArray` and not `UByteArray`
+/// or `UShortArray`, so those two descriptored as `Lkotlin/UByteArray;` and would not load at all.
+fn primitive_array_descriptor(internal: impl InternalName) -> Option<String> {
+    let element = crate::types::prim_array_element(internal)?;
+    Some(format!("[{}", type_descriptor(element)))
 }
 
 /// JVM class-constant spelling for a Kotlin array classifier. Array classes use their descriptor as
@@ -242,7 +229,7 @@ pub fn array_class_descriptor(internal: impl InternalName) -> Option<String> {
     if internal.internal_matches("kotlin/Array") {
         Some("[Ljava/lang/Object;".to_string())
     } else {
-        primitive_array_descriptor(internal).map(str::to_string)
+        primitive_array_descriptor(internal)
     }
 }
 
@@ -286,8 +273,8 @@ pub fn type_descriptor(ty: Ty) -> String {
                 .unwrap_or_else(|| Ty::obj("kotlin/Any"));
             format!("[{}", type_descriptor(reference_array_element(e)))
         }
-        Ty::Obj(n, _) if primitive_array_descriptor(n).is_some() => {
-            primitive_array_descriptor(n).unwrap().into()
+        Ty::Obj(n, _) if crate::types::prim_array_element(n).is_some() => {
+            primitive_array_descriptor(n).expect("checked in the guard")
         }
         Ty::Obj(n, _) => obj_desc(&n.render()),
         // `Nothing` is uninhabited, so no value ever has this descriptor — but it IS written into
