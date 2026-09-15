@@ -209,30 +209,45 @@ pub fn params_descriptor(params: &[Ty]) -> String {
 }
 
 /// The JVM array descriptor for a primitive-array class name (`kotlin/IntArray` → `[I`), or `None`.
-fn primitive_array_descriptor(internal: impl InternalName) -> Option<&'static str> {
-    if internal.internal_matches("kotlin/IntArray") {
-        Some("[I")
-    } else if internal.internal_matches("kotlin/LongArray")
-        || internal.internal_matches("kotlin/ULongArray")
-    {
-        Some("[J")
-    } else if internal.internal_matches("kotlin/ShortArray") {
-        Some("[S")
-    } else if internal.internal_matches("kotlin/ByteArray") {
-        Some("[B")
-    } else if internal.internal_matches("kotlin/BooleanArray") {
-        Some("[Z")
-    } else if internal.internal_matches("kotlin/CharArray") {
-        Some("[C")
-    } else if internal.internal_matches("kotlin/FloatArray") {
-        Some("[F")
-    } else if internal.internal_matches("kotlin/DoubleArray") {
-        Some("[D")
-    } else if internal.internal_matches("kotlin/UIntArray") {
-        Some("[I")
-    } else {
-        None
+/// The signed primitive an unsigned type is stored as, and every other type unchanged.
+///
+/// Kotlin's unsigned types are inline classes over signed primitives, so `UByteArray` is a `byte[]`
+/// and a `UInt` element loads with `iaload`. The rule is one line; what it replaces is the same
+/// four names written out again in every table that decides a WIDTH, which is how two of the four
+/// came to be missing from three of them at once.
+///
+/// Narrow on purpose: a type parameter is left alone here even when its bound is scalar, because an
+/// array element's width is a question about the array, not about what the bound permits.
+pub(crate) fn unsigned_storage(ty: Ty) -> Ty {
+    match ty {
+        Ty::UByte => Ty::Byte,
+        Ty::UShort => Ty::Short,
+        Ty::UInt => Ty::Int,
+        Ty::ULong => Ty::Long,
+        other => other,
     }
+}
+
+/// The JVM array descriptor for a primitive specialized array class name (`kotlin/IntArray` → `[I`).
+///
+/// One lookup rather than a hand-maintained list. [`crate::types::prim_array_element`] already
+/// documents itself as "the single canonical table", and this was the copy that made that untrue:
+/// it named `UIntArray` and `ULongArray` and not `UByteArray` or `UShortArray`, so those two
+/// descriptored as `Lkotlin/UByteArray;` and the class would not load at all.
+fn primitive_array_descriptor(internal: impl InternalName) -> Option<&'static str> {
+    Some(
+        match unsigned_storage(crate::types::prim_array_element(internal)?) {
+            Ty::Int => "[I",
+            Ty::Long => "[J",
+            Ty::Short => "[S",
+            Ty::Byte => "[B",
+            Ty::Boolean => "[Z",
+            Ty::Char => "[C",
+            Ty::Float => "[F",
+            Ty::Double => "[D",
+            _ => return None,
+        },
+    )
 }
 
 /// JVM class-constant spelling for a Kotlin array classifier. Array classes use their descriptor as

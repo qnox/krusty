@@ -20228,11 +20228,11 @@ fn array_load_op(elem: Ty, reference_array: bool) -> (u8, i32) {
     if reference_array {
         return (0x32, 1);
     }
-    match elem {
-        // Unsigned arrays are the unboxed underlying primitive array (`UIntArray` = `[I`,
-        // `ULongArray` = `[J`), so they load with `iaload`/`laload`.
-        Ty::Int | Ty::UInt => (0x2e, 1),
-        Ty::Long | Ty::ULong => (0x2f, 2),
+    // An unsigned array IS the signed array it is an inline class over, so the element's width —
+    // and therefore the opcode — comes from the signed primitive it is stored as.
+    match crate::jvm::names::unsigned_storage(elem) {
+        Ty::Int => (0x2e, 1),
+        Ty::Long => (0x2f, 2),
         Ty::Float => (0x30, 1),
         Ty::Double => (0x31, 2),
         Ty::Boolean | Ty::Byte => (0x33, 1),
@@ -20298,10 +20298,9 @@ fn array_store_op(elem: Ty, reference_array: bool) -> (u8, i32) {
     if reference_array {
         return (0x53, 1);
     }
-    match elem {
-        // Unsigned arrays store into the unboxed underlying primitive array (`[I`/`[J`).
-        Ty::Int | Ty::UInt => (0x4f, 1),
-        Ty::Long | Ty::ULong => (0x50, 2),
+    match crate::jvm::names::unsigned_storage(elem) {
+        Ty::Int => (0x4f, 1),
+        Ty::Long => (0x50, 2),
         Ty::Float => (0x51, 1),
         Ty::Double => (0x52, 2),
         Ty::Boolean | Ty::Byte => (0x54, 1),
@@ -20313,7 +20312,7 @@ fn array_store_op(elem: Ty, reference_array: bool) -> (u8, i32) {
 
 /// `newarray` atype for a primitive element (JVMS Table 6.5.newarray-A).
 fn prim_newarray_atype(elem: Ty) -> u8 {
-    match elem {
+    match crate::jvm::names::unsigned_storage(elem) {
         Ty::Boolean => 4,
         Ty::Char => 5,
         Ty::Float => 6,
