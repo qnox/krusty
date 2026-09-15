@@ -15,6 +15,43 @@
 
 use super::common;
 
+/// Compare the COMPLETE diagnostic set of both compilers — count, file, line, column, message and
+/// order. A nonzero-exit or substring assertion passes on an unrelated rejection, which is how a
+/// "both compilers agree" claim goes stale.
+fn expect_identical_rejection(result: &common::CompilerDiagnosticResult, tag: &str) {
+    let rendered = format!("{}{}", result.krusty_stdout, result.krusty_stderr);
+    let krusty = common::compiler_errors(&rendered);
+    let reference = common::compiler_errors(&result.reference_stderr);
+    assert_ne!(
+        result.reference_code, 0,
+        "{tag}: kotlinc accepted the fixture: {}",
+        result.reference_stderr
+    );
+    assert_ne!(result.krusty_code, 0, "{tag}: krusty accepted: {rendered}");
+    assert!(
+        !reference.is_empty(),
+        "{tag}: kotlinc rejected with no parseable diagnostic: {}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        krusty, reference,
+        "{tag}: diagnostics differ.\nkrusty:  {krusty:#?}\nkotlinc: {reference:#?}"
+    );
+}
+
+/// Run one fixture under BOTH compilers and require the same `box()` value.
+///
+/// `expect_box_ok_files_with_stdlib` alone only proves krusty agrees with itself. These shapes are
+/// about matching the reference compiler, so it must run the identical source.
+fn both_compilers_box(main: &str, stem: &str) {
+    let reference = common::kotlinc_box_result(main);
+    assert_eq!(
+        reference, "OK",
+        "{stem}: the reference compiler disagrees: {reference}"
+    );
+    common::expect_box_ok_files_with_stdlib(&[("Main.kt", main)], stem);
+}
+
 const DECLARATIONS: &str = "interface Pipe\n\
 \n\
 interface Plug<P : Pipe, B : Any> {\n\
@@ -74,7 +111,7 @@ fun box(): String {{\n\
 \x20   return if (cfg.tag == \"json\") \"OK\" else \"FAIL: \" + cfg.tag\n\
 }}\n"
     );
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", &main)], "generic_receiver_lambda_param");
+    both_compilers_box(&main, "generic_receiver_lambda_param");
 }
 
 /// The spelling that already worked: the same type parameters with the receiver passed as an ordinary
@@ -94,7 +131,7 @@ fun box(): String {{\n\
 \x20   return if (cfg.tag == \"json\") \"OK\" else \"FAIL: \" + cfg.tag\n\
 }}\n"
     );
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", &main)], "ordinary_parameter_lambda");
+    both_compilers_box(&main, "ordinary_parameter_lambda");
 }
 
 /// The other spelling that already worked: a CONCRETE extension receiver, `B` still generic.
@@ -112,7 +149,7 @@ fun box(): String {{\n\
 \x20   return if (cfg.tag == \"json\") \"OK\" else \"FAIL: \" + cfg.tag\n\
 }}\n"
     );
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", &main)], "concrete_receiver_lambda");
+    both_compilers_box(&main, "concrete_receiver_lambda");
 }
 
 /// A member that the shaped receiver genuinely does not have is still rejected, so shaping cannot
@@ -131,14 +168,5 @@ fun bad() {{\n\
 }}\n"
     );
     let result = common::compiler_diagnostics(&[("Main.kt", &main)], &[]);
-    assert_ne!(
-        result.reference_code, 0,
-        "kotlinc must reject a member the config does not have: {}",
-        result.reference_stderr
-    );
-    assert_ne!(
-        result.krusty_code, 0,
-        "krusty accepted a member the shaped receiver does not have: {}{}",
-        result.krusty_stdout, result.krusty_stderr
-    );
+    expect_identical_rejection(&result, "a member the shaped receiver lacks");
 }
