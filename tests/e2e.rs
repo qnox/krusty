@@ -1571,7 +1571,7 @@ mod reified_value_class_splice_e2e;
 #[path = "file_private_extension_scope_e2e.rs"]
 mod file_private_extension_scope_e2e;
 
-#[path = "unsigned_arrays_e2e.rs"]
-mod unsigned_arrays_e2e;
 #[path = "settled_instance_check_e2e.rs"]
 mod settled_instance_check_e2e;
+#[path = "unsigned_arrays_e2e.rs"]
+mod unsigned_arrays_e2e;
