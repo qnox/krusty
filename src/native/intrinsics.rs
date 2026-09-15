@@ -281,6 +281,33 @@ pub(super) fn iteration_role(internal: crate::types::TypeName) -> Option<Iterati
     .find_map(|(candidate, role)| internal.matches(candidate).then_some(role))
 }
 
+/// Which role a TYPE plays, including the two the runtime walks that are not `Iterable` at all.
+///
+/// Neither an array nor a `CharSequence` is a `kotlin.collections.Iterable`, and Kotlin still lets
+/// a program reach every `Iterable` member on one, through an extension declared for it. The
+/// runtime walks both — an array's element at its own width, a string's by UTF-16 unit — so the
+/// role is what matters at a call site and the interface list is not.
+pub(super) fn iteration_role_of(ty: Ty) -> Option<IterationRole> {
+    let ty = ty.non_null();
+    if ty.is_array() {
+        return Some(IterationRole::Iterable);
+    }
+    let internal = ty.obj_internal()?;
+    let walkable_text = [
+        "kotlin/String",
+        "kotlin/CharSequence",
+        "java/lang/String",
+        "java/lang/CharSequence",
+    ];
+    if walkable_text
+        .iter()
+        .any(|candidate| internal.matches(candidate))
+    {
+        return Some(IterationRole::Iterable);
+    }
+    iteration_role(internal)
+}
+
 /// Whether a type name is the read-only list the native runtime builds, under either spelling.
 pub(super) fn is_list_type(internal: crate::types::TypeName) -> bool {
     [

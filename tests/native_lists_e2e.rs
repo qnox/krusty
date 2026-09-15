@@ -419,3 +419,76 @@ fn an_indexed_value_is_a_data_class() {
         "OK",
     );
 }
+
+#[test]
+fn an_array_is_walked_at_its_elements_own_width() {
+    // Neither an array nor a `CharSequence` is a `kotlin.collections.Iterable`, and Kotlin still
+    // lets a program reach every `Iterable` member on one. What decides how an element is read is
+    // the ARRAY's own descriptor: it is the only thing that knows how wide the element is and how
+    // to box its bits, which a receiver typed by an interface cannot say.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   var r = \"\"\n\
+         \x20   for ((i, x) in arrayOf(\"a\", \"b\").withIndex()) r += \"$i:$x;\"\n\
+         \x20   for ((i, n) in intArrayOf(7, 8).withIndex()) r += \"$i=$n;\"\n\
+         \x20   for ((i, d) in doubleArrayOf(1.5).withIndex()) r += \"$i~$d;\"\n\
+         \x20   for ((i, c) in charArrayOf('x').withIndex()) r += \"$i$c;\"\n\
+         \x20   return if (r == \"0:a;1:b;0=7;1=8;0~1.5;0x;\") \"OK\" else \"fail: $r\"\n\
+         }\n",
+        "ArrayWalk",
+        "OK",
+    );
+}
+
+#[test]
+fn a_string_is_walked_by_utf16_unit() {
+    // A string stores UTF-8 and its "elements" are the units Kotlin counts, so the walk is the same
+    // one `length` and `get` already pay for rather than a pass over the bytes.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   var r = \"\"\n\
+         \x20   for ((i, c) in \"a\\u00e9b\".withIndex()) r += \"$i$c\"\n\
+         \x20   return if (r == \"0a1\\u00e92b\") \"OK\" else \"fail: $r\"\n\
+         }\n",
+        "StringWalk",
+        "OK",
+    );
+}
+
+#[test]
+fn an_arrays_iterable_members_reach_the_same_runtime_walk() {
+    // The point of giving an array an iterator is not `withIndex`: every member declared on
+    // `Iterable` reaches it through the same dispatch once it has one.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   if (intArrayOf(1, 2, 3).joinToString() != \"1, 2, 3\") return \"fail join\"\n\
+         \x20   val mapped = arrayOf(\"a\", \"b\").map { it + \"!\" }.joinToString()\n\
+         \x20   if (mapped != \"a!, b!\") return \"fail map: $mapped\"\n\
+         \x20   var seen = 0\n\
+         \x20   intArrayOf(4, 5).forEach { seen += it }\n\
+         \x20   return if (seen == 9) \"OK\" else \"fail forEach: $seen\"\n\
+         }\n",
+        "ArrayIterableMembers",
+        "OK",
+    );
+}
+
+#[test]
+fn an_arrays_iterator_answers_through_the_narrow_protocol_too() {
+    // `IntArray.iterator()` has the static type `IntIterator`, whose `next` carries a number rather
+    // than a reference — the same narrow protocol a range's iterator uses. So the walk has to
+    // answer there as well as through the general dispatch, and the receiver's own descriptor is
+    // what tells the two objects apart at run time.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val refs = arrayOf(\"O\", \"K\").iterator()\n\
+         \x20   val ints = intArrayOf(4, 2).iterator()\n\
+         \x20   val chars = charArrayOf('x', 'y').iterator()\n\
+         \x20   val answer = refs.next() + refs.next() + (ints.next() + ints.next())\n\
+         \x20   return if (answer == \"OK6\" && chars.next() == 'x' && chars.next() == 'y') \"OK\"\n\
+         \x20   else \"fail: $answer\"\n\
+         }\n",
+        "ArrayIteratorProtocols",
+        "OK",
+    );
+}

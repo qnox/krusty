@@ -1076,11 +1076,26 @@ KRef kt_range_iterator(KRef range) {
     return (KRef)iterator;
 }
 
+/* Defined with the array and string walks below. A program that asks a primitive array for an
+   iterator is handed one of those, and its STATIC type is `IntIterator`/`LongIterator`/
+   `CharIterator` — the narrow protocol these two functions implement. So the walk has to answer
+   here as well as through the general dispatch, and the descriptor is what says which object this
+   is. */
+static kt_boolean kt_walk_is(KRef iterator);
+static kt_boolean kt_walk_has_next(KRef iterator);
+static kt_long kt_walk_next_long(KRef iterator);
+
 kt_boolean kt_range_iterator_has_next(KRef iterator) {
+    if (kt_walk_is(iterator)) {
+        return kt_walk_has_next(iterator);
+    }
     return ((const KRangeIterator *)iterator)->has_next;
 }
 
 kt_long kt_range_iterator_next(KRef iterator) {
+    if (kt_walk_is(iterator)) {
+        return kt_walk_next_long(iterator);
+    }
     KRangeIterator *self = (KRangeIterator *)iterator;
     if (!self->has_next) {
         KT_FAIL("krusty: no more elements in this range\n");
@@ -1275,6 +1290,143 @@ KRef kt_list_iterator_next(KRef iterator) {
 
    `next` answers a reference for the same reason the question arises: a receiver typed by the
    interface has its element type erased, so what a caller there expects is the boxed element. */
+/* ---- iterating an array or a string ---------------------------------------------------------- */
+
+/* Neither an array nor a `String` is a `kotlin.collections.Iterable`, and Kotlin still lets a
+   program reach every `Iterable` member on one — through an extension, or through a `for` loop the
+   frontend turns into a counted walk before this runtime sees it. What arrives here is the other
+   case: the receiver kept as a value and asked for an iterator. One iterator each, because the
+   element of an array is read at its own width and boxed by its own descriptor, and the "element"
+   of a string is a UTF-16 unit the text does not store as one. */
+typedef struct KWalk {
+    KObjectHeader header;
+    KRef over;
+    kt_int at;
+} KWalk;
+
+static const uint32_t kt_walk_offsets[] = {offsetof(KWalk, over)};
+
+const KType kt_type_array_iterator = {"kotlin.collections.Iterator",
+                                      sizeof("kotlin.collections.Iterator") - 1,
+                                      sizeof(KWalk),
+                                      1,
+                                      0,
+                                      kt_walk_offsets,
+                                      &kt_type_any,
+                                      kt_any_vtable,
+                                      3,
+                                      0};
+
+const KType kt_type_chars_iterator = {"kotlin.collections.CharIterator",
+                                      sizeof("kotlin.collections.CharIterator") - 1,
+                                      sizeof(KWalk),
+                                      1,
+                                      0,
+                                      kt_walk_offsets,
+                                      &kt_type_any,
+                                      kt_any_vtable,
+                                      3,
+                                      0};
+
+static kt_boolean kt_walk_is(KRef iterator) {
+    return iterator != NULL
+           && (iterator->header.type == &kt_type_array_iterator
+               || iterator->header.type == &kt_type_chars_iterator);
+}
+
+/* Whether a descriptor is one of the nine array shapes. */
+static kt_boolean kt_is_array(const KType *type) {
+    return type == &kt_type_array || type == &kt_type_byte_array || type == &kt_type_short_array
+           || type == &kt_type_int_array || type == &kt_type_long_array
+           || type == &kt_type_char_array || type == &kt_type_boolean_array
+           || type == &kt_type_float_array || type == &kt_type_double_array;
+}
+
+static KRef kt_walk_of(const KType *type, KRef over) {
+    KWalk *walk = (KWalk *)kt_gc_allocate(type, sizeof(KWalk));
+    walk->over = over;
+    walk->at = 0;
+    return (KRef)walk;
+}
+
+/* One element of an array, boxed by the descriptor the ARRAY carries — the only thing that knows
+   how wide the element is and how to read its bits. */
+static KRef kt_array_element(KRef array, kt_int at) {
+    const KType *type = array->header.type;
+    const void *elements = (const void *)((const KArray *)array + 1);
+    if (type == &kt_type_array) {
+        return ((KRef *)elements)[at];
+    }
+    if (type == &kt_type_byte_array) {
+        return kt_box_byte(((const kt_byte *)elements)[at]);
+    }
+    if (type == &kt_type_short_array) {
+        return kt_box_short(((const kt_short *)elements)[at]);
+    }
+    if (type == &kt_type_int_array) {
+        return kt_box_int(((const kt_int *)elements)[at]);
+    }
+    if (type == &kt_type_long_array) {
+        return kt_box_long(((const kt_long *)elements)[at]);
+    }
+    if (type == &kt_type_char_array) {
+        return kt_box_char(((const kt_char *)elements)[at]);
+    }
+    if (type == &kt_type_boolean_array) {
+        return kt_box_boolean(((const kt_boolean *)elements)[at]);
+    }
+    if (type == &kt_type_float_array) {
+        return kt_box_float(((const kt_float *)elements)[at]);
+    }
+    return kt_box_double(((const kt_double *)elements)[at]);
+}
+
+static kt_boolean kt_walk_has_next(KRef iterator) {
+    const KWalk *walk = (const KWalk *)iterator;
+    if (iterator->header.type == &kt_type_chars_iterator) {
+        return walk->at < kt_string_length(walk->over);
+    }
+    return walk->at < kt_length_of(walk->over);
+}
+
+/* The element as the 64 bits the narrow iterator protocol carries. A REFERENCE array's element is
+   not a number and must never arrive here: an `Array<T>`'s iterator has the static type
+   `Iterator<T>`, which routes to the general dispatch instead, so reaching this with one means the
+   routing above went wrong rather than that a pointer should be returned as an integer. */
+static kt_long kt_walk_next_long(KRef iterator) {
+    KWalk *walk = (KWalk *)iterator;
+    if (!kt_walk_has_next(iterator)) {
+        KT_FAIL("krusty: no more elements in this iterator\n");
+    }
+    kt_int at = walk->at;
+    walk->at = at + 1;
+    if (iterator->header.type == &kt_type_chars_iterator) {
+        return kt_string_get(walk->over, at);
+    }
+    const KType *type = walk->over->header.type;
+    const void *elements = (const void *)((const KArray *)walk->over + 1);
+    if (type == &kt_type_byte_array) {
+        return ((const kt_byte *)elements)[at];
+    }
+    if (type == &kt_type_short_array) {
+        return ((const kt_short *)elements)[at];
+    }
+    if (type == &kt_type_int_array) {
+        return ((const kt_int *)elements)[at];
+    }
+    if (type == &kt_type_long_array) {
+        return ((const kt_long *)elements)[at];
+    }
+    if (type == &kt_type_char_array) {
+        return ((const kt_char *)elements)[at];
+    }
+    if (type == &kt_type_boolean_array) {
+        return ((const kt_boolean *)elements)[at];
+    }
+    KT_FAIL("krusty: this iterator does not answer a number\n");
+    return 0;
+}
+
 /* ---- withIndex ------------------------------------------------------------------------------ */
 
 /* `IndexedValue(index, value)`, Kotlin's own data class. Only `value` is a reference; the index is
@@ -1403,6 +1555,12 @@ KRef kt_iterable_iterator(KRef iterable) {
     if (iterable != NULL && iterable->header.type == &kt_type_list) {
         return kt_list_iterator(iterable);
     }
+    if (iterable != NULL && kt_is_array(iterable->header.type)) {
+        return kt_walk_of(&kt_type_array_iterator, iterable);
+    }
+    if (iterable != NULL && iterable->header.type == &kt_type_string) {
+        return kt_walk_of(&kt_type_chars_iterator, iterable);
+    }
     if (iterable != NULL && iterable->header.type == &kt_type_with_index) {
         KRef source = kt_iterable_iterator(((const KWithIndex *)iterable)->source);
         KIndexingIterator *counting = (KIndexingIterator *)kt_gc_allocate(
@@ -1417,6 +1575,14 @@ KRef kt_iterable_iterator(KRef iterable) {
 kt_boolean kt_iterator_has_next(KRef iterator) {
     if (iterator != NULL && iterator->header.type == &kt_type_list_iterator) {
         return kt_list_iterator_has_next(iterator);
+    }
+    if (iterator != NULL && iterator->header.type == &kt_type_array_iterator) {
+        const KWalk *walk = (const KWalk *)iterator;
+        return walk->at < kt_length_of(walk->over);
+    }
+    if (iterator != NULL && iterator->header.type == &kt_type_chars_iterator) {
+        const KWalk *walk = (const KWalk *)iterator;
+        return walk->at < kt_string_length(walk->over);
     }
     if (iterator != NULL && iterator->header.type == &kt_type_indexing_iterator) {
         return kt_iterator_has_next(((const KIndexingIterator *)iterator)->source);
@@ -1445,6 +1611,12 @@ static kt_int kt_iterable_size(KRef iterable) {
     }
     if (iterable->header.type == &kt_type_list) {
         return kt_list_size(iterable);
+    }
+    if (kt_is_array(iterable->header.type)) {
+        return kt_length_of(iterable);
+    }
+    if (iterable->header.type == &kt_type_string) {
+        return kt_string_length(iterable);
     }
     if (iterable->header.type != &kt_type_int_range &&
         iterable->header.type != &kt_type_long_range &&
@@ -1511,6 +1683,18 @@ KRef kt_iterator_next(KRef iterator) {
     }
     if (iterator->header.type == &kt_type_list_iterator) {
         return kt_list_iterator_next(iterator);
+    }
+    if (iterator->header.type == &kt_type_array_iterator) {
+        KWalk *walk = (KWalk *)iterator;
+        kt_int at = walk->at;
+        walk->at = at + 1;
+        return kt_array_element(walk->over, at);
+    }
+    if (iterator->header.type == &kt_type_chars_iterator) {
+        KWalk *walk = (KWalk *)iterator;
+        kt_int at = walk->at;
+        walk->at = at + 1;
+        return kt_box_char(kt_string_get(walk->over, at));
     }
     if (iterator->header.type == &kt_type_indexing_iterator) {
         KIndexingIterator *counting = (KIndexingIterator *)iterator;

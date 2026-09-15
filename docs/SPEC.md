@@ -1985,6 +1985,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_lists_e2e.rs`
   (`a_single_element_list_is_not_a_vararg_call_of_length_one`).
 
+- **An array and a string are walkable even though neither is an `Iterable`.** Kotlin declares
+  every `Iterable` member for both, through extensions, and a program may keep the receiver as a
+  value and ask it for an iterator. So the runtime walks both, and what decides how an element is
+  read is the receiver's own DESCRIPTOR: an array's says how wide the element is and how to box its
+  bits, which a receiver typed by an interface cannot. A string's "elements" are the UTF-16 units
+  Kotlin counts, so its walk is the one `length` and `get` already pay for rather than a pass over
+  the bytes.
+  Giving them an iterator is not about one member: every `Iterable` member reaches them through the
+  same dispatch once they have one, so `joinToString`, `map` and `forEach` came with it.
+  A primitive array's iterator answers through TWO protocols. `IntArray.iterator()` has the static
+  type `IntIterator`, whose `next` carries a number rather than a reference — the same narrow
+  protocol a range's iterator uses — so the walk answers there as well, and the receiver's own
+  descriptor is what tells the two objects apart at run time. A reference array's iterator is typed
+  `Iterator<T>` and never reaches that path, which is why a pointer is never returned as a number.
+  Tests: `tests/native_lists_e2e.rs` (`an_array_is_walked_at_its_elements_own_width`,
+  `a_string_is_walked_by_utf16_unit`, `an_arrays_iterable_members_reach_the_same_runtime_walk`,
+  `an_arrays_iterator_answers_through_the_narrow_protocol_too`).
+
 - **`withIndex()` is lazy, and yields a data class.** It answers an ITERABLE rather than a list:
   Kotlin's is lazy, and the loop consuming it may stop early. The object it makes keeps the source
   until something asks it for an iterator, and that iterator counts as it walks — so the index is a
@@ -1992,8 +2010,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `(10..12).withIndex()` count from zero. `IndexedValue` is a Kotlin data class, so its `equals`,
   `hashCode` and `toString` are the data class's and not identity's, and `component1`/`component2`
   answer the same two questions a destructuring asks.
-  Only an `Iterable` source is realized so far — an array or a `CharSequence` is not one of the
-  runtime's iterables yet and keeps declining.
   Tests: `tests/native_lists_e2e.rs` (`with_index_pairs_each_element_with_its_position`,
   `a_with_index_walk_destructures_and_stops_where_it_is_told`,
   `a_range_walks_with_an_index_the_same_way_a_list_does`, `an_indexed_value_is_a_data_class`).

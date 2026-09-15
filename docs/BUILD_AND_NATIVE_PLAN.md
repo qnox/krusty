@@ -1566,12 +1566,24 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **Walking an array or a string, for 2609.** Ten more, and only three of them were `withIndex`:
+   giving these two an iterator means every `Iterable` member reaches them through the dispatch
+   that was already there. The element read is the one thing that cannot be shared — an array's
+   descriptor is the only thing that knows the element's width and how to box its bits, and a
+   string's units are not what its storage holds.
+
+   The full e2e run caught what the conformance lane did not: a program that had been DECLINING
+   (`intArrayOf(1).iterator()`) started being emitted, and emitted wrong. Its static type is
+   `IntIterator`, whose `next` carries a number rather than a reference, so the new walk was being
+   read as a range. Two protocols reach the same object and the descriptor is what separates them —
+   which is the rule this runtime already follows everywhere else, and which I had applied to only
+   one of the two entry points.
+
    **`withIndex`, for 2599.** Lazy rather than eager, which cost nothing to do properly: the
    object keeps the source and the iterator it hands out counts as it walks, so a loop that breaks
-   never asks for the rest. The four that came back are the `Iterable` sources; the array and
-   `CharSequence` ones want an array iterator and a string iterator this runtime does not have yet,
-   which is the next increment and unlocks more than `withIndex` — every `Iterable` member would
-   reach an array through the same dispatch.
+   never asks for the rest. The four that came back were the `Iterable` sources; the array and
+   `CharSequence` ones wanted an array iterator and a string iterator, which is the increment
+   below.
 
    **A stale decline, for 2595.** A data class holding a `Double` had been declined with a reason
    that had stopped being true: "the runtime cannot render the value". It can — `krusty_fp.c`

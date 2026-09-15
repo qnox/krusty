@@ -369,10 +369,7 @@ impl BodyLowering<'_, '_, '_> {
             let (symbol, carried, answer) = indexed_value_symbol(name, args.len())?;
             return Some(self.list_call(symbol, &carried, answer, receiver, args, ret));
         }
-        let role = ty
-            .non_null()
-            .obj_internal()
-            .and_then(super::super::super::intrinsics::iteration_role);
+        let role = super::super::super::intrinsics::iteration_role_of(ty);
         let (symbol, carried, answer) =
             match role.and_then(|role| interface_symbol(role, name, args.len())) {
                 Some(symbol) => symbol,
