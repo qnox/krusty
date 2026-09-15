@@ -18,6 +18,19 @@
 
 use super::common;
 
+/// Run one fixture under BOTH compilers and require the same `box()` value.
+///
+/// `expect_box_ok_files_with_stdlib` alone only proves krusty agrees with itself. These shapes are
+/// about matching the reference compiler, so it must run the identical source.
+fn both_compilers_box(main: &str, stem: &str) {
+    let reference = common::kotlinc_box_result(main);
+    assert_eq!(
+        reference, "OK",
+        "{stem}: the reference compiler disagrees: {reference}"
+    );
+    common::expect_box_ok_files_with_stdlib(&[("Main.kt", main)], stem);
+}
+
 /// The failing shape: an interface built through its companion `invoke`, with two formals reachable
 /// only from the expected type. `S` appears solely as a lambda PARAMETER and `B` solely as the
 /// second one, so neither argument's own type can fix them; the declared result does.
@@ -47,7 +60,7 @@ fun box(): String {\n\
 \x20   if (lens.set(\"xyz\", 1) != \"abc\") return \"FAIL: set\"\n\
 \x20   return \"OK\"\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "companion_invoke_seeding");
+    both_compilers_box(MAIN, "companion_invoke_seeding");
 }
 
 /// The corpus shape: reached through a TYPEALIAS, with a generic enclosing function, and a `set` that
@@ -76,7 +89,7 @@ fun box(): String {\n\
 \x20   if (readOnly { it.length }.get(\"abcd\") != 4) return \"FAIL: extract\"\n\
 \x20   return \"OK\"\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "throwing_argument_seeding");
+    both_compilers_box(MAIN, "throwing_argument_seeding");
 }
 
 /// The spelling that already worked keeps working: the same shape built by a CONSTRUCTOR.
@@ -95,7 +108,7 @@ fun box(): String {\n\
 \x20   if (built.set(\"abc\", 1) != \"abc\") return \"FAIL: set\"\n\
 \x20   return \"OK\"\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "constructor_still_infers");
+    both_compilers_box(MAIN, "constructor_still_infers");
 }
 
 /// An expectation that genuinely does not fit is still rejected — seeding from it must not accept a
@@ -115,14 +128,34 @@ fun bad(): P<String, String, Int, Int> =\n\
 \x20       set = { source: String, _: Int -> source },\n\
 \x20   )\n";
     let result = common::compiler_diagnostics(&[("Main.kt", MAIN)], &[]);
-    assert_ne!(
-        result.reference_code, 0,
-        "kotlinc must reject a String focus against an Int expectation: {}",
-        result.reference_stderr
+    // Both compilers reject, with the same message FORM. They differ in where they place the blame:
+    // kotlinc pinpoints the offending lambda's own result, krusty reports the composed type at the
+    // function's return. That granularity difference is general and predates this change — it
+    // reproduces identically on a binary built without it — so it is recorded rather than matched
+    // loosely. Narrowing krusty's blame to the argument is its own diagnostic-parity change.
+    assert_eq!(
+        common::compiler_errors(&result.krusty_stdout),
+        [],
+        "krusty writes diagnostics to stderr"
     );
-    assert_ne!(
-        result.krusty_code, 0,
-        "krusty accepted a mismatched expectation: {}{}",
-        result.krusty_stdout, result.krusty_stderr
+    assert_eq!(
+        common::compiler_errors(&result.krusty_stderr),
+        [common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: 9,
+            column: 5,
+            message: "return type mismatch: expected 'P<String, String, Int, Int>', actual \
+                      'P<String, String, String, Int>'."
+                .to_string(),
+        }]
+    );
+    assert_eq!(
+        common::compiler_errors(&result.reference_stderr),
+        [common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: 10,
+            column: 35,
+            message: "return type mismatch: expected 'Int', actual 'String'.".to_string(),
+        }]
     );
 }
