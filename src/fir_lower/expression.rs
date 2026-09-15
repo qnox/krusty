@@ -1255,19 +1255,14 @@ impl BodyLowering<'_> {
                 owner,
                 enclosing_depth,
                 field,
+                element,
                 value,
                 conversion,
             } => {
                 let holder = self.enclosing_class_storage_read(*owner, *enclosing_depth, *field)?;
-                let element = self
-                    .body
-                    .expr(*value)
-                    .expect("a checked shared-cell write value must exist")
-                    .ty
-                    .get();
                 let value = self.expression_with_conversion(*value, *conversion)?;
                 self.ir.add_expr(IrExpr::RefSet {
-                    elem: element,
+                    elem: element.get(),
                     holder,
                     value,
                 })
@@ -1275,20 +1270,20 @@ impl BodyLowering<'_> {
             FirExprKind::ConstructorCaptureSharedWrite {
                 owner,
                 field,
+                element,
                 value,
                 conversion,
                 site,
             } => {
+                // `site` says WHICH captured cell — the coordinate this change carries — and
+                // `element` says what the cell holds, which the checker settled when it made the
+                // node. Neither stands in for the other: recovering the element from the value
+                // being written would read the RHS's type where the CELL's is meant, and the two
+                // differ the moment a subtype is assigned into it.
                 let holder = self.constructor_capture_parameter(*owner, *field, *site)?;
-                let element = self
-                    .body
-                    .expr(*value)
-                    .expect("a checked constructor-capture write value must exist")
-                    .ty
-                    .get();
                 let value = self.expression_with_conversion(*value, *conversion)?;
                 self.ir.add_expr(IrExpr::RefSet {
-                    elem: element,
+                    elem: element.get(),
                     holder,
                     value,
                 })
@@ -1331,19 +1326,14 @@ impl BodyLowering<'_> {
                 receiver,
                 path,
                 field,
+                element,
                 value,
                 conversion,
             } => {
                 let holder = self.captured_class_storage_holder(*owner, *receiver, path, *field)?;
-                let element = self
-                    .body
-                    .expr(*value)
-                    .expect("a checked shared-cell write value must exist")
-                    .ty
-                    .get();
                 let value = self.expression_with_conversion(*value, *conversion)?;
                 self.ir.add_expr(IrExpr::RefSet {
-                    elem: element,
+                    elem: element.get(),
                     holder,
                     value,
                 })
@@ -1389,6 +1379,8 @@ impl BodyLowering<'_> {
                 self.checked_lambda(*callable, body, suspend)?
             }
         };
+        self.ir.logical_types.insert(lowered, expression.ty.get());
+        let lowered = crate::ir::complete_bottom_value(&mut self.ir, lowered, expression.ty.get());
         self.ir.logical_types.insert(lowered, expression.ty.get());
         let debug = self.body.expression_debug_lines(expression_id);
         if debug.source != 0 {

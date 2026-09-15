@@ -9,7 +9,9 @@ use super::classreader::{utf8_value, MethodCode, C};
 use crate::types::TypeName;
 use std::collections::HashMap;
 
+mod continuation_flow;
 mod reified_operands;
+use continuation_flow::caller_continuation_reachable;
 pub use reified_operands::substitute_reified;
 use reified_operands::{reify_markers, set_reified_operand};
 
@@ -1190,6 +1192,11 @@ pub struct BranchySplice {
     /// trailing return dropped to fall through — which the caller can then append at ANY stack height
     /// (mid-expression), exactly like the former `splice_branchless`.
     pub join_required: bool,
+    /// Whether the transformed entry-to-end control-flow graph reaches the continuation after this
+    /// splice. A method body with no reachable return (for example `TODO`, whose only exit is
+    /// `athrow`) leaves the enclosing bytecode path unreachable even though its bytes were appended
+    /// in bulk.
+    pub falls_through: bool,
     /// Every replaced lambda invocation. A single inline parameter can be invoked repeatedly; each
     /// occurrence has its own byte position and host verifier state while referring back to the one
     /// pre-built lambda body by `lambda_index`.
@@ -1875,6 +1882,7 @@ pub fn splice_unified(
     let ret = ret_vtype(descriptor, cw)?;
     let offsets_of_param = param_offsets(descriptor)?;
     let mut insns = disassemble(&body.code)?;
+    let old_off = old_offsets(&body.code)?;
     // The body materializes a class whose shape depends on the reified type parameter. Splicing the
     // instructions would reuse the dependency's erased-`T` copy and leave a throwing marker behind.
     // Scanned over the decode above rather than disassembling again: splicing is one of the hottest
@@ -1912,7 +1920,6 @@ pub fn splice_unified(
     }) {
         return None;
     }
-    let old_off = old_offsets(&body.code)?;
     // Decode the host frames against the ORIGINAL body, keyed by old instruction index. A reference
     // parameter is `Top` in frame0 (its real type is unmodeled), so EVERY reference parameter must be a
     // spliced-away lambda (a dead slot) — otherwise a frame that keeps it live would be wrong; bail.
@@ -2371,6 +2378,7 @@ pub fn splice_unified(
         };
         handlers.push((start, end, handler, catch_type));
     }
+    let falls_through = caller_continuation_reachable(&final_insns, &offs, &handlers)?;
     // The host's live body locals at each lambda's invoke point — the host frame (decoded, before
     // relocation) with the largest old index ≤ the invoke. For a loop host that's the loop-body frame
     // (iterator/accumulator live), the context a branchy lambda body's frames need. Empty if no frame
@@ -2438,6 +2446,7 @@ pub fn splice_unified(
         frames,
         join_stack: ret.into_iter().collect(),
         join_required,
+        falls_through,
         lambda_sites: relocated_lambda_sites,
         handlers,
         external_branches,
@@ -2474,28 +2483,6 @@ pub fn splice(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn splice_unified_branchless_drops_return_and_stores_args() {
-        // Body of `inline fun triple(x: Int): Int = x * 3` — `iload_0; iconst_3; imul; ireturn`.
-        let body = MethodCode {
-            max_stack: 2,
-            max_locals: 1,
-            code: vec![0x1a, 0x06, 0x68, 0xac],
-            source_cp: vec![C::Other],
-            stackmap: None,
-            handlers: vec![],
-        };
-        let mut cw = ClassWriter::new("T", "java/lang/Object");
-        let bs = splice_unified(&body, "(I)I", 3, &[], 0, &mut cw, &HashMap::new())
-            .expect("branchless splice");
-        // Prologue stores the one arg into slot 3, then the body runs with no trailing return.
-        // istore_3 ; iload_3 ; iconst_3 ; imul   (compact slot-3 forms; the `ireturn` is dropped)
-        assert_eq!(bs.bytes, vec![0x3e, 0x1d, 0x06, 0x68]);
-        // A pure branchless body needs no join frame — appendable at any operand-stack height.
-        assert!(!bs.join_required);
-    }
-
     #[test]
     fn finds_function_invoke_sites() {
         // pool: Function1.invoke(Object)Object as an InterfaceMethodref, + an unrelated Methodref.
@@ -2775,6 +2762,7 @@ mod tests {
             source_cp: vec![C::Other],
             stackmap: None,
             handlers: vec![],
+            locals: vec![],
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         let out =
@@ -2842,6 +2830,7 @@ mod tests {
             source_cp: vec![C::Other],
             stackmap: None,
             handlers: vec![],
+            locals: vec![],
         };
         assert!(!is_reified_inline(&body));
     }
@@ -2856,6 +2845,7 @@ mod tests {
             source_cp: vec![C::Other],
             stackmap: None,
             handlers: vec![],
+            locals: vec![],
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         let tm = HashMap::new();

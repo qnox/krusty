@@ -3,35 +3,73 @@
 use super::*;
 
 impl JvmLibraries {
+    /// Match an exact physical constructor target to one metadata-normalized constructor
+    /// declaration. Value-class `constructor-impl` remains merely the JVM realization attached to
+    /// that declaration; consumers receive the semantic constructor identity.
+    pub(super) fn inline_plan_constructor(
+        &self,
+        target: MethodTarget<'_>,
+    ) -> Option<(crate::types::TypeName, LibraryMember)> {
+        let (physical_owner_text, name, descriptor, interface) = target;
+        if interface {
+            return None;
+        }
+        let physical_owner = type_name(physical_owner_text);
+        let owner = crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(physical_owner)
+            .unwrap_or(physical_owner);
+        let classifier = self.build_library_type(owner)?;
+        let mut matches = classifier.constructors.iter().filter(|constructor| {
+            constructor.physical_name.as_deref().unwrap_or("<init>") == name
+                && physical_descriptor(constructor) == descriptor
+        });
+        let mut constructor = matches.next()?.clone();
+        if matches.next().is_some() {
+            return None;
+        }
+        constructor.owner = Some(owner);
+        Some((owner, constructor))
+    }
+
     /// Match an invoked physical target to exactly one metadata-normalized Kotlin member. JVM
     /// descriptors identify the realization only; they never supply semantic parameter/result types.
     pub(super) fn inline_plan_member(&self, target: MethodTarget<'_>) -> Option<LibraryMember> {
         let (physical_owner_text, name, descriptor, interface) = target;
         let physical_owner = type_name(physical_owner_text);
-        let owner = crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(physical_owner)
-            .unwrap_or(physical_owner);
-        // Decode the raw declaration directly. Going through `classifier_record` here can observe a
-        // recursively-building cache entry while the enclosing top-level inline declaration is being
-        // normalized; treating that transient partial view as "no plan" would then cache an ordinary
-        // call fallback for this declaration.
-        let classifier = self.build_library_type(owner)?;
-        // `LibraryType::members` is the provider's one combined family of metadata member
-        // functions and property accessors. Match that family once against the invoked physical
-        // target; the existing mapped-builtin name operation is the representation boundary for
-        // declarations such as `CharSequence.get` -> `charAt`.
-        let mut matches = classifier.members.iter().filter(|member| {
-            let declared_name = member
-                .physical_name
-                .as_deref()
-                .unwrap_or(member.name.as_str());
-            crate::jvm::names::mapped_builtin_virtual_name(physical_owner_text, declared_name)
-                == name
-                && physical_descriptor(member) == descriptor
-        });
-        let mut member = matches.next()?.clone();
-        if matches.next().is_some() {
-            return None;
+        let mapped_owners =
+            crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_metadata_declarations(physical_owner);
+        let owners = (!mapped_owners.is_empty())
+            .then_some(mapped_owners)
+            .unwrap_or(std::slice::from_ref(&physical_owner));
+        // Decode every semantic declaration in the physical owner's erasure group directly.
+        // Going through `classifier_record` here can observe a recursively-building cache entry
+        // while the enclosing top-level inline declaration is being normalized. For collections,
+        // unioning read-only and mutable declarations is essential: the same JVM interface owns
+        // both families, while metadata alone tells which declaration owns the invoked member.
+        let mut matches = Vec::new();
+        for owner in owners {
+            let classifier = self.build_library_type(*owner)?;
+            matches.extend(classifier.members.iter().filter_map(|member| {
+                let declared_name = member
+                    .physical_name
+                    .as_deref()
+                    .unwrap_or(member.name.as_str());
+                (crate::jvm::names::mapped_builtin_virtual_name(physical_owner_text, declared_name)
+                    == name
+                    && physical_descriptor(member) == descriptor)
+                    .then(|| (*owner, member.clone()))
+            }));
         }
+        // A member common to both collection faces has one physical realization; retain the
+        // canonical declaration used throughout source typing. A mutable-only member has no such
+        // match and therefore remains the sole candidate from the complete erasure family.
+        if matches.len() > 1 {
+            let canonical =
+                crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(physical_owner);
+            matches.retain(|(owner, _)| Some(*owner) == canonical);
+        }
+        let [(owner, member)] = matches.as_mut_slice() else {
+            return None;
+        };
         // Retain the invoked descriptor only as a physical realization. A suspend call's common
         // shape excludes its CPS continuation; the suspend pass appends that operand exactly once.
         let (mut physical_params, physical_ret) = super::super::parse_method_desc(descriptor)?;
@@ -44,7 +82,7 @@ impl JvmLibraries {
         {
             return None;
         }
-        member.owner = Some(owner);
+        member.owner = Some(*owner);
         // The body supplied the exact physical target. Preserve its spelling when metadata exposes
         // a different Kotlin name (`CharSequence.get` is `charAt` on the JVM); otherwise stable
         // registration would retain the semantic name as though it were the emitted method.
@@ -57,7 +95,7 @@ impl JvmLibraries {
         member.physical_params = physical_params;
         member.physical_ret = physical_ret;
         member.set_is_interface(interface);
-        Some(member)
+        Some(member.clone())
     }
 
     /// Resolve one receiver-less static target through the ordinary top-level provider path. The
@@ -228,6 +266,37 @@ mod tests {
         assert_eq!(realization.callable.external_identity, Some(identity));
         assert_eq!(realization.callable.params, member.params);
         assert_eq!(realization.callable.ret, member.ret);
+    }
+
+    #[test]
+    fn physical_collection_member_selects_its_exact_metadata_declaration() {
+        let stdlib = crate::toolchain::stdlib_jar()
+            .expect("inline dependency test requires the repository Kotlin stdlib");
+        let libraries = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+            vec![stdlib],
+        )));
+        let member = libraries
+            .inline_plan_member(("java/util/Collection", "add", "(Ljava/lang/Object;)Z", true))
+            .expect("Collection.add must normalize through its mutable Kotlin declaration");
+
+        assert_eq!(
+            member.owner,
+            Some(type_name("kotlin/collections/MutableCollection"))
+        );
+        assert_eq!(member.name, "add");
+        assert_eq!(member.params.len(), 1);
+        assert_eq!(member.ret, Ty::Boolean);
+        assert!(member.is_interface());
+
+        let shared = libraries
+            .inline_plan_member((
+                "java/lang/Iterable",
+                "iterator",
+                "()Ljava/util/Iterator;",
+                true,
+            ))
+            .expect("a shared member must retain its canonical Kotlin declaration");
+        assert_eq!(shared.owner, Some(type_name("kotlin/collections/Iterable")));
     }
 
     #[test]

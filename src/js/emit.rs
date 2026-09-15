@@ -344,6 +344,10 @@ fn emit_constructor_args_with_defaults(
 }
 fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
     match node {
+        IrExpr::BottomValue { producer, .. } => format!(
+            "(()=>{{{};throw new Error(\"KotlinNothingValueException\");}})()",
+            emit_expr(ir, *producer, inst)
+        ),
         IrExpr::Const(c) => match c {
             IrConst::Boolean(b) => b.to_string(),
             IrConst::Int(v) => v.to_string(),

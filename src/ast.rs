@@ -5,32 +5,16 @@ use crate::diag::Span;
 use crate::kt_string::{KtString, KtStringBuf};
 use crate::types::Visibility;
 
+mod call_shape;
+pub(crate) use call_shape::explicit_call_receiver;
+pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct ExprId(pub u32);
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct StmtId(pub u32);
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct DeclId(pub u32);
-
-pub fn first_lambda_param_or_it(params: &[String]) -> String {
-    params.first().cloned().unwrap_or_else(|| "it".to_string())
-}
-
-pub fn lambda_params_or_implicit(
-    params: &[String],
-    arity: usize,
-    has_explicit_arrow: bool,
-) -> Option<Vec<String>> {
-    if !params.is_empty() {
-        Some(params.to_vec())
-    } else if arity == 1 && !has_explicit_arrow {
-        Some(vec![first_lambda_param_or_it(params)])
-    } else if arity == 0 {
-        Some(Vec::new())
-    } else {
-        None
-    }
-}
 
 /// A FIELD-LESS `companion object` property (`companion object { val ZERO: T get() = … }`): it IS
 /// its accessors, so there is no static to hoist onto the outer class — kotlinc emits only `getX`
@@ -1883,6 +1867,7 @@ impl File {
     pub fn expr(&self, id: ExprId) -> &Expr {
         &self.expr_arena[id.0 as usize]
     }
+
     pub fn stmt(&self, id: StmtId) -> &Stmt {
         &self.stmt_arena[id.0 as usize]
     }

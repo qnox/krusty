@@ -20571,75 +20571,6 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Lower a `for (name in iterable) body` (also the inlined target of `iterable.forEach { … }`):
-    /// dispatch to the counted range loop, the array/`String` index loop, or the iterator protocol.
-    /// Whether `e`'s AST subtree contains a SUSPEND call (a call the checker resolved to a suspend
-    /// member/function). Stops at a nested `Lambda` (its body is a separate scope). Used to gate the
-    /// suspend-only inline-HOF loop desugar below: a non-suspend HOF keeps its normal library call.
-    fn ast_subtree_suspends(&self, e: AstExprId) -> bool {
-        let call_suspends = self.info.resolved_member(e).is_some_and(|m| m.suspend)
-            || self.info.resolved_extension(e).is_some_and(|c| c.suspend)
-            || self
-                .info
-                .resolved_top_level_call(e)
-                .is_some_and(|c| c.callable.suspend)
-            || self.info.resolved_companion(e).is_some_and(|m| m.suspend());
-        if call_suspends {
-            return true;
-        }
-        if matches!(self.afile.expr(e), Expr::Lambda { .. }) {
-            return false;
-        }
-        self.afile
-            .any_child_expr(e, &mut |c| self.ast_subtree_suspends(c), &mut |s| {
-                self.afile
-                    .any_child_stmt(s, &mut |c| self.ast_subtree_suspends(c))
-            })
-    }
-
-    /// Whether `internal` is (or transitively extends) a `Collection` — so a value of it can be passed to
-    /// `java.util.Collection.addAll`. Used to gate the flatMap loop desugar.
-    fn type_is_collection(&self, internal: TypeName) -> bool {
-        let is_coll = |n: TypeName| {
-            n.matches("kotlin/collections/Collection")
-                || n.matches("kotlin/collections/MutableCollection")
-                || n.matches("kotlin/collections/List")
-                || n.matches("kotlin/collections/MutableList")
-                || n.matches("kotlin/collections/Set")
-                || n.matches("kotlin/collections/MutableSet")
-                || n.matches("java/util/Collection")
-                || n.matches("java/util/List")
-                || n.matches("java/util/Set")
-                || n.matches("java/util/ArrayList")
-        };
-        let mut stack = vec![internal];
-        let mut seen = std::collections::HashSet::new();
-        while let Some(i) = stack.pop() {
-            if !seen.insert(i) {
-                continue;
-            }
-            if is_coll(i) {
-                return true;
-            }
-            if let Some(c) = self.syms.class_by_type_name(i) {
-                if let Some(s) = c.super_internal_name() {
-                    stack.push(s);
-                }
-                stack.extend(c.interface_names());
-            } else if let Some(t) = self.syms.libraries.classifier(i) {
-                stack.extend(t.supertypes.iter_ids());
-            }
-        }
-        false
-    }
-
-    /// Desugar `recv.map { … }` / `recv.flatMap { … }` whose LAMBDA BODY suspends into an accumulating
-    /// loop — `val acc = ArrayList(); for (e in recv) acc.add/addAll(<body>); acc` — exactly kotlinc's
-    /// inline expansion. A stdlib collection HOF lowers its lambda to a separate `FunctionN` impl method,
-    /// which cannot suspend; inlining it into the loop puts the suspension in an ordinary for-loop the
-    /// coroutine pass already models. Gated to the suspend case only, so a non-suspend HOF keeps its
-    /// byte-identical library call. `is_flat` selects `addAll` (flatMap) vs `add` (map). `None` (decline)
-    /// when the receiver has no resolvable iterator (the caller falls back to the normal call path).
     /// The common concrete (non-`Nothing`/`Unit`) type of every `return@<label>` value expression in
     /// `e`'s subtree. This recovers an inline-lambda result type that inference collapsed to `Nothing`
     /// because every path is a local labeled return. Recurses into both `Stmt::Return` and
@@ -20701,133 +20632,6 @@ impl<'a> Lower<'a> {
                 false
             },
         );
-    }
-
-    fn lower_suspend_accumulate_hof(
-        &mut self,
-        is_flat: bool,
-        param: &str,
-        receiver: AstExprId,
-        body: AstExprId,
-    ) -> Option<u32> {
-        let it_ty = self.info.ty(receiver);
-        let protocol = self.info.iterator_protocol(receiver).cloned()?;
-        let iter_dispatch = *protocol.iterator;
-        let iter_ty = protocol.iter_ty;
-        let hasnext = *protocol.has_next;
-        let next = *protocol.next;
-        let elem = protocol.elem_ty;
-
-        // acc = new ArrayList()
-        let acc_new = self.emit_new_external("java/util/ArrayList", "()V", vec![]);
-        let acc_v = self.fresh_value();
-        let acc_ty = Ty::obj("java/util/ArrayList");
-        let var_acc = self.emit_named_variable(acc_v, ty_to_ir(acc_ty), Some(acc_new));
-
-        // it = recv.iterator()  — kotlinc's inline expansion is TWO frames deep
-        // (`flatMap` → `flatMapTo`, `map` → `mapTo`), each binding the receiver to a named inline
-        // local (`$this$flatMap$iv`, then `$this$flatMapTo$iv$iv`); both join the suspend spill
-        // scope like any named var.
-        let recv = self.expr(receiver)?;
-        let recv_v = self.fresh_value();
-        let var_recv = self.emit_named_variable(recv_v, ty_to_ir(it_ty), Some(recv));
-        let recv_g0 = self.emit_get_value(recv_v);
-        let recv_to_v = self.fresh_value();
-        let var_recv_to = self.emit_named_variable(recv_to_v, ty_to_ir(it_ty), Some(recv_g0));
-        let recv_g = self.emit_get_value(recv_to_v);
-        let iter_call = self.lower_iterator_protocol_call(recv_g, it_ty, iter_dispatch)?;
-        let it_v = self.fresh_value();
-        let var_it = self.emit_named_variable(it_v, ty_to_ir(iter_ty), Some(iter_call));
-
-        // cond: it.hasNext()
-        let it_g = self.emit_get_value(it_v);
-        let cond = self.lower_iterator_protocol_call(it_g, iter_ty, hasnext)?;
-
-        // body: e = (elem) it.next(); acc.add/addAll(<inlined lambda body>)
-        let it_g2 = self.emit_get_value(it_v);
-        let next_call = self.lower_iterator_protocol_call(it_g2, iter_ty, next)?;
-        // Coerce the `Object` iterator result to the element type through the same semantic scalar
-        // boundary as an ordinary generic read; the backend owns its physical wrapper adapter.
-        let elem_val = if self.has_scalar_value_repr(elem) {
-            self.emit_type_op(IrTypeOp::ImplicitCoercion, next_call, ty_to_ir(elem))
-        } else if elem != Ty::obj("kotlin/Any") {
-            self.emit_type_op(IrTypeOp::Cast, next_call, ty_to_ir(elem))
-        } else {
-            next_call
-        };
-        // Bind the element to the lambda's parameter, then lower the lambda body and bind ITS value to a
-        // fresh local — as SEPARATE statements, not a bundled block. The body value can be a suspend call;
-        // the coroutine pass surfaces a suspension from a plain `Variable{ init: <suspend call> }` (in a
-        // loop body it already models), but NOT from a block-valued init inside a loop nor from a call
-        // argument. So `val e = next; val part = <body>; acc.add*(part)`.
-        let depth = self.scope.len();
-        // kotlinc binds the loop ELEMENT (`element$iv$iv`) and the lambda PARAMETER (`it`) as
-        // SEPARATE named locals — both join the suspend spill scope.
-        let elem_iv = self.fresh_value();
-        let var_e = self.emit_named_variable(elem_iv, ty_to_ir(elem), Some(elem_val));
-        let elem_bv = self.fresh_value();
-        self.scope.push((param.to_string(), elem_bv, elem));
-        let elem_g = self.emit_get_value(elem_iv);
-        let var_p = self.emit_named_variable(elem_bv, ty_to_ir(elem), Some(elem_g));
-        let body_val = self.expr(body);
-        self.scope.truncate(depth);
-        let body_val = body_val?;
-        // The lambda body lowers to a value-block (`{ stmts…; value }`). Splice its statements into the
-        // loop and bind `part` to the block's VALUE — a plain `Variable{ init: <value> }` the coroutine
-        // pass surfaces (a block-valued init inside a loop body isn't normalized).
-        let (mut loop_stmts, body_v) = match self.ir.exprs[body_val as usize].clone() {
-            IrExpr::Block {
-                stmts,
-                value: Some(v),
-            } => (stmts, v),
-            _ => (Vec::new(), body_val),
-        };
-        let part_ty = self.info.ty(body);
-        // flatMap emits `ArrayList.addAll(Collection)`, but kotlinc's flatMap accepts any `Iterable` and
-        // handles a non-`Collection` via an iterating extension we don't model here — so decline (the
-        // caller falls back / the file bails) when the element result isn't a `Collection` subtype.
-        if is_flat
-            && !part_ty
-                .obj_internal()
-                .is_some_and(|i| self.type_is_collection(i))
-        {
-            self.scope.truncate(depth);
-            return None;
-        }
-        let part_v = self.fresh_value();
-        let var_part = self.emit_variable(part_v, ty_to_ir(part_ty), Some(body_v));
-        let acc_g = self.emit_get_value(acc_v);
-        let part_g = self.emit_get_value(part_v);
-        let (add_name, add_desc, add_arg) = if is_flat {
-            ("addAll", "(Ljava/util/Collection;)Z", part_g)
-        } else {
-            // `add(Object)` takes a reference — box a value/primitive result.
-            let boxed = self.emit_type_op(
-                IrTypeOp::ImplicitCoercion,
-                part_g,
-                ty_to_ir(Ty::obj("kotlin/Any")),
-            );
-            ("add", "(Ljava/lang/Object;)Z", boxed)
-        };
-        let add_call = self.emit_virtual_call(
-            "java/util/ArrayList".to_string(),
-            add_name.to_string(),
-            add_desc.to_string(),
-            false,
-            acc_g,
-            vec![add_arg],
-        );
-        let mut wstmts = vec![var_e, var_p];
-        wstmts.append(&mut loop_stmts);
-        wstmts.push(var_part);
-        wstmts.push(add_call);
-        let wbody = self.emit_block(wstmts, None);
-        let wh = self.emit_while(cond, wbody, None, false, None);
-        let acc_read = self.emit_get_value(acc_v);
-        Some(self.emit_block(
-            vec![var_recv, var_acc, var_recv_to, var_it, wh],
-            Some(acc_read),
-        ))
     }
 
     fn extension_plan_arguments(
@@ -22691,14 +22495,20 @@ impl<'a> Lower<'a> {
         // A platform value committed to a declared non-null type is guarded here, over the lowered
         // value, so every narrowing position the checker recorded goes through one rule.
         let r = r.map(|id| self.guard_platform_narrowing(e, id));
-        // Record the expression's LOGICAL (source) type verbatim, keyed by its IR id — the value-class
-        // pass reads it to recover a value's representation when the IR node alone is ambiguous (a library
-        // call's physical `Object` result whose logical type is a value class). VC-agnostic: just the type.
-        if let Some(id) = r {
+        // Preserve the checked type on the producer, then make any semantic-bottom/physical-
+        // fallthrough mismatch explicit before backend lowering sees this expression.
+        let r = r.map(|id| {
             let ty = self.info.semantic_ty(e);
-            if ty != Ty::Error {
-                self.ir.logical_types.insert(id, ty_to_ir(ty));
+            if ty == Ty::Error {
+                return id;
             }
+            let ty = ty_to_ir(ty);
+            self.ir.logical_types.insert(id, ty);
+            let completed = crate::ir::complete_bottom_value(&mut self.ir, id, ty);
+            self.ir.logical_types.insert(completed, ty);
+            completed
+        });
+        if let Some(id) = r {
             if let Some(&line) = self
                 .afile
                 .expr_source_lines
@@ -22851,15 +22661,6 @@ impl<'a> Lower<'a> {
             // `operand!!` — assert non-null. On a reference, `Intrinsics.checkNotNull` throws if null
             // and yields the value; on a (non-null) primitive it is a no-op.
             Expr::NotNull { operand } => {
-                // `null!!` (a statically-null operand) always throws — emit an actual `throw
-                // NullPointerException()` (an `athrow` the verifier knows diverges), not the
-                // `checkNotNull` call (which is `(Object)V` and so appears to fall through, leaving a
-                // handler placed right after it with an inconsistent frame).
-                if self.info.ty(operand) == Ty::Null {
-                    let exc =
-                        self.emit_new_external("java/lang/NullPointerException", "()V", vec![]);
-                    return Some(self.emit_throw(exc));
-                }
                 let v = self.expr(operand)?;
                 if self.info.semantic_ty(operand).is_reference() {
                     let asserted = self.ir.add_expr(IrExpr::NotNullAssert {
@@ -26171,8 +25972,6 @@ impl<'a> Lower<'a> {
                     | crate::libraries::CompilerIntrinsic::CoroutineSuspended
                     | crate::libraries::CompilerIntrinsic::SuspendCoroutine
                     | crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
-                    | crate::libraries::CompilerIntrinsic::Map
-                    | crate::libraries::CompilerIntrinsic::FlatMap
                     | crate::libraries::CompilerIntrinsic::IsEmpty
                     | crate::libraries::CompilerIntrinsic::IsNotEmpty
                     | crate::libraries::CompilerIntrinsic::Count
@@ -26781,53 +26580,6 @@ impl<'a> Lower<'a> {
                         }
                         None => size,
                     });
-                }
-            }
-            // `iterable.map/flatMap { … }` WHERE THE LAMBDA BODY SUSPENDS: a stdlib collection HOF
-            // lowers its lambda to a `FunctionN` impl that can't suspend, so inline it into an
-            // accumulating loop (kotlinc's own inline expansion) — putting the suspension in an
-            // ordinary for-loop the coroutine pass models. Only in a suspend fn and only when the
-            // lambda actually suspends, so a non-suspend `map`/`flatMap` keeps its library call.
-            // ABI guard: fire ONLY for the stdlib `Iterable.map`/`flatMap`, which return `List<R>`
-            // — so materializing the loop into an `ArrayList` (a `List`) is signature-correct.
-            // A lazy `Sequence.map` (returns `Sequence`) or a user overload returning another
-            // container (`Set`, …) has a non-`List` result type and a NON-`kotlin/collections`
-            // facade; gating on the `List` result type + a resolved stdlib-collections extension
-            // excludes them, so we never hand back an `ArrayList` where the static type is
-            // `Sequence`/`Set` (→ VerifyError / ClassCastException).
-            let collection_intrinsic = self
-                .info
-                .resolved_extension(e)
-                .and_then(|callable| callable.compiler_intrinsic);
-            let suspend_list_hof = match collection_intrinsic {
-                Some(crate::libraries::CompilerIntrinsic::Map) => Some(false),
-                Some(crate::libraries::CompilerIntrinsic::FlatMap) => Some(true),
-                _ => None,
-            };
-            let stdlib_list_hof = suspend_list_hof.is_some()
-                && self.info.ty(e).obj_internal().is_some_and(|i| {
-                    i == "kotlin/collections/List" || i == "kotlin/collections/MutableList"
-                });
-            if self.cur_fn_suspend && stdlib_list_hof && args.len() == 1 {
-                if let Expr::Lambda {
-                    params,
-                    body: lbody,
-                } = self.afile.expr(args[0]).clone()
-                {
-                    let rty = self.info.ty(receiver);
-                    let iterable = rty.obj_internal().is_some()
-                        && self.info.iterator_protocol(receiver).is_some();
-                    if iterable && self.ast_subtree_suspends(lbody) {
-                        let param = ast::first_lambda_param_or_it(&params);
-                        if let Some(v) = self.lower_suspend_accumulate_hof(
-                            suspend_list_hof.unwrap(),
-                            &param,
-                            receiver,
-                            lbody,
-                        ) {
-                            return Some(v);
-                        }
-                    }
                 }
             }
             // A user `inline fun <recv>.name(args)` — expand it here (kotlinc's inliner) with the

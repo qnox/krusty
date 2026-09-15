@@ -39,6 +39,7 @@ impl BodyLowering<'_> {
             prologue,
             cleanup,
             cause_ty,
+            recovery,
             plan_defaults,
             returned_value,
         ) = match plan {
@@ -62,33 +63,25 @@ impl BodyLowering<'_> {
             }
             crate::fir::FirInlineBodyPlan::CollectionTransform {
                 lambda_parameter,
-                flatten,
                 local_names,
-                iterator_ty,
-                iterator,
-                has_next,
-                next,
+                traversal,
                 factory,
                 factory_classifier,
+                factory_parameters,
+                capacity,
                 append,
                 accumulator,
-                append_parameter,
-                append_result,
             } => {
                 return self.external_inline_collection_transform(
                     *lambda_parameter,
-                    *flatten,
                     local_names,
-                    *iterator_ty,
-                    iterator,
-                    has_next,
-                    next,
+                    traversal,
                     *factory,
                     *factory_classifier,
-                    *append,
+                    factory_parameters,
+                    capacity.as_ref(),
+                    append,
                     *accumulator,
-                    *append_parameter,
-                    *append_result,
                     receiver_ty,
                     parameter_types,
                     dispatch_receiver,
@@ -102,6 +95,7 @@ impl BodyLowering<'_> {
                 prologue,
                 cleanup,
                 cause,
+                recovery,
                 defaults,
                 result: returned,
             } => (
@@ -110,6 +104,7 @@ impl BodyLowering<'_> {
                 prologue,
                 cleanup,
                 *cause,
+                recovery.as_deref(),
                 defaults,
                 *returned,
             ),
@@ -179,7 +174,12 @@ impl BodyLowering<'_> {
             &invocation_operands,
         )?;
 
-        let value = if cleanup.is_empty() {
+        let value = if let Some(recovery) = recovery {
+            if !cleanup.is_empty() || cause.is_some() {
+                return None;
+            }
+            self.recover_inline_body(inline_body, recovery, result.get())?
+        } else if cleanup.is_empty() {
             inline_body
         } else {
             self.guard_inline_body(inline_body, cleanup, cause, result.get(), plan_value)?
@@ -200,6 +200,53 @@ impl BodyLowering<'_> {
                 value: Some(value),
             })
         })
+    }
+
+    fn recover_inline_body(
+        &mut self,
+        body: ExprId,
+        recovery: &crate::fir::FirInlineRecovery,
+        result_ty: Ty,
+    ) -> Option<ExprId> {
+        let [constructor_parameter] = recovery.constructor_parameters.as_ref() else {
+            return None;
+        };
+        let construct = |lowering: &mut Self, value| {
+            lowering.ir.add_expr(IrExpr::New {
+                internal: recovery.classifier,
+                args: vec![value],
+                ctor_params: Some(vec![constructor_parameter.get()]),
+                ctor_desc: None,
+                external_target: Some(recovery.constructor),
+                defaults: Box::new([]),
+                default_prefix_count: 0,
+            })
+        };
+        let normal = construct(self, body);
+        let caught_ty = recovery.caught.get().non_null();
+        let caught_internal = caught_ty.obj_internal()?;
+        let caught = self.allocate_temporary();
+        let failure =
+            self.external_inline_plan_call(&recovery.failure, |lowering, value| match value {
+                crate::fir::FirInlineValue::Cause => {
+                    Some((lowering.ir.add_expr(IrExpr::GetValue(caught)), caught_ty))
+                }
+                crate::fir::FirInlineValue::Receiver | crate::fir::FirInlineValue::Parameter(_) => {
+                    None
+                }
+            })?;
+        let failed = construct(self, failure);
+        Some(self.ir.add_expr(IrExpr::Try {
+            body: normal,
+            catches: vec![crate::ir::IrCatch {
+                var: caught,
+                name: None,
+                exc_internal: caught_internal,
+                body: failed,
+            }],
+            finally: None,
+            result: result_ty,
+        }))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -491,7 +538,7 @@ impl BodyLowering<'_> {
         }))
     }
 
-    fn external_inline_iteration_member_call(
+    pub(super) fn external_inline_iteration_member_call(
         &mut self,
         call: &crate::fir::FirInlineIterationMemberCall,
         receiver: ExprId,

@@ -59,7 +59,26 @@ fn a_nested_lambda_in_a_super_constructor_argument_reads_a_captured_local() {
 }
 
 #[test]
-fn two_lambdas_in_a_super_constructor_argument_share_one_captured_local() {
+fn two_lambdas_in_a_super_constructor_argument_reach_one_captured_cell() {
+    // Both lambdas capture the SAME local, and one writes what the other reads — so a pair that
+    // had been given a cell each would answer "fail" while still compiling and running. Two
+    // lambdas capturing two different locals proves nothing here: each would work with a copy.
+    run_ok(
+        "TwoLambdasShareOneCell",
+        "open class Base(val write: () -> Unit, val read: () -> String)\n\
+         fun box(): String {\n\
+         var shared = \"fail\"\n\
+         class Local : Base({ shared = \"OK\" }, { shared })\n\
+         val local = Local()\n\
+         local.write()\n\
+         return local.read() }\n",
+    );
+}
+
+#[test]
+fn two_lambdas_in_a_super_constructor_argument_carry_their_own_captures() {
+    // The companion to the cell test: two lambdas capturing two DIFFERENT locals each get their
+    // own, which is what would look identical to sharing if the test above were the only one.
     run_ok(
         "TwoLambdasInSuperArgument",
         "open class Base(val first: () -> String, val second: () -> String)\n\

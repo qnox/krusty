@@ -1215,9 +1215,8 @@ pub enum FirExprKind {
         owner: DeclarationId,
         field: u32,
     },
-    /// Read a checked local-class capture from the current constructor's synthetic prefix
-    /// parameter. Constructor delegation and constructor-default expressions run before capture
-    /// storage can be read from `this`, so this source is explicit in FIR.
+    /// Read a local-class capture from the constructor prefix. Delegation and defaults run before
+    /// its field is readable from `this`, so this source is explicit in FIR.
     ConstructorCaptureRead {
         owner: DeclarationId,
         field: u32,
@@ -1225,9 +1224,8 @@ pub enum FirExprKind {
         /// Where the value is: the prefix parameter itself, or this body's capture of it.
         site: super::FirConstructorCaptureSite,
     },
-    /// Read one language-level class context supplied in the current constructor's semantic
-    /// prefix. This is separate from local-class captures: `parameter` is the class context
-    /// declaration ordinal and carries no storage-field or backend ABI identity.
+    /// Read a language-level class context from the constructor's semantic prefix. `parameter` is
+    /// its declaration ordinal, not a storage-field or backend ABI identity.
     ConstructorContextRead {
         owner: DeclarationId,
         parameter: u32,
@@ -1237,20 +1235,22 @@ pub enum FirExprKind {
         owner: DeclarationId,
         field: u32,
     },
-    /// Write the element of a shared mutable-local cell stored in this classifier or an enclosing
-    /// local classifier. The synthetic capture field itself remains immutable.
+    /// Write a shared mutable-local cell in this or an enclosing local classifier. Its synthetic
+    /// field stays immutable; `element` is the declared cell type, not inferred from the RHS.
     ClassStorageSharedWrite {
         owner: DeclarationId,
         enclosing_depth: u32,
         field: u32,
+        element: ResolvedTy,
         value: FirExprId,
         conversion: Option<FirConversion>,
     },
-    /// Write through a shared mutable capture supplied by the current constructor's synthetic
-    /// prefix parameter, before the corresponding field is readable from `this`.
+    /// Write through a shared capture in the constructor prefix before its field is readable from
+    /// `this`; `element` is the captured cell's exact declared type.
     ConstructorCaptureSharedWrite {
         owner: DeclarationId,
         field: u32,
+        element: ResolvedTy,
         value: FirExprId,
         conversion: Option<FirConversion>,
         /// Where the cell is: the prefix parameter itself, or this body's capture of it.
@@ -1263,9 +1263,8 @@ pub enum FirExprKind {
         field: u32,
         shared_cell: bool,
     },
-    /// Read a local-class capture field through the class receiver explicitly captured by a
-    /// lifted local callable. `path` is the checker-selected sequence of inner classifiers whose
-    /// synthetic outer-instance fields lead from `receiver` to `owner`.
+    /// Read a local-class capture through a receiver captured by a lifted local callable. `path`
+    /// is the checked inner-class chain from `receiver` to the capture `owner`.
     CapturedClassStorageRead {
         owner: DeclarationId,
         receiver: FirExprId,
@@ -1274,12 +1273,13 @@ pub enum FirExprKind {
         shared_cell: bool,
     },
     /// Write the shared cell stored in a checked local-class capture field through an explicitly
-    /// captured class receiver.
+    /// captured class receiver. `element` is the captured cell's exact declared type.
     CapturedClassStorageSharedWrite {
         owner: DeclarationId,
         receiver: FirExprId,
         path: Box<[DeclarationId]>,
         field: u32,
+        element: ResolvedTy,
         value: FirExprId,
         conversion: Option<FirConversion>,
     },

@@ -48,6 +48,40 @@ pub struct CompilerDiagnosticResult {
     pub reference_stderr: String,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct CompilerError {
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub message: String,
+}
+
+/// Extract every rendered compiler error in emission order. The scratch-directory prefixes differ
+/// between invocations, so the stable source filename is the location boundary compared by tests.
+pub fn compiler_errors(output: &str) -> Vec<CompilerError> {
+    output
+        .lines()
+        .filter_map(|rendered| {
+            let (location, message) = rendered.split_once("error:")?;
+            let location = location.trim().trim_end_matches(':');
+            let mut fields = location.rsplitn(3, ':');
+            let column = fields.next()?.trim().parse().ok()?;
+            let line = fields.next()?.trim().parse().ok()?;
+            let path = fields.next()?.trim();
+            Some(CompilerError {
+                file: std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(path)
+                    .to_string(),
+                line,
+                column,
+                message: message.trim().to_string(),
+            })
+        })
+        .collect()
+}
+
 fn write_fixture_sources(work: &std::path::Path, sources: &[(&str, &str)]) -> Vec<PathBuf> {
     sources
         .iter()
@@ -298,6 +332,21 @@ pub fn kotlinc_box_result(source: &str) -> String {
     let jdk = common::jdk_modules();
     let result = common::run_box(&[], "MainKt", &[output, stdlib, jdk])
         .expect("run kotlinc-built box fixture");
+    let _ = std::fs::remove_dir_all(work);
+    result
+}
+
+/// Compile named in-memory fixtures with kotlinc and run `box()` from `main_class` on the shared JVM.
+pub fn kotlinc_box_files_result(sources: &[(&str, &str)], main_class: &str) -> String {
+    let work = common::scratch_dir().expect("cannot allocate reference-runtime fixture");
+    let source_paths = write_fixture_sources(&work, sources);
+    let output = work.join("out");
+    let (code, diagnostics) = kotlinc_paths_result(&source_paths, &output, &[]);
+    assert_eq!(code, 0, "kotlinc rejected runtime fixture: {diagnostics}");
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let result = common::run_box(&[], main_class, &[output, stdlib, jdk])
+        .expect("run kotlinc-built multi-file box fixture");
     let _ = std::fs::remove_dir_all(work);
     result
 }

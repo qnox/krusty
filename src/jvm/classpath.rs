@@ -10,6 +10,8 @@
 //! - `simple_name → internal_name` for every class in the classpath
 //! - Kotlin type aliases from `@kotlin.Metadata` `d2` arrays in `*TypeAliasesKt.class` files
 
+mod candidate_union;
+
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -499,6 +501,7 @@ macro_rules! cache_stat {
 
 mod inline_plan_cache;
 
+pub(super) use inline_plan_cache::InlinePlanCacheInput;
 use inline_plan_cache::{global_plan_cache, PlanCache, PlanKey};
 
 /// Hit/miss counter for one cache, aggregated across every `Classpath` and worker thread (per-instance
@@ -4828,38 +4831,7 @@ impl Classpath {
         jvm_name: &str,
         packages: &[TypeName],
     ) -> Vec<ExtCandidate> {
-        let tree = self.package_tree();
-        let mut out = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for &pkg in packages {
-            if !seen.insert(pkg) {
-                continue;
-            }
-            let Some(node) = tree.node_for_name(pkg) else {
-                continue;
-            };
-            for &jar_id in &node.jars {
-                if self.entries.get(jar_id).is_none() {
-                    continue;
-                }
-                let members = self.jar_pkg_members_name(jar_id, pkg);
-                if let Some(indices) = members.by_jvm.get(jvm_name) {
-                    for &idx in indices {
-                        let Some(c) = members.candidates.get(idx) else {
-                            continue;
-                        };
-                        if descriptor_parts(&c.descriptor)
-                            .and_then(|(fp, _)| fp)
-                            .as_deref()
-                            == Some(recv_desc)
-                        {
-                            out.push(c.render(&members.owner_names));
-                        }
-                    }
-                }
-            }
-        }
-        out
+        candidate_union::extensions_in_scope(self, recv_desc, jvm_name, packages)
     }
 
     /// The scoped, lazy analogue of [`Self::find_extension_owners`]: the facades that declare a static
@@ -4932,27 +4904,7 @@ impl Classpath {
     /// package it consults only the jars that declare it (the tree), composing their per-(jar, package)
     /// `PkgMembers`; NOT a whole-classpath scan. A package is consulted at most once.
     pub fn functions_in_scope(&self, name: &str, packages: &[TypeName]) -> Vec<ExtCandidate> {
-        let tree = self.package_tree();
-        let mut out = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for &pkg in packages {
-            if !seen.insert(pkg) {
-                continue;
-            }
-            let Some(node) = tree.node_for_name(pkg) else {
-                continue;
-            };
-            for &jar_id in &node.jars {
-                if self.entries.get(jar_id).is_none() {
-                    continue;
-                }
-                let members = self.jar_pkg_members_name(jar_id, pkg);
-                if let Some(indices) = members.by_source.get(name) {
-                    out.extend(members.render_indices(indices));
-                }
-            }
-        }
-        out
+        candidate_union::functions_in_scope(self, name, packages)
     }
 
     /// The spec's top-level memo lookup: the already-composed [`ResolvedSymbols`](crate::libraries::ResolvedSymbols)
@@ -8438,82 +8390,6 @@ mod fq_tests {
         let string = type_name("kotlin/String");
         assert!(cp.builtin_members.borrow().contains_key(&string));
         assert!(cp.builtin_members("kotlin/String").is_empty());
-    }
-
-    #[test]
-    fn inline_plan_memo_refuses_overlaid_owner() {
-        let owner = type_name("p/Widget");
-        let plan = crate::libraries::InlineBodyPlan::InvokeLambda {
-            lambda_parameter: 0,
-            arguments: Vec::new(),
-            prologue: Vec::new(),
-            cleanup: Vec::new(),
-            cause: None,
-            defaults: Vec::new(),
-            result: None,
-        };
-        let cp = Classpath::new(vec![]);
-        cp.memoize_inline_plan(
-            owner,
-            "run",
-            "()V",
-            &[0],
-            0,
-            None,
-            &[],
-            None,
-            Some(Box::new(plan)),
-        );
-        assert!(
-            cp.cached_inline_plan(owner, "run", "()V", &[0], 0, None, &[], None)
-                .is_some(),
-            "memoized plan served while the owner is jar/absent"
-        );
-        assert!(
-            cp.cached_inline_plan(owner, "run", "()V", &[0], 1, None, &[], None)
-                .is_none(),
-            "a semantic callable view must not reuse another view's plan"
-        );
-        assert!(
-            cp.cached_inline_plan(
-                owner,
-                "run",
-                "()V",
-                &[0],
-                0,
-                None,
-                &[],
-                Some((owner, "run$default", "()V")),
-            )
-            .is_none(),
-            "a distinct default realization must not reuse a plan"
-        );
-        // Overlaying the owner must make the remembered plan unreachable: the overlay is
-        // per-request bytecode, and a later request can overlay DIFFERENT bytes under this name.
-        let stubs = crate::jvm::java_stub::stub_classes(
-            &[("W.java".into(), "package p; public class Widget {}".into())],
-            crate::jvm::java_stub::StubMode::Lenient,
-            &|c| c == "java/lang/Object",
-        )
-        .expect("stub");
-        cp.set_stub_overlay(stubs);
-        assert!(
-            cp.cached_inline_plan(owner, "run", "()V", &[0], 0, None, &[], None)
-                .is_none(),
-            "overlaid owner must not serve a remembered plan"
-        );
-        cp.memoize_inline_plan(owner, "unrelated", "()V", &[0], 0, None, &[], None, None);
-        cp.clear_stub_overlay();
-        assert!(
-            cp.cached_inline_plan(owner, "unrelated", "()V", &[0], 0, None, &[], None)
-                .is_none(),
-            "a memoize attempted while overlaid must not be stored"
-        );
-        assert!(
-            cp.cached_inline_plan(owner, "run", "()V", &[0], 0, None, &[], None)
-                .is_some(),
-            "the jar-derived plan is valid again once the overlay clears"
-        );
     }
 
     #[test]

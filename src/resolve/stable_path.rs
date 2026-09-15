@@ -33,28 +33,32 @@ impl<'checker, 'source> StablePathRead<'checker, 'source> {
             if local.has_unstable_delegated_read() {
                 return None;
             }
-            // A bare own-member read is a dispatch-property read. Its binding already identifies
-            // the receiver rung that owns it; a foreign receiver lambda may make another rung the
-            // innermost `this`, but must not change this selected identity.
-            if path.segments.is_empty() {
-                if let ReceiverFnValueOrigin::DispatchProperty {
-                    receiver_identity, ..
-                } = local.origin
+            // An own-member read is a dispatch-property read. Its binding already identifies the
+            // receiver rung that owns it; a foreign receiver lambda may make another rung the
+            // innermost `this`, but must not change this selected identity. `member_ty` decides
+            // whether that read is stable, and the same decision governs the root of a LONGER path
+            // (`config.path`, where `config` is this class's own `val`): Kotlin's stability rule is
+            // per property, so the remaining segments simply walk on from here.
+            if let ReceiverFnValueOrigin::DispatchProperty {
+                receiver_identity, ..
+            } = local.origin
+            {
+                let receiver = self
+                    .checker
+                    .implicit_receivers(scope)
+                    .into_iter()
+                    .find(|candidate| candidate.identity == receiver_identity)?
+                    .ty;
+                self.member_ty(receiver, &path.root)?
+            } else {
+                // A top-level property at the root of a longer path re-enters its accessor.
+                if !path.segments.is_empty()
+                    && !matches!(local.origin, ReceiverFnValueOrigin::Local)
                 {
-                    let receiver = self
-                        .checker
-                        .implicit_receivers(scope)
-                        .into_iter()
-                        .find(|candidate| candidate.identity == receiver_identity)?
-                        .ty;
-                    return self.member_ty(receiver, &path.root);
+                    return None;
                 }
+                local.ty
             }
-            // A member/top-level property at the root of a longer path re-enters its accessor.
-            if !path.segments.is_empty() && !matches!(local.origin, ReceiverFnValueOrigin::Local) {
-                return None;
-            }
-            local.ty
         };
         for segment in &path.segments {
             ty = self.member_ty(ty, segment)?;

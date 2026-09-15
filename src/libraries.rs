@@ -6,9 +6,10 @@ mod inline_body;
 pub use crate::types::Visibility;
 use crate::types::{Ty, TypeName, TypeNameList};
 pub(crate) use array_factories::kotlin_array_factory_kind;
-pub use inline_body::{InlineBodyCall, InlineBodyCallReceiver, InlineBodyDefault, InlineBodyPlan};
 pub use inline_body::{
-    InlineBodyValue, InlineCollectionLocalNames, InlineIterationIndex, InlineIterationTraversal,
+    InlineBodyCall, InlineBodyCallReceiver, InlineBodyDefault, InlineBodyPlan, InlineBodyRecovery,
+    InlineBodyValue, InlineCollectionAppend, InlineCollectionCapacity, InlineCollectionLocalNames,
+    InlineIterationIndex, InlineIterationTraversal,
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -476,8 +477,6 @@ pub enum CompilerIntrinsic {
     SuspendCoroutineUninterceptedOrReturn,
     EnumValues,
     EnumValueOf,
-    Map,
-    FlatMap,
     IsEmpty,
     IsNotEmpty,
     Count,
@@ -1896,11 +1895,6 @@ pub struct FunctionInfo {
     /// value. It travels on the same candidate structure so the checker can combine both facets and
     /// run overload selection once.
     pub implicit_classifier_callable: Option<ImplicitClassifierCallable>,
-    /// Declaration-owned function packages used to resolve the iterator protocol inside this exact
-    /// callable's compiler-provided inline body. Empty means that the callable has no synthesized
-    /// iteration body. Providers attach this semantic capability to the ordinary candidate; callers'
-    /// imports never participate in the body's convention lookup.
-    pub iterator_protocol_scope: Vec<TypeName>,
     /// Annotation class identities declared on this callable. Consumers decide which annotations affect
     /// resolution/emission; the library layer only records their qualified identities.
     pub annotations: Vec<crate::types::TypeName>,
@@ -2120,7 +2114,6 @@ impl FunctionInfo {
             stable_declaration: None,
             source_member: None,
             implicit_classifier_callable: None,
-            iterator_protocol_scope: Vec::new(),
             annotations: Vec::new(),
         }
     }

@@ -3,8 +3,7 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum MappingFailure {
     UnsupportedPlan,
-    IterationNeedsCallSiteProtocol,
-    CollectionTransformNeedsCallSiteProtocol,
+    NeedsSelectedReceiver,
 }
 
 fn map_value(
@@ -96,6 +95,42 @@ fn map_call(
     })
 }
 
+fn map_recovery(
+    recovery: &crate::libraries::InlineBodyRecovery,
+    receiver_parameter: Option<usize>,
+) -> Result<Box<crate::fir::FirInlineRecovery>, MappingFailure> {
+    let caught = crate::fir::ResolvedTy::new(recovery.caught)
+        .map_err(|_| MappingFailure::UnsupportedPlan)?;
+    if caught.get().is_nullable() || caught.get().obj_internal().is_none() {
+        return Err(MappingFailure::UnsupportedPlan);
+    }
+    let constructor = &recovery.constructor;
+    let classifier = constructor.owner.ok_or(MappingFailure::UnsupportedPlan)?;
+    let [constructor_parameter] = constructor.params.as_slice() else {
+        return Err(MappingFailure::UnsupportedPlan);
+    };
+    let failure = map_call(&recovery.failure, receiver_parameter)?;
+    if failure.receiver.is_some()
+        || failure.suspend
+        || failure.arguments.as_ref() != [crate::fir::FirInlineValue::Cause]
+        || failure.parameters.as_ref() != [caught]
+        || (failure.result.get() != *constructor_parameter
+            && failure.result.get() != constructor_parameter.non_null())
+    {
+        return Err(MappingFailure::UnsupportedPlan);
+    }
+    Ok(Box::new(crate::fir::FirInlineRecovery {
+        caught,
+        constructor: constructor
+            .external_identity
+            .ok_or(MappingFailure::UnsupportedPlan)?,
+        classifier,
+        constructor_parameters: Box::new([crate::fir::ResolvedTy::new(*constructor_parameter)
+            .map_err(|_| MappingFailure::UnsupportedPlan)?]),
+        failure: Box::new(failure),
+    }))
+}
+
 pub(super) fn publish(
     plan: Option<&crate::libraries::InlineBodyPlan>,
     receiver_parameter: Option<usize>,
@@ -110,56 +145,72 @@ pub(super) fn publish(
             prologue,
             cleanup,
             cause,
+            recovery,
             defaults,
             result,
-        } => crate::fir::FirInlineBodyPlan::InvokeLambda {
-            lambda_parameter: map_parameter(*lambda_parameter, receiver_parameter)?,
-            arguments: arguments
-                .iter()
-                .copied()
-                .map(|value| map_value(value, receiver_parameter))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_boxed_slice(),
-            prologue: prologue
-                .iter()
-                .map(|call| map_call(call, receiver_parameter))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_boxed_slice(),
-            cleanup: cleanup
-                .iter()
-                .map(|call| map_call(call, receiver_parameter))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_boxed_slice(),
-            cause: cause
-                .map(crate::fir::ResolvedTy::new)
-                .transpose()
-                .map_err(|_| MappingFailure::UnsupportedPlan)?,
-            defaults: defaults
-                .iter()
-                .map(|default| {
-                    Ok(crate::fir::FirInlineDefault {
-                        parameter: map_parameter(default.parameter, receiver_parameter)?,
-                        value: match default.value {
-                            crate::libraries::DefaultValue::Null => {
-                                crate::fir::FirInlineDefaultValue::Null
-                            }
-                            _ => return Err(MappingFailure::UnsupportedPlan),
-                        },
+        } => {
+            if recovery.is_some()
+                && (cause.is_some()
+                    || !prologue.is_empty()
+                    || !cleanup.is_empty()
+                    || !defaults.is_empty()
+                    || result.is_some())
+            {
+                return Err(MappingFailure::UnsupportedPlan);
+            }
+            crate::fir::FirInlineBodyPlan::InvokeLambda {
+                lambda_parameter: map_parameter(*lambda_parameter, receiver_parameter)?,
+                arguments: arguments
+                    .iter()
+                    .copied()
+                    .map(|value| map_value(value, receiver_parameter))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_boxed_slice(),
+                prologue: prologue
+                    .iter()
+                    .map(|call| map_call(call, receiver_parameter))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_boxed_slice(),
+                cleanup: cleanup
+                    .iter()
+                    .map(|call| map_call(call, receiver_parameter))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_boxed_slice(),
+                cause: cause
+                    .map(crate::fir::ResolvedTy::new)
+                    .transpose()
+                    .map_err(|_| MappingFailure::UnsupportedPlan)?,
+                recovery: recovery
+                    .as_deref()
+                    .map(|recovery| map_recovery(recovery, receiver_parameter))
+                    .transpose()?,
+                defaults: defaults
+                    .iter()
+                    .map(|default| {
+                        Ok(crate::fir::FirInlineDefault {
+                            parameter: map_parameter(default.parameter, receiver_parameter)?,
+                            value: match default.value {
+                                crate::libraries::DefaultValue::Null => {
+                                    crate::fir::FirInlineDefaultValue::Null
+                                }
+                                _ => return Err(MappingFailure::UnsupportedPlan),
+                            },
+                        })
                     })
-                })
-                .collect::<Result<Vec<_>, _>>()?
-                .into_boxed_slice(),
-            result: result
-                .map(|value| map_value(value, receiver_parameter))
-                .transpose()?,
-        },
-        crate::libraries::InlineBodyPlan::Iteration { .. } => {
-            return Err(MappingFailure::IterationNeedsCallSiteProtocol)
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_boxed_slice(),
+                result: result
+                    .map(|value| map_value(value, receiver_parameter))
+                    .transpose()?,
+            }
         }
-        // This plan also needs the call-site-selected iterator protocol and applied element type.
+        crate::libraries::InlineBodyPlan::Iteration { .. } => {
+            return Err(MappingFailure::NeedsSelectedReceiver)
+        }
+        // This plan needs the selected receiver and applied lambda/return types.
         // `selected_extension_call` publishes the complete checked variant in `calls`.
         crate::libraries::InlineBodyPlan::CollectionTransform { .. } => {
-            return Err(MappingFailure::CollectionTransformNeedsCallSiteProtocol)
+            return Err(MappingFailure::NeedsSelectedReceiver)
         }
     })))
 }
@@ -168,6 +219,90 @@ pub(super) struct PublishedIteration {
     pub(super) lambda_parameter: u32,
     pub(super) index: Option<crate::fir::FirInlineIterationIndex>,
     pub(super) traversal: crate::fir::FirInlineIterationTraversal,
+}
+
+fn publish_iteration_member(
+    member: &crate::libraries::LibraryMember,
+    receiver: crate::types::Ty,
+) -> Result<crate::fir::FirInlineIterationMemberCall, MappingFailure> {
+    Ok(crate::fir::FirInlineIterationMemberCall {
+        declaration: member
+            .external_identity
+            .ok_or(MappingFailure::UnsupportedPlan)?,
+        receiver: crate::fir::ResolvedTy::new(receiver)
+            .map_err(|_| MappingFailure::UnsupportedPlan)?,
+        parameters: member
+            .params
+            .iter()
+            .copied()
+            .map(crate::fir::ResolvedTy::new)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| MappingFailure::UnsupportedPlan)?
+            .into_boxed_slice(),
+        result: crate::fir::ResolvedTy::new(member.ret)
+            .map_err(|_| MappingFailure::UnsupportedPlan)?,
+    })
+}
+
+pub(super) fn publish_traversal(
+    traversal: &crate::libraries::InlineIterationTraversal,
+    receiver: crate::types::Ty,
+    element: crate::types::Ty,
+) -> Result<crate::fir::FirInlineIterationTraversal, MappingFailure> {
+    Ok(match traversal {
+        crate::libraries::InlineIterationTraversal::Iterator {
+            prepare,
+            has_next,
+            next,
+        } => {
+            let mut current = receiver;
+            let mut published = Vec::with_capacity(prepare.len());
+            for member in prepare {
+                let call = publish_iteration_member(member, current)?;
+                if !call.parameters.is_empty() {
+                    return Err(MappingFailure::UnsupportedPlan);
+                }
+                current = call.result.get();
+                published.push(call);
+            }
+            let has_next = publish_iteration_member(has_next, current)?;
+            let next = publish_iteration_member(next, current)?;
+            if !has_next.parameters.is_empty()
+                || has_next.result.get() != crate::types::Ty::Boolean
+                || !next.parameters.is_empty()
+                || next.result.get() != element
+            {
+                return Err(MappingFailure::UnsupportedPlan);
+            }
+            crate::fir::FirInlineIterationTraversal::Iterator {
+                prepare: published.into_boxed_slice(),
+                has_next: Box::new(has_next),
+                next: Box::new(next),
+            }
+        }
+        crate::libraries::InlineIterationTraversal::Array => {
+            if receiver.array_read_elem() != Some(element) {
+                return Err(MappingFailure::UnsupportedPlan);
+            }
+            crate::fir::FirInlineIterationTraversal::Array
+        }
+        crate::libraries::InlineIterationTraversal::Counted { size, get } => {
+            let size = publish_iteration_member(size, receiver)?;
+            let get = publish_iteration_member(get, receiver)?;
+            if !size.parameters.is_empty()
+                || size.result.get() != crate::types::Ty::Int
+                || get.parameters.as_ref()
+                    != [crate::fir::ResolvedTy::new(crate::types::Ty::Int).expect("resolved Int")]
+                || get.result.get() != element
+            {
+                return Err(MappingFailure::UnsupportedPlan);
+            }
+            crate::fir::FirInlineIterationTraversal::Counted {
+                size: Box::new(size),
+                get: Box::new(get),
+            }
+        }
+    })
 }
 
 pub(super) fn publish_iteration(
@@ -206,81 +341,7 @@ pub(super) fn publish_iteration(
             }
         })
         .transpose()?;
-    let publish_member = |member: &crate::libraries::LibraryMember,
-                          receiver: crate::types::Ty|
-     -> Result<crate::fir::FirInlineIterationMemberCall, MappingFailure> {
-        Ok(crate::fir::FirInlineIterationMemberCall {
-            declaration: member
-                .external_identity
-                .ok_or(MappingFailure::UnsupportedPlan)?,
-            receiver: crate::fir::ResolvedTy::new(receiver)
-                .map_err(|_| MappingFailure::UnsupportedPlan)?,
-            parameters: member
-                .params
-                .iter()
-                .copied()
-                .map(crate::fir::ResolvedTy::new)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| MappingFailure::UnsupportedPlan)?
-                .into_boxed_slice(),
-            result: crate::fir::ResolvedTy::new(member.ret)
-                .map_err(|_| MappingFailure::UnsupportedPlan)?,
-        })
-    };
-    let traversal = match traversal {
-        crate::libraries::InlineIterationTraversal::Iterator {
-            prepare,
-            has_next,
-            next,
-        } => {
-            let mut current = receiver;
-            let mut published = Vec::with_capacity(prepare.len());
-            for member in prepare {
-                let call = publish_member(member, current)?;
-                if !call.parameters.is_empty() {
-                    return Err(MappingFailure::UnsupportedPlan);
-                }
-                current = call.result.get();
-                published.push(call);
-            }
-            let has_next = publish_member(has_next, current)?;
-            let next = publish_member(next, current)?;
-            if !has_next.parameters.is_empty()
-                || has_next.result.get() != crate::types::Ty::Boolean
-                || !next.parameters.is_empty()
-                || next.result.get() != element
-            {
-                return Err(MappingFailure::UnsupportedPlan);
-            }
-            crate::fir::FirInlineIterationTraversal::Iterator {
-                prepare: published.into_boxed_slice(),
-                has_next: Box::new(has_next),
-                next: Box::new(next),
-            }
-        }
-        crate::libraries::InlineIterationTraversal::Array => {
-            if receiver.array_read_elem() != Some(element) {
-                return Err(MappingFailure::UnsupportedPlan);
-            }
-            crate::fir::FirInlineIterationTraversal::Array
-        }
-        crate::libraries::InlineIterationTraversal::Counted { size, get } => {
-            let size = publish_member(size, receiver)?;
-            let get = publish_member(get, receiver)?;
-            if !size.parameters.is_empty()
-                || size.result.get() != crate::types::Ty::Int
-                || get.parameters.as_ref()
-                    != [crate::fir::ResolvedTy::new(crate::types::Ty::Int).expect("resolved Int")]
-                || get.result.get() != element
-            {
-                return Err(MappingFailure::UnsupportedPlan);
-            }
-            crate::fir::FirInlineIterationTraversal::Counted {
-                size: Box::new(size),
-                get: Box::new(get),
-            }
-        }
-    };
+    let traversal = publish_traversal(traversal, receiver, element)?;
     Ok(PublishedIteration {
         lambda_parameter: map_parameter(*lambda_parameter, receiver_parameter)?,
         index,
@@ -333,6 +394,163 @@ pub(super) fn publish_extension_iteration(
             .map_err(|_| MappingFailure::UnsupportedPlan)?,
         index: published.index,
         traversal: published.traversal,
+    })
+}
+
+pub(super) fn publish_extension_collection_transform(
+    plan: &crate::libraries::InlineBodyPlan,
+    context_count: usize,
+    receiver: crate::fir::ResolvedTy,
+    parameters: &[crate::fir::ResolvedTy],
+    result: crate::types::Ty,
+) -> Result<crate::fir::FirInlineBodyPlan, MappingFailure> {
+    let crate::libraries::InlineBodyPlan::CollectionTransform {
+        lambda_parameter,
+        traversal,
+        local_names,
+        factory,
+        capacity,
+        append,
+    } = plan
+    else {
+        return Err(MappingFailure::UnsupportedPlan);
+    };
+    let lambda_parameter = map_parameter(*lambda_parameter, Some(context_count))?;
+    let action = parameters
+        .get(lambda_parameter as usize)
+        .map(|parameter| parameter.get())
+        .and_then(|parameter| match parameter {
+            crate::types::Ty::Fun(signature) => Some(signature),
+            _ => None,
+        })
+        .filter(|signature| signature.params.len() == 1)
+        .ok_or(MappingFailure::UnsupportedPlan)?;
+    let element = action.params[0];
+    let output = result
+        .type_args()
+        .first()
+        .copied()
+        .ok_or(MappingFailure::UnsupportedPlan)?;
+    let factory_classifier = factory.owner.ok_or(MappingFailure::UnsupportedPlan)?;
+    let accumulator_ty = crate::types::Ty::obj_args_name(factory_classifier, &[output]);
+    let factory_parameters = factory
+        .params
+        .iter()
+        .copied()
+        .map(crate::fir::ResolvedTy::new)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| MappingFailure::UnsupportedPlan)?
+        .into_boxed_slice();
+    let capacity = capacity
+        .as_ref()
+        .map(|capacity| match capacity {
+            crate::libraries::InlineCollectionCapacity::Member(member) => {
+                let member = publish_iteration_member(member, receiver.get())?;
+                if !member.parameters.is_empty() || member.result.get() != crate::types::Ty::Int {
+                    return Err(MappingFailure::UnsupportedPlan);
+                }
+                Ok(crate::fir::FirInlineCollectionCapacity::Member(member))
+            }
+            crate::libraries::InlineCollectionCapacity::Extension { callable, default } => {
+                let source_receiver = callable
+                    .source_receiver
+                    .filter(|receiver| callable.params.first() == Some(receiver))
+                    .ok_or(MappingFailure::UnsupportedPlan)?;
+                if callable.context_count != 0
+                    || callable.suspend
+                    || callable.params.len() != 2
+                    || callable.params[1] != crate::types::Ty::Int
+                    || callable.ret != crate::types::Ty::Int
+                {
+                    return Err(MappingFailure::UnsupportedPlan);
+                }
+                Ok(crate::fir::FirInlineCollectionCapacity::Extension {
+                    call: crate::fir::FirInlineCollectionExtensionCall {
+                        declaration: callable
+                            .external_identity
+                            .ok_or(MappingFailure::UnsupportedPlan)?,
+                        source_receiver: crate::fir::ResolvedTy::new(source_receiver)
+                            .map_err(|_| MappingFailure::UnsupportedPlan)?,
+                        parameters: callable
+                            .params
+                            .iter()
+                            .copied()
+                            .map(crate::fir::ResolvedTy::new)
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(|_| MappingFailure::UnsupportedPlan)?
+                            .into_boxed_slice(),
+                        result: crate::fir::ResolvedTy::new(callable.ret)
+                            .map_err(|_| MappingFailure::UnsupportedPlan)?,
+                    },
+                    default: *default,
+                })
+            }
+        })
+        .transpose()?;
+    if factory_parameters.len() != usize::from(capacity.is_some())
+        || factory_parameters
+            .first()
+            .is_some_and(|parameter| parameter.get() != crate::types::Ty::Int)
+    {
+        return Err(MappingFailure::UnsupportedPlan);
+    }
+    let append = match append {
+        crate::libraries::InlineCollectionAppend::Member(member) => {
+            let member = publish_iteration_member(member, accumulator_ty)?;
+            let [parameter] = member.parameters.as_ref() else {
+                return Err(MappingFailure::UnsupportedPlan);
+            };
+            if parameter.get() != action.ret || member.result.get() != crate::types::Ty::Boolean {
+                return Err(MappingFailure::UnsupportedPlan);
+            }
+            crate::fir::FirInlineCollectionAppend::Member(member)
+        }
+        crate::libraries::InlineCollectionAppend::Extension(callable) => {
+            let source_receiver = callable
+                .source_receiver
+                .filter(|receiver| callable.params.first() == Some(receiver))
+                .ok_or(MappingFailure::UnsupportedPlan)?;
+            if callable.context_count != 0
+                || callable.suspend
+                || callable.params.len() != 2
+                || callable.ret != crate::types::Ty::Boolean
+            {
+                return Err(MappingFailure::UnsupportedPlan);
+            }
+            crate::fir::FirInlineCollectionAppend::Extension(
+                crate::fir::FirInlineCollectionExtensionCall {
+                    declaration: callable
+                        .external_identity
+                        .ok_or(MappingFailure::UnsupportedPlan)?,
+                    source_receiver: crate::fir::ResolvedTy::new(source_receiver)
+                        .map_err(|_| MappingFailure::UnsupportedPlan)?,
+                    parameters: callable
+                        .params
+                        .iter()
+                        .copied()
+                        .map(crate::fir::ResolvedTy::new)
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|_| MappingFailure::UnsupportedPlan)?
+                        .into_boxed_slice(),
+                    result: crate::fir::ResolvedTy::new(callable.ret)
+                        .map_err(|_| MappingFailure::UnsupportedPlan)?,
+                },
+            )
+        }
+    };
+    Ok(crate::fir::FirInlineBodyPlan::CollectionTransform {
+        lambda_parameter,
+        local_names: local_names.into(),
+        traversal: publish_traversal(traversal, receiver.get(), element)?,
+        factory: factory
+            .external_identity
+            .ok_or(MappingFailure::UnsupportedPlan)?,
+        factory_classifier,
+        factory_parameters,
+        capacity,
+        append,
+        accumulator: crate::fir::ResolvedTy::new(accumulator_ty)
+            .map_err(|_| MappingFailure::UnsupportedPlan)?,
     })
 }
 
@@ -545,6 +763,7 @@ mod tests {
             prologue,
             cleanup,
             cause,
+            recovery: None,
             defaults,
             result,
         }) = plan
@@ -618,6 +837,7 @@ mod tests {
             prologue,
             cleanup,
             cause,
+            recovery: None,
             defaults,
             result,
         }) = plan
@@ -675,6 +895,7 @@ mod tests {
             }],
             cleanup: Vec::new(),
             cause: None,
+            recovery: None,
             defaults: Vec::new(),
             result: None,
         };
@@ -711,6 +932,7 @@ mod tests {
                 arguments: vec![crate::libraries::InlineBodyValue::Cause],
             }],
             cause: Some(Ty::nullable(Ty::obj("kotlin/Throwable"))),
+            recovery: None,
             defaults: Vec::new(),
             result: None,
         };

@@ -207,6 +207,19 @@ pub fn jvm_to_kotlin_builtin_metadata_name(internal: TypeName) -> Option<TypeNam
     builtin_ids().metadata_owner.get(&internal).copied()
 }
 
+/// Every Kotlin declaration represented by one mapped JVM owner. Collection read-only/mutable
+/// siblings intentionally share a JVM interface, so a physical member target must be matched
+/// against this complete declaration family before its semantic owner is known.
+pub(crate) fn jvm_to_kotlin_builtin_metadata_declarations(
+    internal: TypeName,
+) -> &'static [TypeName] {
+    let ids = builtin_ids();
+    let Some(group) = ids.erasure_group.get(&internal).copied() else {
+        return &[];
+    };
+    &ids.metadata_declarations[usize::from(group)]
+}
+
 /// Whether a resolved JVM internal name denotes a `Throwable` subtype, recognised structurally by
 /// the JDK naming convention (`…Exception`/`…Error`, or `java/lang/Throwable` itself). Used only to
 /// admit the no-arg / single-`String` constructor shapes every JDK throwable provides — the type
@@ -479,6 +492,8 @@ const ERASURE_GROUPS: &[ErasureGroup] = &[
 /// `TypeName` ids through these maps instead of locking the global name tree per string compare.
 struct BuiltinIds {
     erasure_group: FxHashMap<TypeName, u8>,
+    /// Kotlin declarations in each erasure group, indexed by `erasure_group`.
+    metadata_declarations: Vec<Box<[TypeName]>>,
     /// Any builtin (Kotlin or JVM spelling, primitives included) → its canonical JVM internal.
     jvm_builtin: FxHashMap<TypeName, (&'static str, TypeName)>,
     /// Groups whose JVM face is a `java/util/*` collection interface, as a bitmask by group index.
@@ -500,6 +515,7 @@ fn builtin_ids() -> &'static BuiltinIds {
     IDS.get_or_init(|| {
         let tn = crate::types::type_name;
         let mut erasure_group = FxHashMap::default();
+        let mut metadata_declarations = Vec::with_capacity(ERASURE_GROUPS.len());
         let mut jvm_builtin = FxHashMap::default();
         let mut collection_groups = 0u32;
         let mut authoritative_scope_groups = 0u32;
@@ -516,6 +532,17 @@ fn builtin_ids() -> &'static BuiltinIds {
             } = mapping;
             let g = u8::try_from(group).expect("erasure group count fits u8");
             let jvm_id = tn(jvm_name);
+            let mut declarations = kotlin_names
+                .first()
+                .map(|name| vec![tn(name)])
+                .unwrap_or_default();
+            if let Some(mutable) = jvm_collection_to_kotlin_mutable(jvm_name) {
+                let mutable = tn(mutable);
+                if !declarations.contains(&mutable) {
+                    declarations.push(mutable);
+                }
+            }
+            metadata_declarations.push(declarations.into_boxed_slice());
             // Every erasure group is declared by a Kotlin builtin. Keeping the inverse beside the
             // forward identity table prevents consumers from reconstructing only the collection or
             // Kotlin-only-member subsets and silently missing mapped types such as Cloneable/String.
@@ -564,6 +591,7 @@ fn builtin_ids() -> &'static BuiltinIds {
         }
         BuiltinIds {
             erasure_group,
+            metadata_declarations,
             jvm_builtin,
             collection_groups,
             authoritative_scope_groups,
@@ -667,201 +695,6 @@ pub fn type_name_to_jvm_builtin_internal(internal: TypeName) -> Option<&'static 
     builtin_ids().jvm_builtin.get(&internal).map(|(s, _)| *s)
 }
 
-/// One `JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES` entry for a mapped collection.
-struct MappedVisibleMethod {
-    jvm_owner: &'static str,
-    name: &'static str,
-    descriptor: &'static str,
-    /// Mutable entries attach to that face; other entries attach to the group's read-only face.
-    mutable_face: Option<&'static str>,
-}
-
-const fn visible(
-    jvm_owner: &'static str,
-    name: &'static str,
-    descriptor: &'static str,
-) -> MappedVisibleMethod {
-    MappedVisibleMethod {
-        jvm_owner,
-        name,
-        descriptor,
-        mutable_face: None,
-    }
-}
-
-const fn mutable(
-    jvm_owner: &'static str,
-    face: &'static str,
-    name: &'static str,
-    descriptor: &'static str,
-) -> MappedVisibleMethod {
-    MappedVisibleMethod {
-        jvm_owner,
-        name,
-        descriptor,
-        mutable_face: Some(face),
-    }
-}
-
-/// Collection-facing entries from `VISIBLE_METHOD_SIGNATURES`, partitioned by mutability.
-/// `Map.remove(Object,Object)` is already declared by `MutableMap` and is not a visible entry.
-const MAPPED_VISIBLE_METHODS: &[MappedVisibleMethod] = &[
-    visible(
-        "java/util/Iterator",
-        "forEachRemaining",
-        "(Ljava/util/function/Consumer;)V",
-    ),
-    visible(
-        "java/lang/Iterable",
-        "forEach",
-        "(Ljava/util/function/Consumer;)V",
-    ),
-    visible(
-        "java/lang/Iterable",
-        "spliterator",
-        "()Ljava/util/Spliterator;",
-    ),
-    visible(
-        "java/util/Collection",
-        "spliterator",
-        "()Ljava/util/Spliterator;",
-    ),
-    visible(
-        "java/util/Collection",
-        "parallelStream",
-        "()Ljava/util/stream/Stream;",
-    ),
-    visible(
-        "java/util/Collection",
-        "stream",
-        "()Ljava/util/stream/Stream;",
-    ),
-    mutable(
-        "java/util/Collection",
-        "kotlin/collections/MutableCollection",
-        "removeIf",
-        "(Ljava/util/function/Predicate;)Z",
-    ),
-    mutable(
-        "java/util/List",
-        "kotlin/collections/MutableList",
-        "replaceAll",
-        "(Ljava/util/function/UnaryOperator;)V",
-    ),
-    mutable(
-        "java/util/List",
-        "kotlin/collections/MutableList",
-        "addFirst",
-        "(Ljava/lang/Object;)V",
-    ),
-    mutable(
-        "java/util/List",
-        "kotlin/collections/MutableList",
-        "addLast",
-        "(Ljava/lang/Object;)V",
-    ),
-    mutable(
-        "java/util/List",
-        "kotlin/collections/MutableList",
-        "removeFirst",
-        "()Ljava/lang/Object;",
-    ),
-    mutable(
-        "java/util/List",
-        "kotlin/collections/MutableList",
-        "removeLast",
-        "()Ljava/lang/Object;",
-    ),
-    visible(
-        "java/util/Map",
-        "getOrDefault",
-        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
-    ),
-    visible(
-        "java/util/Map",
-        "forEach",
-        "(Ljava/util/function/BiConsumer;)V",
-    ),
-    mutable(
-        "java/util/Map",
-        "kotlin/collections/MutableMap",
-        "computeIfAbsent",
-        "(Ljava/lang/Object;Ljava/util/function/Function;)Ljava/lang/Object;",
-    ),
-    mutable(
-        "java/util/Map",
-        "kotlin/collections/MutableMap",
-        "computeIfPresent",
-        "(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;",
-    ),
-    mutable(
-        "java/util/Map",
-        "kotlin/collections/MutableMap",
-        "compute",
-        "(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;",
-    ),
-    mutable(
-        "java/util/Map",
-        "kotlin/collections/MutableMap",
-        "merge",
-        "(Ljava/lang/Object;Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;",
-    ),
-    mutable(
-        "java/util/Map",
-        "kotlin/collections/MutableMap",
-        "putIfAbsent",
-        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
-    ),
-    mutable(
-        "java/util/Map",
-        "kotlin/collections/MutableMap",
-        "replaceAll",
-        "(Ljava/util/function/BiFunction;)V",
-    ),
-    mutable(
-        "java/util/Map",
-        "kotlin/collections/MutableMap",
-        "replace",
-        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
-    ),
-    mutable(
-        "java/util/Map",
-        "kotlin/collections/MutableMap",
-        "replace",
-        "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z",
-    ),
-];
-
-/// Whether a Java member read from the mapped JVM class is part of the SOURCE scope of the mapped
-/// Kotlin face `face` (`kotlin/collections/MutableMap`, …) under kotlinc's
-/// `VISIBLE_METHOD_SIGNATURES` whitelist. Consulted only where the Kotlin declaration is otherwise
-/// authoritative; the JVM face (`java/util/Map` itself) keeps its full classfile scope untouched.
-pub fn mapped_scope_keeps_jvm_method(
-    face: TypeName,
-    jvm_owner: TypeName,
-    name: &str,
-    descriptor: &str,
-) -> bool {
-    MAPPED_VISIBLE_METHODS.iter().any(|method| {
-        if !jvm_owner.matches(method.jvm_owner)
-            || method.name != name
-            || method.descriptor != descriptor
-        {
-            return false;
-        }
-        match method.mutable_face {
-            Some(mutable) => face.matches(mutable),
-            None => ERASURE_GROUPS.iter().any(|group| {
-                group.jvm_name == method.jvm_owner
-                    && group
-                        .kotlin_names
-                        .first()
-                        .is_some_and(|read_only| face.matches(read_only))
-            }),
-        }
-    })
-}
-
 pub fn to_jvm_type_name(internal: TypeName) -> TypeName {
     builtin_ids()
         .jvm_builtin
@@ -898,11 +731,11 @@ pub fn wrapper_internal(t: Ty) -> Option<&'static str> {
 mod tests {
     use super::{
         is_kotlin_collection_type_name, is_mapped_collection_face,
-        jvm_collection_to_kotlin_type_name, jvm_to_kotlin_builtin_metadata_name,
-        kotlin_prim_to_wrapper, mapped_builtin_has_authoritative_kotlin_scope,
-        mapped_scope_keeps_jvm_method, platform_flexible_upper_bound, to_jvm_internal,
-        to_jvm_type_name, to_kotlin_internal, wrapper_internal, wrapper_to_kotlin_prim_name,
-        MAPPED_VISIBLE_METHODS,
+        jvm_collection_to_kotlin_type_name, jvm_to_kotlin_builtin_metadata_declarations,
+        jvm_to_kotlin_builtin_metadata_name, kotlin_prim_to_wrapper,
+        mapped_builtin_has_authoritative_kotlin_scope, platform_flexible_upper_bound,
+        to_jvm_internal, to_jvm_type_name, to_kotlin_internal, wrapper_internal,
+        wrapper_to_kotlin_prim_name,
     };
     use crate::types::{type_name, Ty};
 
@@ -1075,6 +908,14 @@ mod tests {
             jvm_to_kotlin_builtin_metadata_name(type_name("demo/Foo")),
             None
         );
+        assert_eq!(
+            jvm_to_kotlin_builtin_metadata_declarations(type_name("java/util/Collection")),
+            &[
+                type_name("kotlin/collections/Collection"),
+                type_name("kotlin/collections/MutableCollection"),
+            ],
+            "a physical collection owner represents both authoritative Kotlin declarations"
+        );
     }
 
     #[test]
@@ -1099,46 +940,5 @@ mod tests {
         assert!(!mapped_builtin_has_authoritative_kotlin_scope(type_name(
             "example/UserType"
         )));
-    }
-
-    #[test]
-    fn mapped_visible_method_table_is_exact_and_owner_qualified() {
-        let keys = MAPPED_VISIBLE_METHODS
-            .iter()
-            .map(|method| (method.jvm_owner, method.name, method.descriptor))
-            .collect::<std::collections::HashSet<_>>();
-        assert_eq!(MAPPED_VISIBLE_METHODS.len(), 22);
-        assert_eq!(keys.len(), MAPPED_VISIBLE_METHODS.len());
-
-        assert!(mapped_scope_keeps_jvm_method(
-            type_name("kotlin/collections/Collection"),
-            type_name("java/util/Collection"),
-            "stream",
-            "()Ljava/util/stream/Stream;",
-        ));
-        assert!(!mapped_scope_keeps_jvm_method(
-            type_name("kotlin/collections/MutableCollection"),
-            type_name("java/util/Collection"),
-            "stream",
-            "()Ljava/util/stream/Stream;",
-        ));
-        assert!(mapped_scope_keeps_jvm_method(
-            type_name("kotlin/collections/MutableList"),
-            type_name("java/util/List"),
-            "addFirst",
-            "(Ljava/lang/Object;)V",
-        ));
-        assert!(!mapped_scope_keeps_jvm_method(
-            type_name("kotlin/collections/List"),
-            type_name("java/util/List"),
-            "addFirst",
-            "(Ljava/lang/Object;)V",
-        ));
-        assert!(!mapped_scope_keeps_jvm_method(
-            type_name("kotlin/collections/MutableList"),
-            type_name("java/util/Collection"),
-            "addFirst",
-            "(Ljava/lang/Object;)V",
-        ));
     }
 }

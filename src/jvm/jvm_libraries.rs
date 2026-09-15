@@ -5,8 +5,10 @@
 
 mod inline_body_plan;
 mod inline_capability;
+mod mapped_builtin_member_status;
 
 use inline_capability::{metadata_inline, property_accessor_inline};
+use mapped_builtin_member_status::mapped_builtin_member_status;
 
 use super::classpath::{
     kotlin_name_to_ty, kotlin_type_name_to_ty, metadata_return_info, Classpath,
@@ -18,9 +20,9 @@ use crate::jvm::names::same_mapped_virtual_name;
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::libraries::{
     AnnotationParameterPolicy, AnnotationPositionalPolicy, CallSig, EmptySymbolSource, FnFlags,
-    FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy, GenericSig, InlineBodyPlan, InlineKind,
-    LibConst, LibraryCallable, LibraryConst, LibraryMember, LibraryType, ParamList, PropKind,
-    PropertyInfo, PropertySet, ReturnInfo, SemanticPlatform, Visibility,
+    FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy, GenericSig, InlineKind, LibConst,
+    LibraryCallable, LibraryConst, LibraryMember, LibraryType, ParamList, PropKind, PropertyInfo,
+    PropertySet, ReturnInfo, SemanticPlatform, Visibility,
 };
 use crate::runtime::{
     CountedLoopInfo, PlatformAccessor, PlatformCtor, PlatformField, PlatformRangeCtor,
@@ -2649,17 +2651,10 @@ impl JvmLibraries {
             // collection the builtins REPLACE the JVM class's members; every other mapped builtin still
             // joins them, with anything the class file already states under a physical name dropped.
             if kotlin_scope_is_authoritative {
-                // Retain only the visible JVM signatures assigned to this Kotlin collection face.
+                // Retain only physical members admitted to this mapped Kotlin declaration by the
+                // provider-owned, versioned JVM-builtins policy.
                 members.retain(|member| {
-                    super::jvm_class_map::mapped_scope_keeps_jvm_method(
-                        internal_name,
-                        ci.this_class,
-                        member
-                            .physical_name
-                            .as_deref()
-                            .unwrap_or(member.name.as_str()),
-                        &member.descriptor,
-                    )
+                    mapped_builtin_member_status(internal_name, ci.this_class, member).is_visible()
                 });
             } else {
                 // A mapped JVM method and its Kotlin builtin entry describe one declaration. Prefer the
@@ -3862,12 +3857,24 @@ impl JvmLibraries {
         self.register_external_inline_callable(member, FnKind::Member);
     }
 
+    /// Inline-plan caches are shared by immutable classpath composition, while callable identities
+    /// are local to one `Classpath` instance. Always re-home a cached dependency through the
+    /// consuming classpath's physical declaration key before the plan crosses the provider boundary.
+    fn register_external_inline_dependency_callable(
+        &self,
+        callable: &mut LibraryCallable,
+        kind: FnKind,
+    ) {
+        callable.external_identity = None;
+        self.register_external_callable(callable, kind);
+    }
+
     fn register_external_inline_callable(&self, member: &mut LibraryMember, kind: FnKind) {
         let Some(owner) = member.owner else {
             return;
         };
         let mut callable = FunctionInfo::classifier_member(kind, owner, member.clone()).callable;
-        self.register_external_callable(&mut callable, kind);
+        self.register_external_inline_dependency_callable(&mut callable, kind);
         member.external_identity = callable.external_identity;
     }
 
@@ -5271,12 +5278,6 @@ impl JvmLibraries {
                 if package.matches("kotlin/collections") || package.matches("kotlin/text") =>
             {
                 match name {
-                    "map" if package.matches("kotlin/collections") => {
-                        Some(crate::libraries::CompilerIntrinsic::Map)
-                    }
-                    "flatMap" if package.matches("kotlin/collections") => {
-                        Some(crate::libraries::CompilerIntrinsic::FlatMap)
-                    }
                     "isEmpty" if package.matches("kotlin/collections") => {
                         Some(crate::libraries::CompilerIntrinsic::IsEmpty)
                     }
@@ -5298,10 +5299,6 @@ impl JvmLibraries {
             _ => None,
         };
         if let Some(intrinsic) = compiler_intrinsic {
-            let declaration_package = match namespace {
-                SymbolNamespace::Package(package) => Some(package),
-                SymbolNamespace::Classifier(_) => None,
-            };
             for overload in &mut overloads {
                 let selected_declaration_kind = match intrinsic {
                     crate::libraries::CompilerIntrinsic::ArrayFactory(_)
@@ -5331,8 +5328,6 @@ impl JvmLibraries {
                     | crate::libraries::CompilerIntrinsic::PrimitiveBitNot
                     | crate::libraries::CompilerIntrinsic::PrimitiveBinary(_) => continue,
                     crate::libraries::CompilerIntrinsic::StartCoroutine
-                    | crate::libraries::CompilerIntrinsic::Map
-                    | crate::libraries::CompilerIntrinsic::FlatMap
                     | crate::libraries::CompilerIntrinsic::IsEmpty
                     | crate::libraries::CompilerIntrinsic::IsNotEmpty
                     | crate::libraries::CompilerIntrinsic::Count
@@ -5343,37 +5338,6 @@ impl JvmLibraries {
                 };
                 if overload.kind == selected_declaration_kind {
                     overload.callable.compiler_intrinsic = Some(intrinsic);
-                    if matches!(
-                        intrinsic,
-                        crate::libraries::CompilerIntrinsic::Map
-                            | crate::libraries::CompilerIntrinsic::FlatMap
-                    ) {
-                        overload.callable.inline_body_plan = Some(Box::new(
-                            super::collection_inline_plan::collection_transform(
-                                intrinsic == crate::libraries::CompilerIntrinsic::FlatMap,
-                            ),
-                        ));
-                    }
-                    if matches!(
-                        intrinsic,
-                        crate::libraries::CompilerIntrinsic::Map
-                            | crate::libraries::CompilerIntrinsic::FlatMap
-                    ) {
-                        overload.iterator_protocol_scope =
-                            declaration_package.into_iter().collect();
-                    }
-                }
-            }
-        }
-        if let SymbolNamespace::Package(package) = namespace {
-            for overload in &mut overloads {
-                if overload.kind == FnKind::Extension
-                    && matches!(
-                        overload.callable.inline_body_plan.as_deref(),
-                        Some(InlineBodyPlan::CollectionTransform { .. })
-                    )
-                {
-                    overload.iterator_protocol_scope = vec![package];
                 }
             }
         }
