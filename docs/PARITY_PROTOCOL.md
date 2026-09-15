@@ -2515,3 +2515,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `an_enum_lookup_with_no_suspension_still_works`,
   `src/jvm/suspend/hoisting.rs::tests::a_shared_operand_is_hoisted_independently_at_each_use`,
   `every_remaining_single_operand_node_recurses`.
+- **An unresolvable `return@label` reports the reference diagnostic, at its span (fix).** krusty wrote
+  its own wording at the `return` keyword; the reference compiler writes `unresolved label.` at the
+  `@` token. Both the message and the column differed, for an unknown name and for a name whose
+  lambda does not enclose the return alike. The label survives on the node only as a bare `String`,
+  so the span cannot be recovered afterwards: the parser now records the `@` span for the statement
+  and expression forms, and both report sites read it. Shared test helpers
+  (`common::expect_identical_rejection`) compares the COMPLETE diagnostic
+  set of both compilers — count, file, line, column, message and order — since a nonzero-exit
+  assertion passes on an unrelated rejection, which is how a "both compilers agree" claim goes stale.
+  `tests/unresolved_label_diagnostic_e2e.rs::an_unknown_return_label_matches_the_reference_diagnostic`,
+  `a_declared_but_non_enclosing_return_label_matches_the_reference_diagnostic`,
+  `an_unresolved_label_in_expression_position_matches_the_reference_diagnostic`,
+  `a_resolvable_return_label_still_works`.
