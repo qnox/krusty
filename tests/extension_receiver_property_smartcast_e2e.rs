@@ -39,6 +39,20 @@ fn expect_identical_rejection(result: &common::CompilerDiagnosticResult, tag: &s
 }
 
 /// The failing shape, in both the expression-body and block-body spellings.
+/// Run one fixture under BOTH compilers and require the same `box()` value.
+///
+/// `expect_box_ok_files_with_stdlib` alone only proves krusty agrees with itself. A smart cast that
+/// krusty performs and kotlinc does not — or the reverse — is exactly the disagreement these
+/// fixtures exist to exclude, so the reference compiler must run the identical source.
+fn both_compilers_box(main: &str, stem: &str) {
+    let reference = common::kotlinc_box_result(main);
+    assert_eq!(
+        reference, "OK",
+        "{stem}: the reference compiler disagrees: {reference}"
+    );
+    common::expect_box_ok_files_with_stdlib(&[("Main.kt", main)], stem);
+}
+
 #[test]
 fn an_extension_receivers_property_smart_casts_under_a_bare_name() {
     const MAIN: &str = "class Yaml(val ref: String?)\n\
@@ -57,7 +71,7 @@ fun box(): String {\n\
 \x20   if (Yaml(null).block() != \"none\") return \"FAIL: block absent\"\n\
 \x20   return \"OK\"\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "extension_receiver_smartcast");
+    both_compilers_box(MAIN, "extension_receiver_smartcast");
 }
 
 /// The corpus shape: a nullable sibling property reached with `!!` in the other branch, and a result
@@ -81,7 +95,7 @@ fun box(): String {\n\
 \x20   if (absent.name != \"gp\") return \"FAIL: absent \" + absent.name\n\
 \x20   return \"OK\"\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "extension_receiver_supertype");
+    both_compilers_box(MAIN, "extension_receiver_supertype");
 }
 
 /// The spellings that already worked stay working — a member function, and the qualified `this.ref`.
@@ -99,7 +113,7 @@ fun box(): String {\n\
 \x20   if (explicit(Yaml(\"c\")) != \"c\") return \"FAIL: explicit\"\n\
 \x20   return \"OK\"\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "receiver_spellings_smartcast");
+    both_compilers_box(MAIN, "receiver_spellings_smartcast");
 }
 
 /// A `var` is not stable, so no spelling may narrow it — widening the key must not open a hole.
