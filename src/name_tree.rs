@@ -507,9 +507,16 @@ impl NameTree {
         }
         let exact = other.node(id).exact_nested_owner.load(Ordering::Acquire);
         if exact != 0 {
-            let owner = self.existing_from(other, NameId(exact - 1))?;
-            if self.node(parent).exact_nested_owner.load(Ordering::Acquire) != owner.0 + 1 {
-                return None;
+            let existing = self.node(parent).exact_nested_owner.load(Ordering::Acquire);
+            // A read-only path lookup cannot attach semantic nesting metadata to the destination.
+            // A tree populated from classfile paths may therefore have the same identity with no
+            // recorded relation. Accept that path; reject only a relation that is explicitly known
+            // to name a different owner.
+            if existing != 0 {
+                let owner = self.existing_from(other, NameId(exact - 1))?;
+                if existing != owner.0 + 1 {
+                    return None;
+                }
             }
         }
         Some(parent)
@@ -1042,6 +1049,15 @@ mod tests {
             Some("$serializer")
         );
         assert_eq!(dst.existing_from(&src, generated), Some(moved_generated));
+
+        // A provider tree may index only the physical classfile path. Read-only identity mapping
+        // must not require it to have copied the global tree's supplemental nesting relation first.
+        let provider = NameTree::default();
+        let provider_generated = provider.insert("a/b/C$$serializer");
+        assert_eq!(
+            provider.existing_from(&src, generated),
+            Some(provider_generated)
+        );
         assert_eq!(dst.insert_from(&src, NameTree::ROOT), NameTree::ROOT);
         // Re-inserting the same source id is idempotent in the destination.
         assert_eq!(dst.insert_from(&src, id), moved);
