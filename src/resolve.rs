@@ -48,6 +48,7 @@ mod local_class_scope;
 mod local_method_dependencies;
 mod override_plans;
 mod postponed_diagnostics;
+mod qualified_call_shaping;
 mod safe_call_flow;
 mod sam_constructors;
 mod scope;
@@ -3634,8 +3635,6 @@ enum TopLevelPropertySelection {
 type GenericMemberValueOperandShape = (Option<Ty>, Vec<Ty>, Vec<u32>);
 type GenericMemberValueOperandSlots =
     HashMap<TypeName, HashMap<String, Vec<GenericMemberValueOperandShape>>>;
-
-type MappedNamedArgs = (Vec<ExprId>, Vec<Ty>, Vec<Option<ExprId>>);
 
 /// One member extension property selected for a concrete receiver and implicit dispatch scope.
 ///
@@ -27947,7 +27946,7 @@ impl<'a> Checker<'a> {
                                 return result;
                             }
                         }
-                        let arg_tys = self.arg_tys(scope, args);
+                        let (arg_tys, probe_mark) = self.probe_argument_types(scope, call, args);
                         let targs: Vec<Ty> = self
                             .file
                             .call_type_args
@@ -27972,6 +27971,7 @@ impl<'a> Checker<'a> {
                             )
                             .and_then(CallableCandidateSelection::candidate)
                         {
+                            self.retire_selected_lambda_probe(call, args, probe_mark);
                             return self.finish_top_level_call(
                                 scope,
                                 call,
@@ -27994,15 +27994,13 @@ impl<'a> Checker<'a> {
                                 .top_level_candidates(&name);
                             let trailing_lambda =
                                 self.file.call_has_trailing_lambda.contains(&call.0);
-                            match self.map_named_top_level_args(
+                            match self.map_named_qualified_top_level_args(
                                 scope,
-                                NamedTopLevelCall {
-                                    call,
-                                    name: &name,
-                                    args,
-                                    names,
-                                    trailing_lambda,
-                                },
+                                call,
+                                &name,
+                                args,
+                                names,
+                                trailing_lambda,
                                 candidates,
                             ) {
                                 Ok(Some((_, mapped_types, slots))) => {
@@ -48679,14 +48677,6 @@ struct InapplicableTopLevelCall<'a> {
     explicit_type_args: Vec<Ty>,
 }
 
-struct NamedTopLevelCall<'a> {
-    call: ExprId,
-    name: &'a str,
-    args: &'a [ExprId],
-    names: &'a [Option<String>],
-    trailing_lambda: bool,
-}
-
 struct SelectedCallable {
     info: crate::libraries::FunctionInfo,
     bindings: crate::symbol_resolver::GSigBinds,
@@ -59333,131 +59323,6 @@ impl<'a> Checker<'a> {
         }
         self.diags.error(self.call_callee_name_span(call), message);
         true
-    }
-
-    fn map_named_top_level_args(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        site: NamedTopLevelCall<'_>,
-        candidates: Vec<crate::libraries::FunctionInfo>,
-    ) -> Result<Option<MappedNamedArgs>, ()> {
-        let NamedTopLevelCall {
-            call,
-            name,
-            args,
-            names,
-            trailing_lambda,
-        } = site;
-        let diagnostic_candidates = candidates.clone();
-        let overloads = crate::libraries::FunctionSet {
-            overloads: candidates,
-        }
-        .into_top_level_with_param_names()
-        .collect::<Vec<_>>();
-        let mut mapped = Vec::new();
-        let mut failures = Vec::new();
-        for candidate in overloads {
-            // CONTEXT parameters are not value arguments: they are supplied by the enclosing scope, so
-            // the labels and arity a call is mapped against must exclude them. Mapping against the full
-            // signature counted `context(c: C)` as a parameter, so `combine(b = "K", a = "O")` on
-            // `context(c: C) fun combine(a: String, b: String)` reported "none of the following
-            // candidates is applicable:". Every other named-argument site already strips them with
-            // the context-free call shape; this one did not.
-            let context_count = candidate.context_count.min(candidate.callable.params.len());
-            let value_signature = candidate.call_sig.suffix(context_count);
-            let value_params = &candidate.callable.params[context_count..];
-            match map_call_sig_args_with_trailing(
-                args,
-                Some(names),
-                value_params.len(),
-                &value_signature,
-                trailing_lambda,
-            ) {
-                Ok(slots) => mapped.push((
-                    self.call_slot_score_vararg(
-                        value_params,
-                        &slots,
-                        candidate.call_sig.vararg_index,
-                    ),
-                    slots,
-                    candidate,
-                )),
-                Err(error) => failures.push((error, candidate)),
-            }
-        }
-        if !mapped.is_empty() && mapped.iter().all(|(score, _, _)| score.is_none()) {
-            if mapped.len() == 1 {
-                let (_, slots, candidate) = mapped.pop().unwrap();
-                for (parameter, argument) in candidate.callable.params.iter().zip(&slots) {
-                    if let Some(argument) = argument {
-                        self.expect_assignable(
-                            *parameter,
-                            self.expr_types[argument.0 as usize],
-                            self.span(*argument),
-                            "argument",
-                        );
-                    }
-                }
-            } else if !self.call_already_has_argument_diagnostic(call, args) {
-                self.diags.error(
-                    self.call_callee_name_span(call),
-                    INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
-                );
-            }
-            return Err(());
-        }
-        mapped.retain(|(score, _, _)| score.is_some());
-        mapped.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
-        if let Some((_, slots, _)) = mapped.into_iter().next() {
-            let selected_args = slots.iter().copied().flatten().collect::<Vec<_>>();
-            let selected_types = selected_args
-                .iter()
-                .map(|argument| self.expr_types[argument.0 as usize])
-                .collect();
-            return Ok(Some((selected_args, selected_types, slots)));
-        }
-        if let Some((error, candidate)) = take_unanimous_mapping_error(&mut failures) {
-            self.report_callable_arg_mapping_error(
-                call,
-                args,
-                DiagnosticFunction {
-                    name,
-                    params: &candidate.callable.params,
-                    param_names: &candidate.call_sig.param_names,
-                    param_defaults: &candidate.call_sig.param_defaults,
-                    required: candidate.call_sig.required,
-                    vararg: candidate.call_sig.vararg,
-                    context_count: candidate.context_count,
-                    ret: candidate.callable.ret,
-                    source_display: self.module_source_display(&candidate, candidate.callable.ret),
-                },
-                error,
-            );
-            let explicit_type_args = self.resolved_explicit_type_args(scope, call);
-            self.report_inapplicable_callable_candidates(
-                InapplicableTopLevelCall {
-                    call,
-                    name,
-                    args,
-                    argument_names: Some(names),
-                    trailing_lambda,
-                    mapping_error_reported: true,
-                    explicit_type_args,
-                },
-                diagnostic_candidates,
-            );
-            return Err(());
-        }
-        if !failures.is_empty() {
-            if !self.call_already_has_argument_diagnostic(call, args) {
-                self.diags.error(
-                    self.call_callee_name_span(call),
-                    INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
-                );
-            }
-            return Err(());
-        }
-        Ok(None)
     }
 
     /// Whether an argument-level diagnostic has already been reported inside `call`'s argument list. The

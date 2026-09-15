@@ -336,6 +336,21 @@ pub fn kotlinc_box_result(source: &str) -> String {
     result
 }
 
+/// Compile named in-memory fixtures with kotlinc and run `box()` from `main_class` on the shared JVM.
+pub fn kotlinc_box_files_result(sources: &[(&str, &str)], main_class: &str) -> String {
+    let work = common::scratch_dir().expect("cannot allocate reference-runtime fixture");
+    let source_paths = write_fixture_sources(&work, sources);
+    let output = work.join("out");
+    let (code, diagnostics) = kotlinc_paths_result(&source_paths, &output, &[]);
+    assert_eq!(code, 0, "kotlinc rejected runtime fixture: {diagnostics}");
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let result = common::run_box(&[], main_class, &[output, stdlib, jdk])
+        .expect("run kotlinc-built multi-file box fixture");
+    let _ = std::fs::remove_dir_all(work);
+    result
+}
+
 /// Compile one named source with kotlinc. Unlike [`kotlinc_source_result`], this preserves a caller
 /// supplied extension so frontend-only Kotlin script diagnostics can be compared directly.
 pub fn kotlinc_named_source_result(filename: &str, source: &str) -> (i32, String) {
