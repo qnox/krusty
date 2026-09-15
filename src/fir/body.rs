@@ -5,6 +5,7 @@ use crate::kt_string::KtString;
 use crate::types::{Ty, TypeName};
 
 use super::body_work::BodyWorkItem;
+use super::capture::{FirCapture, FirCaptureSource, FirImplicitReceiverCapture};
 use super::header::{
     next_id, BodyOwnerId, CallableId, ControlTargetId, DeclarationId, DeclarationNameId, FirExprId,
     FirPlatformNarrowingId, FirSamConversionId, FirStatementId, LocalCallableId, LocalValueId,
@@ -896,28 +897,6 @@ pub struct FirDefaultValue {
     pub value: FirExprId,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FirCapture {
-    pub origin: OriginId,
-    pub enclosing_depth: u32,
-    pub source: LocalValueId,
-    pub ty: ResolvedTy,
-    pub shared_cell: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FirImplicitReceiverCapture {
-    pub origin: OriginId,
-    pub enclosing_depth: u32,
-    pub current: bool,
-    pub depth: u32,
-    /// Exact enclosing-instance edges selected in the source body that supplies this capture.
-    /// Empty means an ordinary lexical receiver slot. A non-empty path is interpreted only at the
-    /// capture site; nested forwarding retains it unchanged and never repeats classifier lookup.
-    pub path: Box<[DeclarationId]>,
-    pub ty: ResolvedTy,
-}
-
 /// One checked interface-delegate value evaluated at an anonymous-object construction site. The
 /// stable delegation ordinal binds it to the resolved classifier plan; the value itself is ordinary
 /// checked FIR, so lowering performs no lexical lookup or source reconstruction.
@@ -1242,6 +1221,8 @@ pub enum FirExprKind {
         owner: DeclarationId,
         field: u32,
         shared_cell: bool,
+        /// Where the value is: the prefix parameter itself, or this body's capture of it.
+        site: super::FirConstructorCaptureSite,
     },
     /// Read a language-level class context from the constructor's semantic prefix. `parameter` is
     /// its declaration ordinal, not a storage-field or backend ABI identity.
@@ -1272,6 +1253,8 @@ pub enum FirExprKind {
         element: ResolvedTy,
         value: FirExprId,
         conversion: Option<FirConversion>,
+        /// Where the cell is: the prefix parameter itself, or this body's capture of it.
+        site: super::FirConstructorCaptureSite,
     },
     /// Read a generated capture field through one or more enclosing local-class instances.
     EnclosingClassStorageRead {
@@ -2435,6 +2418,7 @@ impl FirBody {
         shared.extend(self.captures.iter().filter_map(|capture| {
             (capture.enclosing_depth == ancestor_depth && capture.shared_cell)
                 .then_some(capture.source)
+                .and_then(FirCaptureSource::value)
         }));
         let nested_depth = ancestor_depth
             .checked_add(1)
@@ -2457,7 +2441,12 @@ impl FirBody {
         shared: &std::collections::HashSet<LocalValueId>,
     ) {
         for capture in &mut self.captures {
-            if capture.enclosing_depth == ancestor_depth && shared.contains(&capture.source) {
+            if capture.enclosing_depth == ancestor_depth
+                && capture
+                    .source
+                    .value()
+                    .is_some_and(|source| shared.contains(&source))
+            {
                 capture.shared_cell = true;
             }
         }
