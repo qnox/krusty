@@ -243,6 +243,13 @@ pub(super) enum IterationRole {
 }
 
 /// Which role a type name plays, or `None` for anything that plays neither.
+///
+/// The concrete ranges are `Iterable` here as much as the interfaces are, because the runtime's own
+/// `kt_iterable_*` walk dispatches on the DESCRIPTOR and reaches a range as readily as a list. They
+/// are safe to name for the same reason the interfaces are: a file declaring a class that extends
+/// one of them overrides a dependency method and is declined whole. A member that must not be
+/// answered this way — one whose result depends on the receiver being a list — is read by
+/// `list_symbol` behind an `is_list` check, never through this.
 pub(super) fn iteration_role(internal: crate::types::TypeName) -> Option<IterationRole> {
     [
         ("kotlin/collections/Iterable", IterationRole::Iterable),
@@ -251,6 +258,9 @@ pub(super) fn iteration_role(internal: crate::types::TypeName) -> Option<Iterati
         ("java/lang/Iterable", IterationRole::Iterable),
         ("java/util/Collection", IterationRole::Iterable),
         ("java/util/List", IterationRole::Iterable),
+        ("kotlin/ranges/IntRange", IterationRole::Iterable),
+        ("kotlin/ranges/LongRange", IterationRole::Iterable),
+        ("kotlin/ranges/CharRange", IterationRole::Iterable),
         ("kotlin/collections/Iterator", IterationRole::Iterator),
         ("java/util/Iterator", IterationRole::Iterator),
     ]

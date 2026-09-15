@@ -1985,6 +1985,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_lists_e2e.rs`
   (`a_single_element_list_is_not_a_vararg_call_of_length_one`).
 
+- **`joinToString()` is realized only with every parameter at its default.** The stdlib declares
+  six parameters, all defaulted, and the native backend has no `$default` synthetic of a dependency
+  to call — so the defaults would have to be written into the backend, and the only set worth
+  writing is the whole-declaration one a program gets by passing nothing: `", "` between the
+  elements, nothing around them, no limit, and each element rendered by its own `toString`. A call
+  that passes anything declines, with the argument it passed still in sight.
+  A range joins the same way a list does: the member is declared on `Iterable`, and the runtime's
+  walk dispatches on the descriptor rather than on the static type.
+  Tests: `tests/native_lists_e2e.rs` (`a_list_joins_to_a_string_with_the_default_separator`,
+  `joining_renders_each_element_through_its_own_to_string`,
+  `a_range_joins_the_same_way_a_list_does`, `joining_with_an_argument_still_declines`).
+
 - **Slicing and ordering a string on the native target are by UTF-16 unit.** A krusty string holds
   UTF-8 and Kotlin indexes by UTF-16 code unit, so `substring`, `subSequence` and `compareTo` all
   walk the text rather than its bytes: `é` is two bytes and one unit, `𝄞` four bytes and two.

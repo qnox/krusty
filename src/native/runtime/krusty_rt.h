@@ -207,6 +207,12 @@ KRef kt_iterator_next(KRef iterator);
 /* The two walks a program hands a function value. Declared on `Iterable`, so they are answered for
    whichever iterable the receiver holds, by the same dispatch iteration itself goes through. */
 KRef kt_iterable_map(KRef iterable, KRef transform);
+
+/* `xs.joinToString()` with every parameter left at its default: `", "` between the elements,
+   nothing around them, no limit, and each element rendered by its own `toString`. Only that form
+   is realized; a call that passes anything declines at the call site, where the argument it passed
+   is still visible. */
+KRef kt_iterable_join_to_string(KRef iterable);
 void kt_iterable_for_each(KRef iterable, KRef action);
 
 /* ---- lazy ---------------------------------------------------------------------------------- */

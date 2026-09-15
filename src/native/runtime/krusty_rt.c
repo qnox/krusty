@@ -1260,6 +1260,23 @@ KRef kt_iterable_map(KRef iterable, KRef transform) {
     return result;
 }
 
+KRef kt_iterable_join_to_string(KRef iterable) {
+    KRef separator = kt_string_utf8(", ", 2);
+    KRef joined = kt_string_utf8("", 0);
+    KRef iterator = kt_iterable_iterator(iterable);
+    kt_boolean first = 1;
+    while (kt_iterator_has_next(iterator)) {
+        if (!first) {
+            joined = kt_string_plus(joined, separator);
+        }
+        first = 0;
+        /* `kt_to_string` and not the element itself: `joinToString` renders each element the way
+           `"$element"` would, through whatever `toString` the element's own type answers with. */
+        joined = kt_string_plus(joined, kt_to_string(kt_iterator_next(iterator)));
+    }
+    return joined;
+}
+
 /* `xs.forEach { … }`: the same walk with nothing kept, and so nothing to size. */
 void kt_iterable_for_each(KRef iterable, KRef action) {
     KRef iterator = kt_iterable_iterator(iterable);

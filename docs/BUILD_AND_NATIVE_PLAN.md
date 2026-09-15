@@ -1566,6 +1566,12 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **`joinToString()`, for 2561.** The interesting part is what is NOT realized. Every parameter
+   of it is defaulted, and a dependency's defaults live in a `$default` synthetic this backend
+   cannot call — so supporting the argument forms would mean writing the stdlib's default values
+   into the generator, where they would quietly rot. Passing nothing is the one set worth writing
+   down, and every corpus case behind this wanted exactly that.
+
    **Slicing and ordering a string, for 2551.** All of it is a walk, because the storage is UTF-8
    and the index is a UTF-16 unit — the same walk `length` and `get` already pay for. The one thing
    that is not a walk is `removeSuffix`, where bytes settle it outright. Two spellings caught me

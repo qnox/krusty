@@ -103,6 +103,16 @@ fn interface_symbol(
         (IterationRole::Iterable, "forEach", 1) => {
             ("kt_iterable_for_each", vec![any(), any()], Ty::Unit)
         }
+        // `joinToString()` with every parameter left at its default, and no other form of it. The
+        // stdlib declares six, all defaulted, and this backend has no `$default` synthetic of a
+        // dependency to call — so the defaults would have to be written here, and the only one
+        // worth writing is the whole-declaration one a program gets by passing nothing. A call
+        // that passes anything keeps declining, with the argument it passed still in sight.
+        (IterationRole::Iterable, "joinToString", 0) => (
+            "kt_iterable_join_to_string",
+            vec![any()],
+            Ty::obj("kotlin/String"),
+        ),
         _ => return None,
     })
 }

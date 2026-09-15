@@ -296,3 +296,58 @@ fn a_mapped_list_holds_what_the_transform_made() {
         "OK",
     );
 }
+
+#[test]
+fn a_list_joins_to_a_string_with_the_default_separator() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   if (listOf(1, 2, 3).joinToString() != \"1, 2, 3\") return \"fail ints\"\n\
+         \x20   if (listOf(\"a\").joinToString() != \"a\") return \"fail single\"\n\
+         \x20   if (emptyList<Int>().joinToString() != \"\") return \"fail empty\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "JoinToStringDefaults",
+        "OK",
+    );
+}
+
+#[test]
+fn joining_renders_each_element_through_its_own_to_string() {
+    expect_native_box(
+        "class Tag(val text: String) {\n\
+         \x20   override fun toString(): String = \"<$text>\"\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val joined = listOf(Tag(\"a\"), Tag(\"b\")).joinToString()\n\
+         \x20   return if (joined == \"<a>, <b>\") \"OK\" else \"fail: $joined\"\n\
+         }\n",
+        "JoinToStringOverride",
+        "OK",
+    );
+}
+
+#[test]
+fn a_range_joins_the_same_way_a_list_does() {
+    // `joinToString` is declared on `Iterable`, which both of the runtime's iterables wear, so it
+    // goes through the same descriptor dispatch iteration itself does.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val joined = (1..3).joinToString()\n\
+         \x20   return if (joined == \"1, 2, 3\") \"OK\" else \"fail: $joined\"\n\
+         }\n",
+        "JoinToStringRange",
+        "OK",
+    );
+}
+
+#[test]
+fn joining_with_an_argument_still_declines() {
+    // Every parameter of `joinToString` is defaulted and this backend has no `$default` synthetic
+    // of a dependency to call, so a call that passes one has nothing to route to. Declining keeps
+    // the argument in sight rather than dropping it.
+    super::common::expect_native_decline(
+        "fun box(): String = listOf(1, 2, 3).joinToString(\"-\")\n",
+        "JoinToStringWithSeparator",
+        "joinToString",
+    );
+}
