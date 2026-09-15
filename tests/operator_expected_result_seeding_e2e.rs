@@ -16,6 +16,7 @@
 //! the missing input rather than the operands.
 
 use super::common;
+use std::rc::Rc;
 
 /// Run one fixture under BOTH compilers and require the same `box()` value.
 fn both_compilers_box(main: &str, stem: &str) {
@@ -53,6 +54,55 @@ fun box(): String {{\n\
 }}\n"
     );
     both_compilers_box(&main, "plus_declared_result");
+}
+
+/// The checked target must retain the SAME instantiation used to type the operand. Runtime success
+/// alone does not prove that: `List<A>` is assignable to the declared covariant `List<P>`, so a
+/// split decision can execute successfully while recording `T = P` for the parameter and `T = A`
+/// for the result. Inspect the production common-IR boundary and require the plus call itself to
+/// carry `List<P>`.
+#[test]
+fn the_recorded_plus_target_uses_the_expected_instantiation() {
+    let main = format!(
+        "{DECLARATIONS}\
+fun pick(): List<P> = listOf(A()) + listOf(B())\n"
+    );
+    let cp = Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+        common::stdlib_jar(),
+    ]));
+    let (captured, diagnostics) = common::capture_common_ir(
+        &main,
+        "OperatorExpectedResult",
+        Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp)),
+    );
+    assert_eq!(diagnostics, Vec::<String>::new());
+    let [ir] = captured.as_slice() else {
+        panic!("expected one common-IR file, got {}", captured.len());
+    };
+    let list = |element| krusty::types::Ty::obj_args("kotlin/collections/List", &[element]);
+    let iterable = |element| krusty::types::Ty::obj_args("kotlin/collections/Iterable", &[element]);
+    let a = krusty::types::Ty::obj("A");
+    let b = krusty::types::Ty::obj("B");
+    let p = krusty::types::Ty::obj("P");
+    let external_calls = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            krusty::ir::IrExpr::Call {
+                callee: krusty::ir::Callee::External { params, ret, .. },
+                ..
+            } => Some((params.clone(), *ret)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        external_calls,
+        [
+            (vec![a], list(a)),
+            (vec![b], list(b)),
+            (vec![iterable(p)], list(p)),
+        ]
+    );
 }
 
 /// The `fold` spelling the corpus actually uses: the accumulator is the receiver and the expected

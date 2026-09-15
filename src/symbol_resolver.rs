@@ -755,35 +755,6 @@ fn bind_ext_ret_tracking(
     finish_extension_return_bindings(source, gsig, binds, targs)
 }
 
-fn bind_ext_ret_from_call_arguments(
-    source: &dyn SymbolSource,
-    gsig: &GenericSig,
-    call_sig: &CallSig,
-    receiver: Ty,
-    parameter_start: usize,
-    args: &[CallArgKind],
-    targs: &[Ty],
-) -> Ty {
-    let mut binds = extension_receiver_bindings(gsig, receiver, targs);
-    for (index, (&parameter, argument)) in gsig.params[parameter_start.min(gsig.params.len())..]
-        .iter()
-        .zip(args)
-        .enumerate()
-    {
-        if call_sig.parameter_contributes_to_inference(parameter_start + index)
-            && argument.contributes_type_to_inference()
-        {
-            unify_inferred_ty_with_source(
-                source,
-                parameter,
-                argument.inference_type(source, parameter),
-                &mut binds,
-            );
-        }
-    }
-    finish_extension_return_bindings(source, gsig, binds, targs).0
-}
-
 fn extension_receiver_bindings(gsig: &GenericSig, receiver: Ty, targs: &[Ty]) -> GSigBinds {
     let mut binds = seeded_gsig_binds(gsig, targs);
     if let Some(recv_sig) = gsig.receiver {

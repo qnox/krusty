@@ -63,7 +63,20 @@ impl<'a> SymbolResolver<'a> {
         // explicit type argument (already in `bindings`) still wins. An ARGUMENT still cannot widen
         // a receiver-fixed formal — that rule is below and unchanged.
         if let Some(expected) = expected_result {
-            unify_ty(semantic.ret, expected, &mut bindings);
+            if let Some(inferred) = infer_generic_return_bindings_from_symbols(
+                &self.src,
+                &semantic,
+                expected,
+                |actual, bound| resolution_subtype(&self.src, actual, bound),
+            ) {
+                merge_generic_upper_bindings(
+                    &semantic,
+                    type_args,
+                    &mut bindings,
+                    inferred,
+                    |actual, bound| resolution_subtype(&self.src, actual, bound),
+                );
+            }
         }
         if let Some(declared_receiver) = semantic.receiver {
             unify_ty(declared_receiver, binding_receiver, &mut bindings);
@@ -108,6 +121,7 @@ impl<'a> SymbolResolver<'a> {
                 }
             }
         }
+        complete_bottom_constraint_bindings(&semantic, &mut bindings, type_args.len());
         crate::trace_compiler!(
             "fir",
             "receiver call application receiver={receiver:?} name={name} semantic={semantic:?} bindings={bindings:?}",
@@ -140,16 +154,8 @@ impl<'a> SymbolResolver<'a> {
                 .unwrap_or(receiver),
             _ => receiver,
         };
+        let inferred = specialize_final_signature_output_type(&self.src, semantic.ret, &bindings);
         let ret = if selected.is_extension() {
-            let inferred = bind_ext_ret_from_call_arguments(
-                &self.src,
-                &semantic,
-                &selected.call_sig,
-                binding_receiver,
-                selected.context_count,
-                args,
-                type_args,
-            );
             specialized_extension_return(self.lib, &selected, inferred)
         } else {
             let provider = resolved_member_from_info(
@@ -161,7 +167,7 @@ impl<'a> SymbolResolver<'a> {
                 selected.clone(),
             )
             .ret;
-            merge_specialized_return(provider, ty_subst_keep_unbound(semantic.ret, &bindings))
+            merge_specialized_return(provider, inferred)
         };
         CandidateSelection::Selected((selected, params, ret, applied_receiver))
     }
