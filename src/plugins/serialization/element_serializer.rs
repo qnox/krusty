@@ -21,6 +21,12 @@ pub(super) enum ElementSerializerPlan {
         arguments: Vec<ElementSerializerPlan>,
     },
     Nullable(Box<ElementSerializerPlan>),
+    /// A custom serializer declared as a CLASS, constructed with one `KSerializer` per type
+    /// parameter of the class it serves: `BoxSerializer(<serializer for the argument>)`.
+    Constructed {
+        serializer: TypeName,
+        arguments: Vec<ElementSerializerPlan>,
+    },
     Contextual(TypeName),
     Polymorphic(TypeName),
     LocalSingleton(ClassId),
@@ -323,6 +329,33 @@ pub(super) fn element_serializer_plan(
                     serializer_id as ClassId,
                 ));
             }
+            // A serializer CLASS takes one `KSerializer` per type parameter of the class it serves
+            // (`BoxSerializer<T>(itemSerializer)`), so construct it with those argument serializers,
+            // derived recursively. Require the declared constructor to match that convention
+            // exactly: any other constructor shape stays underivable and the caller bails cleanly
+            // rather than emitting a call that does not exist.
+            if let Some(serializer_id) = ir
+                .classes
+                .iter()
+                .position(|class| class.fq_name_id() == custom)
+            {
+                let parameters = &ir.classes[serializer_id].ctor_args;
+                let serves_each_argument = parameters.len() == type_args.len()
+                    && parameters.iter().all(|parameter| {
+                        parameter.ty.non_null().kotlin_class_internal()
+                            == Some(type_name("kotlinx/serialization/KSerializer"))
+                    });
+                if serves_each_argument && !type_args.is_empty() {
+                    let arguments = type_args
+                        .iter()
+                        .map(|argument| element_serializer_plan(ir, ctx, argument))
+                        .collect::<Option<Vec<_>>>()?;
+                    return Some(ElementSerializerPlan::Constructed {
+                        serializer: custom,
+                        arguments,
+                    });
+                }
+            }
         }
     }
     // A DEPENDENCY's `@Serializable` class brings its own generated serializer: read that singleton
@@ -397,6 +430,18 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
         }
         ElementSerializerPlan::Polymorphic(classifier) => {
             build_polymorphic_serializer(ir, classifier)
+        }
+        ElementSerializerPlan::Constructed {
+            serializer,
+            arguments,
+        } => {
+            let arity = arguments.len();
+            let arguments = arguments
+                .into_iter()
+                .map(|argument| emit_element_serializer(ir, argument))
+                .collect::<Vec<_>>();
+            let descriptor = format!("({})V", "Lkotlinx/serialization/KSerializer;".repeat(arity));
+            ir.new_external(&serializer.render(), descriptor, arguments)
         }
         ElementSerializerPlan::LocalSingleton(class) => ir.add_expr(IrExpr::StaticInstance {
             owner: class,

@@ -2458,3 +2458,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `a_same_file_custom_serializer_serves_a_list_element`,
   `an_ordinary_serializable_property_still_derives`,
   `a_class_valued_custom_serializer_is_still_declined_rather_than_miscompiled`.
+- **A class-valued custom serializer is CONSTRUCTED with its argument serializers (fix).** A custom
+  serializer declared as a CLASS takes one `KSerializer` per type parameter of the class it serves —
+  `@Serializable(with = BoxSerializer::class) class Box<T>` with
+  `class BoxSerializer<T>(itemSerializer: KSerializer<T>)` — so an element of that type needs
+  `new BoxSerializer(<serializer for the argument>)`, derived recursively. The element plan had no
+  such shape: it could read a singleton `INSTANCE` or nothing, so this declined and the residual
+  plugin placeholder failed the whole FILE. The plan now constructs one, requiring the declared
+  constructor to match that convention exactly — one `KSerializer` parameter per type argument — so
+  any other constructor shape still declines cleanly instead of emitting a call that does not exist.
+  Reading an `INSTANCE` off such a class compiles and then dies at run time with
+  `NoSuchFieldError: Class BoxSerializer does not have member field 'BoxSerializer INSTANCE'`, which
+  is why every test here runs a real `Json.encodeToString` and asserts the exact JSON rather than
+  merely asserting that compilation succeeded.
+  `tests/same_file_custom_serializer_e2e.rs::a_class_valued_custom_serializer_is_constructed_with_its_argument_serializer`.

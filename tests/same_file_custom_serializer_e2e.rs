@@ -195,18 +195,19 @@ fun box(): String {\n\
     assert_eq!(run_box(MAIN, "ordinary_derivation"), "OK");
 }
 
-/// A custom serializer declared as a CLASS rather than an `object` takes constructor arguments
-/// (`ValueSerializer<T>(dataSerializer)`), so it has no `INSTANCE` field. Reading one would emit a
-/// reference to a field that does not exist, which is worse than declining: this shape must stay a
-/// clean refusal until a plan that CONSTRUCTS the serializer exists. Asserted as a refusal, not as a
-/// success, so the day it starts working this test says so.
+/// A custom serializer declared as a CLASS takes one `KSerializer` per type parameter of the class
+/// it serves — `BoxSerializer<T>(itemSerializer)` — so it is CONSTRUCTED with the element's own
+/// serializer rather than read as a singleton. Before this worked, the plan declined; before the
+/// preceding commit restricted it to objects, it emitted `getstatic BoxSerializer.INSTANCE` and the
+/// program died at run time with `NoSuchFieldError`, which is why this test runs the program.
 #[test]
-fn a_class_valued_custom_serializer_is_still_declined_rather_than_miscompiled() {
+fn a_class_valued_custom_serializer_is_constructed_with_its_argument_serializer() {
     const MAIN: &str = "import kotlinx.serialization.KSerializer\n\
 import kotlinx.serialization.Serializable\n\
 import kotlinx.serialization.descriptors.SerialDescriptor\n\
 import kotlinx.serialization.encoding.Decoder\n\
 import kotlinx.serialization.encoding.Encoder\n\
+import kotlinx.serialization.json.Json\n\
 \n\
 @Serializable(with = BoxSerializer::class)\n\
 class Box<T>(val item: T)\n\
@@ -222,13 +223,10 @@ class BoxSerializer<T>(private val itemSerializer: KSerializer<T>) : KSerializer
 }\n\
 \n\
 @Serializable\n\
-data class Holder(val payload: Box<String>)\n";
-    let jars = runtime_jars();
-    let outcome = common::backend_outcome_in_process(MAIN, "class_valued_serializer", &jars, None);
-    let rendered = format!("{outcome:?}");
-    assert!(
-        rendered.contains("not yet supported"),
-        "a class-valued custom serializer must be declined cleanly, not miscompiled into a \
-         non-existent INSTANCE read; got: {rendered}"
-    );
+data class Holder(val payload: Box<String>)\n\
+fun box(): String {\n\
+\x20   val json = Json.encodeToString(Holder.serializer(), Holder(Box(\"deep\")))\n\
+\x20   return if (json == \"{\\\"payload\\\":\\\"deep\\\"}\") \"OK\" else \"FAIL: \" + json\n\
+}\n";
+    assert_eq!(run_box(MAIN, "constructed_custom_serializer"), "OK");
 }
