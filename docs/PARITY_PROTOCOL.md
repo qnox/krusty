@@ -2297,35 +2297,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `src/resolve/type_join.rs::tests::an_exact_platform_pair_keeps_the_flexible_operand_in_both_orders`,
   `nested_platform_and_genuine_nullable_differences_are_not_outer_pairs`,
   `tests/try_expected_type_join_e2e.rs::a_try_expression_joins_its_branches_against_the_expected_type`.
-- **A spliced lambda's result is boxed from the carrier its own block declares (fix).** A stdlib
-  `inline fun` is spliced as bytecode with its lambda emitted inline at the `FunctionN.invoke` site it
-  replaces; that `invoke` returns `Object`, so a primitive result must be boxed on the way out. A
-  lambda holding a labelled `return@map` carries its result through a local its own block declares,
-  and value indices are numbered PER BODY — so resolving that local through the ambient slot and
-  variable tables answered with whichever body last claimed the number, the enclosing caller, since
-  the lambda is emitted into a scratch frame. An `Int` body reported `Iterable`, the scalar test
-  failed, and the box was skipped entirely: the method emitted
-  `iload N; invokeinterface Collection.add:(Ljava/lang/Object;)Z` and the class failed verification
-  while krusty reported SUCCESS. The block now answers for the local it declares.
-  The carrier must stay PHYSICAL: `semantic_scalar_adapter` treats it as the authority for whether a
-  value is physically scalar, and an unsigned value class is semantically unsigned but physically
-  `int` — replacing it with the checked type instead compiles the repro and breaks the unsigned
-  splice tests, which are the oracle for that distinction.
-  `tests/inline_lambda_result_boxing_e2e.rs::a_labeled_return_in_map_boxes_a_primitive_result`,
-  `every_primitive_element_carrier_is_boxed`, `an_unsigned_element_keeps_its_semantic_box`,
-  `non_local_returns_and_reference_elements_are_unchanged`.
 - **A spliced inline body types its values from its OWN declarations (fix).** Value indices are
-  numbered per body, while `collect_var_types` builds ONE index-keyed map by walking every root — so
-  a nested lambda's declarations sit in it beside the enclosing body's under the same numbers and
-  whichever was inserted last wins. `emit_fn_body_inline` swapped the parameter SLOTS for a spliced
-  body but left that map ambient, so a value read inside the body could be typed from the caller's
-  same-numbered local: a primitive carrier looked like a reference and its box was skipped, which the
-  verifier rejects. The emitter now installs the body's own declaration map alongside its slots, and
-  restores both afterwards. Recovering the type from the syntax AROUND one expression was the earlier
-  shape of this fix and is retired: it patched the one container that happened to be reported, and it
-  returned the raw declared type where `value_ty` answers a JVM-PHYSICAL question — bypassing the
-  `ir_ty_to_jvm` normalization every other entry carries, which is wrong for unsigned and value-class
-  carriers. Scoping the map keeps that normalization by construction.
+  numbered per body. A file-wide value-type map let an enclosing caller, a spliced body, or a nested
+  lambda overwrite the same numeric index. A primitive result could therefore look like a reference,
+  skip its required box at `FunctionN.invoke`, and produce a class the verifier rejected. Every
+  emitter body now builds its own physical declaration map. The walker follows a lambda's capture
+  expressions because they belong to the current body, but stops at its `inline_body`, which owns a
+  separate numbering domain; entering that body installs and later restores both its value slots and
+  declaration map. The common IR walk still traverses inline bodies for genuine whole-tree passes.
+  All stored types pass through `ir_ty_to_jvm`, preserving unsigned/value-class carrier normalization.
+  `src/jvm/ir_emit/inline_body_emission.rs::tests::a_nested_inline_body_cannot_overwrite_its_parents_same_index`,
   `tests/inline_lambda_result_boxing_e2e.rs::a_labeled_return_in_map_boxes_a_primitive_result`,
   `every_primitive_element_carrier_is_boxed` (all eight primitives),
   `an_unsigned_element_keeps_its_semantic_box`,

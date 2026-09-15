@@ -24,6 +24,7 @@ use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 mod bottom_values;
 mod enum_metadata;
 mod field_write;
+mod inline_body_emission;
 mod interface_compatibility;
 mod member_schedule;
 mod operand_stack;
@@ -31,6 +32,7 @@ mod secondary_constructor;
 mod vararg;
 mod when;
 
+use inline_body_emission::collect_body_var_types;
 use member_schedule::{source_ordered_members, SourceOrderedMember};
 use secondary_constructor::SecondaryConstructorEmitter;
 
@@ -4734,25 +4736,6 @@ fn lambda_impl_uses_class_strategy(ir: &IrFile, fid: u32, modes: LambdaModes) ->
                 || modes.for_sam(sam.is_some()) == LambdaMode::Class
                 || (sam.is_none() && is_high_arity_function(*arity)))
     })
-}
-
-/// Map each reachable `IrExpr::Variable` declaration index to its JVM type for one emitted body.
-/// Value indices are body-local and intentionally restart between functions, constructors, and
-/// initializers, so a file-wide map lets an unrelated body overwrite the active slot's type.
-fn collect_var_types(ir: &IrFile, roots: impl IntoIterator<Item = u32>) -> HashMap<u32, Ty> {
-    let mut m = HashMap::new();
-    let mut seen = std::collections::HashSet::new();
-    let mut pending = roots.into_iter().collect::<Vec<_>>();
-    while let Some(expression) = pending.pop() {
-        if !seen.insert(expression) {
-            continue;
-        }
-        if let IrExpr::Variable { index, ty, .. } = ir.expr(expression) {
-            m.insert(*index, ir_ty_to_jvm(ty));
-        }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
-    }
-    m
 }
 
 /// Attach any user annotations recorded for `field` (by name) to the most recently added field.
@@ -13442,7 +13425,7 @@ impl<'a> Emitter<'a> {
             owner: owner.to_string(),
             facade: facade.to_string(),
             slots: HashMap::new(),
-            var_types: collect_var_types(ir, roots),
+            var_types: collect_body_var_types(ir, roots),
             next_slot: 0,
             ret,
             loop_stack: Vec::new(),
@@ -13507,42 +13490,6 @@ impl<'a> Emitter<'a> {
             load(ret, slot, code);
             emit_return(ret, code);
         }
-    }
-
-    /// Emit a lambda's `inline_body` (its value-producing form) INLINE at a stdlib-inline-fn splice:
-    /// bind its parameter value-indices `0..` to the given JVM slots (captures → caller slots, lambda
-    /// params → the on-stack args), then emit the body as a value — leaving the result on the stack. A
-    /// user `return` inside the body emits a real `*return` from the enclosing method, i.e. a correct
-    /// non-local return (no synthetic-return rewriting needed).
-    fn emit_fn_body_inline(
-        &mut self,
-        inline_body: u32,
-        param_slots: &[(u16, Ty)],
-        code: &mut CodeBuilder,
-    ) -> Ty {
-        // Value indices are numbered PER BODY. `self.var_types` is one index-keyed map built by
-        // walking every root, so a nested lambda's declarations sit in it beside the enclosing
-        // body's under the same numbers, and whichever was inserted last wins. Emitting a spliced
-        // body therefore has to install that body's OWN declarations, not just its parameter slots
-        // — otherwise a value read inside it can be typed from the caller's same-numbered local.
-        //
-        // Scoping the map is what makes the answer unambiguous; recovering a type from the syntax
-        // around one expression only patched the shape that happened to be reported. The map is
-        // built by the same `collect_var_types`, so declarations keep their JVM-physical
-        // normalization rather than being read raw off the declaration.
-        let saved_slots = std::mem::take(&mut self.slots);
-        let saved_var_types = std::mem::replace(
-            &mut self.var_types,
-            collect_var_types(self.ir, std::iter::once(inline_body)),
-        );
-        for (i, &(slot, ty)) in param_slots.iter().enumerate() {
-            self.slots.insert(i as u32, (slot, ty));
-        }
-        let result = self.value_ty(inline_body);
-        self.emit_value(inline_body, code);
-        self.slots = saved_slots;
-        self.var_types = saved_var_types;
-        result
     }
 
     /// THE unified host+lambda splice (the merge of the branchy and lambda paths): splice a possibly
