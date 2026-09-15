@@ -220,3 +220,34 @@ fn a_user_value_class_over_an_array_keeps_its_own_carrier() {
          }\n",
     );
 }
+
+/// The erasure question, recorded as the DIVERGENCE it is rather than deleted.
+///
+/// An earlier revision asserted only that krusty and kotlinc agree here, which failed and was
+/// removed — throwing away the evidence with it. It is kept now as what it always was: a krusty
+/// defect this change does not fix, pinned so it cannot be forgotten and so fixing it breaks a test
+/// that has to be updated deliberately.
+///
+/// `kotlin.UIntArray` carries `box-impl`/`unbox-impl`, so a value class crossing into `Any` becomes
+/// one and `is IntArray` is false. krusty does not box at that boundary and answers true. Both
+/// answers are asserted EXACTLY — `docs/SPEC.md` §6 — because equality alone would pass if the two
+/// ever drifted together, and because the point of this test is that they differ.
+#[test]
+fn an_unsigned_array_crossing_into_any_still_diverges_from_kotlinc() {
+    let src = "fun box(): String {\n\
+               \x20   val u: Any = UIntArray(1)\n\
+               \x20   val b: Any = ubyteArrayOf(1u)\n\
+               \x20   return \"\" + (u is IntArray) + \" \" + (u is UIntArray) + \" \" +\n\
+               \x20          (u is LongArray) + \" | \" + (b is ByteArray) + \" \" + (b is UByteArray)\n\
+               }\n";
+    assert_eq!(
+        common::kotlinc_box_result(src),
+        "false true false | false true",
+        "the reference compiler boxes the value class at the `Any` boundary"
+    );
+    assert_eq!(
+        common::expect_box_run_with_stdlib(src, "UnsignedArrayErasureDivergence"),
+        "true true false | true true",
+        "krusty does not box there yet — a known defect, not an accepted answer"
+    );
+}

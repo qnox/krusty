@@ -128,32 +128,24 @@ fn align_mapped_owner_type_parameters(
     }
 }
 
-/// The `kotlin/…Array` classifier name for an array `Ty` — a primitive specialized array
-/// (`kotlin/IntArray`) or the boxed `Array<T>` (`kotlin/Array`). `None` for a non-array type. Arrays are
-/// `Obj` types carrying their class name directly, so this is a straight class-name match.
-fn array_kotlin_fq(ty: Ty) -> Option<&'static str> {
+/// The JVM descriptor of an array `Ty` as `java.util.Arrays` takes it — `[I` for a primitive
+/// specialized array, `[Ljava/lang/Object;` for the boxed `Array<T>`, whose element these overloads
+/// erase. `None` for a non-array type.
+///
+/// One operation rather than a name matched back to itself and then matched again by each caller:
+/// [`crate::types::prim_array_element`] identifies the array and
+/// [`crate::jvm::names::type_descriptor`] erases its element, unsigned arrays included. The chains
+/// this replaced listed the eight signed arrays, so an unsigned array reached none of these
+/// overloads at all.
+fn arrays_overload_descriptor(ty: Ty) -> Option<String> {
     let n = ty.non_null().obj_internal()?;
-    if n.matches("kotlin/BooleanArray") {
-        Some("kotlin/BooleanArray")
-    } else if n.matches("kotlin/CharArray") {
-        Some("kotlin/CharArray")
-    } else if n.matches("kotlin/ByteArray") {
-        Some("kotlin/ByteArray")
-    } else if n.matches("kotlin/ShortArray") {
-        Some("kotlin/ShortArray")
-    } else if n.matches("kotlin/IntArray") {
-        Some("kotlin/IntArray")
-    } else if n.matches("kotlin/LongArray") {
-        Some("kotlin/LongArray")
-    } else if n.matches("kotlin/FloatArray") {
-        Some("kotlin/FloatArray")
-    } else if n.matches("kotlin/DoubleArray") {
-        Some("kotlin/DoubleArray")
-    } else if n.matches("kotlin/Array") {
-        Some("kotlin/Array")
-    } else {
-        None
+    if n.matches("kotlin/Array") {
+        return Some("[Ljava/lang/Object;".to_string());
     }
+    let element = crate::types::prim_array_element(n)?;
+    Some(crate::jvm::names::type_descriptor(crate::types::Ty::array(
+        element,
+    )))
 }
 
 /// The JVM platform's contribution to Kotlin's default imports. The language-level `kotlin.*` set is
@@ -1079,7 +1071,7 @@ impl JvmLibraries {
                     params,
                     ret,
                     physical_ret,
-                    desc.to_string(),
+                    desc,
                 )
             };
             overloads.push(FunctionInfo {
@@ -1159,7 +1151,7 @@ impl JvmLibraries {
                         params,
                         ret,
                         physical,
-                        desc.to_string(),
+                        desc,
                     )
                 }
             };
@@ -6818,25 +6810,15 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
                 )
             }
             RuntimeOp::ArrayToString => {
-                let desc = match array_kotlin_fq(ty.non_null())? {
-                    "kotlin/BooleanArray" => "([Z)Ljava/lang/String;",
-                    "kotlin/CharArray" => "([C)Ljava/lang/String;",
-                    "kotlin/ByteArray" => "([B)Ljava/lang/String;",
-                    "kotlin/ShortArray" => "([S)Ljava/lang/String;",
-                    "kotlin/IntArray" => "([I)Ljava/lang/String;",
-                    "kotlin/LongArray" => "([J)Ljava/lang/String;",
-                    "kotlin/FloatArray" => "([F)Ljava/lang/String;",
-                    "kotlin/DoubleArray" => "([D)Ljava/lang/String;",
-                    "kotlin/Array" => "([Ljava/lang/Object;)Ljava/lang/String;",
-                    _ => return None,
-                };
+                let carrier = arrays_overload_descriptor(ty.non_null())?;
+                let desc = format!("({carrier})Ljava/lang/String;");
                 callable(
                     "java/util/Arrays",
                     "toString",
                     vec![ty],
                     Ty::String,
                     Ty::String,
-                    desc.to_string(),
+                    desc,
                 )
             }
             RuntimeOp::ArrayHashCode => {
@@ -6868,47 +6850,27 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
                         format!("({carrier})I"),
                     );
                 }
-                let desc = match array_kotlin_fq(ty.non_null())? {
-                    "kotlin/BooleanArray" => "([Z)I",
-                    "kotlin/CharArray" => "([C)I",
-                    "kotlin/ByteArray" => "([B)I",
-                    "kotlin/ShortArray" => "([S)I",
-                    "kotlin/IntArray" => "([I)I",
-                    "kotlin/LongArray" => "([J)I",
-                    "kotlin/FloatArray" => "([F)I",
-                    "kotlin/DoubleArray" => "([D)I",
-                    "kotlin/Array" => "([Ljava/lang/Object;)I",
-                    _ => return None,
-                };
+                let carrier = arrays_overload_descriptor(ty.non_null())?;
+                let desc = format!("({carrier})I");
                 callable(
                     "java/util/Arrays",
                     "hashCode",
                     vec![ty],
                     Ty::Int,
                     Ty::Int,
-                    desc.to_string(),
+                    desc,
                 )
             }
             RuntimeOp::ArrayCopyOf => {
-                let desc = match array_kotlin_fq(ty.non_null())? {
-                    "kotlin/BooleanArray" => "([ZI)[Z",
-                    "kotlin/CharArray" => "([CI)[C",
-                    "kotlin/ByteArray" => "([BI)[B",
-                    "kotlin/ShortArray" => "([SI)[S",
-                    "kotlin/IntArray" => "([II)[I",
-                    "kotlin/LongArray" => "([JI)[J",
-                    "kotlin/FloatArray" => "([FI)[F",
-                    "kotlin/DoubleArray" => "([DI)[D",
-                    "kotlin/Array" => "([Ljava/lang/Object;I)[Ljava/lang/Object;",
-                    _ => return None,
-                };
+                let carrier = arrays_overload_descriptor(ty.non_null())?;
+                let desc = format!("({carrier}I){carrier}");
                 callable(
                     "java/util/Arrays",
                     "copyOf",
                     vec![ty, Ty::Int],
                     ty,
                     ty,
-                    desc.to_string(),
+                    desc,
                 )
             }
             RuntimeOp::StartCoroutine => callable(
