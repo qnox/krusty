@@ -19,9 +19,6 @@ use super::lower_body;
 #[path = "callable_references/tests.rs"]
 mod callable_reference_tests;
 
-#[path = "constructor_capture_tests.rs"]
-mod constructor_capture_tests;
-
 #[test]
 fn consuming_lowering_materializes_common_ir_roots() {
     let origin = OriginId::from_raw(0);

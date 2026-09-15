@@ -12,15 +12,18 @@
 
 use crate::fir::{
     BodyOwnerId, DeclarationId, FirBody, FirExpr, FirExprKind, FirStatement, FirStatementKind,
-    OriginId, ResolvedModuleIndex,
+    OriginId, ResolvedModuleIndex, ResolvedTy,
 };
 use crate::ir::IrFile;
 use crate::types::Ty;
 
-// This module is declared inside `tests`, so `super` is that module and the lowering entry point
-// is one level further out.
-use super::super::lower_body;
-use super::resolved;
+use super::lower_body;
+
+/// A type as a checked body carries one. Its own rather than the root test module's, because this
+/// module is a sibling of that one and borrowing from it is what made the root grow.
+fn resolved(ty: Ty) -> ResolvedTy {
+    ResolvedTy::new(ty).unwrap()
+}
 
 #[test]
 fn a_capture_coordinate_naming_no_slot_fails_rather_than_reading_the_parameter() {

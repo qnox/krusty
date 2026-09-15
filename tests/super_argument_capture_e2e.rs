@@ -120,6 +120,38 @@ fn a_lambda_in_a_nested_anonymous_objects_super_argument_reaches_the_enclosing_i
 }
 
 #[test]
+fn a_lambda_in_a_sibling_constructor_argument_reads_a_captured_local() {
+    // A `this(…)` delegation is the other prefix form, and the instance does not exist there
+    // either. The super cases alone cannot show it: they reach the superclass call directly, while
+    // this one hands the lambda to a SIBLING constructor, which then passes it on.
+    run_ok(
+        "LambdaInSiblingArgument",
+        "open class Base(val fn: () -> String)\n\
+         fun box(): String {\n\
+         val o = \"O\"\n\
+         class Local : Base {\n\
+         constructor(fn: () -> String) : super(fn)\n\
+         constructor(k: String) : this({ o + k }) }\n\
+         return Local(\"K\").fn() }\n",
+    );
+}
+
+#[test]
+fn a_lambda_in_a_constructor_default_reads_a_captured_local() {
+    // A defaulted parameter's expression is evaluated in the prefix as well — before the instance
+    // exists and before the superclass call it feeds. The third form, and the only one where the
+    // lambda is not written inside an argument list at all.
+    run_ok(
+        "LambdaInConstructorDefault",
+        "open class Base(val fn: () -> String)\n\
+         fun box(): String {\n\
+         val o = \"OK\"\n\
+         class Local(val make: () -> String = { o }) : Base(make)\n\
+         return Local().fn() }\n",
+    );
+}
+
+#[test]
 fn a_lambda_in_a_super_constructor_argument_calls_an_enclosing_local_function() {
     run_ok(
         "LocalFunInSuperArgument",
