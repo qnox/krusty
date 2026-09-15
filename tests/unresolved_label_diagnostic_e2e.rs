@@ -30,16 +30,23 @@ fun probe() {\n\
     common::expect_identical_rejection(&result, "an unknown return label");
 }
 
-/// A label that exists in the file but does not enclose the return. kotlinc reports the same
-/// `unresolved label.` here, so the two cases must not diverge.
+/// A label that is genuinely DECLARED, on a sibling lambda that does not enclose the return.
+///
+/// `outer@` is written on the first LAMBDA, so the name exists in the file and resolves to a real
+/// lambda label — it simply does not enclose the second lambda. (Writing `outer@` before the
+/// statement instead labels the statement, and kotlinc then reports `target label does not denote a
+/// function.`, which is a different divergence and not this one.) That is a different case from a name
+/// nobody declared, and it is the one worth pinning: kotlinc reports the same `unresolved label.`
+/// for both, so the two must not diverge.
 #[test]
-fn a_non_enclosing_return_label_matches_the_reference_diagnostic() {
+fn a_declared_but_non_enclosing_return_label_matches_the_reference_diagnostic() {
     const MAIN: &str = "fun probe(xs: List<Int>): Int {\n\
-\x20   xs.forEach { return@map }\n\
+\x20   xs.forEach outer@ { return@outer }\n\
+\x20   xs.forEach { return@outer }\n\
 \x20   return 0\n\
 }\n";
     let result = common::compiler_diagnostics(&[("Main.kt", MAIN)], &[]);
-    common::expect_identical_rejection(&result, "a non-enclosing return label");
+    common::expect_identical_rejection(&result, "a declared but non-enclosing return label");
 }
 
 /// The same shape in EXPRESSION position (`?: return@Missing`), which reports through a different
@@ -69,4 +76,46 @@ fn a_resolvable_return_label_still_works() {
     let reference = common::kotlinc_box_result(MAIN);
     assert_eq!(reference, "OK", "reference disagrees: {reference}");
     common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "resolvable_return_label");
+}
+
+/// A RETAINED body whose arena ids shift under compaction.
+///
+/// An `inline` function's body survives past Pass-1, while the bodies before it are discarded, so
+/// the statement and expression ids inside it are renumbered. The label spans are arena-keyed side
+/// tables, so they have to move with that renumbering; a table left behind reads a stale id and
+/// underlines the wrong token, or reports no span at all. The discarded function ahead of it exists
+/// precisely to make the ids shift.
+#[test]
+fn a_retained_inline_body_keeps_its_label_span_through_compaction() {
+    const MAIN: &str = "fun discarded(): Int {\n\
+\x20   val first = 1\n\
+\x20   val second = first + 1\n\
+\x20   val third = second + first\n\
+\x20   return third\n\
+}\n\
+\n\
+inline fun retained(body: () -> Unit) {\n\
+\x20   body()\n\
+\x20   run { return@Missing }\n\
+}\n";
+    let result = common::compiler_diagnostics(&[("Main.kt", MAIN)], &[]);
+    common::expect_identical_rejection(&result, "a retained inline body after compaction");
+}
+
+/// The same, in EXPRESSION position inside the retained body — the other span table.
+#[test]
+fn a_retained_inline_body_keeps_its_expression_label_span_through_compaction() {
+    const MAIN: &str = "fun discarded(): Int {\n\
+\x20   val first = 1\n\
+\x20   val second = first + 1\n\
+\x20   val third = second + first\n\
+\x20   return third\n\
+}\n\
+\n\
+inline fun retained(value: Int?): Int {\n\
+\x20   val chosen = value ?: return@Missing\n\
+\x20   return chosen\n\
+}\n";
+    let result = common::compiler_diagnostics(&[("Main.kt", MAIN)], &[]);
+    common::expect_identical_rejection(&result, "a retained inline expression after compaction");
 }

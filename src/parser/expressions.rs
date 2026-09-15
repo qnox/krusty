@@ -373,46 +373,7 @@ impl Parser<'_> {
         }
         // `return`/`return@label value` in expression position (`x ?: return null`).
         if self.at(TokenKind::KwReturn) {
-            self.bump(); // 'return'
-                         // Keep the `@` span; an unresolvable label is reported there. See `Stmt::Return`.
-            let mut label_span = None;
-            let label = if self.at(TokenKind::At) {
-                label_span = Some(self.tok().span);
-                self.bump();
-                if self.at(TokenKind::Ident) {
-                    let l = self.text().to_string();
-                    self.bump();
-                    Some(l)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            // A value follows unless the next token closes the expression context.
-            let value = if matches!(
-                self.kind(),
-                TokenKind::Newline
-                    | TokenKind::RBrace
-                    | TokenKind::RParen
-                    | TokenKind::RBracket
-                    | TokenKind::Comma
-                    | TokenKind::Eof
-            ) {
-                None
-            } else {
-                Some(self.parse_expr())
-            };
-            let end = value
-                .map(|v| self.file.expr_spans[v.0 as usize])
-                .unwrap_or(start);
-            let expression = self
-                .file
-                .add_expr(Expr::Return { value, label }, Span::new(start.lo, end.hi));
-            if let Some(span) = label_span {
-                self.file.return_label_expr_spans.insert(expression, span);
-            }
-            return expression;
+            return self.parse_return_expression(start);
         }
         // Labeled expression prefix: `label@ <expr>` (`l1@ "s"`, `x@ (1L + 2)`, `l@ { … }`). A label
         // names the following expression as a target for a non-local `return@label`/`break@label`; on a

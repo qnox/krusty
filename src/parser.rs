@@ -17,6 +17,7 @@ mod expressions;
 mod incdec;
 mod lexical_type_parameters;
 mod nesting;
+pub mod return_labels;
 pub(crate) use declaration_stream::visit_declaration_units_with_features;
 use lexical_type_parameters::LexicalTypeParameters;
 
@@ -6296,39 +6297,7 @@ impl<'a> Parser<'a> {
                     start,
                 )
             }
-            TokenKind::KwReturn => {
-                self.bump();
-                // `return@label` — a local return from the lambda carrying `label` (`return@forEach`).
-                // Keep the `@` span: an unresolvable label is reported there, and the label survives
-                // on the node only as a bare name.
-                let mut label_span = None;
-                let label = if self.at(TokenKind::At) {
-                    label_span = Some(self.tok().span);
-                    self.bump(); // '@'
-                    if self.at(TokenKind::Ident) {
-                        let l = self.text().to_string();
-                        self.bump();
-                        Some(l)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                let e = if self.at(TokenKind::Newline)
-                    || self.at(TokenKind::RBrace)
-                    || self.at(TokenKind::Eof)
-                {
-                    None
-                } else {
-                    Some(self.parse_expr())
-                };
-                let statement = self.finish_stmt(Stmt::Return(e, label), start);
-                if let Some(span) = label_span {
-                    self.file.return_label_spans.insert(statement, span);
-                }
-                statement
-            }
+            TokenKind::KwReturn => self.parse_return_statement(start),
             TokenKind::Ident if self.keyword_text("break") => {
                 self.bump();
                 let label = self.parse_loop_label_ref();

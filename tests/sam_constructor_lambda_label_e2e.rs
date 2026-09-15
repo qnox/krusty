@@ -84,7 +84,12 @@ fun box(): String {\n\
 }
 
 /// A label that denotes nothing is still rejected — registering the interface name must not make
-/// every label resolve. Both compilers' output is asserted.
+/// every label resolve.
+///
+/// This used to pin krusty's own wording and column, which differed from the reference compiler's.
+/// They now agree exactly (`unresolved label.` at the `@` token), so the assertion is the shared
+/// identical-rejection one: it compares the complete ordered diagnostic set of both compilers and
+/// cannot drift back apart unnoticed.
 #[test]
 fn an_unknown_label_is_still_rejected() {
     const MAIN: &str = "fun interface Handler {\n\
@@ -93,24 +98,5 @@ fn an_unknown_label_is_still_rejected() {
 \n\
 fun make(): Handler = Handler { return@Missing }\n";
     let result = common::compiler_diagnostics(&[("Main.kt", MAIN)], &[]);
-    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
-    assert_eq!(common::compiler_errors(&result.krusty_stdout), []);
-    assert_eq!(
-        common::compiler_errors(&result.krusty_stderr),
-        [common::CompilerError {
-            file: "Main.kt".to_string(),
-            line: 5,
-            column: 33,
-            message: "return label 'Missing' does not denote an enclosing lambda".to_string(),
-        }]
-    );
-    assert_eq!(
-        common::compiler_errors(&result.reference_stderr),
-        [common::CompilerError {
-            file: "Main.kt".to_string(),
-            line: 5,
-            column: 39,
-            message: "unresolved label.".to_string(),
-        }]
-    );
+    common::expect_identical_rejection(&result, "an unknown label in a SAM constructor");
 }

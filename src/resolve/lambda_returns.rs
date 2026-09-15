@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::ast::{Expr, ExprId, File};
+use crate::ast::{Expr, ExprId, File, StmtId};
 use crate::types::Ty;
 
 use super::{Checker, CheckerScope};
@@ -228,3 +228,32 @@ mod tests {
         assert_eq!(scopes.expected_type(outer), None);
     }
 }
+
+impl Checker<'_> {
+    /// Report a `return@label` whose label denotes no enclosing lambda.
+    ///
+    /// The reference compiler words this `unresolved label.` and points at the `@` token rather than
+    /// the `return` keyword, for an unknown name and for a name whose lambda does not enclose the
+    /// return alike. The `@` span is the parser's record; without it the only position available is
+    /// the whole statement or expression, which underlines the wrong thing.
+    pub(super) fn report_unresolved_statement_label(&mut self, statement: StmtId) {
+        let span = self
+            .file
+            .return_label_spans
+            .statement(statement)
+            .unwrap_or(self.file.stmt_spans[statement.0 as usize]);
+        self.diags.error(span, "unresolved label.".to_string());
+    }
+
+    /// The same in expression position (`x ?: return@Missing`), which reaches the checker through a
+    /// different site and so carries its own span.
+    pub(super) fn report_unresolved_expression_label(&mut self, expression: ExprId) {
+        let span = self
+            .file
+            .return_label_spans
+            .expression(expression)
+            .unwrap_or(self.span(expression));
+        self.diags.error(span, "unresolved label.".to_string());
+    }
+}
+

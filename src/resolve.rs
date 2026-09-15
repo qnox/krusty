@@ -34790,14 +34790,7 @@ impl<'a> Checker<'a> {
             // The reference compiler reports an unresolvable label at the `@` token and words it
             // `unresolved label.`, for an unknown name and for a name whose lambda does not enclose
             // the return alike.
-            self.diags.error(
-                self.file
-                    .return_label_spans
-                    .get(&s)
-                    .copied()
-                    .unwrap_or(self.file.stmt_spans[s.0 as usize]),
-                "unresolved label.".to_string(),
-            );
+            self.report_unresolved_statement_label(s);
             return;
         };
         self.stmt_return_targets.insert(s, target);
@@ -75594,14 +75587,7 @@ impl<'a> Checker<'a> {
                             label,
                             self.lambda_returns.active_labels()
                         );
-                        self.diags.error(
-                            self.file
-                                .return_label_expr_spans
-                                .get(&e)
-                                .copied()
-                                .unwrap_or(self.span(e)),
-                            "unresolved label.".to_string(),
-                        );
+                        self.report_unresolved_expression_label(e);
                         return self.set(e, Ty::Error);
                     }
                 };
