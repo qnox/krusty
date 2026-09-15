@@ -642,7 +642,11 @@ fn mapped_interface_override_publishes_external_declaration_identity() {
     let realization = classpath
         .external_callable(target)
         .expect("external override target realization");
-    assert_eq!(realization.callable.name, "removeAt");
+    assert_eq!(realization.callable.name, "remove");
+    assert_eq!(
+        realization.callable.reflection_name.as_deref(),
+        Some("removeAt")
+    );
     assert!(realization.callable.owner.matches("java/util/List"));
 }
 
