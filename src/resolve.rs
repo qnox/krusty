@@ -48,6 +48,7 @@ mod local_class_scope;
 mod local_method_dependencies;
 mod override_plans;
 mod postponed_diagnostics;
+mod qualified_call_shaping;
 mod safe_call_flow;
 mod sam_constructors;
 mod scope;
@@ -27947,16 +27948,7 @@ impl<'a> Checker<'a> {
                                 return result;
                             }
                         }
-                        // Typing the arguments before a candidate is known is a PROBE: a lambda is
-                        // judged with no expected shape, so `flag = true` in a receiver lambda has
-                        // no receiver to resolve against and reports an unresolved reference. Hold
-                        // those diagnostics aside the way the bare-name path holds its own; the
-                        // selected call below rechecks each lambda with its real shape and discards
-                        // them, while a call that never resolves still commits them.
-                        let probe_mark = self.diags.diags.len();
-                        let arg_tys = self.arg_tys(scope, args);
-                        self.postponed_diagnostics
-                            .capture_since(call, self.diags, probe_mark);
+                        let (arg_tys, probe_mark) = self.probe_argument_types(scope, call, args);
                         let targs: Vec<Ty> = self
                             .file
                             .call_type_args
@@ -27981,51 +27973,15 @@ impl<'a> Checker<'a> {
                             )
                             .and_then(CallableCandidateSelection::candidate)
                         {
-                            // Recheck each lambda against the parameter the selected callable
-                            // declares — this is what binds a receiver lambda's receiver and an
-                            // ordinary lambda's parameter types. A parameter carries its receiver on
-                            // either channel: the call-sig's per-parameter mark, or the function
-                            // type itself, since an extension's call-sig has no mark by design.
                             let mut arg_tys = arg_tys;
-                            let label = self.call_implicit_lambda_label(call).map(str::to_string);
-                            for (index, &argument) in args.iter().enumerate() {
-                                if !matches!(self.file.expr(argument), Expr::Lambda { .. }) {
-                                    continue;
-                                }
-                                let Some(&parameter) = selected.callable.params.get(index) else {
-                                    continue;
-                                };
-                                if !matches!(parameter.non_null(), Ty::Fun(_)) {
-                                    continue;
-                                }
-                                let has_receiver = selected
-                                    .call_sig
-                                    .lambda_receivers
-                                    .get(index)
-                                    .is_some_and(Option::is_some)
-                                    || matches!(
-                                        parameter.non_null(),
-                                        Ty::Fun(signature) if signature.has_receiver
-                                    );
-                                let checked = self.with_lambda_mutation(
-                                    selected.callable.inline.can_inline(),
-                                    |checker| {
-                                        checker.check_argument_expected(
-                                            scope,
-                                            argument,
-                                            parameter,
-                                            has_receiver,
-                                            label.as_deref(),
-                                        )
-                                    },
-                                );
-                                if let Some(slot) = arg_tys.get_mut(index) {
-                                    *slot = checked;
-                                }
-                            }
-                            // The probe's diagnostics described a lambda with no shape; the recheck
-                            // above superseded them, so they must not reach the sink.
-                            self.postponed_diagnostics.discard(call);
+                            self.reshape_selected_lambda_arguments(
+                                scope,
+                                call,
+                                args,
+                                &mut arg_tys,
+                                &selected,
+                                probe_mark,
+                            );
                             return self.finish_top_level_call(
                                 scope,
                                 call,

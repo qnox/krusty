@@ -2241,3 +2241,19 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `a_cross_package_qualified_call_binds_its_lambda_receiver`,
   `the_other_call_spellings_still_shape_their_lambdas`,
   `an_unknown_member_in_the_lambda_is_still_rejected`.
+- **A named lambda argument binds the parameter it NAMES (fix).** Reshaping a selected call's lambdas
+  walked source positions and read the parameter at the same index. A named argument names its
+  parameter, so two reordered function-typed parameters were checked against each other's receivers
+  and `two(second = { onlyBeta() }, first = { onlyAlpha() })` was rejected where the reference
+  compiler accepts it — a defect that predates the shaping loop, which inherited the assumption. The
+  loop now resolves each named argument through `call_sig.param_names`.
+  `tests/qualified_call_receiver_lambda_e2e.rs::reordered_named_receiver_lambdas_bind_their_own_receivers`.
+- **Only the lambda probe's diagnostics are retired (fix).** Arguments are typed before a candidate
+  is known, so a lambda is judged with no shape; those diagnostics are held aside and the selected
+  call rechecks each lambda. Discarding the WHOLE captured batch also discarded authoritative errors
+  from ordinary arguments: `app.dsl.make(missingArgument) { add("x") }` lost its unresolved-reference
+  diagnostic, selected through `Ty::Error`, and reported only an internal checked-FIR failure where
+  the reference compiler names the unresolved argument. `discard_within` now drops only the
+  diagnostics inside the lambda argument spans and returns the rest to the sink at the capture mark,
+  preserving source order.
+  `tests/qualified_call_receiver_lambda_e2e.rs::an_unresolved_ordinary_argument_survives_lambda_shaping`.

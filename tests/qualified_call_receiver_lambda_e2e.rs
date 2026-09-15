@@ -18,6 +18,30 @@
 
 use super::common;
 
+/// Compare the COMPLETE diagnostic set of both compilers — count, file, line, column, message and
+/// order. A nonzero-exit or substring assertion passes on an unrelated rejection, which is how a
+/// "both compilers agree" claim goes stale.
+fn expect_identical_rejection(result: &common::CompilerDiagnosticResult, tag: &str) {
+    let rendered = format!("{}{}", result.krusty_stdout, result.krusty_stderr);
+    let krusty = common::compiler_errors(&rendered);
+    let reference = common::compiler_errors(&result.reference_stderr);
+    assert_ne!(
+        result.reference_code, 0,
+        "{tag}: kotlinc accepted the fixture: {}",
+        result.reference_stderr
+    );
+    assert_ne!(result.krusty_code, 0, "{tag}: krusty accepted: {rendered}");
+    assert!(
+        !reference.is_empty(),
+        "{tag}: kotlinc rejected with no parseable diagnostic: {}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        krusty, reference,
+        "{tag}: diagnostics differ.\nkrusty:  {krusty:#?}\nkotlinc: {reference:#?}"
+    );
+}
+
 /// The failing shape: a package-qualified call whose parameter is a receiver lambda.
 #[test]
 fn a_package_qualified_call_binds_its_lambda_receiver() {
@@ -100,21 +124,61 @@ fun make(block: Config.() -> Unit): Config = Config().apply(block)\n\
 \n\
 fun bad(): Config = a.b.make { missing = true }\n";
     let result = common::compiler_diagnostics(&[("Main.kt", MAIN)], &[]);
-    assert_ne!(
-        result.reference_code, 0,
-        "kotlinc must reject an unknown member: {}",
-        result.reference_stderr
-    );
-    assert!(
-        result
-            .reference_stderr
-            .contains("unresolved reference 'missing'"),
-        "unexpected kotlinc output: {}",
-        result.reference_stderr
-    );
-    assert_ne!(
-        result.krusty_code, 0,
-        "krusty accepted an unknown member: {}{}",
-        result.krusty_stdout, result.krusty_stderr
-    );
+    expect_identical_rejection(&result, "an unknown member in a shaped lambda");
+}
+
+/// An ordinary argument that does not resolve keeps its OWN diagnostic.
+///
+/// Shaping the lambda means typing the arguments once as a probe, before a candidate is known. That
+/// probe's diagnostics are held aside — but only the lambda bodies were judged without a shape. When
+/// the whole batch was dropped on selection, an authoritative error from a plain argument went with
+/// it, and the call then selected through `Ty::Error`: the reference compiler reported the
+/// unresolved name while krusty reported an internal checked-FIR failure and nothing else.
+#[test]
+fn an_unresolved_ordinary_argument_survives_lambda_shaping() {
+    const LIB: &str = "package app.dsl\n\
+\n\
+class Builder {\n\
+\x20   var text: String = \"\"\n\
+\x20   fun add(part: String) {\n\
+\x20       text += part\n\
+\x20   }\n\
+}\n\
+\n\
+fun make(seed: Any, shape: Builder.() -> Unit): String {\n\
+\x20   val b = Builder()\n\
+\x20   b.text = seed.toString()\n\
+\x20   b.shape()\n\
+\x20   return b.text\n\
+}\n";
+    const MAIN: &str = "fun probe(): String = app.dsl.make(missingArgument) { add(\"x\") }\n";
+    let result = common::compiler_diagnostics(&[("Lib.kt", LIB), ("Main.kt", MAIN)], &[]);
+    expect_identical_rejection(&result, "an unresolved ordinary argument");
+}
+
+/// Two function-typed parameters, passed by NAME in the opposite order.
+///
+/// A named argument names its parameter; its source position says nothing about which one it fills.
+/// Checking the lambdas by position therefore judged each against the OTHER's receiver and rejected a
+/// call the reference compiler accepts. This shape fails on master too — the shaping loop introduced
+/// here inherited the assumption rather than inventing it.
+#[test]
+fn reordered_named_receiver_lambdas_bind_their_own_receivers() {
+    const LIB: &str = "package app.dsl\n\
+\n\
+class Alpha {\n\
+\x20   fun onlyAlpha(): String = \"a\"\n\
+}\n\
+\n\
+class Beta {\n\
+\x20   fun onlyBeta(): String = \"b\"\n\
+}\n\
+\n\
+fun two(first: Alpha.() -> String, second: Beta.() -> String): String =\n\
+\x20   Alpha().first() + Beta().second()\n";
+    const MAIN: &str = "fun box(): String {\n\
+\x20   val swapped = app.dsl.two(second = { onlyBeta() }, first = { onlyAlpha() })\n\
+\x20   return if (swapped == \"ab\") \"OK\" else \"FAIL: \" + swapped\n\
+}\n";
+    common::expect_box_ok_files_with_stdlib(&[("Lib.kt", LIB), ("Main.kt", MAIN)], "swapped_named");
 }
