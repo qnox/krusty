@@ -61,6 +61,7 @@ impl Checker<'_> {
             &[argument_ty],
             &[argument],
             span,
+            None,
         ) else {
             crate::trace_compiler!(
                 "resolve",
