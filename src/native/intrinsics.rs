@@ -42,6 +42,13 @@ fn kotlin_owner(owner: &str) -> &str {
         "java/util/NoSuchElementException" => "kotlin/NoSuchElementException",
         "java/util/ConcurrentModificationException" => "kotlin/ConcurrentModificationException",
         "java/lang/Enum" => "kotlin/Enum",
+        // The collections. Kotlin has no `java.util.ArrayList`: `kotlin.collections.ArrayList` is
+        // the type, and this spelling is only how a JVM jar presents it.
+        "java/util/ArrayList" => "kotlin/collections/ArrayList",
+        "java/util/List" => "kotlin/collections/List",
+        "java/util/Collection" => "kotlin/collections/Collection",
+        "java/util/Iterator" => "kotlin/collections/Iterator",
+        "java/lang/Iterable" => "kotlin/collections/Iterable",
         other => other,
     }
 }
@@ -342,18 +349,33 @@ pub(super) enum IterationRole {
 /// answered this way — one whose result depends on the receiver being a list — is read by
 /// `list_symbol` behind an `is_list` check, never through this.
 pub(super) fn iteration_role(internal: crate::types::TypeName) -> Option<IterationRole> {
+    // The table below is written in Kotlin names; a JVM jar's spelling is normalized to one first.
+    let internal = crate::types::type_name(kotlin_owner(&internal.render()));
     [
         ("kotlin/collections/Iterable", IterationRole::Iterable),
         ("kotlin/collections/Collection", IterationRole::Iterable),
         ("kotlin/collections/List", IterationRole::Iterable),
-        ("java/lang/Iterable", IterationRole::Iterable),
-        ("java/util/Collection", IterationRole::Iterable),
-        ("java/util/List", IterationRole::Iterable),
+        // The growable list. It is iterated exactly as a read-only list is: the runtime hands out
+        // the one list iterator, whose cursor is an index and whose bound is `kt_list_size`, which
+        // both shapes answer.
+        (
+            "kotlin/collections/MutableIterable",
+            IterationRole::Iterable,
+        ),
+        (
+            "kotlin/collections/MutableCollection",
+            IterationRole::Iterable,
+        ),
+        ("kotlin/collections/MutableList", IterationRole::Iterable),
+        ("kotlin/collections/ArrayList", IterationRole::Iterable),
+        (
+            "kotlin/collections/MutableIterator",
+            IterationRole::Iterator,
+        ),
         ("kotlin/ranges/IntRange", IterationRole::Iterable),
         ("kotlin/ranges/LongRange", IterationRole::Iterable),
         ("kotlin/ranges/CharRange", IterationRole::Iterable),
         ("kotlin/collections/Iterator", IterationRole::Iterator),
-        ("java/util/Iterator", IterationRole::Iterator),
         // The primitive iterators an array hands out. Each is a concrete stdlib class rather than
         // an interface, and naming them is safe for the reason the interfaces are: the only objects
         // wearing one here are the runtime's own walks, and a file declaring its own subclass of
@@ -400,16 +422,26 @@ pub(super) fn iteration_role_of(ty: Ty) -> Option<IterationRole> {
     iteration_role(internal)
 }
 
-/// Whether a type name is the read-only list the native runtime builds, under either spelling.
+/// Whether a type name is a list the native runtime builds.
 pub(super) fn is_list_type(internal: crate::types::TypeName) -> bool {
-    [
-        "kotlin/collections/List",
-        "kotlin/collections/Collection",
-        "java/util/List",
-        "java/util/Collection",
-    ]
-    .iter()
-    .any(|candidate| internal.matches(candidate))
+    matches!(
+        kotlin_owner(&internal.render()),
+        "kotlin/collections/List"
+            | "kotlin/collections/Collection"
+            // The MUTABLE ones read the same way: every question `List` answers, a `MutableList`
+            // answers identically, and the runtime gives both one entry point.
+            | "kotlin/collections/MutableList"
+            | "kotlin/collections/MutableCollection"
+            | "kotlin/collections/ArrayList"
+    )
+}
+
+/// The growable list the runtime provides, if this names one.
+///
+/// `kotlin.collections.ArrayList` is declared in no file krusty compiles, so constructing one takes
+/// the path `Any()` and the throwables already take: the runtime allocates it.
+pub(super) fn is_array_list(internal: crate::types::TypeName) -> bool {
+    kotlin_owner(&internal.render()) == "kotlin/collections/ArrayList"
 }
 
 /// `x.indices` — the range of an indexable value's positions, which the provider presents as an

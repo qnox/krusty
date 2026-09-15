@@ -163,7 +163,25 @@ pub(super) fn indexed_value_getter_ty(name: &str) -> Ty {
 ///
 /// `size` and an index are `Int`s the generator must not box to ask about, which is why each
 /// signature is spelled out rather than taken as all-references.
-fn list_symbol(name: &str, arity: usize) -> Option<(&'static str, Vec<Ty>, Ty)> {
+/// `physical` is the member's REALIZED parameter list, which is what recovers `removeAt`.
+///
+/// Kotlin's `MutableList` declares `remove(element: E)` and `removeAt(index: Int)`. There is no
+/// `remove(Int)` in Kotlin — the rename is deliberate, and it exists precisely so that removing
+/// the element `2` cannot be confused with removing the element AT `2`.
+///
+/// Both still arrive here as `remove`, for the reason [`kotlin_owner`] exists: `removeAt` is
+/// REALIZED as `java.util.List.remove(int)`, and a mapped builtin whose realization names a
+/// different physical member hands over that physical name — the same way `CharSequence.get`
+/// arrives as `charAt` and `Number.toByte` as `byteValue`.
+///
+/// Only the PHYSICAL parameter can tell the two apart, and the distinction is not academic:
+/// `MutableList<Int>.remove(10)` substitutes `E` to `Int`, so the SEMANTIC parameter of the
+/// ELEMENT overload is `Int` as well, and reading that one turns "remove the element 10" into
+/// "remove at index 10" — an out-of-range index where Kotlin simply answers `false`. The
+/// realizations differ where it counts: the index one takes an `Int` and the element one takes the
+/// erased reference, whatever `E` was substituted to.
+fn list_symbol(name: &str, arity: usize, physical: &[Ty]) -> Option<(&'static str, Vec<Ty>, Ty)> {
+    let by_index = matches!(physical.first().map(|ty| ty.non_null()), Some(Ty::Int));
     Some(match (name, arity) {
         // `List.size` is a Kotlin property over a Java method, so the provider may present the
         // getter under either spelling; both name the same question.
@@ -173,6 +191,20 @@ fn list_symbol(name: &str, arity: usize) -> Option<(&'static str, Vec<Ty>, Ty)> 
         ("indexOf", 1) => ("kt_list_index_of", vec![any(), any()], Ty::Int),
         ("lastIndexOf", 1) => ("kt_list_last_index_of", vec![any(), any()], Ty::Int),
         ("contains", 1) => ("kt_list_contains", vec![any(), any()], Ty::Boolean),
+        // The mutating half. A receiver that is not a growable list never reaches these: Kotlin
+        // declares them on `MutableList` only, so naming one is already the proof.
+        ("add", 1) => ("kt_mutable_list_add", vec![any(), any()], Ty::Boolean),
+        ("add", 2) => (
+            "kt_mutable_list_add_at",
+            vec![any(), Ty::Int, any()],
+            Ty::Unit,
+        ),
+        ("set", 2) => ("kt_mutable_list_set", vec![any(), Ty::Int, any()], any()),
+        ("removeAt", 1) => ("kt_mutable_list_remove_at", vec![any(), Ty::Int], any()),
+        // `removeAt`, under the name its realization gave it; see the note on this function.
+        ("remove", 1) if by_index => ("kt_mutable_list_remove_at", vec![any(), Ty::Int], any()),
+        ("remove", 1) => ("kt_mutable_list_remove", vec![any(), any()], Ty::Boolean),
+        ("clear", 0) => ("kt_mutable_list_clear", vec![any()], Ty::Unit),
         _ => return None,
     })
 }
@@ -196,6 +228,15 @@ impl BodyLowering<'_, '_, '_> {
             ("emptyList", []) | ("listOf", []) => {
                 Some(self.runtime_call("kt_list_empty", &[], any(), &[]))
             }
+            // A growable list, empty or holding what the vararg call already packed. `mutableListOf`
+            // and `arrayListOf` are the same list under two names; neither may SHARE the vararg
+            // array the way `listOf` does, because a write through the list would reach it.
+            ("mutableListOf" | "arrayListOf", []) => {
+                Some(self.runtime_call("kt_mutable_list_new", &[], any(), &[]))
+            }
+            ("mutableListOf" | "arrayListOf", [argument]) if packs_a_vararg => {
+                Some(self.mutable_list_of(*argument))
+            }
             // Kotlin declares `listOf` twice, and which one this is decides whether the argument
             // IS the list's elements or is one OF them. Only the selected declaration's PHYSICAL
             // parameter can say, because a vararg one is an array however its element type was
@@ -207,6 +248,19 @@ impl BodyLowering<'_, '_, '_> {
             ("listOf", [element]) => Some(self.list_single(*element)),
             _ => None,
         }
+    }
+
+    /// `mutableListOf(a, b, c)`: a growable list holding a COPY of the vararg array's elements.
+    ///
+    /// Copied rather than shared, which is the one place this differs from `listOf`: the array a
+    /// vararg call built belongs to the caller, and a list that could be written through would
+    /// reach back into it.
+    fn mutable_list_of(&mut self, elements: u32) -> Result<Option<Value>, Unsupported> {
+        let elements = self.reference(elements)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.runtime_call("kt_mutable_list_of", &[any()], any(), &[elements])
     }
 
     /// `lazy { … }`, or `None` when the declaration is something else.
@@ -347,7 +401,7 @@ impl BodyLowering<'_, '_, '_> {
         }
         let property = self.file.classpath.external_property(target)?;
         let getter = self.file.classpath.external_callable(property.getter)?;
-        list_symbol(&getter.callable.name, 0)?;
+        list_symbol(&getter.callable.name, 0, &[])?;
         Some(getter.callable.name.clone())
     }
 
@@ -358,6 +412,19 @@ impl BodyLowering<'_, '_, '_> {
         receiver: u32,
         args: &[u32],
         ret: Ty,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        self.list_member_declared(name, receiver, args, ret, &[])
+    }
+
+    /// The same, told the member's REALIZED parameter list — see [`list_symbol`] for what it
+    /// decides and why the semantic one cannot.
+    pub(super) fn list_member_declared(
+        &mut self,
+        name: &str,
+        receiver: u32,
+        args: &[u32],
+        ret: Ty,
+        physical: &[Ty],
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let ty = self.type_of(receiver)?;
         // Iteration first: a `List` is iterated through the same dispatch an `Iterable` is, so the
@@ -381,7 +448,7 @@ impl BodyLowering<'_, '_, '_> {
         let (symbol, carried, answer) =
             match role.and_then(|role| interface_symbol(role, name, args.len())) {
                 Some(symbol) => symbol,
-                None if is_list(ty) => list_symbol(name, args.len())?,
+                None if is_list(ty) => list_symbol(name, args.len(), physical)?,
                 None => return None,
             };
         Some(self.list_call(symbol, &carried, answer, receiver, args, ret))

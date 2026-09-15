@@ -536,3 +536,83 @@ fn every_primitive_arrays_iterator_answers_at_its_own_width() {
         "OK",
     );
 }
+
+#[test]
+fn a_growable_list_holds_what_is_added_to_it() {
+    // `ArrayList` is the runtime's, so every question a `List` answers it answers the same way —
+    // `size`, `get`, `contains`, iteration — with the mutating half beside them.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val xs = ArrayList<String>()\n\
+         \x20   if (xs.size != 0) return \"fail empty\"\n\
+         \x20   xs.add(\"a\")\n\
+         \x20   xs.add(\"b\")\n\
+         \x20   xs.add(\"c\")\n\
+         \x20   if (xs.size != 3) return \"fail size: ${xs.size}\"\n\
+         \x20   if (xs[1] != \"b\") return \"fail get\"\n\
+         \x20   if (!xs.contains(\"c\")) return \"fail contains\"\n\
+         \x20   if (xs.indexOf(\"c\") != 2) return \"fail indexOf\"\n\
+         \x20   var joined = \"\"\n\
+         \x20   for (x in xs) joined += x\n\
+         \x20   if (joined != \"abc\") return \"fail iterate: $joined\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "GrowableList",
+        "OK",
+    );
+}
+
+#[test]
+fn a_growable_list_grows_past_its_first_storage() {
+    // The backing array is capacity, not contents: adding past it reallocates, and every element
+    // has to survive that. A hundred is several doublings from the initial four.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val xs = ArrayList<Int>()\n\
+         \x20   for (i in 0 until 100) xs.add(i)\n\
+         \x20   if (xs.size != 100) return \"fail size: ${xs.size}\"\n\
+         \x20   var total = 0\n\
+         \x20   for (x in xs) total += x\n\
+         \x20   if (total != 4950) return \"fail total: $total\"\n\
+         \x20   return if (xs[99] == 99) \"OK\" else \"fail last: ${xs[99]}\"\n\
+         }\n",
+        "GrowableListGrows",
+        "OK",
+    );
+}
+
+#[test]
+fn a_growable_list_removes_and_sets() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val xs = arrayListOf(\"a\", \"b\", \"c\")\n\
+         \x20   if (xs.size != 3) return \"fail built: ${xs.size}\"\n\
+         \x20   if (xs.set(1, \"B\") != \"b\") return \"fail set answer\"\n\
+         \x20   if (xs[1] != \"B\") return \"fail set\"\n\
+         \x20   if (xs.removeAt(0) != \"a\") return \"fail removeAt answer\"\n\
+         \x20   if (xs.size != 2 || xs[0] != \"B\") return \"fail removeAt\"\n\
+         \x20   if (!xs.remove(\"c\")) return \"fail remove\"\n\
+         \x20   if (xs.remove(\"gone\")) return \"fail remove missing\"\n\
+         \x20   xs.clear()\n\
+         \x20   return if (xs.size == 0) \"OK\" else \"fail clear\"\n\
+         }\n",
+        "GrowableListEdits",
+        "OK",
+    );
+}
+
+#[test]
+fn a_built_growable_list_does_not_share_the_vararg_array() {
+    // `mutableListOf(*xs)` copies. A list that shared the caller's array would let a write through
+    // the list reach back into it, which is the one thing `listOf` may do and this may not.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val source = arrayOf(\"a\", \"b\")\n\
+         \x20   val xs = mutableListOf(*source)\n\
+         \x20   xs.set(0, \"changed\")\n\
+         \x20   return if (source[0] == \"a\" && xs[0] == \"changed\") \"OK\" else \"fail: ${source[0]}\"\n\
+         }\n",
+        "GrowableListCopies",
+        "OK",
+    );
+}

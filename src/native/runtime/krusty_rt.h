@@ -209,6 +209,25 @@ kt_int kt_list_index_of(KRef list, KRef value);
 kt_int kt_list_last_index_of(KRef list, KRef value);
 kt_boolean kt_list_contains(KRef list, KRef value);
 KRef kt_list_iterator(KRef list);
+
+/* ---- a growable list -------------------------------------------------------------------------
+
+   `ArrayList`/`MutableList`: the same shape as an immutable list with a SIZE beside the storage,
+   so every read above serves both. See the note on the definition. */
+extern const KType kt_type_mutable_list;
+
+kt_boolean kt_is_mutable_list(KRef value);
+KRef kt_mutable_list_new(void);
+KRef kt_mutable_list_with_capacity(kt_int capacity);
+/* A growable list holding a COPY of an array's elements. */
+KRef kt_mutable_list_of(KRef elements);
+kt_boolean kt_mutable_list_add(KRef self, KRef value);
+void kt_mutable_list_add_at(KRef self, kt_int index, KRef value);
+/* Answers the element that was there, as Kotlin's `set` does. */
+KRef kt_mutable_list_set(KRef self, kt_int index, KRef value);
+KRef kt_mutable_list_remove_at(KRef self, kt_int index);
+kt_boolean kt_mutable_list_remove(KRef self, KRef value);
+void kt_mutable_list_clear(KRef self);
 kt_boolean kt_list_iterator_has_next(KRef iterator);
 KRef kt_list_iterator_next(KRef iterator);
 

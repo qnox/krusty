@@ -274,7 +274,12 @@ the refusals that matter are per-file and discovered mid-lowering.
   exactly one function invoke. General `inline fun` expansion remains constant-pool splicing on the
   production path. This is a JVM-provider-side decode of bytecode into a neutral plan — evidence that
   a neutral description is *possible*, not evidence of a migration under way.
-- No klib reader or writer; no `expect`/`actual` resolution across a source-set hierarchy; no native
+- No klib reader or writer **as a library provider** — with one narrow exception that is real and
+  on the production path: `src/jvm/common_metadata.rs` opens the distribution's
+  `kotlin-stdlib-wasm-js.klib` as a zip and parses its `.knm` package fragments through
+  `metadata::raw_kotlin_metadata`, to recover the common `expect` headers the JVM jar omits. So the
+  metadata half of the container is already decoded; what does not exist is klib as a SYMBOL
+  SOURCE, its IR, or emission. No `expect`/`actual` resolution across a source-set hierarchy; no native
   codegen; no runtime of any kind (no GC, object layout, dispatch, exceptions, threading, or
   coroutine scheduler). `src/jvm/suspend.rs` (~8,000 lines) is a JVM-only IR→IR CPS transform.
 - `docs/ARCHITECTURE.md` scopes LLVM out of the current IR: *"LLVM is the right tool only for a

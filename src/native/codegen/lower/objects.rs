@@ -1330,6 +1330,31 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if let Some(descriptor) = super::super::super::intrinsics::throwable_descriptor(internal) {
             return self.runtime_throwable(descriptor, &name, args, selected);
         }
+        // `ArrayList()`, the runtime's growable list. Declared in no file either, like `Any` and
+        // the throwables above, so the runtime allocates it rather than the generator laying one
+        // out. The capacity overload is a HINT with nothing observable depending on it; a copy
+        // constructor takes a collection and declines, because sharing that collection's storage
+        // would let a write through the new list reach it.
+        if super::super::super::intrinsics::is_array_list(internal) {
+            return match (args, selected) {
+                ([], _) => self.runtime_call("kt_mutable_list_new", &[], any(), &[]),
+                ([argument], Some([only])) if *only == Ty::Int => {
+                    let Some(capacity) = self.coerce(*argument, Ty::Int)? else {
+                        return Ok(None);
+                    };
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call(
+                        "kt_mutable_list_with_capacity",
+                        &[Ty::Int],
+                        any(),
+                        &[capacity],
+                    )
+                }
+                _ => Err(format!("this constructor of `{name}`")),
+            };
+        }
         let class = self.file.class_of(internal, "construction of")?;
         let declaration = &self.file.ir.classes[class as usize];
         if declaration.is_object {

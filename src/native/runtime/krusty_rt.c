@@ -1213,6 +1213,48 @@ const KType kt_type_list = {"kotlin.collections.List",
                             3,
                             0};
 
+/* ---- a growable list ------------------------------------------------------------------------
+
+   `ArrayList`/`MutableList`. The same shape as `KList` with a SIZE beside the storage, because the
+   two differ only in whether every slot of the backing array is an element: an immutable list's
+   array IS its elements, a growable one's array is capacity and `size` says how much of it counts.
+
+   Sharing the shape is what lets `kt_list_size`, `kt_list_get` and everything built on them —
+   `indexOf`, `contains`, the iterator, a `for` loop — serve both. Each asks the DESCRIPTOR which
+   it is holding rather than being written twice, and the iterator keeps working unchanged because
+   the cursor it holds is an index and the bound it compares against is `kt_list_size`. */
+typedef struct KMutableList {
+    KObjectHeader header;
+    KRef elements;
+    kt_int size;
+} KMutableList;
+
+static const uint32_t kt_mutable_list_offsets[] = {offsetof(KMutableList, elements)};
+
+static kt_boolean kt_list_equals(KRef self, KRef other);
+static kt_int kt_list_hash_code(KRef self);
+static KRef kt_list_to_string(KRef self);
+
+/* Its `equals`/`hashCode`/`toString` are the list ones: Kotlin compares any two lists by their
+   elements in order, and a `List` is equal to a `MutableList` holding the same things. */
+static const kt_fn kt_mutable_list_vtable[] = {(kt_fn)kt_list_equals, (kt_fn)kt_list_hash_code,
+                                               (kt_fn)kt_list_to_string};
+
+const KType kt_type_mutable_list = {"kotlin.collections.ArrayList",
+                                    sizeof("kotlin.collections.ArrayList") - 1,
+                                    sizeof(KMutableList),
+                                    1,
+                                    0,
+                                    kt_mutable_list_offsets,
+                                    &kt_type_any,
+                                    kt_mutable_list_vtable,
+                                    3,
+                                    0};
+
+kt_boolean kt_is_mutable_list(KRef value) {
+    return value != NULL && value->header.type == &kt_type_mutable_list;
+}
+
 /* The cursor an iterator holds is an INDEX, not a pointer: the collector may not move an object,
    but an index needs no such promise and reads the same whatever the list is. */
 typedef struct KListIterator {
@@ -1259,21 +1301,29 @@ KRef kt_list_single(KRef value) {
     return kt_list_of(elements);
 }
 
-kt_int kt_list_size(KRef list) { return kt_length_of(((const KList *)list)->elements); }
+/* Both list shapes answer here; see the note on `KMutableList` for why they share the entry point
+   rather than each having its own. A growable list's array is capacity, so its SIZE is the field. */
+kt_int kt_list_size(KRef list) {
+    if (kt_is_mutable_list(list)) {
+        return ((const KMutableList *)list)->size;
+    }
+    return kt_length_of(((const KList *)list)->elements);
+}
 
 kt_boolean kt_list_is_empty(KRef list) { return kt_list_size(list) == 0; }
 
 KRef kt_list_get(KRef list, kt_int index) {
     KRef elements = ((const KList *)list)->elements;
-    if (index < 0 || index >= kt_length_of(elements)) {
-        kt_index_out_of_bounds(index, kt_length_of(elements));
+    kt_int size = kt_list_size(list);
+    if (index < 0 || index >= size) {
+        kt_index_out_of_bounds(index, size);
     }
     return kt_elements_of(elements)[index];
 }
 
 kt_int kt_list_index_of(KRef list, KRef value) {
     KRef elements = ((const KList *)list)->elements;
-    kt_int length = kt_length_of(elements);
+    kt_int length = kt_list_size(list);
     for (kt_int i = 0; i < length; i++) {
         if (kt_equals(kt_elements_of(elements)[i], value)) {
             return i;
@@ -1284,7 +1334,7 @@ kt_int kt_list_index_of(KRef list, KRef value) {
 
 kt_int kt_list_last_index_of(KRef list, KRef value) {
     KRef elements = ((const KList *)list)->elements;
-    for (kt_int i = kt_length_of(elements) - 1; i >= 0; i--) {
+    for (kt_int i = kt_list_size(list) - 1; i >= 0; i--) {
         if (kt_equals(kt_elements_of(elements)[i], value)) {
             return i;
         }
@@ -1293,6 +1343,116 @@ kt_int kt_list_last_index_of(KRef list, KRef value) {
 }
 
 kt_boolean kt_list_contains(KRef list, KRef value) { return kt_list_index_of(list, value) >= 0; }
+
+KRef kt_mutable_list_new(void) {
+    KMutableList *list = (KMutableList *)kt_gc_allocate(&kt_type_mutable_list, sizeof(KMutableList));
+    list->elements = kt_array_new(&kt_type_array, 0);
+    list->size = 0;
+    return (KRef)list;
+}
+
+/* `ArrayList(initialCapacity)`. The capacity is a hint and nothing observable depends on it, so an
+   invalid one is not a failure here — Kotlin's own throws, which this target will do once a
+   `catch` exists to see the difference. */
+KRef kt_mutable_list_with_capacity(kt_int capacity) {
+    KRef list = kt_mutable_list_new();
+    if (capacity > 0) {
+        ((KMutableList *)list)->elements = kt_array_new(&kt_type_array, capacity);
+    }
+    return list;
+}
+
+/* Grow to hold at least one more, doubling so that repeated `add` stays linear overall. */
+static void kt_mutable_list_reserve(KRef self) {
+    KMutableList *list = (KMutableList *)self;
+    kt_int capacity = kt_length_of(list->elements);
+    if (list->size < capacity) {
+        return;
+    }
+    kt_int grown = capacity == 0 ? 4 : capacity * 2;
+    /* The allocation can collect, and `self` is a root in the caller's frame, so the OLD array
+       stays reachable through it until the new one is stored. */
+    KRef replacement = kt_array_new(&kt_type_array, grown);
+    kt_array_copy_into(replacement, 0, list->elements);
+    list->elements = replacement;
+}
+
+/* `mutableListOf(a, b, c)` — a COPY of what the vararg call packed, not a share of it. The array
+   belongs to the caller, and this list can be written through. */
+KRef kt_mutable_list_of(KRef elements) {
+    kt_int length = kt_length_of(elements);
+    /* `elements` stays live in this parameter across both allocations. */
+    KRef list = kt_mutable_list_with_capacity(length);
+    kt_array_copy_into(((KMutableList *)list)->elements, 0, elements);
+    ((KMutableList *)list)->size = length;
+    return list;
+}
+
+kt_boolean kt_mutable_list_add(KRef self, KRef value) {
+    kt_mutable_list_reserve(self);
+    KMutableList *list = (KMutableList *)self;
+    kt_elements_of(list->elements)[list->size++] = value;
+    /* Kotlin's `MutableList.add` answers whether the list changed, which for a list is always. */
+    return true;
+}
+
+KRef kt_mutable_list_set(KRef self, kt_int index, KRef value) {
+    KMutableList *list = (KMutableList *)self;
+    if (index < 0 || index >= list->size) {
+        kt_index_out_of_bounds(index, list->size);
+    }
+    KRef *slot = &kt_elements_of(list->elements)[index];
+    KRef previous = *slot;
+    *slot = value;
+    return previous;
+}
+
+void kt_mutable_list_add_at(KRef self, kt_int index, KRef value) {
+    KMutableList *list = (KMutableList *)self;
+    if (index < 0 || index > list->size) {
+        kt_index_out_of_bounds(index, list->size);
+    }
+    kt_mutable_list_reserve(self);
+    KRef *elements = kt_elements_of(list->elements);
+    for (kt_int at = list->size; at > index; at--) {
+        elements[at] = elements[at - 1];
+    }
+    elements[index] = value;
+    list->size++;
+}
+
+KRef kt_mutable_list_remove_at(KRef self, kt_int index) {
+    KMutableList *list = (KMutableList *)self;
+    if (index < 0 || index >= list->size) {
+        kt_index_out_of_bounds(index, list->size);
+    }
+    KRef *elements = kt_elements_of(list->elements);
+    KRef removed = elements[index];
+    for (kt_int at = index; at + 1 < list->size; at++) {
+        elements[at] = elements[at + 1];
+    }
+    /* Clear the vacated slot so the collector stops tracing what the list no longer holds. */
+    elements[--list->size] = NULL;
+    return removed;
+}
+
+kt_boolean kt_mutable_list_remove(KRef self, KRef value) {
+    kt_int at = kt_list_index_of(self, value);
+    if (at < 0) {
+        return false;
+    }
+    kt_mutable_list_remove_at(self, at);
+    return true;
+}
+
+void kt_mutable_list_clear(KRef self) {
+    KMutableList *list = (KMutableList *)self;
+    KRef *elements = kt_elements_of(list->elements);
+    for (kt_int at = 0; at < list->size; at++) {
+        elements[at] = NULL;
+    }
+    list->size = 0;
+}
 
 KRef kt_list_iterator(KRef list) {
     KListIterator *iterator =
@@ -1585,7 +1745,10 @@ KRef kt_iterable_with_index(KRef iterable) {
 }
 
 KRef kt_iterable_iterator(KRef iterable) {
-    if (iterable != NULL && iterable->header.type == &kt_type_list) {
+    /* Either list shape: the one list iterator serves both, because its cursor is an index and the
+       bound it compares against is `kt_list_size`, which both answer. */
+    if (iterable != NULL
+        && (iterable->header.type == &kt_type_list || kt_is_mutable_list(iterable))) {
         return kt_list_iterator(iterable);
     }
     if (iterable != NULL && kt_is_array(iterable->header.type)) {
@@ -1642,7 +1805,7 @@ static kt_int kt_iterable_size(KRef iterable) {
     if (iterable == NULL) {
         KT_FAIL("krusty: member access on a null receiver\n");
     }
-    if (iterable->header.type == &kt_type_list) {
+    if (iterable->header.type == &kt_type_list || kt_is_mutable_list(iterable)) {
         return kt_list_size(iterable);
     }
     if (kt_is_array(iterable->header.type)) {
@@ -1754,7 +1917,10 @@ static kt_boolean kt_list_equals(KRef self, KRef other) {
     if (self == other) {
         return true;
     }
-    if (other == NULL || other->header.type != &kt_type_list) {
+    /* Either shape counts as a list: Kotlin compares two lists by their elements in order, so a
+       `List` and a `MutableList` holding the same things are equal. */
+    if (other == NULL
+        || (other->header.type != &kt_type_list && !kt_is_mutable_list(other))) {
         return false;
     }
     kt_int size = kt_list_size(self);
@@ -1774,7 +1940,7 @@ static kt_boolean kt_list_equals(KRef self, KRef other) {
 /* Kotlin's own: 1 folded with `31 * h + e.hashCode()`, a null element contributing 0. */
 static kt_int kt_list_hash_code(KRef self) {
     KRef elements = ((const KList *)self)->elements;
-    kt_int length = kt_length_of(elements);
+    kt_int length = kt_list_size(self);
     uint32_t hash = 1;
     for (kt_int i = 0; i < length; i++) {
         hash = 31u * hash + (uint32_t)kt_hash_code(kt_elements_of(elements)[i]);
@@ -1787,7 +1953,7 @@ static kt_int kt_list_hash_code(KRef self) {
    allocate, and the joined text has to stay reachable across that. */
 static KRef kt_list_to_string(KRef self) {
     KRef elements = ((const KList *)self)->elements;
-    kt_int length = kt_length_of(elements);
+    kt_int length = kt_list_size(self);
     KRef text = kt_string_utf8("[", 1);
     for (kt_int i = 0; i < length; i++) {
         if (i > 0) {

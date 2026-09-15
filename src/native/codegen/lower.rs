@@ -2277,8 +2277,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         {
                             return realized;
                         }
-                        // A `listOf` result and the iterator it answers with.
-                        if let Some(realized) = self.list_member(&name, receiver, args, *ret) {
+                        // A `listOf` result and the iterator it answers with. The PHYSICAL
+                        // parameters go with it: they are what tells `removeAt` from `remove`,
+                        // and the semantic ones cannot — see `lists::list_symbol`.
+                        let physical = realization.callable.physical_params.clone();
+                        if let Some(realized) =
+                            self.list_member_declared(&name, receiver, args, *ret, &physical)
+                        {
                             return realized;
                         }
                         // `a to b`: an extension of the tuples facade, so its left operand is the

@@ -282,7 +282,17 @@ fn outcome(scratch: &Path, file: &Path, target: NativeTarget) -> Outcome {
     let result = run(&executable);
     let _ = std::fs::remove_file(&executable);
     match result {
-        Ok(stdout) if stdout == "OK\n" => Outcome::Pass,
+        // The entry prints what `box()` returned, as the LAST line. Anything before it is the
+        // PROGRAM's own output — `controlStructures/kt513.kt` builds a list and `println`s it
+        // before returning `OK` — which the JVM lane never sees, because there the answer is a
+        // return value rather than a stream. Requiring the whole of stdout to be `OK` counted
+        // every such case as a miscompile, which is the opposite of what it is.
+        //
+        // This does not weaken the check: a program that prints `OK` itself and then answers
+        // something else still fails, because the answer is what comes last.
+        Ok(stdout) if stdout.trim_end_matches('\n').rsplit('\n').next() == Some("OK") => {
+            Outcome::Pass
+        }
         Ok(stdout) => Outcome::Failed(format!("box() printed {stdout:?}")),
         Err(error) => Outcome::Failed(error),
     }
