@@ -174,3 +174,41 @@ fun box(): String {\n\
 }\n";
     assert_eq!(run_box(MAIN, "ordinary_derivation"), "OK");
 }
+
+/// A custom serializer declared as a CLASS rather than an `object` takes constructor arguments
+/// (`ValueSerializer<T>(dataSerializer)`), so it has no `INSTANCE` field. Reading one would emit a
+/// reference to a field that does not exist, which is worse than declining: this shape must stay a
+/// clean refusal until a plan that CONSTRUCTS the serializer exists. Asserted as a refusal, not as a
+/// success, so the day it starts working this test says so.
+#[test]
+fn a_class_valued_custom_serializer_is_still_declined_rather_than_miscompiled() {
+    const MAIN: &str = "import kotlinx.serialization.KSerializer\n\
+import kotlinx.serialization.Serializable\n\
+import kotlinx.serialization.descriptors.SerialDescriptor\n\
+import kotlinx.serialization.encoding.Decoder\n\
+import kotlinx.serialization.encoding.Encoder\n\
+\n\
+@Serializable(with = BoxSerializer::class)\n\
+class Box<T>(val item: T)\n\
+\n\
+class BoxSerializer<T>(private val itemSerializer: KSerializer<T>) : KSerializer<Box<T>> {\n\
+\x20   override val descriptor: SerialDescriptor = itemSerializer.descriptor\n\
+\n\
+\x20   override fun serialize(encoder: Encoder, value: Box<T>) {\n\
+\x20       itemSerializer.serialize(encoder, value.item)\n\
+\x20   }\n\
+\n\
+\x20   override fun deserialize(decoder: Decoder): Box<T> = Box(itemSerializer.deserialize(decoder))\n\
+}\n\
+\n\
+@Serializable\n\
+data class Holder(val payload: Box<String>)\n";
+    let jars = runtime_jars();
+    let outcome = common::backend_outcome_in_process(MAIN, "class_valued_serializer", &jars, None);
+    let rendered = format!("{outcome:?}");
+    assert!(
+        rendered.contains("not yet supported"),
+        "a class-valued custom serializer must be declined cleanly, not miscompiled into a \
+         non-existent INSTANCE read; got: {rendered}"
+    );
+}
