@@ -1621,6 +1621,47 @@ KRef kt_not_null(KRef value) {
     return value;
 }
 
+/* A `throw` the program wrote itself: the prefix names the exception the JVM would raise and the
+   rest is the program's own message. `kt_render` needs its storage kept alive across the call that
+   reads it, which is what the local is for. */
+static void kt_throw_with(const char *prefix, size_t prefix_length, KRef message) {
+    kt_write(2, prefix, prefix_length);
+    if (message != NULL) {
+        kt_int length = 0;
+        KRef storage = NULL;
+        const char *bytes = kt_render(message, &length, &storage);
+        kt_write(2, bytes, (size_t)length);
+    }
+    kt_write(2, "\n", 1);
+    kt_exit(134);
+}
+
+#define KT_THROW(prefix, message) kt_throw_with(prefix, sizeof(prefix) - 1, message)
+
+void kt_not_implemented(void) {
+    KT_THROW("krusty: An operation is not implemented.", NULL);
+}
+
+void kt_not_implemented_reason(KRef reason) {
+    KT_THROW("krusty: An operation is not implemented: ", reason);
+}
+
+void kt_illegal_state(KRef message) { KT_THROW("krusty: ", message); }
+
+void kt_require(kt_boolean value) {
+    if (!value) {
+        KT_THROW("krusty: Failed requirement.", NULL);
+    }
+}
+
+void kt_check(kt_boolean value) {
+    if (!value) {
+        KT_THROW("krusty: Check failed.", NULL);
+    }
+}
+
+#undef KT_THROW
+
 void kt_abstract_method_called(void) { KT_FAIL("krusty: abstract method called\n"); }
 
 void kt_null_receiver(void) { KT_FAIL("krusty: member access on a null receiver\n"); }

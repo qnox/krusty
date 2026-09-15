@@ -311,6 +311,17 @@ KRef kt_safe_cast(KRef object, const KType *type);
 KRef kt_not_null(KRef value);
 
 void kt_abstract_method_called(void);
+
+/* The standard-library throws a program writes on purpose: `TODO()`, `error(message)`, and a
+   failed `require`/`check`. There are no exceptions on this target yet, so each is the same
+   diagnosable exit `!!` on null and a failed cast already give — and no program that could CATCH
+   one of these compiles here, so nothing observable is lost by not raising it. The message is the
+   program's own, rendered the way `"$message"` renders it. */
+void kt_not_implemented(void);
+void kt_not_implemented_reason(KRef reason);
+void kt_illegal_state(KRef message);
+void kt_require(kt_boolean value);
+void kt_check(kt_boolean value);
 void kt_nothing_value_returned(void);
 /* A member access on `null`: the placeholder for NullPointerException. */
 void kt_null_receiver(void);

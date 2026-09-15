@@ -900,6 +900,72 @@ fn a_slice_between_the_halves_of_one_character_fails_loudly() {
 }
 
 #[test]
+fn a_throw_a_program_wrote_stops_it_and_says_what_happened() {
+    let Some(target) = host() else {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    };
+    // The half that matters: a `TODO`, an `error` or a failed `require` must STOP the program. A
+    // Kotlin exception is not catchable on this target — `try` declines whole — so the realization
+    // is a diagnosable exit, and what it says has to name what the program asked for.
+    for (source, expected) in [
+        (
+            "fun main() { println(\"before\"); TODO(\"the rest of it\") }\n",
+            "An operation is not implemented: the rest of it",
+        ),
+        (
+            "fun main() { println(\"before\"); TODO() }\n",
+            "An operation is not implemented.",
+        ),
+        (
+            "fun main() { println(\"before\"); error(\"nothing to do\") }\n",
+            "nothing to do",
+        ),
+        (
+            "fun main() { println(\"before\"); require(1 > 2) }\n",
+            "Failed requirement.",
+        ),
+        (
+            "fun main() { println(\"before\"); check(1 > 2) }\n",
+            "Check failed.",
+        ),
+    ] {
+        let (artifacts, diagnostics) = compile(&[("Main", source)], target);
+        assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
+        let objects = artifacts
+            .iter()
+            .map(|(_, bytes)| bytes.as_slice())
+            .collect::<Vec<_>>();
+        let image = krusty::native::link_program(&objects, target).expect("link");
+        let scratch = Scratch::new("throw");
+        let executable = scratch.path().join("program");
+        std::fs::write(&executable, &image).expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let output =
+            common::run_freshly_written(std::process::Command::new(&executable).env_clear())
+                .expect("run");
+        assert!(
+            !output.status.success(),
+            "{source}: a throw must not continue"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "before\n",
+            "{source}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected),
+            "{source}: stderr {:?} does not name {expected:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
 fn a_lambda_is_an_object_that_can_be_passed_called_and_returned() {
     if host().is_none() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");

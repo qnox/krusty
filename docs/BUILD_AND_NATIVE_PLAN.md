@@ -1566,6 +1566,16 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **`TODO`, `error`, `require`, `check`, for 2570.** These throw, and this target has no
+   exceptions — but it already answers `!!` on null and a failed cast with a diagnosable exit, and
+   these are the same thing with the program's own message. Nothing is decided about `try` by
+   doing so: no program that could catch one of these compiles here at all, so there is no
+   observable difference to get wrong, and when exceptions arrive these become throws.
+   The forms taking a `lazyMessage` stay declined, and that is the considered part: the parameter
+   is a lambda of an `inline` declaration, Kotlin lets such a lambda return from the enclosing
+   function, and nothing here can splice a dependency's body — so calling it as an ordinary
+   function value would be a miscompile, not a slower answer.
+
    **The collector against the runtime's OWN objects.** The stress tests covered what the
    generator emits — class instances, arrays, closure captures — and nothing that the runtime lays
    out itself. That gap had grown: a list, a pair, a lazy, a list iterator and a shared string

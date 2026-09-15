@@ -1985,6 +1985,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_lists_e2e.rs`
   (`a_single_element_list_is_not_a_vararg_call_of_length_one`).
 
+- **A throw a program writes on purpose is a diagnosable exit on the native target.** `TODO()`,
+  `error(message)` and a failed `require`/`check` all throw in Kotlin. Nothing on this target can
+  catch one — `try` declines whole — so each is realized as the loud exit the runtime already gives
+  for `!!` on null, a failed cast and an out-of-bounds index, naming the exception the JVM would
+  raise and the program's own message. No program that could OBSERVE the difference compiles here,
+  which is what makes the substitution sound rather than convenient; when exceptions arrive these
+  become throws, and nothing about the `try` design is settled by this.
+  `TODO()` is a `Nothing`, so the caller's bottom-value contract takes over from the call.
+  The forms taking a `lazyMessage` still DECLINE. That parameter is a lambda of an `inline`
+  declaration whose body is not here to splice, and Kotlin lets such a lambda return from the
+  enclosing function — so invoking it as an ordinary function value would be a miscompile rather
+  than a slower answer.
+  Tests: `tests/native_throws_e2e.rs` (`a_todo_is_a_bottom_value_the_caller_never_reads`,
+  `a_satisfied_requirement_is_not_a_failure`, `a_message_lambda_still_declines`),
+  `tests/native_codegen_e2e.rs` (`a_throw_a_program_wrote_stops_it_and_says_what_happened`).
+
 - **`joinToString()` is realized only with every parameter at its default.** The stdlib declares
   six parameters, all defaulted, and the native backend has no `$default` synthetic of a dependency
   to call — so the defaults would have to be written into the backend, and the only set worth

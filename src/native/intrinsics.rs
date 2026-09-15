@@ -94,6 +94,19 @@ pub(super) fn runtime_function(owner: &str, name: &str, params: &[Ty]) -> Option
                 ConsoleOperand::Reference => Some(format!("kt_{name}_any")),
             }
         }
+        // The throws a program writes on purpose. Each is a `Nothing` or a check that diverges, so
+        // the caller's own bottom-value contract takes over from here; the runtime's part is the
+        // diagnosable exit this target gives a throw until it has exceptions.
+        //
+        // Only the forms that take no `lazyMessage` are named. That parameter is a LAMBDA of an
+        // `inline` declaration whose body is not here to splice, and Kotlin lets such a lambda
+        // return from the enclosing function — so invoking it as an ordinary function value would
+        // be a miscompile rather than a slower answer, and the form declines instead.
+        ("kotlin", "TODO", []) => Some("kt_not_implemented".to_string()),
+        ("kotlin", "TODO", [_]) => Some("kt_not_implemented_reason".to_string()),
+        ("kotlin", "error", [_]) => Some("kt_illegal_state".to_string()),
+        ("kotlin", "require", [Ty::Boolean]) => Some("kt_require".to_string()),
+        ("kotlin", "check", [Ty::Boolean]) => Some("kt_check".to_string()),
         _ => None,
     }
 }
