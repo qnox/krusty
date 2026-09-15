@@ -121,6 +121,24 @@ pub(super) enum Slot {
     /// A `value class`'s `equals`, `hashCode` or `toString`, answered by its underlying value —
     /// which is what makes it a value class rather than a one-field class.
     ValueMember { class: ClassId, member: ValueMember },
+    /// An override reachable through a base whose signature has a different REPRESENTATION:
+    /// `A<T : Number>.foo(): T` erases its result to a reference, and `Z : A<Int>` overriding it
+    /// returns an unboxed machine integer. The base's slot cannot hold that body — a caller reading
+    /// the slot through `A` would read an integer as a pointer — so it holds this instead: a small
+    /// function with the BASE's signature that converts each operand and forwards.
+    ///
+    /// It forwards by DISPATCH rather than by calling the override directly, and that is the whole
+    /// reason it is a slot number here and not a function id. A further subclass replaces `target`
+    /// with its own body, and a bridge that had named the override would keep running the wrong
+    /// one; re-dispatching through the receiver's own vtable reaches whatever that receiver
+    /// actually is.
+    Bridge {
+        /// The base method whose signature this entry wears.
+        declared: FunId,
+        /// The slot to forward through, and the method whose carriers that slot expects.
+        target_slot: u32,
+        target: FunId,
+    },
 }
 
 /// Which of `kotlin.Any`'s three a synthesized value-class member answers.
@@ -752,8 +770,13 @@ fn layout_class(
         // interface region, which is pointed at this method's slot once that slot is known.
         let mut interface_keys = Vec::new();
         let mut class_replaces = None;
+        // A base whose signature has a different REPRESENTATION keeps its own slot and gets a
+        // bridge placed in it once this method's slot is known. A class base can always take one;
+        // an interface base's number is program-wide rather than this vtable's, so one there is
+        // still declined.
+        let mut bridged: Vec<(u32, FunId)> = Vec::new();
         for &overridden in overridden_functions.get(&fid).into_iter().flatten() {
-            check_same_representation(ir, function, &ir.functions[overridden as usize])?;
+            let matches = same_representation(function, &ir.functions[overridden as usize]);
             let owner = ir.functions[overridden as usize]
                 .dispatch_receiver
                 .and_then(|owner| ir.class_id_by_name(owner))
@@ -765,13 +788,20 @@ fn layout_class(
                 })?;
             let key = function_key(ir, owner, overridden);
             if ir.classes[owner as usize].is_interface {
+                // The interface's number is placed program-wide rather than in this vtable, so
+                // there is no entry here to put a bridge in. Declined rather than answered wrongly.
+                unbridgeable(ir, function, &ir.functions[overridden as usize])?;
                 interface_keys.push(key);
                 continue;
             }
             let slot = slots.get(&key).copied().ok_or_else(|| {
                 format!("an override with no slot to replace (`{}`)", function.name)
             })?;
-            class_replaces = Some(slot);
+            if matches {
+                class_replaces = Some(slot);
+            } else {
+                bridged.push((slot, overridden));
+            }
         }
         // A member EXTENSION's override is not in the override tables — the frontend records none
         // for one — so an override of it would take a new slot and a call through the base's type
@@ -829,6 +859,16 @@ fn layout_class(
         slots.insert(own_key, slot);
         for key in interface_keys {
             slots.insert(key, slot);
+        }
+        // The base keeps its own slot and its own signature; what changes is only what stands in
+        // it. Forwarding by DISPATCH rather than to this method by id is what keeps a further
+        // subclass's override reachable through the same base.
+        for (base_slot, declared) in bridged {
+            vtable[base_slot as usize] = Slot::Bridge {
+                declared,
+                target_slot: slot,
+                target: fid,
+            };
         }
     }
 
@@ -997,7 +1037,7 @@ fn register_inherited_interface_members(
         // one returns an unboxed machine integer, the other a reference, and pointing the
         // interface's slot at it would have a caller read an integer as a pointer. The JVM emits a
         // bridge for exactly this; until one is emitted here, the file is declined.
-        check_same_representation(
+        unbridgeable(
             ir,
             &ir.functions[implementation as usize],
             &ir.functions[overridden as usize],
@@ -1263,23 +1303,28 @@ fn overridden_properties(
     Ok(map)
 }
 
-/// An override must be callable through the overridden slot's signature. Kotlin permits a
-/// covariant return (`A` → `B`, both references) and generic specialization (`T` → `Int`); the
-/// second changes the machine representation and would need a bridge method, which does not
-/// exist here yet.
-fn check_same_representation(
-    ir: &IrFile,
-    implementation: &IrFunction,
-    overridden: &IrFunction,
-) -> Result<(), Unsupported> {
-    let same = implementation.params.len() == overridden.params.len()
+/// Whether an override is callable through the overridden slot's signature as it stands.
+///
+/// Kotlin permits a covariant return (`A` → `B`, both references), which changes nothing here, and
+/// generic specialization (`T` → `Int`), which changes the machine representation. The second needs
+/// a [`Slot::Bridge`] in the base's slot; this is the question that says which.
+fn same_representation(implementation: &IrFunction, overridden: &IrFunction) -> bool {
+    implementation.params.len() == overridden.params.len()
         && implementation
             .params
             .iter()
             .zip(&overridden.params)
             .all(|(a, b)| c_kind(*a) == c_kind(*b))
-        && c_kind(implementation.ret) == c_kind(overridden.ret);
-    if same {
+        && c_kind(implementation.ret) == c_kind(overridden.ret)
+}
+
+/// The decline an override keeps when no bridge can be placed for it.
+fn unbridgeable(
+    ir: &IrFile,
+    implementation: &IrFunction,
+    overridden: &IrFunction,
+) -> Result<(), Unsupported> {
+    if same_representation(implementation, overridden) {
         return Ok(());
     }
     let owner = implementation
@@ -1666,7 +1711,10 @@ mod tests {
     }
 
     #[test]
-    fn an_override_that_changes_representation_is_declined() {
+    fn an_override_that_changes_representation_takes_a_bridge_and_a_slot_of_its_own() {
+        // `A.f(Any?)` takes a reference and `B.f(Int)` an unboxed integer, so `A`'s slot cannot
+        // hold `B`'s body. It holds a bridge that forwards to the slot `B`'s own body took, which
+        // is what lets a call through `B` read `B`'s signature and pay for no conversion.
         let mut ir = IrFile::default();
         let a = class(&mut ir, "A", "kotlin/Any", 0);
         let b = class(&mut ir, "B", "A", 1);
@@ -1682,8 +1730,26 @@ mod tests {
             function("f", "B", vec![Ty::Int], Ty::Unit, false),
         );
         record_override(&mut ir, b, b_f, a_f);
-        let error = build(&ir).expect_err("a KRef slot cannot hold a kt_int implementation");
-        assert!(error.contains("representation"), "{error}");
+        let model = build(&ir).expect("a representation change is bridged");
+        let base_slot = model.layouts[a as usize].slots[&SlotKey::Function(a_f)];
+        let own_slot = model.layouts[b as usize].slots[&SlotKey::Function(b_f)];
+        assert_ne!(
+            base_slot, own_slot,
+            "the override keeps a slot of its own, with its own signature"
+        );
+        assert_eq!(
+            model.layouts[b as usize].vtable[base_slot as usize],
+            Slot::Bridge {
+                declared: a_f,
+                target_slot: own_slot,
+                target: b_f,
+            },
+            "the base's slot holds a bridge forwarding to the override's slot"
+        );
+        assert_eq!(
+            model.layouts[b as usize].vtable[own_slot as usize],
+            Slot::Function(b_f)
+        );
     }
 
     #[test]

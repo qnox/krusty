@@ -670,3 +670,87 @@ fn a_super_property_of_an_interface_reaches_its_default_accessor() {
         "named!\n"
     );
 }
+
+#[test]
+fn an_override_that_changes_representation_is_reached_through_a_bridge() {
+    if !available() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `A<T : Number>.foo(): T` erases its result to a reference; `Z : A<Int>` returns an unboxed
+    // machine integer. The base's slot cannot hold `Z`'s body — a caller reading it through `A`
+    // would read an integer as a pointer — so it holds a bridge with the BASE's signature that
+    // converts and forwards. The two call sites below are the whole point: one reads the slot
+    // through `Z`, the other through `A`, and they must agree on the answer while disagreeing
+    // about its representation.
+    assert_eq!(
+        run("open class A<T : Number>(val t: T) {\n\
+             \x20   open fun foo(): T = t\n\
+             }\n\
+             class Z : A<Int>(17) {\n\
+             \x20   override fun foo() = 239\n\
+             }\n\
+             fun main() {\n\
+             \x20   val z = Z()\n\
+             \x20   val a: A<Int> = z\n\
+             \x20   println(z.foo())\n\
+             \x20   println(a.foo())\n\
+             }\n"),
+        "239\n239\n"
+    );
+}
+
+#[test]
+fn a_bridge_reaches_a_further_override_rather_than_the_one_that_needed_it() {
+    if !available() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // The reason a bridge forwards by DISPATCH and not by calling the override it was made for.
+    // `Y : Z` replaces the target slot with its own body; a bridge that had named `Z.foo` would
+    // keep running `Z`'s. Read through all three static types, on one `Y`.
+    assert_eq!(
+        run("open class A<T : Number>(val t: T) {\n\
+             \x20   open fun foo(): T = t\n\
+             }\n\
+             open class Z : A<Int>(17) {\n\
+             \x20   override fun foo() = 239\n\
+             }\n\
+             class Y : Z() {\n\
+             \x20   override fun foo() = 7\n\
+             }\n\
+             fun main() {\n\
+             \x20   val y = Y()\n\
+             \x20   val z: Z = y\n\
+             \x20   val a: A<Int> = y\n\
+             \x20   println(y.foo())\n\
+             \x20   println(z.foo())\n\
+             \x20   println(a.foo())\n\
+             }\n"),
+        "7\n7\n7\n"
+    );
+}
+
+#[test]
+fn a_bridge_converts_its_arguments_as_well_as_its_answer() {
+    if !available() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // The other direction: the base's parameter is a reference and the override's is an unboxed
+    // integer, so the bridge unboxes on the way in rather than boxing on the way out.
+    assert_eq!(
+        run("open class Box<T> {\n\
+             \x20   open fun take(value: T): String = \"base\"\n\
+             }\n\
+             class Ints : Box<Int>() {\n\
+             \x20   override fun take(value: Int): String = \"got $value\"\n\
+             }\n\
+             fun main() {\n\
+             \x20   val b: Box<Int> = Ints()\n\
+             \x20   println(b.take(5))\n\
+             \x20   println(Ints().take(6))\n\
+             }\n"),
+        "got 5\ngot 6\n"
+    );
+}

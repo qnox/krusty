@@ -236,12 +236,35 @@ impl<'a> FileLowering<'a> {
             .filter(|slot| {
                 matches!(
                     slot,
-                    Slot::FieldGetter { .. } | Slot::FieldSetter { .. } | Slot::ValueMember { .. }
+                    Slot::FieldGetter { .. }
+                        | Slot::FieldSetter { .. }
+                        | Slot::ValueMember { .. }
+                        | Slot::Bridge { .. }
                 )
             })
             .collect();
         for slot in synthesized {
             if self.accessors.contains_key(&slot) {
+                continue;
+            }
+            if let Slot::Bridge {
+                declared,
+                target_slot,
+                target,
+            } = &slot
+            {
+                // The BASE's signature, which is the whole point of the entry: a caller reading
+                // this slot through the base reads what the base declares.
+                let base = &self.ir.functions[*declared as usize];
+                let mut params = vec![any()];
+                params.extend(super::functions::carried_parameters(self.ir, *declared));
+                let ret = base.ret;
+                let id = self.declare_local_function(
+                    &format!("kt_bridge_{declared}_{target}_{target_slot}"),
+                    &params,
+                    ret,
+                )?;
+                self.accessors.insert(slot, id);
                 continue;
             }
             if let Slot::ValueMember { class, member } = &slot {
@@ -453,9 +476,10 @@ impl<'a> FileLowering<'a> {
                     self.functions[*fid as usize].expect("a vtable entry has a body")
                 }
                 Slot::Abstract => self.import("kt_abstract_method_called", &[], Ty::Unit)?,
-                Slot::FieldGetter { .. } | Slot::FieldSetter { .. } | Slot::ValueMember { .. } => {
-                    self.accessors[slot]
-                }
+                Slot::FieldGetter { .. }
+                | Slot::FieldSetter { .. }
+                | Slot::ValueMember { .. }
+                | Slot::Bridge { .. } => self.accessors[slot],
             });
         }
         let name = self.kotlin_name(class);
@@ -620,6 +644,14 @@ impl<'a> FileLowering<'a> {
     /// A synthesized accessor: the field load or store an open property without a source
     /// accessor dispatches to.
     fn define_accessor(&mut self, slot: &Slot, id: FuncId) -> Result<(), Unsupported> {
+        if let Slot::Bridge {
+            declared,
+            target_slot,
+            target,
+        } = slot
+        {
+            return self.define_bridge(*declared, *target_slot, *target, id);
+        }
         if let Slot::ValueMember { class, member } = slot {
             return self.define_value_member(*class, *member, id);
         }
@@ -667,6 +699,72 @@ impl<'a> FileLowering<'a> {
     /// values by the same rule a data class compares a field by. `hashCode` is that field's hash.
     /// `toString` renders `IC(n=1)`: the class's Kotlin name, the property's name, and the value
     /// through the runtime's own rendering.
+    /// A bridge: the base's signature in, the override's out, and a dispatch between them.
+    ///
+    /// `A<T : Number>.foo(): T` erases its result to a reference and `Z : A<Int>` returns an
+    /// unboxed integer, so the base's slot cannot hold `Z`'s body — a caller reading the slot
+    /// through `A` would read an integer as a pointer. This stands there instead: it takes what the
+    /// BASE declares, converts each operand to what the override's slot expects, and converts the
+    /// answer back.
+    ///
+    /// It forwards by DISPATCH and not by calling the override, which is what keeps it right under
+    /// a further subclass: `Y : Z` replaces the target slot with its own body, and this reaches
+    /// whatever the receiver actually is rather than the override that happened to need the bridge.
+    fn define_bridge(
+        &mut self,
+        declared: crate::ir::FunId,
+        target_slot: u32,
+        target: crate::ir::FunId,
+        id: FuncId,
+    ) -> Result<(), Unsupported> {
+        let base = self.ir.functions[declared as usize].clone();
+        let carried = super::functions::carried_parameters(self.ir, declared);
+        let mut params = vec![any()];
+        params.extend(carried.iter().copied());
+        let result = base.ret;
+        let signature = self.signature_of(&params, result)?;
+        let forwarded = super::functions::carried_parameters(self.ir, target);
+        let forwarded_ret = self.ir.functions[target as usize].ret;
+        let name = format!("bridge to `{}`", base.name);
+        self.emit_function(
+            id,
+            signature,
+            carrier(result),
+            &name,
+            &mut |body, values| {
+                let mut arguments = Vec::with_capacity(forwarded.len());
+                for (index, &want) in forwarded.iter().enumerate() {
+                    let have = carried.get(index).copied();
+                    let Some(value) = body.convert(values[index + 1], have, want)? else {
+                        return Err("a `Unit` operand crossing a bridge".to_string());
+                    };
+                    arguments.push(value);
+                }
+                let answer = body.dispatch(
+                    values[0],
+                    target_slot,
+                    &forwarded,
+                    forwarded_ret,
+                    &arguments,
+                )?;
+                match answer {
+                    Some(answer) => {
+                        let Some(answer) = body.convert(answer, Some(forwarded_ret), result)?
+                        else {
+                            return Err("a `Unit` answer crossing a bridge".to_string());
+                        };
+                        body.builder.ins().return_(&[answer]);
+                    }
+                    None => {
+                        body.builder.ins().return_(&[]);
+                    }
+                }
+                body.terminate();
+                Ok(())
+            },
+        )
+    }
+
     fn define_value_member(
         &mut self,
         class: ClassId,

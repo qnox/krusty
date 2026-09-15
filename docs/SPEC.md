@@ -2035,6 +2035,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   64 exactly as `Long` does. Both answers were pinned against krusty's JVM backend.
   Test: `tests/native_codegen_e2e.rs` (`a_floating_point_data_class_field_compares_by_its_bits`).
 
+- **An override that changes representation is reached through a BRIDGE in the base's slot.**
+  `A<T : Number>.foo(): T` erases its result to a reference, and `Z : A<Int>` overriding it returns
+  an unboxed machine integer. The base's slot cannot hold that body — a caller reading the slot
+  through `A` would read an integer as a pointer — so it holds a small function with the BASE's
+  signature that converts each operand and forwards. The override keeps a slot of its own, with its
+  own signature, which is what a call through `Z` reads.
+  The bridge forwards by DISPATCH rather than by calling the override, and that is the whole reason
+  it names a slot and not a function: a further subclass replaces the target slot with its own body,
+  and a bridge that had named the override would keep running the wrong one.
+  An INTERFACE base of a different representation still declines. Its slot number is placed
+  program-wide rather than in this class's vtable, so there is no entry here to put a bridge in.
+  Tests: `tests/native_classes_e2e.rs`
+  (`an_override_that_changes_representation_is_reached_through_a_bridge`,
+  `a_bridge_reaches_a_further_override_rather_than_the_one_that_needed_it`,
+  `a_bridge_converts_its_arguments_as_well_as_its_answer`).
+
 - **`super.p` on a property is the base class's own realization, reached without dispatch.** A
   `super` access on a PROPERTY names the property and not an accessor, and a class whose accessors
   are the default ones declares no method for it at all — so the method search the native generator

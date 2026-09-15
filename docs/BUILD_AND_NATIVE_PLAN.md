@@ -1566,6 +1566,17 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **Bridges, for 2621.** The decline named the JVM's answer — "a bridge method is needed" — and
+   the native one is not a method: it is an entry in the base's slot, wearing the base's signature,
+   converting and forwarding. The question worth getting right was what it forwards TO. Naming the
+   override would be wrong the moment a further subclass overrides again, so it re-dispatches
+   through the receiver's own vtable at the override's slot, which reaches whatever the receiver
+   actually is. The override keeping a slot of its own is the other half: a call through `Z` reads
+   `Z`'s signature and never pays for the conversion.
+   An interface base is still declined. Its number is program-wide rather than this vtable's, so
+   there is no entry to put a bridge in — which is a real piece of the remaining work rather than
+   an oversight.
+
    **The primitive iterators, for 2615.** Six more that the walk above made reachable and did not
    finish: `ByteArray.iterator()` is a `ByteIterator`, a concrete class the role table did not know,
    so `hasNext` on it declined. Adding the five that have no range — Byte, Short, Boolean, Float,

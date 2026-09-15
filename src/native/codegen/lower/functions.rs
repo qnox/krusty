@@ -359,7 +359,8 @@ impl<'a> FileLowering<'a> {
                 model::Slot::Abstract => self.import("kt_abstract_method_called", &[], Ty::Unit)?,
                 model::Slot::FieldGetter { .. }
                 | model::Slot::FieldSetter { .. }
-                | model::Slot::ValueMember { .. } => {
+                | model::Slot::ValueMember { .. }
+                | model::Slot::Bridge { .. } => {
                     return Err("a functional interface with a synthesized member".to_string())
                 }
             });
