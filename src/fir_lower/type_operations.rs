@@ -6,6 +6,11 @@ use crate::types::{stored_value_ty, Ty};
 
 use super::{BodyLowering, FirLoweringFailure};
 
+/// The language-defined answer for an instance check which does not depend on the operand.
+fn settled_instance_answer(target: Ty) -> Option<bool> {
+    (target.non_null().canonical_semantic() == Ty::Nothing).then_some(false)
+}
+
 impl BodyLowering<'_> {
     /// `operand is target` (or `!is`), with the one case the LANGUAGE settles folded.
     ///
@@ -25,16 +30,20 @@ impl BodyLowering<'_> {
     ///
     /// `x is Nothing?` reaches this through the null-or-instance expansion in `expression`, so it
     /// becomes `x == null || false` — which is what `Nothing?`, the type of `null` and of nothing
-    /// else, means. `x as? Nothing` reaches it through the guard below and yields `null`, which is
-    /// the same fact seen from the other side.
+    /// else, means. Safe casts consume the same settled answer before constructing their generic
+    /// guard and directly yield `null`, which is the same fact seen from the other side.
     pub(super) fn instance_check(
         &mut self,
         negated: bool,
         operand: crate::ir::ExprId,
         target: crate::types::Ty,
     ) -> crate::ir::ExprId {
-        if target.non_null().canonical_semantic() == crate::types::Ty::Nothing {
-            let answer = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(negated)));
+        if let Some(answer) = settled_instance_answer(target) {
+            let answer = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(if negated {
+                !answer
+            } else {
+                answer
+            })));
             return self.ir.add_expr(IrExpr::Block {
                 stmts: vec![operand],
                 value: Some(answer),
@@ -67,6 +76,18 @@ impl BodyLowering<'_> {
             .ty
             .get();
         let mut value = self.expression(operand)?;
+        // A safe cast to either `Nothing` or `Nothing?` can never produce a non-null value. Fold
+        // the whole cast here, while the semantic target is still available: retaining the generic
+        // guarded `when` would leave an unreachable cast branch whose JVM stack type (`Object`)
+        // still has to verify against the null-only result branch. The operand remains a statement,
+        // so its effects and divergence are preserved exactly once.
+        if settled_instance_answer(target) == Some(false) {
+            let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
+            return Ok(self.ir.add_expr(IrExpr::Block {
+                stmts: vec![value],
+                value: Some(null),
+            }));
+        }
         let storage_type = if operand_type == Ty::Unit {
             let unit = self.ir.add_expr(IrExpr::UnitInstance);
             value = self.ir.add_expr(IrExpr::Block {
@@ -130,9 +151,19 @@ mod tests {
     use crate::types::Ty;
 
     use super::super::lower_body;
+    use super::settled_instance_answer;
 
     fn resolved(ty: Ty) -> ResolvedTy {
         ResolvedTy::new(ty).unwrap()
+    }
+
+    #[test]
+    fn the_settled_answer_normalizes_both_nothing_representations() {
+        assert_eq!(settled_instance_answer(Ty::Nothing), Some(false));
+        assert_eq!(
+            settled_instance_answer(Ty::obj("kotlin/Nothing")),
+            Some(false)
+        );
     }
 
     /// Lower `<a literal> is/!is Nothing` as the only root of a body, and answer the `IrExpr` the
@@ -167,11 +198,11 @@ mod tests {
         (ir, produced)
     }
 
-    /// A safe cast to `Nothing` guards on the SAME settled answer, which is what makes it yield
-    /// `null` for every value. Its guard is a separate construction from the `is` above — it had
-    /// its own `InstanceOf` until this change — so the `is` tests alone would not have held it.
+    /// A safe cast to `Nothing` evaluates its operand and directly produces `null`. Retaining the
+    /// generic guarded shape would also retain an unreachable checked-cast branch; backends still
+    /// have to verify unreachable branch types, so the language-settled cast must disappear here.
     #[test]
-    fn a_safe_cast_to_nothing_guards_on_the_settled_false() {
+    fn a_safe_cast_to_nothing_keeps_its_operand_and_drops_the_unreachable_cast() {
         let origin = OriginId::from_raw(0);
         let mut body = FirBody::new(BodyOwnerId::from_raw(1));
         let operand = body.add_expr(FirExpr {
@@ -199,26 +230,20 @@ mod tests {
             .expect("a safe cast to Nothing lowers");
         let produced = ir.expr(*root.roots.last().expect("one root")).clone();
 
-        // `Block { the temporary, When { [(guard, cast), (_, null)] } }` — reach the guard.
-        let IrExpr::Block { value, .. } = produced else {
+        let IrExpr::Block { stmts, value } = produced else {
             panic!("a safe cast lowers to a block, got {produced:?}");
         };
-        let value = value.expect("a safe cast produces a value");
-        let IrExpr::When { branches } = ir.expr(value) else {
-            panic!("a safe cast lowers to a `when`, got {:?}", ir.expr(value));
-        };
-        let guard = branches
-            .first()
-            .and_then(|(guard, _)| *guard)
-            .expect("the first branch is guarded");
-        let IrExpr::Block { value: answer, .. } = ir.expr(guard) else {
-            panic!("the guard is the settled block, got {:?}", ir.expr(guard));
-        };
-        let answer = answer.expect("the settled guard produces a value");
+        assert_eq!(stmts.len(), 1, "the operand is evaluated exactly once");
         assert!(
-            matches!(ir.expr(answer), IrExpr::Const(IrConst::Boolean(false))),
-            "the guard is a settled `false`, got {:?}",
-            ir.expr(answer)
+            matches!(ir.expr(stmts[0]), IrExpr::Const(IrConst::Int(7))),
+            "the operand remains the statement, got {:?}",
+            ir.expr(stmts[0])
+        );
+        let value = value.expect("a safe cast produces a value");
+        assert!(
+            matches!(ir.expr(value), IrExpr::Const(IrConst::Null)),
+            "the result is the exact null value, got {:?}",
+            ir.expr(value)
         );
     }
 
