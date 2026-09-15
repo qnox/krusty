@@ -2480,10 +2480,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   only while no simple name contains a `$` of its own. The serialization plugin generates a nested
   class named `$serializer`, so krusty recorded `LOwner$$serializer;`, which expands to
   `Owner..serializer` — a class id with a doubled separator, naming nothing. kotlinc writes
-  `Owner.$serializer` literally for exactly that reason. The shortcut is now taken only when
-  replacing every `$` reproduces the class id, which is the reader's own expansion, so the encoder
-  cannot drift from it; otherwise the class id is interned verbatim. Ordinary nested classes
-  (`Outer$Inner`) keep the shortcut and their bytes are unchanged.
+  `Owner.$serializer` literally for exactly that reason. Metadata now consumes the resolved
+  `TypeName` identity: the name tree remembers each exact nested-child relation, including a simple
+  name that begins with `$`, and the encoder walks those relations to build the class id. It uses the
+  descriptor shortcut only when no actual name segment contains a literal `$`; otherwise the class
+  id is interned verbatim. The old descriptor-string-to-class-id recovery API is deleted, including
+  for sealed-subclass metadata. Ordinary nested classes (`Outer$Inner`) keep the shortcut and their
+  bytes are unchanged.
   `src/metadata/type_encoder.rs::class_id_tests::a_nesting_separator_becomes_a_dot`,
   `a_simple_name_may_begin_with_a_dollar`, `the_shortcut_is_taken_only_when_it_round_trips`,
   `tests/serializer_metadata_class_id_e2e.rs::a_generated_serializer_records_kotlincs_class_id`,

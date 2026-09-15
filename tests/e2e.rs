@@ -1584,6 +1584,8 @@ mod reified_value_class_splice_e2e;
 mod file_private_extension_scope_e2e;
 
 mod serializer_metadata_class_id_e2e;
+#[path = "common/kotlin_metadata.rs"]
+mod serializer_metadata_test_support;
 #[path = "settled_instance_check_e2e.rs"]
 mod settled_instance_check_e2e;
 #[path = "unsigned_arrays_e2e.rs"]

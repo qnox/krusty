@@ -2053,12 +2053,7 @@ fn build_class_metadata(
     } else {
         Vec::new()
     };
-    let sealed_descs: Vec<String> = sealed_sorted
-        .iter()
-        .map(|subclass| format!("L{};", subclass.render()))
-        .collect();
     let nested_refs: Vec<&str> = nested_names.iter().map(String::as_str).collect();
-    let sealed_refs: Vec<&str> = sealed_descs.iter().map(String::as_str).collect();
     let class_type_parameters = ir
         .class_signature(&c.fq_name())
         .map(|signature| signature.type_params.as_slice())
@@ -2171,7 +2166,7 @@ fn build_class_metadata(
         .map(|retained| retained.annotation.clone())
         .collect();
     let (d1_bytes, d2) = build_class(
-        &c.fq_name(),
+        c.fq_name_id(),
         &ctor_params,
         vc_ctor_desc.as_deref().unwrap_or(&ctor_desc),
         &props,
@@ -2232,7 +2227,7 @@ fn build_class_metadata(
             nested: &nested_refs,
             member_order: &member_order,
             type_aliases: &type_aliases,
-            sealed_subclasses: &sealed_refs,
+            sealed_subclasses: &sealed_sorted,
             supertypes: &supertypes,
             annotations: &metadata_annotations,
             primary_ctor_annotations: &primary_ctor_annotations(c),

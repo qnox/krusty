@@ -63,8 +63,7 @@ fn reference_classes(src: &str, stem: &str) -> PathBuf {
         "{stem}: the reference serialization plugin is missing at {}",
         plugin.display()
     );
-    let joined =
-        std::env::join_paths(&runtime_jars()).expect("join the reference classpath");
+    let joined = std::env::join_paths(&runtime_jars()).expect("join the reference classpath");
     let (code, diagnostics) = common::kotlinc_compile(&[
         format!("-Xplugin={}", plugin.display()),
         "-jvm-target".to_string(),
@@ -99,14 +98,20 @@ fn assert_d2_matches_kotlinc(src: &str, stem: &str, class_internal: &str) {
         .find(|(name, _)| name == class_internal)
         .unwrap_or_else(|| panic!("{stem}: krusty emitted no {class_internal}"));
 
-    let (_, reference_d2) = common::raw_kotlin_metadata(&reference)
-        .unwrap_or_else(|| panic!("{stem}: kotlinc's {class_internal} carries no @Metadata"));
-    let (_, actual_d2) = common::raw_kotlin_metadata(actual)
+    let (_, reference_d2) =
+        super::serializer_metadata_test_support::raw_kotlin_metadata(&reference)
+            .unwrap_or_else(|| panic!("{stem}: kotlinc's {class_internal} carries no @Metadata"));
+    let (_, actual_d2) = super::serializer_metadata_test_support::raw_kotlin_metadata(actual)
         .unwrap_or_else(|| panic!("{stem}: krusty's {class_internal} carries no @Metadata"));
+    let reference_class_id = reference_d2
+        .first()
+        .unwrap_or_else(|| panic!("{stem}: kotlinc metadata has no class-id string"));
+    let actual_class_id = actual_d2
+        .first()
+        .unwrap_or_else(|| panic!("{stem}: krusty metadata has no class-id string"));
 
     assert_eq!(
-        actual_d2.first(),
-        reference_d2.first(),
+        actual_class_id, reference_class_id,
         "{stem}: {class_internal} records a different class id than kotlinc"
     );
 }
