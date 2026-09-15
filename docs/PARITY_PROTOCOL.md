@@ -2390,3 +2390,87 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `ordinary_packed_vararg_stays_byte_identical_to_kotlinc`,
   `the_same_calls_in_a_fixed_arity_call_still_work`,
   `a_straight_line_inline_body_still_works_as_a_vararg_element`.
+- **An operator's shared formal is seeded from the call's expected result (fix).**
+  `Iterable<T>.plus(Iterable<T>): List<T>` shares one `T` between the receiver, the argument and the
+  result. The argument expectation was derived from the RECEIVER alone, so
+  `fun pick(): List<P> = listOf(A()) + listOf(B())` committed the receiver call to `List<A>` and then
+  judged the argument against `Iterable<A>`. Kotlin solves receiver, argument and expected result
+  together. Selection is untouched — the same candidate wins — and only what the arguments are
+  CHECKED AGAINST is re-derived, with the expected result seeded before the receiver so the receiver
+  still fixes whatever it leaves open and an explicit type argument still wins. This does not let an
+  ARGUMENT widen a receiver-fixed formal: that rule is what keeps `Comparable<T>.compareTo` sound and
+  is unchanged. Every other operator convention passes no expectation, since a comparison's result is
+  `Boolean` and a range's is a range — neither says anything about the operand formals.
+  KNOWN LIMIT: a chained `a + b + c` still fixes the inner operator from its own receiver, because the
+  inner call sits in receiver position and receives no expectation; the corpus shape is a `fold`
+  accumulator, which this covers.
+  `tests/operator_expected_result_seeding_e2e.rs::a_declared_result_seeds_a_plus_over_two_inferred_operands`,
+  `a_fold_accumulator_seeds_its_operator`, `an_explicit_type_argument_on_the_receiver_still_works`,
+  `a_declared_receiver_val_still_works`,
+  `an_operand_that_does_not_fit_the_expectation_is_still_rejected`.
+- **An `invoke` operator selection receives the call's expected type (fix).** Every other callable
+  selection in the checker forwards the expression's expectation to `select_callable_candidate`;
+  the `invoke` operator path passed `None`, so a companion `operator fun invoke` inferred its type
+  parameters from the argument list alone. A formal that appears only as a lambda RESULT was then
+  pinned by whatever that lambda happened to produce — a `set` that throws fixed it to `Nothing` —
+  and a formal that appears only as a lambda PARAMETER was never bound at all, yielding
+  `expected 'P<String, String, A, A>', actual 'P<String, Nothing, A, B>'`.
+  The expectation now reaches every spelling of the convention: member and extension selection, the
+  companion factory's lambda SHAPE (so an expected-only formal is bound before the lambda body is
+  typed, which is what lets the body read `s.length`), and a member EXTENSION
+  `operator fun Recv.invoke` on an implicit dispatch receiver. A SAFE call now carries an explicit
+  `SafeLifted` result constraint: inference compares the nullable lift of the DECLARED result with
+  the expectation for the whole safe-call expression. It never guesses the declaration type by
+  stripping nullability from that expectation, which cannot distinguish `R` from an already-nullable
+  `R?`. The lift is idempotent, so both forms retain their exact selected result. Seeding remains a
+  constraint and not a commitment — the receiver and arguments still refine it, and a mismatched
+  expectation is still rejected.
+  A CONSTRUCTOR of the same shape was never affected, which is what kept the defect narrow.
+  The local-extension sibling has no expectation to thread: it performs no generic instantiation
+  from arguments or context, binding formals from `unify_ty(generic.receiver, receiver)` alone.
+  `tests/expected_type_seeds_invoke_e2e.rs::a_companion_invoke_binds_formals_only_the_expectation_supplies`,
+  `a_throwing_argument_does_not_pin_a_formal_the_expectation_fixes`,
+  `a_companion_invoke_body_reads_the_expected_parameter`,
+  `a_receiver_companion_invoke_body_reads_the_expected_receiver`,
+  `a_safe_property_invoke_lifts_the_nullable_expectation`,
+  `a_safe_property_invoke_preserves_an_already_nullable_result`,
+  `a_safe_function_value_invoke_keeps_its_declared_result`,
+  `a_member_extension_invoke_binds_the_expected_formal`,
+  `a_constructor_of_the_same_shape_still_infers`, `a_mismatched_expectation_is_still_rejected`;
+  `src/fir/body_check/invoke_tests.rs::safe_property_invoke_keeps_an_already_nullable_selected_result`
+  asserts the exact selected FIR result that a null-returning runtime fixture cannot observe.
+- **A class-level `@Serializable(with = …)` declared in the SAME file is honored for an element (fix).**
+  The element-serializer plan looked for a generated `$serializer`, then for an EXTERNAL serializer —
+  a map that deliberately covers only types this compilation does NOT declare. A class this file
+  declares that names its own serializer has neither, so the plan came back empty, the plugin left its
+  `serialize-body` placeholder rather than emit a half-built serializer, and the residual node failed
+  the whole FILE (`this construct is not yet supported by the IR backend`). The IDENTICAL class in a
+  sibling file always worked, because it resolves through the external map — the reverse of what a
+  file split would suggest, and the reason this was previously recorded backwards. The plan now reads
+  the declaring class's own `with =` before the external lookup, exactly as that class's `serializer()`
+  accessor already does. An `object` serializer is represented by its resolved local `ClassId` and
+  read through `INSTANCE`; a serializer CLASS is handled by the construction plan below. Ordinary
+  derivation is unchanged.
+  `tests/same_file_custom_serializer_e2e.rs::a_same_file_custom_serializer_serves_a_direct_property`,
+  `a_same_file_custom_serializer_serves_a_map_value`,
+  `a_same_file_custom_serializer_serves_a_list_element`,
+  `an_ordinary_serializable_property_still_derives`.
+- **A class-valued custom serializer is CONSTRUCTED with its argument serializers (fix).** A custom
+  serializer declared as a CLASS takes one `KSerializer` per type parameter of the class it serves —
+  `@Serializable(with = BoxSerializer::class) class Box<T>` with
+  `class BoxSerializer<T>(itemSerializer: KSerializer<T>)` — so an element of that type needs
+  `new BoxSerializer(<serializer for the argument>)`, derived recursively. The element plan had no
+  such shape: it could read a singleton `INSTANCE` or nothing, so this declined and the residual
+  plugin placeholder failed the whole FILE. The plan now constructs one, requiring the declared
+  constructor to match that convention exactly — one `KSerializer` parameter over each distinct
+  resolved type-parameter identity, in declaration order — so any other constructor shape still
+  declines cleanly instead of emitting a call that does not exist. The plan carries the serializer's
+  local `ClassId`; common IR emits its ordinary typed `New` node and leaves the constructor descriptor
+  to the backend, rather than rendering the owner and hardcoding a JVM descriptor in plugin lowering.
+  Reading an `INSTANCE` off such a class compiles and then dies at run time with
+  `NoSuchFieldError: Class BoxSerializer does not have member field 'BoxSerializer INSTANCE'`, which
+  is why every test here runs a real `Json.encodeToString` and asserts the exact JSON rather than
+  merely asserting that compilation succeeded. The fixtures provision one pinned runtime and run
+  identically under krusty and kotlinc.
+  `tests/same_file_custom_serializer_e2e.rs::a_class_valued_custom_serializer_is_constructed_with_its_argument_serializer`,
+  `a_constructed_custom_serializer_composes_below_a_collection`.

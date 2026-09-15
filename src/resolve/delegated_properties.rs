@@ -68,6 +68,7 @@ pub(super) fn select_delegate_operator(
         &args,
         &[],
         &callables,
+        None,
     ) {
         crate::symbol_resolver::CandidateSelection::Selected((selected, _, ret)) => {
             crate::symbol_resolver::CandidateSelection::Selected((selected, ret))
@@ -352,6 +353,7 @@ impl Checker<'_> {
                 &call_args,
                 &[],
                 &callables,
+                None,
             ) {
                 crate::symbol_resolver::CandidateSelection::Selected((
                     selected,
@@ -399,7 +401,7 @@ impl Checker<'_> {
                 },
                 MemberExtensionFunctionCall {
                     extension_receiver: delegate_ty,
-                    expected_result,
+                    result_constraint: CallResultConstraint::direct(expected_result),
                     name,
                     args: &syntax,
                     arg_tys: args,

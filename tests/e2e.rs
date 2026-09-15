@@ -544,6 +544,8 @@ mod error_receiver_cascade_e2e;
 mod expected_return_invariant_binding_e2e;
 #[path = "expected_type_propagation_e2e.rs"]
 mod expected_type_propagation_e2e;
+#[path = "expected_type_seeds_invoke_e2e.rs"]
+mod expected_type_seeds_invoke_e2e;
 #[path = "explicit_backing_field_e2e.rs"]
 mod explicit_backing_field_e2e;
 #[path = "explicit_import_shadows_same_package_e2e.rs"]
@@ -1125,6 +1127,8 @@ mod one_armed_when_fallthrough_e2e;
 mod extension_receiver_specificity_e2e;
 #[path = "int_when_switch_e2e.rs"]
 mod int_when_switch_e2e;
+#[path = "operator_expected_result_seeding_e2e.rs"]
+mod operator_expected_result_seeding_e2e;
 #[path = "operator_inc_dec_e2e.rs"]
 mod operator_inc_dec_e2e;
 #[path = "operator_index_e2e.rs"]
@@ -1287,6 +1291,8 @@ mod sam_conversion_e2e;
 mod sam_generic_lambda_param_e2e;
 #[path = "sam_lambda_expected_result_e2e.rs"]
 mod sam_lambda_expected_result_e2e;
+#[path = "same_file_custom_serializer_e2e.rs"]
+mod same_file_custom_serializer_e2e;
 #[path = "same_package_classpath_e2e.rs"]
 mod same_package_classpath_e2e;
 #[path = "samefile_nested_object_value_e2e.rs"]
@@ -1315,6 +1321,8 @@ mod serialization_coverage_e2e;
 mod serialization_krusty_only_e2e;
 #[path = "serialization_roundtrip_e2e.rs"]
 mod serialization_roundtrip_e2e;
+#[path = "common/serialization.rs"]
+mod serialization_test_support;
 #[path = "session_subsystems_e2e.rs"]
 mod session_subsystems_e2e;
 #[path = "shadowed_method_tparam_e2e.rs"]

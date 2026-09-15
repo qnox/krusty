@@ -3,7 +3,7 @@
 use super::{
     build_contextual_serializer, build_polymorphic_serializer, class_ty,
     collection_serializer_builder, generated_serializer_accessor, is_nullable, kserializer_of,
-    serializer_of_name, type_is_contextual, wrap_nullable_serializer,
+    serializer_of_name, type_is_contextual, wrap_nullable_serializer, KSERIALIZER_FQ,
 };
 use crate::ir::{Callee, ClassId, ExprId, IrExpr, IrFile};
 use crate::libraries::InlineKind;
@@ -21,6 +21,12 @@ pub(super) enum ElementSerializerPlan {
         arguments: Vec<ElementSerializerPlan>,
     },
     Nullable(Box<ElementSerializerPlan>),
+    /// A local custom serializer class, constructed with one `KSerializer` per type parameter of
+    /// the class it serves: `BoxSerializer(<serializer for the argument>)`.
+    LocalConstructed {
+        serializer: ClassId,
+        arguments: Vec<ElementSerializerPlan>,
+    },
     Contextual(TypeName),
     Polymorphic(TypeName),
     LocalSingleton(ClassId),
@@ -295,6 +301,86 @@ pub(super) fn element_serializer_plan(
             arguments,
         });
     }
+    // A class this file DECLARES may name its own serializer with a class-level
+    // `@Serializable(with = X::class)`. It then has no generated `$serializer` (the accessor branch
+    // in `generate_declarations` handles the class itself), so the `$serializer` lookup above finds
+    // nothing, and `external_serializer` deliberately covers only types this compilation does NOT
+    // declare. Without this arm a same-file annotated class was underivable as an element while the
+    // IDENTICAL class in a sibling file resolved through the external map — the reverse of what the
+    // file split would suggest. Read the class's own `with =` here, exactly as its accessor does.
+    if let Some(class_id) = ir
+        .classes
+        .iter()
+        .position(|class| class.fq_name_id() == fq_name)
+    {
+        if let Some(custom) = super::annotations::custom_serializer_of(ctx, ir, class_id as ClassId)
+        {
+            // Only an `object` serializer is reachable as a singleton. A custom serializer declared
+            // as a CLASS takes constructor arguments — `ValueSerializer<T>(dataSerializer)` — so
+            // reading an `INSTANCE` field off it would reference a field that does not exist. That
+            // shape stays underivable here and the caller bails cleanly, exactly as before; it needs
+            // a plan that CONSTRUCTS the serializer from its argument serializers.
+            if let Some(serializer_id) = ir
+                .classes
+                .iter()
+                .position(|class| class.fq_name_id() == custom && class.is_object)
+            {
+                return Some(ElementSerializerPlan::LocalSingleton(
+                    serializer_id as ClassId,
+                ));
+            }
+            // A serializer CLASS takes one `KSerializer` per type parameter of the class it serves
+            // (`BoxSerializer<T>(itemSerializer)`), so construct it with those argument serializers,
+            // derived recursively. Require the declared constructor to match that convention
+            // exactly: any other constructor shape stays underivable and the caller bails cleanly
+            // rather than emitting a call that does not exist.
+            if let Some(serializer_id) = ir
+                .classes
+                .iter()
+                .position(|class| class.fq_name_id() == custom)
+            {
+                let serializer = &ir.classes[serializer_id];
+                let readable_arguments = type_args
+                    .iter()
+                    .map(|argument| match argument {
+                        Ty::OutProjection(inner) | Ty::StarProjection(inner) => Some(**inner),
+                        Ty::InProjection(_) => None,
+                        _ => Some(*argument),
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                // Each constructor parameter must be `KSerializer<P>` for a distinct DECLARED type
+                // parameter. Inspect the resolved `TyParam` identity carried by the type; the strings
+                // in `IrClass::type_params` are source labels and are deliberately used only for the
+                // declaration count, never to recover identity from spelling.
+                let mut parameter_type_parameters = std::collections::HashSet::new();
+                let parameters_match = serializer.constructor_prefix_count == 0
+                    && serializer.captured_type_params.is_empty()
+                    && !readable_arguments.is_empty()
+                    && serializer.type_params.len() == readable_arguments.len()
+                    && serializer.ctor_args.len() == readable_arguments.len()
+                    && serializer.ctor_args.iter().all(|parameter| {
+                        let declared = parameter.declared_ty.unwrap_or(parameter.ty).non_null();
+                        let Ty::Obj(classifier, [argument]) = declared else {
+                            return false;
+                        };
+                        classifier == type_name(KSERIALIZER_FQ)
+                            && argument
+                                .ty_param_name()
+                                .is_some_and(|identity| parameter_type_parameters.insert(identity))
+                    });
+                if parameters_match {
+                    let arguments = readable_arguments
+                        .iter()
+                        .map(|argument| element_serializer_plan(ir, ctx, argument))
+                        .collect::<Option<Vec<_>>>()?;
+                    return Some(ElementSerializerPlan::LocalConstructed {
+                        serializer: serializer_id as ClassId,
+                        arguments,
+                    });
+                }
+            }
+        }
+    }
     // A DEPENDENCY's `@Serializable` class brings its own generated serializer: read that singleton
     // off the classpath, which is exactly what kotlinc emits
     // (`getstatic dep/Inner$$serializer.INSTANCE`). Deriving one here is impossible — the plugin only
@@ -367,6 +453,25 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
         }
         ElementSerializerPlan::Polymorphic(classifier) => {
             build_polymorphic_serializer(ir, classifier)
+        }
+        ElementSerializerPlan::LocalConstructed {
+            serializer,
+            arguments,
+        } => {
+            let internal = ir.classes[serializer as usize].fq_name_id();
+            let arguments = arguments
+                .into_iter()
+                .map(|argument| emit_element_serializer(ir, argument))
+                .collect::<Vec<_>>();
+            ir.add_expr(IrExpr::New {
+                internal,
+                args: arguments,
+                ctor_params: None,
+                ctor_desc: None,
+                external_target: None,
+                defaults: Box::new([]),
+                default_prefix_count: 0,
+            })
         }
         ElementSerializerPlan::LocalSingleton(class) => ir.add_expr(IrExpr::StaticInstance {
             owner: class,

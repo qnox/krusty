@@ -438,9 +438,20 @@ mod tests {
             if path.ends_with("tests.rs") {
                 continue;
             }
+            // `wide_stack` is infrastructure, not a semantic dependency: a `stacker` wrapper and
+            // the shared nesting bound. Lowering recurses over the checked nesting and must be
+            // able to grow the stack to reach that bound, exactly as the checker does.
             assert_allowed_crate_modules_in_file(
                 &path,
-                &["fir", "ir", "names", "trace", "trace_compiler", "types"],
+                &[
+                    "fir",
+                    "ir",
+                    "names",
+                    "trace",
+                    "trace_compiler",
+                    "types",
+                    "wide_stack",
+                ],
             );
         }
     }
