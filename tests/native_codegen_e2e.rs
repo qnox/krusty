@@ -2431,3 +2431,38 @@ fn what_kotlin_asks_of_a_value_directly() {
         "B\ntrue\ntrue\ntrue\ny\ntrue\ntrue\nfalse\ntrue\ntrue\ntrue\nfalse\ntrue\n"
     );
 }
+/// A callable reference is equal by WHAT IT REFERS TO, not by identity.
+///
+/// Kotlin's four rules in one program: two unbound references to the same declaration are equal
+/// though they are different objects; two bound ones with the same receiver are equal; two bound
+/// ones with different receivers are not; and a bound one never equals an unbound one. `hashCode`
+/// has to agree with each `equals` it is paired with.
+///
+/// The values cross as `Any` on purpose. That is how the corpus asks — `checkEqual(x: Any, y: Any)`
+/// — and it is the case the generator cannot see statically, so the answer has to come from the
+/// object's own table rather than from anything known at the call.
+#[test]
+fn a_callable_reference_is_equal_by_what_it_refers_to() {
+    common::expect_native_box(
+        "class Foo\n\
+         fun Foo.topLevelExtension(): Unit {}\n\
+         fun box(): String {\n\
+         \x20   val foo = Foo()\n\
+         \x20   val bar = Foo()\n\
+         \x20   val a: Any = Foo::topLevelExtension\n\
+         \x20   val b: Any = Foo::topLevelExtension\n\
+         \x20   if (a != b) return \"fail unbound\"\n\
+         \x20   if (a.hashCode() != b.hashCode()) return \"fail unbound hash\"\n\
+         \x20   val c: Any = foo::topLevelExtension\n\
+         \x20   val d: Any = foo::topLevelExtension\n\
+         \x20   if (c != d) return \"fail bound\"\n\
+         \x20   if (c.hashCode() != d.hashCode()) return \"fail bound hash\"\n\
+         \x20   val e: Any = bar::topLevelExtension\n\
+         \x20   if (c == e) return \"fail different receivers\"\n\
+         \x20   if (c == a) return \"fail bound vs unbound\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "RefEquality",
+        "OK",
+    );
+}

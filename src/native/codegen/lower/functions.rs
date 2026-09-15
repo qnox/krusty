@@ -39,6 +39,10 @@ struct Site {
     /// function value carrying captures; what differs is the TYPE it wears, and therefore which
     /// vtable a caller dispatches through.
     sam: Option<crate::ir::IrSamTarget>,
+    /// Set for a CALLABLE REFERENCE whose only capture is its bound receiver, if any — the shape
+    /// [`crate::native::runtime`]'s reference equality reads. A reference that captures more than
+    /// that keeps identity equality, which is what it had before any of this.
+    identity: Option<String>,
 }
 
 /// The site an expression creates, or `None` when it creates none.
@@ -56,6 +60,9 @@ fn closure_site(expr: &IrExpr) -> Option<Result<Site, Unsupported>> {
             impl_fn: *impl_fn,
             captures: captures.clone(),
             sam: sam.clone(),
+            // A SAM delegate's identity depends on WHAT IT WRAPS, which needs the arena to see —
+            // so it is decided in `declare_lambdas` rather than here.
+            identity: None,
         })),
         IrExpr::CallableReference(reference) => Some(if reference.declaration_suspend {
             Err("a suspend callable reference".to_string())
@@ -70,10 +77,42 @@ fn closure_site(expr: &IrExpr) -> Option<Result<Site, Unsupported>> {
                 // A callable reference converted to a `fun interface` arrives as a lambda with a
                 // SAM target, not as a reference, so there is none to carry here.
                 sam: None,
+                identity: reference
+                    .captures
+                    .is_empty()
+                    .then(|| reference_identity(reference)),
             })
         }),
         _ => None,
     }
+}
+
+/// A callable reference's identity for EQUALITY: which declaration it names, and whether a
+/// receiver is bound to it.
+///
+/// Two `Foo::bar` written in two places are different objects with different descriptors, and
+/// Kotlin says they are equal — so this is the thing they must share. `foo::bar` gets a different
+/// one from `Foo::bar` for the opposite reason: those must not be equal. Derived from the IR's
+/// `target`, which is the declaration's own identity rather than anything about the site.
+fn reference_identity(reference: &crate::ir::IrCallableReference) -> String {
+    use crate::ir::IrCallableReferenceTarget as Target;
+    let named = match &reference.target {
+        Target::Module(callable) => format!("m{}", model::c_identifier(&format!("{callable:?}"))),
+        Target::Constructor { classifier } => {
+            format!("c{}", model::c_identifier(&classifier.render()))
+        }
+        Target::Local { owner, name } => format!(
+            "l{}_{}",
+            model::c_identifier(&owner.map(|o| o.render()).unwrap_or_default()),
+            model::c_identifier(name)
+        ),
+    };
+    let bound = if reference.bound_receiver.is_some() {
+        "b"
+    } else {
+        "u"
+    };
+    format!("kt_refid_{bound}_{named}")
 }
 
 /// The emitted pieces of one lambda site.
@@ -162,6 +201,25 @@ fn layout(types: &[Ty]) -> (Vec<u32>, u32, Vec<u32>) {
 }
 
 impl<'a> FileLowering<'a> {
+    /// The marker two callable references to the same declaration share, defined once per file.
+    ///
+    /// Its ADDRESS is the identity; nothing ever reads its contents. One byte, because a symbol
+    /// needs storage to have an address at all.
+    fn reference_identity_marker(&mut self, name: &str) -> Result<DataId, Unsupported> {
+        if let Some(existing) = self.reference_identities.get(name) {
+            return Ok(*existing);
+        }
+        let id = self.declare_local_data(name, false)?;
+        let mut description = DataDescription::new();
+        description.define(vec![0u8; 1].into_boxed_slice());
+        description.set_align(1);
+        self.module
+            .define_data(id, &description)
+            .map_err(|error| format!("defining `{name}` ({error})"))?;
+        self.reference_identities.insert(name.to_string(), id);
+        Ok(id)
+    }
+
     /// Declare a type and a thunk for every lambda in the file, before any body is compiled.
     pub(super) fn declare_lambdas(&mut self) -> Result<(), Unsupported> {
         for index in 0..self.ir.exprs.len() {
@@ -172,6 +230,7 @@ impl<'a> FileLowering<'a> {
                 impl_fn,
                 captures,
                 sam,
+                identity,
             } = site?;
             let body = self
                 .ir
@@ -207,6 +266,28 @@ impl<'a> FileLowering<'a> {
                     ));
                 }
             }
+            // A SAM conversion is a delegate that CAPTURES the function value it wraps (see
+            // `fir_lower::sam_conversions`). Two of them are equal exactly when the same interface
+            // wraps equal functions, and "equal functions" is the question the captured object
+            // already answers for itself — so the identity is keyed on the interface, which is the
+            // one thing two `id(::f)` written in two places share: neither the delegate nor its
+            // thunk is.
+            //
+            // Only over a REFERENCE. Kotlin says SAMs over lambdas are never equal, and they would
+            // be here: `id { }` at one site captures one non-capturing lambda, which is a
+            // singleton, so two conversions of it would wrap the same object. `simpleLambdas.kt`
+            // is that case, and it is why this asks what the delegate wraps rather than trusting
+            // that a SAM delegate always wraps something with an identity of its own.
+            let identity = identity.or_else(|| {
+                let target = sam.as_ref()?;
+                let wrapped = *captures.first()?;
+                matches!(self.ir.expr(wrapped), IrExpr::CallableReference(_)).then(|| {
+                    format!(
+                        "kt_refid_sam_{}",
+                        model::c_identifier(&target.classifier.render())
+                    )
+                })
+            });
             let capture_types: Vec<Ty> =
                 carried_parameters(self.ir, impl_fn)[..captures.len()].to_vec();
             let (capture_offsets, instance_size, references) = layout(&capture_types);
@@ -219,8 +300,17 @@ impl<'a> FileLowering<'a> {
                 // table has to be one a caller can dispatch through — full length, with the
                 // interface's own member pointing at this lambda's body.
                 Some(target) => {
-                    let (vtable, interfaces, kotlin_name) =
+                    let (mut vtable, interfaces, kotlin_name) =
                         self.sam_table(target, &base, impl_fn, &capture_offsets)?;
+                    let marker = match &identity {
+                        Some(name) => {
+                            let marker = self.reference_identity_marker(name)?;
+                            vtable[0] = self.runtime_member_import("kt_reference_equals")?;
+                            vtable[1] = self.runtime_member_import("kt_reference_hash_code")?;
+                            Some(marker)
+                        }
+                        None => None,
+                    };
                     self.define_type_descriptor(
                         descriptor,
                         &base,
@@ -230,6 +320,7 @@ impl<'a> FileLowering<'a> {
                         &vtable,
                         any_type,
                         &interfaces,
+                        marker,
                     )?;
                 }
                 None => {
@@ -239,6 +330,22 @@ impl<'a> FileLowering<'a> {
                         any(),
                     )?;
                     let mut vtable = self.any_vtable()?;
+                    // A callable reference answers `equals`/`hashCode` by WHAT IT REFERS TO, not
+                    // by identity — `Foo::bar == Foo::bar` though the two are different objects.
+                    // The pair goes in the object's own table so that a comparison reaching it
+                    // through `Any`, which is how two `Any` parameters are compared, gets the same
+                    // answer as one through the reference's own type.
+                    let marker = match &identity {
+                        Some(name) => {
+                            let marker = self.reference_identity_marker(name)?;
+                            // `any_vtable` builds the three `kotlin.Any` slots in order, so these
+                            // two are `equals` and `hashCode` (`KT_SLOT_*` in `krusty_rt.h`).
+                            vtable[0] = self.runtime_member_import("kt_reference_equals")?;
+                            vtable[1] = self.runtime_member_import("kt_reference_hash_code")?;
+                            Some(marker)
+                        }
+                        None => None,
+                    };
                     vtable.push(thunk);
                     // `toString` on a function value prints this name, as `Function1` would on the
                     // JVM.
@@ -252,6 +359,7 @@ impl<'a> FileLowering<'a> {
                         &vtable,
                         any_type,
                         &[],
+                        marker,
                     )?;
                     self.define_thunk(thunk, &base, impl_fn, &capture_offsets, arity)?;
                 }
@@ -538,6 +646,7 @@ impl<'a> FileLowering<'a> {
             &vtable,
             any_type,
             &[],
+            None,
         )?;
         self.holders.insert(key, descriptor);
         Ok(descriptor)
@@ -551,6 +660,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             impl_fn,
             captures,
             sam,
+            ..
         } = closure_site(self.file.ir.expr(site)).expect("only a closure site reaches here")?;
         // Converting a NULLABLE function value to a `fun interface` yields null when the value is
         // null — `isNull(nullableFun(true))` must answer true, not call `invoke` on a wrapper

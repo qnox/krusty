@@ -60,6 +60,13 @@ typedef struct KType {
        no second chain to walk. An interface's own descriptor carries its bases here too. */
     const struct KType *const *interfaces;
     uint32_t interface_count;
+    /* Non-NULL only on a CALLABLE REFERENCE's descriptor, where it is the identity of the
+       declaration referred to, together with whether a receiver is bound. Two `Foo::bar` written
+       in two places are different objects with different descriptors, and Kotlin says they are
+       EQUAL — so equality cannot be identity and cannot be the descriptor either. This is the
+       thing they share. A bound `foo::bar` gets a different one from an unbound `Foo::bar`,
+       because those must not be equal however much else they have in common. */
+    const void *reference_target;
 } KType;
 
 
@@ -422,6 +429,17 @@ KRef kt_throwable_message(KRef self);
 /* Report an uncaught throw and end the program. See the note on the definition for why every throw
    is uncaught today. */
 void kt_throw(KRef thrown);
+
+/* ---- callable references --------------------------------------------------------------------
+
+   `kotlin.Any`'s identity equality is wrong for a callable reference: Kotlin promises that
+   `Foo::bar == Foo::bar` and that `foo::bar == foo::bar`, while `foo::bar != bar::bar` and a bound
+   reference never equals an unbound one. These answer all four from the descriptor's
+   `reference_target` and the bound receiver, and they sit in the object's own vtable so a
+   comparison through `Any` — which is how `x != y` on two `Any` parameters reaches here — gets the
+   same answer as a comparison through the reference's own type. */
+kt_boolean kt_reference_equals(KRef self, KRef other);
+kt_int kt_reference_hash_code(KRef self);
 
 /* `x::class` and `String::class`: a `kotlin.reflect.KClass` over one type descriptor.
    Two objects are EQUAL when they describe the same type, which is what Kotlin promises and what

@@ -183,6 +183,7 @@ pub fn lower_file(
         default_wrappers: HashMap::new(),
         default_constructors: HashMap::new(),
         enum_entries: HashMap::new(),
+        reference_identities: HashMap::new(),
         holders: HashMap::new(),
         references: HashMap::new(),
     };
@@ -264,6 +265,10 @@ struct FileLowering<'a> {
     holders: HashMap<String, DataId>,
     /// The emitted pieces of each property reference, by the expression that creates it.
     references: HashMap<u32, references::ReferenceItems>,
+    /// One marker per (referenced declaration, bound-ness) this file mentions — the identity two
+    /// callable references compare. Deduplicated here because two sites naming the same
+    /// declaration must reach the SAME marker; that is the whole point of it.
+    reference_identities: HashMap<String, DataId>,
 }
 
 impl<'a> FileLowering<'a> {

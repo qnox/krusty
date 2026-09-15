@@ -2449,6 +2449,42 @@ KRef kt_throwable_message(KRef self) { return ((KThrowable *)self)->message; }
    a file containing a `try` is declined whole — so reporting and exiting here IS the propagation,
    and it is what Kotlin does with an exception nothing handles. The exit code matches the one a
    failed cast already uses, which is the JVM backend's for an abnormal end. */
+/* ---- callable references ----------------------------------------------------------------- */
+
+/* A bound reference keeps its receiver as its first reference field, which is what
+   `reference_count` being non-zero means on one of these descriptors: the lowering gives this
+   pair only to a reference whose captures are exactly the bound receiver or nothing at all. */
+static KRef kt_reference_receiver(KRef self) {
+    const KType *type = self->header.type;
+    if (type->reference_count == 0) {
+        return NULL;
+    }
+    return *(KRef *)((uint8_t *)self + type->reference_offsets[0]);
+}
+
+kt_boolean kt_reference_equals(KRef self, KRef other) {
+    if (other == NULL) {
+        return false;
+    }
+    const void *mine = self->header.type->reference_target;
+    /* An ordinary object's descriptor has none, so it is never equal to a reference — and neither
+       is a reference to a DIFFERENT declaration, or a bound one to an unbound one. */
+    if (mine == NULL || mine != other->header.type->reference_target) {
+        return false;
+    }
+    return kt_equals(kt_reference_receiver(self), kt_reference_receiver(other));
+}
+
+kt_int kt_reference_hash_code(KRef self) {
+    /* Equal references must hash alike, so the hash is built from exactly what equality reads. */
+    kt_int hash = (kt_int)(uintptr_t)self->header.type->reference_target;
+    KRef receiver = kt_reference_receiver(self);
+    if (receiver != NULL) {
+        hash = hash * 31 + kt_hash_code(receiver);
+    }
+    return hash;
+}
+
 void kt_throw(KRef thrown) {
     kt_int length = 0;
     KRef storage = NULL;

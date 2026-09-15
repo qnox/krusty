@@ -28,7 +28,9 @@ mod ktype {
     pub const VTABLE_LENGTH: u32 = 48;
     pub const INTERFACES: u32 = 56;
     pub const INTERFACE_COUNT: u32 = 64;
-    pub const SIZE: usize = 72;
+    /// Only a callable reference's descriptor has one; see the note on `KType`.
+    pub const REFERENCE_TARGET: u32 = 72;
+    pub const SIZE: usize = 80;
 }
 
 /// Where an object keeps its type: the header is one pointer.
@@ -54,6 +56,10 @@ fn any_member(symbol: &str) -> Option<(Vec<Ty>, Ty)> {
         "kt_any_hash_code" => (vec![any()], Ty::Int),
         "kt_any_to_string" => (vec![any()], any()),
         "kt_enum_to_string" => (vec![any()], any()),
+        // A callable reference's own `equals`/`hashCode`: same shapes as `kotlin.Any`'s, different
+        // answers. See the note beside them in `krusty_rt.h`.
+        "kt_reference_equals" => (vec![any(), any()], Ty::Boolean),
+        "kt_reference_hash_code" => (vec![any()], Ty::Int),
         _ => return None,
     })
 }
@@ -389,6 +395,7 @@ impl<'a> FileLowering<'a> {
         vtable: &[FuncId],
         superclass: DataId,
         interfaces: &[DataId],
+        reference_target: Option<DataId>,
     ) -> Result<(), Unsupported> {
         let references = if reference_offsets.is_empty() {
             None
@@ -462,6 +469,7 @@ impl<'a> FileLowering<'a> {
             (ktype::SUPER, Some(superclass)),
             (ktype::VTABLE, Some(table)),
             (ktype::INTERFACES, implemented),
+            (ktype::REFERENCE_TARGET, reference_target),
         ] {
             let Some(data) = data else {
                 continue;
@@ -536,6 +544,7 @@ impl<'a> FileLowering<'a> {
             &vtable,
             superclass,
             &interfaces,
+            None,
         )
     }
 
