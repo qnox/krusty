@@ -1095,7 +1095,7 @@ pub(super) fn unify_inferred_ty_impl(
     }
 }
 
-pub(super) fn merge_inferred_ty_from_symbols(
+pub(crate) fn merge_inferred_ty_from_symbols(
     source: Option<&dyn SymbolSource>,
     current: Ty,
     actual: Ty,
