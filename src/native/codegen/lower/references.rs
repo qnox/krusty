@@ -736,6 +736,77 @@ impl BodyLowering<'_, '_, '_> {
         self.reference_member(&name, receiver, &[], ret)
     }
 
+    /// `p.getValue(thisRef, property)` and `p.setValue(thisRef, property, value)`.
+    ///
+    /// `val x by ::top` delegates to the property reference itself, through two stdlib operators
+    /// that are `inline` one-liners: `getValue` is `get()` on a `KProperty0` and `get(thisRef)` on
+    /// a `KProperty1`, and `setValue` the same for `set`. A dependency `inline` body is not here to
+    /// splice, so they are realized rather than inlined — which of the two a site means is the
+    /// RECEIVER's type, since that is what selected the overload in the first place.
+    ///
+    /// `property` is the metadata object, which these operators ignore; it is still evaluated,
+    /// because a program that can see the difference is entitled to.
+    pub(super) fn reference_delegate(
+        &mut self,
+        owner: &str,
+        name: &str,
+        receiver: u32,
+        args: &[u32],
+        ret: Ty,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        if !super::super::super::intrinsics::is_property_delegates_facade(owner) {
+            return None;
+        }
+        let takes_receiver = self.type_of(receiver).and_then(reference_receiver)?;
+        // Which operands reach the slot: a `KProperty1` is handed `thisRef`, a `KProperty0` is not,
+        // and the written value is always the last one.
+        let kept: Vec<usize> = match (name, args.len()) {
+            ("getValue", 2) => takes_receiver.then_some(0).into_iter().collect(),
+            ("setValue", 3) => takes_receiver.then_some(0).into_iter().chain([2]).collect(),
+            _ => return None,
+        };
+        let slot = if name == "setValue" { SET } else { GET };
+        Some(self.delegate_call(slot, receiver, args, &kept, ret))
+    }
+
+    fn delegate_call(
+        &mut self,
+        slot: u32,
+        receiver: u32,
+        args: &[u32],
+        kept: &[usize],
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let object = self.reference(receiver)?;
+        // Every argument is evaluated, in source order, whether or not the slot is handed it.
+        let mut evaluated = Vec::with_capacity(args.len());
+        for argument in args {
+            evaluated.push(self.reference(*argument)?);
+        }
+        if self.terminated {
+            return Ok(None);
+        }
+        let mut arguments: Vec<Value> = kept.iter().map(|index| evaluated[*index]).collect();
+        // A bound reference's slot ignores the receiver operand; a null keeps one signature for
+        // both shapes, exactly as `reference_call` does.
+        let expected = usize::from(slot == SET) + 1;
+        while arguments.len() < expected {
+            arguments.insert(0, self.builder.ins().iconst(types::I64, 0));
+        }
+        let params = vec![any(); arguments.len()];
+        let answer = self.dispatch(
+            object,
+            slot,
+            &params,
+            if slot == SET { Ty::Unit } else { any() },
+            &arguments,
+        )?;
+        let Some(answer) = answer else {
+            return Ok(None);
+        };
+        self.convert(answer, Some(any()), ret)
+    }
+
     fn reference_call(
         &mut self,
         slot: u32,
@@ -774,6 +845,25 @@ impl BodyLowering<'_, '_, '_> {
         // here and is unboxed back at the call site.
         self.convert(answer, Some(any()), ret)
     }
+}
+
+/// Whether a reference of this type is HANDED the receiver its `get` reads through.
+///
+/// `KProperty1` is — it names a member and the call supplies the object — while a `KProperty0`
+/// carries its own or needs none. `None` for anything else, including the arity-less `KProperty`
+/// and `KCallable`: those say nothing about how many receivers a call passes, and a delegate
+/// operator's overload was selected on exactly that.
+fn reference_receiver(ty: Ty) -> Option<bool> {
+    let internal = ty.non_null().obj_internal()?;
+    [
+        ("kotlin/reflect/KProperty0", false),
+        ("kotlin/reflect/KProperty1", true),
+        ("kotlin/reflect/KMutableProperty0", false),
+        ("kotlin/reflect/KMutableProperty1", true),
+    ]
+    .iter()
+    .find(|(candidate, _)| internal.matches(candidate))
+    .map(|(_, takes)| *takes)
 }
 
 /// Whether a type is one of the reflection types a property reference wears.

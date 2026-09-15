@@ -199,6 +199,14 @@ pub(super) fn is_callable_name(owner: crate::types::TypeName, name: &str) -> boo
         .any(|candidate| owner.matches(candidate))
 }
 
+/// Whether a declaration's owner is the file facade the stdlib's delegate operators on a property
+/// reference live in. `kotlin.getValue`/`kotlin.setValue` are top-level extensions of
+/// `KProperty0`/`KProperty1`, so they reach a backend as members of
+/// `kotlin/PropertyReferenceDelegatesKt`.
+pub(super) fn is_property_delegates_facade(owner: &str) -> bool {
+    kotlin_owner(owner) == "kotlin/PropertyReferenceDelegatesKt"
+}
+
 /// Whether a declaration's owner is the file facade `lazy` and `Lazy.getValue` live in. Both are
 /// top-level declarations of `kotlin`, so they reach a backend as members of `kotlin/LazyKt`.
 pub(super) fn is_lazy_facade(owner: &str) -> bool {

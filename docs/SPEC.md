@@ -1985,6 +1985,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_lists_e2e.rs`
   (`a_single_element_list_is_not_a_vararg_call_of_length_one`).
 
+- **`by ::foo` delegates to the reference's own `get` and `set`.** The stdlib declares four
+  operators in `kotlin/PropertyReferenceDelegatesKt` — `getValue` and `setValue` on `KProperty0`
+  and on `KProperty1` — each an `inline` one-liner over the reference's own member. A dependency
+  `inline` body is not there to splice, so the native generator realizes them instead, and which of
+  the two overloads a site means is read off the RECEIVER's type: a `KProperty1` is handed the
+  delegating property's owner as its receiver, a `KProperty0` carries its own or needs none. The
+  `property` metadata operand these operators ignore is still evaluated.
+  The delegate is the reference and not a copy of the value, so each read asks the property again —
+  which a source-written getter makes visible.
+  Tests: `tests/native_property_reference_e2e.rs`
+  (`a_property_delegating_to_a_bound_reference_reads_through_it`,
+  `a_property_delegating_to_a_top_level_reference_reads_and_writes`,
+  `a_property_delegating_to_an_unbound_reference_is_handed_the_owner`,
+  `delegating_to_a_reference_reaches_the_source_accessor`).
+
 - **A class's initializers are bodies too.** The native generator declares a type for every
   property reference and every local delegated property's metadata in a pass over the file, and
   those passes have to finish before the FIRST body is defined — not before the first top-level

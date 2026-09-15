@@ -2172,6 +2172,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         if let Some(realized) = self.reference_member(&name, receiver, args, *ret) {
                             return realized;
                         }
+                        // `val x by ::top`: the stdlib's delegate operators on a reference, which
+                        // are `get`/`set` under another name and reach the same table.
+                        if let Some(realized) =
+                            self.reference_delegate(&owner, &name, receiver, args, *ret)
+                        {
+                            return realized;
+                        }
                         // A `listOf` result and the iterator it answers with.
                         if let Some(realized) = self.list_member(&name, receiver, args, *ret) {
                             return realized;

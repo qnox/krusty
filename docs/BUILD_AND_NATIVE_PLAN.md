@@ -1566,6 +1566,13 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **Delegating to a reference, for 2522.** `val x by ::top` calls one of four stdlib operators
+   that are `inline` one-liners over the reference's own `get`/`set`. Nothing can splice a
+   dependency's `inline` body, so they are realized here — the only real question being which
+   overload a site took, which the receiver's type answers: `KProperty1` is handed a receiver and
+   `KProperty0` is not. Fourteen corpus cases, well past the five the decline table named, because
+   the same programs were behind the declaration-order fix above.
+
    **Declaration order, for 2508.** `class A { val r = C::z }` was declining on a construct the
    generator has realized for a long time. The reference passes ran between `define_classes` and
    the top-level function loop, which reads as "after the declarations, before the bodies" and is

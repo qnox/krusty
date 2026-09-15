@@ -402,3 +402,89 @@ fn a_local_delegated_property_of_a_class_body_is_realized() {
         "OK",
     );
 }
+
+#[test]
+fn a_property_delegating_to_a_bound_reference_reads_through_it() {
+    // `by O::z` is the stdlib's `KProperty0.getValue`, an `inline` one-liner whose body is not
+    // here to splice — so the generator realizes it as the `get` it means.
+    expect_native_box(
+        "object Source {\n\
+         \x20   val held: Int = 42\n\
+         }\n\
+         class Holder {\n\
+         \x20   val borrowed by Source::held\n\
+         }\n\
+         fun box(): String = if (Holder().borrowed == 42) \"OK\" else \"fail: ${Holder().borrowed}\"\n",
+        "DelegateToABoundReference",
+        "OK",
+    );
+}
+
+#[test]
+fn a_property_delegating_to_a_top_level_reference_reads_and_writes() {
+    // The mutable half: `setValue` on a `KMutableProperty0` is the reference's own `set`, so the
+    // write has to reach the property the reference names and not a field of the delegate.
+    expect_native_box(
+        "var held: String = \"fail\"\n\
+         var borrowed by ::held\n\
+         fun box(): String {\n\
+         \x20   borrowed = \"OK\"\n\
+         \x20   if (held != \"OK\") return \"fail write: $held\"\n\
+         \x20   return if (borrowed == \"OK\") \"OK\" else \"fail read: $borrowed\"\n\
+         }\n",
+        "DelegateToATopLevelReference",
+        "OK",
+    );
+}
+
+#[test]
+fn a_property_delegating_to_an_unbound_reference_is_handed_the_owner() {
+    // A `KProperty1` names a member and is HANDED the object, which for a delegate is the owner
+    // of the delegating property — the one operand that separates these two overloads.
+    expect_native_box(
+        "class Cell(val held: String) {\n\
+         \x20   val borrowed by Cell::held\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val cell = Cell(\"OK\")\n\
+         \x20   return if (cell.borrowed == \"OK\") \"OK\" else \"fail: ${cell.borrowed}\"\n\
+         }\n",
+        "DelegateToAnUnboundReference",
+        "OK",
+    );
+}
+
+#[test]
+fn a_local_property_delegating_to_a_reference_reads_through_it() {
+    expect_native_box(
+        "val held: String = \"OK\"\n\
+         fun box(): String {\n\
+         \x20   val borrowed by ::held\n\
+         \x20   return borrowed\n\
+         }\n",
+        "LocalDelegateToAReference",
+        "OK",
+    );
+}
+
+#[test]
+fn delegating_to_a_reference_reaches_the_source_accessor() {
+    // The delegate is the reference, not a copy of the value: each read asks the property again,
+    // which a source-written getter makes visible.
+    expect_native_box(
+        "var reads = 0\n\
+         val held: Int\n\
+         \x20   get() {\n\
+         \x20       reads++\n\
+         \x20       return reads\n\
+         \x20   }\n\
+         val borrowed by ::held\n\
+         fun box(): String {\n\
+         \x20   if (borrowed != 1) return \"fail first: $borrowed\"\n\
+         \x20   if (borrowed != 2) return \"fail second: $borrowed\"\n\
+         \x20   return if (reads == 2) \"OK\" else \"fail count: $reads\"\n\
+         }\n",
+        "DelegateToAReferenceAsksAgain",
+        "OK",
+    );
+}
