@@ -8,8 +8,12 @@
 //!
 //! What these do NOT cover is the boxed form. `kotlin.UIntArray` is a real class with `box-impl`
 //! and `unbox-impl`, so a value class crossing into `Any` becomes one — and krusty does not box
-//! there, which is a separate defect with its own shape. These programs keep every array in its
-//! static type, where the unboxed representation is the whole answer.
+//! there, which is a separate defect with its own shape, pinned at the end of this file.
+//!
+//! Only `each_width_allocates_loads_and_stores_through_its_own_opcodes` is evidence about the
+//! REPRESENTATION; it reads the bytecode. The rest are runtime semantic controls, and a runtime
+//! control cannot prove a representation: a bare `[I` is a nullable JVM reference and survives a
+//! generic round trip unchanged, so those programs pass whether or not anything was boxed.
 
 use super::common;
 
@@ -159,10 +163,12 @@ fn each_width_allocates_loads_and_stores_through_its_own_opcodes() {
 }
 
 #[test]
-fn a_nullable_unsigned_array_is_the_boxed_value_class() {
-    // A nullable value class cannot be the bare carrier — `null` has to be representable — so this
-    // is the one place the array type does NOT erase to its signed array, and the erasure must not
-    // be applied blindly.
+fn a_nullable_unsigned_array_carries_both_null_and_a_value() {
+    // A RUNTIME control, and only that: it pins that `null` and an array are both representable at
+    // a nullable unsigned type and that the array's own size survives. It says nothing about the
+    // representation — a bare `[I` is itself a nullable JVM reference, so this would pass whether
+    // or not the value class is boxed here. What krusty actually does at a reference boundary is
+    // the subject of `an_unsigned_array_crossing_into_any_still_diverges_from_kotlinc` below.
     agrees_with_kotlinc(
         "NullableUnsignedArray",
         "fun box(): String {\n\
@@ -177,7 +183,9 @@ fn a_nullable_unsigned_array_is_the_boxed_value_class() {
 
 #[test]
 fn an_unsigned_array_through_a_generic_keeps_its_elements() {
-    // A type parameter erases to a reference, so the array crosses into the boxed form and back.
+    // Also a runtime control. A type parameter erases to a reference, and this pins that the
+    // elements and length come back intact across that boundary — not that anything was boxed
+    // crossing it: a bare `[I` survives `identity<T>` unchanged, so this passes either way.
     agrees_with_kotlinc(
         "GenericUnsignedArray",
         "fun <T> identity(value: T): T = value\n\

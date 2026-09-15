@@ -594,39 +594,37 @@ pub fn intern_fnsig(s: FnSig) -> &'static FnSig {
     I.get_or_init(ShardedInterner::default).intern_owned(s)
 }
 
-/// The element type of a primitive specialized array class (`kotlin/IntArray` → `Int`), or `None` for a
-/// non-primitive-array name. The unsigned arrays (`UIntArray`, …) keep their unsigned element so their
-/// value-class identity survives; they still erase to the signed primitive array descriptor (`[I`).
-/// The single canonical table — [`Ty::array_elem`], the constructor, and the backend descriptor logic
-/// all route through it rather than each carrying their own copy.
+/// Every primitive specialized array class and the element it holds — THE inventory, in one place.
+///
+/// An unsigned array keeps its unsigned element so its value-class identity survives; it still
+/// erases to the signed primitive array descriptor (`[I`), which is [`crate::jvm::names`]'s job and
+/// not this table's. Anything needing the set of these classes iterates here rather than writing the
+/// names out again: every copy that has existed eventually disagreed with this one, and the ones
+/// that omitted `UByteArray` and `UShortArray` emitted `int[]` for a `byte[]`.
+pub const PRIM_ARRAY_CLASSES: [(&str, Ty); 12] = [
+    ("kotlin/IntArray", Ty::Int),
+    ("kotlin/LongArray", Ty::Long),
+    ("kotlin/ShortArray", Ty::Short),
+    ("kotlin/ByteArray", Ty::Byte),
+    ("kotlin/BooleanArray", Ty::Boolean),
+    ("kotlin/CharArray", Ty::Char),
+    ("kotlin/FloatArray", Ty::Float),
+    ("kotlin/DoubleArray", Ty::Double),
+    ("kotlin/UByteArray", Ty::UByte),
+    ("kotlin/UShortArray", Ty::UShort),
+    ("kotlin/UIntArray", Ty::UInt),
+    ("kotlin/ULongArray", Ty::ULong),
+];
+
+/// The element type of a primitive specialized array class (`kotlin/IntArray` → `Int`), or `None`
+/// for a non-primitive-array name. A lookup in [`PRIM_ARRAY_CLASSES`], which is the canonical table
+/// — [`Ty::array_elem`], the constructor, and the backend descriptor logic all route through this
+/// rather than each carrying their own copy.
 pub fn prim_array_element(internal: impl InternalName) -> Option<Ty> {
-    if internal.internal_matches("kotlin/IntArray") {
-        Some(Ty::Int)
-    } else if internal.internal_matches("kotlin/LongArray") {
-        Some(Ty::Long)
-    } else if internal.internal_matches("kotlin/ShortArray") {
-        Some(Ty::Short)
-    } else if internal.internal_matches("kotlin/ByteArray") {
-        Some(Ty::Byte)
-    } else if internal.internal_matches("kotlin/BooleanArray") {
-        Some(Ty::Boolean)
-    } else if internal.internal_matches("kotlin/CharArray") {
-        Some(Ty::Char)
-    } else if internal.internal_matches("kotlin/FloatArray") {
-        Some(Ty::Float)
-    } else if internal.internal_matches("kotlin/DoubleArray") {
-        Some(Ty::Double)
-    } else if internal.internal_matches("kotlin/UByteArray") {
-        Some(Ty::UByte)
-    } else if internal.internal_matches("kotlin/UShortArray") {
-        Some(Ty::UShort)
-    } else if internal.internal_matches("kotlin/UIntArray") {
-        Some(Ty::UInt)
-    } else if internal.internal_matches("kotlin/ULongArray") {
-        Some(Ty::ULong)
-    } else {
-        None
-    }
+    PRIM_ARRAY_CLASSES
+        .iter()
+        .find(|(name, _)| internal.internal_matches(name))
+        .map(|(_, element)| *element)
 }
 
 /// Element type fixed by a specialized primitive-array creator. Both the class-shaped size

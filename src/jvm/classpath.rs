@@ -158,34 +158,20 @@ fn meta_ids() -> &'static MetaNameIds {
             ))
         })
         .collect();
-        // Each primitive specialized array's descriptor, derived rather than listed: the names come
-        // from the one table that identifies them and the descriptor from the one operation that
-        // erases an element, unsigned included. The list this replaced named `UIntArray` and
-        // `ULongArray` only, so `UByteArray` and `UShortArray` had no descriptor at this boundary.
-        let prim_array = [
-            "kotlin/BooleanArray",
-            "kotlin/ByteArray",
-            "kotlin/ShortArray",
-            "kotlin/IntArray",
-            "kotlin/LongArray",
-            "kotlin/CharArray",
-            "kotlin/FloatArray",
-            "kotlin/DoubleArray",
-            "kotlin/UByteArray",
-            "kotlin/UShortArray",
-            "kotlin/UIntArray",
-            "kotlin/ULongArray",
-        ]
-        .into_iter()
-        .map(|name| {
-            let element = crate::types::prim_array_element(name)
-                .expect("every name here is a primitive specialized array");
-            (
-                tn(name),
-                crate::jvm::names::type_descriptor(crate::types::Ty::array(element)),
-            )
-        })
-        .collect();
+        // Each primitive specialized array's descriptor, from the canonical inventory rather than
+        // a second copy of the names: `PRIM_ARRAY_CLASSES` is iterated, and the descriptor follows
+        // from the one operation that erases an element. The list this replaced was that second
+        // copy, and it named `UIntArray` and `ULongArray` only — so `UByteArray` and `UShortArray`
+        // had no descriptor at this boundary at all.
+        let prim_array = crate::types::PRIM_ARRAY_CLASSES
+            .iter()
+            .map(|(name, element)| {
+                (
+                    tn(name),
+                    crate::jvm::names::type_descriptor(crate::types::Ty::array(*element)),
+                )
+            })
+            .collect();
         MetaNameIds {
             prim,
             prim_wrapper,
