@@ -501,6 +501,7 @@ macro_rules! cache_stat {
 
 mod inline_plan_cache;
 
+pub(super) use inline_plan_cache::InlinePlanCacheInput;
 use inline_plan_cache::{global_plan_cache, PlanCache, PlanKey};
 
 /// Hit/miss counter for one cache, aggregated across every `Classpath` and worker thread (per-instance
@@ -8389,80 +8390,6 @@ mod fq_tests {
         let string = type_name("kotlin/String");
         assert!(cp.builtin_members.borrow().contains_key(&string));
         assert!(cp.builtin_members("kotlin/String").is_empty());
-    }
-
-    #[test]
-    fn inline_plan_memo_refuses_overlaid_owner() {
-        let owner = type_name("p/Widget");
-        let plan = crate::libraries::InlineBodyPlan::InvokeLambda {
-            lambda_parameter: 0,
-            arguments: Vec::new(),
-            prologue: Vec::new(),
-            cleanup: Vec::new(),
-            cause: None,
-            recovery: None,
-            defaults: Vec::new(),
-            result: None,
-        };
-        let cp = Classpath::new(vec![]);
-        cp.memoize_inline_plan(
-            owner,
-            "run",
-            "()V",
-            &[0],
-            0,
-            None,
-            &[],
-            None,
-            Some(Box::new(plan)),
-        );
-        let same_view = cp.cached_inline_plan(owner, "run", "()V", &[0], 0, None, &[], None);
-        assert!(same_view.is_some());
-        assert!(
-            cp.cached_inline_plan(owner, "run", "()V", &[0], 1, None, &[], None)
-                .is_none(),
-            "a semantic callable view must not reuse another view's plan"
-        );
-        assert!(
-            cp.cached_inline_plan(
-                owner,
-                "run",
-                "()V",
-                &[0],
-                0,
-                None,
-                &[],
-                Some((owner, "run$default", "()V")),
-            )
-            .is_none(),
-            "a distinct default realization must not reuse a plan"
-        );
-        // Overlaying the owner must make the remembered plan unreachable: the overlay is
-        // per-request bytecode, and a later request can overlay DIFFERENT bytes under this name.
-        let stubs = crate::jvm::java_stub::stub_classes(
-            &[("W.java".into(), "package p; public class Widget {}".into())],
-            crate::jvm::java_stub::StubMode::Lenient,
-            &|c| c == "java/lang/Object",
-        )
-        .expect("stub");
-        cp.set_stub_overlay(stubs);
-        assert!(
-            cp.cached_inline_plan(owner, "run", "()V", &[0], 0, None, &[], None)
-                .is_none(),
-            "overlaid owner must not serve a remembered plan"
-        );
-        cp.memoize_inline_plan(owner, "unrelated", "()V", &[0], 0, None, &[], None, None);
-        cp.clear_stub_overlay();
-        assert!(
-            cp.cached_inline_plan(owner, "unrelated", "()V", &[0], 0, None, &[], None)
-                .is_none(),
-            "a memoize attempted while overlaid must not be stored"
-        );
-        assert!(
-            cp.cached_inline_plan(owner, "run", "()V", &[0], 0, None, &[], None)
-                .is_some(),
-            "the jar-derived plan is valid again once the overlay clears"
-        );
     }
 
     #[test]

@@ -2483,7 +2483,6 @@ pub fn splice(
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn finds_function_invoke_sites() {
         // pool: Function1.invoke(Object)Object as an InterfaceMethodref, + an unrelated Methodref.
@@ -2763,6 +2762,7 @@ mod tests {
             source_cp: vec![C::Other],
             stackmap: None,
             handlers: vec![],
+            locals: vec![],
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         let out =
@@ -2830,6 +2830,7 @@ mod tests {
             source_cp: vec![C::Other],
             stackmap: None,
             handlers: vec![],
+            locals: vec![],
         };
         assert!(!is_reified_inline(&body));
     }
@@ -2844,6 +2845,7 @@ mod tests {
             source_cp: vec![C::Other],
             stackmap: None,
             handlers: vec![],
+            locals: vec![],
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         let tm = HashMap::new();

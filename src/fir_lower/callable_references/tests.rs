@@ -674,11 +674,18 @@ fn inline_array_initializer_is_spliced_before_common_ir_escapes() {
 
 #[test]
 fn suspending_collection_map_is_structural_before_common_ir_escapes() {
+    // The decoded map plan normalizes Iterator and ArrayList dependencies from the active JDK.
+    // This test constructs its platform manually, so include the same explicit boot classpath the
+    // compiler harness supplies rather than asking an intentionally stdlib-only provider to invent
+    // declarations that are not on its classpath.
+    let mut classpath = crate::toolchain::classpath_jars_for("// WITH_STDLIB");
+    classpath.push(
+        crate::toolchain::jdk_modules()
+            .expect("suspending collection-map lowering test requires the repository JDK modules"),
+    );
     let platform: Box<dyn crate::libraries::SemanticPlatform> =
         Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-                crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
-            )),
+            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
         ));
     let ir = lower_single_source_with_platform(
         "suspend fun render(value: Int): Int = value + 1\n\

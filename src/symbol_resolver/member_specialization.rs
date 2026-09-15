@@ -2,7 +2,8 @@
 
 use super::{ty_subst, ty_subst_keep_unbound, GSigBinds};
 use crate::libraries::{
-    GenericSig, InlineIterationTraversal, LibraryCallable, LibraryMember, PropertyInfo,
+    GenericSig, InlineBodyPlan, InlineCollectionAppend, InlineCollectionCapacity,
+    InlineIterationTraversal, LibraryCallable, LibraryMember, PropertyInfo,
 };
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
@@ -342,6 +343,96 @@ pub(crate) fn specialize_inline_iteration_traversal(
         InlineIterationTraversal::Counted { size, get } => {
             **size = specialize_fixed_member_receiver(source, receiver, size)?;
             **get = specialize_fixed_member_receiver(source, receiver, get)?;
+        }
+    }
+    Some(())
+}
+
+fn specialize_fixed_extension(
+    source: &dyn SymbolSource,
+    receiver: Ty,
+    arguments: &[Ty],
+    callable: &LibraryCallable,
+) -> Option<LibraryCallable> {
+    let signature = callable.generic_sig.as_deref()?;
+    let declared_receiver = signature.receiver?;
+    if signature.params.len() != arguments.len() {
+        return None;
+    }
+    let mut bindings = GSigBinds::new();
+    super::unify_ty_from_symbols(source, declared_receiver, receiver, &mut bindings);
+    for (&declared, &actual) in signature.params.iter().zip(arguments) {
+        super::unify_ty_from_symbols(source, declared, actual, &mut bindings);
+    }
+    let mut specialized = callable.clone();
+    specialized.params = std::iter::once(specialize_signature_receiver_type(
+        source,
+        declared_receiver,
+        &bindings,
+    ))
+    .chain(
+        signature
+            .params
+            .iter()
+            .map(|parameter| specialize_signature_input_type(source, *parameter, &bindings)),
+    )
+    .collect();
+    specialized.ret = specialize_signature_output_type(source, signature.ret, &bindings);
+    specialized.source_receiver = specialized.params.first().copied();
+    let [specialized_receiver, specialized_arguments @ ..] = specialized.params.as_slice() else {
+        return None;
+    };
+    (member_slots_are_applied(&specialized.params, specialized.ret, &signature.formals)
+        && super::semantic_arg_assignable(source, specialized_receiver, &receiver)
+        && specialized_arguments
+            .iter()
+            .zip(arguments)
+            .all(|(declared, actual)| super::semantic_arg_assignable(source, declared, actual)))
+    .then_some(specialized)
+}
+
+/// Apply selected receiver/output types to every exact dependency in a decoded collection body.
+/// The provider already fixed each declaration identity; this only specializes its metadata
+/// signature and never performs callable lookup or name-based dispatch.
+pub(crate) fn specialize_inline_collection_transform(
+    source: &dyn SymbolSource,
+    receiver: Ty,
+    part: Ty,
+    output: Ty,
+    plan: &mut InlineBodyPlan,
+) -> Option<()> {
+    let InlineBodyPlan::CollectionTransform {
+        traversal,
+        factory,
+        capacity,
+        append,
+        ..
+    } = plan
+    else {
+        return None;
+    };
+    specialize_inline_iteration_traversal(source, receiver, traversal)?;
+    let factory_owner = factory.owner?;
+    if source.classifier(factory_owner)?.type_params().len() != 1 {
+        return None;
+    }
+    let accumulator = Ty::obj_args_name(factory_owner, &[output]);
+    if let Some(capacity) = capacity {
+        match capacity {
+            InlineCollectionCapacity::Member(member) => {
+                **member = specialize_fixed_member_receiver(source, receiver, member)?;
+            }
+            InlineCollectionCapacity::Extension { callable, .. } => {
+                **callable = specialize_fixed_extension(source, receiver, &[Ty::Int], callable)?;
+            }
+        }
+    }
+    match append {
+        InlineCollectionAppend::Member(member) => {
+            **member = specialize_fixed_member_receiver(source, accumulator, member)?;
+        }
+        InlineCollectionAppend::Extension(callable) => {
+            **callable = specialize_fixed_extension(source, accumulator, &[part], callable)?;
         }
     }
     Some(())

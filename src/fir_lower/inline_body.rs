@@ -63,33 +63,25 @@ impl BodyLowering<'_> {
             }
             crate::fir::FirInlineBodyPlan::CollectionTransform {
                 lambda_parameter,
-                flatten,
                 local_names,
-                iterator_ty,
-                iterator,
-                has_next,
-                next,
+                traversal,
                 factory,
                 factory_classifier,
+                factory_parameters,
+                capacity,
                 append,
                 accumulator,
-                append_parameter,
-                append_result,
             } => {
                 return self.external_inline_collection_transform(
                     *lambda_parameter,
-                    *flatten,
                     local_names,
-                    *iterator_ty,
-                    iterator,
-                    has_next,
-                    next,
+                    traversal,
                     *factory,
                     *factory_classifier,
-                    *append,
+                    factory_parameters,
+                    capacity.as_ref(),
+                    append,
                     *accumulator,
-                    *append_parameter,
-                    *append_result,
                     receiver_ty,
                     parameter_types,
                     dispatch_receiver,
@@ -546,7 +538,7 @@ impl BodyLowering<'_> {
         }))
     }
 
-    fn external_inline_iteration_member_call(
+    pub(super) fn external_inline_iteration_member_call(
         &mut self,
         call: &crate::fir::FirInlineIterationMemberCall,
         receiver: ExprId,

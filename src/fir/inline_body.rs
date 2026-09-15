@@ -1,6 +1,5 @@
 //! Checked, source-independent inline expansion contracts.
 
-use super::body::FirIteratorCall;
 use super::identities::ExternalCallableId;
 use super::signature::ResolvedTy;
 
@@ -97,23 +96,19 @@ pub enum FirInlineBodyPlan {
         index: Option<FirInlineIterationIndex>,
         traversal: FirInlineIterationTraversal,
     },
-    /// Checked structural expansion of an exact collection inline declaration. Iterator convention
-    /// calls were selected in the declaration's lookup scope; factory/append are opaque provider
-    /// identities. Common lowering therefore performs no library lookup or target-ABI reasoning.
+    /// Checked structural expansion of an exact collection inline declaration. Traversal,
+    /// factory, and append are opaque provider identities. Common lowering therefore performs no
+    /// library lookup or target-ABI reasoning.
     CollectionTransform {
         lambda_parameter: u32,
-        flatten: bool,
         local_names: FirInlineCollectionLocalNames,
-        iterator_ty: ResolvedTy,
-        iterator: Box<FirIteratorCall>,
-        has_next: Box<FirIteratorCall>,
-        next: Box<FirIteratorCall>,
+        traversal: FirInlineIterationTraversal,
         factory: ExternalCallableId,
         factory_classifier: crate::types::TypeName,
-        append: ExternalCallableId,
+        factory_parameters: Box<[ResolvedTy]>,
+        capacity: Option<FirInlineCollectionCapacity>,
+        append: FirInlineCollectionAppend,
         accumulator: ResolvedTy,
-        append_parameter: ResolvedTy,
-        append_result: ResolvedTy,
     },
 }
 
@@ -123,6 +118,29 @@ pub struct FirInlineCollectionLocalNames {
     pub inner_receiver: Box<str>,
     pub destination: Box<str>,
     pub element: Box<str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FirInlineCollectionCapacity {
+    Member(FirInlineIterationMemberCall),
+    Extension {
+        call: FirInlineCollectionExtensionCall,
+        default: i32,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FirInlineCollectionAppend {
+    Member(FirInlineIterationMemberCall),
+    Extension(FirInlineCollectionExtensionCall),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirInlineCollectionExtensionCall {
+    pub declaration: ExternalCallableId,
+    pub source_receiver: ResolvedTy,
+    pub parameters: Box<[ResolvedTy]>,
+    pub result: ResolvedTy,
 }
 
 impl From<&crate::libraries::InlineCollectionLocalNames> for FirInlineCollectionLocalNames {
