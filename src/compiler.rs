@@ -8,7 +8,7 @@ mod streaming_tests;
 use crate::ast::File;
 pub use crate::backend::{Artifact, Backend};
 use crate::diag::{DiagSink, Span};
-use crate::frontend::{check_source_set, CheckedFile, FrontendSymbols, StreamingSourceSetAnalysis};
+use crate::frontend::StreamingSourceSetAnalysis;
 use diagnostic_recovery::recover_pass_two_diagnostics;
 
 /// Consume the production source-set analysis and require its finalized streaming Pass-1 product
@@ -285,16 +285,6 @@ pub fn lower_analyzed_to_common_ir(
 
     impl Backend for DiscardCommonIr {
         type State = ();
-
-        fn lower_file(
-            &self,
-            _checked: CheckedFile<'_>,
-            _stem: &str,
-            _state: &mut Self::State,
-            _diags: &mut DiagSink,
-        ) -> Vec<Artifact> {
-            panic!("common-lowering census accepts streamed checked FIR only")
-        }
 
         fn lower_ir_file(
             &self,
@@ -1097,86 +1087,23 @@ pub fn check_frontend_only(
     census
 }
 
-/// Check each parsed file and hand it to the backend.
-pub fn compile<B: Backend>(
-    files: &[File],
-    stems: &[String],
-    syms: &mut FrontendSymbols,
-    backend: &B,
-    module_name: &str,
-    diags: &mut DiagSink,
-) -> Vec<Artifact> {
-    let types = check_source_set(files, syms, diags);
-    emit_checked(files, stems, &types, syms, backend, module_name, diags)
-}
-
-/// Hand a checked source set to a backend.
-pub fn emit_checked<B: Backend>(
-    files: &[File],
-    stems: &[String],
-    types: &[Option<crate::frontend::FrontendTypeInfo>],
-    syms: &FrontendSymbols,
-    backend: &B,
-    module_name: &str,
-    diags: &mut DiagSink,
-) -> Vec<Artifact> {
-    if files.len() != stems.len() || files.len() != types.len() {
-        diags.error(
-            Span::new(0, 0),
-            "internal error: source files, stems, and checked types have different lengths",
-        );
-        return Vec::new();
-    }
-    if let Some(index) = files.iter().position(|file| file.is_script) {
-        diags.set_file(index as u32);
-        diags.error(
-            Span::new(0, 0),
-            "Kotlin scripts can be analyzed but cannot be emitted",
-        );
-        return Vec::new();
-    }
-    let mut outputs = Vec::new();
-    let mut state = B::State::default();
-    for (i, ((file, stem), info)) in files.iter().zip(stems).zip(types).enumerate() {
-        diags.set_file(i as u32);
-        let Some(info) = info.as_ref() else {
-            continue;
-        };
-        if diags.has_errors() {
-            continue;
-        }
-        outputs.extend(backend.lower_file(
-            CheckedFile {
-                file,
-                file_index: i as u32,
-                info,
-                symbols: syms,
-                module_name,
-            },
-            stem,
-            &mut state,
-            diags,
-        ));
-    }
-    if !diags.has_errors() {
-        outputs.extend(backend.finalize(state, module_name));
-    }
-    outputs
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::Artifact;
     use crate::features::LangFeatures;
-    use crate::frontend::{
-        analyze_source_set_with_features, collect_signatures, parse_source_with_detected_features,
-    };
-    use crate::lexer::lex;
+    use crate::frontend::analyze_source_set_with_features;
     use crate::libraries::EmptySymbolSource;
-    use crate::parser::parse_script_with_features;
     use crate::source::SourceInput;
     use crate::types::Ty;
+
+    fn emitted_diagnostics(diags: &DiagSink) -> Vec<(u32, &str)> {
+        diags
+            .diags
+            .iter()
+            .map(|diagnostic| (diagnostic.file, diagnostic.msg.as_str()))
+            .collect()
+    }
 
     struct RecordingBackend;
 
@@ -1192,17 +1119,6 @@ mod tests {
 
     impl Backend for RecordingBackend {
         type State = usize;
-
-        fn lower_file(
-            &self,
-            checked: CheckedFile<'_>,
-            stem: &str,
-            state: &mut Self::State,
-            _diags: &mut DiagSink,
-        ) -> Vec<Artifact> {
-            *state += checked.file.decls.len();
-            vec![(format!("{stem}.out"), Vec::new())]
-        }
 
         fn lower_ir_file(
             &self,
@@ -1227,16 +1143,6 @@ mod tests {
 
     impl Backend for ModuleCallRecordingBackend {
         type State = usize;
-
-        fn lower_file(
-            &self,
-            _checked: CheckedFile<'_>,
-            _stem: &str,
-            _state: &mut Self::State,
-            _diags: &mut DiagSink,
-        ) -> Vec<Artifact> {
-            panic!("streamed production emission must not invoke legacy syntax lowering")
-        }
 
         fn lower_ir_file(
             &self,
@@ -1272,16 +1178,6 @@ mod tests {
     impl Backend for FileAnnotationRecordingBackend {
         type State = usize;
 
-        fn lower_file(
-            &self,
-            _checked: CheckedFile<'_>,
-            _stem: &str,
-            _state: &mut Self::State,
-            _diags: &mut DiagSink,
-        ) -> Vec<Artifact> {
-            panic!("streamed production emission must not invoke legacy syntax lowering")
-        }
-
         fn lower_ir_file(
             &self,
             file: crate::backend::CheckedIrFile<'_>,
@@ -1302,16 +1198,6 @@ mod tests {
 
     impl Backend for MemberAnnotationRecordingBackend {
         type State = usize;
-
-        fn lower_file(
-            &self,
-            _checked: CheckedFile<'_>,
-            _stem: &str,
-            _state: &mut Self::State,
-            _diags: &mut DiagSink,
-        ) -> Vec<Artifact> {
-            panic!("streamed production emission must not invoke legacy syntax lowering")
-        }
 
         fn lower_ir_file(
             &self,
@@ -1349,16 +1235,6 @@ mod tests {
     impl Backend for BodylessClassAnnotationRecordingBackend {
         type State = usize;
 
-        fn lower_file(
-            &self,
-            _checked: CheckedFile<'_>,
-            _stem: &str,
-            _state: &mut Self::State,
-            _diags: &mut DiagSink,
-        ) -> Vec<Artifact> {
-            panic!("streamed production emission must not invoke legacy syntax lowering")
-        }
-
         fn lower_ir_file(
             &self,
             file: crate::backend::CheckedIrFile<'_>,
@@ -1387,16 +1263,6 @@ mod tests {
 
     impl Backend for EnumEntryCallRecordingBackend {
         type State = usize;
-
-        fn lower_file(
-            &self,
-            _checked: CheckedFile<'_>,
-            _stem: &str,
-            _state: &mut Self::State,
-            _diags: &mut DiagSink,
-        ) -> Vec<Artifact> {
-            panic!("streamed production emission must not invoke legacy syntax lowering")
-        }
 
         fn lower_ir_file(
             &self,
@@ -3427,20 +3293,15 @@ mod tests {
     #[test]
     fn compiler_orchestrates_frontend_then_backend() {
         let mut diags = DiagSink::new();
-        let files = vec![parse_source_with_detected_features(
-            "fun box(): String = \"OK\"",
-            &mut diags,
-        )];
+        let inputs = [SourceInput::kotlin("fun box(): String = \"OK\"").with_file_stem("Main")];
         let stems = vec!["Main".to_string()];
-        let mut syms = collect_signatures(&files, &mut diags);
-        let outputs = compile(
-            &files,
-            &stems,
-            &mut syms,
-            &RecordingBackend,
-            "main",
+        let analysis = analyze_source_set_with_features(
+            &inputs,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
             &mut diags,
         );
+        let outputs = emit_analyzed(analysis, &stems, &RecordingBackend, "main", &mut diags);
 
         assert!(!diags.has_errors(), "{:?}", diags.diags);
         assert_eq!(outputs.len(), 2);
@@ -3451,22 +3312,20 @@ mod tests {
     #[test]
     fn compiler_does_not_lower_after_frontend_error() {
         let mut diags = DiagSink::new();
-        let files = vec![parse_source_with_detected_features(
-            "fun box(): Int = \"no\"",
-            &mut diags,
-        )];
+        let inputs = [SourceInput::kotlin("fun box(): Int = \"no\"").with_file_stem("Main")];
         let stems = vec!["Main".to_string()];
-        let mut syms = collect_signatures(&files, &mut diags);
-        let outputs = compile(
-            &files,
-            &stems,
-            &mut syms,
-            &RecordingBackend,
-            "main",
+        let analysis = analyze_source_set_with_features(
+            &inputs,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
             &mut diags,
         );
+        let outputs = emit_analyzed(analysis, &stems, &RecordingBackend, "main", &mut diags);
 
-        assert!(diags.has_errors());
+        assert_eq!(
+            emitted_diagnostics(&diags),
+            [(0, "return type mismatch: expected 'Int', actual 'String'.")]
+        );
         assert!(outputs.is_empty());
     }
 
@@ -3475,26 +3334,23 @@ mod tests {
         let parameter = "value".repeat(14 * 1024);
         let source = format!("fun crowded({parameter}: Int): Int = 0");
         let mut diags = DiagSink::new();
-        let files = vec![
-            parse_source_with_detected_features(&source, &mut diags),
-            parse_source_with_detected_features(&source, &mut diags),
+        let inputs = [
+            SourceInput::kotlin(&source).with_file_stem("First"),
+            SourceInput::kotlin(&source).with_file_stem("Second"),
         ];
         let stems = vec!["First".to_string(), "Second".to_string()];
-        let mut syms = collect_signatures(&files, &mut diags);
-        let outputs = compile(
-            &files,
-            &stems,
-            &mut syms,
-            &RecordingBackend,
-            "main",
+        let analysis = analyze_source_set_with_features(
+            &inputs,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
             &mut diags,
         );
+        let outputs = emit_analyzed(analysis, &stems, &RecordingBackend, "main", &mut diags);
 
-        assert!(diags.has_errors());
-        assert!(diags
-            .diags
-            .iter()
-            .any(|diagnostic| diagnostic.msg.starts_with("conflicting overloads:")));
+        assert_eq!(
+            emitted_diagnostics(&diags),
+            [(0, "conflicting overloads:"), (1, "conflicting overloads:"),]
+        );
         assert!(outputs.is_empty());
     }
 
@@ -3503,26 +3359,22 @@ mod tests {
         let source = "fun crowded(value: Int): Int = value\n\
                       private fun crowded(value: Int): Int = value";
         let mut diags = DiagSink::new();
-        let files = vec![parse_source_with_detected_features(source, &mut diags)];
+        let inputs = [SourceInput::kotlin(source).with_file_stem("Main")];
         let stems = vec!["Main".to_string()];
-        let mut syms = collect_signatures(&files, &mut diags);
-        let outputs = compile(
-            &files,
-            &stems,
-            &mut syms,
-            &RecordingBackend,
-            "main",
+        let analysis = analyze_source_set_with_features(
+            &inputs,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
             &mut diags,
         );
+        let outputs = emit_analyzed(analysis, &stems, &RecordingBackend, "main", &mut diags);
 
-        assert!(diags.has_errors());
         assert_eq!(
-            diags
-                .diags
-                .iter()
-                .filter(|diagnostic| diagnostic.msg.starts_with("conflicting overloads:"))
-                .count(),
-            2
+            emitted_diagnostics(&diags),
+            [
+                (0, "conflicting overloads:\nfun crowded(value: Int): Int"),
+                (0, "conflicting overloads:\nfun crowded(value: Int): Int"),
+            ]
         );
         assert!(outputs.is_empty());
     }
@@ -3530,37 +3382,30 @@ mod tests {
     #[test]
     fn cross_file_private_context_function_cannot_reach_lowering() {
         let mut diags = DiagSink::new();
-        let files = vec![
-            parse_source_with_detected_features(
+        let inputs = [
+            SourceInput::kotlin(
                 "fun <T, R> with(receiver: T, block: T.() -> R): R = receiver.block()\n\
                  class Scope\n\
                  fun use(scope: Scope): Int = with(scope) { hidden(1) }",
-                &mut diags,
-            ),
-            parse_source_with_detected_features(
+            )
+            .with_file_stem("Caller"),
+            SourceInput::kotlin(
                 "private context(scope: Scope) fun hidden(value: Int): Int = value",
-                &mut diags,
-            ),
+            )
+            .with_file_stem("Hidden"),
         ];
         let stems = vec!["Caller".to_string(), "Hidden".to_string()];
-        let mut syms = collect_signatures(&files, &mut diags);
-        let outputs = compile(
-            &files,
-            &stems,
-            &mut syms,
-            &RecordingBackend,
-            "main",
+        let analysis = analyze_source_set_with_features(
+            &inputs,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
             &mut diags,
         );
+        let outputs = emit_analyzed(analysis, &stems, &RecordingBackend, "main", &mut diags);
 
         assert_eq!(
-            diags
-                .diags
-                .iter()
-                .filter(|diagnostic| diagnostic.file == 0)
-                .map(|diagnostic| diagnostic.msg.as_str())
-                .collect::<Vec<_>>(),
-            ["cannot access 'hidden': it is private in its file"]
+            emitted_diagnostics(&diags),
+            [(0, "cannot access 'hidden': it is private in its file")]
         );
         assert!(outputs.is_empty());
     }
@@ -3569,50 +3414,42 @@ mod tests {
     fn compiler_does_not_emit_kotlin_scripts() {
         let source = "val value = 1";
         let mut diags = DiagSink::new();
-        let tokens = lex(source, &mut diags);
-        let files = vec![parse_script_with_features(
-            source,
-            &tokens,
-            &mut diags,
-            &LangFeatures::new(),
-        )];
+        let inputs = [SourceInput::kotlin_script(source).with_file_stem("Script")];
         let stems = vec!["Script".to_string()];
-        let mut syms = collect_signatures(&files, &mut diags);
-        let outputs = compile(
-            &files,
-            &stems,
-            &mut syms,
-            &RecordingBackend,
-            "main",
+        let analysis = analyze_source_set_with_features(
+            &inputs,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
             &mut diags,
         );
+        let outputs = emit_analyzed(analysis, &stems, &RecordingBackend, "main", &mut diags);
 
         assert!(outputs.is_empty());
-        assert!(diags
-            .diags
-            .iter()
-            .any(|diagnostic| diagnostic.msg.contains("cannot be emitted")));
+        assert_eq!(
+            emitted_diagnostics(&diags),
+            [(0, "Kotlin scripts can be analyzed but cannot be emitted")]
+        );
     }
 
     #[test]
-    fn checked_emission_rejects_misaligned_source_metadata() {
+    fn streamed_emission_rejects_misaligned_source_metadata() {
         let mut diags = DiagSink::new();
-        let files = vec![parse_source_with_detected_features(
-            "fun box(): String = \"OK\"",
-            &mut diags,
-        )];
-        let syms = collect_signatures(&files, &mut diags);
-        let outputs = emit_checked(
-            &files,
-            &[],
-            &[],
-            &syms,
-            &RecordingBackend,
-            "main",
+        let inputs = [SourceInput::kotlin("fun box(): String = \"OK\"").with_file_stem("Main")];
+        let analysis = analyze_source_set_with_features(
+            &inputs,
+            Box::new(EmptySymbolSource),
+            &LangFeatures::new(),
             &mut diags,
         );
+        let outputs = emit_analyzed(analysis, &[], &RecordingBackend, "main", &mut diags);
 
         assert!(outputs.is_empty());
-        assert!(diags.has_errors());
+        assert_eq!(
+            emitted_diagnostics(&diags),
+            [(
+                0,
+                "internal error: source files, stems, and checked types have different lengths"
+            )]
+        );
     }
 }

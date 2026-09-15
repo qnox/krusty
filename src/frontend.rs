@@ -12,7 +12,6 @@ use crate::libraries::{EmptySymbolSource, SemanticPlatform};
 mod header_validation;
 mod inline_preparation;
 mod retained_syntax;
-pub(crate) use crate::resolve::class_internal_resolver;
 pub use crate::resolve::ClassFlags as FrontendClassFlags;
 pub(crate) use crate::resolve::ClassModel as FrontendClassModel;
 pub(crate) use crate::resolve::ClassSig as FrontendClassSig;
@@ -40,17 +39,6 @@ pub(crate) use crate::resolve::{selected_context_values, SelectedContextSources}
 /// Types carried by the public source-set analysis signatures, re-exported here so process
 /// adapters do not have to reach through the frontend boundary into source classification.
 pub use crate::source::{SourceInput, SourceKind};
-
-/// A single parsed file together with the frontend facts needed by a backend.
-pub struct CheckedFile<'a> {
-    pub file: &'a File,
-    pub file_index: u32,
-    pub info: &'a FrontendTypeInfo,
-    pub symbols: &'a FrontendSymbols,
-    /// The compilation's module name (kotlinc `-module-name`), for the serialization plugin's
-    /// `write$Self$<module>` helper. `"main"` by default.
-    pub module_name: &'a str,
-}
 
 /// Analysis result for a jointly compiled source set.
 ///

@@ -71,10 +71,10 @@ mod tests {
 
     #[test]
     fn backend_contract_uses_only_frontend_handoff_dependencies() {
-        // The streaming handoff owns one common-IR unit plus a classifier-only semantic view. The
-        // legacy `lower_file` method still names `CheckedFile`; production `CheckedIrFile` cannot
-        // expose parser arenas, source maps, resolver entry points, or the frontend symbol table.
-        assert_allowed_crate_modules("src/backend.rs", &["diag", "fir", "frontend", "ir"]);
+        // The streaming handoff owns one common-IR unit plus a classifier-only semantic view.
+        // `CheckedIrFile` cannot expose parser arenas, source maps, resolver entry points, or the
+        // frontend symbol table.
+        assert_allowed_crate_modules("src/backend.rs", &["diag", "fir", "ir"]);
         assert_allowed_crate_modules_in_tree(
             "src/backend",
             &[
