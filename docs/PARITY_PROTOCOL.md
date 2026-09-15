@@ -2492,7 +2492,7 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `tests/serializer_metadata_class_id_e2e.rs::a_generated_serializer_records_kotlincs_class_id`,
   `the_serializable_class_itself_still_records_its_own_class_id`.
 - **Every single-operand node hoists its suspension, not a subset (fix).** The suspend hoister
-  recurses through one IR node kind per arm, and two nodes had none: an enum lookup's name
+  recurses through one IR node kind per arm. Source-reachable gaps included an enum lookup's name
   (`enumValueOf<Level>(pickName())`) and the construction of the `Ref` holder that boxes a captured
   mutable local (`var total = count()` where a closure captures `total`). Either left the suspension
   where the state-machine flattener cannot split it, so the backend declined the whole function with
@@ -2503,8 +2503,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   needed nothing: that is a holder write, which already had its arm, and it is the control that
   isolates the holder's construction as the gap. Found by listing every `IrExpr` variant, diffing it
   against the arms the hoister handles, and compiling one fixture per variant that can carry a
-  sub-expression.
+  sub-expression. `NewArray(size)` and bound `KClassLiteral(value)` are covered too; the remaining
+  unconditional one-child nodes (`RefGet`, `EnclosingInstance`, `LateinitInitialized`) now recurse
+  directly rather than relying on their current source constructors to supply pure operands. Before
+  hoisting, a suspending body also expands shared common-IR DAG operands into private per-use nodes.
+  That ownership step happens before lexical-scope and debug-line capture, so every cloned suspension
+  keeps authoritative side-table identity and a temp inserted for one parent never leaks into another.
   `tests/suspend_single_operand_hoist_e2e.rs::an_enum_lookup_hoists_a_suspending_name`,
   `a_captured_local_hoists_a_suspending_initializer`,
   `a_captured_local_assigned_from_a_suspension_later_still_works`,
-  `an_enum_lookup_with_no_suspension_still_works`.
+  `an_enum_lookup_with_no_suspension_still_works`,
+  `src/jvm/suspend/hoisting.rs::tests::a_shared_operand_is_hoisted_independently_at_each_use`,
+  `every_remaining_single_operand_node_recurses`.

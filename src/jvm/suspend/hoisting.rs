@@ -689,6 +689,11 @@ fn hoist_expr(
             ir.exprs[e as usize] = IrExpr::RefNew { elem, init };
             e
         }
+        IrExpr::RefGet { holder, elem } => {
+            let holder = hoist_expr(ir, holder, suspend_set, orig_rets, value_types, prelude);
+            ir.exprs[e as usize] = IrExpr::RefGet { holder, elem };
+            e
+        }
         // `arrayOfNulls<String>(count())` — the size evaluates before the array exists, so a
         // suspension in it hoists like any other single operand.
         IrExpr::NewArray { array_type, size } => {
@@ -953,6 +958,32 @@ fn hoist_expr(
             let nr = hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::GetField {
                 receiver: nr,
+                class,
+                index,
+            };
+            e
+        }
+        IrExpr::EnclosingInstance {
+            receiver,
+            inner,
+            outer,
+        } => {
+            let receiver = hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude);
+            ir.exprs[e as usize] = IrExpr::EnclosingInstance {
+                receiver,
+                inner,
+                outer,
+            };
+            e
+        }
+        IrExpr::LateinitInitialized {
+            receiver,
+            class,
+            index,
+        } => {
+            let receiver = hoist_expr(ir, receiver, suspend_set, orig_rets, value_types, prelude);
+            ir.exprs[e as usize] = IrExpr::LateinitInitialized {
+                receiver,
                 class,
                 index,
             };
@@ -1322,10 +1353,128 @@ fn hoisted_value_ty(
             .get(*class as usize)
             .and_then(|class| class.fields.get(*index as usize))
             .map(|field| field.ty),
+        IrExpr::EnclosingInstance { outer, .. } => Some(Ty::obj_name(*outer)),
+        IrExpr::LateinitInitialized { class, index, .. } => ir
+            .classes
+            .get(*class as usize)
+            .and_then(|class| class.fields.get(*index as usize))
+            .map(|field| field.ty),
         IrExpr::PropertyRead { ty, .. } => {
             (!matches!(ty, Ty::Unit | Ty::Error | Ty::TyParam(..))).then_some(*ty)
         }
         IrExpr::RefGet { elem, .. } => Some(*elem),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{IrIntrinsicSuspensionKind, IrIntrinsicSuspensionPoint};
+
+    #[test]
+    fn a_shared_operand_is_hoisted_independently_at_each_use() {
+        let mut ir = IrFile::default();
+        let suspension = ir.add_expr(IrExpr::UnitInstance);
+        ir.intrinsic_suspension_points.insert(
+            suspension,
+            IrIntrinsicSuspensionPoint {
+                result: Ty::String,
+                kind: IrIntrinsicSuspensionKind::Safe,
+            },
+        );
+        let shared = ir.add_expr(IrExpr::EnumValueOf {
+            classifier: type_name("example/Level"),
+            arg: suspension,
+        });
+        let concat = ir.add_expr(IrExpr::StringConcat(vec![shared, shared]));
+        let returned = ir.add_expr(IrExpr::Return(Some(concat)));
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![returned],
+            value: None,
+        });
+
+        crate::ir::make_expression_children_unique(&mut ir, body);
+        hoist_suspensions(&mut ir, body, &HashSet::new(), &[], &mut HashMap::new());
+
+        let IrExpr::Block { stmts, .. } = &ir.exprs[body as usize] else {
+            panic!("hoisting must retain the function body block")
+        };
+        let suspension_bindings = stmts
+            .iter()
+            .filter(|&&statement| {
+                let IrExpr::Variable {
+                    init: Some(initializer),
+                    ..
+                } = ir.exprs[statement as usize]
+                else {
+                    return false;
+                };
+                ir.intrinsic_suspension_points.contains_key(&initializer)
+            })
+            .count();
+        assert_eq!(
+            suspension_bindings, 2,
+            "each reference to a shared expression is a distinct evaluation"
+        );
+    }
+
+    #[test]
+    fn every_remaining_single_operand_node_recurses() {
+        for shape in ["ref-get", "enclosing-instance", "lateinit-initialized"] {
+            let mut ir = IrFile::default();
+            let suspension = ir.add_expr(IrExpr::UnitInstance);
+            ir.intrinsic_suspension_points.insert(
+                suspension,
+                IrIntrinsicSuspensionPoint {
+                    result: Ty::String,
+                    kind: IrIntrinsicSuspensionKind::Safe,
+                },
+            );
+            let expression = match shape {
+                "ref-get" => IrExpr::RefGet {
+                    holder: suspension,
+                    elem: Ty::String,
+                },
+                "enclosing-instance" => IrExpr::EnclosingInstance {
+                    receiver: suspension,
+                    inner: type_name("example/Outer$Inner"),
+                    outer: type_name("example/Outer"),
+                },
+                "lateinit-initialized" => IrExpr::LateinitInitialized {
+                    receiver: suspension,
+                    class: 0,
+                    index: 0,
+                },
+                _ => unreachable!(),
+            };
+            let expression = ir.add_expr(expression);
+            let returned = ir.add_expr(IrExpr::Return(Some(expression)));
+            let body = ir.add_expr(IrExpr::Block {
+                stmts: vec![returned],
+                value: None,
+            });
+
+            crate::ir::make_expression_children_unique(&mut ir, body);
+            hoist_suspensions(&mut ir, body, &HashSet::new(), &[], &mut HashMap::new());
+
+            let IrExpr::Block { stmts, .. } = &ir.exprs[body as usize] else {
+                panic!("hoisting must retain the function body block")
+            };
+            assert_eq!(
+                stmts
+                    .iter()
+                    .filter(|&&statement| {
+                        matches!(
+                            ir.exprs[statement as usize],
+                            IrExpr::Variable { init: Some(initializer), .. }
+                                if ir.intrinsic_suspension_points.contains_key(&initializer)
+                        )
+                    })
+                    .count(),
+                1,
+                "{shape} must expose its unconditional suspending operand"
+            );
+        }
     }
 }

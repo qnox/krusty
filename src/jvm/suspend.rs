@@ -200,6 +200,16 @@ pub fn lower_suspend(
         let fn_unit_ret = orig_rets[fid as usize] == Ty::Unit;
         let forward =
             body.and_then(|b| tail_forward_call(ir, b, &suspend_set, fn_unit_ret, &orig_rets));
+        // Common IR is a DAG and may share one operand between several evaluation sites. Hoisting
+        // rewrites descendants in place and installs each suspension temp in the current parent's
+        // prelude, so every non-forward body that can reach a suspension must own one node per use.
+        // Do this before scope/debug-line capture: cloned suspension identities then become the
+        // authoritative keys used by every later coroutine phase.
+        if let (Some(b), None) = (body, forward) {
+            if expr_calls_suspend(ir, b, &suspend_set) {
+                crate::ir::make_expression_children_unique(ir, b);
+            }
+        }
         // Capture the per-suspension lexical scope lists BEFORE splice/hoist reshape the body:
         // `splice_return_blocks` flattens block STATEMENTS into their parent, which would leak a
         // block-scoped local (a `for`-loop iterator) into every later suspension's scope. Suspend-call
@@ -1769,7 +1779,6 @@ fn normalize_value_when(ir: &mut IrFile, expression: ExprId) -> Option<ExprId> {
         _ => None,
     }
 }
-
 
 /// Snapshot the semantic types in one function's value-index namespace before suspend hoisting.
 /// `IrFile::exprs` is a module-wide arena while `GetValue(n)` is function-local, so any type query

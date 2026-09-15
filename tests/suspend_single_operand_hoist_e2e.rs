@@ -1,10 +1,12 @@
 //! The suspend hoister descends into every single-operand node, not a subset of them.
 //!
-//! `hoist_expr` recurses through one IR node kind per arm, and two nodes had no arm at all:
+//! `hoist_expr` recurses through one IR node kind per arm, and four source-reachable nodes had no arm:
 //!
 //! * `enumValueOf<Level>(pickName())` — the enum lookup's operand;
 //! * `var total = count()` where a lambda captures `total`, which boxes the local into a
-//!   `Ref` holder whose INITIALIZER then held the suspension.
+//!   `Ref` holder whose INITIALIZER then held the suspension;
+//! * `arrayOfNulls<String>(size())` — the new array's size;
+//! * `make()::class` — the bound class literal's receiver.
 //!
 //! Both left the suspension buried where the state-machine flattener cannot split it, so the backend
 //! declined the whole function:
@@ -200,7 +202,10 @@ fun box(): String {{\n\
 \x20   return if (made[0] == null) \"OK\" else \"FAIL: element\"\n\
 }}\n"
     );
-    assert_eq!(run_box_with("an_array_size_hoists_a_suspension", &main), "OK");
+    assert_eq!(
+        run_box_with("an_array_size_hoists_a_suspension", &main),
+        "OK"
+    );
 }
 
 /// A BOUND class literal whose receiver suspends. `make()::class` evaluates the receiver for its
@@ -225,8 +230,8 @@ fun box(): String {{\n\
 }
 
 /// Two single-operand nodes fed by SEPARATE suspensions in one expression. Each operand must be
-/// hoisted to its own temp, in evaluation order, and each must run exactly once — the shape that a
-/// hoist rewriting a shared arena node in place would get wrong.
+/// hoisted to its own temp, in evaluation order, and each must run exactly once. Shared-arena-node
+/// ownership is covered separately by the hoister unit test, which constructs a real DAG.
 #[test]
 fn two_operands_in_one_expression_each_hoist_once() {
     let main = format!(
