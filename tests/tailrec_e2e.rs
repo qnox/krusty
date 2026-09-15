@@ -147,20 +147,23 @@ fun box(): String {\n\
 }
 
 #[test]
-fn a_return_inside_an_inlined_lambda_keeps_its_call() {
-    // The other boundary: a lambda's `return`s are the lambda's to answer, and nothing at this
-    // level separates one that leaves this function from one that leaves only the lambda. Left
-    // alone, so the answer must simply still be right.
-    const SRC: &str = "tailrec fun inLambda(n: Int, acc: Int): Int {\n\
-    run {\n\
-        if (n == 0) return acc\n\
-        return inLambda(n - 1, acc + 1)\n\
-    }\n\
-    return -1\n\
+fn a_lambda_in_the_body_keeps_its_own_returns_while_the_body_is_rewritten() {
+    // The other boundary, from the outside. `step` is a real function VALUE built inside the
+    // `tailrec` body: its `return@step` belongs to the lambda, and rewriting it would turn a value
+    // the lambda yields into a step of the enclosing function's loop. The enclosing `return` is
+    // this function's and must still become that step — 1,000,000 deep, so the two claims are
+    // separable by what the program does rather than by inspecting the IR.
+    //
+    // Deliberately NOT `run { … }`: an inline call is spliced structurally before this pass, so it
+    // leaves no lambda for the walk to stop at and would test nothing.
+    const SRC: &str = "tailrec fun viaLambda(n: Int, acc: Int): Int {\n\
+    val step: (Int) -> Int = inner@{ x -> if (x < 0) return@inner 0 else x + 1 }\n\
+    if (n == 0) return acc\n\
+    return viaLambda(n - 1, acc + step(0))\n\
 }\n\
 fun box(): String {\n\
-    val answer = inLambda(100, 0)\n\
-    return if (answer == 100) \"OK\" else \"fail: \" + answer\n\
+    val answer = viaLambda(1000000, 0)\n\
+    return if (answer == 1000000) \"OK\" else \"fail: \" + answer\n\
 }\n";
     let out = run(SRC);
     assert_eq!(out, "OK");
@@ -240,9 +243,8 @@ fun box(): String {\n\
     if (sum(10) != 55) return \"fail sum\"\n\
     return \"OK\"\n\
 }\n";
-    let Some((krusty, reference)) = common::box_run_matches_kotlinc(SRC, "TailrecDiff") else {
-        panic!("tailrec differential: reference compiler unavailable");
-    };
+    let reference = common::kotlinc_box_result(SRC);
+    let krusty = run(SRC);
     assert_eq!(krusty, reference, "krusty and kotlinc disagree");
     assert_eq!(krusty, "OK");
 }

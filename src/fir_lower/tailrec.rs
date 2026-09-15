@@ -29,9 +29,7 @@ pub(super) fn finish_tailrec_body(
     // nothing of this function runs after one. `tail_value` reads the first off the body's shape,
     // and this sweeps the rest out of the whole body — after the rebuild above, so a tail the
     // rebuild already turned into a loop step is not visited a second time.
-    for &root in &roots {
-        rewrite_returned_tail_calls(ir, root, function, parameter_count, result, origin)?;
-    }
+    rewrite_returned_tail_calls(ir, &roots, function, parameter_count, result, origin)?;
     let loop_body = generated(
         ir,
         IrExpr::Block {
@@ -62,6 +60,47 @@ pub(super) fn finish_tailrec_body(
     ))
 }
 
+/// How many parent edges reach each node from the body's roots.
+///
+/// Counted over EVERY edge, including the ones the sweep will not follow — a `try`'s contents and a
+/// lambda's inline body. Common IR is a DAG: lowering may hand one id to two parents, and the
+/// second parent is exactly the one that must not see a rewrite made through the first. A node this
+/// says is reached once is one no other parent can observe changing.
+fn parent_edges(ir: &IrFile, roots: &[ExprId]) -> std::collections::HashMap<ExprId, u32> {
+    let mut edges: std::collections::HashMap<ExprId, u32> = std::collections::HashMap::new();
+    // A root is owned by the body itself, which is an edge like any other.
+    for &root in roots {
+        *edges.entry(root).or_default() += 1;
+    }
+    let mut pending: Vec<ExprId> = roots.to_vec();
+    let mut expanded = std::collections::HashSet::new();
+    while let Some(expression) = pending.pop() {
+        // A node declares its children once however many edges reach it; expanding it twice would
+        // count the same edges again rather than find new ones.
+        if !expanded.insert(expression) {
+            continue;
+        }
+        let mut children = Vec::new();
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
+        for child in children {
+            *edges.entry(child).or_default() += 1;
+            pending.push(child);
+        }
+    }
+    edges
+}
+
+/// Whether a `return` leaves THIS function.
+///
+/// The checked depth is the authority, not the shape the `return` sits in: zero is a return of this
+/// callable and a deeper one targets a frame outside it. A `return` lowering generated itself
+/// carries no depth and is this function's by construction.
+fn returns_from_here(ir: &IrFile, expression: ExprId) -> bool {
+    ir.checked_return_depths
+        .get(&expression)
+        .is_none_or(|&depth| depth == 0)
+}
+
 /// Rewrite every self-call that a `return` puts in tail position, wherever in the body it stands.
 ///
 /// What makes a `return` a tail position is not the shape it sits in: nothing of this function runs
@@ -72,23 +111,33 @@ pub(super) fn finish_tailrec_body(
 ///
 /// What does stop the walk is OWNERSHIP of the `return`, and of what runs after it:
 ///
-/// * An inlined lambda's body. Its `return`s are the lambda's to answer, and a non-local one that
-///   is this function's reaches the surrounding statement anyway; a local one does not, and nothing
-///   at this level tells them apart. The lambda's CAPTURES are ordinary expressions of this
-///   function and stay in the walk.
+/// * An inlined lambda's body. Its `return`s answer to the lambda, and a depth-ZERO one there is
+///   the lambda's own — the one shape the checked depth below cannot tell apart from this
+///   function's, which is why the boundary and not the depth is what keeps the walk out. The
+///   lambda's CAPTURES are ordinary expressions of this function and stay in the walk.
 /// * A `try`. Its `finally` still has to run, so a `return` inside it does not leave directly.
 ///
-/// The rewrite happens IN PLACE, at the `return`'s own id: it is the same statement, saying the
-/// same thing, and everything that referred to it still does.
+/// The rewrite happens IN PLACE, at the `return`'s own id, and two facts make that sound rather
+/// than convenient:
+///
+/// * The node is reached by exactly ONE edge. A `return` the DAG shares is left alone — the program
+///   keeps recursing, which is the answer this pass started from and is never a wrong one. Rewriting
+///   it would change what the other parent sees, and that parent may be the `try` or the inline body
+///   this walk deliberately did not enter.
+/// * The `return` is this function's, by its checked depth rather than by where it was found.
+///
+/// A slot that stops being a `Return` gives up its `checked_return_depths` entry with it: that fact
+/// describes a return node, and the side table's contract is that only a return carries one.
 fn rewrite_returned_tail_calls(
     ir: &mut IrFile,
-    root: ExprId,
+    roots: &[ExprId],
     function: FunId,
     parameter_count: usize,
     result: Ty,
     origin: OriginId,
 ) -> Result<(), FirLoweringFailure> {
-    let mut pending = vec![root];
+    let edges = parent_edges(ir, roots);
+    let mut pending: Vec<ExprId> = roots.to_vec();
     let mut seen = std::collections::HashSet::new();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
@@ -102,7 +151,9 @@ fn rewrite_returned_tail_calls(
                 pending.extend(captures.clone());
                 continue;
             }
-            IrExpr::Return(Some(_)) => {
+            IrExpr::Return(Some(_))
+                if returns_from_here(ir, expression) && edges.get(&expression) == Some(&1) =>
+            {
                 // The same rewriter the body's own tail goes through, asked about this `return`
                 // instead: it is a tail position too, so whatever it makes of the body's last
                 // expression it makes of this one. The answer replaces the `return` where it
@@ -111,6 +162,9 @@ fn rewrite_returned_tail_calls(
                     tail_value(ir, expression, function, parameter_count, result, origin)?;
                 let node = ir.expr(rebuilt).clone();
                 let stepped = !matches!(node, IrExpr::Return(_));
+                if stepped {
+                    ir.checked_return_depths.remove(&expression);
+                }
                 ir.exprs[expression as usize] = node;
                 if stepped {
                     continue;
@@ -279,4 +333,157 @@ fn generated(ir: &mut IrFile, expression: IrExpr, cause: OriginId) -> ExprId {
         },
     );
     id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{IrFunction, IrNodeOrigin};
+
+    const FUNCTION: FunId = 0;
+
+    /// A one-parameter `tailrec fun step(n: Int): Int` with nothing in it yet. The body is supplied
+    /// per test, because what each test is about is the SHAPE the sweep is handed.
+    fn file() -> IrFile {
+        let mut ir = IrFile::default();
+        ir.add_fun(IrFunction {
+            name: "step".to_string(),
+            params: vec![Ty::Int],
+            ret: Ty::Int,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        ir
+    }
+
+    /// `return step(n)` — the shape the rewrite turns into a loop step.
+    fn returned_self_call(ir: &mut IrFile) -> ExprId {
+        let argument = ir.add_expr(IrExpr::GetValue(0));
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(FUNCTION),
+            dispatch_receiver: None,
+            args: vec![argument],
+        });
+        ir.add_expr(IrExpr::Return(Some(call)))
+    }
+
+    fn finish(ir: &mut IrFile, roots: Vec<ExprId>) {
+        finish_tailrec_body(ir, roots, FUNCTION, 1, OriginId::from_raw(0))
+            .expect("the body has a tail");
+    }
+
+    /// Every node carrying a checked return depth is still a `Return`, which is the side table's
+    /// documented contract.
+    fn depths_describe_returns(ir: &IrFile) -> bool {
+        ir.checked_return_depths
+            .keys()
+            .all(|&expression| matches!(ir.expr(expression), IrExpr::Return(_)))
+    }
+
+    #[test]
+    fn a_return_reached_by_one_edge_becomes_a_loop_step() {
+        // The control for the two tests below: with nothing else pointing at it, the `return` is
+        // rewritten, so a later "left alone" is the guard working and not the rewrite being off.
+        let mut ir = file();
+        let returned = returned_self_call(&mut ir);
+        ir.checked_return_depths.insert(returned, 0);
+        let tail = ir.add_expr(IrExpr::Return(None));
+        finish(&mut ir, vec![returned, tail]);
+
+        assert!(
+            matches!(ir.expr(returned), IrExpr::Block { .. }),
+            "a uniquely owned `return` of a self call is the loop step"
+        );
+        // The slot stopped being a `Return`, so the fact that described it went with it.
+        assert_eq!(ir.checked_return_depths.get(&returned), None);
+        assert!(depths_describe_returns(&ir));
+    }
+
+    #[test]
+    fn a_return_the_dag_shares_with_a_try_is_left_alone() {
+        // Common IR is a DAG. This `return` is reachable both as an ordinary statement and from
+        // inside a `try`, which the sweep deliberately does not enter — so rewriting it through
+        // the edge the sweep DOES follow would change what the `try` holds, where a `finally` still
+        // has to run. One edge is the whole licence to rewrite in place, and there are two here.
+        let mut ir = file();
+        let shared = returned_self_call(&mut ir);
+        let guarded = ir.add_expr(IrExpr::Try {
+            body: shared,
+            catches: Vec::new(),
+            finally: None,
+            result: Ty::Int,
+        });
+        let tail = ir.add_expr(IrExpr::Return(None));
+        finish(&mut ir, vec![shared, guarded, tail]);
+
+        assert!(
+            matches!(ir.expr(shared), IrExpr::Return(Some(_))),
+            "a `return` the DAG shares is left as it was"
+        );
+        assert!(depths_describe_returns(&ir));
+    }
+
+    #[test]
+    fn a_lambdas_capture_is_swept_and_its_inline_body_is_not() {
+        // The two halves of one boundary. A lambda's captures are evaluated by THIS function, so a
+        // `return` among them is this function's tail position; its inline body belongs to the
+        // lambda, and a depth-ZERO return there is the lambda's own — the one shape the checked
+        // depth cannot tell apart from this function's, which is why the boundary and not the depth
+        // is what keeps the sweep out of an inline body.
+        let mut ir = file();
+        let capture = returned_self_call(&mut ir);
+        ir.checked_return_depths.insert(capture, 0);
+        let inner = returned_self_call(&mut ir);
+        ir.checked_return_depths.insert(inner, 0);
+        let lambda = ir.add_expr(IrExpr::Lambda {
+            impl_fn: FUNCTION,
+            arity: 0,
+            captures: vec![capture],
+            sam: None,
+            inline_body: Some(inner),
+        });
+        let tail = ir.add_expr(IrExpr::Return(None));
+        finish(&mut ir, vec![lambda, tail]);
+
+        assert!(
+            matches!(ir.expr(capture), IrExpr::Block { .. }),
+            "a capture expression is this function's and is swept"
+        );
+        assert!(
+            matches!(ir.expr(inner), IrExpr::Return(Some(_))),
+            "an inline body is the lambda's and is left whole"
+        );
+        assert_eq!(ir.checked_return_depths.get(&inner), Some(&0));
+        assert!(depths_describe_returns(&ir));
+    }
+
+    #[test]
+    fn a_return_that_targets_an_outer_frame_is_left_alone() {
+        // The ownership test is the checked DEPTH, not the shape the `return` was found in: a
+        // non-zero depth names a frame outside this one, and stepping this function's loop would
+        // answer a question nobody asked.
+        let mut ir = file();
+        let returned = returned_self_call(&mut ir);
+        ir.checked_return_depths.insert(returned, 1);
+        let tail = ir.add_expr(IrExpr::Return(None));
+        finish(&mut ir, vec![returned, tail]);
+
+        assert!(matches!(ir.expr(returned), IrExpr::Return(Some(_))));
+        assert_eq!(ir.checked_return_depths.get(&returned), Some(&1));
+        assert!(depths_describe_returns(&ir));
+    }
+
+    #[test]
+    fn a_generated_node_records_where_it_came_from() {
+        let mut ir = file();
+        let tail = ir.add_expr(IrExpr::Return(None));
+        finish(&mut ir, vec![tail]);
+        let generated = ir.exprs.len() as ExprId - 1;
+        assert!(matches!(
+            ir.fir_origins.get(&generated),
+            Some(IrNodeOrigin::Synthetic { .. })
+        ));
+    }
 }
