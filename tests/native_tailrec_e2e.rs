@@ -45,13 +45,31 @@ fn a_tailrec_still_holding_a_self_call_is_declined() {
 }
 
 #[test]
-fn a_tailrec_with_a_receiver_to_rebind_is_declined() {
-    // The rewrite assigns the parameters and jumps; an extension's receiver is not a parameter it
-    // can assign, so this one is never attempted and the function recurses as written.
-    expect_native_decline(
+fn a_tailrec_extension_rebinds_its_receiver_and_runs_flat() {
+    // This was declined on the premise that an extension's receiver is not a parameter the step can
+    // assign. It is one: the receiver is inserted into the parameter list at its own position and
+    // passed as an ordinary argument, so the step re-binds it like any other — which is also why
+    // the self-call may name a DIFFERENT receiver and still be a loop step. A million deep is the
+    // observable, since an emitted call would exhaust any stack this target has.
+    expect_native_box(
         "tailrec fun Int.walk(acc: Int): Int = if (this == 0) acc else (this - 1).walk(acc + 1)\n\
          fun box(): String = if (1000000.walk(0) == 1000000) \"OK\" else \"fail\"\n",
         "ExtensionTailrec",
-        "common lowering leaves recursive",
+        "OK",
+    );
+}
+
+#[test]
+fn a_tailrec_member_steps_on_its_own_instance_and_runs_flat() {
+    // The member counterpart: the self-call dispatches on `this`, so the instance does not change
+    // and only the parameters are reassigned.
+    expect_native_box(
+        "class Counter(val step: Int) {\n\
+         \x20   tailrec fun count(n: Int, acc: Int): Int =\n\
+         \x20       if (n == 0) acc else count(n - 1, acc + step)\n\
+         }\n\
+         fun box(): String = if (Counter(1).count(1000000, 0) == 1000000) \"OK\" else \"fail\"\n",
+        "MemberTailrec",
+        "OK",
     );
 }

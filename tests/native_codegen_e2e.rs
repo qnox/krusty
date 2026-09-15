@@ -1352,33 +1352,23 @@ fn a_tailrec_the_checked_lowering_leaves_recursive_is_declined() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
         return;
     };
-    // `tailrec` is a promise about STACK, and only a top-level non-extension function has its tail
-    // calls rewritten into a loop today. A member, an extension or a local `tailrec` still recurses,
-    // and the source wrote the modifier because it recurses past any stack — so accepting one means
-    // emitting a program that dies on a guard page at a depth the source expects to survive. How
-    // deep a native stack goes is the machine's business, and a gate must not depend on it, so the
-    // generator declines these instead of compiling them into a crash.
-    for (label, source) in [
-        (
-            "a member",
-            "class Counter {\n\
-             \x20   tailrec fun down(n: Int) { if (n > 0) down(n - 1) }\n\
-             }\n\
-             fun main() { Counter().down(1000000) }\n",
-        ),
-        (
-            "an extension",
-            "tailrec fun Int.down(n: Int) { if (n > 0) this.down(n - 1) }\n\
-             fun main() { 1.down(1000000) }\n",
-        ),
-        (
-            "a local",
-            "fun main() {\n\
-             \x20   tailrec fun down(n: Int) { if (n > 0) down(n - 1) }\n\
-             \x20   down(1000000)\n\
-             }\n",
-        ),
-    ] {
+    // `tailrec` is a promise about STACK, and the source wrote the modifier because the function
+    // recurses past any stack — so accepting one the rewrite did not take means emitting a program
+    // that dies on a guard page at a depth the source expects to survive. How deep a native stack
+    // goes is the machine's business, and a gate must not depend on it, so the generator declines
+    // these instead of compiling them into a crash.
+    //
+    // A member and an extension used to be on this list. They are rewritten now — the rewrite is a
+    // question about the FRAME rather than about where a function was declared — and
+    // `native_tailrec_e2e` asserts they run flat. What is left is the LOCAL `tailrec`, whose
+    // captures take slots the step does not reassign.
+    for (label, source) in [(
+        "a local",
+        "fun main() {\n\
+         \x20   tailrec fun down(n: Int) { if (n > 0) down(n - 1) }\n\
+         \x20   down(1000000)\n\
+         }\n",
+    )] {
         let (_, diagnostics) = compile(&[("Main", source)], target);
         assert!(
             diagnostics
