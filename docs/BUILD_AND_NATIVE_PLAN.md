@@ -1566,6 +1566,23 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **A mapped builtin arrives under its physical name — a base move, not an increment.** `s[i]`
+   stopped lowering on a head that had changed nothing about strings: both string-indexing tests
+   failed with `the native backend does not support the member java.lang.String.charAt yet`.
+   `kotlin.CharSequence.get` used to reach a backend under its KOTLIN name, and the JVM emitter
+   rewrote it to `charAt` at the point of emission. Master's #939 modelled mapped builtins as
+   resolved realizations, which moves that answer upstream: the realization names
+   `java.lang.CharSequence.charAt` as the physical member, so the physical name is what a backend is
+   now handed. The native intrinsic table matched only `get` and declined its own string indexing.
+   Both names map to `kt_string_get` — the same member reached by two routes, so an alias rather
+   than a replacement, for the same reason `kotlin_owner` accepts `java/lang/String` alongside
+   `kotlin/String`. Four realizations rename a member; the other three (`Map.keys`, `Map.entries`,
+   `MutableList.removeAt`) reach this backend through the list intrinsics instead.
+   The lesson is about where the native backend is exposed: it reads the SAME resolved signatures
+   the JVM backend does, so a core change to how a member is named is a native change whether or not
+   it names the native backend. The JVM side absorbed this one in `physical_name_for_call`; nothing
+   made the native table's omission visible until its own e2e tests ran.
+
    **The two built-in supertypes, for 2652.** `is Number` and `is Comparable<*>` were declining for
    the reason the array check did: no descriptor to compare against. Neither type has an instance of
    its own, so each is a descriptor the boxes POINT AT — the interface list the runtime's `is`
@@ -1600,6 +1617,25 @@ before:**
    expectation down would have been recording a guess as a fact.
    So: not a small increment, and blocked on something I cannot measure here. The JVM defects want
    their own change; the identity question wants kotlinc.
+
+   **Resolved, both halves.** A kotlinc 2.4.10 was provisioned by hand — `just` is unavailable here,
+   so `run-tests.sh` never reached its provisioning step, and running those four steps directly
+   (download the release, extract it, point `KRUSTY_KOTLINC` at the binary, point
+   `KRUSTY_KOTLIN_BOX_DIR` at the corpus) takes a few minutes. The question then turned out not to
+   be open at all. `javap` shows `kotlin.UIntArray` is a real class
+   with `box-impl` and `unbox-impl`, and kotlinc answers `(UIntArray(1) as Any) is IntArray` with
+   **false**: a value class crossing into `Any` becomes its box. krusty answers `true` because it
+   does not box at that boundary — a SEPARATE defect from the widths, now pinned by a test that
+   asserts both answers exactly rather than merely that they differ.
+   The JVM width defects are #940, which is where the four opcode/atype/descriptor tables stop
+   carrying unsigned names of their own and route through `Ty::scalar_value_repr` and
+   `PRIM_ARRAY_CLASSES` instead. The native increment this entry set out to write is unblocked once
+   that lands.
+   The entry above stands as written because backing out was the right call on what was known then.
+   What it got wrong is narrower than it reads: "not mine to settle" was true, but "blocked on
+   something I cannot measure here" was a statement about the environment that a few minutes of
+   provisioning falsified. An unavailable oracle is worth trying to obtain before it is recorded as
+   a blocker.
 
    **A ledger entry #897 retired, for 2647 — and a lesson about what CI actually builds.** Both
    conformance lanes went red on a head whose native lane is green locally, with one line of
