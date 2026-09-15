@@ -1566,6 +1566,20 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **A ledger entry #897 retired, for 2647 — and a lesson about what CI actually builds.** Both
+   conformance lanes went red on a head whose native lane is green locally, with one line of
+   explanation: `super/kt4173_2.kt: listed in native_box_expected_failures.txt but passes now`.
+   Locally that case SIGSEGVs, deterministically, five runs out of five.
+   The difference is not the machine. GitHub builds a pull request's MERGE REF, not its head, so CI
+   was testing this branch merged with a master that had gained #897 nine minutes earlier — and
+   #897's own PR body had named `super/kt4173_2.kt` among the cases it fixes. The ledger can only
+   shrink honestly, so it shrank: the entry came out with the merge that earned it.
+   Worth keeping because the reasoning it invites is wrong. A case that passes in CI and crashes
+   locally reads as a latent memory bug whose symptom moved with the layout, which is exactly what
+   the previous increment's class changes might have done — and chasing that would have been a whole
+   afternoon spent on a branch that was simply behind its base. A local run of a PR branch is not
+   what CI runs, and the first thing to reconcile is the base.
+
    **The checks a type settles by itself, for 2646.** `Nothing` has no instances and every
    non-`null` value is an `Any`, so neither question needs to reach the object — only its
    nullability, which turns `is Nothing?` into `== null` and `is Any?` into a constant. The receiver
