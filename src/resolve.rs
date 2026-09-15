@@ -48317,57 +48317,102 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                 .then_some(file)
                 .or_else(|| source_files?.get(index as usize))
         };
-        let source_annotations = if let Some(symbols) = syms.pass_one_symbols() {
-            symbols
-                .classes
-                .iter()
-                .filter_map(|(&classifier, class)| {
-                    let source = source_at(class.source_file)?;
-                    let declaration = match active_declarations {
-                        Some(active) if class.source_file == file_index => {
-                            active.class(source, class.stable_declaration?)?.1
-                        }
-                        Some(_) => return None,
-                        None => match source.decl(class.source_decl?) {
-                            Decl::Class(declaration) => declaration,
-                            Decl::Fun(_) | Decl::Property(_) => return None,
-                        },
-                    };
-                    let annotations = resolved_index.map_or_else(
-                        || {
-                            declaration
-                                .annotations
-                                .iter()
-                                .filter_map(|annotation| {
-                                    symbols.resolved_annotation(class.source_file, annotation)
-                                })
-                                .collect::<Vec<_>>()
-                        },
-                        |index| {
-                            class
-                                .stable_declaration
-                                .map(|declaration| {
-                                    index.declaration_annotations(declaration).to_vec()
-                                })
-                                .unwrap_or_default()
-                        },
-                    );
-                    Some((classifier, annotations))
-                })
-                .collect()
-        } else {
-            let index = resolved_index.expect("Pass 2 requires a finalized declaration index");
-            (0..index.declaration_count())
-                .filter_map(|raw| {
-                    let declaration = crate::fir::DeclarationId::from_raw(raw as u32);
-                    let classifier = index.classifier_header(declaration)?.classifier;
-                    Some((
-                        classifier,
-                        index.declaration_annotations(declaration).to_vec(),
-                    ))
-                })
-                .collect()
-        };
+        let source_annotations: std::collections::HashMap<TypeName, Vec<TypeName>> =
+            if let Some(symbols) = syms.pass_one_symbols() {
+                symbols
+                    .classes
+                    .iter()
+                    .filter_map(|(&classifier, class)| {
+                        let source = source_at(class.source_file)?;
+                        let declaration = match active_declarations {
+                            Some(active) if class.source_file == file_index => {
+                                active.class(source, class.stable_declaration?)?.1
+                            }
+                            Some(_) => return None,
+                            None => match source.decl(class.source_decl?) {
+                                Decl::Class(declaration) => declaration,
+                                Decl::Fun(_) | Decl::Property(_) => return None,
+                            },
+                        };
+                        let annotations = resolved_index.map_or_else(
+                            || {
+                                declaration
+                                    .annotations
+                                    .iter()
+                                    .filter_map(|annotation| {
+                                        symbols.resolved_annotation(class.source_file, annotation)
+                                    })
+                                    .collect::<Vec<_>>()
+                            },
+                            |index| {
+                                class
+                                    .stable_declaration
+                                    .map(|declaration| {
+                                        index.declaration_annotations(declaration).to_vec()
+                                    })
+                                    .unwrap_or_default()
+                            },
+                        );
+                        Some((classifier, annotations))
+                    })
+                    .collect()
+            } else {
+                let index = resolved_index.expect("Pass 2 requires a finalized declaration index");
+                (0..index.declaration_count())
+                    .filter_map(|raw| {
+                        let declaration = crate::fir::DeclarationId::from_raw(raw as u32);
+                        let classifier = index.classifier_header(declaration)?.classifier;
+                        Some((
+                            classifier,
+                            index.declaration_annotations(declaration).to_vec(),
+                        ))
+                    })
+                    .collect()
+            };
+        // A classifier a call NAMES may live on the classpath, where its annotations are metadata
+        // rather than syntax. A plugin asking whether that classifier is annotated must get the same
+        // answer either way, so complete the map for exactly the classifiers these calls mention.
+        // Bounded by the call set: no classpath-wide scan, and a source classifier already present
+        // keeps its resolved annotations.
+        let mut source_annotations = source_annotations;
+        {
+            let libraries = syms.libraries();
+            let mut named = Vec::new();
+            for call in &calls {
+                let types = call
+                    .type_arguments
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .chain(call.params.iter().copied());
+                // `List<InfraConfig>` names both classifiers, so walk the arguments too.
+                let mut pending = types.collect::<Vec<_>>();
+                while let Some(ty) = pending.pop() {
+                    if let Some(classifier) = ty.kotlin_class_internal() {
+                        named.push(classifier);
+                    }
+                    pending.extend(ty.type_args().iter().copied());
+                }
+            }
+            for classifier in named {
+                if source_annotations.contains_key(&classifier) {
+                    continue;
+                }
+                let Some(shape) =
+                    crate::symbol_source::SymbolSource::classifier(libraries, classifier)
+                else {
+                    continue;
+                };
+                source_annotations.insert(
+                    classifier,
+                    shape
+                        .annotations
+                        .iter()
+                        .map(|annotation| annotation.annotation)
+                        .collect(),
+                );
+            }
+        }
         let context = crate::plugins::FrontendExpressionContext {
             calls,
             source_annotations,
