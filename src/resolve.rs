@@ -52,6 +52,7 @@ mod operator_calls;
 mod override_plans;
 mod postponed_diagnostics;
 mod qualified_call_shaping;
+mod receiver_flow;
 mod safe_call_flow;
 mod sam_constructors;
 mod scope;
@@ -63755,35 +63756,6 @@ impl<'a> Checker<'a> {
         runtime_tt.is_reference().then_some(runtime_tt)
     }
 
-    /// The access path an expression denotes: a root name followed by property segments through
-    /// plain (`.`) and safe (`?.`) member reads. `None` for anything else (a call result, an
-    /// indexed read, a temporary) — a proof on it says nothing about a later re-read.
-    fn expr_access_path(&self, e: ExprId) -> Option<NarrowPath> {
-        match self.file.expr(e) {
-            Expr::Name(n) => Some(NarrowPath::root_only(n)),
-            Expr::Member { receiver, name } => {
-                let mut path = self.expr_access_path(*receiver)?;
-                path.segments.push(name.clone());
-                Some(path)
-            }
-            Expr::SafeCall {
-                receiver,
-                name,
-                args: None,
-            } => {
-                let mut path = self.expr_access_path(*receiver)?;
-                path.segments.push(name.clone());
-                Some(path)
-            }
-            Expr::As {
-                operand,
-                nullable: false,
-                ..
-            } => self.expr_access_path(*operand),
-            _ => None,
-        }
-    }
-
     /// The type a successful checked cast narrows a stable path to. A nullable target accepts null,
     /// so the proven type remains nullable.
     fn proven_narrowed_ty(
@@ -64609,91 +64581,9 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Apply one narrowing without the support gate: a root-only path shadows the binding in the
-    /// current scope (the classic mechanism — reads resolve to the narrowed `Local`), a property
-    /// path is recorded in the current [`Self::path_narrows`] frame for the read-time hook.
-    fn apply_narrowing_unchecked(&mut self, scope: &CheckerScope<'_>, path: &NarrowPath, ty: Ty) {
-        if path.segments.is_empty() {
-            let root = path.root.clone();
-            if root == "this" {
-                // `this` is a receiver coordinate, not a top-level property or lexical local. Its
-                // active type is carried by `with_this_narrow`; retain the path fact as well for
-                // explicit receiver reads and intersection projections.
-                self.record_path_narrowing(scope, path.clone(), ty);
-                return;
-            }
-            // Alias: a proof on the BARE name of an own member `val` (`if (p != null)`) also
-            // narrows the qualified `this.p` read form — same immutable property.
-            if matches!(
-                self.lookup(scope, &root).map(|local| local.origin),
-                Some(ReceiverFnValueOrigin::DispatchProperty { .. })
-            ) {
-                self.record_path_narrowing(
-                    scope,
-                    NarrowPath {
-                        root: "this".to_string(),
-                        segments: vec![root.clone()],
-                    },
-                    ty,
-                );
-            }
-            if self.lookup(scope, &root).is_some() {
-                crate::trace_compiler!("smartcast", "root narrowing shadows lexical value {root}");
-                self.declare_narrowing_shadow(scope, &root, ty);
-            } else {
-                // A stable top-level `val` has no lexical value binding to shadow. Retain its exact
-                // access path and let the selected property read consume the proven type.
-                self.record_path_narrowing(scope, path.clone(), ty);
-                crate::trace_compiler!(
-                    "smartcast",
-                    "root narrowing records property path {path:?}"
-                );
-            }
-        } else {
-            self.record_path_narrowing(scope, path.clone(), ty);
-            // Alias: a proof on `this.p` also narrows the BARE `p` read form (same property).
-            if path.root == "this" && path.segments.len() == 1 {
-                let name = path.segments[0].clone();
-                if matches!(
-                    self.lookup(scope, &name).map(|local| local.origin),
-                    Some(ReceiverFnValueOrigin::DispatchProperty { .. })
-                ) {
-                    self.declare_narrowing_shadow(scope, &name, ty);
-                }
-            }
-        }
-    }
-
     /// Record a property-path narrowing in the scope that proved it.
     fn record_path_narrowing(&mut self, scope: &CheckerScope<'_>, path: NarrowPath, ty: Ty) {
         scope.narrow_path(path, ty);
-    }
-
-    /// The active narrowing for a property path, if any. A proof recorded OUTSIDE the rung holding
-    /// the root's innermost binding describes an outer, now-shadowed binding; a `this`-rooted proof
-    /// was made against the receiver of the rung that established it, and crossing out of that rung
-    /// means `this` is a different object (a receiver lambda of the same type is still a different
-    /// object). Both are expressed by where the walk stops.
-    fn lookup_path_narrowing(&self, scope: &CheckerScope<'_>, path: &NarrowPath) -> Option<Ty> {
-        let rooted_at_this = path.root == "this";
-        for rung in scope.ancestors() {
-            if let Some(ty) = rung.path_narrowing(path) {
-                return Some(ty);
-            }
-            if rooted_at_this {
-                if matches!(
-                    rung.kind(),
-                    ScopeKind::Class { .. } | ScopeKind::Function { receiver: Some(_) }
-                ) {
-                    return None;
-                }
-            } else if rung.declared_here(&path.root, Ns::Value) {
-                // The rung declaring the root was just consulted; a proof recorded further out
-                // describes the binding this one shadows.
-                return None;
-            }
-        }
-        None
     }
 
     /// All incomparable smart-cast constituents currently proved for one access path. Like the
