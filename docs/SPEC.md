@@ -1985,6 +1985,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_lists_e2e.rs`
   (`a_single_element_list_is_not_a_vararg_call_of_length_one`).
 
+- **What a parameter is CARRIED as comes from the record, not from reading the body.** A `var` a
+  closure captures is replaced by a cell, and the parameter still says `Int` because `Int` is what
+  the programmer wrote; believing the declaration truncates a pointer into a 32-bit parameter.
+  Common lowering RECORDS which parameters carry a holder, in `shared_capture_parameters`, and that
+  record is the answer. Inferring it from the body instead — a body that reaches a holder through
+  `RefGet`/`RefSet` is holding one — cannot see a parameter the body only PASSES ON: a lambda that
+  does nothing with the cell but hand it to an object it constructs dereferences it nowhere.
+  The failure is worth writing down because of how it presented. The truncation is invisible where
+  it happens: the REFERENCE path still read the cell and rendered the right number, while every
+  SCALAR use of the same variable read a different one. `"" + x` said `1` and `x == 1` said false,
+  in the same expression. An array index is what shows the scalar path on its own.
+  Tests: `tests/native_gc_stress_e2e.rs`
+  (`a_capture_a_lambda_only_passes_on_is_still_a_cell`).
+
+- **`map` and `forEach` are answered for whichever iterable the receiver holds.** Both are declared
+  on `Iterable`, which a range wears as much as a list does, so they go through the same dispatch on
+  the DESCRIPTOR that iteration itself does. `map` answers a list — an array with a header — so the
+  runtime asks the iterable its size once and allocates once; the result list is built before the
+  walk, because every element comes from a call that may collect, and the half-filled result has to
+  be a root across each one.
+  Tests: `tests/native_lists_e2e.rs` (`map_and_for_each_walk_whichever_iterable_they_are_handed`,
+  `a_mapped_list_holds_what_the_transform_made`).
+
 - **`by lazy { … }` is where the runtime calls back into emitted code.** A `Lazy` holds its
   initializer until the first read and its value afterwards, with one bit saying which; the
   initializer is dropped once it has run, as Kotlin's own `SynchronizedLazyImpl` does, since keeping

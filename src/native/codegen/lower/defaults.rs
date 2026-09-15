@@ -140,7 +140,7 @@ impl<'a> FileLowering<'a> {
             .dispatch_receiver
             .map(|owner| Ty::Obj(owner, &[]))
             .into_iter()
-            .chain(functions::carried_parameters(self.ir, &declaration))
+            .chain(functions::carried_parameters(self.ir, key.function))
             .collect();
         let name = format!("{}$defaults", declaration.name);
         let omitted = key.omitted.clone();

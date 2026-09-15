@@ -360,3 +360,33 @@ fn interleaved_object_sizes_reuse_their_slots() {
         "a program that allocates far more than it keeps must run in the memory it keeps"
     );
 }
+
+#[test]
+fn a_capture_a_lambda_only_passes_on_is_still_a_cell() {
+    // What a parameter is CARRIED as is not always what it declares: a `var` a closure captures is
+    // a cell, and the parameter still says `Int` because `Int` is what the programmer wrote.
+    //
+    // Reading that off the body — a body that reaches a holder is holding one — misses the body
+    // that only PASSES IT ON. This lambda dereferences the cell nowhere; it hands it to an object
+    // it constructs. Typed by its declaration, the thunk loaded a pointer as an `i32`, and the
+    // truncation is invisible at the point it happens: the reference path still read the cell and
+    // rendered `1`, while every scalar use of the same variable read `0`. The array index is what
+    // shows the scalar path on its own.
+    crate::common::expect_native_box(
+        "interface R { fun run() }\n\
+         fun box(): String {\n\
+         \x20   var x = 0\n\
+         \x20   val make = { object : R { override fun run() { x += 1 } } }\n\
+         \x20   make().run()\n\
+         \x20   make().run()\n\
+         \x20   val marks = IntArray(8)\n\
+         \x20   marks[x] = 7\n\
+         \x20   if (marks[2] != 7) return \"fail index\"\n\
+         \x20   if (x != 2) return \"fail compare\"\n\
+         \x20   if (x - 2 != 0) return \"fail arithmetic\"\n\
+         \x20   return if (\"\" + x == \"2\") \"OK\" else \"fail render\"\n\
+         }\n",
+        "PassedOnCapture",
+        "OK",
+    );
+}

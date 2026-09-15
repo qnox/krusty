@@ -1534,6 +1534,24 @@ before:**
    a lock decline by arity, because this target has no threads and quietly treating one as the plain
    form would drop exactly what the program asked for.
 
+   **Then `map`/`forEach`, which cost a miscompile to land — 2472.** Building them was easy once the
+   runtime could call a function value, and the one real decision was the same one iteration had
+   already faced: both are declared on `Iterable`, which a range wears as much as a list does, so
+   they dispatch on the descriptor rather than on any static type. What was NOT easy is that they
+   made one more corpus file compile, and that file then answered wrongly — for a reason that had
+   nothing to do with collections and had been latent all along.
+   A `var` a closure captures is a cell, and which parameters carry one was being READ OFF THE BODY:
+   a body that dereferences a holder is holding one. That misses the body which only passes it on —
+   a lambda that hands the cell to an object it constructs dereferences it nowhere — so the thunk
+   loaded a pointer as an `i32`. Common lowering had recorded the fact all along, in
+   `shared_capture_parameters`, and the generator was inferring instead of reading it.
+   The presentation is the part worth remembering: the truncation is invisible where it happens. The
+   reference path still read the cell and rendered the right number while every scalar use of the
+   same variable read a different one — `"" + x` said `1` and `x == 1` said false, in one
+   expression. Narrowing it took an array index, which is a use of the value that neither renders
+   nor compares, and then the emitted Cranelift function, which is what the new `native` trace
+   category exists for.
+
 #### Decided: Kotlin/Native's memory model, not the JVM's
 
 The native target reproduces **Kotlin/Native's** concurrency contract, not the JVM's. That follows

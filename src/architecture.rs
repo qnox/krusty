@@ -827,6 +827,15 @@ mod tests {
         }
     }
 
+    /// The tracing macro is not a dependency in the sense these budgets are about.
+    ///
+    /// A budget says which parts of the compiler a file may KNOW about — which layer's concepts it
+    /// is allowed to reason in. `trace_compiler!` carries no concepts: it is off by default, where
+    /// it compiles to nothing at all, and `CLAUDE.md` names it as THE way to emit diagnostics from
+    /// compiler code. Counting it would mean every file that ever traces has to widen its budget to
+    /// say so, which tells a reader nothing and makes the real entries harder to see.
+    const CROSS_CUTTING: &[&str] = &["trace_compiler"];
+
     fn collect_path_module(path: &syn::Path, modules: &mut BTreeSet<String>, roots: &[&str]) {
         let mut segments = path.segments.iter();
         if segments
@@ -834,7 +843,10 @@ mod tests {
             .is_some_and(|segment| is_crate_root(segment, roots))
         {
             if let Some(module) = segments.next() {
-                modules.insert(module.ident.to_string());
+                let module = module.ident.to_string();
+                if !CROSS_CUTTING.contains(&module.as_str()) {
+                    modules.insert(module);
+                }
             }
         }
     }

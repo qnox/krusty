@@ -1289,7 +1289,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 function.name
             ));
         };
-        let params = super::functions::carried_parameters(self.file.ir, function);
+        let params = super::functions::carried_parameters(self.file.ir, fid);
         let ret = function.ret;
         let Some(object) = self.receiver(receiver)? else {
             return Ok(None);
@@ -1640,7 +1640,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // The ABI is the DECLARATION's, not the call site's: every override fills this slot with a
         // body compiled to the declaration's carriers, so an argument whose checked type is narrower
         // still crosses as what the slot expects.
-        let carried = super::functions::carried_parameters(ir, function);
+        let carried = super::functions::carried_parameters(ir, fid);
         let ret = function.ret;
         let Some(object) = self.receiver(receiver)? else {
             return Ok(None);
@@ -1695,11 +1695,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     })
             })
             .ok_or_else(|| format!("a `super` call to an unknown method (`{name}`)"))?;
-        let function = &ir.functions[fid as usize];
         let Some(id) = self.file.functions[fid as usize] else {
             return Err(format!("a `super` call to the abstract method `{name}`"));
         };
-        let params = super::functions::carried_parameters(ir, function);
+        let params = super::functions::carried_parameters(ir, fid);
         let Some(object) = self.receiver(receiver)? else {
             return Ok(None);
         };

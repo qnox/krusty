@@ -276,10 +276,8 @@ impl<'a> FileLowering<'a> {
     }
 
     /// The signature of an IR function: a method takes its receiver first.
-    fn function_signature(
-        &self,
-        function: &crate::ir::IrFunction,
-    ) -> Result<Signature, Unsupported> {
+    fn function_signature(&self, id: crate::ir::FunId) -> Result<Signature, Unsupported> {
+        let function = &self.ir.functions[id as usize];
         let mut params = Vec::with_capacity(function.params.len() + 1);
         if let Some(owner) = function.dispatch_receiver {
             if self.ir.class_id_by_name(owner).is_none() {
@@ -290,7 +288,7 @@ impl<'a> FileLowering<'a> {
             }
             params.push(any());
         }
-        params.extend(functions::carried_parameters(self.ir, function));
+        params.extend(functions::carried_parameters(self.ir, id));
         self.signature_of(&params, function.ret)
     }
 
@@ -306,7 +304,7 @@ impl<'a> FileLowering<'a> {
                 self.functions.push(None);
                 continue;
             }
-            let signature = self.function_signature(function)?;
+            let signature = self.function_signature(index as crate::ir::FunId)?;
             let id = self
                 .module
                 .declare_function(&self.symbols.functions[index], Linkage::Export, &signature)
@@ -399,6 +397,9 @@ impl<'a> FileLowering<'a> {
             builder.seal_all_blocks();
             builder.finalize(frontend_config);
         }
+        // The emitted function, for when a compiled program answers wrongly and the IR that made it
+        // reads correctly — the difference is then in this, and nothing else shows it.
+        crate::trace_compiler!("native", "{name}\n{}", context.func.display());
         self.module
             .define_function(id, &mut context)
             .map_err(|error| format!("compiling `{name}` ({error})"))?;
@@ -426,13 +427,16 @@ impl<'a> FileLowering<'a> {
                 function.name
             ));
         }
-        let signature = self.function_signature(function)?;
+        let signature = self.function_signature(index as crate::ir::FunId)?;
         // `this`, when there is one, is value slot 0 and the parameters follow it.
         let mut slots: Vec<Ty> = Vec::with_capacity(function.params.len() + 1);
         if let Some(owner) = function.dispatch_receiver {
             slots.push(Ty::Obj(owner, &[]));
         }
-        slots.extend(functions::carried_parameters(self.ir, function));
+        slots.extend(functions::carried_parameters(
+            self.ir,
+            index as crate::ir::FunId,
+        ));
         let name = function.name.clone();
         let ret = function.ret;
         self.emit_function(
@@ -2031,10 +2035,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 if dispatch_receiver.is_some() {
                     return Err("a static call with a receiver".to_string());
                 }
-                let params = functions::carried_parameters(
-                    self.file.ir,
-                    &self.file.ir.functions[*function as usize],
-                );
+                let params = functions::carried_parameters(self.file.ir, *function);
                 let arguments = self.arguments(args, &params)?;
                 if self.terminated {
                     return Ok(None);

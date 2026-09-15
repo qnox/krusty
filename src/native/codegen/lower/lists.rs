@@ -95,6 +95,14 @@ fn interface_symbol(
             ("kt_iterator_has_next", vec![any()], Ty::Boolean)
         }
         (IterationRole::Iterator, "next", 0) => ("kt_iterator_next", vec![any()], any()),
+        // The two walks a program hands a function value. Kotlin declares both on `Iterable`, and
+        // a receiver typed by it may hold either of the two iterables this runtime has — so they
+        // go through the same descriptor dispatch iteration itself does, and a range is walked as
+        // readily as a list.
+        (IterationRole::Iterable, "map", 1) => ("kt_iterable_map", vec![any(), any()], any()),
+        (IterationRole::Iterable, "forEach", 1) => {
+            ("kt_iterable_for_each", vec![any(), any()], Ty::Unit)
+        }
         _ => return None,
     })
 }

@@ -93,12 +93,19 @@ pub(super) struct LambdaItems {
 ///
 /// A `var` that a closure captures is replaced by a holder, and what is passed to the lambda's body
 /// is that cell — but the parameter still says `Int`, because `Int` is what the programmer wrote.
-/// The BODY is what settles it: it reaches a holder through [`IrExpr::RefGet`]/[`IrExpr::RefSet`]
-/// rather than using the value directly. Believing the declaration instead truncates a pointer into
-/// a 32-bit parameter, which is a miscompile with no symptom where it happens — the collector's
-/// stress tests are what caught it, because the damage only became visible once something was kept
-/// alive across a collection and read back.
-pub(super) fn carried_parameters(ir: &IrFile, function: &crate::ir::IrFunction) -> Vec<Ty> {
+/// Believing the declaration instead truncates a pointer into a 32-bit parameter, which is a
+/// miscompile with no symptom where it happens.
+///
+/// Common lowering RECORDS which parameters carry a holder, in `shared_capture_parameters`, and
+/// that record is the answer. The body scan below is a second, weaker source for the same fact —
+/// a body that reaches a holder through [`IrExpr::RefGet`]/[`IrExpr::RefSet`] is holding one. It
+/// cannot see a parameter the body only PASSES ON: a lambda that does nothing with the cell but
+/// hand it to an object it constructs dereferences it nowhere, so the scan alone typed that
+/// parameter `Int` and the thunk loaded a pointer as an `i32`. Both are consulted because the
+/// record is authoritative and the scan costs nothing; neither can wrongly claim a parameter is a
+/// holder, only miss one.
+pub(super) fn carried_parameters(ir: &IrFile, id: crate::ir::FunId) -> Vec<Ty> {
+    let function = &ir.functions[id as usize];
     let Some(body) = function.body else {
         return function.params.clone();
     };
@@ -125,7 +132,8 @@ pub(super) fn carried_parameters(ir: &IrFile, function: &crate::ir::IrFunction) 
         .iter()
         .enumerate()
         .map(|(index, declared)| {
-            if holders[index + first] {
+            let ordinal = u32::try_from(index).expect("too many parameters");
+            if holders[index + first] || ir.shared_capture_parameters.contains_key(&(id, ordinal)) {
                 any()
             } else {
                 *declared
@@ -200,7 +208,7 @@ impl<'a> FileLowering<'a> {
                 }
             }
             let capture_types: Vec<Ty> =
-                carried_parameters(self.ir, body)[..captures.len()].to_vec();
+                carried_parameters(self.ir, impl_fn)[..captures.len()].to_vec();
             let (capture_offsets, instance_size, references) = layout(&capture_types);
 
             let base = format!("kt_fn_{index}");
@@ -381,7 +389,7 @@ impl<'a> FileLowering<'a> {
         result: Ty,
     ) -> Result<(), Unsupported> {
         let body = &self.ir.functions[impl_fn as usize];
-        let declared = carried_parameters(self.ir, body);
+        let declared = carried_parameters(self.ir, impl_fn);
         let produced = body.ret;
         let target = self.functions[impl_fn as usize]
             .ok_or_else(|| "a lambda whose body has no code".to_string())?;
@@ -457,7 +465,7 @@ impl<'a> FileLowering<'a> {
         arity: usize,
     ) -> Result<(), Unsupported> {
         let body = &self.ir.functions[impl_fn as usize];
-        let parameters = carried_parameters(self.ir, body);
+        let parameters = carried_parameters(self.ir, impl_fn);
         let ret = body.ret;
         let target = self.functions[impl_fn as usize]
             .ok_or_else(|| "a lambda whose body has no code".to_string())?;
@@ -579,8 +587,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             items.instance_size,
             items.capture_offsets.clone(),
         );
-        let parameters =
-            carried_parameters(self.file.ir, &self.file.ir.functions[impl_fn as usize]);
+        let parameters = carried_parameters(self.file.ir, impl_fn);
 
         // Captures first, then the allocation: a capture that allocates must not leave a
         // half-built object for a collection to find.

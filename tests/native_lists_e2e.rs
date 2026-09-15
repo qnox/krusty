@@ -250,3 +250,49 @@ fn a_lazy_holds_its_value_and_answers_before_it_has_one() {
         "OK",
     );
 }
+
+#[test]
+fn map_and_for_each_walk_whichever_iterable_they_are_handed() {
+    // Both are declared on `Iterable`, so a receiver typed by it may hold either of the two things
+    // this runtime can iterate. The runtime decides from the descriptor — the same decision
+    // iteration itself makes — so a range is walked as readily as a list.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val doubled = listOf(1, 2, 3).map { it * 2 }\n\
+         \x20   if (doubled != listOf(2, 4, 6)) return \"fail list map: $doubled\"\n\
+         \x20   val counted = (1..4).map { it + 10 }\n\
+         \x20   if (counted != listOf(11, 12, 13, 14)) return \"fail range map: $counted\"\n\
+         \x20   if (listOf<Int>().map { it }.size != 0) return \"fail empty map\"\n\
+         \x20   if ((1..0).map { it }.size != 0) return \"fail empty range map\"\n\
+         \x20   var total = 0\n\
+         \x20   listOf(1, 2, 3).forEach { total += it }\n\
+         \x20   (1..4).forEach { total += it }\n\
+         \x20   return if (total == 16) \"OK\" else \"fail forEach: $total\"\n\
+         }\n",
+        "MapAndForEach",
+        "OK",
+    );
+}
+
+#[test]
+fn a_mapped_list_holds_what_the_transform_made() {
+    // Every element is allocated by a call the loop makes, and each such call may collect — so the
+    // result has to be a root while it is still being filled.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val built = (1..200).map { \"item\" + it }\n\
+         \x20   var waste = \"\"\n\
+         \x20   var at = 0\n\
+         \x20   while (at < 200000) {\n\
+         \x20       waste = \"x\" + at\n\
+         \x20       at += 1\n\
+         \x20   }\n\
+         \x20   if (waste == \"\") return \"fail waste\"\n\
+         \x20   if (built.size != 200) return \"fail size: \" + built.size\n\
+         \x20   if (built[0] != \"item1\") return \"fail first: \" + built[0]\n\
+         \x20   return if (built[199] == \"item200\") \"OK\" else \"fail last: \" + built[199]\n\
+         }\n",
+        "MappedListSurvives",
+        "OK",
+    );
+}

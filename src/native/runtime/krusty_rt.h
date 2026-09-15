@@ -200,6 +200,11 @@ KRef kt_iterable_iterator(KRef iterable);
 kt_boolean kt_iterator_has_next(KRef iterator);
 KRef kt_iterator_next(KRef iterator);
 
+/* The two walks a program hands a function value. Declared on `Iterable`, so they are answered for
+   whichever iterable the receiver holds, by the same dispatch iteration itself goes through. */
+KRef kt_iterable_map(KRef iterable, KRef transform);
+void kt_iterable_for_each(KRef iterable, KRef action);
+
 /* ---- lazy ---------------------------------------------------------------------------------- */
 
 /* `by lazy { … }`: the initializer until it has run, the value afterwards, and the one bit that

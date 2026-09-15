@@ -957,6 +957,70 @@ kt_boolean kt_iterator_has_next(KRef iterator) {
     return kt_range_iterator_has_next(iterator);
 }
 
+/* Call a one-argument function value. The second place the runtime calls back into emitted code,
+   through the same slot `kt_lazy_value` uses; see `KT_SLOT_INVOKE`. */
+static KRef kt_invoke_one(KRef function, KRef argument) {
+    if (function == NULL || function->header.type->vtable == NULL ||
+        function->header.type->vtable_length <= KT_SLOT_INVOKE) {
+        KT_FAIL("krusty: a function value was expected here\n");
+    }
+    return ((KRef(*)(KRef, KRef))function->header.type->vtable[KT_SLOT_INVOKE])(function, argument);
+}
+
+/* How many elements an iterable will yield. Only the two this runtime has are askable, and the
+   descriptor says which — a range's count is its bounds, a list's is its array's length.
+
+   `map` needs this because it answers a LIST, and a list is an array with a header: there is one
+   allocation, sized once, rather than a buffer that grows. */
+static kt_int kt_iterable_size(KRef iterable) {
+    if (iterable == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    if (iterable->header.type == &kt_type_list) {
+        return kt_list_size(iterable);
+    }
+    if (iterable->header.type != &kt_type_int_range &&
+        iterable->header.type != &kt_type_long_range &&
+        iterable->header.type != &kt_type_char_range) {
+        KT_FAIL("krusty: this iterable cannot be counted\n");
+    }
+    kt_long first = kt_range_first(iterable);
+    kt_long last = kt_range_last(iterable);
+    if (first > last) {
+        return 0;
+    }
+    kt_long count = last - first + 1;
+    if (count > INT32_MAX) {
+        KT_FAIL("krusty: a range too long to collect\n");
+    }
+    return (kt_int)count;
+}
+
+/* `xs.map { … }`: one new list, the transform applied to each element in order.
+
+   The result list is built BEFORE the loop so that it, and through it the array, is a root across
+   every call the loop makes — each of which may collect, and each of which may allocate whatever
+   the transform returns. Elements already written are traced through the array like any other
+   reference, so there is nothing to defer and no barrier to write. */
+KRef kt_iterable_map(KRef iterable, KRef transform) {
+    kt_int size = kt_iterable_size(iterable);
+    KRef elements = kt_array_new(&kt_type_array, size);
+    KRef result = kt_list_of(elements);
+    KRef iterator = kt_iterable_iterator(iterable);
+    for (kt_int i = 0; i < size; i++) {
+        kt_elements_of(elements)[i] = kt_invoke_one(transform, kt_iterator_next(iterator));
+    }
+    return result;
+}
+
+/* `xs.forEach { … }`: the same walk with nothing kept, and so nothing to size. */
+void kt_iterable_for_each(KRef iterable, KRef action) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        kt_invoke_one(action, kt_iterator_next(iterator));
+    }
+}
+
 KRef kt_iterator_next(KRef iterator) {
     if (iterator == NULL) {
         KT_FAIL("krusty: member access on a null receiver\n");
