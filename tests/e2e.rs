@@ -1251,6 +1251,8 @@ mod sam_conversion_e2e;
 mod sam_generic_lambda_param_e2e;
 #[path = "sam_lambda_expected_result_e2e.rs"]
 mod sam_lambda_expected_result_e2e;
+#[path = "same_file_custom_serializer_e2e.rs"]
+mod same_file_custom_serializer_e2e;
 #[path = "same_package_classpath_e2e.rs"]
 mod same_package_classpath_e2e;
 #[path = "samefile_nested_object_value_e2e.rs"]
@@ -1279,6 +1281,8 @@ mod serialization_coverage_e2e;
 mod serialization_krusty_only_e2e;
 #[path = "serialization_roundtrip_e2e.rs"]
 mod serialization_roundtrip_e2e;
+#[path = "common/serialization.rs"]
+mod serialization_test_support;
 #[path = "session_subsystems_e2e.rs"]
 mod session_subsystems_e2e;
 #[path = "shadowed_method_tparam_e2e.rs"]
