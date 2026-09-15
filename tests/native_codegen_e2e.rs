@@ -774,6 +774,32 @@ fn boxing_a_small_value_hands_out_the_same_object() {
 }
 
 #[test]
+fn a_long_outside_the_cache_is_not_confused_with_one_inside_it() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // The cache slot is picked by the WHOLE value. Each `Long` here has a low word that lands in
+    // -128..127 while the value does not — `Long.MIN_VALUE`'s low word is zero, `Long.MAX_VALUE`'s
+    // is -1, and `1L shl 32` is zero again — so a slot chosen from the low word alone would hand
+    // back whatever was cached for that small number, and the value would come out changed.
+    assert_eq!(
+        run("fun boxed(n: Long): Any = n\n\
+             fun main() {\n\
+             \x20   println(boxed(0L))\n\
+             \x20   println(boxed(Long.MIN_VALUE))\n\
+             \x20   println(boxed(-1L))\n\
+             \x20   println(boxed(Long.MAX_VALUE))\n\
+             \x20   println(boxed(1L shl 32))\n\
+             \x20   println(boxed(0L) === boxed(0L))\n\
+             \x20   println(boxed(Long.MIN_VALUE) == boxed(Long.MIN_VALUE))\n\
+             \x20   println(boxed(0L) == boxed(Long.MIN_VALUE))\n\
+             }\n"),
+        "0\n-9223372036854775808\n-1\n9223372036854775807\n4294967296\ntrue\ntrue\nfalse\n"
+    );
+}
+
+#[test]
 fn a_not_null_assertion_passes_a_value_through_and_fails_on_null() {
     let Some(target) = host() else {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");

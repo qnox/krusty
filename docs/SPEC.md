@@ -1985,6 +1985,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_lists_e2e.rs`
   (`a_single_element_list_is_not_a_vararg_call_of_length_one`).
 
+- **The small-value box cache is keyed by the whole value.** Kotlin lets a program observe box
+  identity in -128..127, so the native runtime keeps one static object per value in that range. The
+  slot has to be chosen from the value itself and not from its low word: `Long.MIN_VALUE`'s low
+  32 bits are zero and `Long.MAX_VALUE`'s are -1, so a truncating key put them in the slots for 0
+  and -1 and handed those boxes back — `"${Long.MIN_VALUE}"` printed `0` once anything had boxed a
+  zero, and `boxed(0L) == boxed(Long.MIN_VALUE)` answered true.
+  Test: `tests/native_codegen_e2e.rs`
+  (`a_long_outside_the_cache_is_not_confused_with_one_inside_it`).
+
 - **`by ::foo` delegates to the reference's own `get` and `set`.** The stdlib declares four
   operators in `kotlin/PropertyReferenceDelegatesKt` — `getValue` and `setValue` on `KProperty0`
   and on `KProperty1` — each an `inline` one-liner over the reference's own member. A dependency

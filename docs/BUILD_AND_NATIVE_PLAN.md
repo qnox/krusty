@@ -1566,6 +1566,13 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **A box cache that lost the top half of a `Long`.** Found while bringing up `inc`/`dec` on a
+   boxed primitive: a corpus case answered `Fail decLong`, and the reduction had no `inc` in it at
+   all — two interpolated `Long`s were enough. The cache slot was picked with `(int)value`, so
+   every `Long` whose low word happened to land in -128..127 took that small number's slot and came
+   back as it. A long-standing wrong answer that nothing had asked for before, because printing two
+   `Long`s where one is `Long.MIN_VALUE` is a narrow thing to do.
+
    **Delegating to a reference, for 2522.** `val x by ::top` calls one of four stdlib operators
    that are `inline` one-liners over the reference's own `get`/`set`. Nothing can splice a
    dependency's `inline` body, so they are realized here — the only real question being which

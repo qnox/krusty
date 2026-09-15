@@ -423,8 +423,11 @@ KRef kt_string_plus(KRef a, KRef b) {
 #define KT_BOX(suffix, type_descriptor, field, carrier, low, high)                                 \
     static KObject kt_cache_##suffix[(high) - (low) + 1];                                          \
     KRef kt_box_##suffix(carrier value) {                                                          \
-        if ((int)value >= (low) && (int)value <= (high)) {                                         \
-            KObject *cached = &kt_cache_##suffix[(int)value - (low)];                              \
+        /* The WHOLE value picks the slot, never its low word: `Long.MIN_VALUE` truncated to an    \
+           `int` is zero, which put it in zero's slot and handed it back as zero from then on. */  \
+        kt_long slot = (kt_long)value;                                                             \
+        if (slot >= (low) && slot <= (high)) {                                                     \
+            KObject *cached = &kt_cache_##suffix[(int)(slot - (low))];                             \
             if (cached->header.type == NULL) {                                                     \
                 cached->header.type = &type_descriptor;                                            \
                 cached->as.field = value;                                                          \
