@@ -1268,13 +1268,13 @@ pub(crate) fn infer_generic_call_bindings_from_symbols(
 
 /// The same solve with an extension RECEIVER contributing to it.
 ///
-/// The receiver belongs in the constraint set, not in a second pass over the result. A value
-/// parameter mentions a formal in an invariant position and fixes it exactly; an extension receiver
-/// only requires that the receiver be assignable to the formal's instantiation, which is a LOWER
-/// bound. Unifying the receiver after the arguments have already bound a formal cannot express that
-/// — it either overwrites argument evidence or is discarded by it, depending on which ran last.
-/// Solving both together lets the formal take the join of what the receiver and the arguments each
-/// require.
+/// The receiver belongs in the constraint set, not in a second pass over the result. Each value
+/// argument contributes constraints according to the variance of its parameter position; an
+/// extension receiver adds the requirement that the actual receiver be assignable to the formal
+/// receiver's instantiation. Unifying the receiver after the arguments have already bound a formal
+/// cannot express their combined evidence — it either overwrites an argument binding or is
+/// discarded by it, depending on which ran last. Solving both together lets the ordinary constraint
+/// solver apply the declared variance and bounds to all evidence at once.
 pub(crate) fn infer_generic_call_bindings_with_receiver_from_symbols(
     source: &dyn SymbolSource,
     generic_sig: &GenericSig,

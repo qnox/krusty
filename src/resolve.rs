@@ -41,9 +41,9 @@ mod context_sensitive_resolution;
 mod delegated_properties;
 mod dependency_platform;
 mod finalized_projection;
+mod generic_call_bindings;
 mod interface_delegation;
 mod invoke_selection;
-mod generic_call_bindings;
 mod lambda_expectation;
 mod lambda_returns;
 mod local_capture_dependencies;
@@ -54395,7 +54395,6 @@ impl<'a> Checker<'a> {
             expected_result,
         )
     }
-
 
     fn lambda_overload_partially_applicable(
         &self,

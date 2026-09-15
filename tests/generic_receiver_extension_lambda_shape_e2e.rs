@@ -19,15 +19,23 @@ use super::common;
 /// order. A nonzero-exit or substring assertion passes on an unrelated rejection, which is how a
 /// "both compilers agree" claim goes stale.
 fn expect_identical_rejection(result: &common::CompilerDiagnosticResult, tag: &str) {
-    let rendered = format!("{}{}", result.krusty_stdout, result.krusty_stderr);
-    let krusty = common::compiler_errors(&rendered);
+    let krusty = common::compiler_errors(&result.krusty_stderr);
     let reference = common::compiler_errors(&result.reference_stderr);
-    assert_ne!(
-        result.reference_code, 0,
-        "{tag}: kotlinc accepted the fixture: {}",
-        result.reference_stderr
+    assert_eq!(
+        result.reference_code, 1,
+        "{tag}: kotlinc exited {} rather than rejecting the fixture: {}",
+        result.reference_code, result.reference_stderr
     );
-    assert_ne!(result.krusty_code, 0, "{tag}: krusty accepted: {rendered}");
+    assert_eq!(
+        result.krusty_code, 1,
+        "{tag}: krusty exited {} rather than rejecting the fixture: {}{}",
+        result.krusty_code, result.krusty_stdout, result.krusty_stderr
+    );
+    assert_eq!(
+        common::compiler_errors(&result.krusty_stdout),
+        [],
+        "{tag}: krusty wrote diagnostics to stdout, where the comparison would miss them"
+    );
     assert!(
         !reference.is_empty(),
         "{tag}: kotlinc rejected with no parseable diagnostic: {}",
@@ -89,10 +97,7 @@ fun box(): String {{\n\
 \x20   return if (cfg.tag == \"json\") \"OK\" else \"FAIL: \" + cfg.tag\n\
 }}\n"
     );
-    common::expect_box_ok_files_with_stdlib(
-        &[("Main.kt", &main)],
-        "generic_receiver_lambda_receiver",
-    );
+    both_compilers_box(&main, "generic_receiver_lambda_receiver");
 }
 
 /// The same loss with an ordinary value parameter instead of a lambda receiver — so the defect is the
