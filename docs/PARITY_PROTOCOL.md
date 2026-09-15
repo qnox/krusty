@@ -2439,3 +2439,18 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `a_constructor_of_the_same_shape_still_infers`, `a_mismatched_expectation_is_still_rejected`;
   `src/fir/body_check/invoke_tests.rs::safe_property_invoke_keeps_an_already_nullable_selected_result`
   asserts the exact selected FIR result that a null-returning runtime fixture cannot observe.
+- **A class-level `@Serializable(with = …)` declared in the SAME file is honored for an element (fix).**
+  The element-serializer plan looked for a generated `$serializer`, then for an EXTERNAL serializer —
+  a map that deliberately covers only types this compilation does NOT declare. A class this file
+  declares that names its own serializer has neither, so the plan came back empty, the plugin left its
+  `serialize-body` placeholder rather than emit a half-built serializer, and the residual node failed
+  the whole FILE (`this construct is not yet supported by the IR backend`). The IDENTICAL class in a
+  sibling file always worked, because it resolves through the external map — the reverse of what a
+  file split would suggest, and the reason this was previously recorded backwards. The plan now reads
+  the declaring class's own `with =` before the external lookup, exactly as that class's `serializer()`
+  accessor already does: an `object` serializer through its `INSTANCE`, any other through the same
+  classpath singleton path. Ordinary derivation is unchanged.
+  `tests/same_file_custom_serializer_e2e.rs::a_same_file_custom_serializer_serves_a_direct_property`,
+  `a_same_file_custom_serializer_serves_a_map_value`,
+  `a_same_file_custom_serializer_serves_a_list_element`,
+  `an_ordinary_serializable_property_still_derives`.

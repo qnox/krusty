@@ -295,6 +295,34 @@ pub(super) fn element_serializer_plan(
             arguments,
         });
     }
+    // A class this file DECLARES may name its own serializer with a class-level
+    // `@Serializable(with = X::class)`. It then has no generated `$serializer` (the accessor branch
+    // in `generate_declarations` handles the class itself), so the `$serializer` lookup above finds
+    // nothing, and `external_serializer` deliberately covers only types this compilation does NOT
+    // declare. Without this arm a same-file annotated class was underivable as an element while the
+    // IDENTICAL class in a sibling file resolved through the external map — the reverse of what the
+    // file split would suggest. Read the class's own `with =` here, exactly as its accessor does.
+    if let Some(class_id) = ir
+        .classes
+        .iter()
+        .position(|class| class.fq_name_id() == fq_name)
+    {
+        if let Some(custom) = super::annotations::custom_serializer_of(ctx, ir, class_id as ClassId)
+        {
+            // An `object` serializer is its `INSTANCE` singleton; one declared elsewhere is read the
+            // same way off the classpath.
+            if let Some(serializer_id) = ir
+                .classes
+                .iter()
+                .position(|class| class.fq_name_id() == custom && class.is_object)
+            {
+                return Some(ElementSerializerPlan::LocalSingleton(
+                    serializer_id as ClassId,
+                ));
+            }
+            return Some(ElementSerializerPlan::ExternalSingleton(custom));
+        }
+    }
     // A DEPENDENCY's `@Serializable` class brings its own generated serializer: read that singleton
     // off the classpath, which is exactly what kotlinc emits
     // (`getstatic dep/Inner$$serializer.INSTANCE`). Deriving one here is impossible — the plugin only
