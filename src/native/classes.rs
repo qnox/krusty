@@ -241,8 +241,8 @@ fn any_slot_signature(slot: u32) -> (&'static [CKind], CKind) {
 /// Reject, by name, a class this step does not lower.
 pub(super) fn check_supported(class: &IrClass) -> Result<(), Unsupported> {
     let name = class.fq_name();
-    let construct = if class.is_annotation || class.annotation_impl_of.is_some() {
-        "an annotation class"
+    let construct = if class.annotation_impl_of.is_some() {
+        "an annotation implementation class"
     } else if class.prop_ref.is_some() || class.func_ref.is_some() {
         "a callable reference"
     } else if class.ctor_args.iter().any(|argument| argument.is_vararg) {

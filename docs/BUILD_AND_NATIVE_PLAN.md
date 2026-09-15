@@ -1566,6 +1566,24 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **Annotations are metadata nothing here keeps, for 2641.** A file declined WHOLE on the mere
+   declaration of an annotation class — forty-four corpus cases, most of which only declare one and
+   apply it. Nothing emitted for this target can be asked what annotations a declaration carries, so
+   applying one changes nothing a program can observe and accepting the declaration costs nothing.
+   Sixteen came back.
+   Where to draw the line was the decision, and the probe made it rather than my judgement:
+   dropping the decline outright gained twenty and turned ten into WRONG ANSWERS, every one of them
+   in `annotations/instances/`. Kotlin defines an annotation instance's `equals`, `hashCode` and
+   `toString` over its arguments, arrays by content, and this backend would hand it `kotlin.Any`'s
+   identity ones — so reading a member answers correctly while comparing two instances answers
+   `false` where Kotlin says `true`. Constructing one therefore declines, at the value rather than
+   at each thing done with it, which is why reading a member declines too.
+   The first attempt drew the line at the `annotation_impl_of` class and changed nothing: that class
+   is the JVM backend's own synthesis, and the shared lowering hands a backend the annotation class
+   directly. Which also says where the rest of the work belongs — the instance's members are
+   Kotlin's rule, not a target's, so making them work is the common lowering's job and not a second
+   copy of the rule over here.
+
    **An array is a type the runtime already names, for 2625.** `is IntArray` was declining because
    an array is not a class the program declares, so there was no class id to look a descriptor up
    by. There was a descriptor all along: every array the generator allocates wears one of the

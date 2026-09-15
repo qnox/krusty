@@ -6381,6 +6381,21 @@ and behavior is checked by RUNNING the emitted program.
   `an_unboxing_cast_stays_a_representation_change`), `tests/native_classes_e2e.rs`
   (`a_failed_cast_to_a_string_fails_loudly_too`).
 
+- **An annotation on a declaration is metadata this target does not keep; an annotation INSTANCE is
+  a value it declines to build.** Nothing emitted for this target can be asked what annotations a
+  declaration carries, so applying one changes nothing a program can observe and the declaration
+  costs the generator nothing to accept — every target a program may write one on, a class, a
+  function, a property, a field, a parameter, a local and an expression. Constructing one declines,
+  and the line is at the value rather than at each thing done with it: Kotlin defines an annotation
+  instance's `equals`, `hashCode` and `toString` over its arguments, with array members compared and
+  rendered by CONTENT, and this backend would give it `kotlin.Any`'s identity ones. Reading a
+  member would then answer correctly while comparing two instances answered `false` where Kotlin
+  says `true` — a half-right that answers rather than declines. (The JVM backend realizes these
+  members through an `annotationImpl` class it synthesizes itself, so the shared lowering hands a
+  backend the annotation class directly; making the instance work here is therefore a question for
+  the common lowering rather than a second copy of Kotlin's rule.)
+  Tests: `tests/native_annotations_e2e.rs`.
+
 - **A top-level property is a global slot, initialized before the entry function, and rooted in the
   collector if it holds a reference.** The JVM realizes a top-level property as a private static
   field plus a `getX`/`setX` pair (and an `access$get<X>$p` bridge when a sibling class reads a

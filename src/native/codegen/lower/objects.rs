@@ -1287,6 +1287,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if declaration.is_abstract || declaration.is_sealed {
             return Err(format!("construction of the abstract class `{name}`"));
         }
+        // An annotation INSTANCE is a value whose `equals`, `hashCode` and `toString` Kotlin
+        // defines over its arguments — arrays by content — and this backend would give it
+        // `kotlin.Any`'s identity ones. Reading its members would work and comparing two would
+        // not, which is the kind of half-right that answers rather than declines. Declaring and
+        // applying an annotation is unaffected: neither produces a value.
+        if declaration.is_annotation {
+            return Err(format!("construction of the annotation class `{name}`"));
+        }
         // Matching uses the DECLARED list, because that is what the construction node names;
         // filling the frame uses the physical one, because that is what the constructor declares.
         let primary_declared: Vec<Ty> = declaration
