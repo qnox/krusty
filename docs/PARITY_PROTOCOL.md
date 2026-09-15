@@ -2363,3 +2363,22 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   genuinely version-dependent serializers are probed; the primitives ship in every supported version.
   `tests/instant_builtin_serializer_e2e.rs::an_instant_property_serializes_through_the_builtin`,
   `an_instant_collection_element_serializes_through_the_builtin`, `the_uuid_builtin_still_works`.
+- **A branching inline body may be a vararg element (fix).** Vararg packing evaluates each element
+  with `[array, index]` already on the operand stack. A spliced BRANCHY inline body needs an empty
+  stack — its relocated frames carry no stack prefix — so the splicer declined, and because a
+  required stdlib inline body that cannot be spliced bails the whole FILE, one such argument cost a
+  module every class in it: `sink("A".takeUnless { xs.isEmpty() })` reported
+  `JVM backend inline error: inline splice failed`. Branchy elements are now evaluated into temps
+  first, on a clean stack, exactly as the constructor and `Ref`-holder paths already do for their own
+  held pairs; element evaluation stays left to right. The new path is gated on the same
+  `records_frame` predicate those paths use, so a vararg whose elements are all ordinary keeps its
+  existing emission byte for byte. Three controls separate the cause: the identical calls in a
+  FIXED-ARITY parameter list always worked (that path already spills), a straight-line inline body
+  (`let { it.size }`) always worked as a vararg element, and a user-declared `vararg` function fails
+  identically to `listOf`, so nothing here is stdlib-specific. NOT yet byte-identical for this shape:
+  kotlinc keeps the stack prefix and emits frames that include it, which would need the frame
+  relocator to carry a stack prefix.
+  `tests/vararg_inline_argument_splice_e2e.rs::a_branching_inline_call_may_be_the_only_vararg_element`,
+  `several_branching_inline_calls_may_share_one_vararg_call`,
+  `the_same_calls_in_a_fixed_arity_call_still_work`,
+   `a_straight_line_inline_body_still_works_as_a_vararg_element`.
