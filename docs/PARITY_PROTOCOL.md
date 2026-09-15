@@ -2274,3 +2274,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `a_char_sequence_expectation_joins_with_a_string_tail`,
   `several_labeled_returns_join_before_the_tail`, `the_equal_exit_shapes_still_infer`,
   `unrelated_exits_are_still_rejected`.
+- **A Java unbounded wildcard is a STAR projection (fix).** `?` in Java source (`*` in a JVM generic
+  signature) was read as `out Any?`. It reads the same, but `OutProjection` and `StarProjection` are
+  distinct `Ty` constructors, so a type coming from Java compared UNEQUAL to the same type written in
+  Kotlin, and an invariant join of the two then manufactured a projection neither side had. Measured
+  against kotlinc in five positions — `List<?>`, `W<?>` and `Map<String, ?>` all disagreed
+  (`out Any!` versus `*`), while `? extends X` and `? super X` already matched exactly and are
+  untouched: those are genuine variance. The stale unit expectation that encoded the old shape is
+  updated with that evidence.
+  `src/jvm/jvm_libraries.rs::tests::ordinary_generic_signatures_retain_projection_and_inner_class_parsing`,
+  `tests/diagnostics_match_kotlinc.rs::java_unbounded_wildcard_diagnostic_is_a_star_projection`.
