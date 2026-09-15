@@ -71,6 +71,10 @@ typedef struct KObjectHeader {
 #define KT_SLOT_EQUALS 0u    /* kt_boolean (*)(KRef self, KRef other) */
 #define KT_SLOT_HASH_CODE 1u /* kt_int (*)(KRef self) */
 #define KT_SLOT_TO_STRING 2u /* KRef (*)(KRef self) — a kotlin.String */
+/* A FUNCTION VALUE's own member, in the one slot it declares beyond kotlin.Any's three. The
+   generator puts a lambda's and a callable reference's `invoke` there; nothing else in this runtime
+   calls through it, and nothing but a function value is ever handed to something that does. */
+#define KT_SLOT_INVOKE 3u /* KRef (*)(KRef self, …) */
 
 /* ---- memory ---------------------------------------------------------------------------------- */
 
@@ -195,6 +199,21 @@ KRef kt_list_iterator_next(KRef iterator);
 KRef kt_iterable_iterator(KRef iterable);
 kt_boolean kt_iterator_has_next(KRef iterator);
 KRef kt_iterator_next(KRef iterator);
+
+/* ---- lazy ---------------------------------------------------------------------------------- */
+
+/* `by lazy { … }`: the initializer until it has run, the value afterwards, and the one bit that
+   says which. The initializer is dropped once it has run, as Kotlin's own `SynchronizedLazyImpl`
+   does — it is no longer reachable from the program, so keeping it would keep its captures alive
+   for nothing.
+
+   Single-threaded for now: this target has no threads, and Kotlin's default mode synchronizes. When
+   threads arrive, this is where that lock goes. */
+extern const KType kt_type_lazy;
+
+KRef kt_lazy_of(KRef initializer);
+KRef kt_lazy_value(KRef lazy);
+kt_boolean kt_lazy_is_initialized(KRef lazy);
 
 /* ---- pairs --------------------------------------------------------------------------------- */
 

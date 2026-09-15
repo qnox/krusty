@@ -480,6 +480,79 @@ KT_UNBOX(double, double_value, kt_double)
 
 #undef KT_UNBOX
 
+/* ---- lazy ---------------------------------------------------------------------------------- */
+
+typedef struct KLazy {
+    KObjectHeader header;
+    /* The initializer while it is still needed, NULL once the value has been computed. */
+    KRef initializer;
+    KRef value;
+    kt_boolean computed;
+} KLazy;
+
+static const uint32_t kt_lazy_offsets[] = {offsetof(KLazy, initializer), offsetof(KLazy, value)};
+
+static KRef kt_lazy_to_string(KRef self);
+
+/* `equals` and `hashCode` are identity, as Kotlin's `Lazy` leaves them — it is not a data class,
+   and two separately created lazies are two objects whatever they hold. */
+static const kt_fn kt_lazy_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
+                                       (kt_fn)kt_lazy_to_string};
+
+const KType kt_type_lazy = {"kotlin.Lazy",
+                            sizeof("kotlin.Lazy") - 1,
+                            sizeof(KLazy),
+                            2,
+                            0,
+                            kt_lazy_offsets,
+                            &kt_type_any,
+                            kt_lazy_vtable,
+                            3,
+                            0};
+
+KRef kt_lazy_of(KRef initializer) {
+    KLazy *lazy = (KLazy *)kt_gc_allocate(&kt_type_lazy, sizeof(KLazy));
+    lazy->initializer = initializer;
+    lazy->value = NULL;
+    lazy->computed = false;
+    return (KRef)lazy;
+}
+
+kt_boolean kt_lazy_is_initialized(KRef lazy) { return ((const KLazy *)lazy)->computed; }
+
+/* The value, computing it on the first ask. This is the one place the runtime CALLS back into
+   emitted code: the initializer is a `Function0`, and a function value answers `invoke` in the one
+   vtable slot it declares beyond `kotlin.Any`'s three. */
+KRef kt_lazy_value(KRef lazy) {
+    KLazy *self = (KLazy *)lazy;
+    if (self->computed) {
+        return self->value;
+    }
+    KRef initializer = self->initializer;
+    if (initializer == NULL || initializer->header.type->vtable == NULL ||
+        initializer->header.type->vtable_length <= KT_SLOT_INVOKE) {
+        KT_FAIL("krusty: a lazy value has no initializer to run\n");
+    }
+    KRef value =
+        ((KRef(*)(KRef))initializer->header.type->vtable[KT_SLOT_INVOKE])(initializer);
+    /* Re-read through `lazy`: the call above can collect, and `self` is a root only because it is
+       this local. The collector never moves an object, so the pointer is still good. */
+    self->value = value;
+    self->computed = true;
+    self->initializer = NULL;
+    return value;
+}
+
+/* Kotlin's own: the value once there is one, and a fixed text before that — which is the whole
+   point of `Lazy.toString`, that asking for it must not force the value. */
+static KRef kt_lazy_to_string(KRef self) {
+    const KLazy *lazy = (const KLazy *)self;
+    if (!lazy->computed) {
+        return kt_string_utf8("Lazy value not initialized yet.", 31);
+    }
+    return kt_to_string(lazy->value);
+}
+
 /* ---- pairs --------------------------------------------------------------------------------- */
 
 /* `a to b`. Two references and nothing else — Kotlin's `Pair` is a data class over two values, and

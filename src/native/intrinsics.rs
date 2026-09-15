@@ -185,6 +185,12 @@ pub(super) fn is_range_until(owner: &str, name: &str, arity: usize) -> bool {
     facade_package(kotlin_owner(owner)) == Some("kotlin/ranges") && name == "until" && arity == 1
 }
 
+/// Whether a declaration's owner is the file facade `lazy` and `Lazy.getValue` live in. Both are
+/// top-level declarations of `kotlin`, so they reach a backend as members of `kotlin/LazyKt`.
+pub(super) fn is_lazy_facade(owner: &str) -> bool {
+    kotlin_owner(owner) == "kotlin/LazyKt"
+}
+
 /// Whether a declaration's owner is the file facade `to` lives in. `kotlin.to` is a top-level
 /// extension, so it reaches a backend as a member of `kotlin/TuplesKt` — the `kotlin/io/ConsoleKt`
 /// situation again, normalized in the same place.

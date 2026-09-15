@@ -181,3 +181,72 @@ fn a_pair_destructures_through_its_components() {
         "OK",
     );
 }
+
+#[test]
+fn a_lazy_value_is_computed_once_and_only_when_asked() {
+    // Both halves matter and neither is visible from the value alone: the initializer must not run
+    // before the first read, and must not run again after it.
+    expect_native_box(
+        "var runs = 0\n\
+         val greeting: String by lazy {\n\
+         \x20   runs += 1\n\
+         \x20   \"O\" + \"K\"\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   if (runs != 0) return \"fail eager: $runs\"\n\
+         \x20   val first = greeting\n\
+         \x20   if (runs != 1) return \"fail first: $runs\"\n\
+         \x20   val second = greeting\n\
+         \x20   if (runs != 1) return \"fail again: $runs\"\n\
+         \x20   if (first != second) return \"fail differs\"\n\
+         \x20   return first\n\
+         }\n",
+        "LazyOnce",
+        "OK",
+    );
+}
+
+#[test]
+fn a_lazy_initializer_reads_what_it_captured() {
+    // The runtime calls back into emitted code to compute the value, so the initializer has to
+    // arrive as the closure it is — captures and all — rather than as a bare function pointer.
+    expect_native_box(
+        "class Holder(private val part: String) {\n\
+         \x20   val whole: String by lazy { part + \"K\" }\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val outer = \"O\"\n\
+         \x20   val local: String by lazy { outer + \"K\" }\n\
+         \x20   if (Holder(\"O\").whole != \"OK\") return \"fail member\"\n\
+         \x20   return local\n\
+         }\n",
+        "LazyCaptures",
+        "OK",
+    );
+}
+
+#[test]
+fn a_lazy_holds_its_value_and_answers_before_it_has_one() {
+    // `Lazy.toString` must not force the value — that is the whole point of its wording — and the
+    // computed value has to survive collection, being reachable only through the lazy.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val held = lazy { \"a\" + \"b\" }\n\
+         \x20   if (held.isInitialized()) return \"fail early\"\n\
+         \x20   if (held.toString() != \"Lazy value not initialized yet.\") return \"fail render\"\n\
+         \x20   if (held.value != \"ab\") return \"fail value\"\n\
+         \x20   if (!held.isInitialized()) return \"fail late\"\n\
+         \x20   if (held.toString() != \"ab\") return \"fail rendered value\"\n\
+         \x20   var waste = \"\"\n\
+         \x20   var at = 0\n\
+         \x20   while (at < 200000) {\n\
+         \x20       waste = \"x\" + at\n\
+         \x20       at += 1\n\
+         \x20   }\n\
+         \x20   if (waste == \"\") return \"fail waste\"\n\
+         \x20   return if (held.value == \"ab\") \"OK\" else \"fail survived\"\n\
+         }\n",
+        "LazyValueSurvives",
+        "OK",
+    );
+}

@@ -1985,6 +1985,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_lists_e2e.rs`
   (`a_single_element_list_is_not_a_vararg_call_of_length_one`).
 
+- **`by lazy { … }` is where the runtime calls back into emitted code.** A `Lazy` holds its
+  initializer until the first read and its value afterwards, with one bit saying which; the
+  initializer is dropped once it has run, as Kotlin's own `SynchronizedLazyImpl` does, since keeping
+  it would keep its captures alive for nothing. Computing the value means CALLING the initializer,
+  which is a function value — so the runtime dispatches through the one vtable slot a function value
+  declares beyond `kotlin.Any`'s three, where krusty's generator puts `invoke`. That slot is the
+  contract between the two, and nothing but a function value ever reaches something that calls
+  through it.
+  Only the one-argument `lazy` is realized. The overloads taking a thread-safety mode or a lock
+  decline by arity: this target has no threads yet, and answering one of those as if it were the
+  plain form would silently drop what the program asked for. `Lazy.toString` does not force the
+  value — that is the whole point of its wording.
+  Tests: `tests/native_lists_e2e.rs` (`a_lazy_value_is_computed_once_and_only_when_asked`,
+  `a_lazy_initializer_reads_what_it_captured`,
+  `a_lazy_holds_its_value_and_answers_before_it_has_one`).
+
 - **`a to b` is a runtime object, and a checked property read of one is decided by its receiver.**
   A `Pair` is two references with the three `kotlin.Any` members answering componentwise, as
   Kotlin's data class does; `component1`/`component2` are the same two questions under the names a

@@ -1524,6 +1524,16 @@ before:**
    helper and read a bound as a pointer. The range tests caught it, which is the argument for having
    written them.
 
+   **`by lazy` took it to 2463, and opened a direction the runtime had not gone in.** A lazy is a
+   small object — initializer, value, one bit — but computing its value means CALLING the
+   initializer, and the initializer is a function value the generator emitted. So for the first time
+   the runtime dispatches INTO emitted code, through the one vtable slot a function value declares
+   beyond `kotlin.Any`'s three. That slot is now a stated contract between the two halves rather
+   than an implementation detail of lambdas, and it is what any future runtime-held callback will
+   use. Only the plain one-argument `lazy` is answered: the overloads taking a thread-safety mode or
+   a lock decline by arity, because this target has no threads and quietly treating one as the plain
+   form would drop exactly what the program asked for.
+
 #### Decided: Kotlin/Native's memory model, not the JVM's
 
 The native target reproduces **Kotlin/Native's** concurrency contract, not the JVM's. That follows

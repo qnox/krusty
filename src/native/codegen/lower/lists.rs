@@ -10,6 +10,9 @@
 //! `Set` and `Map` are not this type and decline by name, so a program using one is skipped rather
 //! than answered wrongly.
 //!
+//! `Lazy` lives here as well — `by lazy { … }` is a delegate object like any other, and computing
+//! its value is the one place the runtime calls back into emitted code.
+//!
 //! `Pair` lives here too, for the same reasons in miniature: `a to b` is a heap object of a
 //! runtime-owned type holding two references, and the runtime answers its members so that the three
 //! `kotlin.Any` declares agree with what Kotlin's data class says. `Triple` is not one of these.
@@ -34,6 +37,26 @@ fn is_list(ty: Ty) -> bool {
     ty.non_null()
         .obj_internal()
         .is_some_and(super::super::super::intrinsics::is_list_type)
+}
+
+/// Whether a type is the runtime's `Lazy`.
+fn is_lazy(ty: Ty) -> bool {
+    ty.non_null()
+        .obj_internal()
+        .is_some_and(|internal| internal.matches("kotlin/Lazy"))
+}
+
+/// The runtime function answering one member of a `Lazy`.
+///
+/// `getValue` is the delegate convention's own name for the same question, and it is an EXTENSION
+/// of the lazy facade rather than a member — so it arrives with the lazy as its receiver and the
+/// delegation's two operands as arguments, neither of which a lazy reads.
+fn lazy_symbol(name: &str, arity: usize) -> Option<(&'static str, Vec<Ty>, Ty)> {
+    Some(match (name, arity) {
+        ("getValue", 0) | ("getValue", 2) | ("value", 0) => ("kt_lazy_value", vec![any()], any()),
+        ("isInitialized", 0) => ("kt_lazy_is_initialized", vec![any()], Ty::Boolean),
+        _ => return None,
+    })
 }
 
 /// Whether a type is the runtime's `Pair`.
@@ -124,6 +147,47 @@ impl BodyLowering<'_, '_, '_> {
             ("listOf", [element]) => Some(self.list_single(*element)),
             _ => None,
         }
+    }
+
+    /// `lazy { … }`, or `None` when the declaration is something else.
+    ///
+    /// Only the one-argument form is realized. The overloads taking a thread-safety mode or a lock
+    /// decline by arity: this target has no threads, and answering one of those as if it were the
+    /// plain form would silently drop what the program asked for.
+    pub(super) fn lazy_construction(
+        &mut self,
+        owner: &str,
+        name: &str,
+        args: &[u32],
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        if !super::super::super::intrinsics::is_lazy_facade(owner) || name != "lazy" {
+            return None;
+        }
+        let [initializer] = args else { return None };
+        Some(self.lazy_of(*initializer))
+    }
+
+    fn lazy_of(&mut self, initializer: u32) -> Result<Option<Value>, Unsupported> {
+        let function = self.reference(initializer)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.runtime_call("kt_lazy_of", &[any()], any(), &[function])
+    }
+
+    /// `l.value` — a checked read of a dependency property the runtime answers.
+    pub(super) fn lazy_getter(
+        &self,
+        target: crate::fir::ExternalPropertyId,
+        receiver: u32,
+    ) -> Option<String> {
+        if !self.type_of(receiver).is_some_and(is_lazy) {
+            return None;
+        }
+        let property = self.file.classpath.external_property(target)?;
+        let getter = self.file.classpath.external_callable(property.getter)?;
+        lazy_symbol(&getter.callable.name, 0)?;
+        Some(getter.callable.name.clone())
     }
 
     /// `a to b`, or `None` when the declaration is something else.
@@ -220,6 +284,13 @@ impl BodyLowering<'_, '_, '_> {
         let ty = self.type_of(receiver)?;
         // Iteration first: a `List` is iterated through the same dispatch an `Iterable` is, so the
         // one member both spellings share is answered in one place.
+        if is_lazy(ty) {
+            let (symbol, carried, answer) = lazy_symbol(name, args.len())?;
+            // `getValue(thisRef, property)` hands over two operands a lazy has no use for; the
+            // runtime takes the receiver alone, so they are not evaluated here either — the
+            // delegation already evaluated whatever they name.
+            return Some(self.list_call(symbol, &carried, answer, receiver, &[], ret));
+        }
         if is_pair(ty) {
             let (symbol, carried, answer) = pair_symbol(name, args.len())?;
             return Some(self.list_call(symbol, &carried, answer, receiver, args, ret));

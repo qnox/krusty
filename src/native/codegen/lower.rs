@@ -1206,13 +1206,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 target,
                 receiver: Some(receiver),
                 ..
-            }) if self.pair_getter(target, receiver).is_some() => {
+            }) if self.lazy_getter(target, receiver).is_some()
+                || self.pair_getter(target, receiver).is_some() =>
+            {
                 let name = self
-                    .pair_getter(target, receiver)
+                    .lazy_getter(target, receiver)
+                    .or_else(|| self.pair_getter(target, receiver))
                     .expect("checked by the guard");
                 match self.list_member(&name, receiver, &[], any()) {
                     Some(realized) => realized,
-                    None => Err(format!("`{name}` of a receiver that is not a pair")),
+                    None => Err(format!("`{name}` of a receiver that answers none of it")),
                 }
             }
             // `values.size`: the same runtime answer an explicit call to the getter would get,
@@ -1495,7 +1498,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     // depends on the receiver as much as on the getter — a range declares `first`
                     // too — so the receiverless read is none of them.
                     None => match receiver {
-                        Some(receiver) if self.pair_getter(*target, *receiver).is_some() => any(),
+                        Some(receiver)
+                            if self.lazy_getter(*target, *receiver).is_some()
+                                || self.pair_getter(*target, *receiver).is_some() =>
+                        {
+                            any()
+                        }
                         Some(receiver) if self.list_getter(*target, *receiver).is_some() => Ty::Int,
                         _ => self.range_getter(*target)?.2,
                     },
@@ -2194,6 +2202,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         if let Some(realized) =
                             self.list_construction(&owner, &name, packs_a_vararg, args)
                         {
+                            return realized;
+                        }
+                        if let Some(realized) = self.lazy_construction(&owner, &name, args) {
                             return realized;
                         }
                         let Some(symbol) =
