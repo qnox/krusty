@@ -475,6 +475,30 @@ mod tests {
     }
 
     #[test]
+    fn a_return_under_a_privately_owned_ancestor_is_still_swept() {
+        // The control for the test above, and the one a descendant-marking rule needs most: the
+        // same nesting with nothing else pointing at the block. One path reaches the return, so it
+        // becomes the loop step. Without this, marking EVERY descendant of every node shared would
+        // pass the test above while quietly switching the sweep off for anything inside a block.
+        let mut ir = file();
+        let returned = returned_self_call(&mut ir);
+        ir.checked_return_depths.insert(returned, 0);
+        let owned = ir.add_expr(IrExpr::Block {
+            stmts: vec![returned],
+            value: None,
+        });
+        let tail = ir.add_expr(IrExpr::Return(None));
+        finish(&mut ir, vec![owned, tail]);
+
+        assert!(
+            matches!(ir.expr(returned), IrExpr::Block { .. }),
+            "one path to the `return` is the licence to rewrite it where it stands"
+        );
+        assert_eq!(ir.checked_return_depths.get(&returned), None);
+        assert!(depths_describe_returns(&ir));
+    }
+
+    #[test]
     fn a_lambdas_capture_is_swept_and_its_inline_body_is_not() {
         // The two halves of one boundary. A lambda's captures are evaluated by THIS function, so a
         // `return` among them is this function's tail position; its inline body belongs to the
