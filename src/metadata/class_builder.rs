@@ -16,7 +16,7 @@ use crate::metadata::type_encoder::{
     semantic_type_parameters, MetadataTypeParameter, StringTable, TypeParameters,
 };
 use crate::metadata::{property_flags, protobuf::Pb};
-use crate::types::{Ty, Visibility};
+use crate::types::{Ty, TypeName, Visibility};
 
 /// Property descriptor for class metadata: name, type, mutability, and JVM accessor signatures.
 pub struct PropMeta {
@@ -560,8 +560,8 @@ pub struct ClassTail<'a> {
     /// Enclosing declaration parameters referenced by this class's members. Kotlin metadata does
     /// not repeat their declarations, but reserves their IDs before this class's own parameters.
     pub captured_type_params: &'a [String],
-    /// Direct sealed subtypes as JVM descriptors.
-    pub sealed_subclasses: &'a [&'a str],
+    /// Resolved identities of direct sealed subtypes.
+    pub sealed_subclasses: &'a [TypeName],
     /// Declared semantic supertypes, including applied type arguments. Physical erasure belongs to
     /// the classfile `super_class`/`interfaces` entries; Kotlin metadata must retain `H<A>` so
     /// reflection and downstream type substitution do not see a raw `H`.
@@ -618,7 +618,7 @@ pub struct EnumEntryMeta<'a> {
 }
 
 pub fn build_class(
-    class_internal: &str,
+    class_internal: TypeName,
     ctor_params: &[(String, Ty)],
     ctor_desc: &str,
     props: &[PropMeta],
@@ -636,8 +636,8 @@ pub fn build_class(
     // proto writes fields in field-number order below — so the d2 indices match. Build every sub-message
     // first (interning), then assemble the `Class` message.
 
-    // f3 = fq_name: a class-id derived from the `L...;` descriptor.
-    let fq = st.class_id_from_desc(&format!("L{class_internal};"));
+    // f3 = fq_name: the resolved class identity encoded directly into the metadata string table.
+    let fq = st.class_id(class_internal);
 
     // f5 = typeParameter: `{ id, name }` per declared parameter, in order. kotlinc interns the names
     // right after the fq_name, before any member signature.
@@ -695,7 +695,7 @@ pub fn build_class(
     if !enum_entries.is_empty() {
         supertype_msgs.push(type_pb(
             &mut st,
-            Ty::obj_args("kotlin/Enum", &[Ty::obj(class_internal)]),
+            Ty::obj_args("kotlin/Enum", &[Ty::obj_name(class_internal)]),
             &class_type_parameters,
         ));
     } else if tail.supertypes.is_empty() {
@@ -1237,7 +1237,7 @@ pub fn build_class(
     let sealed_idxs: Vec<u32> = tail
         .sealed_subclasses
         .iter()
-        .map(|d| st.class_id_from_desc(d))
+        .map(|&subclass| st.class_id(subclass))
         .collect();
     // The module name (f101) interns after the sealed ids — kotlinc places it after every
     // structural string.
@@ -1411,7 +1411,15 @@ mod tests {
     // exact d1 protobuf (mUTF-8-decoded to raw bytes) + d2 string table. Drives byte-for-byte parity.
     #[test]
     fn empty_class_metadata_byte_matches_kotlinc() {
-        let (d1, d2) = build_class("demo/E", &[], "()V", &[], &[], &[], &ClassTail::default());
+        let (d1, d2) = build_class(
+            crate::types::type_name("demo/E"),
+            &[],
+            "()V",
+            &[],
+            &[],
+            &[],
+            &ClassTail::default(),
+        );
         assert_eq!(
             d2,
             vec![
@@ -1437,7 +1445,7 @@ mod tests {
     #[test]
     fn one_property_class_metadata_byte_matches_kotlinc() {
         let (d1, d2) = build_class(
-            "demo/C",
+            crate::types::type_name("demo/C"),
             &[("x".into(), Ty::Int)],
             "(I)V",
             &[PropMeta {
@@ -1670,7 +1678,7 @@ mod tests {
             },
         ];
         let (d1, _d2) = build_class(
-            "demo/Point",
+            crate::types::type_name("demo/Point"),
             &[("x".into(), Ty::Int), ("y".into(), Ty::String)],
             "(ILjava/lang/String;)V",
             &props,
@@ -1714,7 +1722,7 @@ mod tests {
     fn generic_property_and_default_ctor_param() {
         let list_string = Ty::obj_args("kotlin/collections/List", &[Ty::String]);
         let (_d1, d2) = build_class(
-            "demo/D",
+            crate::types::type_name("demo/D"),
             &[("r".into(), list_string)],
             "(Ljava/util/List;)V",
             &[PropMeta {
@@ -1766,7 +1774,7 @@ mod tests {
     #[test]
     fn regular_method_class_metadata_byte_matches_kotlinc() {
         let (d1, _d2) = build_class(
-            "demo/S",
+            crate::types::type_name("demo/S"),
             &[],
             "()V",
             &[],
@@ -1796,7 +1804,7 @@ mod tests {
     #[test]
     fn companion_object_metadata_byte_matches_kotlinc() {
         let (d1, d2) = build_class(
-            "demo/C",
+            crate::types::type_name("demo/C"),
             &[],
             "()V",
             &[],
@@ -1834,7 +1842,7 @@ mod tests {
     #[test]
     fn no_compatibility_compiler_requirement_matches_kotlinc() {
         let (d1, _) = build_class(
-            "demo/I",
+            crate::types::type_name("demo/I"),
             &[],
             "()V",
             &[],
@@ -1865,7 +1873,7 @@ mod tests {
     #[test]
     fn module_name_metadata_byte_matches_kotlinc() {
         let (d1, d2) = build_class(
-            "demo/C",
+            crate::types::type_name("demo/C"),
             &[("x".into(), Ty::Int)],
             "(I)V",
             &[PropMeta {
@@ -1924,7 +1932,7 @@ mod tests {
     #[test]
     fn secondary_ctor_metadata_byte_matches_kotlinc() {
         let (d1, d2) = build_class(
-            "demo/C",
+            crate::types::type_name("demo/C"),
             &[("x".into(), Ty::Int)],
             "(I)V",
             &[PropMeta {
@@ -1990,7 +1998,7 @@ mod tests {
     #[test]
     fn class_metadata_has_expected_strings() {
         let (_d1, d2) = build_class(
-            "demo/Point",
+            crate::types::type_name("demo/Point"),
             &[("x".into(), Ty::Int), ("y".into(), Ty::String)],
             "(ILjava/lang/String;)V",
             &[

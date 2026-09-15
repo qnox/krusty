@@ -97,15 +97,13 @@ impl StringTable {
         if let Some(predefined) = predefined_index(classifier) {
             return self.builtin(predefined);
         }
-        let mut record = Pb::new();
-        record.field_varint(3, 2); // DESC_TO_CLASS_ID
-        self.intern(format!("L{};", classifier.render()), record)
-    }
-
-    pub(crate) fn class_id_from_desc(&mut self, descriptor: &str) -> u32 {
-        let mut record = Pb::new();
-        record.field_varint(3, 2); // DESC_TO_CLASS_ID
-        self.intern(descriptor.to_owned(), record)
+        let encoded = class_id_of(classifier);
+        if encoded.descriptor_shortcut {
+            let mut record = Pb::new();
+            record.field_varint(3, 2); // DESC_TO_CLASS_ID
+            return self.intern(format!("L{};", classifier.render()), record);
+        }
+        self.intern(encoded.literal, Pb::new())
     }
 
     pub(crate) fn serialize_types(&self) -> Pb {
@@ -772,5 +770,102 @@ mod tests {
         .unwrap();
         assert!(encoded.as_bytes().starts_with(&[0x20]));
         assert!(encoded.as_bytes().contains(&0x30));
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct EncodedClassId {
+    literal: String,
+    descriptor_shortcut: bool,
+}
+
+/// Kotlin-metadata class id and whether `DESC_TO_CLASS_ID` can encode it losslessly.
+///
+/// Nesting is read from the interned identity relation. The JVM spelling alone is ambiguous:
+/// `Owner$$serializer` cannot say whether the second `$` is another boundary or part of the nested
+/// simple name. A descriptor shortcut is safe exactly when none of the actual path segments contains
+/// a literal `$`; the metadata reader is then free to replace every JVM nesting separator with `.`.
+fn class_id_of(classifier: TypeName) -> EncodedClassId {
+    let mut nested = Vec::new();
+    let mut outer = classifier;
+    while let Some(owner) = outer.nested_owner() {
+        nested.push(
+            outer
+                .nested_segment_within(owner)
+                .expect("a recorded nested owner must own the classifier segment"),
+        );
+        outer = owner;
+    }
+
+    let mut descriptor_shortcut = true;
+    let mut path = Some(outer);
+    while let Some(segment) = path {
+        descriptor_shortcut &= !segment.segment_ref().contains('$');
+        path = segment.parent();
+    }
+
+    let mut literal = outer.render();
+    for segment in nested.into_iter().rev() {
+        descriptor_shortcut &= !segment.contains('$');
+        literal.push('.');
+        literal.push_str(segment);
+    }
+    EncodedClassId {
+        literal,
+        descriptor_shortcut,
+    }
+}
+
+#[cfg(test)]
+mod class_id_tests {
+    use super::class_id_of;
+    use crate::types::type_name;
+
+    /// A reader expands `DESC_TO_CLASS_ID` by replacing every `$`; the shortcut is only usable when
+    /// that reproduces the class id. These are the cases on both sides of that line.
+    #[test]
+    fn a_nesting_separator_becomes_a_dot() {
+        assert_eq!(class_id_of(type_name("Plain")).literal, "Plain");
+        assert_eq!(class_id_of(type_name("pkg/Plain")).literal, "pkg/Plain");
+        let outer = type_name("pkg/Outer");
+        assert_eq!(
+            class_id_of(outer.nested_child("Inner")).literal,
+            "pkg/Outer.Inner"
+        );
+        assert_eq!(
+            class_id_of(outer.nested_child("Inner").nested_child("Deep")).literal,
+            "pkg/Outer.Inner.Deep"
+        );
+    }
+
+    /// A simple name that itself begins with `$` — the serialization plugin's `$serializer` — keeps
+    /// that `$` instead of turning it into a second separator.
+    #[test]
+    fn a_simple_name_may_begin_with_a_dollar() {
+        let retention = type_name("Retention");
+        assert_eq!(
+            class_id_of(retention.nested_child("$serializer")).literal,
+            "Retention.$serializer"
+        );
+        let nested = type_name("pkg/A").nested_child("B");
+        assert_eq!(
+            class_id_of(nested.nested_child("$serializer")).literal,
+            "pkg/A.B.$serializer"
+        );
+    }
+
+    /// The round-trip property the encoder decides on: the descriptor shortcut is usable exactly
+    /// when replacing every `$` reproduces the class id.
+    #[test]
+    fn the_shortcut_is_taken_only_when_it_round_trips() {
+        let outer = type_name("pkg/Outer");
+        assert!(class_id_of(type_name("Plain")).descriptor_shortcut);
+        assert!(class_id_of(outer.nested_child("Inner")).descriptor_shortcut);
+        assert!(class_id_of(outer.nested_child("Inner").nested_child("Deep")).descriptor_shortcut);
+        assert!(!class_id_of(outer.nested_child("$serializer")).descriptor_shortcut);
+        assert!(
+            !class_id_of(outer.nested_child("Inner").nested_child("$serializer"))
+                .descriptor_shortcut
+        );
     }
 }
