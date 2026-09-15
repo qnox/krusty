@@ -13,6 +13,13 @@
 
 use super::common;
 
+fn both_compilers_box(main: &str, stem: &str) {
+    let reference = common::kotlinc_box_result(main);
+    let krusty = common::expect_box_run_with_stdlib(main, stem);
+    assert_eq!(reference, "OK", "{stem}: reference compiler");
+    assert_eq!(krusty, reference, "{stem}: runtime differential");
+}
+
 /// The failing shape, on a Kotlin `fun interface`.
 #[test]
 fn a_kotlin_fun_interface_constructor_labels_its_lambda() {
@@ -33,7 +40,7 @@ fun box(): String {\n\
 \x20   make(false).handle(3)\n\
 \x20   return if (seen.toString() == \"13\") \"OK\" else \"FAIL: \" + seen\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "fun_interface_lambda_label");
+    both_compilers_box(MAIN, "fun_interface_lambda_label");
 }
 
 /// The same through a JAVA functional interface, which reaches the conversion by the same route.
@@ -52,7 +59,7 @@ fun box(): String {\n\
 \x20   make(false).run()\n\
 \x20   return if (seen.toString() == \"rr\") \"OK\" else \"FAIL: \" + seen\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "java_interface_lambda_label");
+    both_compilers_box(MAIN, "java_interface_lambda_label");
 }
 
 /// A SAM lambda that returns a VALUE through its label, so the label must carry the result too, not
@@ -73,7 +80,7 @@ fun box(): String {\n\
 \x20   if (make(true).map(5) != 10) return \"FAIL: doubled\"\n\
 \x20   return \"OK\"\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "sam_label_value");
+    both_compilers_box(MAIN, "sam_label_value");
 }
 
 /// A label that denotes nothing is still rejected — registering the interface name must not make
@@ -86,14 +93,24 @@ fn an_unknown_label_is_still_rejected() {
 \n\
 fun make(): Handler = Handler { return@Missing }\n";
     let result = common::compiler_diagnostics(&[("Main.kt", MAIN)], &[]);
-    assert_ne!(
-        result.reference_code, 0,
-        "kotlinc must reject an unknown label: {}",
-        result.reference_stderr
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+    assert_eq!(common::compiler_errors(&result.krusty_stdout), []);
+    assert_eq!(
+        common::compiler_errors(&result.krusty_stderr),
+        [common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: 5,
+            column: 33,
+            message: "return label 'Missing' does not denote an enclosing lambda".to_string(),
+        }]
     );
-    assert_ne!(
-        result.krusty_code, 0,
-        "krusty accepted an unknown label: {}{}",
-        result.krusty_stdout, result.krusty_stderr
+    assert_eq!(
+        common::compiler_errors(&result.reference_stderr),
+        [common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: 5,
+            column: 39,
+            message: "unresolved label.".to_string(),
+        }]
     );
 }

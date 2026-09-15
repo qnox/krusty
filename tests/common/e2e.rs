@@ -48,6 +48,40 @@ pub struct CompilerDiagnosticResult {
     pub reference_stderr: String,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct CompilerError {
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub message: String,
+}
+
+/// Extract every rendered compiler error in emission order. The scratch-directory prefixes differ
+/// between invocations, so the stable source filename is the location boundary compared by tests.
+pub fn compiler_errors(output: &str) -> Vec<CompilerError> {
+    output
+        .lines()
+        .filter_map(|rendered| {
+            let (location, message) = rendered.split_once("error:")?;
+            let location = location.trim().trim_end_matches(':');
+            let mut fields = location.rsplitn(3, ':');
+            let column = fields.next()?.trim().parse().ok()?;
+            let line = fields.next()?.trim().parse().ok()?;
+            let path = fields.next()?.trim();
+            Some(CompilerError {
+                file: std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(path)
+                    .to_string(),
+                line,
+                column,
+                message: message.trim().to_string(),
+            })
+        })
+        .collect()
+}
+
 fn write_fixture_sources(work: &std::path::Path, sources: &[(&str, &str)]) -> Vec<PathBuf> {
     sources
         .iter()
