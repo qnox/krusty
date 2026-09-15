@@ -2333,3 +2333,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `a_classpath_generic_member_uses_the_same_implicit_bound`,
   `a_top_level_generic_of_the_same_shape_still_works`, `an_explicit_type_argument_still_works`,
   `a_declared_non_null_bound_still_rejects_a_nullable_result`.
+- **A suspension inside a `throw` operand is hoisted (fix).** `throw classify(status, body())`, where
+  `body()` suspends, left the suspension buried in the thrown expression. The state-machine flattener
+  cannot split a suspension there, so it declined the whole function and the backend reported
+  `this suspend-function shape is not yet supported by the IR backend` — a per-FILE verdict, so one
+  such `throw` cost a module every class in the file. `throw` evaluates its operand unconditionally
+  and to completion before control leaves, exactly like the single-operand statements beside it in the
+  hoister (`!!`, a `lateinit` check, arithmetic negation), each of which already hoisted its operand;
+  `Throw` simply had no arm. Two controls isolate it: binding the same call to a local first, and
+  returning the identical expression instead of throwing it, both always worked.
+  `tests/suspend_throw_operand_e2e.rs::a_suspension_inside_a_thrown_expression_is_hoisted`,
+  `a_conditional_throw_hoists_its_suspension_too`,
+  `the_same_suspension_bound_to_a_local_still_works`,
+  `the_same_expression_returned_instead_of_thrown_still_works`.

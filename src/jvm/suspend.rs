@@ -2415,6 +2415,16 @@ fn hoist_expr(
             };
             e
         }
+        // `throw classify(status, body())` — the thrown expression evaluates unconditionally and to
+        // completion before control leaves, so a suspension inside it hoists to a preceding temp
+        // exactly like the single-operand statements beside this arm. Without it the suspension
+        // stayed buried in the operand, where the state-machine flattener cannot split it, and the
+        // whole function was declined.
+        IrExpr::Throw { operand } => {
+            let operand = hoist_expr(ir, operand, suspend_set, orig_rets, value_types, prelude);
+            ir.exprs[e as usize] = IrExpr::Throw { operand };
+            e
+        }
         IrExpr::NotNullAssert { operand, message } => {
             let operand = hoist_expr(ir, operand, suspend_set, orig_rets, value_types, prelude);
             ir.exprs[e as usize] = IrExpr::NotNullAssert { operand, message };
