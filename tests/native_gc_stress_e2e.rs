@@ -390,3 +390,168 @@ fn a_capture_a_lambda_only_passes_on_is_still_a_cell() {
         "OK",
     );
 }
+
+#[test]
+fn a_substring_keeps_the_storage_it_was_cut_from() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A substring SHARES the receiver's byte array and points into the middle of it, so the only
+    // thing keeping that array alive is the string object's own storage field. The originals are
+    // dropped on every iteration and the text is read back at the end: an untraced storage field
+    // frees the bytes the slices name, and the answer comes back as something else or not at all.
+    assert_eq!(
+        run(&format!(
+            "{CHURN}\
+             fun main() {{\n\
+             \x20   val kept = arrayOfNulls<String>(500)\n\
+             \x20   var i = 0\n\
+             \x20   while (i < 500) {{\n\
+             \x20       val whole = \"prefix-$i-suffix\"\n\
+             \x20       kept[i] = whole.substring(7, whole.length - 7)\n\
+             \x20       if (i % 50 == 0) churn(4000)\n\
+             \x20       i = i + 1\n\
+             \x20   }}\n\
+             \x20   churn(40000)\n\
+             \x20   var intact = 0\n\
+             \x20   var j = 0\n\
+             \x20   while (j < 500) {{\n\
+             \x20       if (kept[j] == \"$j\") intact = intact + 1\n\
+             \x20       j = j + 1\n\
+             \x20   }}\n\
+             \x20   println(intact)\n\
+             }}\n"
+        )),
+        "500\n",
+        "a slice must keep the array it points into alive across every collection"
+    );
+}
+
+#[test]
+fn the_runtimes_own_composite_objects_trace_what_they_hold() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A list, a pair and a bound property reference each carry their references in their own
+    // runtime-written descriptor rather than in one the generator emitted, so a wrong offset there
+    // is a class of bug the tests above cannot reach. Each is built, kept, collected around many
+    // times, and then read.
+    assert_eq!(
+        run(&format!(
+            "{CHURN}\
+             class Cell(var text: String)\n\
+             fun main() {{\n\
+             \x20   val lists = arrayOfNulls<List<String>>(200)\n\
+             \x20   val pairs = arrayOfNulls<Pair<String, Cell>>(200)\n\
+             \x20   var i = 0\n\
+             \x20   while (i < 200) {{\n\
+             \x20       lists[i] = listOf(\"a-$i\", \"b-$i\", \"c-$i\")\n\
+             \x20       pairs[i] = \"key-$i\" to Cell(\"held-$i\")\n\
+             \x20       if (i % 20 == 0) churn(4000)\n\
+             \x20       i = i + 1\n\
+             \x20   }}\n\
+             \x20   churn(40000)\n\
+             \x20   var elements = 0\n\
+             \x20   var components = 0\n\
+             \x20   var j = 0\n\
+             \x20   while (j < 200) {{\n\
+             \x20       val list = lists[j]!!\n\
+             \x20       if (list.size == 3 && list[0] == \"a-$j\" && list[2] == \"c-$j\") {{\n\
+             \x20           elements = elements + 1\n\
+             \x20       }}\n\
+             \x20       val pair = pairs[j]!!\n\
+             \x20       if (pair.first == \"key-$j\" && pair.second.text == \"held-$j\") {{\n\
+             \x20           components = components + 1\n\
+             \x20       }}\n\
+             \x20       j = j + 1\n\
+             \x20   }}\n\
+             \x20   println(elements)\n\
+             \x20   println(components)\n\
+             }}\n"
+        )),
+        "200\n200\n",
+        "a list's array and a pair's two components must survive every collection"
+    );
+}
+
+#[test]
+fn a_lazy_keeps_its_initializer_until_it_runs_and_its_value_after() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A `Lazy` holds two references at different times: the initializer, which is a closure over
+    // the enclosing locals and is the only thing keeping them alive before the first read, and the
+    // value afterwards. Collections happen on both sides of that switch here, so an untraced
+    // initializer shows up as a wrong value and an untraced value as a lost one.
+    assert_eq!(
+        run(&format!(
+            "{CHURN}\
+             fun main() {{\n\
+             \x20   val held = arrayOfNulls<Lazy<String>>(200)\n\
+             \x20   var i = 0\n\
+             \x20   while (i < 200) {{\n\
+             \x20       val label = \"seed-$i\"\n\
+             \x20       held[i] = lazy {{ \"computed-$label\" }}\n\
+             \x20       if (i % 20 == 0) churn(4000)\n\
+             \x20       i = i + 1\n\
+             \x20   }}\n\
+             \x20   churn(40000)\n\
+             \x20   var computed = 0\n\
+             \x20   var j = 0\n\
+             \x20   while (j < 200) {{\n\
+             \x20       if (held[j]!!.value == \"computed-seed-$j\") computed = computed + 1\n\
+             \x20       if (j % 20 == 0) churn(4000)\n\
+             \x20       j = j + 1\n\
+             \x20   }}\n\
+             \x20   churn(40000)\n\
+             \x20   var again = 0\n\
+             \x20   var k = 0\n\
+             \x20   while (k < 200) {{\n\
+             \x20       if (held[k]!!.value == \"computed-seed-$k\") again = again + 1\n\
+             \x20       k = k + 1\n\
+             \x20   }}\n\
+             \x20   println(computed)\n\
+             \x20   println(again)\n\
+             }}\n"
+        )),
+        "200\n200\n",
+        "a lazy must keep its initializer before the first read and its value after"
+    );
+}
+
+#[test]
+fn an_iterator_keeps_the_list_it_is_walking() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // The iterator holds the list and an INDEX, and the list here is reachable through nothing
+    // else — it was built inline and the iterator is what the loop keeps. Collections happen
+    // inside the walk, so an untraced list field frees the very elements being read.
+    assert_eq!(
+        run(&format!(
+            "{CHURN}\
+             fun walk(size: Int): String {{\n\
+             \x20   val iterator = (0 until size).map {{ n -> \"element-$n\" }}.iterator()\n\
+             \x20   var seen = 0\n\
+             \x20   var last = \"\"\n\
+             \x20   while (iterator.hasNext()) {{\n\
+             \x20       last = iterator.next()\n\
+             \x20       if (seen % 10 == 0) churn(2000)\n\
+             \x20       seen = seen + 1\n\
+             \x20   }}\n\
+             \x20   return \"$seen/$last\"\n\
+             }}\n\
+             fun main() {{\n\
+             \x20   println(walk(200))\n\
+             \x20   churn(40000)\n\
+             \x20   println(walk(50))\n\
+             }}\n"
+        )),
+        "200/element-199\n50/element-49\n",
+        "an iterator must keep the list it is the only reference to"
+    );
+}

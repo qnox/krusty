@@ -1566,6 +1566,21 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **The collector against the runtime's OWN objects.** The stress tests covered what the
+   generator emits — class instances, arrays, closure captures — and nothing that the runtime lays
+   out itself. That gap had grown: a list, a pair, a lazy, a list iterator and a shared string
+   storage each carry their references in a hand-written descriptor, and a wrong offset there is
+   the same bug with none of the same coverage. Four programs now hold each of them across many
+   collections and read them back. Each was checked by BLINDING the descriptor it tests — dropping
+   the reference count, or pointing an offset at the wrong field — and confirming the test fails;
+   two came back as wrong answers and two as a SIGSEGV, which is what a wrong offset does.
+
+   The concurrency half of the same question needs no new tests yet, and that is a finding rather
+   than a gap: this runtime starts no threads, and `the_runtime_starts_no_threads` pins that by
+   reading the syscall header rather than by trusting a comment. It fails the moment `clone`,
+   `futex` or `pthread` appears — which is exactly when the Kotlin/Native memory model this target
+   committed to has to be implemented and these tests rewritten.
+
    **`joinToString()`, for 2561.** The interesting part is what is NOT realized. Every parameter
    of it is defaulted, and a dependency's defaults live in a `$default` synthetic this backend
    cannot call — so supporting the argument forms would mean writing the stdlib's default values
