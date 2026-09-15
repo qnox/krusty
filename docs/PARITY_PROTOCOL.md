@@ -2297,6 +2297,21 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `src/resolve/type_join.rs::tests::an_exact_platform_pair_keeps_the_flexible_operand_in_both_orders`,
   `nested_platform_and_genuine_nullable_differences_are_not_outer_pairs`,
   `tests/try_expected_type_join_e2e.rs::a_try_expression_joins_its_branches_against_the_expected_type`.
+- **A spliced inline body types its values from its OWN declarations (fix).** Value indices are
+  numbered per body. A file-wide value-type map let an enclosing caller, a spliced body, or a nested
+  lambda overwrite the same numeric index. A primitive result could therefore look like a reference,
+  skip its required box at `FunctionN.invoke`, and produce a class the verifier rejected. Every
+  emitter body now builds its own physical declaration map. The walker follows a lambda's capture
+  expressions because they belong to the current body, but stops at its `inline_body`, which owns a
+  separate numbering domain; entering that body installs and later restores both its value slots and
+  declaration map. The common IR walk still traverses inline bodies for genuine whole-tree passes.
+  All stored types pass through `ir_ty_to_jvm`, preserving unsigned/value-class carrier normalization.
+  `src/jvm/ir_emit/inline_body_emission.rs::tests::a_nested_inline_body_cannot_overwrite_its_parents_same_index`,
+  `tests/inline_lambda_result_boxing_e2e.rs::a_labeled_return_in_map_boxes_a_primitive_result`,
+  `every_primitive_element_carrier_is_boxed` (all eight primitives),
+  `an_unsigned_element_keeps_its_semantic_box`,
+  `non_local_returns_and_reference_elements_are_unchanged` — each runs the identical fixture under
+  the reference compiler too, since these shapes are about matching ITS carrier decisions.
 - **An absent type-parameter bound is `Any?`, not `Any` (fix).** The member call path copied a
   declaration's `GenericSig` into a second `GenericMethod` shape, flattened its bounds, and filled
   each ABSENT type-parameter bound with a non-null `Any`.
