@@ -146,6 +146,10 @@ typedef struct KArray {
    kind Kotlin has here: `0`, `false`, `\u0000`, `0.0` and `null` are all zero bits. */
 KRef kt_array_new(const KType *type, kt_int length);
 
+/* Copy `source`'s elements into `destination` at `at`, answering where the next element goes. What
+   a spread needs: `f(a, *xs, b)` builds one array whose size only run time knows. */
+kt_int kt_array_copy_into(KRef destination, kt_int at, KRef source);
+
 /* An index outside `0 until size`. Kotlin throws IndexOutOfBoundsException; with no exception
    machinery yet the honest realization is a diagnosable exit. */
 void kt_index_out_of_bounds(kt_int index, kt_int size);

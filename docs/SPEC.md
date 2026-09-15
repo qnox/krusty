@@ -1985,6 +1985,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_lists_e2e.rs`
   (`a_single_element_list_is_not_a_vararg_call_of_length_one`).
 
+- **A spread makes a vararg array whose length only run time knows.** A `vararg` call normally
+  builds its array from elements the generator can count, so each has a constant offset. `f(a, *xs,
+  b)` is as long as `xs` is: the length is summed at run time from the non-spread count plus each
+  spread array's own, and the elements are placed at a running index — a spread by copying its
+  elements in, the rest one at a time. The running index counts ELEMENTS, so the stride is what
+  turns it into an address, and a spread copies by that same stride rather than by a pointer's
+  width.
+  The COPY is also the semantics: the callee's `vararg` array is its own, and a spread that passed
+  the caller's array itself would let a write reach back through it.
+  Tests: `tests/native_spread_e2e.rs`.
+
 - **A `fun interface` method may be an extension, and that changes nothing about the object.**
   Kotlin lets the single abstract method take a receiver (`fun String.foo(): String`), and inside
   the lambda implementing it `this` is that receiver. The receiver is a declared PARAMETER of the

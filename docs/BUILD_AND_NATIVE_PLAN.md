@@ -1559,6 +1559,13 @@ before:**
    Worth recording as a kind of decline to go looking for: one that tests a PROPERTY of a construct
    rather than a capability the code lacks.
 
+   **Spread arguments, for 2496.** The one thing a `vararg` call had been able to assume is that it
+   can count its elements, which is what gives each a constant offset. `f(a, *xs, b)` takes that
+   away: the length is summed at run time and the elements go at a running index, a spread copying
+   its elements in and the rest placed one at a time. The copy is not an implementation choice but
+   the semantics — the callee's array is its own, and one that shared storage with the caller's
+   would let a write reach back through it, which is what the third test pins.
+
 #### Decided: Kotlin/Native's memory model, not the JVM's
 
 The native target reproduces **Kotlin/Native's** concurrency contract, not the JVM's. That follows

@@ -801,6 +801,28 @@ static KRef kt_range_to_string(KRef self) {
     return kt_string_of((KRef)buffer, kt_bytes_of(buffer), length);
 }
 
+/* Copy `source`'s elements into `destination` starting at `at`, and answer where the next element
+   goes. The two arrays share an element kind — a spread into a `vararg` is a spread of the same
+   type — so the DESTINATION's stride measures both.
+
+   This exists because a spread's length is only known at run time: `f(a, *xs, b)` builds one array
+   whose size nothing static can compute, and copying is what the callee's own array must contain.
+   A copy, rather than passing `xs` itself, is also what keeps the callee from writing through to
+   the caller's array. */
+kt_int kt_array_copy_into(KRef destination, kt_int at, KRef source) {
+    if (destination == NULL || source == NULL) {
+        KT_FAIL("krusty: a spread of null\n");
+    }
+    kt_int length = ((const KArray *)source)->length;
+    uint32_t stride = destination->header.type->element_size;
+    if (at < 0 || length < 0 || at + length > ((const KArray *)destination)->length) {
+        kt_index_out_of_bounds(at + length, ((const KArray *)destination)->length);
+    }
+    memcpy((char *)(KArray *)destination + sizeof(KArray) + (size_t)at * stride,
+           (const char *)(const KArray *)source + sizeof(KArray), (size_t)length * stride);
+    return at + length;
+}
+
 /* ---- lists --------------------------------------------------------------------------------- */
 
 /* `listOf(...)` as a VALUE. The elements are an ordinary `Array<T>` the list holds, which is what

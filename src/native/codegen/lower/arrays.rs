@@ -152,16 +152,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         spreads: &[bool],
         elements: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
-        if spreads.iter().any(|spread| *spread) {
-            return Err("a spread argument (`*array`)".to_string());
-        }
         let shape = self.array_shape(array)?;
+        let spread = spreads.iter().any(|spread| *spread);
 
         // Elements first, then the allocation: an element that allocates must not leave a
-        // half-built array for a collection to find.
+        // half-built array for a collection to find. A SPREAD element is the array it spreads,
+        // which crosses as a reference whatever the elements are.
         let mut values = Vec::with_capacity(elements.len());
-        for value in elements {
-            let Some(value) = self.coerce(*value, shape.stored)? else {
+        for (value, spread) in elements.iter().zip(spreads) {
+            let stored = if *spread { any() } else { shape.stored };
+            let Some(value) = self.coerce(*value, stored)? else {
                 return Err("a `Unit` array element".to_string());
             };
             if self.terminated {
@@ -170,7 +170,30 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             values.push(value);
         }
         let descriptor = self.data_address(shape.descriptor);
-        let length = self.builder.ins().iconst(types::I32, values.len() as i64);
+        // With no spread the length is the element count, and every element has a known offset.
+        // With one it is not: `f(a, *xs, b)` is as long as `xs` is, which only run time knows, so
+        // the length is summed and the elements are placed at a running index rather than at a
+        // constant.
+        let length = match spread {
+            false => self.builder.ins().iconst(types::I32, values.len() as i64),
+            true => {
+                let mut length = self.builder.ins().iconst(
+                    types::I32,
+                    spreads.iter().filter(|spread| !**spread).count() as i64,
+                );
+                for (value, spread) in values.iter().zip(spreads) {
+                    if !*spread {
+                        continue;
+                    }
+                    let spread = self
+                        .builder
+                        .ins()
+                        .load(types::I32, trusted(), *value, LENGTH);
+                    length = self.builder.ins().iadd(length, spread);
+                }
+                length
+            }
+        };
         let array = self
             .runtime_call(
                 "kt_array_new",
@@ -179,11 +202,37 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 &[descriptor, length],
             )?
             .expect("`kt_array_new` returns the array");
-        for (index, value) in values.into_iter().enumerate() {
-            let offset = ELEMENTS + (index as i64) * i64::from(shape.stride);
-            self.builder
+        if !spread {
+            for (index, value) in values.into_iter().enumerate() {
+                let offset = ELEMENTS + (index as i64) * i64::from(shape.stride);
+                self.builder
+                    .ins()
+                    .store(trusted(), value, array, offset as i32);
+            }
+            return Ok(Some(array));
+        }
+        let mut at = self.builder.ins().iconst(types::I32, 0);
+        for (value, spread) in values.into_iter().zip(spreads) {
+            if *spread {
+                at = self
+                    .runtime_call(
+                        "kt_array_copy_into",
+                        &[any(), Ty::Int, any()],
+                        Ty::Int,
+                        &[array, at, value],
+                    )?
+                    .expect("`kt_array_copy_into` answers the next index");
+                continue;
+            }
+            let offset = self.builder.ins().uextend(types::I64, at);
+            let offset = self
+                .builder
                 .ins()
-                .store(trusted(), value, array, offset as i32);
+                .imul_imm_s(offset, i64::from(shape.stride));
+            let address = self.builder.ins().iadd_imm_s(array, ELEMENTS);
+            let address = self.builder.ins().iadd(address, offset);
+            self.builder.ins().store(trusted(), value, address, 0);
+            at = self.builder.ins().iadd_imm_s(at, 1);
         }
         Ok(Some(array))
     }
