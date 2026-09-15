@@ -646,36 +646,6 @@ impl crate::types::ClassifierAnnotationSource for CheckedBackendClassifiers<'_> 
     }
 }
 
-/// Checked adapter used by the legacy syntax-lowering path while it remains available to tests.
-pub struct SymbolSourceClassifiers<'a> {
-    source: &'a dyn SymbolSource,
-}
-
-impl<'a> SymbolSourceClassifiers<'a> {
-    pub fn new(source: &'a dyn SymbolSource) -> Self {
-        Self { source }
-    }
-}
-
-impl BackendClassifierSource for SymbolSourceClassifiers<'_> {
-    fn classifier(&self, classifier: TypeName) -> Option<Arc<BackendClassifierFact>> {
-        let shape = self.source.classifier(classifier)?;
-        validate_classifier(classifier, &shape).unwrap_or_else(|error| {
-            panic!("classifier crossed the backend boundary with invalid types: {error:?}")
-        });
-        Some(Arc::new(BackendClassifierFact::from_library(&shape)))
-    }
-}
-
-impl crate::types::ClassifierAnnotationSource for SymbolSourceClassifiers<'_> {
-    fn classifier_annotations(
-        &self,
-        classifier: TypeName,
-    ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
-        BackendClassifierSource::classifier(self, classifier).map(|fact| fact.annotations.to_vec())
-    }
-}
-
 fn validate_classifier(classifier: TypeName, shape: &LibraryType) -> Result<(), BackendFactError> {
     let mut saw_pending = false;
     let mut saw_error = false;
