@@ -81,8 +81,8 @@ pub(crate) use finalized_projection::{
     project_finalized_signatures, publish_stable_declaration_metadata,
 };
 use lambda_expectation::{functional_argument_expectation, FunctionalArgumentExpectation};
-use lambda_returns::LambdaReturnScopes;
 pub use lambda_returns::ReturnTarget;
+use lambda_returns::{call_implicit_lambda_label, LambdaReturnScopes};
 use local_class_scope::{
     local_class_enclosing_tparams, local_class_sibling_names, EnclosingTypeParameterDeclaration,
 };
@@ -31052,7 +31052,9 @@ impl<'a> Checker<'a> {
                                     a,
                                     Ty::Fun(signature),
                                     has_receiver,
-                                    None,
+                                    call_implicit_lambda_label(self.file, call)
+                                        .map(str::to_string)
+                                        .as_deref(),
                                 );
                                 if collect_postponed {
                                     let inferred = self
@@ -60092,7 +60094,8 @@ impl<'a> Checker<'a> {
         }
         if !arguments_already_mapped {
             let positional_signature = CallSig::default();
-            let implicit_lambda_label = self.call_implicit_lambda_label(call).map(str::to_string);
+            let implicit_lambda_label =
+                call_implicit_lambda_label(self.file, call).map(str::to_string);
             for (i, (p, a)) in params.iter().zip(arg_tys).enumerate() {
                 let actual = self.selected_argument_type(
                     scope,
@@ -72673,16 +72676,6 @@ impl<'a> Checker<'a> {
         true
     }
 
-    fn call_implicit_lambda_label(&self, call: ExprId) -> Option<&str> {
-        let Expr::Call { callee, .. } = self.file.expr(call) else {
-            return None;
-        };
-        match self.file.expr(*callee) {
-            Expr::Name(name) | Expr::Member { name, .. } => Some(name.as_str()),
-            _ => None,
-        }
-    }
-
     /// Validate the source arguments of one already-selected callable and commit their semantic
     /// parameter slots. Selection owns WHICH callable won; this origin-neutral seam owns Kotlin's
     /// named/default/vararg/trailing-lambda mapping for every selected callable.
@@ -72704,7 +72697,7 @@ impl<'a> Checker<'a> {
         // Candidate probing and selected-call commitment must expose the same implicit label.
         // Rechecking a postponed/SAM lambda against the winner otherwise drops `return@callee`
         // even though the call syntax—and therefore the label—has not changed.
-        let implicit_lambda_label = self.call_implicit_lambda_label(call).map(str::to_string);
+        let implicit_lambda_label = call_implicit_lambda_label(self.file, call).map(str::to_string);
         let slots = match map_call_args(
             args,
             arg_names,
