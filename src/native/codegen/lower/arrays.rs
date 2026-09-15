@@ -22,7 +22,7 @@ pub(super) const ELEMENTS: i64 = 16;
 const LENGTH: i32 = 8;
 
 /// The runtime type and element stride for an array type, or the decline naming it.
-fn array_type(array: Ty) -> Result<(&'static str, u32), Unsupported> {
+pub(super) fn array_type(array: Ty) -> Result<(&'static str, u32), Unsupported> {
     if array.non_null().is_reference_array() {
         return Ok(("kt_type_array", 8));
     }

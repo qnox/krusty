@@ -6356,6 +6356,18 @@ and behavior is checked by RUNNING the emitted program.
   Tests: `tests/native_classes_e2e.rs` (`is_and_safe_casts_follow_the_superclass_chain`,
   `a_failed_cast_fails_loudly_naming_both_types`).
 
+- **An array type is one of those runtime types, and what its descriptor separates is the element
+  WIDTH.** `is`, `as` and `as?` against `IntArray` or `Array<*>` ask the runtime about the same
+  descriptor an allocation already stamps on the array, because the collector has to be told the
+  element width and whether to look inside. That width is exactly Kotlin's own erasure here:
+  `Array<String>` and `Array<Foo>` are one type, `IntArray` is neither of them, and `is Array<*>` is
+  the only form a program may write. An `as` to an array is therefore CHECKED like a class's, where
+  before it fell through to a coercion — which changes nothing about a reference and so let an
+  `Array<String>` be read as an `IntArray`, four bytes out of every eight-byte slot. An unsigned
+  array still declines: the runtime lays out no array for it, so there is no descriptor to name.
+  Tests: `tests/native_type_checks_e2e.rs`, and `tests/native_classes_e2e.rs`
+  (`a_failed_cast_to_an_array_fails_loudly_too`).
+
 - **A top-level property is a global slot, initialized before the entry function, and rooted in the
   collector if it holds a reference.** The JVM realizes a top-level property as a private static
   field plus a `getX`/`setX` pair (and an `access$get<X>$p` bridge when a sibling class reads a

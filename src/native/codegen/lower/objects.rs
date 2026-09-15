@@ -144,6 +144,16 @@ impl<'a> FileLowering<'a> {
             Ty::UShort => "kt_type_ushort",
             Ty::UInt => "kt_type_uint",
             Ty::ULong => "kt_type_ulong",
+            // An array is not a class this file declares, so there is no class id to look one up
+            // by — but it is a type the RUNTIME names, and the descriptor an allocation already
+            // stamps on it is the one a check has to ask about. What that descriptor separates is
+            // the element WIDTH, which is Kotlin's own erasure: `Array<String>` and `Array<Foo>`
+            // are one type here, and `IntArray` is neither of them. An element the runtime lays
+            // out no array for has no descriptor to name, which is what the `None` says.
+            _ if target.is_array() => match super::arrays::array_type(target) {
+                Ok((symbol, _)) => symbol,
+                Err(_) => return Ok(None),
+            },
             _ => return Ok(None),
         };
         self.import_data(symbol).map(Some)
@@ -1593,6 +1603,28 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(())
     }
 
+    /// The descriptor a CAST to `ty` must be checked against, or `None` when the cast is a
+    /// representation change rather than a question about an object.
+    ///
+    /// A class and an array both name an object wearing a descriptor, so `as` and `as?` can ask
+    /// the runtime the same question `is` does. A scalar or a `String` does not belong here even
+    /// though [`FileLowering::type_descriptor`] names one for it: `x as Int` is an unboxing, whose
+    /// realization is the coercion the fall-through performs, and routing it through `kt_cast`
+    /// would hand back the box where the site expects the number.
+    fn checked_cast_target(&mut self, ty: Ty) -> Result<Option<DataId>, Unsupported> {
+        let target = ty.non_null();
+        if let Some(class) = target
+            .obj_internal()
+            .and_then(|name| self.file.ir.class_id_by_name(name))
+        {
+            return Ok(Some(self.file.classes[class as usize].descriptor));
+        }
+        if target.is_array() {
+            return self.file.type_descriptor(target);
+        }
+        Ok(None)
+    }
+
     /// `is`, `as`, `as?` and the coercions the frontend inserts.
     pub(super) fn type_operation(
         &mut self,
@@ -1600,10 +1632,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         arg: u32,
         type_operand: Ty,
     ) -> Result<Option<Value>, Unsupported> {
-        let class_target = type_operand
-            .non_null()
-            .obj_internal()
-            .and_then(|name| self.file.ir.class_id_by_name(name));
         match op {
             IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf => {
                 let Some(descriptor) = self.file.type_descriptor(type_operand)? else {
@@ -1641,9 +1669,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 }
                 Ok(Some(result))
             }
-            IrTypeOp::Cast | IrTypeOp::CastNonNull if class_target.is_some() => {
-                let descriptor =
-                    self.file.classes[class_target.expect("checked") as usize].descriptor;
+            // A cast to something WEARING a descriptor is a question the runtime answers; a cast
+            // to anything else is a representation change, and the coercion is its whole
+            // realization.
+            IrTypeOp::Cast | IrTypeOp::CastNonNull => {
+                let Some(descriptor) = self.checked_cast_target(type_operand)? else {
+                    return self.coerce(arg, type_operand);
+                };
                 let helper = if op == IrTypeOp::Cast || type_operand.is_nullable() {
                     "kt_cast"
                 } else {
@@ -1656,10 +1688,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.runtime_call(helper, &[any(), any()], any(), &[object, descriptor])
             }
             IrTypeOp::SafeCast => {
-                let Some(class) = class_target else {
+                let Some(descriptor) = self.checked_cast_target(type_operand)? else {
                     return Err(format!("an `as?` to `{}`", type_name_of(type_operand)));
                 };
-                let descriptor = self.file.classes[class as usize].descriptor;
                 let Some(object) = self.receiver(arg)? else {
                     return Ok(None);
                 };
@@ -1671,9 +1702,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     &[object, descriptor],
                 )
             }
-            IrTypeOp::ImplicitCoercion | IrTypeOp::Cast | IrTypeOp::CastNonNull => {
-                self.coerce(arg, type_operand)
-            }
+            IrTypeOp::ImplicitCoercion => self.coerce(arg, type_operand),
         }
     }
 

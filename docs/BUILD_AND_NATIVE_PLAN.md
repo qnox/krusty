@@ -1566,6 +1566,22 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **An array is a type the runtime already names, for 2625.** `is IntArray` was declining because
+   an array is not a class the program declares, so there was no class id to look a descriptor up
+   by. There was a descriptor all along: every array the generator allocates wears one of the
+   runtime's own, because the collector has to be told the element width and whether to look inside.
+   Naming that same descriptor at a type check was the whole change.
+   The four cases are not why it was worth doing. `as` to an array had no descriptor either, and its
+   fall-through is a COERCION — which changes nothing about a reference, so `value as IntArray` on
+   an `Array<String>` passed the object straight through and every read off it was four bytes out of
+   an eight-byte slot, a pointer answered as a number. A miscompile, not a decline, and invisible
+   until something read the array. It now fails loudly the way a class's failed cast does.
+   What the descriptor separates is the element WIDTH, which happens to be exactly Kotlin's erasure
+   here: `Array<String>` and `Array<Foo>` are one type, `is Array<*>` is the only form a program may
+   write, and `IntArray` is neither of them. An unsigned array still declines — the runtime lays out
+   no array for one, so there is no descriptor to name, which is the honest answer rather than a
+   near-enough one.
+
    **Merging #920, and a claim of mine that was wrong.** I had said the tailrec core fix was worth
    about eighteen native cases. It is worth none of them: the native decline counts by FUNCTION
    name, and every shape still declining is one #920's own PR body listed as out of scope — a
