@@ -1,5 +1,5 @@
-//! The recursive passes over source nesting — the checker and IR-lowering `expr_inner`, and the
-//! parser's expression/type/statement/declaration funnels — are depth-bounded
+//! The recursive passes over source nesting — the checker, the checked-FIR lowering expression
+//! funnel, and the parser's expression/type/statement/declaration funnels — are depth-bounded
 //! (`expr_depth`, 500 semantic levels; 1000 parser entries) and promise the bound is survivable:
 //! past it the construct degrades (`Error` type / lowering bail / parser error node with a
 //! balanced skip), the file is skipped, never crashed. That promise must hold on a
