@@ -2346,3 +2346,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `a_conditional_throw_hoists_its_suspension_too`,
   `the_same_suspension_bound_to_a_local_still_works`,
   `the_same_expression_returned_instead_of_thrown_still_works`.
+- **`kotlin.time.Instant` has a builtin element serializer (fix).** The builtin table mapped the
+  primitives, `String` and `kotlin.uuid.Uuid`, but not `kotlin.time.Instant`, so a `@Serializable`
+  class with an `Instant` property could derive no element serializer, the plugin left its
+  `serialize-body` placeholder, and the residual node failed the whole FILE. The runtime ships
+  `kotlinx/serialization/internal/InstantSerializer`, exactly parallel to the `UuidSerializer` entry
+  already present. Both the key mapping and the serializer name are added, so a property and a
+  collection ELEMENT are served alike. The tests round-trip through a real `Json` and assert the exact
+  ISO-8601 text, which is what proves the serializer is wired to the right runtime class rather than
+  merely present.
+  `tests/instant_builtin_serializer_e2e.rs::an_instant_property_serializes_through_the_builtin`,
+  `an_instant_collection_element_serializes_through_the_builtin`, `the_uuid_builtin_still_works`.

@@ -914,6 +914,8 @@ fn builtin_element_key(ty: &Ty) -> Option<&'static str> {
         "kotlin/String"
     } else if fq.matches("kotlin/uuid/Uuid") {
         "kotlin/uuid/Uuid"
+    } else if fq.matches("kotlin/time/Instant") {
+        "kotlin/time/Instant"
     } else {
         return None;
     })
@@ -931,6 +933,7 @@ fn builtin_element_serializer(ty: &Ty) -> Option<&'static str> {
         "kotlin/Byte" => "kotlinx/serialization/internal/ByteSerializer",
         "kotlin/Short" => "kotlinx/serialization/internal/ShortSerializer",
         "kotlin/uuid/Uuid" => "kotlinx/serialization/internal/UuidSerializer",
+        "kotlin/time/Instant" => "kotlinx/serialization/internal/InstantSerializer",
         _ => return None,
     })
 }
