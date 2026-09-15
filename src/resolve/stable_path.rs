@@ -27,7 +27,7 @@ impl<'checker, 'source> StablePathRead<'checker, 'source> {
                 // dispatch property's is below. Falling straight through to the top-level rule
                 // answered `None` and dropped the proof before it was ever recorded.
                 if path.segments.is_empty() {
-                    if let Some(receiver) = self.receiver_owning(scope, &path.root) {
+                    if let Some(receiver) = self.checker.receiver_owning(scope, &path.root) {
                         return self.member_ty(receiver, &path.root);
                     }
                 }
@@ -74,20 +74,6 @@ impl<'checker, 'source> StablePathRead<'checker, 'source> {
             ty = self.member_ty(ty, segment)?;
         }
         Some(ty)
-    }
-
-    /// Nearest implicit receiver that declares `name`, if any. Scope-tower order is preserved, so
-    /// an inner receiver shadows an outer one exactly as member selection does.
-    fn receiver_owning(&self, scope: &CheckerScope<'_>, name: &str) -> Option<Ty> {
-        self.checker
-            .implicit_receivers(scope)
-            .into_iter()
-            .map(|candidate| candidate.ty)
-            .find(|receiver| {
-                self.checker
-                    .lookup_prop_name(receiver.non_null(), name)
-                    .is_some()
-            })
     }
 
     /// A same-file top-level `val` with its compiler-default backing-field getter is stable like a

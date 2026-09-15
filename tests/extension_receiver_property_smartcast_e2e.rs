@@ -15,6 +15,29 @@
 
 use super::common;
 
+/// Compare the COMPLETE diagnostic set of both compilers — count, file, line, column, message and
+/// order. A nonzero-exit or substring assertion passes on an unrelated rejection.
+fn expect_identical_rejection(result: &common::CompilerDiagnosticResult, tag: &str) {
+    let rendered = format!("{}{}", result.krusty_stdout, result.krusty_stderr);
+    let krusty = common::compiler_errors(&rendered);
+    let reference = common::compiler_errors(&result.reference_stderr);
+    assert_ne!(
+        result.reference_code, 0,
+        "{tag}: kotlinc accepted the fixture: {}",
+        result.reference_stderr
+    );
+    assert_ne!(result.krusty_code, 0, "{tag}: krusty accepted: {rendered}");
+    assert!(
+        !reference.is_empty(),
+        "{tag}: kotlinc rejected with no parseable diagnostic: {}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        krusty, reference,
+        "{tag}: diagnostics differ.\nkrusty:  {krusty:#?}\nkotlinc: {reference:#?}"
+    );
+}
+
 /// The failing shape, in both the expression-body and block-body spellings.
 #[test]
 fn an_extension_receivers_property_smart_casts_under_a_bare_name() {
@@ -87,21 +110,57 @@ fn a_mutable_extension_receiver_property_still_declines() {
 fun take(value: String): String = value\n\
 fun Yaml.expand(): String = if (ref != null) take(ref) else \"none\"\n";
     let result = common::compiler_diagnostics(&[("Main.kt", MAIN)], &[]);
-    assert_ne!(
-        result.reference_code, 0,
-        "kotlinc must reject a `var` smart cast: {}",
-        result.reference_stderr
+    // Both compilers reject at the same position. They WORD it differently: kotlinc explains why the
+    // smart cast is impossible, while krusty reports the resulting type mismatch. That gap is
+    // general — krusty has no `mutable property that could be mutated concurrently` wording for any
+    // receiver — and predates this change, so it is recorded exactly rather than papered over with a
+    // substring match. Converging the wording is its own diagnostic-parity change.
+    assert_eq!(
+        common::compiler_errors(&result.krusty_stdout),
+        [],
+        "krusty writes diagnostics to stderr"
     );
-    assert!(
-        result
-            .reference_stderr
-            .contains("smart cast to 'String' is impossible, because 'ref' is a mutable property"),
-        "unexpected kotlinc output: {}",
-        result.reference_stderr
+    assert_eq!(
+        common::compiler_errors(&result.krusty_stderr),
+        [common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: 3,
+            column: 51,
+            message: "argument type mismatch: actual type is 'String?', but 'String' was expected."
+                .to_string(),
+        }]
     );
-    assert_ne!(
-        result.krusty_code, 0,
-        "krusty accepted a `var` smart cast kotlinc rejects: {}{}",
-        result.krusty_stdout, result.krusty_stderr
+    assert_eq!(
+        common::compiler_errors(&result.reference_stderr),
+        [common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: 3,
+            column: 51,
+            message: "smart cast to 'String' is impossible, because 'ref' is a mutable property \
+                      that could be mutated concurrently."
+                .to_string(),
+        }]
     );
+}
+
+/// A NEARER receiver shadows an outer one that declares the same property name.
+///
+/// The proof `ref != null` is about the extension receiver's `ref`. Inside `Inner.run { … }` the
+/// nearest receiver is an `Inner`, whose own `ref` is unproven, so the read must NOT find the outer
+/// proof. Recorder and read resolve the name through one receiver walk precisely so they cannot
+/// disagree about which receiver owns it; this asserts the reference compiler's verdict, record for
+/// record.
+#[test]
+fn a_nearer_receiver_of_the_same_property_name_is_not_proven() {
+    const MAIN: &str = "class Outer(val ref: String?)\n\
+class Inner(val ref: String?)\n\
+fun take(value: String): String = value\n\
+fun Outer.probe(inner: Inner): String {\n\
+\x20   if (ref != null) {\n\
+\x20       return inner.run { take(ref) }\n\
+\x20   }\n\
+\x20   return \"none\"\n\
+}\n";
+    let result = common::compiler_diagnostics(&[("Main.kt", MAIN)], &[]);
+    expect_identical_rejection(&result, "a shadowing nearer receiver");
 }

@@ -64640,9 +64640,9 @@ impl<'a> Checker<'a> {
             if self.lookup(scope, &root).is_some() {
                 crate::trace_compiler!("smartcast", "root narrowing shadows lexical value {root}");
                 self.declare_narrowing_shadow(scope, &root, ty);
-            } else if scope
-                .this_ty()
-                .is_some_and(|this| self.lookup_prop_name(this.non_null(), &root).is_some())
+            } else if self
+                .receiver_owning(scope, &root)
+                .is_some_and(|receiver| scope.this_ty() == Some(receiver))
             {
                 // A bare name that is a property of the CURRENT receiver — an extension function
                 // reading its own receiver's property — has no lexical binding to shadow, and the
@@ -64697,6 +64697,20 @@ impl<'a> Checker<'a> {
     /// was made against the receiver of the rung that established it, and crossing out of that rung
     /// means `this` is a different object (a receiver lambda of the same type is still a different
     /// object). Both are expressed by where the walk stops.
+    /// Nearest implicit receiver that declares `name`, if any.
+    ///
+    /// Scope-tower order is preserved, so an inner receiver shadows an outer one exactly as member
+    /// selection does. Both the narrowing RECORDER and the stable-path READ resolve a bare name
+    /// through this one walk: if they disagreed about which receiver owns the name, a proof about an
+    /// outer receiver's property could be found by a read of a nearer receiver's property of the
+    /// same name.
+    pub(super) fn receiver_owning(&self, scope: &CheckerScope<'_>, name: &str) -> Option<Ty> {
+        self.implicit_receivers(scope)
+            .into_iter()
+            .map(|candidate| candidate.ty)
+            .find(|receiver| self.lookup_prop_name(receiver.non_null(), name).is_some())
+    }
+
     fn lookup_path_narrowing(&self, scope: &CheckerScope<'_>, path: &NarrowPath) -> Option<Ty> {
         let rooted_at_this = path.root == "this";
         for rung in scope.ancestors() {
