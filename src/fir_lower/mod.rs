@@ -57,6 +57,25 @@ pub struct LoweredFirBody {
     pub implicit_return: bool,
     pub property_storage_type: Option<crate::types::Ty>,
     pub property_delegate: Option<crate::fir::FirPropertyDelegatePlan>,
+    /// Where this body put its receiver and parameters.
+    pub slots: BodySlots,
+}
+
+/// The value slots a body assigned to the things a CALLER supplies.
+///
+/// `BodyLowering::value_slot` is the authority on this layout, and it has more contributors than
+/// "`this`, then the parameters": captures, a local class's constructor captures and context values,
+/// context parameters and an extension receiver all take slots first. A pass that REASSIGNS
+/// parameters — the `tailrec` loop rewrite is the only one — must write the slots the body actually
+/// read, so the lowering reports them here rather than leaving them to be derived a second time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BodySlots {
+    /// The dispatch receiver's slot, for a member.
+    pub dispatch_receiver: Option<u32>,
+    /// The slot of the first entry of the IR function's parameter list — which includes an
+    /// extension receiver, inserted at its own position, so this is that receiver's slot for an
+    /// extension.
+    pub first_parameter: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -193,6 +212,7 @@ pub(crate) fn lower_body_with_context(
             .property_storage_type()
             .map(crate::fir::ResolvedTy::get),
         property_delegate: body.property_delegate().cloned(),
+        slots: lowering.body_slots(),
     };
     local_callables.realizations = lowering.published_local_callables;
     if let Some(classifier) = enclosing_classifier {
@@ -493,6 +513,17 @@ impl<'a> BodyLowering<'a> {
 
     fn dispatch_receiver_slot(&self) -> Option<u32> {
         self.has_dispatch_receiver.then_some(self.capture_count)
+    }
+
+    /// The slots a caller's values occupy — see [`BodySlots`].
+    fn body_slots(&self) -> BodySlots {
+        BodySlots {
+            dispatch_receiver: self.dispatch_receiver_slot(),
+            first_parameter: self.capture_count
+                + self.class_constructor_capture_count
+                + self.class_constructor_context_count
+                + u32::from(self.has_dispatch_receiver),
+        }
     }
 
     fn record_expression_origins(

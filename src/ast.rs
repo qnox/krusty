@@ -843,6 +843,8 @@ pub struct FunDecl {
     pub override_span: Option<Span>,
     /// Exact span of the `operator` modifier. Present exactly when [`Self::is_operator`] is true.
     pub operator_span: Option<Span>,
+    /// Source span of a `tailrec` modifier, for the diagnostic that rejects it on an open member.
+    pub tailrec_span: Option<Span>,
     /// 1-based source line of the `fun` declaration (from `span.lo`), for its `LineNumberTable`.
     /// 0 = unknown (no debug table emitted). Filled by the same parser post-pass as `Class::decl_line`.
     ///
