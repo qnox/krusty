@@ -29,8 +29,8 @@ use std::sync::OnceLock;
 
 use super::common;
 
-fn walk(dir: &Path, prefix: &str, depth: usize, out: &mut Option<PathBuf>) {
-    if out.is_some() || depth > 10 {
+fn walk(dir: &Path, prefix: &str, depth: usize, out: &mut Vec<PathBuf>) {
+    if depth > 10 {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -42,18 +42,38 @@ fn walk(dir: &Path, prefix: &str, depth: usize, out: &mut Option<PathBuf>) {
             walk(&path, prefix, depth + 1, out);
         } else if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
             if name.starts_with(prefix) && name.ends_with(".jar") && !name.contains("sources") {
-                *out = Some(path.clone());
-                return;
+                out.push(path.clone());
             }
         }
     }
 }
 
+/// The numeric version embedded in a jar file name, for ordering. Sorting the PATHS as strings
+/// instead puts `1.9` above `1.10`; comparing the parsed components orders them properly.
+fn version_key(path: &Path) -> Vec<u64> {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(|stem| {
+            stem.rsplit('-')
+                .next()
+                .unwrap_or_default()
+                .split('.')
+                .map(|part| part.parse::<u64>().unwrap_or(0))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The NEWEST matching jar. Taking the FIRST match encountered instead selects whichever version the
+/// directory walk happens to reach first, which can silently resolve to a runtime that predates the
+/// serializer under test — that failure mode produced a `NoClassDefFoundError` in a sibling suite,
+/// which reads as a compiler bug rather than a test-fixture bug.
 fn find(prefix: &str) -> PathBuf {
     let home = std::env::var("HOME").expect("HOME must be set to locate the serialization runtime");
-    let mut out = None;
-    walk(&Path::new(&home).join(".gradle"), prefix, 0, &mut out);
-    out.unwrap_or_else(|| {
+    let mut found = Vec::new();
+    walk(&Path::new(&home).join(".gradle"), prefix, 0, &mut found);
+    found.sort_by_key(|path| version_key(path));
+    found.pop().unwrap_or_else(|| {
         panic!(
             "no {prefix}*.jar under ~/.gradle, so this test cannot run.\n\
              It must not self-skip: a skipped serialization test passes on an unfixed compiler."
