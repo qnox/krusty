@@ -59,6 +59,7 @@ mod stable_path_legacy_bridge;
 mod streaming_signature_bridge;
 #[cfg(test)]
 mod streaming_signature_tests;
+mod type_join;
 
 // The capture storage-kind contract and the write analysis behind it. Imported by name so the call
 // sites read as they did when these lived here: what moved is the responsibility, not the spelling.
@@ -102,6 +103,7 @@ pub(crate) use streaming_signature_bridge::{
     publish_checked_local_signatures, publish_checked_local_signatures_in_active_root,
     publish_discovered_local_capture_declarations,
 };
+use type_join::join_type_projection;
 
 const MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES: usize = 64;
 const MAX_OVERLOAD_DIAGNOSTIC_BYTES: usize = 64 * 1024;
@@ -45143,65 +45145,6 @@ pub(crate) fn join_applied_classifier(
         arguments.push(argument);
     }
     Some(Ty::obj_args_name(owner, &arguments))
-}
-
-pub(crate) fn join_type_projection(
-    source: &dyn SymbolSource,
-    oracle: &dyn crate::assignable::TypeOracle,
-    declaration_variance: crate::types::TypeVariance,
-    star_upper_bound: Ty,
-    left: Ty,
-    right: Ty,
-    visiting: &mut std::collections::HashSet<(Ty, Ty)>,
-) -> Option<Ty> {
-    if left == right {
-        return Some(left);
-    }
-    let projection = |argument| match argument {
-        Ty::InProjection(inner) => (true, false, *inner),
-        Ty::OutProjection(inner) | Ty::StarProjection(inner) => (false, true, *inner),
-        other => (true, true, other),
-    };
-    let (left_in, left_out, left) = projection(left);
-    let (right_in, right_out, right) = projection(right);
-    let allows_out = declaration_variance != crate::types::TypeVariance::In;
-    if allows_out && left_out && right_out {
-        if visiting.contains(&(left, right)) || visiting.contains(&(right, left)) {
-            return Some(Ty::out_projection(star_upper_bound));
-        }
-        let joined = semantic_common_supertype_inner(source, oracle, left, right, visiting);
-        return Some(match (declaration_variance, joined) {
-            (crate::types::TypeVariance::Out, Some(joined)) => joined,
-            (_, Some(joined)) => Ty::out_projection(joined),
-            (_, None) => Ty::out_projection(star_upper_bound),
-        });
-    }
-    let allows_in = declaration_variance != crate::types::TypeVariance::Out;
-    if allows_in && left_in && right_in {
-        let intersection = if crate::assignable::is_assignable(
-            &crate::assignable::TyCtx::new(),
-            oracle,
-            left,
-            right,
-        ) {
-            left
-        } else if crate::assignable::is_assignable(
-            &crate::assignable::TyCtx::new(),
-            oracle,
-            right,
-            left,
-        ) {
-            right
-        } else {
-            Ty::Nothing
-        };
-        return Some(if declaration_variance == crate::types::TypeVariance::In {
-            intersection
-        } else {
-            Ty::in_projection(intersection)
-        });
-    }
-    Some(Ty::out_projection(star_upper_bound))
 }
 
 /// `===`/`!==` operands kotlinc forbids: an unsigned type or a `@JvmInline value` class, neither of

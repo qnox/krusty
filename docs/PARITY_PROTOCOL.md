@@ -2284,3 +2284,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   updated with that evidence.
   `src/jvm/jvm_libraries.rs::tests::ordinary_generic_signatures_retain_projection_and_inner_class_parsing`,
   `tests/diagnostics_match_kotlinc.rs::java_unbounded_wildcard_diagnostic_is_a_star_projection`.
+- **An invariant join treats a platform argument and its plain counterpart as one type (fix).**
+  `Resp<*>!` and `Resp<*>` denote the same type differing only in what is KNOWN about null, yet the
+  projection join compared them by exact equality, fell through to its invariant path, and wrapped the
+  result in `out` — a projection neither operand had, which an invariant expectation then rejects.
+  The join now recognises that pair and keeps the PLATFORM side, deliberately: its flexibility carries
+  the null-assertion obligation that guarded positions depend on, and an earlier attempt that
+  discarded it regressed `platform_call_assertions_e2e`. A genuine `X?` against `X` is a different
+  question — it admits null — and still requires the projection. The shortcut is deliberately one
+  wrapper deep: nested flexible arguments are joined by their owning classifier instead of making
+  the result depend on branch order.
+  `src/resolve/type_join.rs::tests::an_exact_platform_pair_keeps_the_flexible_operand_in_both_orders`,
+  `nested_platform_and_genuine_nullable_differences_are_not_outer_pairs`,
+  `tests/try_expected_type_join_e2e.rs::a_try_expression_joins_its_branches_against_the_expected_type`.
