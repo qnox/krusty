@@ -401,7 +401,7 @@ impl Checker<'_> {
                 },
                 MemberExtensionFunctionCall {
                     extension_receiver: delegate_ty,
-                    expected_result,
+                    result_constraint: CallResultConstraint::direct(expected_result),
                     name,
                     args: &syntax,
                     arg_tys: args,

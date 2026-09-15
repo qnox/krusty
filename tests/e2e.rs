@@ -540,6 +540,8 @@ mod error_receiver_cascade_e2e;
 mod expected_return_invariant_binding_e2e;
 #[path = "expected_type_propagation_e2e.rs"]
 mod expected_type_propagation_e2e;
+#[path = "expected_type_seeds_invoke_e2e.rs"]
+mod expected_type_seeds_invoke_e2e;
 #[path = "explicit_backing_field_e2e.rs"]
 mod explicit_backing_field_e2e;
 #[path = "explicit_import_shadows_same_package_e2e.rs"]

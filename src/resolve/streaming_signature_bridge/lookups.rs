@@ -895,7 +895,7 @@ impl ProductionSignatureSemantics<'_> {
             },
             super::super::MemberExtensionFunctionCall {
                 extension_receiver,
-                expected_result,
+                result_constraint: super::super::CallResultConstraint::direct(expected_result),
                 name,
                 args: &argument_ordinals,
                 arg_tys: arguments,

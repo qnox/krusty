@@ -480,6 +480,24 @@ fn safe_callable_property_invokes_an_operator_declared_on_its_superinterface() {
 }
 
 #[test]
+fn safe_property_invoke_keeps_an_already_nullable_selected_result() {
+    let (body, _) = checked_function_body(
+        "class Fold { operator fun <T> invoke(): T? = null }\n\
+         class Holder(val fold: Fold)\n\
+         fun value(holder: Holder?): String? = holder?.fold()\n",
+        "value",
+    );
+    let safe = body.expr(root_expression(&body)).expect("safe call");
+    assert_eq!(safe.ty.get(), Ty::nullable(Ty::String));
+    let FirExprKind::SafeCall { selector, .. } = safe.kind else {
+        panic!("safe property invoke must retain an explicit null-guarded selector")
+    };
+    let selected = body.expr(selector).expect("selected invoke");
+    assert_eq!(selected.ty.get(), Ty::nullable(Ty::String));
+    assert!(matches!(selected.kind, FirExprKind::Call(_)));
+}
+
+#[test]
 fn not_null_assertion_propagates_nullable_expectation_into_generic_call() {
     let (body, _) = checked_function_body(
         "fun <T> produce(): T = 1L as T\n\
