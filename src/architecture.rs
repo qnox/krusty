@@ -615,13 +615,13 @@ mod tests {
         assert_allowed_crate_modules(
             "src/bin/bytediff.rs",
             &[
+                "compiler",
                 "conformance",
                 "diag",
+                "features",
                 "frontend",
-                "ir_lower",
                 "jvm",
-                "lexer",
-                "parser",
+                "source",
             ],
         );
         assert_allowed_crate_modules(

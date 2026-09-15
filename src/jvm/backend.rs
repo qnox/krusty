@@ -70,62 +70,7 @@ pub enum SkipReason {
 ///     machines. Runs after all IR→IR transforms, before emit.
 ///
 /// Per-site concerns (timing counters, bail-reason strings, diagnostics) stay at the call sites.
-pub fn run_backend_passes(
-    ir: &mut crate::ir::IrFile,
-    facade: &str,
-    module_name: &str,
-    syms: &FrontendSymbols,
-    classpath: &crate::jvm::classpath::Classpath,
-    classifiers: &dyn crate::types::ClassifierAnnotationSource,
-) -> Result<(), SkipReason> {
-    let mut discard = crate::jvm::suspend::ContinuationMetadataMap::default();
-    run_backend_passes_with_metadata(
-        ir,
-        facade,
-        module_name,
-        syms,
-        classpath,
-        classifiers,
-        &mut discard,
-    )
-}
-
-/// Run the JVM pass pipeline and retain continuation metadata for class emission.
-pub fn run_backend_passes_with_metadata(
-    ir: &mut crate::ir::IrFile,
-    facade: &str,
-    module_name: &str,
-    syms: &FrontendSymbols,
-    classpath: &crate::jvm::classpath::Classpath,
-    classifiers: &dyn crate::types::ClassifierAnnotationSource,
-    continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
-) -> Result<(), SkipReason> {
-    crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor, classifiers);
-    let module_value_classes: std::collections::HashMap<_, _> = syms
-        .classes
-        .values()
-        .filter_map(|class| {
-            class
-                .value_field
-                .as_ref()
-                .map(|(_, ty)| (class.internal_name(), *ty))
-        })
-        .collect();
-    let module_readable_value_classes = module_value_classes.keys().copied().collect();
-    run_backend_passes_after_plugins(
-        ir,
-        facade,
-        &module_value_classes,
-        &module_readable_value_classes,
-        classpath,
-        continuation_metadata,
-        None,
-    )
-}
-
-/// Streaming JVM pipeline entry. Native plugins consume only checked common-IR declaration
-/// metadata; the reparsed Pass-2 source unit is not part of their contract.
-pub fn run_backend_passes_with_checked_metadata(
+pub(crate) fn run_backend_passes(
     ir: &mut crate::ir::IrFile,
     facade: &str,
     module_name: &str,
@@ -702,7 +647,7 @@ impl JvmBackend {
         let package = ir.package.clone().unwrap_or_default();
         let facade_name = file_class_name(stem, ir.package.as_deref());
         let mut continuation_metadata = crate::jvm::suspend::ContinuationMetadataMap::default();
-        if let Err(reason) = run_backend_passes_with_checked_metadata(
+        if let Err(reason) = run_backend_passes(
             &mut ir,
             &facade_name,
             module_name,
