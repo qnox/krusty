@@ -129,16 +129,14 @@ pub enum Callee {
     },
     /// A top-level function defined in ANOTHER source file of the same multi-file compilation —
     /// `invokestatic <facade>.<name>(params)ret`. Carries the signature as backend-agnostic `Ty`s
-    /// (the JVM backend builds the descriptor), so `ir_lower` needn't know JVM descriptors. Distinct
+    /// (the JVM backend builds the descriptor), so common lowering never needs JVM descriptors. Distinct
     /// from `Local` (same IrFile, by index) and `Static` (a resolved classpath/library method).
     CrossFile {
         facade: TypeName,
         name: String,
         params: Vec<Ty>,
         ret: Ty,
-        /// Exact current-module declaration that produced this realized cross-file edge. Legacy
-        /// common lowering may construct a physical cross-file call directly and therefore has no
-        /// stable declaration identity.
+        /// Exact current-module declaration that produced this realized cross-file edge.
         module_target: Option<crate::fir::CallableId>,
         /// Whether this edge invokes the declaration's default-argument synthetic. Kept separate
         /// from the JVM spelling so representation passes never infer semantics from `$default`.
@@ -1032,9 +1030,9 @@ pub enum IrExpr {
     /// `FunctionN.invoke` returns an `Object`. Another backend realizes the unit value differently.
     UnitInstance,
     /// The enclosing suspend function's own `Continuation` — the receiver bound to the lambda parameter
-    /// of `suspendCoroutineUninterceptedOrReturn { c -> … }`. A placeholder emitted by `ir_lower` that the
-    /// CPS pass (`jvm/suspend.rs`) rewrites to the real continuation value (`GetValue(<cont slot>)`) once
-    /// the trailing `Continuation` parameter exists. It must never survive to the emitter.
+    /// of `suspendCoroutineUninterceptedOrReturn { c -> … }`. Common lowering emits this placeholder;
+    /// the CPS pass rewrites it to the real continuation value once the trailing `Continuation`
+    /// parameter exists. It must never survive to the emitter.
     CurrentContinuation,
     /// Invoke a function value (`f(args)` where `f: (A,…) -> R`) via the `FunctionN.invoke` interface
     /// method. Arguments are boxed to `Object`; the `Object` result is cast/unboxed to `ret`.
@@ -2734,11 +2732,11 @@ pub struct IrFile {
     /// how an inline declaration is represented (the JVM emitter, for example, adds kotlinc's
     /// `$i$f$<name>` local marker to emitted non-suspend bodies).
     pub top_level_inline_functions: std::collections::HashSet<u32>,
-    /// `FunId`s of `suspend fun`s, tagged by ir_lower. The coroutine pass (`jvm::suspend`) owns the
+    /// `FunId`s of `suspend fun`s, tagged by common lowering. The coroutine pass (`jvm::suspend`) owns the
     /// whole transform: it rewrites each to the continuation-passing-style ABI (an extra
     /// `kotlin.coroutines.Continuation` parameter, return type erased to `Object`) and, for a function
-    /// with suspension points, builds the state machine + continuation class. ir_lower itself lowers a
-    /// `suspend fun` as a plain function (mirroring how value classes stay plain until their pass).
+    /// with suspension points, builds the state machine + continuation class. Common lowering keeps a
+    /// `suspend fun` plain, mirroring how value classes stay plain until their target pass.
     pub suspend_funs: Vec<u32>,
     /// Methods the source declares WITHOUT `override` — a fresh declaration rather than an override of a
     /// supertype member. A language fact nothing else in the IR records: `IrFunction` carries a signature,
@@ -2773,8 +2771,8 @@ pub struct IrFile {
     /// suspension call expression.
     pub value_class_suspend_calls: std::collections::HashMap<ExprId, IrValueClassSuspendResult>,
     /// `ExprId` of each direct call to a `suspend fun` → the callee's LOGICAL return type (the source
-    /// return, before CPS erasure to `Object`). Recorded by ir_lower from the resolver
-    /// (`flags.suspend`), so the coroutine pass recognizes a suspend call to ANOTHER file or a classpath
+    /// return, before CPS erasure to `Object`). Recorded from the checked FIR call target, so the
+    /// coroutine pass recognizes a suspend call to ANOTHER file or a classpath
     /// dependency — whose `FunId` is absent from this file's `suspend_funs`. Same-file/member suspend
     /// calls are caught by `suspend_funs`; this is the cross-unit complement.
     pub suspend_calls: std::collections::HashMap<u32, Ty>,
@@ -2790,8 +2788,8 @@ pub struct IrFile {
     /// a state machine with the lambda instance itself as the continuation — `(invokeSuspend FunId,
     /// lambda ClassId, field_base)`. `field_base` is the first free field index on the lambda class
     /// (after its captures/parameters), where the coroutine pass appends the `result`/`label`/spilled
-    /// fields. ir_lower builds `invokeSuspend` with the plain body (suspend calls un-threaded); the pass
-    /// flattens it. (Single-suspension lambdas are handled inline by ir_lower instead.) `field_base` is
+    /// fields. Common lowering builds `invokeSuspend` with the plain body; the pass flattens it.
+    /// `field_base` is
     /// the number of leading capture/parameter fields — the pass reloads them into locals `2..` at each
     /// `invokeSuspend` entry (so a captured/parameter value survives a re-entry), excludes them from
     /// spilling, and places the result/label/spilled fields after them.
@@ -2868,7 +2866,7 @@ pub struct IrFile {
     field_signatures: std::collections::HashMap<TypeName, Vec<(String, String)>>,
     /// Classpath `@JvmInline value class` (fq-internal-name → erased underlying `Ty`) REFERENCED in
     /// this file. The JVM value-class pass merges these into its erasure map so a dependency value class
-    /// unboxes exactly like a same-file declaration. Populated by ir_lower (which has the classpath);
+    /// unboxes exactly like a same-file declaration. Populated from checked external classifier facts;
     /// native unsigned builtins keep their dedicated `Ty`/runtime handling and are not recorded here.
     external_value_classes: std::collections::HashMap<TypeName, Ty>,
     /// Expression identity → `(declared value-class name, erased underlying type)` for a construction
@@ -2888,8 +2886,8 @@ pub struct IrFile {
     /// concrete type is a backend-agnostic `Ty`; the JVM splicer maps it to an internal name.
     pub reified_call_subst: std::collections::HashMap<u32, Vec<(String, Ty)>>,
     /// Extension-call `ExprId` → the extension's DECLARED (un-erased) receiver source type, forwarded
-    /// verbatim from the resolved callable's `source_receiver`. `ir_lower` records it with NO value-class
-    /// reasoning of its own; the value-class pass reads it to decide box/unbox at the receiver. The signal
+    /// verbatim from the checked callable's `source_receiver`. Common lowering records it with no
+    /// value-class reasoning; the value-class pass reads it to decide box/unbox at the receiver. The signal
     /// distinguishes `fun Result<T>.getOrThrow()` (receiver `kotlin/Result` — a value class whose facade
     /// method takes the UNBOXED underlying, so a `Boxed` receiver unboxes) from a generic `fun <T> T.foo()`
     /// (receiver a type variable — erases to `Object`, receiver stays boxed) even though both erase
@@ -2897,8 +2895,8 @@ pub struct IrFile {
     /// is `None` at the source and never inserted).
     pub ext_call_source_receiver: std::collections::HashMap<u32, Ty>,
     /// Call `ExprId` → the callee's DECLARED (un-erased, pre-substitution) return type, forwarded
-    /// verbatim from the resolved library member's `declared_ret`. `ir_lower` records it with NO
-    /// value-class reasoning of its own; the value-class pass reads it to decide the RESULT's
+    /// verbatim from the checked external call's `declared_ret`. Common lowering records it with no
+    /// value-class reasoning; the value-class pass reads it to decide the RESULT's
     /// representation, exactly as `ext_call_source_receiver` does for the receiver.
     ///
     /// The distinction it carries cannot be recovered from the descriptor: a value class returned by

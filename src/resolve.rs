@@ -11966,8 +11966,8 @@ fn collect_signatures_with_cp_impl(
                     }
                     // A delegated property `val x: T by Del()`: type is the annotation if present, else the
                     // delegate's `getValue` return type. Resolving the read-type here lets `val a = x`
-                    // infer. (The lowering — `x$delegate`/`x$kprop` + `getX()` — is in ir_lower; an
-                    // unresolvable delegate type yields `Error` and the file skips.)
+                    // infer. Checked FIR carries the selected delegate operations into common
+                    // lowering; an unresolvable delegate type yields `Error` and the file skips.
                     let inferred_ty = if compact_headers.is_some() {
                         match property_header.declared_type.as_ref() {
                             Some(declared) => {
@@ -20028,13 +20028,10 @@ pub enum ExprLowering {
     /// increment reached FIR with no write target and failed as an unknown local.
     TopLevelPropertyIncDec(Box<ResolvedPropertyAccess>),
     /// `::prop.isInitialized` after the property reference has selected a `lateinit` declaration.
-    /// Checked FIR consumes `declaration`; the legacy lowerer temporarily consumes the parallel
-    /// storage coordinates. No phase is allowed to reinterpret the callable-reference spelling.
+    /// Checked FIR consumes this stable identity. No later phase may reinterpret the
+    /// callable-reference spelling.
     LateinitInitialized {
         declaration: Option<crate::fir::DeclarationId>,
-        owner: TypeName,
-        property: String,
-        top_level: bool,
     },
     /// A call or function reference resolved to a local function declaration.
     LocalFunction {
@@ -77637,7 +77634,7 @@ impl<'a> Checker<'a> {
                 // A WIDENED value over a primitive range: `when (x: Any) { in 4..10 -> … }`. kotlinc
                 // lowers it to `CollectionsKt.contains(4..10, x)`, which is true exactly when `x` is a
                 // BOXED element of the range — so it stays a comparison chain, guarded by the
-                // `instanceof` the boxed element type implies (see `ir_lower::expr_inner_in_range`).
+                // `instanceof` the boxed element type implies.
                 let comparison = range_st
                     .range_counter_type()
                     .expect("widened direct membership is restricted to counted primitive ranges");
@@ -79546,7 +79543,7 @@ impl<'a> Checker<'a> {
         &mut self,
         scope: &CheckerScope<'_>,
         expression: ExprId,
-    ) -> Option<(Option<crate::fir::DeclarationId>, TypeName, String, bool)> {
+    ) -> Option<Option<crate::fir::DeclarationId>> {
         let (receiver, name) = match self.file.expr(expression) {
             Expr::CallableRef { receiver, name } => (*receiver, name.clone()),
             _ => return None,
@@ -79584,20 +79581,7 @@ impl<'a> Checker<'a> {
                 .property
                 .or(candidates.extension_property)
                 .filter(|property| stable_is_lateinit(property.stable_declaration))
-                .map(|property| {
-                    let declaration = property.stable_declaration;
-                    let owner = property
-                        .reflection_owner
-                        .non_null()
-                        .obj_internal()
-                        .unwrap_or(property.getter.owner);
-                    (
-                        declaration,
-                        owner,
-                        property.name,
-                        property.companion_extension,
-                    )
-                })
+                .map(|property| property.stable_declaration)
         };
         if receiver.is_none() || bound_to_this {
             for implicit in self.implicit_receivers(scope) {
@@ -79624,25 +79608,12 @@ impl<'a> Checker<'a> {
             let current_source = index
                 .declaration_anchor(declaration)
                 .is_some_and(|anchor| anchor.source.raw() == self.file_index);
-            return (current_source && stable_is_lateinit(Some(declaration))).then(|| {
-                (
-                    Some(declaration),
-                    property.property.owner,
-                    property.property.name.clone(),
-                    true,
-                )
-            });
+            return (current_source && stable_is_lateinit(Some(declaration)))
+                .then_some(Some(declaration));
         }
         let source = property.property.source_key?;
         let header = self.module.legacy_symbols()?.source_props.get(&source)?;
-        (source.0 == self.file_index && header.is_lateinit).then(|| {
-            (
-                declaration,
-                property.property.owner,
-                property.property.name.clone(),
-                true,
-            )
-        })
+        (source.0 == self.file_index && header.is_lateinit).then_some(declaration)
     }
 
     fn expr_inner_member(
@@ -79689,18 +79660,9 @@ impl<'a> Checker<'a> {
             // `lateinit` field is `null` until assigned), so it needs no reflection and no `KProperty`
             // value at all.
             if name == "isInitialized" {
-                if let Some((declaration, owner, property, top_level)) =
-                    self.selected_lateinit_reference(scope, receiver)
-                {
-                    self.expr_lowers.insert(
-                        e,
-                        ExprLowering::LateinitInitialized {
-                            declaration,
-                            owner,
-                            property,
-                            top_level,
-                        },
-                    );
+                if let Some(declaration) = self.selected_lateinit_reference(scope, receiver) {
+                    self.expr_lowers
+                        .insert(e, ExprLowering::LateinitInitialized { declaration });
                     return self.set(e, Ty::Boolean);
                 }
             }
