@@ -15,38 +15,6 @@
 
 use super::common;
 
-/// Compare the COMPLETE diagnostic set of both compilers — count, file, line, column, message and
-/// order. A nonzero-exit or substring assertion passes on an unrelated rejection, which is how a
-/// "both compilers agree" claim goes stale.
-fn expect_identical_rejection(result: &common::CompilerDiagnosticResult, tag: &str) {
-    let krusty = common::compiler_errors(&result.krusty_stderr);
-    let reference = common::compiler_errors(&result.reference_stderr);
-    assert_eq!(
-        result.reference_code, 1,
-        "{tag}: kotlinc exited {} rather than rejecting the fixture: {}",
-        result.reference_code, result.reference_stderr
-    );
-    assert_eq!(
-        result.krusty_code, 1,
-        "{tag}: krusty exited {} rather than rejecting the fixture: {}{}",
-        result.krusty_code, result.krusty_stdout, result.krusty_stderr
-    );
-    assert_eq!(
-        common::compiler_errors(&result.krusty_stdout),
-        [],
-        "{tag}: krusty wrote diagnostics to stdout, where the comparison would miss them"
-    );
-    assert!(
-        !reference.is_empty(),
-        "{tag}: kotlinc rejected with no parseable diagnostic: {}",
-        result.reference_stderr
-    );
-    assert_eq!(
-        krusty, reference,
-        "{tag}: diagnostics differ.\nkrusty:  {krusty:#?}\nkotlinc: {reference:#?}"
-    );
-}
-
 /// Run one fixture under BOTH compilers and require the same `box()` value.
 ///
 /// `expect_box_ok_files_with_stdlib` alone only proves krusty agrees with itself. These shapes are
@@ -173,7 +141,7 @@ fun bad() {{\n\
 }}\n"
     );
     let result = common::compiler_diagnostics(&[("Main.kt", &main)], &[]);
-    expect_identical_rejection(&result, "a member the shaped receiver lacks");
+    common::expect_identical_rejection(&result, "a member the shaped receiver lacks");
 }
 
 /// Receiver and argument each supply a LOWER bound for the same formal, and neither is the other.
