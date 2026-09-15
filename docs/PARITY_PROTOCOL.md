@@ -2343,8 +2343,12 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   file split would suggest, and the reason this was previously recorded backwards. The plan now reads
   the declaring class's own `with =` before the external lookup, exactly as that class's `serializer()`
   accessor already does: an `object` serializer through its `INSTANCE`, any other through the same
-  classpath singleton path. Ordinary derivation is unchanged.
+  classpath singleton path — and ONLY an `object` serializer, since a custom serializer declared as a
+  CLASS takes constructor arguments (`ValueSerializer<T>(dataSerializer)`) and has no `INSTANCE` field
+  to read; that shape stays a clean refusal until a plan that CONSTRUCTS the serializer exists.
+  Ordinary derivation is unchanged.
   `tests/same_file_custom_serializer_e2e.rs::a_same_file_custom_serializer_serves_a_direct_property`,
   `a_same_file_custom_serializer_serves_a_map_value`,
   `a_same_file_custom_serializer_serves_a_list_element`,
-  `an_ordinary_serializable_property_still_derives`.
+  `an_ordinary_serializable_property_still_derives`,
+  `a_class_valued_custom_serializer_is_still_declined_rather_than_miscompiled`.

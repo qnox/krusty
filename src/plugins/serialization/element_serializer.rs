@@ -179,8 +179,11 @@ pub(super) fn element_serializer_plan(
     {
         if let Some(custom) = super::annotations::custom_serializer_of(ctx, ir, class_id as ClassId)
         {
-            // An `object` serializer is its `INSTANCE` singleton; one declared elsewhere is read the
-            // same way off the classpath.
+            // Only an `object` serializer is reachable as a singleton. A custom serializer declared
+            // as a CLASS takes constructor arguments — `ValueSerializer<T>(dataSerializer)` — so
+            // reading an `INSTANCE` field off it would reference a field that does not exist. That
+            // shape stays underivable here and the caller bails cleanly, exactly as before; it needs
+            // a plan that CONSTRUCTS the serializer from its argument serializers.
             if let Some(serializer_id) = ir
                 .classes
                 .iter()
@@ -190,7 +193,6 @@ pub(super) fn element_serializer_plan(
                     serializer_id as ClassId,
                 ));
             }
-            return Some(ElementSerializerPlan::ExternalSingleton(custom));
         }
     }
     // A DEPENDENCY's `@Serializable` class brings its own generated serializer: read that singleton
