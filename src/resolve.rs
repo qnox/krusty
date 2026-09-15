@@ -23,7 +23,7 @@ use crate::symbol_resolver::{CallArgKind, InheritedNestedClassifier};
 use crate::symbol_source::{CachedCompositeSource, SymbolQueryCache, SymbolSource};
 use crate::type_engine::{DeclKey, DeclineReason, Resolution, TypeEngine};
 use crate::types::{
-    existing_type_name, ty_mentions_param, type_name, type_name_nested_child, wk, Ty, TypeName,
+    existing_type_name, ty_mentions_param, type_name, type_name_nested_child, Ty, TypeName,
     Visibility,
 };
 use scope::{ContextReceiver, ContextValue, FlowExclusion, NarrowPath, Ns, ScopeKind};
@@ -1229,8 +1229,6 @@ fn register_top_level_function_conflict(
     retained
 }
 
-pub type ResolvedMember = crate::symbol_resolver::ResolvedMember;
-
 /// Bit-packed boolean flags for a [`Signature`], collapsing `vararg`/`is_inline`/`is_operator`/
 /// `is_override`/`is_final`/`is_suspend`/`requires_splice`/`has_reified_type_params`/`is_abstract`/
 /// `low_priority` into one word. Read through the
@@ -2336,22 +2334,6 @@ impl ClassSig {
     pub fn type_param_variances(&self) -> &Vec<crate::types::TypeVariance> {
         &self.type_parameters.type_param_variances
     }
-}
-
-/// Backend-facing classifier metadata keyed by an already-resolved owner. This is deliberately not a
-/// resolver result: name/prefix/overload selection has finished before a consumer asks for this model.
-/// Source and dependency classifiers project into the same shape so emission never branches on origin.
-#[derive(Clone, Debug)]
-pub(crate) struct ClassModel {
-    pub value_underlying: Option<Ty>,
-    pub type_parameters: Vec<String>,
-    pub constructor_params: Vec<Ty>,
-    pub constructor_param_shapes: Vec<Ty>,
-    /// Annotation members in constructor order. `Some(empty)` denotes a marker annotation; `None`
-    /// denotes an ordinary classifier. Providers normalize every declaration origin into this shape.
-    pub annotation_members: Option<Vec<(String, Ty)>>,
-    /// File-independent constructor defaults parallel to [`Self::constructor_params`].
-    pub constructor_defaults: Vec<Option<CtorDefaultValue>>,
 }
 
 /// The symbolic declaration shape of a generic member method.
@@ -4356,55 +4338,6 @@ impl SymbolTable {
             .find(|class| class.stable_declaration == Some(declaration))
     }
 
-    pub(crate) fn class_model(&self, owner: TypeName) -> Option<ClassModel> {
-        if let Some(class) = self.classes.get(&owner) {
-            return Some(ClassModel {
-                value_underlying: class.value_field.as_ref().map(|(_, ty)| *ty),
-                type_parameters: class.type_params.clone(),
-                constructor_params: class.ctor_params.clone(),
-                constructor_param_shapes: class
-                    .ctor_param_shapes
-                    .iter()
-                    .map(|(shape, _)| *shape)
-                    .collect(),
-                annotation_members: class.is_annotation().then(|| {
-                    class
-                        .ctor_param_names
-                        .iter()
-                        .map(|(name, _)| name.clone())
-                        .zip(class.ctor_params.iter().copied())
-                        .collect()
-                }),
-                constructor_defaults: class.ctor_defaults.clone(),
-            });
-        }
-        let class = self.libraries.classifier(owner)?;
-        let constructor_params = class
-            .constructors
-            .first()
-            .map(|constructor| constructor.params.clone())
-            .unwrap_or_default();
-        Some(ClassModel {
-            value_underlying: class.value_underlying,
-            type_parameters: class.type_params.clone(),
-            constructor_param_shapes: constructor_params.clone(),
-            constructor_params,
-            annotation_members: class.annotation_application().map(|application| {
-                application
-                    .parameters
-                    .names
-                    .into_iter()
-                    .zip(application.parameters.types)
-                    .collect()
-            }),
-            constructor_defaults: class
-                .constructors
-                .first()
-                .map(|constructor| constructor.default_values.clone())
-                .unwrap_or_default(),
-        })
-    }
-
     /// Resolve one source file's alias spelling to its target module class. The returned class still
     /// comes from the canonical internal-name table; aliases never manufacture duplicate signatures.
     pub fn source_class_alias(&self, file: u32, alias: &str) -> Option<&ClassSig> {
@@ -5087,28 +5020,6 @@ impl SymbolTable {
             symbols: self,
             libraries,
         }
-    }
-
-    pub(crate) fn is_source_subtype(&self, sub: Ty, sup: Ty) -> bool {
-        crate::assignable::is_subtype(
-            &crate::assignable::TyCtx::new(),
-            &self.source_constructor_matcher(),
-            sub,
-            sup,
-        )
-    }
-
-    /// Answer a lowering-time compatibility question through the front-end handoff rather than
-    /// exposing the assignability engine to `ir_lower`. Despite the historical matcher name, its
-    /// constructor lookup federates current-module and library symbols, so this remains valid when
-    /// `sub` reaches `sup` across a source/classpath boundary.
-    pub(crate) fn is_assignable_across_sources(&self, sub: Ty, sup: Ty) -> bool {
-        crate::assignable::is_assignable(
-            &crate::assignable::TyCtx::new(),
-            &self.source_constructor_matcher(),
-            sub,
-            sup,
-        )
     }
 
     /// The source enum entry names for this classifier identity.
@@ -18507,11 +18418,6 @@ fn ty_of_ref_with(
     base
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct InheritedMethodConstraint {
-    pub(crate) is_final: bool,
-}
-
 /// Result of typechecking a file: the type assigned to every expression node.
 /// Where a PLATFORM value is committed to a declared non-null type, as far as the guard's SHAPE is
 /// concerned. Measured against kotlinc 2.4.10: a declared type propagates into a conditional, so each
@@ -18567,17 +18473,6 @@ pub struct TypeInfo {
     /// layout used for the class dispatch receiver, not retained syntax or a lowering-time lookup.
     pub(crate) checked_local_classifier_type_arguments: HashMap<crate::fir::DeclarationId, Vec<Ty>>,
     pub anonymous_object_types: HashMap<DeclId, TypeName>,
-    /// Base-class methods visible to compiler-generated members. The checker owns the hierarchy walk;
-    /// lowering consumes this closed fact and never asks a symbol provider to select a method.
-    inherited_method_constraints: HashMap<(TypeName, String), InheritedMethodConstraint>,
-    /// Declared dispatch owner for each generated data-class reference hash. Interface values use
-    /// `Any`; concrete classifier values use their own classifier. This is classifier metadata, not a
-    /// backend lookup, and is fixed before lowering builds the synthesized body.
-    data_class_hash_owners: HashMap<(TypeName, String), TypeName>,
-    /// Class declarations whose semantic superclass is valid Kotlin but cannot be emitted safely by
-    /// this backend. The checker records the exact capability failure; lowering only fails that class
-    /// and never queries classifier providers again.
-    pub(crate) unsupported_class_emission: HashMap<DeclId, &'static str>,
     /// Selected expression lowerings that cannot be recovered from the expression shape alone.
     pub expr_lowers: HashMap<ExprId, ExprLowering>,
     /// Exact functional-interface conversion selected for an argument. Lowering consumes this
@@ -18893,32 +18788,6 @@ pub enum ResolvedCall {
     LocalFunction(Box<ResolvedLocalFunctionCall>),
 }
 
-/// The two callable capabilities needed before IR emission: whether invoking the selected target is a
-/// coroutine suspension point, and whether its body must be spliced. Keep them together because a
-/// generated suspend-lambda state machine cannot satisfy a mandatory splice. A merely-inline public
-/// callable still has a legal JVM call target and must not be rejected. This value is derived from the
-/// exact checker-selected target, independent of whether that target came from source, another module,
-/// or a classpath provider.
-#[derive(Clone, Copy, Debug)]
-pub struct SelectedCallCapabilities {
-    suspend: bool,
-    inline: InlineKind,
-}
-
-impl SelectedCallCapabilities {
-    fn new(suspend: bool, inline: InlineKind) -> Self {
-        Self { suspend, inline }
-    }
-
-    pub(crate) fn suspends(self) -> bool {
-        self.suspend
-    }
-
-    fn requires_suspend_inline_splice(self) -> bool {
-        self.suspend && self.inline.must_inline()
-    }
-}
-
 impl ResolvedCall {
     fn library_extension(callable: crate::libraries::LibraryCallable) -> Self {
         Self::Extension(Box::new(ResolvedExtensionCall::library(callable)))
@@ -18985,17 +18854,6 @@ impl ResolvedCall {
         }
     }
 
-    /// Provider-owned spelling of this already-selected receiver call. Synthetic convention lowering
-    /// uses it only as an emit handle; semantic lookup and overload selection are complete.
-    pub(crate) fn emit_name(&self) -> Option<&str> {
-        match self {
-            Self::Member(resolved) => Some(&resolved.member.name),
-            Self::Extension(extension) => Some(&extension.callable.name),
-            Self::MemberExtension { name, .. } => Some(name),
-            Self::TopLevel(_) | Self::Companion(_) | Self::LocalFunction(_) => None,
-        }
-    }
-
     /// Whether the selected callee is `suspend`, for every target kind that records the flag. The
     /// Local functions derive the same fact from their retained signature. Every selected target that
     /// can carry `suspend` must report it here: this query decides whether the enclosing lambda receives
@@ -19024,39 +18882,6 @@ impl ResolvedCall {
             Self::Companion(member) => member.owner,
             Self::MemberExtension { owner, .. } => Some(*owner),
             Self::LocalFunction(_) => None,
-        }
-    }
-
-    /// Complete callable capabilities for this exact checker-selected target. Computing both facts in
-    /// one origin switch prevents the suspend classifier and suspend-inline safety gate from drifting
-    /// when a new target provider or syntax path is added.
-    fn capabilities(&self) -> SelectedCallCapabilities {
-        match self {
-            Self::Member(resolved) => {
-                SelectedCallCapabilities::new(resolved.suspend, resolved.member.inline)
-            }
-            Self::TopLevel(call) => {
-                SelectedCallCapabilities::new(call.callable.suspend, call.callable.inline)
-            }
-            Self::Extension(extension) => {
-                SelectedCallCapabilities::new(extension.callable.suspend, extension.callable.inline)
-            }
-            Self::Companion(member) => {
-                SelectedCallCapabilities::new(member.suspend(), member.inline)
-            }
-            // A SIBLING-FILE callee is never spliced when it is `suspend`: `inline` on the
-            // declaration does not change the cross-file ABI — kotlinc emits the same
-            // `plusOne(int, Continuation)` method for an `inline suspend fun` as for a plain one, plus
-            // a private `$$forInline` copy it splices only inside the declaring compilation. Reporting
-            // `can_inline` here made the suspend-lambda gate refuse a call that is in fact reached
-            // through its real CPS entry point (see `docs/SPEC.md`).
-            Self::MemberExtension {
-                suspend, inline, ..
-            } => SelectedCallCapabilities::new(*suspend, *inline),
-            Self::LocalFunction(callable) => SelectedCallCapabilities::new(
-                callable.sig.is_suspend(),
-                InlineKind::from_flags(callable.sig.is_inline(), callable.sig.requires_splice()),
-            ),
         }
     }
 }
@@ -19671,26 +19496,6 @@ impl DelegateGetValueTarget {
 }
 
 impl TypeInfo {
-    pub(crate) fn inherited_method_constraint(
-        &self,
-        owner: TypeName,
-        name: &str,
-    ) -> Option<InheritedMethodConstraint> {
-        self.inherited_method_constraints
-            .get(&(owner, name.to_string()))
-            .copied()
-    }
-
-    pub(crate) fn data_class_hash_owner(
-        &self,
-        owner: TypeName,
-        property: &str,
-    ) -> Option<TypeName> {
-        self.data_class_hash_owners
-            .get(&(owner, property.to_string()))
-            .copied()
-    }
-
     pub fn resolved_type_ref(&self, reference: &TypeRef) -> Option<TypeName> {
         self.resolved_type(reference)?
             .non_null()
@@ -20667,7 +20472,6 @@ pub struct CompoundAssignmentTarget {
     /// The exact operator selected by the checker. Provider origin remains linkage metadata on the
     /// target; statement lowering must not translate it into a second source/classpath hierarchy.
     pub call: Box<ResolvedCall>,
-    capabilities: SelectedCallCapabilities,
 }
 
 impl CompoundAssignmentTarget {
@@ -20687,14 +20491,7 @@ impl CompoundAssignmentTarget {
     /// whether the statement is a SUSPENSION POINT. A compound assignment never appears as an
     /// `Expr::Call`, so a call-shaped scan cannot see this; the coroutine classification asks here.
     pub(crate) fn suspends(&self) -> bool {
-        self.capabilities.suspends()
-    }
-
-    /// The stronger capability pair used by the suspend-lambda inline safety gate. Keeping it on the
-    /// selected target makes statement-form `plusAssign` agree with expression-form operators and
-    /// ordinary calls instead of growing another name/origin-specific lookup.
-    pub(crate) fn requires_suspend_inline_splice(&self) -> bool {
-        self.capabilities.requires_suspend_inline_splice()
+        self.call.suspends()
     }
 }
 
@@ -20801,15 +20598,13 @@ impl TypeInfo {
     fn convention_call_has(
         &self,
         expr_id: ExprId,
-        predicate: impl Fn(SelectedCallCapabilities) -> bool,
+        predicate: impl Fn(&ResolvedCall) -> bool,
     ) -> bool {
-        self.resolved_calls
-            .get(&expr_id)
-            .is_some_and(|call| predicate(call.capabilities()))
+        self.resolved_calls.get(&expr_id).is_some_and(&predicate)
             || SyntheticOperatorCall::ALL.iter().any(|&key| {
                 self.resolved_operator_calls
                     .get(&(expr_id, key))
-                    .is_some_and(|call| predicate(call.capabilities()))
+                    .is_some_and(&predicate)
             })
     }
 
@@ -20819,13 +20614,13 @@ impl TypeInfo {
     fn convention_stmt_has(
         &self,
         stmt_id: StmtId,
-        predicate: impl Fn(SelectedCallCapabilities) -> bool,
+        predicate: impl Fn(&ResolvedCall) -> bool,
         compound_predicate: impl Fn(&CompoundAssignmentTarget) -> bool,
     ) -> bool {
         SyntheticOperatorCall::ALL.iter().any(|&key| {
             self.resolved_stmt_operator_calls
                 .get(&(stmt_id, key))
-                .is_some_and(|call| predicate(call.capabilities()))
+                .is_some_and(&predicate)
         }) || self
             .compound_assignment_target(stmt_id)
             .is_some_and(compound_predicate)
@@ -20836,35 +20631,15 @@ impl TypeInfo {
     /// operator. None of these is necessarily an `Expr::Call`, so coroutine classification asks the
     /// exact selected capabilities instead of matching syntax.
     pub(crate) fn convention_call_suspends(&self, expr_id: ExprId) -> bool {
-        self.convention_call_has(expr_id, SelectedCallCapabilities::suspends)
+        self.convention_call_has(expr_id, ResolvedCall::suspends)
     }
 
     /// Statement form of [`Self::convention_call_suspends`].
     pub(crate) fn convention_stmt_suspends(&self, stmt_id: StmtId) -> bool {
         self.convention_stmt_has(
             stmt_id,
-            SelectedCallCapabilities::suspends,
+            ResolvedCall::suspends,
             CompoundAssignmentTarget::suspends,
-        )
-    }
-
-    /// Whether an expression-form convention selected a suspend target whose call site must be
-    /// spliced. A suspend-lambda state machine cannot satisfy that obligation.
-    pub(crate) fn convention_call_requires_suspend_inline_splice(&self, expr_id: ExprId) -> bool {
-        self.convention_call_has(
-            expr_id,
-            SelectedCallCapabilities::requires_suspend_inline_splice,
-        )
-    }
-
-    /// Statement-form counterpart of
-    /// [`Self::convention_call_requires_suspend_inline_splice`], including the specialized in-place
-    /// compound-assignment target.
-    pub(crate) fn convention_stmt_requires_suspend_inline_splice(&self, stmt_id: StmtId) -> bool {
-        self.convention_stmt_has(
-            stmt_id,
-            SelectedCallCapabilities::requires_suspend_inline_splice,
-            CompoundAssignmentTarget::requires_suspend_inline_splice,
         )
     }
 
@@ -41289,8 +41064,14 @@ fun box(): String {
             protocol.iter_ty,
             Ty::obj_args("BoxedIterator", &[Ty::String])
         );
-        assert_eq!(protocol.has_next.emit_name(), Some("hasNext"));
-        assert_eq!(protocol.next.emit_name(), Some("next"));
+        assert!(matches!(
+            protocol.has_next.as_ref(),
+            ResolvedCall::Member(resolved) if resolved.member.name == "hasNext"
+        ));
+        assert!(matches!(
+            protocol.next.as_ref(),
+            ResolvedCall::Member(resolved) if resolved.member.name == "next"
+        ));
         assert!(
             matches!(
                 protocol.iterator.as_ref(),
@@ -46065,9 +45846,6 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         field_receiver_identity: None,
         in_script_body: false,
         expr_lowers: HashMap::new(),
-        inherited_method_constraints: HashMap::new(),
-        data_class_hash_owners: HashMap::new(),
-        unsupported_class_emission: HashMap::new(),
         resolved_sam_conversions: HashMap::new(),
         inferred_fun_rets: HashMap::new(),
         inferred_ext_fun_rets: HashMap::new(),
@@ -47845,9 +47623,6 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         class_literal_targets,
         applied_annotations,
         expr_lowers,
-        inherited_method_constraints,
-        data_class_hash_owners,
-        unsupported_class_emission,
         resolved_sam_conversions,
         inferred_fun_rets,
         inferred_ext_fun_rets,
@@ -48188,10 +47963,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         checked_local_classifier_identities,
         checked_local_classifier_type_arguments,
         anonymous_object_types,
-        inherited_method_constraints,
-        data_class_hash_owners,
         expr_lowers,
-        unsupported_class_emission,
         resolved_sam_conversions,
         stmt_lowers,
         stmt_return_targets,
@@ -49181,9 +48953,6 @@ struct Checker<'a> {
     in_script_body: bool,
     /// Accumulated output maps (moved into TypeInfo at the end of `check_file`).
     expr_lowers: HashMap<ExprId, ExprLowering>,
-    inherited_method_constraints: HashMap<(TypeName, String), InheritedMethodConstraint>,
-    data_class_hash_owners: HashMap<(TypeName, String), TypeName>,
-    unsupported_class_emission: HashMap<DeclId, &'static str>,
     resolved_sam_conversions: HashMap<ExprId, crate::symbol_resolver::SamSignature>,
     inferred_fun_rets: HashMap<(u32, u32), Ty>,
     inferred_ext_fun_rets: HashMap<(u32, u32, String), Ty>,
@@ -67510,62 +67279,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Snapshot the nearest base-class method for every inherited source name. A same-name overload
-    /// family is deliberately recorded as ambiguous by reserving the name without a constraint: a
-    /// later synthesis decision must not pick one overload arbitrarily.
-    fn record_inherited_method_constraints(&mut self, owner: TypeName) {
-        let resolver = self.resolver();
-        let direct_superclass = |classifier: &crate::libraries::LibraryType| {
-            classifier
-                .supertype_templates
-                .iter()
-                .filter_map(|supertype| supertype.non_null().obj_internal())
-                .find(|supertype| {
-                    resolver
-                        .classifier(*supertype)
-                        .is_some_and(|classifier| !classifier.is_interface())
-                })
-        };
-        let Some(mut current) = resolver
-            .classifier(owner)
-            .and_then(|classifier| direct_superclass(&classifier))
-        else {
-            return;
-        };
-        let mut visited_classes = std::collections::HashSet::new();
-        let mut visited_names = std::collections::HashSet::new();
-        let mut constraints = Vec::new();
-        while visited_classes.insert(current) {
-            let Some(classifier) = resolver.classifier(current) else {
-                break;
-            };
-            for (name, callables) in &classifier.declared_callables {
-                if !visited_names.insert(name.clone()) {
-                    continue;
-                }
-                let methods = callables
-                    .functions()
-                    .iter()
-                    .filter(|method| method.kind == crate::libraries::FnKind::Member)
-                    .collect::<Vec<_>>();
-                if let [method] = methods.as_slice() {
-                    constraints.push((
-                        (owner, name.clone()),
-                        InheritedMethodConstraint {
-                            is_final: method.flags.is_final,
-                        },
-                    ));
-                }
-            }
-            let Some(superclass) = direct_superclass(&classifier) else {
-                break;
-            };
-            current = superclass;
-        }
-        drop(resolver);
-        self.inherited_method_constraints.extend(constraints);
-    }
-
     /// Whether the nearest declaration of every callable in `owner`'s normalized hierarchy is
     /// concrete. Providers expose only direct declarations and direct supertypes; core performs the
     /// complete traversal. The class chain decides before interfaces at every depth (a class-side
@@ -67765,88 +67478,6 @@ impl<'a> Checker<'a> {
             owner.render(),
         );
         unresolved.is_empty()
-    }
-
-    /// Fix the virtual `hashCode` dispatch owner of every generated data-class property while
-    /// classifier metadata is available. Lowering receives this closed decision; it does not inspect
-    /// source or dependency symbols while building the synthetic method body.
-    fn record_data_class_hash_owners(&mut self, owner: TypeName, span: Span) {
-        let properties = self
-            .resolved_index
-            .and_then(|index| {
-                let owner = index.classifier_declaration(owner)?;
-                Some(
-                    index
-                        .owned_declarations(owner)
-                        .iter()
-                        .filter_map(|declaration| {
-                            let declaration = *declaration;
-                            let header = index.declaration_header(declaration)?;
-                            (header.kind == crate::fir::DeclarationKind::Property
-                                && header
-                                    .flags
-                                    .has(crate::fir::DeclarationFlags::PROPERTY_PARAMETER))
-                            .then(|| {
-                                Some((
-                                    index.declaration_name(declaration)?.to_string(),
-                                    index.signature(declaration)?.result.get(),
-                                ))
-                            })?
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .or_else(|| match &self.module {
-                CheckerModuleSymbols::Legacy(source) => source
-                    .pass_one_symbols()
-                    .class_by_type_name(owner)
-                    .map(|class| {
-                        class
-                            .props
-                            .iter()
-                            .map(|(name, ty, _)| (name.clone(), *ty))
-                            .collect()
-                    }),
-                CheckerModuleSymbols::Streamed(_) => None,
-            })
-            .unwrap_or_default();
-        for (property, ty) in properties {
-            let ty = ty.non_null();
-            if ty.is_array()
-                || matches!(
-                    ty,
-                    Ty::Int
-                        | Ty::Short
-                        | Ty::Byte
-                        | Ty::Char
-                        | Ty::Boolean
-                        | Ty::Long
-                        | Ty::Double
-                        | Ty::Float
-                )
-            {
-                continue;
-            }
-            let classifier = ty.kotlin_class_internal();
-            let hash_owner = match classifier {
-                None => wk::any(),
-                Some(classifier) => match self.resolver().classifier(classifier) {
-                    Some(shape) if shape.is_interface() => wk::any(),
-                    Some(_) => classifier,
-                    None => {
-                        self.diags.error(
-                            span,
-                            format!(
-                                "missing classifier metadata for data-class property '{property}'"
-                            ),
-                        );
-                        continue;
-                    }
-                },
-            };
-            self.data_class_hash_owners
-                .insert((owner, property), hash_owner);
-        }
     }
 
     /// A concrete result constraint available without resolving every read in a local property's
@@ -68557,12 +68188,6 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        if let Some(owner) = current_owner {
-            self.record_inherited_method_constraints(owner);
-            if cl.is_data {
-                self.record_data_class_hash_owners(owner, cl.span);
-            }
-        }
         if let Some((owner, superclass, separate_emission)) = current_owner.and_then(|owner| {
             cl.base_class.as_ref()?;
             self.resolved_body_local_supertypes
@@ -68619,10 +68244,9 @@ impl<'a> Checker<'a> {
                 && cl.modality != crate::ast::Modality::Abstract
                 && !self.has_no_unimplemented_abstract_members(owner);
             if leaves_abstract_members {
-                // This is a Kotlin declaration error, not an emitter capability gate. The old AST
-                // lowerer consumed `unsupported_class_emission`; the checked-FIR pipeline quite
-                // correctly does not. Diagnose it while the complete semantic hierarchy is live so
-                // an invalid concrete class can never reach either lowering path.
+                // This is a Kotlin declaration error, not an emitter capability gate. Diagnose it
+                // while the complete semantic hierarchy is live so an invalid concrete class can
+                // never reach common lowering.
                 self.diags.error(
                     cl.span,
                     format!(
@@ -68630,28 +68254,6 @@ impl<'a> Checker<'a> {
                         cl.name
                     ),
                 );
-            }
-            let unsupported = if cl.is_enum() || !separate_emission {
-                None
-            } else if let Some(shape) = inheritance {
-                let discharged = !shape.is_abstract
-                    || cl.modality == crate::ast::Modality::Abstract
-                    || !leaves_abstract_members;
-                if !discharged {
-                    Some("gate:nonlocal-superclass-abstract-obligations")
-                } else if cl.primary_ctor_annotations.is_some()
-                    && cl.base_args.is_empty()
-                    && !shape.has_no_arg_constructor
-                {
-                    Some("gate:nonlocal-superclass-no-zero-arg-constructor")
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            if let Some(reason) = unsupported {
-                self.unsupported_class_emission.insert(d, reason);
             }
         }
         // A plain nested class cuts the receiver chain; an `inner class` keeps `this@Outer`, and so

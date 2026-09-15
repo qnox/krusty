@@ -1,5 +1,6 @@
 //! Compiler orchestration.
 
+mod declaration_metadata;
 mod diagnostic_recovery;
 mod metadata_handoff;
 #[cfg(test)]
