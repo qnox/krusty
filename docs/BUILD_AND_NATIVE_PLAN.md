@@ -1566,6 +1566,45 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **How an exception propagates: a pending slot, not an unwinder.** This is the second of the
+   three low-IR decisions the risks section says must be answered by design rather than inherited.
+
+   *Table-driven unwinding* is what a mature implementation uses, and the only one that costs
+   nothing when nothing throws. It also assumes an unwinder. krusty has no libc and writes its own
+   ELF, so "use the platform's" is not on the table: it means Cranelift emitting unwind info, the
+   linker placing and relocating `.eh_frame`, and the runtime carrying a DWARF CFI interpreter and a
+   personality routine — the most delicate code in any runtime, all of it before a single `try` runs.
+   That is a phase, not an increment.
+
+   *setjmp/longjmp* is far smaller — a saved register context per architecture, a handler stack, a
+   jump. It is rejected on CORRECTNESS, not cost: `setjmp` returns twice and nothing in Cranelift's
+   SSA can express that, so a value the generator is entitled to keep in a register across the `try`
+   is stale after the jump. The failure is silent and data-dependent. Buying a cheaper `try` with a
+   miscompile is not a trade this backend makes.
+
+   *Explicit propagation through a pending slot* is the choice. A global holding the in-flight
+   exception, registered with `kt_gc_add_global_root` so it stays reachable while in flight. `throw`
+   stores into it and returns the zero value of the frame's return type; a call that could observe a
+   throw loads the slot and branches — to the enclosing `try`'s dispatch block if there is one,
+   otherwise to a block returning that same zero value with the slot still set, which IS the
+   propagation. A caller never reads the value a throwing call returned, because it checks first.
+
+   The cost is stated rather than hidden: one load and one perfectly-predicted branch per call that
+   can throw, where unwinding costs nothing. What it buys is a mechanism correct under Cranelift's
+   SSA, needing no unwind tables and no returns-twice, and identical on all three architectures
+   because it is ordinary control flow rather than something the machine has to agree to.
+
+   The choice does not leak into the IR. `IrExpr::Try` and `IrExpr::Throw` are unchanged, so moving
+   to table-driven unwinding later is a change to this lowering and this runtime — not to the common
+   IR, and not to a single test written against it.
+
+   **The order it is built in follows from what is already declined.** A file containing any `Try`
+   is declined WHOLE, so inside an accepted file there is no handler and no `finally`. That makes
+   "a `throw` terminates the program reporting the exception" the correct Kotlin answer for every
+   program this backend accepts today, not a stopgap — and it needs the exception hierarchy and the
+   `Throw` lowering without needing the call-site checks at all. Those arrive with `try`/`catch`,
+   which is when a handler first exists for a check to find.
+
    **The four unsigned arrays, and a stride that is not a name.** `an array of UInt`/`UByte` was
    the increment backed out earlier in this log, blocked on krusty's JVM backend allocating a
    `UByteArray` as `int[]`. #940 fixed that, and the native side is four descriptors and four arms.
@@ -1958,8 +1997,8 @@ demonstrated the build-speed thesis on the JVM.
 the low native IR and must be answered when it is designed, independently of Cranelift-versus-
 hand-written: (1) precise versus conservative GC — precise requires explicit safepoint and stack-map
 nodes in the IR; (2) exception propagation — table-driven unwinding versus explicit result
-propagation; (3) whether `suspend` lowers through the existing CPS transform or to native stack
-switching. Note that emitting a *host language* answers all three by inheritance rather than by
+propagation, **now answered: see "How an exception propagates" in the increment log**; (3) whether
+`suspend` lowers through the existing CPS transform or to native stack switching. Note that emitting a *host language* answers all three by inheritance rather than by
 design: C forces conservative GC (see above), and Go would supply its collector, `panic`/`recover`
 and goroutines. That is most of the argument in Go's favour and the whole of the reason not to let
 the C scaffold drift into being the answer.
