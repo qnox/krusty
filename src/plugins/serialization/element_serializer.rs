@@ -1,9 +1,9 @@
 //! Select and emit one complete serializer for a property element type.
 
 use super::{
-    build_contextual_serializer, build_polymorphic_serializer, builtin_element_serializer,
-    class_ty, collection_serializer_builder, generated_serializer_accessor, is_nullable,
-    kserializer_of, serializer_of_name, type_is_contextual, wrap_nullable_serializer,
+    build_contextual_serializer, build_polymorphic_serializer, class_ty,
+    collection_serializer_builder, generated_serializer_accessor, is_nullable, kserializer_of,
+    serializer_of_name, type_is_contextual, wrap_nullable_serializer,
 };
 use crate::ir::{Callee, ClassId, ExprId, IrExpr, IrFile};
 use crate::libraries::InlineKind;
@@ -27,6 +27,77 @@ pub(super) enum ElementSerializerPlan {
     ExternalSingleton(TypeName),
     Builtin(&'static str),
 }
+
+/// Builtin serializers that are NOT in every supported kotlinx.serialization artifact. The plugin
+/// context probes these against the active classpath; a mapping to one of them is only usable when
+/// the probe found it. The long-standing primitive serializers are omitted on purpose — they are in
+/// every supported version, so probing them would cost lookups that can only answer yes.
+pub(crate) const RUNTIME_DEPENDENT_SERIALIZERS: &[&str] = &[
+    "kotlinx/serialization/internal/InstantSerializer",
+    "kotlinx/serialization/internal/UuidSerializer",
+];
+
+pub(super) fn builtin_element_key(ty: &Ty) -> Option<&'static str> {
+    let fq = match ty.non_null() {
+        Ty::Int => type_name("kotlin/Int"),
+        Ty::Long => type_name("kotlin/Long"),
+        Ty::Boolean => type_name("kotlin/Boolean"),
+        Ty::Double => type_name("kotlin/Double"),
+        Ty::Float => type_name("kotlin/Float"),
+        Ty::Char => type_name("kotlin/Char"),
+        Ty::Byte => type_name("kotlin/Byte"),
+        Ty::Short => type_name("kotlin/Short"),
+        Ty::String => type_name("kotlin/String"),
+        semantic => semantic.kotlin_class_internal()?,
+    };
+    Some(if fq.matches("kotlin/Int") {
+        "kotlin/Int"
+    } else if fq.matches("kotlin/Long") {
+        "kotlin/Long"
+    } else if fq.matches("kotlin/Boolean") {
+        "kotlin/Boolean"
+    } else if fq.matches("kotlin/Double") {
+        "kotlin/Double"
+    } else if fq.matches("kotlin/Float") {
+        "kotlin/Float"
+    } else if fq.matches("kotlin/Char") {
+        "kotlin/Char"
+    } else if fq.matches("kotlin/Byte") {
+        "kotlin/Byte"
+    } else if fq.matches("kotlin/Short") {
+        "kotlin/Short"
+    } else if fq.matches("kotlin/String") {
+        "kotlin/String"
+    } else if fq.matches("kotlin/uuid/Uuid") {
+        "kotlin/uuid/Uuid"
+    } else if fq.matches("kotlin/time/Instant") {
+        "kotlin/time/Instant"
+    } else {
+        return None;
+    })
+}
+
+pub(super) fn builtin_element_serializer(ty: &Ty) -> Option<&'static str> {
+    Some(match builtin_element_key(ty)? {
+        "kotlin/String" => "kotlinx/serialization/internal/StringSerializer",
+        "kotlin/Int" => "kotlinx/serialization/internal/IntSerializer",
+        "kotlin/Long" => "kotlinx/serialization/internal/LongSerializer",
+        "kotlin/Boolean" => "kotlinx/serialization/internal/BooleanSerializer",
+        "kotlin/Double" => "kotlinx/serialization/internal/DoubleSerializer",
+        "kotlin/Float" => "kotlinx/serialization/internal/FloatSerializer",
+        "kotlin/Char" => "kotlinx/serialization/internal/CharSerializer",
+        "kotlin/Byte" => "kotlinx/serialization/internal/ByteSerializer",
+        "kotlin/Short" => "kotlinx/serialization/internal/ShortSerializer",
+        "kotlin/uuid/Uuid" => "kotlinx/serialization/internal/UuidSerializer",
+        "kotlin/time/Instant" => "kotlinx/serialization/internal/InstantSerializer",
+        _ => return None,
+    })
+}
+
+/// If `ty` names a `@JvmInline value class` defined in this IR, its TERMINAL underlying type — how
+/// krusty represents a value-class-typed field/value. Recurses through a value-class chain
+/// (`A(val b: B)`, `B(val i: Int)` → `Int`), depth-bounded against a malformed cycle. `None` for any
+/// type that isn't (transitively) a value class.
 
 /// Select one complete serializer plan without mutating IR. Applicability checks and expression
 /// construction consume this same decision, so they cannot drift into parallel overload systems.
@@ -178,6 +249,15 @@ pub(super) fn element_serializer_plan(
         }
     }
     if let Some(ser) = builtin_element_serializer(ty) {
+        // A builtin mapping is only usable when the ACTIVE runtime carries that class. The
+        // long-standing primitive serializers always exist; the newer ones do not ship in every
+        // supported kotlinx.serialization artifact, and emitting a reference to a class that is
+        // absent would fail at class-load rather than here. Declining leaves the caller to bail
+        // with a diagnostic, which is the same answer as any other underivable element.
+        let serializer = crate::types::type_name(ser);
+        if RUNTIME_DEPENDENT_SERIALIZERS.contains(&ser) && !ctx.runtime_provides(serializer) {
+            return None;
+        }
         return Some(ElementSerializerPlan::Builtin(ser));
     }
     None

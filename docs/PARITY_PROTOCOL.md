@@ -2355,5 +2355,11 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   collection ELEMENT are served alike. The tests round-trip through a real `Json` and assert the exact
   ISO-8601 text, which is what proves the serializer is wired to the right runtime class rather than
   merely present.
+  A builtin mapping is only usable when the ACTIVE runtime carries that serializer:
+  `InstantSerializer` ships in newer kotlinx.serialization cores and not in supported older ones, and
+  emitting a reference to an absent class fails at CLASS-LOAD rather than at compile time. The plugin
+  context records which runtime-dependent serializers the classpath actually provides, and a mapping
+  to one it does not declines — the same clean bail as any other underivable element. Only the
+  genuinely version-dependent serializers are probed; the primitives ship in every supported version.
   `tests/instant_builtin_serializer_e2e.rs::an_instant_property_serializes_through_the_builtin`,
   `an_instant_collection_element_serializes_through_the_builtin`, `the_uuid_builtin_still_works`.

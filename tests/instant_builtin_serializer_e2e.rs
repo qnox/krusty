@@ -13,61 +13,29 @@
 //! The runtime ships `kotlinx/serialization/internal/InstantSerializer`, exactly parallel to the
 //! `UuidSerializer` entry already in the table.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use super::common;
 
 /// Collect every `<prefix>*.jar` under a root (no `-sources`).
-fn walk(dir: &Path, prefix: &str, depth: usize, out: &mut Vec<PathBuf>) {
-    if depth > 10 {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            walk(&path, prefix, depth + 1, out);
-        } else if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
-            if name.starts_with(prefix) && name.ends_with(".jar") && !name.contains("sources") {
-                out.push(path.clone());
-            }
-        }
-    }
-}
+/// The kotlinx.serialization runtime, PROVISIONED rather than discovered.
+///
+/// Crawling `~/.gradle` makes the test depend on whatever a developer happens to have cached: it
+/// panics on a machine that has never resolved the artifact (CI), and on a machine that has several
+/// it silently picks one. `ensure_maven` fetches the pinned version into the shared dependency cache
+/// — the same path the coroutines runtime uses — so every run compiles against the same bytes.
+const SERIALIZATION_VERSION: &str = "1.9.0";
 
-/// The numeric version embedded in a jar file name, for ordering. `kotlinx-serialization-core-jvm-
-/// 1.11.0.jar` sorts above `…-1.6.3.jar`.
-fn version_key(path: &Path) -> Vec<u64> {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .map(|stem| {
-            stem.rsplit('-')
-                .next()
-                .unwrap_or_default()
-                .split('.')
-                .map(|part| part.parse::<u64>().unwrap_or(0))
-                .collect()
+fn provisioned(artifact: &str) -> PathBuf {
+    krusty::toolchain::ensure_maven("org.jetbrains.kotlinx", artifact, SERIALIZATION_VERSION)
+        .unwrap_or_else(|| {
+            panic!(
+                "could not provision {artifact}:{SERIALIZATION_VERSION}; this test must not \
+                 self-skip, since a skipped serialization test passes on a compiler that would \
+                 have rejected the fixture. Check network access or set KRUSTY_DEPS_CACHE."
+            )
         })
-        .unwrap_or_default()
-}
-
-/// The NEWEST matching jar. Picking the first match found instead selects whichever version happens
-/// to be encountered first, which silently resolves to a runtime that predates the serializer under
-/// test — the control here failed exactly that way with `NoClassDefFoundError: UuidSerializer`.
-fn find(prefix: &str) -> PathBuf {
-    let home = std::env::var("HOME").expect("HOME must be set to locate the serialization runtime");
-    let mut found = Vec::new();
-    walk(&Path::new(&home).join(".gradle"), prefix, 0, &mut found);
-    found.sort_by_key(|path| version_key(path));
-    found.pop().unwrap_or_else(|| {
-        panic!(
-            "no {prefix}*.jar under ~/.gradle, so this test cannot run.\n\
-             It must not self-skip: a skipped serialization test passes on an unfixed compiler."
-        )
-    })
 }
 
 fn runtime_jars() -> Vec<PathBuf> {
@@ -75,8 +43,8 @@ fn runtime_jars() -> Vec<PathBuf> {
     JARS.get_or_init(|| {
         vec![
             common::stdlib_jar(),
-            find("kotlinx-serialization-core-jvm"),
-            find("kotlinx-serialization-json-jvm"),
+            provisioned("kotlinx-serialization-core-jvm"),
+            provisioned("kotlinx-serialization-json-jvm"),
         ]
     })
     .clone()
@@ -84,6 +52,62 @@ fn runtime_jars() -> Vec<PathBuf> {
 
 /// Compile in krusty and RUN the result. A compile-only assertion would not catch a serializer that
 /// is wired to the wrong runtime class, which is the failure mode this table entry can produce.
+/// Compile and run the SAME fixture with the reference compiler, on the SAME runtime jars and its
+/// own serialization plugin.
+///
+/// Running only krusty proves krusty agrees with itself. These fixtures assert exact JSON, so the
+/// question they exist to answer — does krusty pick the serializer kotlinc picks — is only answered
+/// by running kotlinc over the identical source and comparing the same value.
+fn reference_box(src: &str, stem: &str) -> String {
+    let work = common::scratch_dir()
+        .unwrap_or_else(|| panic!("{stem}: cannot allocate a scratch directory"))
+        .join(format!("{stem}-reference"));
+    std::fs::create_dir_all(&work).expect("create reference fixture directory");
+    let source = work.join("Main.kt");
+    std::fs::write(&source, src).expect("write reference fixture");
+    let out = work.join("classes");
+    let plugin = common::kotlinc_lib_dir()
+        .unwrap_or_else(|| panic!("{stem}: no reference compiler lib directory"))
+        .join("kotlinx-serialization-compiler-plugin.jar");
+    assert!(
+        plugin.is_file(),
+        "{stem}: the reference serialization plugin is missing at {}",
+        plugin.display()
+    );
+    let jars = runtime_jars();
+    let joined = std::env::join_paths(&jars).expect("join the reference classpath");
+    let (code, diagnostics) = common::kotlinc_compile(&[
+        format!("-Xplugin={}", plugin.display()),
+        "-jvm-target".to_string(),
+        "25".to_string(),
+        "-opt-in=kotlin.time.ExperimentalTime,kotlin.uuid.ExperimentalUuidApi".to_string(),
+        "-cp".to_string(),
+        joined.to_string_lossy().into_owned(),
+        "-d".to_string(),
+        out.display().to_string(),
+        source.display().to_string(),
+    ])
+    .unwrap_or_else(|| panic!("{stem}: the reference compiler could not be invoked"));
+    assert_eq!(
+        code, 0,
+        "{stem}: kotlinc rejected the fixture: {diagnostics}"
+    );
+    let mut cp = vec![out];
+    cp.extend(jars);
+    common::run_box(&[], "MainKt", &cp)
+        .unwrap_or_else(|| panic!("{stem}: the reference-built box() did not run"))
+}
+
+/// Run one fixture under BOTH compilers and require the same `box()` value.
+fn both_compilers_box(src: &str, stem: &str) -> String {
+    let reference = reference_box(src, stem);
+    assert_eq!(
+        reference, "OK",
+        "{stem}: the reference compiler disagrees: {reference}"
+    );
+    run_box(src, stem)
+}
+
 fn run_box(src: &str, stem: &str) -> String {
     let jars = runtime_jars();
     let classes = common::compile_in_process(src, stem, &jars, None).unwrap_or_else(|| {
@@ -116,7 +140,7 @@ fun box(): String {\n\
 \x20   val back = Json.decodeFromString(Stamped.serializer(), json)\n\
 \x20   return if (back == value) \"OK\" else \"FAIL: round trip \" + back\n\
 }\n";
-    assert_eq!(run_box(MAIN, "instant_property"), "OK");
+    assert_eq!(both_compilers_box(MAIN, "instant_property"), "OK");
 }
 
 /// The same type reached through a collection ELEMENT, which is the path the builtin table serves.
@@ -139,7 +163,7 @@ fun box(): String {\n\
 \x20   val back = Json.decodeFromString(Timeline.serializer(), json)\n\
 \x20   return if (back == value) \"OK\" else \"FAIL: round trip \" + back\n\
 }\n";
-    assert_eq!(run_box(MAIN, "instant_element"), "OK");
+    assert_eq!(both_compilers_box(MAIN, "instant_element"), "OK");
 }
 
 /// The control: `Uuid`, the entry this one is modelled on, still works.
@@ -160,5 +184,5 @@ fun box(): String {\n\
 \x20   val json = Json.encodeToString(Keyed.serializer(), value)\n\
 \x20   return if (json == \"{\\\"id\\\":\\\"00000000-0000-0000-0000-000000000000\\\"}\") \"OK\" else \"FAIL: \" + json\n\
 }\n";
-    assert_eq!(run_box(MAIN, "uuid_builtin"), "OK");
+    assert_eq!(both_compilers_box(MAIN, "uuid_builtin"), "OK");
 }

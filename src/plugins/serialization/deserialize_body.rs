@@ -1,9 +1,10 @@
 //! Checked generation of a serializer's `deserialize` body.
 
+use super::element_serializer::builtin_element_serializer;
 use super::{
-    builtin_element_serializer, class_ty, collection_serializer_builder, contextual_serializer_for,
-    decode_element_method, element_serializer_expr, element_serializer_plan, inline_prim_methods,
-    is_nullable, property_is_contextual, slot_width, value_class_underlying, virtual_iface,
+    class_ty, collection_serializer_builder, contextual_serializer_for, decode_element_method,
+    element_serializer_expr, element_serializer_plan, inline_prim_methods, is_nullable,
+    property_is_contextual, slot_width, value_class_underlying, virtual_iface,
 };
 use crate::ir::{ClassId, ExprId, IrConst, IrExpr, IrFile, IrTypeOp};
 use crate::kt_string::KtString;
