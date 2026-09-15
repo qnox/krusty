@@ -810,6 +810,34 @@ pub fn stdlib_jar() -> PathBuf {
 
 /// `kotlinx-coroutines-core-jvm`, needed by the suspend/`runBlocking` suites.
 #[allow(dead_code)]
+/// The pinned `kotlinx-serialization-core-jvm` jar.
+///
+/// Panics rather than returning `Option`: a serialization test that skips when its runtime is absent
+/// passes on a compiler that would have rejected the fixture, which is how a green suite stops
+/// meaning anything.
+pub fn serialization_core_jar() -> PathBuf {
+    krusty::toolchain::serialization_core_jar().unwrap_or_else(|| {
+        panic!(
+            "no kotlinx-serialization-core-jvm jar; the serialization tests cannot run.\n\
+             It is provisioned on demand from Maven Central (version {}); check network access or \
+             set KRUSTY_DEPS_CACHE to a directory that already holds it.",
+            krusty::toolchain::SERIALIZATION_VERSION
+        )
+    })
+}
+
+/// The pinned `kotlinx-serialization-json-jvm` jar, matching [`serialization_core_jar`].
+pub fn serialization_json_jar() -> PathBuf {
+    krusty::toolchain::serialization_json_jar().unwrap_or_else(|| {
+        panic!(
+            "no kotlinx-serialization-json-jvm jar; the serialization tests cannot run.\n\
+             It is provisioned on demand from Maven Central (version {}); check network access or \
+             set KRUSTY_DEPS_CACHE to a directory that already holds it.",
+            krusty::toolchain::SERIALIZATION_VERSION
+        )
+    })
+}
+
 pub fn coroutines_jar() -> PathBuf {
     krusty::toolchain::coroutines_jar().unwrap_or_else(|| {
         panic!(
