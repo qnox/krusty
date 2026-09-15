@@ -248,3 +248,74 @@ fun box(): String {\n\
     assert_eq!(krusty, reference, "krusty and kotlinc disagree");
     assert_eq!(krusty, "OK");
 }
+
+/// A `tailrec` MEMBER: the self-call re-binds no receiver — it is the same `this` — so the same
+/// loop rewrite applies, and `tailrec` on a member promises the same thing it promises at top
+/// level. Without the rewrite this recurses a million deep and the JVM answers with a
+/// `StackOverflowError` instead of a number.
+#[test]
+fn a_member_tailrec_runs_flat() {
+    const SRC: &str = "class Counter(val step: Int) {\n\
+    tailrec fun count(n: Int, acc: Int): Int = if (n == 0) acc else count(n - 1, acc + step)\n\
+}\n\
+fun box(): String {\n\
+    if (Counter(1).count(1000000, 0) != 1000000) return \"fail count\"\n\
+    if (Counter(2).count(1000000, 0) != 2000000) return \"fail step\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(SRC), "OK");
+}
+
+/// A `tailrec` EXTENSION: the receiver is an ordinary parameter of the static function the
+/// extension lowers to, so the step reassigns it like any other — including when the self-call
+/// moves to a DIFFERENT receiver, which a rewrite that treated the receiver as fixed would get
+/// wrong rather than merely decline.
+#[test]
+fn an_extension_tailrec_runs_flat() {
+    const SRC: &str = "tailrec fun Int.countDown(acc: Int): Int = if (this == 0) acc else (this - 1).countDown(acc + 1)\n\
+fun box(): String {\n\
+    if (1000000.countDown(0) != 1000000) return \"fail count\"\n\
+    if (0.countDown(7) != 7) return \"fail base\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(SRC), "OK");
+}
+
+/// A member whose self-call names a DIFFERENT instance is not the same frame, so it is not a loop
+/// step and must keep recursing — the rewrite has to read the receiver rather than assume it.
+#[test]
+fn a_member_call_on_another_instance_still_recurses() {
+    const SRC: &str = "class Counter(val id: Int) {\n\
+    tailrec fun count(n: Int, acc: Int): Int {\n\
+        if (n == 0) return acc\n\
+        return Counter(id).count(n - 1, acc + 1)\n\
+    }\n\
+}\n\
+fun box(): String = if (Counter(1).count(100, 0) == 100) \"OK\" else \"fail\"\n";
+    assert_eq!(run(SRC), "OK");
+}
+
+/// Both shapes asked of the REFERENCE compiler too: a `StackOverflowError` on one side and an
+/// answer on the other is exactly the divergence this reports.
+#[test]
+fn member_and_extension_tailrec_agree_with_kotlinc() {
+    const SRC: &str = "class Counter {\n\
+    tailrec fun count(n: Int, acc: Int): Int {\n\
+        if (n == 0) return acc\n\
+        return count(n - 1, acc + 1)\n\
+    }\n\
+}\n\
+tailrec fun Int.down(acc: Int): Int {\n\
+    if (this == 0) return acc\n\
+    return (this - 1).down(acc + 1)\n\
+}\n\
+fun box(): String {\n\
+    if (Counter().count(1000000, 0) != 1000000) return \"fail member\"\n\
+    if (1000000.down(0) != 1000000) return \"fail extension\"\n\
+    return \"OK\"\n\
+}\n";
+    let reference = common::kotlinc_box_result(SRC);
+    let krusty = run(SRC);
+    assert_eq!(krusty, reference, "krusty and kotlinc disagree");
+    assert_eq!(krusty, "OK");
+}

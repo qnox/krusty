@@ -18,7 +18,7 @@ use super::{
     },
     lower_body_with_context,
     properties::{accept_property_body, finalize_properties, predeclare_properties},
-    tailrec::finish_tailrec_body,
+    tailrec::{finish_tailrec_body, Frame as TailrecFrame},
     FirLoweringFailure, LocalCallableLoweringContext,
 };
 
@@ -1263,21 +1263,33 @@ impl<'a> CommonIrBodySink<'a> {
             );
         }
         let roots = lowered.roots.into_vec();
-        let body = if declaration_header
+        // The rewrite below covers a tail self-call whose whole frame is the parameter list it
+        // reassigns, which is more shapes than "a top-level `fun` called by name".
+        //
+        // An EXTENSION qualifies: its receiver is inserted into that parameter list (at
+        // `extension_position`) and passed as an ordinary argument, so `(this - 1).f(acc)` steps by
+        // reassigning it like any other parameter — a self-call to a DIFFERENT receiver is a loop
+        // step rather than a shape to decline.
+        //
+        // A MEMBER qualifies when the call dispatches on `this`, which is the same frame: the
+        // instance does not change, so only the parameters are reassigned. `Other().f(n - 1)` is a
+        // different instance, `is_self_call` says so, and it stays a call.
+        //
+        // A context parameter is still left recursing: it takes slots between the receiver and the
+        // parameters, and nothing here tests that layout.
+        let tailrec = declaration_header
             .flags
             .has(crate::fir::DeclarationFlags::TAILREC)
-            && self.ir.functions[function as usize].is_static
-            && callable.shape.extension_receiver.is_none()
-            && callable.shape.context_parameter_count == 0
-        {
-            finish_tailrec_body(
-                self.ir,
-                roots,
-                function,
-                self.ir.functions[function as usize].params.len(),
-                origin,
-            )
-            .map_err(FirFileLoweringFailure::Body)?
+            && callable.shape.context_parameter_count == 0;
+        let parameter_count = self.ir.functions[function as usize].params.len();
+        let frame = match lowered.slots.dispatch_receiver {
+            _ if !tailrec => None,
+            Some(receiver) => Some(TailrecFrame::of_member(function, receiver, parameter_count)),
+            None => Some(TailrecFrame::of_static(function, parameter_count)),
+        };
+        let body = if let Some(frame) = frame {
+            finish_tailrec_body(self.ir, roots, frame, origin)
+                .map_err(FirFileLoweringFailure::Body)?
         } else {
             finish_callable_body(
                 self.ir,
