@@ -2,8 +2,171 @@
 
 use super::*;
 
+/// Emit one checked vararg value. Spread validation and both physical array-building strategies
+/// live here so frame-recording elements cannot accidentally be handled by only one call shape.
+pub(super) fn emit(
+    emitter: &mut Emitter<'_>,
+    array_type: &Ty,
+    elements: &[u32],
+    spreads: &[bool],
+    code: &mut CodeBuilder,
+) {
+    if spreads.len() != elements.len() {
+        emitter
+            .run
+            .set_emit_error("vararg spread flags do not match the element list".to_string());
+        return;
+    }
+    if !spreads.iter().any(|&spread| spread) {
+        emit_packed_array(emitter, array_type, elements, code);
+        return;
+    }
+
+    // A spread builder normally remains on the operand stack while each element is evaluated.
+    // A frame-recording element cannot inherit that hidden prefix, so evaluate every element on an
+    // empty stack first. Spilling all of them preserves source order and exactly-once evaluation.
+    let temps = elements
+        .iter()
+        .any(|&element| emitter.records_frame(element))
+        .then(|| emitter.spill_to_temps(elements, code));
+    let element_type = array_jvm_element(array_type);
+    if element_type.is_jvm_scalar() {
+        emit_primitive_spread(
+            emitter,
+            element_type,
+            elements,
+            spreads,
+            temps.as_deref(),
+            code,
+        );
+    } else {
+        emit_reference_spread(
+            emitter,
+            array_type,
+            element_type,
+            elements,
+            spreads,
+            temps.as_deref(),
+            code,
+        );
+    }
+    if let Some(temps) = temps {
+        for (_, _, key) in temps {
+            emitter.slots.remove(&key);
+        }
+    }
+}
+
+fn emit_primitive_spread(
+    emitter: &mut Emitter<'_>,
+    element_type: Ty,
+    elements: &[u32],
+    spreads: &[bool],
+    temps: Option<&[(u16, Ty, u32)]>,
+    code: &mut CodeBuilder,
+) {
+    let Some((builder, add_desc, array_desc)) = primitive_spread_builder(element_type) else {
+        emitter
+            .run
+            .set_emit_error("primitive vararg spread has no platform builder".to_string());
+        return;
+    };
+    let class = emitter.cw.class_ref(builder);
+    code.new_obj(class);
+    code.dup();
+    code.push_int(elements.len() as i32, emitter.cw);
+    let init = emitter.cw.methodref(builder, "<init>", "(I)V");
+    code.invokespecial(init, 1, 0);
+    let held = emitter.held_pair(builder);
+    for (index, &element) in elements.iter().enumerate() {
+        code.dup();
+        if let Some(temps) = temps {
+            let (slot, ty, _) = temps[index];
+            load(ty, slot, code);
+        } else {
+            // Preserve the established byte sequence when no child records a frame.
+            emitter.emit_value_over(element, &held, code);
+        }
+        if spreads[index] {
+            let add_spread = emitter.cw.methodref(
+                "kotlin/jvm/internal/PrimitiveSpreadBuilder",
+                "addSpread",
+                "(Ljava/lang/Object;)V",
+            );
+            code.invokevirtual(add_spread, 1, 0);
+        } else {
+            let add = emitter.cw.methodref(builder, "add", add_desc);
+            code.invokevirtual(add, slot_words(element_type) as i32, 0);
+        }
+    }
+    let to_array = emitter
+        .cw
+        .methodref(builder, "toArray", &format!("(){array_desc}"));
+    code.invokevirtual(to_array, 0, 1);
+}
+
+fn emit_reference_spread(
+    emitter: &mut Emitter<'_>,
+    array_type: &Ty,
+    element_type: Ty,
+    elements: &[u32],
+    spreads: &[bool],
+    temps: Option<&[(u16, Ty, u32)]>,
+    code: &mut CodeBuilder,
+) {
+    let builder = "kotlin/jvm/internal/SpreadBuilder";
+    let class = emitter.cw.class_ref(builder);
+    code.new_obj(class);
+    code.dup();
+    code.push_int(elements.len() as i32, emitter.cw);
+    let init = emitter.cw.methodref(builder, "<init>", "(I)V");
+    code.invokespecial(init, 1, 0);
+    let box_element = reference_array_scalar_adapter(element_type);
+    let held = emitter.held_pair(builder);
+    for (index, &element) in elements.iter().enumerate() {
+        code.dup();
+        if let Some(temps) = temps {
+            let (slot, ty, _) = temps[index];
+            load(ty, slot, code);
+        } else {
+            // Preserve the established byte sequence when no child records a frame.
+            emitter.emit_value_over(element, &held, code);
+        }
+        let method = if spreads[index] {
+            emitter
+                .cw
+                .methodref(builder, "addSpread", "(Ljava/lang/Object;)V")
+        } else {
+            if let Some(primitive) = box_element {
+                box_prim_free(emitter.cw, code, primitive);
+            }
+            emitter
+                .cw
+                .methodref(builder, "add", "(Ljava/lang/Object;)V")
+        };
+        code.invokevirtual(method, 1, 0);
+    }
+    code.push_int(0, emitter.cw);
+    let element_class = emitter
+        .cw
+        .class_ref(&crate::jvm::names::instanceof_internal_name(
+            element_type.non_null(),
+        ));
+    code.anewarray(element_class);
+    let to_array = emitter.cw.methodref(
+        builder,
+        "toArray",
+        "([Ljava/lang/Object;)[Ljava/lang/Object;",
+    );
+    code.invokevirtual(to_array, 1, 1);
+    let array_class = emitter
+        .cw
+        .class_ref(&type_descriptor(ir_ty_to_jvm(array_type)));
+    code.checkcast(array_class);
+}
+
 /// Build a packed array through the next local slot, matching kotlinc's evaluation and frame shape.
-pub(super) fn emit_packed_array(
+fn emit_packed_array(
     emitter: &mut Emitter<'_>,
     array_type: &Ty,
     elements: &[u32],
@@ -84,7 +247,11 @@ fn emit_packed_array_through_temps(
     if element_type.is_jvm_scalar() && !reference_array {
         code.newarray(prim_newarray_atype(element_type));
     } else {
-        let class = emitter.cw.class_ref(&ref_internal(element_type.non_null()));
+        let class = emitter
+            .cw
+            .class_ref(&crate::jvm::names::instanceof_internal_name(
+                element_type.non_null(),
+            ));
         code.anewarray(class);
     }
 

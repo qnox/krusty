@@ -2370,9 +2370,12 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   module every class in it: `sink("A".takeUnless { xs.isEmpty() })` reported
   `JVM backend inline error: inline splice failed`. Branchy elements are now evaluated into temps
   first, on a clean stack, exactly as the constructor and `Ref`-holder paths already do for their own
-  held pairs; element evaluation stays left to right. The new path is gated on the same
-  `records_frame` predicate those paths use, so a vararg whose elements are all ordinary keeps its
-  existing emission byte for byte. Three controls separate the cause: the identical calls in a
+  held pairs; element evaluation stays left to right. This applies to packed arrays and to both
+  reference and primitive spread builders: the old spread path otherwise kept `[builder, builder]`
+  live across the same branch. The new path is gated on the same `records_frame` predicate those
+  paths use, so a vararg whose elements are all ordinary keeps its existing emission byte for byte;
+  the ordinary packed form is also asserted byte-identical to kotlinc. Three controls separate the
+  cause: the identical calls in a
   FIXED-ARITY parameter list always worked (that path already spills), a straight-line inline body
   (`let { it.size }`) always worked as a vararg element, and a user-declared `vararg` function fails
   identically to `listOf`, so nothing here is stdlib-specific. NOT yet byte-identical for this shape:
@@ -2380,5 +2383,10 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   relocator to carry a stack prefix.
   `tests/vararg_inline_argument_splice_e2e.rs::a_branching_inline_call_may_be_the_only_vararg_element`,
   `several_branching_inline_calls_may_share_one_vararg_call`,
+  `a_branching_ordinary_element_may_follow_a_spread`,
+  `a_branching_expression_may_supply_the_spread_array`,
+  `branching_spread_elements_are_evaluated_once_from_left_to_right`,
+  `primitive_branching_spread_and_element_use_the_same_frame_safe_path`,
+  `ordinary_packed_vararg_stays_byte_identical_to_kotlinc`,
   `the_same_calls_in_a_fixed_arity_call_still_work`,
-   `a_straight_line_inline_body_still_works_as_a_vararg_element`.
+  `a_straight_line_inline_body_still_works_as_a_vararg_element`.
