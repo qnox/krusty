@@ -4813,7 +4813,7 @@ impl<'a> SymbolResolver<'a> {
 
 // --- Navigation helpers (member/constructor resolution expressed purely against the trait) --------
 // The inherited-member walk over a library type's hierarchy — arg-dependent binding, so it lives in
-// this layer (not the oracle). `resolve` and `ir_lower` share one implementation, backend-agnostic.
+// this layer (not the oracle). Resolution uses this one backend-agnostic implementation.
 
 pub(crate) fn apply_platform_call_parameter_nullability(
     mut params: Vec<Ty>,
@@ -8279,8 +8279,6 @@ mod tests {
         }
     }
 
-    impl crate::runtime::TargetRuntime for FakeSource {}
-
     struct CountingSource {
         inner: FakeSource,
         counted_name: &'static str,
@@ -8314,8 +8312,6 @@ mod tests {
             self.inner.library_value_form(ty)
         }
     }
-
-    impl crate::runtime::TargetRuntime for CountingSource {}
 
     #[test]
     fn a_receiver_call_queries_its_imported_name_once() {
