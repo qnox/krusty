@@ -1790,12 +1790,42 @@ mod tests {
     fn out_of_scope_classes_are_declined_by_name() {
         let mut ir = IrFile::default();
         let id = class(&mut ir, "D", "kotlin/Any", 0);
-        // A data class, an interface, a value class and an `inner` class are deliberately absent
-        // from this list: each lowers like the class it is now. What remains are constructs with
-        // no realization at all yet.
-        ir.classes[id as usize].is_annotation = true;
+        // A data class, an interface, a value class, an `inner` class and now an ANNOTATION class
+        // are deliberately absent from this list: each lowers like the class it is now, an
+        // annotation because applying one produces nothing a program here can observe. What
+        // remains are constructs with no realization at all yet.
+        ir.classes[id as usize]
+            .ctor_args
+            .push(crate::ir::IrCtorArg {
+                name: Some("rest".to_string()),
+                ty: Ty::Int,
+                declared_ty: None,
+                is_field: false,
+                field_index: None,
+                has_default: false,
+                is_vararg: true,
+                type_param: None,
+                check: None,
+            });
         assert!(build(&ir)
             .expect_err("declined")
-            .contains("an annotation class"));
+            .contains("a vararg constructor parameter"));
+    }
+
+    #[test]
+    fn an_annotation_class_is_laid_out_and_its_implementation_class_is_not() {
+        // The declaration is metadata and lowers like the class it is; what this target cannot
+        // give an annotation is a VALUE, and the refusal for that lives at the construction rather
+        // than here. The implementation class is the JVM backend's own synthesis and reaches this
+        // model only by mistake, so it is named separately.
+        let mut ir = IrFile::default();
+        let id = class(&mut ir, "D", "kotlin/Any", 0);
+        ir.classes[id as usize].is_annotation = true;
+        build(&ir).expect("an annotation declaration lays out like any other class");
+
+        ir.classes[id as usize].annotation_impl_of = Some(TypeName::from("D"));
+        assert!(build(&ir)
+            .expect_err("declined")
+            .contains("an annotation implementation class"));
     }
 }
