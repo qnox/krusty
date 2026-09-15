@@ -1452,7 +1452,8 @@ impl SymbolSource for ModuleSymbols<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frontend::{CtorDefaultValue, FrontendClassFlags, FrontendExtPropSig, SigFlags};
+    use crate::frontend::{FrontendClassFlags, FrontendExtPropSig};
+    use crate::resolve::{CtorDefaultValue, SigFlags};
     use std::collections::{HashMap, HashSet};
 
     fn sig(params: Vec<Ty>, ret: Ty) -> Signature {

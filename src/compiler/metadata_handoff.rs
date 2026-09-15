@@ -166,14 +166,17 @@ fn attach_function_metadata(
     let Some(&function_id) = ir.checked_callable_functions.get(&callable.id) else {
         return;
     };
-    let annotations = crate::ir_lower::declaration_annotations(&function.annotations, info);
+    let annotations =
+        super::declaration_metadata::declaration_annotations(&function.annotations, info);
     if !annotations.is_empty() {
         ir.function_annotations.insert(function_id, annotations);
     }
     let mut parameter_annotations = function
         .params
         .iter()
-        .map(|parameter| crate::ir_lower::value_parameter_annotations(&parameter.annotations, info))
+        .map(|parameter| {
+            super::declaration_metadata::value_parameter_annotations(&parameter.annotations, info)
+        })
         .collect::<Vec<_>>();
     if callable.shape.extension_receiver.is_some() {
         parameter_annotations.insert(
@@ -252,7 +255,8 @@ pub(super) fn attach_checked_declaration_metadata(
             .iter()
             .map(|(annotation, _)| annotation.clone())
             .collect::<Vec<_>>();
-        ir.file_annotations = crate::ir_lower::declaration_annotations(&annotations, info);
+        ir.file_annotations =
+            super::declaration_metadata::declaration_annotations(&annotations, info);
         ir.file_annotations_attached = true;
     }
     if let Some(function) = active.function(file, selected_root) {
@@ -268,21 +272,23 @@ pub(super) fn attach_checked_declaration_metadata(
     let classifier = ir.classes[class_id as usize].fq_name_id();
     let ir_class = &mut ir.classes[class_id as usize];
     ir_class.applied_annotations =
-        crate::ir_lower::declaration_annotations(&class.annotations, info);
-    ir_class.field_annotations = crate::ir_lower::class_field_annotations(class, info);
-    ir_class.property_annotations = crate::ir_lower::class_property_annotations(class, info);
-    ir_class.primary_ctor_annotations = crate::ir_lower::declaration_annotations(
+        super::declaration_metadata::declaration_annotations(&class.annotations, info);
+    ir_class.field_annotations = super::declaration_metadata::class_field_annotations(class, info);
+    ir_class.property_annotations =
+        super::declaration_metadata::class_property_annotations(class, info);
+    ir_class.primary_ctor_annotations = super::declaration_metadata::declaration_annotations(
         class
             .primary_ctor_annotations
             .as_deref()
             .unwrap_or_default(),
         info,
     );
-    ir_class.ctor_param_annotations = crate::ir_lower::primary_constructor_parameter_annotations(
-        class,
-        info,
-        ir_class.constructor_prefix_count as usize,
-    );
+    ir_class.ctor_param_annotations =
+        super::declaration_metadata::primary_constructor_parameter_annotations(
+            class,
+            info,
+            ir_class.constructor_prefix_count as usize,
+        );
 
     for (ordinal, constructor) in class.secondary_ctors.iter().enumerate() {
         let Some(declaration) = index.owned_declaration(
@@ -296,7 +302,7 @@ pub(super) fn attach_checked_declaration_metadata(
             continue;
         };
         checked.annotations =
-            crate::ir_lower::declaration_annotations(&constructor.annotations, info);
+            super::declaration_metadata::declaration_annotations(&constructor.annotations, info);
     }
 
     if let Some(header) = index.declaration_spellings(stable_class) {

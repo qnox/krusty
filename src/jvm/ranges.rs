@@ -5,7 +5,6 @@ use std::rc::Rc;
 use super::{classpath::Classpath, jvm_libraries::JvmLibraries};
 use crate::fir::FirRangeOperation;
 use crate::ir::{Callee, ExprId, IrCheckedOperation, IrExpr, IrFile, IrTypeOp};
-use crate::runtime::{RuntimeOp, TargetRuntime};
 use crate::types::Ty;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -394,7 +393,7 @@ fn unsigned_compare_slots(
     operation: crate::ir::IrBinOp,
     counter: Ty,
 ) -> Option<ExprId> {
-    let callable = runtime.runtime_callable(RuntimeOp::UnsignedCompare, counter)?;
+    let callable = runtime.unsigned_compare_callable(counter)?;
     let lhs = ir.add_expr(IrExpr::GetValue(lhs));
     let rhs = ir.add_expr(IrExpr::GetValue(rhs));
     let compared = ir.add_expr(static_call(callable, lhs, rhs));

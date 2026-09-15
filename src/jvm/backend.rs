@@ -1341,26 +1341,43 @@ mod tests {
 
     #[test]
     fn common_lowering_leaves_jvm_storage_choices_to_backend() {
-        let lowering = include_str!("../ir_lower.rs");
-        assert!(!lowering.contains("lower_companion_properties"));
-        assert!(!lowering.contains("mark_jvm_companion_hoisted_static"));
-        assert!(!lowering.contains("jvm_default"));
-        assert!(!lowering.contains("fieldInitializerOptimization"));
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut offenders = Vec::new();
+        visit(&root.join("src/fir_lower"), &mut |path, text| {
+            for forbidden in [
+                "lower_companion_properties",
+                "mark_jvm_companion_hoisted_static",
+                "jvm_default",
+                "fieldInitializerOptimization",
+            ] {
+                if text.contains(forbidden) {
+                    offenders.push(format!("{}: {forbidden}", path.display()));
+                }
+            }
+        });
+        assert!(
+            offenders.is_empty(),
+            "common lowering must leave JVM storage choices to the backend:\n{}",
+            offenders.join("\n")
+        );
     }
 
     #[test]
     fn common_lowering_leaves_bridge_barriers_to_backends() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ir_lower.rs");
-        let text = std::fs::read_to_string(path).expect("read common lowering");
-        let offenders = text
-            .lines()
-            .filter(|line| {
-                line.contains("type_safe_barrier") && !line.contains("type_safe_barrier: false")
-            })
-            .collect::<Vec<_>>();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut offenders = Vec::new();
+        visit(&root.join("src/fir_lower"), &mut |path, text| {
+            for (line, source) in text.lines().enumerate() {
+                if source.contains("type_safe_barrier")
+                    && !source.contains("type_safe_barrier: false")
+                {
+                    offenders.push(format!("{}:{}: {source}", path.display(), line + 1));
+                }
+            }
+        });
         assert!(
             offenders.is_empty(),
-            "common lowering must not assign backend bridge barriers:\n{}",
+            "checked FIR lowering must not assign backend bridge barriers:\n{}",
             offenders.join("\n")
         );
     }

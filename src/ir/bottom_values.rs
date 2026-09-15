@@ -163,40 +163,6 @@ impl IrFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diag::DiagSink;
-    use crate::frontend::analyze_source_standalone;
-    use crate::libraries::EmptySymbolSource;
-
-    #[test]
-    fn legacy_ast_lowering_publishes_bottom_completion_for_null_assertion() {
-        let mut diagnostics = DiagSink::new();
-        let (file, symbols, types) =
-            analyze_source_standalone("fun fail(): Nothing = null!!\n", &mut diagnostics);
-        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-        let ir = crate::ir_lower::lower_file(
-            &file,
-            &types.expect("checked types"),
-            &symbols.expect("checked symbols"),
-            &EmptySymbolSource,
-        )
-        .expect("legacy common-IR lowering");
-
-        let completions = ir
-            .exprs
-            .iter()
-            .filter_map(|expression| match expression {
-                IrExpr::BottomValue {
-                    producer,
-                    completion,
-                } => Some((*producer, *completion)),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let [(producer, IrBottomValueCompletion::Diverge)] = completions.as_slice() else {
-            panic!("exactly one divergent bottom completion expected: {completions:?}");
-        };
-        assert!(matches!(ir.expr(*producer), IrExpr::NotNullAssert { .. }));
-    }
 
     #[test]
     fn bottom_completion_obeys_the_expression_use_context() {

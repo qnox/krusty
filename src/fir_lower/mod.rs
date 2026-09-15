@@ -6,6 +6,8 @@
 mod array_references;
 mod arrays;
 mod assertions;
+#[cfg(feature = "trace")]
+mod body_trace;
 #[cfg(test)]
 mod bottom_value_tests;
 mod checked;
@@ -64,44 +66,6 @@ enum LoweringState {
     Lowered(ExprId),
 }
 
-#[cfg(feature = "trace")]
-fn trace_checked_body(body: &FirBody, index: &ResolvedModuleIndex) {
-    if !crate::trace::enabled("fir") {
-        return;
-    }
-    let receiver_expressions = (0..body.expression_count())
-        .filter_map(|raw| {
-            let id = FirExprId::from_raw(u32::try_from(raw).ok()?);
-            let expression = body.expr(id)?;
-            matches!(
-                expression.kind,
-                crate::fir::FirExprKind::ImplicitReceiver { .. }
-                    | crate::fir::FirExprKind::EnclosingReceiver { .. }
-                    | crate::fir::FirExprKind::CapturedImplicitReceiver { .. }
-                    | crate::fir::FirExprKind::ClassStorageRead { .. }
-                    | crate::fir::FirExprKind::ConstructorCaptureRead { .. }
-                    | crate::fir::FirExprKind::ConstructorContextRead { .. }
-                    | crate::fir::FirExprKind::CapturedClassStorageRead { .. }
-            )
-            .then_some((id, expression.origin, expression.ty, &expression.kind))
-        })
-        .collect::<Vec<_>>();
-    crate::trace_compiler!(
-        "fir",
-        "lower checked body owner={:?} declaration_name={:?} anchor={:?} local={:?} name={:?} receiver={:?} context={:?} context_values={} captures={:?} implicit_receiver_captures={:?} receiver_expressions={receiver_expressions:?}",
-        body.owner(),
-        index.declaration_name(crate::fir::DeclarationId::from_raw(body.owner().raw())),
-        index.declaration_anchor(crate::fir::DeclarationId::from_raw(body.owner().raw())),
-        body.local_callable(),
-        body.debug_name(),
-        body.receiver_type(),
-        body.context_receiver_types(),
-        body.context_value_count(),
-        body.captures(),
-        body.implicit_receiver_captures(),
-    );
-}
-
 pub fn lower_body(
     body: FirBody,
     index: &ResolvedModuleIndex,
@@ -129,7 +93,7 @@ pub(crate) fn lower_body_with_context(
     let owner = body.owner();
     ir.source_line_count = ir.source_line_count.max(body.source_line_count());
     #[cfg(feature = "trace")]
-    trace_checked_body(&body, index);
+    body_trace::trace_checked_body(&body, index);
     let declaration = crate::fir::DeclarationId::from_raw(owner.raw());
     let enclosing_classifier = index
         .enclosing_classifier(declaration)
