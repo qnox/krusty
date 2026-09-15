@@ -4317,6 +4317,51 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   declarations are statements everywhere, not only in scripts; the soft-keyword prefix no longer
   parses as an expression name (`src/frontend.rs::modifier_prefixed_local_functions_parse_in_bodies`).
 
+- **A `return` is a tail position wherever it stands.** `tailrec` rewrites a tail self-call into a
+  loop step, and the tail positions of a function are not only its last expression: nothing of the
+  function runs after a `return`, so `if (n > 0) return f(n - 1)` written before the body's final
+  statement is a tail call too. The rewrite used to reach only the body's last root, so such a
+  function was left recursing — and a `tailrec` left recursing is not a slower answer but a
+  `StackOverflowError`, which is exactly the outcome the modifier was written to rule out.
+
+  **What bounds the search is OWNERSHIP, not syntax.** A loop is not a boundary: Kotlin reads
+  `while (…) { … return f(x) }` as a tail call, and the `continue` the rewrite writes carries the
+  synthetic loop's own label, so leaving the inner loop is the rewrite working rather than a reason
+  to skip it. Two things do stop it. An inlined LAMBDA's body owns its own `return`s — a depth-zero
+  one there is the lambda's, which is the one shape the checked depth cannot tell apart from this
+  function's, so the boundary rather than the depth is what keeps the walk out; its captures are
+  ordinary expressions of the enclosing function and stay in the walk. A `try` has a `finally` that
+  still has to run, so a `return` inside it does not leave directly — the ordering of that `finally`
+  is what a test can see, and does.
+
+  **Whether a `return` is THIS function's is the checked depth, not the shape it was found in.**
+  `IrFile::checked_return_depths` is the authority: depth zero is a return of this callable and a
+  deeper one targets a frame outside it; a `return` lowering generated itself carries no depth and
+  is this function's by construction. A slot that stops being a `Return` gives up its entry with it,
+  because the side table's contract is that only a return node carries one.
+
+  **The rewrite happens in place, and one root-to-node path is the whole licence for that.** Common
+  IR is a DAG: lowering may hand one ancestor id to two parents, so its descendants are observed on
+  both paths even when each has one direct parent node. Every structural edge is inventoried first —
+  including the ones the rewrite will not follow — and multiple reachability is propagated through
+  descendants. A `return` reached by more than one path is left alone. That program keeps recursing,
+  which is the answer this pass started from and is never a wrong one.
+
+  A trailing LOOP is left as the statement it is rather than wrapped in a `return`: a loop is not a
+  value and has no tail position of its own, and returning one is what a body ending in
+  `while (true) { … return f(x) }` used to compile to, which the verifier rejected.
+  Tests: `tests/tailrec_e2e.rs` (`tailrec_through_a_return_that_is_not_the_last_statement`,
+  `tailrec_through_a_return_inside_a_loop`, `a_return_a_finally_still_follows_is_not_rewritten`,
+  `a_lambda_in_the_body_keeps_its_own_returns_while_the_body_is_rewritten`,
+  `a_call_that_only_looks_like_a_tail_call_still_recurses`, and
+  `tailrec_rewriting_agrees_with_kotlinc`, which asks the reference compiler the same questions);
+  `src/fir_lower/tailrec.rs` (`a_return_the_dag_shares_with_a_try_is_left_alone`,
+  `a_return_below_a_shared_ancestor_is_left_alone`,
+  `a_return_that_targets_an_outer_frame_is_left_alone`,
+  `a_lambdas_capture_is_swept_and_its_inline_body_is_not`,
+  `a_return_reached_by_one_path_becomes_a_loop_step`), which state the three rules above on the IR
+  directly — a DAG edge crossing an opaque boundary has no Kotlin source that produces it.
+
 - **Element-form vararg calls select and lower against classpath extensions.** `"a.b".trim('.')`
   expands `trim(vararg chars: Char)` element-wise (an exact element type beats an assignable one, so
   the `Char` overload wins over `String`); `fq.split('.')` additionally requires every parameter
