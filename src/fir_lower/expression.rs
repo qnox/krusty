@@ -9,45 +9,6 @@ use crate::types::Ty;
 use super::{BodyLowering, FirLoweringFailure, LoweringState};
 
 impl BodyLowering<'_> {
-    /// `operand is target` (or `!is`), with the one case the LANGUAGE settles folded.
-    ///
-    /// `Nothing` has no instances, so no value is one and the answer does not depend on the
-    /// operand. There is also no class to test against — `kotlin.Nothing` is uninstantiable by
-    /// construction — so a backend asking the question has nothing to ask about, and the JVM
-    /// emitter answered it by erasing the target to `java/lang/Object`, which every non-null value
-    /// passes. The rule is Kotlin's rather than a target's, so it is settled here, once.
-    ///
-    /// The operand is still EVALUATED. A settled check folds the answer, not the expression, and an
-    /// operand may have effects.
-    ///
-    /// `x is Nothing?` reaches this through the null-or-instance expansion above, so it becomes
-    /// `x == null || false` — which is what `Nothing?`, the type of `null` and of nothing else,
-    /// means.
-    fn instance_check(
-        &mut self,
-        negated: bool,
-        operand: crate::ir::ExprId,
-        target: crate::types::Ty,
-    ) -> crate::ir::ExprId {
-        if target.non_null() == crate::types::Ty::Nothing {
-            let answer = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(negated)));
-            return self.ir.add_expr(IrExpr::Block {
-                stmts: vec![operand],
-                value: Some(answer),
-            });
-        }
-        let op = if negated {
-            IrTypeOp::NotInstanceOf
-        } else {
-            IrTypeOp::InstanceOf
-        };
-        self.ir.add_expr(IrExpr::TypeOp {
-            op,
-            arg: operand,
-            type_operand: target,
-        })
-    }
-
     pub(super) fn expression(
         &mut self,
         expression_id: FirExprId,

@@ -305,6 +305,56 @@ pub fn type_descriptor(ty: Ty) -> String {
     }
 }
 
+/// The class an `instanceof`/`checkcast` names for `t`.
+///
+/// One mapping, because the two instructions must agree: a value that passes the check is exactly a
+/// value the cast admits. It is a REPRESENTATION question — which runtime class stands for a Kotlin
+/// type — so it belongs with the other naming here rather than inside the emitter.
+///
+/// The fallback is erasure and not a default: an unbounded type parameter genuinely tests against
+/// `Object`, which is what Kotlin's erasure means and what kotlinc emits. A type that merely has no
+/// arm therefore erases silently, which is how `Unit` came to answer `true` for every non-null
+/// value, so a Kotlin type with a runtime class of its own is named explicitly.
+///
+/// `kotlin.Nothing` is deliberately absent: it has no runtime class at all (there is no
+/// `kotlin/Nothing.class` in kotlin-stdlib), so no name here could be right. Common lowering
+/// settles `is Nothing` before a backend sees it.
+pub(crate) fn instanceof_internal_name(t: Ty) -> String {
+    match t {
+        Ty::String => "java/lang/String".to_string(),
+        Ty::Nullable(inner) | Ty::PlatformNullable(inner) if inner.is_unsigned() => match *inner {
+            Ty::UByte => "kotlin/UByte".to_string(),
+            Ty::UShort => "kotlin/UShort".to_string(),
+            Ty::UInt => "kotlin/UInt".to_string(),
+            Ty::ULong => "kotlin/ULong".to_string(),
+            _ => unreachable!("is_unsigned accepts only the four unsigned scalar types"),
+        },
+        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner
+            .boxed_ref()
+            .and_then(Ty::obj_internal)
+            .map(|name| crate::jvm::names::classfile_internal_name(&name.render()))
+            .unwrap_or_else(|| instanceof_internal_name(*inner)),
+        // An array's reference identity is its descriptor (`[I`, `[Ljava/lang/String;`) — checked before
+        // the `Obj` arm since arrays are now `Obj("kotlin/Array")`/`Obj("kotlin/IntArray")` too.
+        t if t.is_array() => type_descriptor(t),
+        // Erase a Kotlin built-in name (`kotlin/collections/MutableList`) to its JVM identity here at the
+        // bytecode boundary, so `instanceof`/`checkcast`/method-owner refs never leak a Kotlin-only name.
+        Ty::Obj(n, _) => crate::jvm::names::classfile_internal_name(&n.render()),
+        // A function type's reference identity is its `kotlin/jvm/functions/FunctionN` interface, so
+        // `x is Function1<*, *>` / `x as (A) -> B` test/cast against that class, not `Object`.
+        Ty::Fun(signature) => crate::jvm::names::function_interface_internal_name(
+            signature.params.len() + usize::from(signature.suspend),
+        ),
+        // `Unit` is a real class with one instance, so `x is Unit` is a real question about the
+        // object. Without this arm it fell to the erasure below and asked `instanceof
+        // java/lang/Object`, which every non-null value passes.
+        Ty::Unit => "kotlin/Unit".to_string(),
+        // Everything left is erased: an unbounded type parameter tests against `Object`, which is
+        // what Kotlin's erasure means and what kotlinc emits.
+        _ => "java/lang/Object".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

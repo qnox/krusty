@@ -14,9 +14,20 @@
 
 use super::common;
 
+/// Run `body` under krusty AND under the reference compiler, and require the SAME output.
+///
+/// Not `expect_box_ok_with_stdlib`: that asserts krusty answers `"OK"`, which pins my reading of
+/// the rule rather than kotlinc's. These shapes are exactly the ones where krusty's own answer was
+/// confidently wrong, so the reference compiler has to be the one supplying it.
+fn agrees_with_kotlinc(stem: &str, body: &str) {
+    let krusty = common::expect_box_run_with_stdlib(body, stem);
+    assert_eq!(krusty, common::kotlinc_box_result(body), "{stem}");
+}
+
 #[test]
 fn no_value_is_an_instance_of_nothing() {
-    common::expect_box_ok_with_stdlib(
+    agrees_with_kotlinc(
+        "NoValueIsNothing",
         "fun box(): String {\n\
          \x20   val present: Any? = \"a\"\n\
          \x20   val absent: Any? = null\n\
@@ -25,13 +36,13 @@ fn no_value_is_an_instance_of_nothing() {
          \x20   if (present !is Nothing) { } else return \"fail: !is disagrees\"\n\
          \x20   return \"OK\"\n\
          }\n",
-        "NoValueIsNothing",
     );
 }
 
 #[test]
 fn nullable_nothing_admits_null_and_nothing_else() {
-    common::expect_box_ok_with_stdlib(
+    agrees_with_kotlinc(
+        "NullableNothingIsNull",
         "fun box(): String {\n\
          \x20   val present: Any? = \"a\"\n\
          \x20   val absent: Any? = null\n\
@@ -39,7 +50,6 @@ fn nullable_nothing_admits_null_and_nothing_else() {
          \x20   if (absent !is Nothing?) return \"fail: null is not Nothing?\"\n\
          \x20   return \"OK\"\n\
          }\n",
-        "NullableNothingIsNull",
     );
 }
 
@@ -47,7 +57,8 @@ fn nullable_nothing_admits_null_and_nothing_else() {
 fn unit_is_a_class_a_value_either_is_or_is_not() {
     // Not settled by the language — `Unit` has exactly one instance, so this is a real question
     // about the object. It answered `true` for everything for the same reason `Nothing` did.
-    common::expect_box_ok_with_stdlib(
+    agrees_with_kotlinc(
+        "UnitIsARealQuestion",
         "fun box(): String {\n\
          \x20   val unit: Any = Unit\n\
          \x20   val other: Any = \"a\"\n\
@@ -55,13 +66,13 @@ fn unit_is_a_class_a_value_either_is_or_is_not() {
          \x20   if (other is Unit) return \"fail: a String is Unit\"\n\
          \x20   return \"OK\"\n\
          }\n",
-        "UnitIsARealQuestion",
     );
 }
 
 #[test]
 fn a_settled_check_still_evaluates_its_receiver() {
-    common::expect_box_ok_with_stdlib(
+    agrees_with_kotlinc(
+        "SettledCheckEvaluatesReceiver",
         "var calls = 0\n\
          fun subject(): Any? { calls++; return \"a\" }\n\
          fun box(): String {\n\
@@ -71,6 +82,5 @@ fn a_settled_check_still_evaluates_its_receiver() {
          \x20   if (nullOnly) return \"fail: Nothing?\"\n\
          \x20   return if (calls == 2) \"OK\" else \"fail: $calls\"\n\
          }\n",
-        "SettledCheckEvaluatesReceiver",
     );
 }
