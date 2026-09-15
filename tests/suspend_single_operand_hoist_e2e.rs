@@ -72,13 +72,26 @@ fn run_box_with(tag: &str, main: &str) -> String {
     common::expect_box_run(main, "Main", &classpath(), Some(jdk.as_path()))
 }
 
+/// Every suspending helper here calls `yield()`, so it genuinely SUSPENDS and resumes rather than
+/// completing synchronously. That is the difference that matters: a helper which returns without
+/// suspending never forces the flattener to split the state machine at that operand, so it cannot
+/// show whether the operand was hoisted. Each helper also bumps `calls`, which the fixtures assert,
+/// so a hoist that evaluates its operand twice — or not at all — is observable rather than hidden
+/// behind a result that happens to be the same either way.
 const DECLARATIONS: &str = "import kotlinx.coroutines.runBlocking\n\
+import kotlinx.coroutines.yield\n\
 \n\
 enum class Level { LOW, HIGH }\n\
 \n\
-suspend fun pickName(): String = \"HIGH\"\n\
+var calls = 0\n\
 \n\
-suspend fun count(): Int = 2\n\
+suspend fun pickName(): String { calls++; yield(); return \"HIGH\" }\n\
+\n\
+suspend fun count(): Int { calls++; yield(); return 2 }\n\
+\n\
+suspend fun size(): Int { calls++; yield(); return 3 }\n\
+\n\
+suspend fun make(): Any { calls++; yield(); return \"text\" }\n\
 \n";
 
 /// An enum lookup whose name comes from a suspension.
@@ -89,6 +102,7 @@ fn an_enum_lookup_hoists_a_suspending_name() {
 suspend fun pick(): Level = enumValueOf<Level>(pickName())\n\
 fun box(): String {{\n\
 \x20   val level = runBlocking {{ pick() }}\n\
+\x20   if (calls != 1) return \"FAIL: evaluated \" + calls + \" times\"\n\
 \x20   return if (level == Level.HIGH) \"OK\" else \"FAIL: \" + level\n\
 }}\n"
     );
@@ -112,6 +126,7 @@ suspend fun tally(): Int {{\n\
 }}\n\
 fun box(): String {{\n\
 \x20   val total = runBlocking {{ tally() }}\n\
+\x20   if (calls != 1) return \"FAIL: evaluated \" + calls + \" times\"\n\
 \x20   return if (total == 5) \"OK\" else \"FAIL: \" + total\n\
 }}\n"
     );
@@ -167,6 +182,64 @@ fun box(): String {{\n\
     );
     assert_eq!(
         run_box_with("an_enum_lookup_with_no_suspension_still_works", &main),
+        "OK"
+    );
+}
+
+/// An array whose SIZE suspends. The size is evaluated before the array exists, so the suspension
+/// cannot stay where it is: `NewArray` had no arm at all.
+#[test]
+fn an_array_size_hoists_a_suspension() {
+    let main = format!(
+        "{DECLARATIONS}\
+suspend fun build(): Array<String?> = arrayOfNulls<String>(size())\n\
+fun box(): String {{\n\
+\x20   val made = runBlocking {{ build() }}\n\
+\x20   if (calls != 1) return \"FAIL: evaluated \" + calls + \" times\"\n\
+\x20   if (made.size != 3) return \"FAIL: size \" + made.size\n\
+\x20   return if (made[0] == null) \"OK\" else \"FAIL: element\"\n\
+}}\n"
+    );
+    assert_eq!(run_box_with("an_array_size_hoists_a_suspension", &main), "OK");
+}
+
+/// A BOUND class literal whose receiver suspends. `make()::class` evaluates the receiver for its
+/// runtime class, so the suspension is a single operand like any other; `KClassLiteral` had no arm.
+/// An unbound `String::class` carries no operand and cannot suspend, which is why the arm matches
+/// only the bound form.
+#[test]
+fn a_bound_class_literal_hoists_a_suspending_receiver() {
+    let main = format!(
+        "{DECLARATIONS}\
+suspend fun runtimeClass(): String = make()::class.simpleName ?: \"?\"\n\
+fun box(): String {{\n\
+\x20   val name = runBlocking {{ runtimeClass() }}\n\
+\x20   if (calls != 1) return \"FAIL: evaluated \" + calls + \" times\"\n\
+\x20   return if (name == \"String\") \"OK\" else \"FAIL: \" + name\n\
+}}\n"
+    );
+    assert_eq!(
+        run_box_with("a_bound_class_literal_hoists_a_suspending_receiver", &main),
+        "OK"
+    );
+}
+
+/// Two single-operand nodes fed by SEPARATE suspensions in one expression. Each operand must be
+/// hoisted to its own temp, in evaluation order, and each must run exactly once — the shape that a
+/// hoist rewriting a shared arena node in place would get wrong.
+#[test]
+fn two_operands_in_one_expression_each_hoist_once() {
+    let main = format!(
+        "{DECLARATIONS}\
+suspend fun both(): Int = arrayOfNulls<String>(size()).size + count()\n\
+fun box(): String {{\n\
+\x20   val total = runBlocking {{ both() }}\n\
+\x20   if (calls != 2) return \"FAIL: evaluated \" + calls + \" times\"\n\
+\x20   return if (total == 5) \"OK\" else \"FAIL: \" + total\n\
+}}\n"
+    );
+    assert_eq!(
+        run_box_with("two_operands_in_one_expression_each_hoist_once", &main),
         "OK"
     );
 }
