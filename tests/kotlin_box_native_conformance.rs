@@ -43,8 +43,12 @@ enum Outcome {
     Pass,
     /// The native backend declined a construct, named.
     Declined(String),
-    /// The frontend rejected the source (not this backend's business).
-    Frontend,
+    /// The frontend rejected the source (not this backend's business), carrying what it said.
+    ///
+    /// The reason is kept for the same purpose a decline's is: this bucket is a thousand cases
+    /// wide and opaque without it, and what is in it is core work that every backend would gain
+    /// from — so it is ranked in the report rather than left as a number.
+    Frontend(String),
     /// The compiler panicked somewhere other than the native backend: no program was produced, so
     /// nothing was miscompiled, but a compiler defect is a compiler defect and it is listed.
     FrontendPanic(String),
@@ -139,10 +143,20 @@ thread_local! {
     /// to RESOLVE is counted as declined — so the lane was reporting "not supported yet" for a
     /// whole family of programs it had never actually attempted. The two lanes have to compile
     /// against the same thing for the comparison between them to mean anything.
-    static CLASSPATH: std::rc::Rc<Classpath> = std::rc::Rc::new(Classpath::new(vec![
-        krusty::toolchain::stdlib_jar().expect("checked by `host`"),
-        krusty::toolchain::jdk_modules().expect("checked by `host`"),
-    ]));
+    static CLASSPATH: std::rc::Rc<Classpath> = std::rc::Rc::new(Classpath::new(
+        [
+            krusty::toolchain::stdlib_jar().expect("checked by `host`"),
+            krusty::toolchain::jdk_modules().expect("checked by `host`"),
+        ]
+        .into_iter()
+        // `kotlin-test`, which is what `// WITH_STDLIB` means on top of the stdlib: the corpus
+        // checks itself with `assertEquals`, `assertTrue` and `assertFailsWith`, and without the
+        // jar those do not resolve — nor does the `kotlin.test` package path itself, which is why
+        // `test` was the second most unresolved name in the whole corpus. The JVM lane has carried
+        // it all along; this one had not.
+        .chain(krusty::toolchain::kotlin_test_jar())
+        .collect::<Vec<_>>(),
+    ));
 }
 
 thread_local! {
@@ -182,8 +196,8 @@ fn compile(source: &str, stem: &str, target: NativeTarget) -> Result<Vec<u8>, Ou
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs, platform, &features, &mut diags,
     );
-    if !diags.diags.is_empty() {
-        return Err(Outcome::Frontend);
+    if let Some(first) = diags.diags.first() {
+        return Err(Outcome::Frontend(first.msg.clone()));
     }
     let backend = CraneliftBackend::new(classpath, target).with_entry(Entry::Box);
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "box", &mut diags);
@@ -196,14 +210,16 @@ fn compile(source: &str, stem: &str, target: NativeTarget) -> Result<Vec<u8>, Ou
             decline.trim_end_matches(" yet").to_string(),
         ));
     }
-    if !diags.diags.is_empty() {
-        return Err(Outcome::Frontend);
+    if let Some(first) = diags.diags.first() {
+        return Err(Outcome::Frontend(first.msg.clone()));
     }
     match artifacts.into_iter().next() {
         Some((_, object)) => Ok(object),
         // The frontend produced no checked file for the backend to lower and said nothing about
         // it. That is the JVM pipeline's silence to account for, not a native miscompile.
-        None => Err(Outcome::Frontend),
+        None => Err(Outcome::Frontend(
+            "the frontend produced no checked file and said nothing".to_string(),
+        )),
     }
 }
 
@@ -405,6 +421,7 @@ fn kotlin_codegen_box_native_conformance() {
     let mut passed = 0usize;
     let mut frontend = 0usize;
     let mut declined: BTreeMap<String, usize> = BTreeMap::new();
+    let mut frontend_reasons: BTreeMap<String, usize> = BTreeMap::new();
     let mut not_applicable: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut traced: Vec<(PathBuf, String)> = Vec::new();
     let mut frontend_panics: Vec<(PathBuf, String)> = Vec::new();
@@ -422,7 +439,14 @@ fn kotlin_codegen_box_native_conformance() {
                 "listed in native_box_expected_failures.txt but passes now: remove it".to_string(),
             )),
             Outcome::Pass => passed += 1,
-            Outcome::Frontend => frontend += 1,
+            Outcome::Frontend(reason) => {
+                frontend += 1;
+                // Kept VERBATIM, unlike a decline. Almost every one of these is an unresolved
+                // reference, and there the name is the whole of the information: the shape says
+                // only "something was not found", while the name says which symbol the provider
+                // does not expose and therefore what to fix.
+                *frontend_reasons.entry(reason).or_default() += 1;
+            }
             Outcome::FrontendPanic(reason) => frontend_panics.push((file.clone(), reason)),
             Outcome::Declined(reason) => {
                 traced.push((file.clone(), reason.clone()));
@@ -463,6 +487,15 @@ fn kotlin_codegen_box_native_conformance() {
         }
     }
 
+    // The other backlog, and the larger one: what the FRONTEND refuses. Every case here is core
+    // work — nothing about it is this backend's — and all three backends would gain from it, which
+    // is why it is ranked beside the declines rather than left as a single number.
+    let mut frontend_ranked: Vec<(&String, &usize)> = frontend_reasons.iter().collect();
+    frontend_ranked.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    for (reason, count) in frontend_ranked.iter().take(60) {
+        eprintln!("  frontend {count:>5}  {reason}");
+    }
+
     // The backlog: what the generator declines, most frequent first.
     let mut reasons: Vec<(&String, &usize)> = declined.iter().collect();
     reasons.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
@@ -477,6 +510,9 @@ fn kotlin_codegen_box_native_conformance() {
             let _ = writeln!(out, "{report}");
             for (reason, count) in &reasons {
                 let _ = writeln!(out, "declined\t{count}\t{reason}");
+            }
+            for (reason, count) in &frontend_ranked {
+                let _ = writeln!(out, "frontend\t{count}\t{reason}");
             }
         }
     }

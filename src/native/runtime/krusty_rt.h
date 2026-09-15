@@ -415,6 +415,10 @@ kt_int kt_string_compare_to(KRef a, KRef b);
    their trailing bytes do. */
 KRef kt_string_remove_suffix(KRef self, KRef suffix);
 
+/* A string LITERAL, interned: equal literals are ONE object, as Kotlin promises. `slot` is a static
+   per distinct text; see the definition for why the root is registered before the allocation. */
+KRef kt_string_literal(const char *bytes, kt_int length, KRef *slot);
+
 /* `Any?.toString()` — also what a string template calls on each interpolated value. */
 KRef kt_to_string(KRef value);
 

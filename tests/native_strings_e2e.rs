@@ -130,3 +130,26 @@ fn the_comparison_magnitude_agrees_with_the_jvm_backend() {
         "-1/1/-2/2/0"
     );
 }
+
+#[test]
+fn equal_string_literals_are_one_object() {
+    // Kotlin interns literals: `"a" === "a"` is true, and a function returning a literal answers
+    // the identical string every call. Building the string where it is written answers `false` to
+    // both — the bytes are shared but the object is not, and `===` asks about the object.
+    expect_native_box(
+        "fun hello() = \"Hello\"\n\
+         fun box(): String {\n\
+         \x20   val a = \"Hello\"\n\
+         \x20   val b = \"Hello\"\n\
+         \x20   if (a != b) return \"fail ==\"\n\
+         \x20   if (a !== b) return \"fail === across two literals\"\n\
+         \x20   if (hello() !== hello()) return \"fail === across two calls\"\n\
+         \x20   if (hello() !== a) return \"fail === call vs literal\"\n\
+         \x20   val other = \"Goodbye\"\n\
+         \x20   if (a === other) return \"fail different texts are one object\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "InternedLiterals",
+        "OK",
+    );
+}

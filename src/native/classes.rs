@@ -1067,6 +1067,21 @@ fn register_inherited_interface_members(
         let (Some(owner), Some(interface)) = (implementation.class, overridden.class) else {
             continue;
         };
+        // The same representation check the METHOD path above makes, for the same reason and with
+        // the same consequence when it is missing. `interface C<T> { var size: T }` implemented by
+        // `class B : C<Int>, A()` where `A` declares `var size: Int` erases the interface's
+        // accessors to a REFERENCE while the inherited ones are an unboxed machine integer.
+        // Aliasing the interface's slot onto them has a caller read that integer as a pointer —
+        // a segmentation fault, where the contract is that a program this generator cannot emit is
+        // declined. A property is what `bridges/test7.kt` is about, which is why the method check
+        // did not catch it.
+        if c_kind(implementation.ty) != c_kind(overridden.ty) {
+            return Err(format!(
+                "an interface property whose implementation changes its representation                  (`{}.{}`; a bridge method is needed)",
+                ir.classes[owner as usize].fq_name(),
+                implementation.name
+            ));
+        }
         for setter in [false, true] {
             let (from, to) = if setter {
                 (

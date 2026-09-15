@@ -2615,6 +2615,22 @@ KRef kt_throwable_message(KRef self) { return ((KThrowable *)self)->message; }
    a file containing a `try` is declined whole — so reporting and exiting here IS the propagation,
    and it is what Kotlin does with an exception nothing handles. The exit code matches the one a
    failed cast already uses, which is the JVM backend's for an abnormal end. */
+/* A string LITERAL, interned. Kotlin promises that equal literals are the same object — `"a" ===
+   "a"` is true, and a function returning a literal answers the identical string every call — so a
+   literal cannot allocate where it is written. `slot` is a static one per distinct text, filled on
+   first use and traced from then on.
+
+   The root is registered BEFORE the allocation rather than after: the slot is reachable from that
+   moment, holding NULL until the string exists, and a collection triggered by this very allocation
+   finds a root it can trace rather than one it has not been told about. */
+KRef kt_string_literal(const char *bytes, kt_int length, KRef *slot) {
+    if (*slot == NULL) {
+        kt_gc_add_global_root((void **)slot);
+        *slot = kt_string_utf8(bytes, length);
+    }
+    return *slot;
+}
+
 /* ---- callable references ----------------------------------------------------------------- */
 
 /* A bound reference keeps its receiver as its first reference field, which is what

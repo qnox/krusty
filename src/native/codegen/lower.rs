@@ -176,6 +176,7 @@ pub fn lower_file(
         imports: HashMap::new(),
         data_imports: HashMap::new(),
         strings: HashMap::new(),
+        string_objects: HashMap::new(),
         classes: Vec::new(),
         accessors: HashMap::new(),
         statics: Vec::new(),
@@ -247,6 +248,10 @@ struct FileLowering<'a> {
     data_imports: HashMap<String, DataId>,
     /// String literal data, deduplicated by content.
     strings: HashMap<Vec<u8>, DataId>,
+    /// The interned string OBJECT for each distinct literal text — one slot per text, filled on
+    /// first use. Kotlin promises equal literals are the same object, so the text's bytes being
+    /// shared (above) is not enough: the string built from them has to be shared too.
+    string_objects: HashMap<Vec<u8>, DataId>,
     /// Per-class emitted items, parallel to `ir.classes`.
     classes: Vec<objects::ClassItems>,
     /// Synthesized field accessors the vtables reference, by slot.
@@ -340,6 +345,26 @@ impl<'a> FileLowering<'a> {
     }
 
     /// A string literal's UTF-8 bytes as read-only data, shared between identical literals.
+    /// The slot holding the interned object for one literal text; see [`BodyLowering::string_literal`].
+    fn string_object_slot(&mut self, bytes: &[u8]) -> Result<DataId, Unsupported> {
+        if let Some(id) = self.string_objects.get(bytes) {
+            return Ok(*id);
+        }
+        let name = format!("kt_str_obj_{}", self.string_objects.len());
+        let id = self
+            .module
+            .declare_data(&name, Linkage::Local, true, false)
+            .map_err(|error| format!("declaring an interned string slot ({error})"))?;
+        let mut description = DataDescription::new();
+        description.define(vec![0u8; 8].into_boxed_slice());
+        description.set_align(8);
+        self.module
+            .define_data(id, &description)
+            .map_err(|error| format!("defining an interned string slot ({error})"))?;
+        self.string_objects.insert(bytes.to_vec(), id);
+        Ok(id)
+    }
+
     fn string_data(&mut self, bytes: &[u8]) -> Result<DataId, Unsupported> {
         if let Some(id) = self.strings.get(bytes) {
             return Ok(*id);
@@ -1411,21 +1436,35 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// A string object for a literal's bytes.
+    /// A string literal, INTERNED: equal literals are one object, which is Kotlin's promise and
+    /// observable through `===`. Building one where it is written would answer `false` for
+    /// `"a" === "a"`, and would answer it for a function returning a literal too — every call
+    /// allocating a new string.
+    ///
+    /// So the bytes get a slot alongside them, one per distinct text, and the runtime fills it on
+    /// first use. The slot is the interning table: there is no lookup, because the generator
+    /// already knows which literals are the same text.
     fn string_literal(&mut self, bytes: &[u8]) -> Result<Value, Unsupported> {
         let data = self.file.string_data(bytes)?;
+        let slot = self.file.string_object_slot(bytes)?;
         let global = self
             .file
             .module
             .declare_data_in_func(data, self.builder.func);
         let pointer = self.builder.ins().symbol_value(types::I64, global);
         let length = self.builder.ins().iconst(types::I32, bytes.len() as i64);
+        let slot = self
+            .file
+            .module
+            .declare_data_in_func(slot, self.builder.func);
+        let slot = self.builder.ins().symbol_value(types::I64, slot);
         let string = self.runtime_call(
-            "kt_string_utf8",
-            &[Ty::obj("kotlin/Any"), Ty::Int],
+            "kt_string_literal",
+            &[Ty::obj("kotlin/Any"), Ty::Int, Ty::obj("kotlin/Any")],
             Ty::String,
-            &[pointer, length],
+            &[pointer, length, slot],
         )?;
-        Ok(string.expect("`kt_string_utf8` returns a string"))
+        Ok(string.expect("`kt_string_literal` returns a string"))
     }
 
     /// Whether an expression produces a function value: a lambda, a `::f`, or anything typed as
