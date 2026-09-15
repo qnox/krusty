@@ -2303,7 +2303,24 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             if self.terminated {
                                 return Ok(None);
                             }
-                            return self.runtime_call(symbol, &carried, answer, &arguments);
+                            let produced =
+                                self.runtime_call(symbol, &carried, answer, &arguments)?;
+                            // The table says what the runtime function PHYSICALLY answers; the
+                            // call node says what the site expects. Reconciling the two is this
+                            // boundary's job rather than something to assume: they are different
+                            // sources and nothing here made them agree.
+                            //
+                            // They disagree today for `Number.toByte`/`toShort`, which the
+                            // classpath provider types `Int` because `desc_to_ty` reads the JVM
+                            // descriptors `B` and `S` as `Int` — a core defect with its own fix,
+                            // invisible to the JVM backend because a byte and an int share a stack
+                            // slot there. Without this, the i8 the runtime answers reaches a box
+                            // helper that takes an i32 and Cranelift's verifier rejects the
+                            // function. When the provider is fixed the coercion becomes a no-op.
+                            let Some(produced) = produced else {
+                                return Ok(None);
+                            };
+                            return self.convert(produced, Some(answer), *ret);
                         }
                         let Some(symbol) =
                             super::super::intrinsics::runtime_member(&owner, &name, params)

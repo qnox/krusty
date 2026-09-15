@@ -440,16 +440,29 @@ pub(super) fn scalar_member(
         // `kotlin.Number`'s six conversions. A site that could type its value only as a `Number`
         // hands over a box, and which primitive is inside is the descriptor's answer — so the
         // runtime reads it rather than the generator guessing from the static type.
-        ("kotlin/Number", "toByte", []) => Some(("kt_number_to_byte", vec![reference], Ty::Byte)),
-        ("kotlin/Number", "toShort", []) => {
+        //
+        // Each arrives under EITHER name, for the reason [`kotlin_owner`] exists and exactly as
+        // `kotlin.CharSequence.get`/`java.lang.CharSequence.charAt` does: a mapped builtin whose
+        // realization names a different physical member hands over that physical name. Observed:
+        // `toByte`/`toShort` come through as `byteValue`/`shortValue` while `toInt`/`toLong` keep
+        // the Kotlin spelling, so neither list is the one to write alone. The two spellings are the
+        // SAME member, not one replacing the other.
+        ("kotlin/Number", "toByte" | "byteValue", []) => {
+            Some(("kt_number_to_byte", vec![reference], Ty::Byte))
+        }
+        ("kotlin/Number", "toShort" | "shortValue", []) => {
             Some(("kt_number_to_short", vec![reference], Ty::Short))
         }
-        ("kotlin/Number", "toInt", []) => Some(("kt_number_to_int", vec![reference], Ty::Int)),
-        ("kotlin/Number", "toLong", []) => Some(("kt_number_to_long", vec![reference], Ty::Long)),
-        ("kotlin/Number", "toFloat", []) => {
+        ("kotlin/Number", "toInt" | "intValue", []) => {
+            Some(("kt_number_to_int", vec![reference], Ty::Int))
+        }
+        ("kotlin/Number", "toLong" | "longValue", []) => {
+            Some(("kt_number_to_long", vec![reference], Ty::Long))
+        }
+        ("kotlin/Number", "toFloat" | "floatValue", []) => {
             Some(("kt_number_to_float", vec![reference], Ty::Float))
         }
-        ("kotlin/Number", "toDouble", []) => {
+        ("kotlin/Number", "toDouble" | "doubleValue", []) => {
             Some(("kt_number_to_double", vec![reference], Ty::Double))
         }
         _ => None,
