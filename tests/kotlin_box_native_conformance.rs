@@ -56,8 +56,10 @@ enum Outcome {
 
 fn host() -> Option<NativeTarget> {
     let target = NativeTarget::host()?;
-    (krusty::native::can_link(target) && krusty::toolchain::stdlib_jar().is_some())
-        .then_some(target)
+    (krusty::native::can_link(target)
+        && krusty::toolchain::stdlib_jar().is_some()
+        && krusty::toolchain::jdk_modules().is_some())
+    .then_some(target)
 }
 
 /// The corpus: the reference checkout when provisioned, else the vendored cases.
@@ -128,8 +130,18 @@ fn not_applicable(src: &str) -> Option<&'static str> {
 thread_local! {
     /// One classpath per worker thread: it is `Rc`-shared and caches parsed class files, so
     /// building it per case would redo the stdlib jar's index thousands of times.
+    ///
+    /// The stdlib jar AND the JDK jimage, which is the pair the JVM lane compiles against. Nothing
+    /// about the emitted program changes — it links against the runtime and no JVM is involved —
+    /// but the SIGNATURES come out of JVM artifacts until the provider is klib-based (see
+    /// `native::intrinsics`), and a mapped builtin like `kotlin.Throwable` is a typealias for a
+    /// `java.lang` class. Without the jimage those names resolve to nothing, and a case that fails
+    /// to RESOLVE is counted as declined — so the lane was reporting "not supported yet" for a
+    /// whole family of programs it had never actually attempted. The two lanes have to compile
+    /// against the same thing for the comparison between them to mean anything.
     static CLASSPATH: std::rc::Rc<Classpath> = std::rc::Rc::new(Classpath::new(vec![
         krusty::toolchain::stdlib_jar().expect("checked by `host`"),
+        krusty::toolchain::jdk_modules().expect("checked by `host`"),
     ]));
 }
 
