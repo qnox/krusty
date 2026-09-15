@@ -84,3 +84,36 @@ fn a_settled_check_still_evaluates_its_receiver() {
          }\n",
     );
 }
+
+#[test]
+fn a_safe_cast_to_nothing_answers_null_and_evaluates_its_subject_once() {
+    // The other side of the same rule, and its own path: `as?` lowers to a guard, a checked cast
+    // and `null`, and the guard used to erase to `Object` — so a non-null value SURVIVED a cast
+    // that can only ever yield `null`. The counter is what makes "once" a claim: the lowering
+    // evaluates the subject into a temporary and the guard reads that temporary, so a shape that
+    // re-evaluated instead would answer `null` just as well and count two.
+    agrees_with_kotlinc(
+        "SafeCastToNothing",
+        "var calls = 0\n\
+         fun subject(): Any? { calls++; return \"a\" }\n\
+         fun box(): String {\n\
+         \x20   val cast = subject() as? Nothing\n\
+         \x20   if (cast != null) return \"fail: survived the cast\"\n\
+         \x20   return if (calls == 1) \"OK\" else \"fail: $calls\"\n\
+         }\n",
+    );
+}
+
+#[test]
+fn a_safe_cast_to_nullable_nothing_admits_only_null() {
+    agrees_with_kotlinc(
+        "SafeCastToNullableNothing",
+        "fun box(): String {\n\
+         \x20   val present: Any? = \"a\"\n\
+         \x20   val absent: Any? = null\n\
+         \x20   if ((present as? Nothing?) != null) return \"fail: a value survived\"\n\
+         \x20   if ((absent as? Nothing?) != null) return \"fail: null became a value\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+    );
+}

@@ -126,9 +126,10 @@ fn js_instanceof(arg: &str, t: &Ty) -> String {
     // `Unit` is this target's `undefined` (see `IrExpr::UnitInstance`), not a class, so asking for
     // one is an identity test against that value. Without this it fell to the `false` below and
     // `Unit is Unit` was false — and there is no `Unit` class for `instanceof` to name either, so
-    // reaching the `obj_internal` arm would be a ReferenceError rather than an answer. Keyed on
-    // both spellings for the same reason `String` is.
-    if nn == Ty::Unit || nn.obj_internal().is_some_and(|n| n.matches("kotlin/Unit")) {
+    // reaching the `obj_internal` arm would be a ReferenceError rather than an answer. Normalized
+    // rather than listing both spellings: `canonical_semantic` already decides which `Ty` a
+    // `kotlin/Unit` object name is.
+    if nn.canonical_semantic() == Ty::Unit {
         return format!("({arg} === undefined)");
     }
     if let Some(fq_name) = nn.obj_internal() {

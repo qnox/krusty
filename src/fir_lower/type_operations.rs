@@ -18,6 +18,11 @@ impl BodyLowering<'_> {
     /// The operand is still EVALUATED. A settled check folds the answer, not the expression, and an
     /// operand may have effects.
     ///
+    /// The target is normalized first. `Nothing` reaches here both as `Ty::Nothing` and as
+    /// `Obj("kotlin/Nothing")` depending on where it was written, and matching one spelling would
+    /// answer the rule for some programs and not others — so `canonical_semantic` decides it once
+    /// rather than this becoming another site that lists both.
+    ///
     /// `x is Nothing?` reaches this through the null-or-instance expansion in `expression`, so it
     /// becomes `x == null || false` — which is what `Nothing?`, the type of `null` and of nothing
     /// else, means. `x as? Nothing` reaches it through the guard below and yields `null`, which is
@@ -28,7 +33,7 @@ impl BodyLowering<'_> {
         operand: crate::ir::ExprId,
         target: crate::types::Ty,
     ) -> crate::ir::ExprId {
-        if target.non_null() == crate::types::Ty::Nothing {
+        if target.non_null().canonical_semantic() == crate::types::Ty::Nothing {
             let answer = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(negated)));
             return self.ir.add_expr(IrExpr::Block {
                 stmts: vec![operand],
@@ -160,6 +165,61 @@ mod tests {
             .expect("a settled check lowers");
         let produced = ir.expr(*root.roots.last().expect("one root")).clone();
         (ir, produced)
+    }
+
+    /// A safe cast to `Nothing` guards on the SAME settled answer, which is what makes it yield
+    /// `null` for every value. Its guard is a separate construction from the `is` above — it had
+    /// its own `InstanceOf` until this change — so the `is` tests alone would not have held it.
+    #[test]
+    fn a_safe_cast_to_nothing_guards_on_the_settled_false() {
+        let origin = OriginId::from_raw(0);
+        let mut body = FirBody::new(BodyOwnerId::from_raw(1));
+        let operand = body.add_expr(FirExpr {
+            origin,
+            ty: resolved(Ty::obj("kotlin/Any")),
+            kind: FirExprKind::Constant(crate::fir::FirConstant::Int(7)),
+        });
+        let cast = body.add_expr(FirExpr {
+            origin,
+            ty: resolved(Ty::nullable(Ty::Nothing)),
+            kind: FirExprKind::TypeOperation {
+                operation: FirTypeOperation::SafeCast,
+                operand,
+                target: resolved(Ty::Nothing),
+            },
+        });
+        let statement = body.add_statement(FirStatement {
+            origin,
+            kind: FirStatementKind::Expression(cast),
+        });
+        body.push_root(statement);
+
+        let mut ir = IrFile::default();
+        let root = lower_body(body, &ResolvedModuleIndex::default(), &mut ir)
+            .expect("a safe cast to Nothing lowers");
+        let produced = ir.expr(*root.roots.last().expect("one root")).clone();
+
+        // `Block { the temporary, When { [(guard, cast), (_, null)] } }` — reach the guard.
+        let IrExpr::Block { value, .. } = produced else {
+            panic!("a safe cast lowers to a block, got {produced:?}");
+        };
+        let value = value.expect("a safe cast produces a value");
+        let IrExpr::When { branches } = ir.expr(value) else {
+            panic!("a safe cast lowers to a `when`, got {:?}", ir.expr(value));
+        };
+        let guard = branches
+            .first()
+            .and_then(|(guard, _)| *guard)
+            .expect("the first branch is guarded");
+        let IrExpr::Block { value: answer, .. } = ir.expr(guard) else {
+            panic!("the guard is the settled block, got {:?}", ir.expr(guard));
+        };
+        let answer = answer.expect("the settled guard produces a value");
+        assert!(
+            matches!(ir.expr(answer), IrExpr::Const(IrConst::Boolean(false))),
+            "the guard is a settled `false`, got {:?}",
+            ir.expr(answer)
+        );
     }
 
     /// The shape, not just the answer: a settled check folds the ANSWER and keeps the operand as an
