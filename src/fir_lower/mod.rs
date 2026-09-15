@@ -248,6 +248,9 @@ struct BodyLowering<'a> {
     published_local_callables:
         HashMap<crate::fir::BodyLocalCallableDeclarationId, LocalCallableRealization>,
     control_path: Vec<crate::fir::LocalCallableId>,
+    /// Nesting depth of the recursive expression funnel, used to decide when to re-check the
+    /// remaining stack. See [`BodyLowering::expression`].
+    expression_depth: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -341,6 +344,7 @@ impl<'a> BodyLowering<'a> {
             local_callable_scopes,
             published_local_callables,
             control_path: Vec::new(),
+            expression_depth: 0,
         }
     }
 
