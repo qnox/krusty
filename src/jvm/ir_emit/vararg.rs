@@ -16,7 +16,11 @@ pub(super) fn emit_packed_array(
         code.newarray(prim_newarray_atype(element_type));
     } else {
         // Nullability does not change the reference array class.
-        let class = emitter.cw.class_ref(&ref_internal(element_type.non_null()));
+        let class = emitter
+            .cw
+            .class_ref(&crate::jvm::names::instanceof_internal_name(
+                element_type.non_null(),
+            ));
         code.anewarray(class);
     }
 
