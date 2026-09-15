@@ -19,6 +19,19 @@
 
 use super::common;
 
+/// Run one fixture under BOTH compilers and require the same `box()` value.
+///
+/// `expect_box_ok_files_with_stdlib` alone only proves krusty agrees with itself. These shapes are
+/// about matching the reference compiler, so it must run the identical source.
+fn both_compilers_box(main: &str, stem: &str) {
+    let reference = common::kotlinc_box_result(main);
+    assert_eq!(
+        reference, "OK",
+        "{stem}: the reference compiler disagrees: {reference}"
+    );
+    common::expect_box_ok_files_with_stdlib(&[("Main.kt", main)], stem);
+}
+
 const DECLARATIONS: &str = "class Status(val v: String)\n\
 \n\
 fun source(present: Boolean): Status? = if (present) Status(\"here\") else null\n\
@@ -41,7 +54,7 @@ fun box(): String {{\n\
 \x20   return if (present != null && present.v == \"here\") \"OK\" else \"FAIL: \" + present?.v\n\
 }}\n"
     );
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", &main)], "member_generic_nullable");
+    both_compilers_box(&main, "member_generic_nullable");
 }
 
 /// The control that isolates the MEMBER path: the identical generic function declared top-level
@@ -62,7 +75,7 @@ fun box(): String {{\n\
 \x20   return if (present != null && present.v == \"here\") \"OK\" else \"FAIL: \" + present?.v\n\
 }}\n"
     );
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", &main)], "top_level_generic_nullable");
+    both_compilers_box(&main, "top_level_generic_nullable");
 }
 
 /// The other control: an explicit type argument bypassed the synthetic bound entirely.
@@ -82,7 +95,7 @@ fun box(): String {{\n\
 \x20   return if (present != null && present.v == \"here\") \"OK\" else \"FAIL: \" + present?.v\n\
 }}\n"
     );
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", &main)], "explicit_targ_nullable");
+    both_compilers_box(&main, "explicit_targ_nullable");
 }
 
 /// A DECLARED non-null bound must still reject a nullable result — the narrowing this restores is
@@ -98,14 +111,33 @@ class Probe {{\n\
 }}\n"
     );
     let result = common::compiler_diagnostics(&[("Main.kt", &main)], &[]);
-    assert_ne!(
-        result.reference_code, 0,
-        "kotlinc must reject a nullable result against an 'R : Any' bound: {}",
-        result.reference_stderr
+    // Both compilers reject, and both blame the same expression. They WORD it differently, and point
+    // one token apart: krusty renders the generic bound violation through its inferred-type message,
+    // kotlinc through its return-mismatch message. The divergence is general and predates this
+    // change — a plain `fun probe(): Status = source()` renders IDENTICALLY in both compilers, so it
+    // is this bound-violation path alone that carries the second spelling. Recorded exactly rather
+    // than matched loosely; converging the two renderings is its own diagnostic-parity change.
+    assert_eq!(
+        common::compiler_errors(&result.krusty_stdout),
+        [],
+        "krusty writes diagnostics to stderr"
     );
-    assert_ne!(
-        result.krusty_code, 0,
-        "krusty accepted a nullable result against a non-null bound: {}{}",
-        result.krusty_stdout, result.krusty_stderr
+    assert_eq!(
+        common::compiler_errors(&result.krusty_stderr),
+        [common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: 6,
+            column: 48,
+            message: "type mismatch: inferred type is Status? but Status was expected".to_string(),
+        }]
+    );
+    assert_eq!(
+        common::compiler_errors(&result.reference_stderr),
+        [common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: 6,
+            column: 50,
+            message: "return type mismatch: expected 'Status', actual 'Status?'.".to_string(),
+        }]
     );
 }
