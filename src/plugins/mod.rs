@@ -110,6 +110,11 @@ pub struct PluginContext {
     /// itself with `@Serializable(with = …)`. A plugin can only DERIVE a serializer for what this
     /// file declares; for everything else only the target knows where the serializer is.
     external_serializers: std::collections::HashMap<TypeName, TypeName>,
+    /// Serializer classes the ACTIVE runtime actually provides. A builtin mapping is only usable
+    /// when the artifact on the classpath carries that class: `InstantSerializer` ships in newer
+    /// kotlinx.serialization cores but not in supported older ones, and emitting a reference to a
+    /// class that is not there fails at class-load rather than at compile time.
+    runtime_serializers: std::collections::HashSet<TypeName>,
 }
 
 impl Default for PluginContext {
@@ -118,6 +123,7 @@ impl Default for PluginContext {
             class_annotations: HashMap::new(),
             target_type_descriptor: no_target_type_descriptor,
             external_serializers: std::collections::HashMap::new(),
+            runtime_serializers: std::collections::HashSet::new(),
         }
     }
 }
@@ -128,6 +134,7 @@ impl Clone for PluginContext {
             class_annotations: self.class_annotations.clone(),
             target_type_descriptor: self.target_type_descriptor,
             external_serializers: self.external_serializers.clone(),
+            runtime_serializers: self.runtime_serializers.clone(),
         }
     }
 }
@@ -149,6 +156,22 @@ impl PluginContext {
     ) -> Self {
         self.external_serializers = serializers;
         self
+    }
+
+    /// Record which serializer classes the active runtime provides.
+    pub(crate) fn with_runtime_serializers(
+        mut self,
+        serializers: std::collections::HashSet<TypeName>,
+    ) -> Self {
+        self.runtime_serializers = serializers;
+        self
+    }
+
+    /// Whether the active runtime provides `serializer`. A builtin mapping must consult this before
+    /// emitting a reference: a class absent from the artifact on the classpath would only fail when
+    /// the JVM tried to load it.
+    pub(crate) fn runtime_provides(&self, serializer: TypeName) -> bool {
+        self.runtime_serializers.contains(&serializer)
     }
 
     /// The serializer class (a JVM internal name) the target can reference for `internal`, when one
@@ -391,11 +414,24 @@ pub fn run_enabled(
     {
         return;
     }
-    let ctx = ctx.with_external_serializers(external_serializers(ir, classifiers));
+    let ctx = ctx
+        .with_external_serializers(external_serializers(ir, classifiers))
+        .with_runtime_serializers(runtime_serializers(classifiers));
     enabled_plugins(module_name).run(ir, &ctx);
 }
 
 /// Field classifiers this file does not declare, normalized through the single checked provider.
+/// Which of the runtime-dependent builtin serializers the ACTIVE artifact carries. Only classes that
+/// are not present in every supported kotlinx.serialization version need listing: the long-standing
+/// primitives are always there, so probing them would cost lookups for no decision.
+fn runtime_serializers(
+    classifiers: &dyn crate::types::ClassifierAnnotationSource,
+) -> std::collections::HashSet<TypeName> {
+    serialization::element_serializer::runtime_dependent_serializers()
+        .filter(|&serializer| classifiers.classifier_annotations(serializer).is_some())
+        .collect()
+}
+
 fn external_serializers(
     ir: &IrFile,
     classifiers: &dyn crate::types::ClassifierAnnotationSource,
