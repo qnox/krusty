@@ -49,15 +49,15 @@ pub fn expect_identical_rejection(result: &CompilerDiagnosticResult, tag: &str) 
     let stdout_errors = compiler_errors(&result.krusty_stdout);
     let krusty = compiler_errors(&result.krusty_stderr);
     let reference = compiler_errors(&result.reference_stderr);
-    assert_ne!(
-        result.reference_code, 0,
-        "{tag}: kotlinc accepted the fixture, so there is no rejection to match: {}",
-        result.reference_stderr
+    assert_eq!(
+        result.reference_code, 1,
+        "{tag}: kotlinc exited {} rather than rejecting the fixture: {}",
+        result.reference_code, result.reference_stderr
     );
-    assert_ne!(
-        result.krusty_code, 0,
-        "{tag}: krusty accepted a fixture kotlinc rejects: {}{}",
-        result.krusty_stdout, result.krusty_stderr
+    assert_eq!(
+        result.krusty_code, 1,
+        "{tag}: krusty exited {} rather than rejecting the fixture: {}{}",
+        result.krusty_code, result.krusty_stdout, result.krusty_stderr
     );
     assert_eq!(
         stdout_errors,
