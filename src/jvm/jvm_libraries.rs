@@ -639,9 +639,7 @@ impl JvmLibraries {
             }
             let is_default = c.name.ends_with("$default");
             let meta_name = c.name.strip_suffix("$default").unwrap_or(&c.name);
-            let Some((mut params, physical_ret)) =
-                parse_method_desc_with_field_params(&c.descriptor)
-            else {
+            let Some((mut params, physical_ret)) = parse_method_desc(&c.descriptor) else {
                 continue;
             };
             if is_default && params.len() >= 2 {
@@ -1298,7 +1296,7 @@ impl JvmLibraries {
                 .is_some_and(|(_, companion)| companion == semantic)
             {
                 return Self::const_fields(&ci.fields, |field| {
-                    Some(field_desc_to_ty(&field.descriptor))
+                    Some(declared_desc_to_ty(&field.descriptor))
                 });
             }
             if let Some(outer) = self.cp.find_name(owner) {
@@ -1528,7 +1526,7 @@ impl JvmLibraries {
         // overload the WRONG signature). Only when `@Metadata` has no FUNCTION for the name (a Java method,
         // a synthetic, or a PROPERTY getter — recorded as a property, not a function) do we read the JVM
         // `Signature`, which uses the legacy receiver-in-`params[0]` shape.
-        let (desc_params, desc_ret) = parse_method_desc_with_field_params(jvm_desc)?;
+        let (desc_params, desc_ret) = parse_method_desc(jvm_desc)?;
         if let Some(gsig) =
             self.cp
                 .aligned_generic_sig_name(owner, jvm_name, &desc_params, &desc_ret, &|name| {
@@ -3365,7 +3363,7 @@ pub(crate) fn descriptor_narrowing(desc: &str) -> usize {
 ///
 /// This is the STACK reading: `B` and `S` answer `Int`, because that is the slot the JVM holds one
 /// in. It is the right answer to a physical question and the wrong one for a declaration's type,
-/// which is what [`field_desc_to_ty`] is for — see the note there.
+/// which is what [`declared_desc_to_ty`] is for — see the note there.
 pub fn desc_to_ty(d: &str) -> Ty {
     match d {
         "I" | "B" | "S" => Ty::Int,
@@ -3376,7 +3374,7 @@ pub fn desc_to_ty(d: &str) -> Ty {
         "C" => Ty::Char,
         "V" => Ty::Unit,
         s if s == type_descriptor(Ty::String) => Ty::String,
-        s if s.starts_with('[') => Ty::array(field_desc_to_ty(&s[1..])),
+        s if s.starts_with('[') => Ty::array(declared_desc_to_ty(&s[1..])),
         s if s.starts_with('L') && s.ends_with(';') => {
             let raw_internal = &s[1..s.len() - 1];
             Ty::obj(to_kotlin_internal(raw_internal))
@@ -3388,17 +3386,17 @@ pub fn desc_to_ty(d: &str) -> Ty {
 /// The SEMANTIC reading of the same descriptor: `B` is `Byte` and `S` is `Short`, because that is
 /// what the declaration says, whatever slot the JVM carries one in.
 ///
-/// A method’s RESULT is read this way too. `java.lang.Number.byteValue()B` declares `Byte`, and
-/// reading it the stack’s way made Kotlin’s `Number.toByte()` a `kotlin.Int` — invisible on the JVM
-/// backend, where a byte and an int share a slot, and wrong everywhere the result is asked as a
-/// TYPE: `wide.toByte()::class.simpleName` answered `Int` where kotlinc answers `Byte`. Parameters
-/// still take the stack reading in [`parse_method_desc`]; widening the semantic reading to them is
-/// a separate question about overload selection, not this one.
-pub(super) fn field_desc_to_ty(d: &str) -> Ty {
+/// Method parameters and results are read this way too. `java.lang.Number.byteValue()B` declares
+/// `Byte`, and reading it the stack’s way made Kotlin’s `Number.toByte()` a `kotlin.Int` — invisible
+/// on the JVM backend, where a byte and an int share a slot, and wrong everywhere the result is asked
+/// as a TYPE. The same carrier reading made a Java `accept(byte)` declaration look like
+/// `accept(Int)` to overload selection. Stack-slot normalization belongs in the backend, after the
+/// source declaration has been selected.
+pub(super) fn declared_desc_to_ty(d: &str) -> Ty {
     match d {
         "B" => Ty::Byte,
         "S" => Ty::Short,
-        s if s.starts_with('[') => Ty::array(field_desc_to_ty(&s[1..])),
+        s if s.starts_with('[') => Ty::array(declared_desc_to_ty(&s[1..])),
         _ => desc_to_ty(d),
     }
 }
@@ -3427,7 +3425,7 @@ fn java_annotation_parameter_list(class: &crate::jvm::classreader::ClassInfo) ->
             if !parameters.is_empty() {
                 return None;
             }
-            let erased = field_desc_to_ty(ret);
+            let erased = declared_desc_to_ty(ret);
             let generic = method
                 .signature
                 .as_deref()
@@ -3690,16 +3688,8 @@ fn interface_holder_method(
 pub(crate) fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
     let (params, ret) = crate::jvm::names::parse_method_descriptor(desc)?;
     Some((
-        params.into_iter().map(desc_to_ty).collect(),
-        field_desc_to_ty(ret),
-    ))
-}
-
-fn parse_method_desc_with_field_params(desc: &str) -> Option<(Vec<Ty>, Ty)> {
-    let (params, ret) = crate::jvm::names::parse_method_descriptor(desc)?;
-    Some((
-        params.into_iter().map(field_desc_to_ty).collect(),
-        field_desc_to_ty(ret),
+        params.into_iter().map(declared_desc_to_ty).collect(),
+        declared_desc_to_ty(ret),
     ))
 }
 
@@ -4335,7 +4325,7 @@ impl JvmLibraries {
                 .filter(|_| Ty::obj_name(cn).scalar_value_repr().is_none())
                 .filter(|field| !field.is_private() || overloads.is_empty())
             {
-                let erased_ty = field_desc_to_ty(&field.descriptor);
+                let erased_ty = declared_desc_to_ty(&field.descriptor);
                 let field_ty = field
                     .signature
                     .as_deref()
@@ -5371,7 +5361,7 @@ impl JvmLibraries {
         callable: &LibraryCallable,
     ) -> Option<crate::libraries::DefaultCallRealization> {
         let bridge_name = format!("{}$default", callable.name);
-        let (base_params, _) = parse_method_desc_with_field_params(&callable.descriptor)?;
+        let (base_params, _) = parse_method_desc(&callable.descriptor)?;
         let is_continuation = |ty: Ty| {
             ty.obj_internal()
                 .is_some_and(|name| name.matches("kotlin/coroutines/Continuation"))
@@ -5400,7 +5390,7 @@ impl JvmLibraries {
                 if !method.is_static() || method.name != bridge_name {
                     return None;
                 }
-                let (params, ret) = parse_method_desc_with_field_params(&method.descriptor)?;
+                let (params, ret) = parse_method_desc(&method.descriptor)?;
                 if !params.starts_with(&base_params) {
                     return None;
                 }
@@ -5447,7 +5437,7 @@ impl JvmLibraries {
         let class = self.cp.find_name(owner)?;
         let physical_name = member.physical_name.as_deref().unwrap_or(&member.name);
         let bridge_name = format!("{physical_name}$default");
-        let (base_params, _) = parse_method_desc_with_field_params(&member.descriptor)?;
+        let (base_params, _) = parse_method_desc(&member.descriptor)?;
         let is_continuation = |ty: Ty| {
             ty.obj_internal()
                 .is_some_and(|name| name.matches("kotlin/coroutines/Continuation"))
@@ -5469,7 +5459,7 @@ impl JvmLibraries {
                     if !method.is_static() || method.name != bridge_name {
                         return None;
                     }
-                    let (params, ret) = parse_method_desc_with_field_params(&method.descriptor)?;
+                    let (params, ret) = parse_method_desc(&method.descriptor)?;
                     // A dispatched member's base descriptor excludes its receiver while its static
                     // `$default` bridge prepends one. A direct interface-holder or value-class
                     // realization already carries that receiver in the base descriptor.
@@ -5842,7 +5832,7 @@ impl JvmLibraries {
                             })
                             .map(|ty| self.semanticize_jvm_type(ty))
                     })
-                    .unwrap_or_else(|| field_desc_to_ty(&f.descriptor));
+                    .unwrap_or_else(|| declared_desc_to_ty(&f.descriptor));
                 let ty = if ci.meta.is_present() {
                     ty
                 } else {
@@ -7593,6 +7583,16 @@ mod tests {
                 "accepted malformed descriptor {invalid}"
             );
         }
+    }
+
+    #[test]
+    fn method_descriptor_preserves_declared_primitive_width() {
+        assert_eq!(parse_method_desc("()B"), Some((Vec::new(), Ty::Byte)));
+        assert_eq!(parse_method_desc("()S"), Some((Vec::new(), Ty::Short)));
+        assert_eq!(
+            parse_method_desc("(BS)S"),
+            Some((vec![Ty::Byte, Ty::Short], Ty::Short))
+        );
     }
 
     #[test]

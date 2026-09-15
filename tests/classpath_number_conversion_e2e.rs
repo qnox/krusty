@@ -50,9 +50,76 @@ fn a_number_conversion_answers_the_type_it_declares() {
         }
     "#;
 
+    let reference = common::kotlinc_box_result(source);
+    assert_eq!(
+        reference, "Byte/Short/Int/Long/Float/Double",
+        "reference compiler disagrees"
+    );
+
     let Some(output) = common::compile_and_run_box(source, "Main", &[stdlib], Some(jdk.as_path()))
     else {
         panic!("compile/run returned None");
     };
-    assert_eq!(output, "Byte/Short/Int/Long/Float/Double");
+    assert_eq!(output, reference);
+}
+
+#[test]
+fn java_narrow_scalar_signatures_keep_their_declared_types() {
+    let java = [(
+        "Narrow.java".into(),
+        r#"
+        package fixtures;
+        public final class Narrow {
+            public static byte echoByte(byte value) { return value; }
+            public static short echoShort(short value) { return value; }
+            public static String select(byte value) { return "byte"; }
+            public static String select(int value) { return "int"; }
+        }
+    "#
+        .into(),
+    )];
+    let Some((library, _)) = common::javac_compile(&java, &[]) else {
+        panic!("javac must compile the narrow-scalar fixture");
+    };
+    let root = library.parent().map(std::path::Path::to_path_buf);
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classpath = vec![library, stdlib];
+    let source = r#"
+        import fixtures.Narrow
+
+        fun name(value: Any): String = value::class.simpleName ?: "null"
+        fun box(): String {
+            val byte: Byte = 7
+            val short: Short = 8
+            return listOf(
+                name(Narrow.echoByte(byte)),
+                name(Narrow.echoShort(short)),
+                name(Narrow.echoByte(7)),
+                name(Narrow.echoShort(8)),
+                Narrow.select(byte),
+                Narrow.select(7),
+            ).joinToString("/")
+        }
+    "#;
+
+    let reference =
+        common::kotlinc_box_result_with_classpath(source, std::slice::from_ref(&classpath[0]));
+    assert_eq!(
+        reference, "Byte/Short/Byte/Short/byte/int",
+        "reference compiler disagrees"
+    );
+
+    let classes = common::compile_in_process(source, "Main", &classpath, Some(jdk.as_path()))
+        .unwrap_or_else(|| {
+            panic!(
+                "{:?}",
+                common::front_end_diagnostics(source, &classpath, Some(jdk.as_path()))
+            )
+        });
+    let output = common::run_box(&classes, "MainKt", &classpath).expect("run box");
+    if let Some(root) = root {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    assert_eq!(output, reference);
 }
