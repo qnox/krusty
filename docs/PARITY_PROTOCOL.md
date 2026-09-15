@@ -2171,3 +2171,106 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   name + descriptor`, preserving declaration order and retaining genuine overloads and distinct
   owners. No library or member spelling participates in the decision.
   `tests/classpath_candidate_union_e2e.rs::copied_classpath_entry_keeps_indexed_iteration_unambiguous`.
+- **A SAM constructor's lambda carries the interface name as its implicit label (fix).**
+  `Runnable { … return@Runnable … }` converts a lambda through a SAM constructor, and Kotlin labels
+  that lambda with the interface's own name — the same rule that labels `forEach { … }`'s lambda
+  `forEach`. The constructor-argument path passed a hardcoded `None` for that label, so the return
+  had nothing to denote: `return label 'Runnable' does not denote an enclosing lambda`. Because that
+  is the FIRST check of the body, its verdict is the one that stands — which is why removing the SAM
+  path's own reuse shortcut, so its labelled recheck always ran, changed nothing. A Kotlin
+  `fun interface` and a Java functional interface fail and are fixed alike, since both reach the same
+  conversion. A label that denotes nothing is still rejected.
+  `tests/sam_constructor_lambda_label_e2e.rs::a_kotlin_fun_interface_constructor_labels_its_lambda`,
+  `a_java_functional_interface_constructor_labels_its_lambda`,
+  `a_labeled_return_through_a_sam_constructor_carries_its_value`,
+  `an_unknown_label_is_still_rejected`.
+- **A safe call to an inline collection transform keeps its iteration plan (fix).** `map`/`flatMap`
+  are expanded structurally: resolution records the declaration-scoped iterator protocol for the
+  call, and checked FIR embeds it in the call's inline plan. Both sides key that protocol by the
+  RECEIVER expression, but resolution read the receiver out of an `Expr::Call`'s `Member` callee
+  only — and a safe call is its own AST node that owns its receiver directly. `xs?.map { … }`
+  therefore filed the protocol under the CALL expression while the checker looked under `xs`; the
+  lookup missed, and since a transform with a lambda argument is a hard failure once its protocol is
+  absent, the whole FILE died with
+  `internal error: checked FIR construction failed … MissingStableCallTarget`.
+  `?.forEach` was unaffected — its plan comes from the declaration body, not from this protocol —
+  which is what kept the gap narrow enough to miss.
+  `tests/safe_call_collection_transform_e2e.rs::a_safe_call_to_a_collection_transform_compiles`,
+  `a_suspension_inside_a_safe_call_transform_runs`, `the_other_receiver_spellings_still_transform`.
+- **Safe calls and inline collection transforms use declaration-owned traversal identities (fix).**
+  Collection transforms are expanded only when one strict JVM-provider decoder recognizes the
+  selected declaration body's complete allocation/traversal/lambda/append/loop/result dataflow.
+  The decoder publishes exact stable identities for every prepare step, `hasNext`, `next`, the
+  collection constructor, optional capacity operation, and member/extension append operation; it
+  also validates the source local names against their exact LocalVariableTable descriptors and
+  live ranges. Resolution specializes those fixed declarations to the selected receiver and result;
+  checked FIR consumes the closed plan for ordinary, safe, and implicit receivers alike. The old
+  `Map`/`FlatMap` name-derived intrinsics, hardcoded ArrayList/add/addAll plan, and checker bridge that
+  re-resolved iterator spellings are deleted. A changed body fails the structural decoder closed.
+  `tests/safe_call_collection_transform_e2e.rs::a_safe_call_to_a_collection_transform_compiles`,
+  `a_suspension_inside_a_safe_call_transform_runs`,
+  `a_suspending_safe_map_receiver_threads_every_traversal_identity`,
+  `receiver_spellings_and_iterator_shadow_keep_the_declaration_plan`,
+  `a_user_defined_same_named_call_remains_an_ordinary_call`.
+- **A smart cast survives a path rooted at the receiver's own property (fix).**
+  `if (config.path != null) { config.path.length }`, where `config` is the class's own `val`, was
+  never narrowed: the stable-path reader declined ANY non-local root that carried further segments,
+  so no proof was recorded at all. The failure wore two faces — a nullable receiver where the value
+  was dereferenced, and candidate applicability where it was passed on — which is why one cause
+  produced two unrelated-looking diagnostics in the same file. Kotlin's stability rule is per
+  PROPERTY (a `val` with the default getter, not open, not delegated, no context parameters), and the
+  member reader already enforced exactly that for a single-segment path; a longer path now walks on
+  from the same decision instead of bailing. The identical body with the root as a PARAMETER always
+  worked, which is what isolated the root's binding kind rather than the path's shape. A `var` in the
+  path and a custom getter are still refused, asserted against both compilers.
+  `tests/receiver_property_path_smartcast_e2e.rs::a_receiver_property_path_narrows_for_a_dereference`,
+  `a_receiver_property_path_narrows_for_an_argument`, `a_parameter_rooted_path_still_narrows`,
+  `a_mutable_property_in_the_path_is_still_refused`, `a_custom_getter_in_the_path_is_still_refused`.
+- **A package-qualified call shapes its lambda argument (fix).** `Json { prettyPrint = true }` binds
+  the lambda's receiver from the selected callable's parameter; spelled with its package —
+  `kotlinx.serialization.json.Json { … }` — the receiver never reached the lambda and every member
+  read inside it failed. It is not only the receiver: a qualified call shaped NO lambda argument, so
+  an ordinary value lambda's parameters arrived as `Any` too. The qualified path types its arguments
+  BEFORE a candidate is known, which judges a lambda with no expected shape; the bare-name path holds
+  that probe's diagnostics aside, rechecks each lambda once a callable is selected, and discards the
+  superseded probe. The qualified path did none of the three. All three are needed and each alone
+  changes nothing: capture without discard commits the diagnostics later anyway, and rechecking
+  without capture leaves the probe's errors standing. A call that never resolves still commits them,
+  so an unknown member inside the lambda is still rejected.
+  `tests/qualified_call_receiver_lambda_e2e.rs::a_package_qualified_call_binds_its_lambda_receiver`,
+  `a_cross_package_qualified_call_binds_its_lambda_receiver`,
+  `the_other_call_spellings_still_shape_their_lambdas`,
+  `an_unknown_member_in_the_lambda_is_still_rejected`.
+- **A qualified lambda uses the common selected-argument mapping (fix).** The first repair added a
+  second positional lambda-shaping loop to the qualified path. That loop could not represent named,
+  default, context, or many-to-one vararg mapping. It is deleted: after selection, the existing
+  origin-neutral commit maps every source argument and rechecks its lambda under the specialized
+  parameter exactly once. This accepts both reordered named receiver lambdas and a trailing receiver
+  lambda after positional vararg elements, matching the reference compiler at runtime.
+  `tests/qualified_call_receiver_lambda_e2e.rs::reordered_named_receiver_lambdas_bind_their_own_receivers`,
+  `a_trailing_lambda_after_a_vararg_uses_the_selected_parameter_slot`.
+- **Only the lambda probe's diagnostics are retired (fix).** Arguments are typed before a candidate
+  is known, so a lambda is judged with no shape; those diagnostics are held aside and the selected
+  call rechecks each lambda. Discarding the WHOLE captured batch also discarded authoritative errors
+  from ordinary arguments: `app.dsl.make(missingArgument) { add("x") }` lost its unresolved-reference
+  diagnostic, selected through `Ty::Error`, and reported only an internal checked-FIR failure where
+  the reference compiler names the unresolved argument. `discard_within` now drops only the
+  diagnostics inside the lambda argument spans and returns the rest to the sink at the capture mark,
+  preserving source order.
+  `tests/qualified_call_receiver_lambda_e2e.rs::an_unresolved_ordinary_argument_survives_lambda_shaping`.
+- **A lambda's labelled returns and its tail join through the symbol source (fix).** A lambda leaves
+  through its labelled returns AND its tail, and those exits can carry different but related types:
+  `flatMap` expects `Iterable<T>` while a tail that built a list produced `List<T>`; `joinToString`
+  expects `CharSequence` while a tail produced `String`. The exits were merged by TYPE IDENTITY
+  alone, so any pair that was not equal (modulo nullability) collapsed to `Any` — which then failed
+  against the very expectation that produced one of the exits
+  (`inferred type is Any but Iterable<Item> was expected`). `map` was unaffected because both of its
+  exits are the element type itself and were therefore equal, which is what kept the gap narrow. The
+  surrounding inference already joins through the symbol source, where a subtype yields its
+  supertype; every labelled-return contribution and the tail now use that same merge. Joining only
+  the accumulated returns with the tail is insufficient because two related labelled returns may
+  already have collapsed to `Any`. Exits with no useful common supertype remain rejected.
+  `tests/lambda_exit_join_e2e.rs::a_labeled_return_and_a_tail_join_to_their_supertype`,
+  `a_char_sequence_expectation_joins_with_a_string_tail`,
+  `several_labeled_returns_join_before_the_tail`, `the_equal_exit_shapes_still_infer`,
+  `unrelated_exits_are_still_rejected`.

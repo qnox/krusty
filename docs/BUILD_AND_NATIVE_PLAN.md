@@ -1566,6 +1566,17 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **Merging #920, and a claim of mine that was wrong.** I had said the tailrec core fix was worth
+   about eighteen native cases. It is worth none of them: the native decline counts by FUNCTION
+   name, and every shape still declining is one #920's own PR body listed as out of scope — a
+   receiver to re-bind, defaulted arguments, a call under `&&`/`?:`. Conformance is unchanged at
+   2621 across the merge.
+   What the merge did change is one of my tests. `a_tailrec_still_holding_a_self_call_is_declined`
+   used a loop around the tail call, and #920 rewrites exactly that — so the program started being
+   emitted and answering `OK` where the test wanted a decline. Its purpose still stands, so it now
+   uses a shape Kotlin itself calls non-tail (`1 + walk(n - 1)`, which kotlinc reports as
+   NON_TAIL_RECURSIVE_CALL) beside a tail call the rewrite does loop.
+
    **Bridges, for 2621.** The decline named the JVM's answer — "a bridge method is needed" — and
    the native one is not a method: it is an entry in the base's slot, wearing the base's signature,
    converting and forwarding. The question worth getting right was what it forwards TO. Naming the

@@ -32,7 +32,6 @@ mod callable_reference_selection;
 mod capture_analysis;
 mod capture_storage;
 mod collection_literals;
-mod collection_transform_bridge;
 mod compound_assignments;
 mod conditional_branch;
 mod constant_evaluation;
@@ -49,6 +48,7 @@ mod local_class_scope;
 mod local_method_dependencies;
 mod override_plans;
 mod postponed_diagnostics;
+mod qualified_call_shaping;
 mod safe_call_flow;
 mod sam_constructors;
 mod scope;
@@ -81,8 +81,8 @@ pub(crate) use finalized_projection::{
     project_finalized_signatures, publish_stable_declaration_metadata,
 };
 use lambda_expectation::{functional_argument_expectation, FunctionalArgumentExpectation};
-use lambda_returns::LambdaReturnScopes;
 pub use lambda_returns::ReturnTarget;
+use lambda_returns::{call_implicit_lambda_label, LambdaReturnScopes};
 use local_class_scope::{
     local_class_enclosing_tparams, local_class_sibling_names, EnclosingTypeParameterDeclaration,
 };
@@ -3635,8 +3635,6 @@ enum TopLevelPropertySelection {
 type GenericMemberValueOperandShape = (Option<Ty>, Vec<Ty>, Vec<u32>);
 type GenericMemberValueOperandSlots =
     HashMap<TypeName, HashMap<String, Vec<GenericMemberValueOperandShape>>>;
-
-type MappedNamedArgs = (Vec<ExprId>, Vec<Ty>, Vec<Option<ExprId>>);
 
 /// One member extension property selected for a concrete receiver and implicit dispatch scope.
 ///
@@ -27948,7 +27946,7 @@ impl<'a> Checker<'a> {
                                 return result;
                             }
                         }
-                        let arg_tys = self.arg_tys(scope, args);
+                        let (arg_tys, probe_mark) = self.probe_argument_types(scope, call, args);
                         let targs: Vec<Ty> = self
                             .file
                             .call_type_args
@@ -27973,6 +27971,7 @@ impl<'a> Checker<'a> {
                             )
                             .and_then(CallableCandidateSelection::candidate)
                         {
+                            self.retire_selected_lambda_probe(call, args, probe_mark);
                             return self.finish_top_level_call(
                                 scope,
                                 call,
@@ -27995,15 +27994,13 @@ impl<'a> Checker<'a> {
                                 .top_level_candidates(&name);
                             let trailing_lambda =
                                 self.file.call_has_trailing_lambda.contains(&call.0);
-                            match self.map_named_top_level_args(
+                            match self.map_named_qualified_top_level_args(
                                 scope,
-                                NamedTopLevelCall {
-                                    call,
-                                    name: &name,
-                                    args,
-                                    names,
-                                    trailing_lambda,
-                                },
+                                call,
+                                &name,
+                                args,
+                                names,
+                                trailing_lambda,
                                 candidates,
                             ) {
                                 Ok(Some((_, mapped_types, slots))) => {
@@ -31052,7 +31049,9 @@ impl<'a> Checker<'a> {
                                     a,
                                     Ty::Fun(signature),
                                     has_receiver,
-                                    None,
+                                    call_implicit_lambda_label(self.file, call)
+                                        .map(str::to_string)
+                                        .as_deref(),
                                 );
                                 if collect_postponed {
                                     let inferred = self
@@ -35034,7 +35033,7 @@ impl<'a> Checker<'a> {
                 Some(expression) => self.check_lambda_return_value(scope, expression, lambda),
                 None => Ty::Unit,
             };
-            self.lambda_returns.record_returned_type(lambda, returned);
+            self.record_lambda_returned_type(lambda, returned);
             return;
         }
         let rt = self.ret_ty;
@@ -48373,15 +48372,8 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                     ),
                     _ => return None,
                 };
-                let explicit_receiver = match file.expr(expression) {
-                    Expr::Call { callee, .. } => match file.expr(*callee) {
-                        Expr::Member { receiver, .. } => Some(*receiver),
-                        _ => None,
-                    },
-                    Expr::SafeCall { receiver, .. } => Some(*receiver),
-                    _ => None,
-                }
-                .map(|receiver| (receiver, info.ty(receiver)));
+                let explicit_receiver = crate::ast::explicit_call_receiver(file, expression)
+                    .map(|receiver| (receiver, info.ty(receiver)));
                 Some(crate::plugins::FrontendSelectedCall {
                     expression,
                     explicit_receiver,
@@ -48683,14 +48675,6 @@ struct InapplicableTopLevelCall<'a> {
     trailing_lambda: bool,
     mapping_error_reported: bool,
     explicit_type_args: Vec<Ty>,
-}
-
-struct NamedTopLevelCall<'a> {
-    call: ExprId,
-    name: &'a str,
-    args: &'a [ExprId],
-    names: &'a [Option<String>],
-    trailing_lambda: bool,
 }
 
 struct SelectedCallable {
@@ -59341,131 +59325,6 @@ impl<'a> Checker<'a> {
         true
     }
 
-    fn map_named_top_level_args(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        site: NamedTopLevelCall<'_>,
-        candidates: Vec<crate::libraries::FunctionInfo>,
-    ) -> Result<Option<MappedNamedArgs>, ()> {
-        let NamedTopLevelCall {
-            call,
-            name,
-            args,
-            names,
-            trailing_lambda,
-        } = site;
-        let diagnostic_candidates = candidates.clone();
-        let overloads = crate::libraries::FunctionSet {
-            overloads: candidates,
-        }
-        .into_top_level_with_param_names()
-        .collect::<Vec<_>>();
-        let mut mapped = Vec::new();
-        let mut failures = Vec::new();
-        for candidate in overloads {
-            // CONTEXT parameters are not value arguments: they are supplied by the enclosing scope, so
-            // the labels and arity a call is mapped against must exclude them. Mapping against the full
-            // signature counted `context(c: C)` as a parameter, so `combine(b = "K", a = "O")` on
-            // `context(c: C) fun combine(a: String, b: String)` reported "none of the following
-            // candidates is applicable:". Every other named-argument site already strips them with
-            // the context-free call shape; this one did not.
-            let context_count = candidate.context_count.min(candidate.callable.params.len());
-            let value_signature = candidate.call_sig.suffix(context_count);
-            let value_params = &candidate.callable.params[context_count..];
-            match map_call_sig_args_with_trailing(
-                args,
-                Some(names),
-                value_params.len(),
-                &value_signature,
-                trailing_lambda,
-            ) {
-                Ok(slots) => mapped.push((
-                    self.call_slot_score_vararg(
-                        value_params,
-                        &slots,
-                        candidate.call_sig.vararg_index,
-                    ),
-                    slots,
-                    candidate,
-                )),
-                Err(error) => failures.push((error, candidate)),
-            }
-        }
-        if !mapped.is_empty() && mapped.iter().all(|(score, _, _)| score.is_none()) {
-            if mapped.len() == 1 {
-                let (_, slots, candidate) = mapped.pop().unwrap();
-                for (parameter, argument) in candidate.callable.params.iter().zip(&slots) {
-                    if let Some(argument) = argument {
-                        self.expect_assignable(
-                            *parameter,
-                            self.expr_types[argument.0 as usize],
-                            self.span(*argument),
-                            "argument",
-                        );
-                    }
-                }
-            } else if !self.call_already_has_argument_diagnostic(call, args) {
-                self.diags.error(
-                    self.call_callee_name_span(call),
-                    INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
-                );
-            }
-            return Err(());
-        }
-        mapped.retain(|(score, _, _)| score.is_some());
-        mapped.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
-        if let Some((_, slots, _)) = mapped.into_iter().next() {
-            let selected_args = slots.iter().copied().flatten().collect::<Vec<_>>();
-            let selected_types = selected_args
-                .iter()
-                .map(|argument| self.expr_types[argument.0 as usize])
-                .collect();
-            return Ok(Some((selected_args, selected_types, slots)));
-        }
-        if let Some((error, candidate)) = take_unanimous_mapping_error(&mut failures) {
-            self.report_callable_arg_mapping_error(
-                call,
-                args,
-                DiagnosticFunction {
-                    name,
-                    params: &candidate.callable.params,
-                    param_names: &candidate.call_sig.param_names,
-                    param_defaults: &candidate.call_sig.param_defaults,
-                    required: candidate.call_sig.required,
-                    vararg: candidate.call_sig.vararg,
-                    context_count: candidate.context_count,
-                    ret: candidate.callable.ret,
-                    source_display: self.module_source_display(&candidate, candidate.callable.ret),
-                },
-                error,
-            );
-            let explicit_type_args = self.resolved_explicit_type_args(scope, call);
-            self.report_inapplicable_callable_candidates(
-                InapplicableTopLevelCall {
-                    call,
-                    name,
-                    args,
-                    argument_names: Some(names),
-                    trailing_lambda,
-                    mapping_error_reported: true,
-                    explicit_type_args,
-                },
-                diagnostic_candidates,
-            );
-            return Err(());
-        }
-        if !failures.is_empty() {
-            if !self.call_already_has_argument_diagnostic(call, args) {
-                self.diags.error(
-                    self.call_callee_name_span(call),
-                    INAPPLICABLE_OVERLOAD_PREFIX.to_string(),
-                );
-            }
-            return Err(());
-        }
-        Ok(None)
-    }
-
     /// Whether an argument-level diagnostic has already been reported inside `call`'s argument list. The
     /// generic "none of the following candidates is applicable:" list is a LAST resort: adding it to a call
     /// that already carries specific per-argument errors tells the programmer less, not more, and reads as a
@@ -60092,7 +59951,8 @@ impl<'a> Checker<'a> {
         }
         if !arguments_already_mapped {
             let positional_signature = CallSig::default();
-            let implicit_lambda_label = self.call_implicit_lambda_label(call).map(str::to_string);
+            let implicit_lambda_label =
+                call_implicit_lambda_label(self.file, call).map(str::to_string);
             for (i, (p, a)) in params.iter().zip(arg_tys).enumerate() {
                 let actual = self.selected_argument_type(
                     scope,
@@ -72673,16 +72533,6 @@ impl<'a> Checker<'a> {
         true
     }
 
-    fn call_implicit_lambda_label(&self, call: ExprId) -> Option<&str> {
-        let Expr::Call { callee, .. } = self.file.expr(call) else {
-            return None;
-        };
-        match self.file.expr(*callee) {
-            Expr::Name(name) | Expr::Member { name, .. } => Some(name.as_str()),
-            _ => None,
-        }
-    }
-
     /// Validate the source arguments of one already-selected callable and commit their semantic
     /// parameter slots. Selection owns WHICH callable won; this origin-neutral seam owns Kotlin's
     /// named/default/vararg/trailing-lambda mapping for every selected callable.
@@ -72704,7 +72554,7 @@ impl<'a> Checker<'a> {
         // Candidate probing and selected-call commitment must expose the same implicit label.
         // Rechecking a postponed/SAM lambda against the winner otherwise drops `return@callee`
         // even though the call syntax—and therefore the label—has not changed.
-        let implicit_lambda_label = self.call_implicit_lambda_label(call).map(str::to_string);
+        let implicit_lambda_label = call_implicit_lambda_label(self.file, call).map(str::to_string);
         let slots = match map_call_args(
             args,
             arg_names,
@@ -77044,7 +76894,7 @@ impl<'a> Checker<'a> {
                         }
                     };
                     if let ReturnTarget::Lambda(lambda) = target {
-                        self.lambda_returns.record_returned_type(lambda, returned);
+                        self.record_lambda_returned_type(lambda, returned);
                     }
                 }
                 Ty::Nothing
@@ -83546,24 +83396,7 @@ impl<'a> Checker<'a> {
             .collect::<Vec<_>>();
         self.mark_context_extension_receiver_used(scope, e, &context_args);
         let selected_receiver = selected.receiver.unwrap_or(rt);
-        let receiver_expression = match self.file.expr(e) {
-            Expr::Call { callee, .. } => match self.file.expr(*callee) {
-                Expr::Member { receiver, .. } => Some(*receiver),
-                _ => None,
-            },
-            _ => None,
-        };
-        let collection_transform_iterator_receiver = (!selected.iterator_protocol_scope.is_empty()
-            && args
-                .iter()
-                .any(|argument| matches!(self.file.expr(*argument), Expr::Lambda { .. })))
-        .then(|| {
-            (
-                receiver_expression,
-                selected_receiver,
-                selected.iterator_protocol_scope.clone(),
-            )
-        });
+        let receiver_expression = crate::ast::explicit_call_receiver(self.file, e);
         if let Some(receiver_expression) = receiver_expression {
             if selected_receiver != rt
                 && self
@@ -83660,19 +83493,44 @@ impl<'a> Checker<'a> {
             // return here from rechecked operands erased `Set<String>` back to raw `Set` whenever a
             // postponed nested producer still exposed its private type variable.
             callable.ret = selected.callable.ret;
-            if let Some(crate::libraries::InlineBodyPlan::Iteration { traversal, .. }) =
-                callable.inline_body_plan.as_deref_mut()
-            {
-                if crate::symbol_resolver::specialize_inline_iteration_traversal(
-                    self.libraries,
-                    selected_receiver,
-                    traversal,
-                )
-                .is_none()
-                {
+            let collection_types = callable.inline_body_plan.as_deref().and_then(|plan| {
+                let crate::libraries::InlineBodyPlan::CollectionTransform {
+                    lambda_parameter, ..
+                } = plan
+                else {
+                    return None;
+                };
+                let Ty::Fun(action) = callable.params.get(*lambda_parameter).copied()? else {
+                    return None;
+                };
+                Some((action.ret, callable.ret.type_args().first().copied()?))
+            });
+            if let Some(plan) = callable.inline_body_plan.as_deref_mut() {
+                let publishable = match plan {
+                    crate::libraries::InlineBodyPlan::Iteration { traversal, .. } => {
+                        crate::symbol_resolver::specialize_inline_iteration_traversal(
+                            self.libraries,
+                            selected_receiver,
+                            traversal,
+                        )
+                    }
+                    crate::libraries::InlineBodyPlan::CollectionTransform { .. } => {
+                        collection_types.and_then(|(part, output)| {
+                            crate::symbol_resolver::specialize_inline_collection_transform(
+                                self.libraries,
+                                selected_receiver,
+                                part,
+                                output,
+                                plan,
+                            )
+                        })
+                    }
+                    crate::libraries::InlineBodyPlan::InvokeLambda { .. } => Some(()),
+                };
+                if publishable.is_none() {
                     self.diags.error(
                         self.call_callee_name_span(e),
-                        "selected inline iteration body has an unpublishable traversal declaration"
+                        "selected inline body has an unpublishable declaration dependency"
                             .to_string(),
                     );
                     return Some(Ty::Error);
@@ -83696,30 +83554,6 @@ impl<'a> Checker<'a> {
             self.resolved_calls
                 .insert(e, ResolvedCall::Extension(Box::new(resolved)));
             self.record_resolved_extension_sam_arguments(e, args);
-            if let Some((receiver, declared_receiver, declaration_scope)) =
-                collection_transform_iterator_receiver
-            {
-                // An unqualified call selected from an implicit-receiver rung has no receiver AST
-                // expression. Key its declaration-scoped protocol by the call expression itself;
-                // checked FIR already materializes the selected implicit receiver separately and
-                // immediately embeds this protocol in the inline plan.
-                let protocol_source = receiver.unwrap_or(e);
-                if self
-                    .record_declaration_iterator_protocol(
-                        protocol_source,
-                        declared_receiver,
-                        &declaration_scope,
-                    )
-                    .is_none()
-                {
-                    self.diags.error(
-                        receiver.map_or_else(|| self.span(e), |receiver| self.span(receiver)),
-                        "krusty: selected inline iteration body has no declaration-scoped iterator protocol"
-                            .to_string(),
-                    );
-                    return Some(Ty::Error);
-                }
-            }
             return Some(ret);
         }
 
@@ -85348,29 +85182,6 @@ impl<'a> Checker<'a> {
             "lambda return scope exit expression={e:?} label={label:?}"
         );
         out
-    }
-
-    /// The RETURN of the function type a lambda expression carries. An anonymous function's declared
-    /// return type (`fun (…): T`) wins over the body type: a block body ending in `return` types as
-    /// `Nothing`, which would otherwise erase the result (and make the lowered closure emit a void
-    /// `return` where its caller expects a value). Falls back to the body type when undeclared.
-    fn lambda_ret_ty(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        e: ExprId,
-        bret: Ty,
-        coerce_return_to_unit: bool,
-    ) -> Ty {
-        match self.file.anon_fun_ret.get(&e.0).cloned() {
-            Some(declared) => self.type_ref_ty(scope, &declared),
-            None if coerce_return_to_unit => Ty::Unit,
-            None => match self.lambda_returns.take_returned_type(e) {
-                None => bret,
-                Some(returned) if bret == Ty::Nothing => returned,
-                Some(_) if bret == Ty::Error => Ty::Error,
-                Some(returned) => crate::symbol_resolver::merge_inferred_ty(Some(returned), bret),
-            },
-        }
     }
 
     fn check_lambda_body(

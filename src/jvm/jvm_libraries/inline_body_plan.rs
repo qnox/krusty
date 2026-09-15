@@ -3,6 +3,7 @@
 //! Bytecode is used only to recognize the physical control-flow and exact call targets. Semantic
 //! member signatures come from the Kotlin classifier model built from metadata.
 
+mod collection_transform;
 mod dependencies;
 mod iteration;
 mod recovery;
@@ -607,6 +608,28 @@ fn valid_finally_contract(contract: FinallyContract<'_>) -> bool {
 }
 
 impl JvmLibraries {
+    fn register_inline_iteration_traversal(
+        &self,
+        traversal: &mut crate::libraries::InlineIterationTraversal,
+    ) {
+        match traversal {
+            crate::libraries::InlineIterationTraversal::Iterator {
+                prepare,
+                has_next,
+                next,
+            } => {
+                for member in prepare.iter_mut().chain([has_next.as_mut(), next.as_mut()]) {
+                    self.register_external_inline_member(member);
+                }
+            }
+            crate::libraries::InlineIterationTraversal::Array => {}
+            crate::libraries::InlineIterationTraversal::Counted { size, get } => {
+                self.register_external_inline_member(size);
+                self.register_external_inline_member(get);
+            }
+        }
+    }
+
     /// Assign stable external identities to every declaration referenced by an inline plan before
     /// the plan crosses the provider boundary.
     pub(super) fn register_inline_body_plan_dependencies(&self, plan: &mut InlineBodyPlan) {
@@ -623,15 +646,16 @@ impl JvmLibraries {
                         Some(InlineBodyCallReceiver::Extension(_)) => FnKind::Extension,
                         None => FnKind::TopLevel,
                     };
-                    self.register_external_callable(&mut call.callable, kind);
+                    self.register_external_inline_dependency_callable(&mut call.callable, kind);
                 }
                 if let Some(recovery) = recovery {
                     let owner = recovery
                         .constructor
                         .owner
                         .expect("inline recovery constructor must name its classifier");
+                    recovery.constructor.external_identity = None;
                     self.register_external_constructor(owner, &mut recovery.constructor);
-                    self.register_external_callable(
+                    self.register_external_inline_dependency_callable(
                         &mut recovery.failure.callable,
                         FnKind::TopLevel,
                     );
@@ -641,33 +665,46 @@ impl JvmLibraries {
                 index, traversal, ..
             } => {
                 if let Some(InlineIterationIndex::Checked { overflow }) = index {
-                    self.register_external_callable(&mut overflow.callable, FnKind::TopLevel);
+                    self.register_external_inline_dependency_callable(
+                        &mut overflow.callable,
+                        FnKind::TopLevel,
+                    );
                 }
-                match traversal {
-                    crate::libraries::InlineIterationTraversal::Iterator {
-                        prepare,
-                        has_next,
-                        next,
-                    } => {
-                        for member in prepare.iter_mut().chain([has_next.as_mut(), next.as_mut()]) {
-                            self.register_external_inline_member(member);
-                        }
-                    }
-                    crate::libraries::InlineIterationTraversal::Array => {}
-                    crate::libraries::InlineIterationTraversal::Counted { size, get } => {
-                        self.register_external_inline_member(size);
-                        self.register_external_inline_member(get);
-                    }
-                }
+                self.register_inline_iteration_traversal(traversal);
             }
             InlineBodyPlan::CollectionTransform {
-                factory, append, ..
+                traversal,
+                factory,
+                capacity,
+                append,
+                ..
             } => {
+                self.register_inline_iteration_traversal(traversal);
                 let owner = factory
                     .owner
                     .expect("collection inline factory must name its classifier");
+                factory.external_identity = None;
                 self.register_external_constructor(owner, factory);
-                self.register_external_inline_member(append);
+                if let Some(capacity) = capacity {
+                    match capacity {
+                        crate::libraries::InlineCollectionCapacity::Member(member) => {
+                            self.register_external_inline_member(member)
+                        }
+                        crate::libraries::InlineCollectionCapacity::Extension {
+                            callable, ..
+                        } => self.register_external_inline_dependency_callable(
+                            callable,
+                            FnKind::Extension,
+                        ),
+                    }
+                }
+                match append {
+                    crate::libraries::InlineCollectionAppend::Member(member) => {
+                        self.register_external_inline_member(member)
+                    }
+                    crate::libraries::InlineCollectionAppend::Extension(callable) => self
+                        .register_external_inline_dependency_callable(callable, FnKind::Extension),
+                }
             }
         }
     }
@@ -680,23 +717,25 @@ impl JvmLibraries {
         // Every candidate overload the provider builds computes a plan, so the decode below is
         // memoized per declaration. The key carries every physical input read by the decoder.
         let parameter_slots = callable_parameter_slots(&callable.physical_params);
-        let default_target = callable.default_realization.as_deref().map(|realization| {
-            (
-                realization.declaration_owner,
-                realization.name.as_str(),
-                realization.descriptor.as_str(),
-            )
-        });
-        if let Some(plan) = self.cp.cached_inline_plan(
-            callable.owner,
-            &callable.name,
-            &body_descriptor,
-            &parameter_slots,
-            callable.context_count,
-            callable.source_receiver,
-            &callable.params,
-            default_target,
-        ) {
+        let generic_signature = callable
+            .generic_sig
+            .as_deref()
+            .map(|signature| (signature.receiver, signature.ret));
+        let cache_input = crate::jvm::classpath::InlinePlanCacheInput {
+            owner: callable.owner,
+            name: &callable.name,
+            body_descriptor: &body_descriptor,
+            parameter_slots: &parameter_slots,
+            physical_parameters: &callable.physical_params,
+            context_count: callable.context_count,
+            source_receiver: callable.source_receiver,
+            semantic_parameters: &callable.params,
+            semantic_result: callable.ret,
+            suspend: callable.suspend,
+            generic_signature,
+            default_realization: callable.default_realization.as_deref(),
+        };
+        if let Some(plan) = self.cp.cached_inline_plan(cache_input) {
             return plan.map(|boxed| *boxed);
         }
         let mut decode_unavailable = false;
@@ -709,17 +748,8 @@ impl JvmLibraries {
         // Failed body or required metadata/member reads are transient. Do not globally cache one as
         // the stable declaration fact "this inline body has no recognized plan".
         if !decode_unavailable {
-            self.cp.memoize_inline_plan(
-                callable.owner,
-                &callable.name,
-                &body_descriptor,
-                &parameter_slots,
-                callable.context_count,
-                callable.source_receiver,
-                &callable.params,
-                default_target,
-                plan.clone().map(Box::new),
-            );
+            self.cp
+                .memoize_inline_plan(cache_input, plan.clone().map(Box::new));
         }
         plan
     }
@@ -731,6 +761,16 @@ impl JvmLibraries {
         parameter_slots: &[u16],
         decode_unavailable: &mut bool,
     ) -> Option<InlineBodyPlan> {
+        match self.inline_collection_transform_body_plan(callable, body_descriptor, parameter_slots)
+        {
+            collection_transform::CollectionTransformDecode::Plan(plan) => return Some(plan),
+            collection_transform::CollectionTransformDecode::Rejected => return None,
+            collection_transform::CollectionTransformDecode::Unavailable => {
+                *decode_unavailable = true;
+                return None;
+            }
+            collection_transform::CollectionTransformDecode::NotRecognized => {}
+        }
         if let Some(plan) = self.inline_iteration_body_plan(
             callable,
             body_descriptor,
@@ -738,6 +778,9 @@ impl JvmLibraries {
             decode_unavailable,
         ) {
             return Some(plan);
+        }
+        if *decode_unavailable {
+            return None;
         }
         let owner = callable.owner.render();
         let inline_name = format!("{}$$forInline", callable.name);

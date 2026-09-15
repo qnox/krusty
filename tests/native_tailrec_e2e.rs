@@ -21,16 +21,22 @@ fn a_rewritten_tailrec_runs_in_constant_stack() {
 
 #[test]
 fn a_tailrec_still_holding_a_self_call_is_declined() {
-    // The rewrite does not descend into a loop — a `continue` to the rewritten loop would leave
-    // this one — so the call survives and the function recurses after all. What the generator must
-    // not do is emit it: the program would run to a segmentation fault at the depth the source
-    // wrote `tailrec` to make safe, and how deep a native stack goes is the machine's business.
+    // `tailrec` is a promise about the modifier, not about every call in the body: `1 + walk(n - 1)`
+    // has work after it and is not a tail call, which Kotlin says too by reporting
+    // NON_TAIL_RECURSIVE_CALL for it. The rewrite loops the tail call beside it and correctly
+    // leaves this one, so the function recurses after all.
+    //
+    // What the generator must not do is emit it. The program would run to a segmentation fault at
+    // the depth the source wrote `tailrec` to make safe, and how deep a native stack goes is the
+    // machine's business rather than the language's.
+    //
+    // A loop around the tail call used to be this shape. It no longer is: the rewrite reaches a
+    // `return` inside a loop, and the `continue` it writes carries the synthetic loop's own label.
     expect_native_decline(
         "tailrec fun walk(n: Int): Int {\n\
-         \x20   while (true) {\n\
-         \x20       if (n <= 0) return 0\n\
-         \x20       return walk(n - 1)\n\
-         \x20   }\n\
+         \x20   if (n <= 0) return 0\n\
+         \x20   if (n == 7) return 1 + walk(n - 1)\n\
+         \x20   return walk(n - 1)\n\
          }\n\
          fun box(): String = if (walk(1000000) == 0) \"OK\" else \"fail\"\n",
         "UnfinishedTailrec",

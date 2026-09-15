@@ -852,6 +852,8 @@ mod labeled_super_e2e;
 mod labeled_this_e2e;
 #[path = "lambda_e2e.rs"]
 mod lambda_e2e;
+#[path = "lambda_exit_join_e2e.rs"]
+mod lambda_exit_join_e2e;
 #[path = "lambda_result_inference_e2e.rs"]
 mod lambda_result_inference_e2e;
 #[path = "lambda_result_type_variable_e2e.rs"]
@@ -1179,6 +1181,8 @@ mod property_infer_member_e2e;
 mod property_initializer_newline_e2e;
 #[path = "qq1_safecall_diverging_scope_block_e2e.rs"]
 mod qq1_safecall_diverging_scope_block_e2e;
+#[path = "qualified_call_receiver_lambda_e2e.rs"]
+mod qualified_call_receiver_lambda_e2e;
 #[path = "qualified_name_e2e.rs"]
 mod qualified_name_e2e;
 #[path = "range_property_e2e.rs"]
@@ -1195,6 +1199,8 @@ mod receiver_lambda_e2e;
 mod receiver_lambda_in_method_e2e;
 #[path = "receiver_lambda_member_smartcast_e2e.rs"]
 mod receiver_lambda_member_smartcast_e2e;
+#[path = "receiver_property_path_smartcast_e2e.rs"]
+mod receiver_property_path_smartcast_e2e;
 #[path = "reference_adaptation_e2e.rs"]
 mod reference_adaptation_e2e;
 #[path = "reference_in_range_e2e.rs"]
@@ -1243,6 +1249,8 @@ mod run_noreceiver_e2e;
 mod safe_call_any_member_e2e;
 #[path = "safe_call_argument_list_e2e.rs"]
 mod safe_call_argument_list_e2e;
+#[path = "safe_call_collection_transform_e2e.rs"]
+mod safe_call_collection_transform_e2e;
 #[path = "safe_call_e2e.rs"]
 mod safe_call_e2e;
 #[path = "safe_call_generic_field_e2e.rs"]
@@ -1263,6 +1271,8 @@ mod safe_call_unresolved_member_e2e;
 mod safe_cast_elvis_e2e;
 #[path = "sam_classpath_e2e.rs"]
 mod sam_classpath_e2e;
+#[path = "sam_constructor_lambda_label_e2e.rs"]
+mod sam_constructor_lambda_label_e2e;
 #[path = "sam_conversion_e2e.rs"]
 mod sam_conversion_e2e;
 #[path = "sam_generic_lambda_param_e2e.rs"]
