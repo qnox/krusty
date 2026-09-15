@@ -105,7 +105,6 @@ struct MetaNameIds {
     /// descriptor while `@Metadata` keeps the primitive's own name, and the alignment path compares
     /// the two — keyed by `TypeName` so the comparison stays a pointer compare.
     prim_wrapper: crate::name_tree::FxHashMap<crate::types::TypeName, crate::types::TypeName>,
-    prim_array: crate::name_tree::FxHashMap<crate::types::TypeName, String>,
     array: crate::types::TypeName,
     any: crate::types::TypeName,
     object: crate::types::TypeName,
@@ -158,24 +157,9 @@ fn meta_ids() -> &'static MetaNameIds {
             ))
         })
         .collect();
-        // Each primitive specialized array's descriptor, from the canonical inventory rather than
-        // a second copy of the names: `PRIM_ARRAY_CLASSES` is iterated, and the descriptor follows
-        // from the one operation that erases an element. The list this replaced was that second
-        // copy, and it named `UIntArray` and `ULongArray` only — so `UByteArray` and `UShortArray`
-        // had no descriptor at this boundary at all.
-        let prim_array = crate::types::PRIM_ARRAY_CLASSES
-            .iter()
-            .map(|(name, element)| {
-                (
-                    tn(name),
-                    crate::jvm::names::type_descriptor(crate::types::Ty::array(*element)),
-                )
-            })
-            .collect();
         MetaNameIds {
             prim,
             prim_wrapper,
-            prim_array,
             array: tn("kotlin/Array"),
             any: tn("kotlin/Any"),
             object: tn("java/lang/Object"),
@@ -187,11 +171,16 @@ fn meta_ids() -> &'static MetaNameIds {
     })
 }
 
-fn primitive_array_descriptor_name(internal: TypeName) -> Option<&'static str> {
-    meta_ids()
-        .prim_array
-        .get(&internal)
-        .map(|descriptor| descriptor.as_str())
+/// The ELEMENT WIDTH a primitive specialized array carries, or `None` for a name that is not one.
+///
+/// Width rather than name is what this boundary compares, and it is what makes an unsigned array
+/// align with the signed array it is an inline class over: `UByteArray` and `ByteArray` are both
+/// `byte[]`, so both answer `Byte`. The answer comes from the interned identity through the
+/// canonical element table, so nothing here enumerates the classes — the list that used to, named
+/// `UIntArray` and `ULongArray` only, which left `UByteArray` and `UShortArray` with no answer at
+/// this boundary at all.
+fn prim_array_width(internal: TypeName) -> Option<crate::types::Ty> {
+    crate::types::prim_array_element(internal)?.scalar_value_repr()
 }
 
 fn ty_erases_to_object(desc: Ty) -> bool {
@@ -339,11 +328,8 @@ fn meta_param_compat(
     if name == ids.array {
         return desc.is_reference_array();
     }
-    if let Some(meta_desc) = primitive_array_descriptor_name(name) {
-        return desc
-            .obj_internal()
-            .and_then(primitive_array_descriptor_name)
-            == Some(meta_desc);
+    if let Some(width) = prim_array_width(name) {
+        return desc.obj_internal().and_then(prim_array_width) == Some(width);
     }
     if let Some(prim) = ids.prim.get(&name) {
         if nullable {
@@ -401,11 +387,8 @@ fn meta_param_exact(
         return matches!(desc, Ty::Obj(n, args)
             if *n == ids.array && args.first().copied().is_some_and(ty_erases_to_object));
     }
-    if let Some(meta_desc) = primitive_array_descriptor_name(name) {
-        return desc
-            .obj_internal()
-            .and_then(primitive_array_descriptor_name)
-            == Some(meta_desc);
+    if let Some(width) = prim_array_width(name) {
+        return desc.obj_internal().and_then(prim_array_width) == Some(width);
     }
     if let Some(prim) = ids.prim.get(&name) {
         if nullable {

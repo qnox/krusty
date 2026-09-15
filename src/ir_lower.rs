@@ -5156,7 +5156,7 @@ fn lower_file_at_reporting_impl(
             // The unsigned specialized arrays (`UIntArray`, `ULongArray`) are inline classes over
             // `[I`/`[J`, but the compiler models and emits them AS the primitive array — never boxing to
             // the wrapper object. Excluding them here keeps them out of the value-class erasure map.
-            if crate::types::prim_array_element(&fq.render()).is_some() {
+            if crate::types::prim_array_element(fq).is_some() {
                 continue;
             }
             let Some(t) = lo.syms.libraries.classifier(fq) else {

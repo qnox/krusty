@@ -8,6 +8,7 @@ use crate::backend::{BackendClassifierSource, SymbolSourceClassifiers};
 use crate::ir::{
     Callee, IrBinOp, IrClass, IrConst, IrCtorArg, IrExpr, IrField, IrFile, IrFunction, IrTypeOp,
 };
+use crate::jvm::array_representation::{array_load_op, array_store_op, prim_newarray_atype};
 use crate::jvm::classfile::{
     ClassWriter, CodeBuilder, InnerClassResolver, Label, VerifType, MAJOR_JAVA8,
 };
@@ -20224,24 +20225,6 @@ fn reference_array_scalar_adapter(element: Ty) -> Option<Ty> {
         .or_else(|| boxed_prim_of(element))
 }
 
-fn array_load_op(elem: Ty, reference_array: bool) -> (u8, i32) {
-    if reference_array {
-        return (0x32, 1);
-    }
-    // An unsigned array IS the signed array it is an inline class over, so the element's width —
-    // and therefore the opcode — is the one `scalar_value_repr` already assigns it.
-    match scalar_element(elem, "load") {
-        Ty::Int => (0x2e, 1),
-        Ty::Long => (0x2f, 2),
-        Ty::Float => (0x30, 1),
-        Ty::Double => (0x31, 2),
-        Ty::Boolean | Ty::Byte => (0x33, 1),
-        Ty::Char => (0x34, 1),
-        Ty::Short => (0x35, 1),
-        other => unreachable!("a primitive array element carried as {other:?} (load)"),
-    }
-}
-
 /// `(opcode, value-words)` for an array element store (`Xastore`).
 /// Push the zero value of `t` (the placeholder for an omitted `$default` argument; the stub overwrites
 /// it when the mask bit is set).
@@ -20292,50 +20275,6 @@ fn numeric_cmp_int_category(lt: Ty, rt: Ty) -> bool {
          reference shapes belong on the identity/null/areEqual paths"
     );
     !matches!(lt, Ty::Long | Ty::Double | Ty::Float)
-}
-
-fn array_store_op(elem: Ty, reference_array: bool) -> (u8, i32) {
-    if reference_array {
-        return (0x53, 1);
-    }
-    match scalar_element(elem, "store") {
-        Ty::Int => (0x4f, 1),
-        Ty::Long => (0x50, 2),
-        Ty::Float => (0x51, 1),
-        Ty::Double => (0x52, 2),
-        Ty::Boolean | Ty::Byte => (0x54, 1),
-        Ty::Char => (0x55, 1),
-        Ty::Short => (0x56, 1),
-        other => unreachable!("a primitive array element carried as {other:?} (store)"),
-    }
-}
-
-/// `newarray` atype for a primitive element (JVMS Table 6.5.newarray-A).
-fn prim_newarray_atype(elem: Ty) -> u8 {
-    match scalar_element(elem, "newarray") {
-        Ty::Boolean => 4,
-        Ty::Char => 5,
-        Ty::Float => 6,
-        Ty::Double => 7,
-        Ty::Byte => 8,
-        Ty::Short => 9,
-        Ty::Int => 10,
-        Ty::Long => 11,
-        other => unreachable!("a primitive array element carried as {other:?} (newarray)"),
-    }
-}
-
-/// The primitive an element of a PRIMITIVE array is carried as, which is what decides its width.
-///
-/// `Ty::scalar_value_repr` owns the rule, unsigned erasure included: a `UByteArray`'s element is a
-/// `UByte` and is carried as a `Byte`. Reaching here with anything else means a reference array was
-/// routed to a primitive opcode, which is an invariant failure rather than a shape to encode — the
-/// silent `aaload`/`aastore`/`int` fallbacks these replaced are exactly how `UByte` and `UShort`
-/// came to be stored as references without anything saying so.
-fn scalar_element(elem: Ty, what: &str) -> Ty {
-    elem.scalar_value_repr().unwrap_or_else(|| {
-        unreachable!("a primitive array element that is not a scalar: {elem:?} ({what})")
-    })
 }
 
 /// Normalize a call's return JVM-type: a Kotlin `Nothing` is carried as an object whose JVM mapping is
@@ -20461,60 +20400,57 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         Ty::UShort => Ty::Short,
         Ty::UInt => Ty::Int,
         Ty::ULong => Ty::Long,
-        Ty::Obj(fq_name, type_args) => match () {
-            _ if fq_name.matches("kotlin/Int") => Ty::Int,
-            _ if fq_name.matches("kotlin/Long") => Ty::Long,
-            _ if fq_name.matches("kotlin/Short") => Ty::Short,
-            _ if fq_name.matches("kotlin/Byte") => Ty::Byte,
-            _ if fq_name.matches("kotlin/Boolean") => Ty::Boolean,
-            _ if fq_name.matches("kotlin/Char") => Ty::Char,
-            _ if fq_name.matches("kotlin/Double") => Ty::Double,
-            _ if fq_name.matches("kotlin/Float") => Ty::Float,
-            _ if fq_name.matches("kotlin/String") => Ty::String,
-            // Arrays are regular class types the JVM backend lowers to JVM array types here.
-            // Every primitive specialized array, signed and unsigned alike, through the one table
-            // that identifies them. An unsigned array is an `inline class` over the signed primitive
-            // array and at the JVM level IS that array (`UIntArray` = `[I`), which is the same
-            // erasure the scalar arm above applies — so the element is carried by
-            // `scalar_value_repr` rather than by a second list of names. The list this replaced
-            // named `UIntArray` and `ULongArray` only, so a `UByteArray` reached emission carried as
-            // a reference array.
-            _ if crate::types::prim_array_element(fq_name).is_some() => Ty::array(scalar_element(
-                crate::types::prim_array_element(fq_name).expect("checked in the guard"),
-                "carrier",
-            )),
-            // A `kotlin/Array<T>` is a JVM reference array: a primitive element `T` is BOXED
-            // (`Array<Int>` = `[Ljava/lang/Integer;`, distinct from the unboxed `IntArray` = `[I`).
-            _ if fq_name.matches("kotlin/Array") => Ty::array(
-                type_args
-                    .first()
-                    .map(|e| {
-                        // A projection is valid here as the ARRAY classifier's type argument, even
-                        // though it is never a value type of its own. Erase it at this boundary:
-                        // `out X` has the readable element `X`; `in X` can only be read as `Any`.
-                        let semantic = match e.non_null() {
-                            Ty::OutProjection(inner) | Ty::StarProjection(inner) => *inner,
-                            Ty::InProjection(_) => Ty::obj("kotlin/Any"),
-                            _ => *e,
-                        };
-                        let boxed = jvm_reference_array_element(semantic);
-                        // Keep a NULLABLE element's `?`: `Array<Int?>` = `Integer[]` whose `get` yields the
-                        // BOXED element (it can be `null`), UNLIKE `Array<Int>` whose `get` unboxes.
-                        // `boxed_prim_of` returns `None` for a `Nullable(..)`, so the emitter's `Array.get`
-                        // keeps it boxed and `.set` skips the extra box — matching the value the front end
-                        // supplies (boxed for a nullable element, unboxed for a non-null one).
-                        if e.is_nullable() {
-                            Ty::nullable(boxed)
-                        } else {
-                            boxed
-                        }
-                    })
-                    .unwrap_or(Ty::obj("java/lang/Object")),
-            ),
-            _ => Ty::obj(&crate::jvm::names::classfile_internal_name(
-                &fq_name.render(),
-            )),
-        },
+        Ty::Obj(fq_name, type_args) => {
+            // Arrays are regular class types the JVM backend lowers to JVM array types here. Every
+            // primitive specialized array, signed and unsigned alike, goes through the one operation
+            // that identifies them and the one that decides an element's width — see
+            // `jvm::array_representation`.
+            if let Some(carrier) = crate::jvm::array_representation::prim_array_carrier(fq_name) {
+                return carrier;
+            }
+            match () {
+                _ if fq_name.matches("kotlin/Int") => Ty::Int,
+                _ if fq_name.matches("kotlin/Long") => Ty::Long,
+                _ if fq_name.matches("kotlin/Short") => Ty::Short,
+                _ if fq_name.matches("kotlin/Byte") => Ty::Byte,
+                _ if fq_name.matches("kotlin/Boolean") => Ty::Boolean,
+                _ if fq_name.matches("kotlin/Char") => Ty::Char,
+                _ if fq_name.matches("kotlin/Double") => Ty::Double,
+                _ if fq_name.matches("kotlin/Float") => Ty::Float,
+                _ if fq_name.matches("kotlin/String") => Ty::String,
+                // A `kotlin/Array<T>` is a JVM reference array: a primitive element `T` is BOXED
+                // (`Array<Int>` = `[Ljava/lang/Integer;`, distinct from the unboxed `IntArray` = `[I`).
+                _ if fq_name.matches("kotlin/Array") => Ty::array(
+                    type_args
+                        .first()
+                        .map(|e| {
+                            // A projection is valid here as the ARRAY classifier's type argument, even
+                            // though it is never a value type of its own. Erase it at this boundary:
+                            // `out X` has the readable element `X`; `in X` can only be read as `Any`.
+                            let semantic = match e.non_null() {
+                                Ty::OutProjection(inner) | Ty::StarProjection(inner) => *inner,
+                                Ty::InProjection(_) => Ty::obj("kotlin/Any"),
+                                _ => *e,
+                            };
+                            let boxed = jvm_reference_array_element(semantic);
+                            // Keep a NULLABLE element's `?`: `Array<Int?>` = `Integer[]` whose `get` yields the
+                            // BOXED element (it can be `null`), UNLIKE `Array<Int>` whose `get` unboxes.
+                            // `boxed_prim_of` returns `None` for a `Nullable(..)`, so the emitter's `Array.get`
+                            // keeps it boxed and `.set` skips the extra box — matching the value the front end
+                            // supplies (boxed for a nullable element, unboxed for a non-null one).
+                            if e.is_nullable() {
+                                Ty::nullable(boxed)
+                            } else {
+                                boxed
+                            }
+                        })
+                        .unwrap_or(Ty::obj("java/lang/Object")),
+                ),
+                _ => Ty::obj(&crate::jvm::names::classfile_internal_name(
+                    &fq_name.render(),
+                )),
+            }
+        }
         // The JVM representation of a function type is `kotlin/jvm/functions/FunctionN`. A `suspend`
         // function type carries a trailing `Continuation` parameter, so its arity is one greater.
         Ty::Fun(s) => Ty::obj(&crate::jvm::names::function_interface_internal_name(

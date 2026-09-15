@@ -601,7 +601,7 @@ pub fn intern_fnsig(s: FnSig) -> &'static FnSig {
 /// not this table's. Anything needing the set of these classes iterates here rather than writing the
 /// names out again: every copy that has existed eventually disagreed with this one, and the ones
 /// that omitted `UByteArray` and `UShortArray` emitted `int[]` for a `byte[]`.
-pub const PRIM_ARRAY_CLASSES: [(&str, Ty); 12] = [
+const PRIM_ARRAY_CLASSES: [(&str, Ty); 12] = [
     ("kotlin/IntArray", Ty::Int),
     ("kotlin/LongArray", Ty::Long),
     ("kotlin/ShortArray", Ty::Short),
@@ -651,21 +651,10 @@ pub fn primitive_array_creator_element(name: &str) -> Option<Ty> {
 /// The primitive specialized array class name for a primitive element (`Int` → `kotlin/IntArray`), or
 /// `None` for a reference element (which lives in a boxed `Array<T>`). Inverse of [`prim_array_element`].
 pub fn prim_array_name(elem: Ty) -> Option<&'static str> {
-    Some(match elem {
-        Ty::Int => "kotlin/IntArray",
-        Ty::Long => "kotlin/LongArray",
-        Ty::Short => "kotlin/ShortArray",
-        Ty::Byte => "kotlin/ByteArray",
-        Ty::Boolean => "kotlin/BooleanArray",
-        Ty::Char => "kotlin/CharArray",
-        Ty::Float => "kotlin/FloatArray",
-        Ty::Double => "kotlin/DoubleArray",
-        Ty::UByte => "kotlin/UByteArray",
-        Ty::UShort => "kotlin/UShortArray",
-        Ty::UInt => "kotlin/UIntArray",
-        Ty::ULong => "kotlin/ULongArray",
-        _ => return None,
-    })
+    PRIM_ARRAY_CLASSES
+        .iter()
+        .find(|(_, element)| *element == elem)
+        .map(|(name, _)| *name)
 }
 
 /// `java.lang.annotation.ElementType` constants in DECLARATION order. kotlinc projects a Kotlin
