@@ -17,44 +17,6 @@
 
 use super::common;
 
-
-/// Require that BOTH compilers reject the fixture with the identical diagnostic set.
-///
-/// The exit code is pinned to exactly 1, not merely nonzero: a panic exits 101, and a nonzero
-/// assertion would accept that as a rejection whenever the expected diagnostic happened to be
-/// printed before the crash — which is precisely the failure this fixture exists to catch, since
-/// the production change it guards replaced an assertion. The complete rendered contract is
-/// compared too: same count, file, line, column, message and order, with nothing error-shaped on
-/// stdout where the comparison would not see it.
-fn expect_identical_rejection(result: &common::CompilerDiagnosticResult, tag: &str) {
-    assert_eq!(
-        result.krusty_code, 1,
-        "{tag}: krusty exited {} rather than rejecting the fixture: {}{}",
-        result.krusty_code, result.krusty_stdout, result.krusty_stderr
-    );
-    assert_eq!(
-        result.reference_code, 1,
-        "{tag}: kotlinc exited {} rather than rejecting the fixture: {}",
-        result.reference_code, result.reference_stderr
-    );
-    assert_eq!(
-        common::compiler_errors(&result.krusty_stdout),
-        [],
-        "{tag}: krusty wrote diagnostics to stdout, where the comparison would miss them"
-    );
-    let krusty = common::compiler_errors(&result.krusty_stderr);
-    let reference = common::compiler_errors(&result.reference_stderr);
-    assert!(
-        !reference.is_empty(),
-        "{tag}: kotlinc rejected with no parseable diagnostic: {}",
-        result.reference_stderr
-    );
-    assert_eq!(
-        krusty, reference,
-        "{tag}: diagnostics differ.\nkrusty:  {krusty:#?}\nkotlinc: {reference:#?}"
-    );
-}
-
 /// Run one fixture under BOTH compilers and require the same `box()` value.
 ///
 /// `expect_box_ok_files_with_stdlib` alone only proves krusty agrees with itself. These shapes are
@@ -129,5 +91,8 @@ fn a_bad_annotation_argument_is_still_rejected_beside_an_inline_member() {
 \x20   inline fun decorate(make: () -> String): String = make() + tag()\n\
 }\n";
     let result = common::compiler_diagnostics(&[("Main.kt", MAIN)], &[]);
-    expect_identical_rejection(&result, "a bad annotation argument beside an inline member");
+    common::expect_identical_rejection(
+        &result,
+        "a bad annotation argument beside an inline member",
+    );
 }

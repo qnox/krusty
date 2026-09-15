@@ -28,6 +28,7 @@ use crate::types::{
 };
 use scope::{ContextReceiver, ContextValue, FlowExclusion, NarrowPath, Ns, ScopeKind};
 
+mod annotation_applications;
 mod call_result_constraint;
 mod callable_reference_selection;
 mod capture_analysis;
@@ -55,7 +56,6 @@ mod postponed_diagnostics;
 mod qualified_call_shaping;
 mod safe_call_flow;
 mod sam_constructors;
-mod annotation_applications;
 mod source_fragment;
 use source_fragment::SourceFragmentMode;
 mod scope;
@@ -65296,7 +65296,6 @@ impl<'a> Checker<'a> {
                     })
             })
     }
-
 
     /// Check annotation arguments for one declaration's type parameters after signature collection
     /// has committed every annotation occurrence to its qualified classifier identity. An absent
