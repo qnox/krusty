@@ -500,15 +500,8 @@ impl BodyLowering<'_> {
                             rhs: null,
                         });
                         let instance_read = self.ir.add_expr(IrExpr::GetValue(temporary));
-                        let instance_test = self.ir.add_expr(IrExpr::TypeOp {
-                            op: if negated {
-                                IrTypeOp::NotInstanceOf
-                            } else {
-                                IrTypeOp::InstanceOf
-                            },
-                            arg: instance_read,
-                            type_operand: target.get().non_null(),
-                        });
+                        let instance_test =
+                            self.instance_check(negated, instance_read, target.get().non_null());
                         let combined = self.ir.add_expr(IrExpr::PrimitiveBinOp {
                             op: if negated { IrBinOp::And } else { IrBinOp::Or },
                             lhs: null_test,
@@ -519,13 +512,16 @@ impl BodyLowering<'_> {
                             value: Some(combined),
                         })
                     }
-                    FirTypeOperation::Is | FirTypeOperation::NotIs | FirTypeOperation::Cast => {
-                        self.ir.add_expr(IrExpr::TypeOp {
-                            op: lower_type_operation(*operation, target.get()),
-                            arg: operand,
-                            type_operand: target.get(),
-                        })
-                    }
+                    FirTypeOperation::Is | FirTypeOperation::NotIs => self.instance_check(
+                        *operation == FirTypeOperation::NotIs,
+                        operand,
+                        target.get(),
+                    ),
+                    FirTypeOperation::Cast => self.ir.add_expr(IrExpr::TypeOp {
+                        op: lower_type_operation(*operation, target.get()),
+                        arg: operand,
+                        type_operand: target.get(),
+                    }),
                 }
             }
             FirExprKind::ImplicitConversion { value, conversion } => {

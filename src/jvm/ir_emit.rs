@@ -2432,7 +2432,7 @@ fn data_class_hashcode_owner(ir: &IrFile, bodies: &dyn MethodBodies, ty: Ty) -> 
     let mut owner = if ty.is_nullable() && ty.non_null().is_jvm_scalar() {
         "java/lang/Object".to_owned()
     } else {
-        ref_internal(ty.non_null())
+        crate::jvm::names::instanceof_internal_name(ty.non_null())
     };
     if ty
         .non_null()
@@ -5211,7 +5211,7 @@ fn emit_backing_field_read_adaptation(
         if field_jvm.is_jvm_scalar() {
             box_prim_free(cw, code, field_jvm);
         } else {
-            let internal = ref_internal(accessor_jvm);
+            let internal = crate::jvm::names::instanceof_internal_name(accessor_jvm);
             if internal != "java/lang/Object" {
                 let class = cw.class_ref(&internal);
                 code.checkcast(class);
@@ -5248,7 +5248,7 @@ fn emit_backing_field_write_adaptation(
     } else if accessor_jvm.is_jvm_scalar() && field_jvm.is_reference() {
         box_prim_free(cw, code, accessor_jvm);
     } else if accessor_jvm.is_reference() && field_jvm.is_reference() {
-        let internal = ref_internal(field_jvm);
+        let internal = crate::jvm::names::instanceof_internal_name(field_jvm);
         if internal != "java/lang/Object" {
             let class = cw.class_ref(&internal);
             code.checkcast(class);
@@ -8017,7 +8017,7 @@ fn emit_func_ref_class(
             inv.checkcast(wref);
             unbox_prim(&mut cw, &mut inv, adapter);
         } else if jt.is_jvm_scalar() && target_jt.is_reference() {
-            let target = ref_internal(target_jt);
+            let target = crate::jvm::names::instanceof_internal_name(target_jt);
             if target != "java/lang/Object" {
                 let cref = cw.class_ref(&target);
                 inv.checkcast(cref);
@@ -8355,7 +8355,7 @@ fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
                 code.ifnull(dispatch);
             }
             code.aload(parameter_slot);
-            let concrete = ref_internal(cp[barrier.parameter]);
+            let concrete = crate::jvm::names::instanceof_internal_name(cp[barrier.parameter]);
             let concrete_class = cw.class_ref(&concrete);
             code.instance_of(concrete_class);
             code.ifne(dispatch);
@@ -8403,7 +8403,7 @@ fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
                 code.invokevirtual(m, 0, slot_words(*ct) as i32);
             } else if et != ct {
                 if et.is_reference() && ct.is_reference() {
-                    let ci = cw.class_ref(&ref_internal(*ct));
+                    let ci = cw.class_ref(&crate::jvm::names::instanceof_internal_name(*ct));
                     code.checkcast(ci);
                 } else if et.is_reference() && ct.is_jvm_scalar() {
                     unbox_prim(cw, &mut code, *ct);
@@ -8440,10 +8440,13 @@ fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
             // A CPS target returns Object while this bridge must recover a reference value-class
             // carrier before `box-impl`. Scalar carriers arrive already boxed and never take this path.
             debug_assert!(tr.is_reference() && cr.is_reference());
-            let carrier = cw.class_ref(&ref_internal(cr));
+            let carrier = cw.class_ref(&crate::jvm::names::instanceof_internal_name(cr));
             code.checkcast(carrier);
         }
-        if cr.is_reference() && ref_internal(cr) == "java/lang/Void" && !er.is_reference() {
+        if cr.is_reference()
+            && crate::jvm::names::instanceof_internal_name(cr) == "java/lang/Void"
+            && !er.is_reference()
+        {
             // A `Nothing` override may have a `java/lang/Void` descriptor while the value-class
             // supertype bridge returns the unboxed primitive. The target must diverge; if it ever
             // falls through, discard the null-only Void result and throw to keep the bridge verifiable.
@@ -8488,14 +8491,18 @@ fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
                 // `kotlin/Unit` singleton the erased bridge must return.
                 let f = cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
                 code.getstatic(f, 1);
-            } else if er.is_reference() && cr.is_reference() && ref_internal(cr) == "java/lang/Void"
+            } else if er.is_reference()
+                && cr.is_reference()
+                && crate::jvm::names::instanceof_internal_name(cr) == "java/lang/Void"
             {
                 // `Nothing?` has only the value `null`, but its concrete JVM descriptor is
                 // `java/lang/Void`. A bridge returning a narrower reference (for example a nullable
                 // value class box) must refine the verifier type before `areturn`.
-                let ci = cw.class_ref(&ref_internal(er));
+                let ci = cw.class_ref(&crate::jvm::names::instanceof_internal_name(er));
                 code.checkcast(ci);
-            } else if er.is_reference() && !er.is_array() && ref_internal(cr) == "java/lang/Object"
+            } else if er.is_reference()
+                && !er.is_array()
+                && crate::jvm::names::instanceof_internal_name(cr) == "java/lang/Object"
             {
                 // Covariant generic DIAMOND: the inherited concrete getter returns the erased
                 // `Object` (`val x: T` in a generic base), but an interface in the hierarchy requires
@@ -8505,7 +8512,7 @@ fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
                 // direction (concrete is a SUBtype of erased) needs no cast; this is the inverse.
                 // Restricted to a plain object type (`Ty::Obj`): an array `er` would need a descriptor-
                 // form class ref, and that narrowing direction doesn't arise here.
-                let ci = cw.class_ref(&ref_internal(er));
+                let ci = cw.class_ref(&crate::jvm::names::instanceof_internal_name(er));
                 code.checkcast(ci);
             } // reference→reference (concrete is a subtype of erased): no cast needed
         }
@@ -15348,7 +15355,7 @@ impl<'a> Emitter<'a> {
             // A generic Java field's descriptor erases to its formal bound (`CharSequence` for
             // `T : CharSequence`), while this applied read may be `String`. Preserve the selected
             // field descriptor for `getfield`, then narrow its result to the logical binding.
-            let internal = ref_internal(logical);
+            let internal = crate::jvm::names::instanceof_internal_name(logical);
             if internal != "java/lang/Object" {
                 let class = self.cw.class_ref(&internal);
                 code.checkcast(class);
@@ -15380,7 +15387,7 @@ impl<'a> Emitter<'a> {
         if !exp.is_reference() || type_descriptor(s) == type_descriptor(exp) {
             return;
         }
-        let internal = ref_internal(exp);
+        let internal = crate::jvm::names::instanceof_internal_name(exp);
         if internal != "java/lang/Object" {
             let ci = self.cw.class_ref(&internal);
             code.checkcast(ci);
@@ -16814,10 +16821,10 @@ impl<'a> Emitter<'a> {
                 let internal = if jvm_ty.is_jvm_scalar() {
                     semantic_scalar_adapter(*type_operand, jvm_ty)
                         .boxed_ref()
-                        .map(ref_internal)
-                        .unwrap_or_else(|| ref_internal(jvm_ty))
+                        .map(crate::jvm::names::instanceof_internal_name)
+                        .unwrap_or_else(|| crate::jvm::names::instanceof_internal_name(jvm_ty))
                 } else {
-                    ref_internal(jvm_ty)
+                    crate::jvm::names::instanceof_internal_name(jvm_ty)
                 };
                 crate::trace_compiler!(
                     "value_classes",
@@ -16887,10 +16894,9 @@ impl<'a> Emitter<'a> {
                             );
                         }
                         let redundant = if physical_arg.is_jvm_scalar() {
-                            semantic_arg
-                                .non_null()
-                                .boxed_ref()
-                                .is_some_and(|source| ref_internal(source) == internal)
+                            semantic_arg.non_null().boxed_ref().is_some_and(|source| {
+                                crate::jvm::names::instanceof_internal_name(source) == internal
+                            })
                         } else {
                             type_descriptor(physical_arg) == type_descriptor(jvm_ty)
                         };
@@ -16993,7 +16999,7 @@ impl<'a> Emitter<'a> {
                             && target.is_reference()
                             && type_descriptor(at) != type_descriptor(target)
                         {
-                            let internal = ref_internal(target);
+                            let internal = crate::jvm::names::instanceof_internal_name(target);
                             if internal != "java/lang/Object" {
                                 let class = self.cw.class_ref(&internal);
                                 code.checkcast(class);
@@ -17644,7 +17650,9 @@ impl<'a> Emitter<'a> {
                             code.invokevirtual(method, 1, 0);
                         }
                         code.push_int(0, self.cw);
-                        let element_class = self.cw.class_ref(&ref_internal(et.non_null()));
+                        let element_class = self
+                            .cw
+                            .class_ref(&crate::jvm::names::instanceof_internal_name(et.non_null()));
                         code.anewarray(element_class);
                         let to_array = self.cw.methodref(
                             builder,
@@ -17669,7 +17677,9 @@ impl<'a> Emitter<'a> {
                 } else {
                     // Peel a nullable element's `?`: `Array<Int?>` = `Integer[]`, so the `anewarray` class
                     // is `java/lang/Integer` (the `?` only tells `Array.get`/`.set` to keep it boxed).
-                    let ci = self.cw.class_ref(&ref_internal(et.non_null()));
+                    let ci = self
+                        .cw
+                        .class_ref(&crate::jvm::names::instanceof_internal_name(et.non_null()));
                     code.anewarray(ci);
                 }
             }
@@ -17720,8 +17730,12 @@ impl<'a> Emitter<'a> {
                 let ejvm = ir_ty_to_jvm(elem);
                 code.getfield(f, slot_words(ejvm) as i32);
                 // An `ObjectRef.element` is typed `Object`; narrow to the boxed value's reference type.
-                if ejvm.is_reference() && ref_internal(ejvm) != "java/lang/Object" {
-                    let cc = self.cw.class_ref(&ref_internal(ejvm));
+                if ejvm.is_reference()
+                    && crate::jvm::names::instanceof_internal_name(ejvm) != "java/lang/Object"
+                {
+                    let cc = self
+                        .cw
+                        .class_ref(&crate::jvm::names::instanceof_internal_name(ejvm));
                     code.checkcast(cc);
                 }
             }
@@ -19082,7 +19096,13 @@ impl<'a> Emitter<'a> {
         {
             if matches!(to, IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf) {
                 let jvm_ty = ir_ty_to_jvm(type_operand);
-                (!jvm_ty.is_jvm_scalar()).then(|| (*to, *arg, ref_internal(jvm_ty)))
+                (!jvm_ty.is_jvm_scalar()).then(|| {
+                    (
+                        *to,
+                        *arg,
+                        crate::jvm::names::instanceof_internal_name(jvm_ty),
+                    )
+                })
             } else {
                 None
             }
@@ -19733,7 +19753,9 @@ impl<'a> Emitter<'a> {
             Ty::Obj(n, _) => {
                 VerifType::ObjectName(crate::jvm::names::classfile_internal_name(&n.render()))
             }
-            Ty::Nullable(_) | Ty::PlatformNullable(_) => VerifType::ObjectName(ref_internal(ty)),
+            Ty::Nullable(_) | Ty::PlatformNullable(_) => {
+                VerifType::ObjectName(crate::jvm::names::instanceof_internal_name(ty))
+            }
             Ty::Null => VerifType::Null,
             _ => VerifType::Top,
         }
@@ -20059,36 +20081,6 @@ fn emit_num_conv(from: Ty, to: Ty, code: &mut CodeBuilder) {
         Ty::Short => code.i2s(),
         Ty::Char => code.i2c(),
         _ => {}
-    }
-}
-
-fn ref_internal(t: Ty) -> String {
-    match t {
-        Ty::String => "java/lang/String".to_string(),
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) if inner.is_unsigned() => match *inner {
-            Ty::UByte => "kotlin/UByte".to_string(),
-            Ty::UShort => "kotlin/UShort".to_string(),
-            Ty::UInt => "kotlin/UInt".to_string(),
-            Ty::ULong => "kotlin/ULong".to_string(),
-            _ => unreachable!("is_unsigned accepts only the four unsigned scalar types"),
-        },
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner
-            .boxed_ref()
-            .and_then(Ty::obj_internal)
-            .map(|name| crate::jvm::names::classfile_internal_name(&name.render()))
-            .unwrap_or_else(|| ref_internal(*inner)),
-        // An array's reference identity is its descriptor (`[I`, `[Ljava/lang/String;`) — checked before
-        // the `Obj` arm since arrays are now `Obj("kotlin/Array")`/`Obj("kotlin/IntArray")` too.
-        t if t.is_array() => type_descriptor(t),
-        // Erase a Kotlin built-in name (`kotlin/collections/MutableList`) to its JVM identity here at the
-        // bytecode boundary, so `instanceof`/`checkcast`/method-owner refs never leak a Kotlin-only name.
-        Ty::Obj(n, _) => crate::jvm::names::classfile_internal_name(&n.render()),
-        // A function type's reference identity is its `kotlin/jvm/functions/FunctionN` interface, so
-        // `x is Function1<*, *>` / `x as (A) -> B` test/cast against that class, not `Object`.
-        Ty::Fun(signature) => crate::jvm::names::function_interface_internal_name(
-            signature.params.len() + usize::from(signature.suspend),
-        ),
-        _ => "java/lang/Object".to_string(),
     }
 }
 
