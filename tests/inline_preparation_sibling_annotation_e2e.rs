@@ -17,6 +17,43 @@
 
 use super::common;
 
+/// Compare the COMPLETE diagnostic set of both compilers — count, file, line, column, message and
+/// order. A nonzero-exit or substring assertion passes on an unrelated rejection, which is how a
+/// "both compilers agree" claim goes stale.
+fn expect_identical_rejection(result: &common::CompilerDiagnosticResult, tag: &str) {
+    let rendered = format!("{}{}", result.krusty_stdout, result.krusty_stderr);
+    let krusty = common::compiler_errors(&rendered);
+    let reference = common::compiler_errors(&result.reference_stderr);
+    assert_ne!(
+        result.reference_code, 0,
+        "{tag}: kotlinc accepted the fixture: {}",
+        result.reference_stderr
+    );
+    assert_ne!(result.krusty_code, 0, "{tag}: krusty accepted: {rendered}");
+    assert!(
+        !reference.is_empty(),
+        "{tag}: kotlinc rejected with no parseable diagnostic: {}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        krusty, reference,
+        "{tag}: diagnostics differ.\nkrusty:  {krusty:#?}\nkotlinc: {reference:#?}"
+    );
+}
+
+/// Run one fixture under BOTH compilers and require the same `box()` value.
+///
+/// `expect_box_ok_files_with_stdlib` alone only proves krusty agrees with itself. These shapes are
+/// about matching the reference compiler, so it must run the identical source.
+fn both_compilers_box(main: &str, stem: &str) {
+    let reference = common::kotlinc_box_result(main);
+    assert_eq!(
+        reference, "OK",
+        "{stem}: the reference compiler disagrees: {reference}"
+    );
+    common::expect_box_ok_files_with_stdlib(&[("Main.kt", main)], stem);
+}
+
 /// The crashing shape, reduced: one argument-bearing annotation, one inline sibling.
 #[test]
 fn an_inline_member_does_not_crash_an_annotated_sibling() {
@@ -30,7 +67,7 @@ fun box(): String {\n\
 \x20   val decorated = Store().decorate { \"made-\" }\n\
 \x20   return if (decorated == \"made-t\") \"OK\" else \"FAIL: \" + decorated\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "inline_sibling_suppress");
+    both_compilers_box(MAIN, "inline_sibling_suppress");
 }
 
 /// The annotation itself is irrelevant — any application that carries arguments releases the same
@@ -47,7 +84,7 @@ fun box(): String {\n\
 \x20   val decorated = Store().decorate { \"made-\" }\n\
 \x20   return if (decorated == \"made-t\") \"OK\" else \"FAIL: \" + decorated\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "inline_sibling_deprecated");
+    both_compilers_box(MAIN, "inline_sibling_deprecated");
 }
 
 /// The control that isolates the inline member as the trigger: the same annotated method in a class
@@ -64,7 +101,7 @@ fun box(): String {\n\
 \x20   val decorated = Store().decorate { \"made-\" }\n\
 \x20   return if (decorated == \"made-t\") \"OK\" else \"FAIL: \" + decorated\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "no_inline_sibling");
+    both_compilers_box(MAIN, "no_inline_sibling");
 }
 
 /// Skipping released syntax must not skip real checking: an annotation argument of the wrong type is
@@ -78,14 +115,5 @@ fn a_bad_annotation_argument_is_still_rejected_beside_an_inline_member() {
 \x20   inline fun decorate(make: () -> String): String = make() + tag()\n\
 }\n";
     let result = common::compiler_diagnostics(&[("Main.kt", MAIN)], &[]);
-    assert_ne!(
-        result.reference_code, 0,
-        "kotlinc must reject an Int where @Suppress takes String: {}",
-        result.reference_stderr
-    );
-    assert_ne!(
-        result.krusty_code, 0,
-        "krusty accepted a mistyped annotation argument: {}{}",
-        result.krusty_stdout, result.krusty_stderr
-    );
+    expect_identical_rejection(&result, "a bad annotation argument beside an inline member");
 }
