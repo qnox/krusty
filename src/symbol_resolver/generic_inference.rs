@@ -1257,8 +1257,38 @@ pub(crate) fn infer_generic_call_bindings_from_symbols(
     actuals: impl IntoIterator<Item = (usize, Ty, bool)>,
     vararg_index: Option<usize>,
 ) -> GSigBinds {
-    let mut inferred =
-        infer_generic_call_constraints_from_symbols(source, generic_sig, actuals, vararg_index);
+    infer_generic_call_bindings_with_receiver_from_symbols(
+        source,
+        generic_sig,
+        None,
+        actuals,
+        vararg_index,
+    )
+}
+
+/// The same solve with an extension RECEIVER contributing to it.
+///
+/// The receiver belongs in the constraint set, not in a second pass over the result. A value
+/// parameter mentions a formal in an invariant position and fixes it exactly; an extension receiver
+/// only requires that the receiver be assignable to the formal's instantiation, which is a LOWER
+/// bound. Unifying the receiver after the arguments have already bound a formal cannot express that
+/// — it either overwrites argument evidence or is discarded by it, depending on which ran last.
+/// Solving both together lets the formal take the join of what the receiver and the arguments each
+/// require.
+pub(crate) fn infer_generic_call_bindings_with_receiver_from_symbols(
+    source: &dyn SymbolSource,
+    generic_sig: &GenericSig,
+    actual_receiver: Option<Ty>,
+    actuals: impl IntoIterator<Item = (usize, Ty, bool)>,
+    vararg_index: Option<usize>,
+) -> GSigBinds {
+    let mut inferred = infer_generic_call_constraints_with_receiver_from_symbols(
+        source,
+        generic_sig,
+        actual_receiver,
+        actuals,
+        vararg_index,
+    );
     let tightest_upper = inferred.tightest_upper_bindings(source);
     for formal in inferred.upper_only {
         let binding = tightest_upper.get(&formal).copied().unwrap_or(Ty::Nothing);

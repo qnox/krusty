@@ -43,6 +43,7 @@ mod dependency_platform;
 mod finalized_projection;
 mod interface_delegation;
 mod invoke_selection;
+mod generic_call_bindings;
 mod lambda_expectation;
 mod lambda_returns;
 mod local_capture_dependencies;
@@ -54395,89 +54396,6 @@ impl<'a> Checker<'a> {
         )
     }
 
-    fn merge_mapped_generic_argument_bindings(
-        &self,
-        overload: &crate::libraries::FunctionInfo,
-        args_and_partial: (&[ExprId], &[Option<Ty>]),
-        argument_map: &[usize],
-        named_whole_array_varargs: &[bool],
-        explicit_type_arguments: &[Ty],
-        bindings: &mut crate::symbol_resolver::GSigBinds,
-    ) {
-        let (args, arg_tys) = args_and_partial;
-        let semantic = overload.semantic_signature();
-        let source = self.fed_source();
-        let inferred = crate::symbol_resolver::infer_generic_call_bindings_from_symbols(
-            &source,
-            &semantic,
-            argument_map
-                .iter()
-                .copied()
-                .zip(arg_tys)
-                .enumerate()
-                .filter_map(|(argument, (parameter, actual))| {
-                    if self
-                        .unbound_contextual_result_signature(*args.get(argument)?)
-                        .is_some()
-                    {
-                        return None;
-                    }
-                    let actual = (*actual)?;
-                    let whole_array = named_whole_array_varargs
-                        .get(argument)
-                        .copied()
-                        .unwrap_or(false)
-                        || self.file.is_spread_arg(args[argument]);
-                    Some((parameter, actual, whole_array))
-                }),
-            overload.call_sig.vararg_index,
-        );
-        crate::symbol_resolver::merge_generic_bindings(
-            &semantic,
-            explicit_type_arguments,
-            bindings,
-            inferred,
-        );
-    }
-
-    fn mapped_generic_call_bindings(
-        &self,
-        overload: &crate::libraries::FunctionInfo,
-        receiver: Option<Ty>,
-        args_and_partial: (&[ExprId], &[Option<Ty>]),
-        argument_map: &[usize],
-        named_whole_array_varargs: &[bool],
-        type_args: &[Ty],
-    ) -> crate::symbol_resolver::GSigBinds {
-        let (args, arg_tys) = args_and_partial;
-        let semantic = overload.semantic_signature();
-        let mut bindings = crate::symbol_resolver::seeded_gsig_binds(&semantic, type_args);
-        let source = self.fed_source();
-        // Arguments bind before the receiver. A value parameter mentions a formal in an INVARIANT
-        // position and therefore fixes it exactly, while an extension receiver only requires that
-        // the receiver be assignable to the formal's instantiation — it is a lower bound, not an
-        // equation. Binding the receiver first pinned `P` to the receiver's own class, so
-        // `App().install(pluginOfPipe) { … }` judged `Plug<Pipe, Cfg>` against `Plug<App, B>` and
-        // declined the overload, leaving its lambda unshaped. The receiver now supplies only the
-        // formals the arguments leave open.
-        self.merge_mapped_generic_argument_bindings(
-            overload,
-            (args, arg_tys),
-            argument_map,
-            named_whole_array_varargs,
-            type_args,
-            &mut bindings,
-        );
-        if let (Some(receiver), Some(receiver_shape)) = (receiver, semantic.receiver) {
-            crate::symbol_resolver::unify_ty_from_symbols(
-                &source,
-                receiver_shape,
-                receiver,
-                &mut bindings,
-            );
-        }
-        bindings
-    }
 
     fn lambda_overload_partially_applicable(
         &self,
@@ -54836,6 +54754,7 @@ impl<'a> Checker<'a> {
         let fixed_before_argument_merge = expectation_binds.clone();
         self.merge_mapped_generic_argument_bindings(
             overload,
+            receiver,
             (args, arg_tys),
             argument_map,
             whole_array_varargs,

@@ -170,3 +170,176 @@ fun bad() {{\n\
     let result = common::compiler_diagnostics(&[("Main.kt", &main)], &[]);
     expect_identical_rejection(&result, "a member the shaped receiver lacks");
 }
+
+/// Receiver and argument each supply a LOWER bound for the same formal, and neither is the other.
+///
+/// This is the case a separate receiver unification cannot express: whichever ran last would win,
+/// binding `T` to `App` or to `Cfg`. Solved together, `T` takes the join of both. The call only
+/// compiles if that join is reached, so acceptance is the assertion.
+#[test]
+fn a_receiver_and_an_argument_join_into_one_formal() {
+    let main = format!(
+        "{DECLARATIONS}\
+fun <T : Any> T.pair(other: T): String = \"paired\"\n\
+fun box(): String {{\n\
+\x20   val joined = App().pair(Cfg())\n\
+\x20   return if (joined == \"paired\") \"OK\" else \"FAIL: \" + joined\n\
+}}\n"
+    );
+    both_compilers_box(&main, "receiver_argument_join");
+}
+
+/// The formal appears inside a VARIANT shell on the argument side. `List<out T>` admits a
+/// `List<Pipe>` for `T = Pipe`, and the receiver `App` is assignable to that — so the shell must be
+/// read as a lower bound too, not turned into an equation that pins `T` to `App`.
+#[test]
+fn a_formal_inside_a_variant_shell_still_admits_the_receiver() {
+    let main = format!(
+        "{DECLARATIONS}\
+fun <T : Any> T.among(items: List<T>): Int = items.size\n\
+fun box(): String {{\n\
+\x20   val seen = App().among(listOf<Pipe>(App(), App()))\n\
+\x20   return if (seen == 2) \"OK\" else \"FAIL: \" + seen\n\
+}}\n"
+    );
+    both_compilers_box(&main, "variant_shell_receiver");
+}
+
+/// An INVARIANT argument fixes the formal to something the receiver is not. Solving receiver and
+/// arguments together must still REJECT this — a lower bound is not permission to ignore the
+/// argument.
+///
+/// Both compilers reject, and their diagnostics are recorded exactly rather than compared, because
+/// they disagree about more than wording: kotlinc keeps `P` bound from the RECEIVER and reports the
+/// argument against `Plug<App, …>`, while krusty binds `P` from the formal's bound and reports it
+/// against `Plug<Pipe, Any>`. That divergence is not introduced here — it is what the rejecting
+/// path does on both sides of this change — and converging it is its own work. What this fixture
+/// pins is that the call is refused, and by exactly these diagnostics, so a future change to the
+/// solve cannot start accepting it unnoticed.
+#[test]
+fn a_receiver_the_invariant_argument_excludes_is_still_rejected() {
+    let main = format!(
+        "{DECLARATIONS}\
+class Other : Pipe\n\
+\n\
+object OtherPlug : Plug<Other, Cfg> {{\n\
+\x20   override fun make(): Cfg = Cfg()\n\
+}}\n\
+\n\
+fun <P : Pipe, B : Any> P.install(plugin: Plug<P, B>, configure: B.() -> Unit) {{\n\
+\x20   plugin.make().configure()\n\
+}}\n\
+fun probe() {{\n\
+\x20   App().install(OtherPlug) {{ json() }}\n\
+}}\n"
+    );
+    let result = common::compiler_diagnostics(&[("Main.kt", &main)], &[]);
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+    assert_eq!(common::compiler_errors(&result.krusty_stdout), []);
+    assert_eq!(
+        common::compiler_errors(&result.krusty_stderr),
+        [
+            common::CompilerError {
+                file: "Main.kt".to_string(),
+                line: 31,
+                column: 19,
+                message: "argument type mismatch: actual type is 'OtherPlug', but \
+                          'Plug<Pipe, Any>' was expected."
+                    .to_string(),
+            },
+            common::CompilerError {
+                file: "Main.kt".to_string(),
+                line: 31,
+                column: 32,
+                message: "unresolved reference 'json'.".to_string(),
+            },
+        ]
+    );
+    assert_eq!(
+        common::compiler_errors(&result.reference_stderr),
+        [
+            common::CompilerError {
+                file: "Main.kt".to_string(),
+                line: 31,
+                column: 11,
+                message: "cannot infer type for type parameter 'B'. Specify it explicitly."
+                    .to_string(),
+            },
+            common::CompilerError {
+                file: "Main.kt".to_string(),
+                line: 31,
+                column: 19,
+                message: "argument type mismatch: actual type is 'OtherPlug', but \
+                          'Plug<App, uninferred B (of fun <P : Pipe, B : Any> P.install)>' was \
+                          expected."
+                    .to_string(),
+            },
+            common::CompilerError {
+                file: "Main.kt".to_string(),
+                line: 31,
+                column: 30,
+                message: "cannot infer type for type parameter 'B'. Specify it explicitly."
+                    .to_string(),
+            },
+        ]
+    );
+}
+
+/// EXPLICIT type arguments fix the formals outright, so neither the receiver nor the argument may
+/// move them.
+#[test]
+fn explicit_type_arguments_still_fix_both_formals() {
+    let main = format!(
+        "{DECLARATIONS}\
+fun <P : Pipe, B : Any> P.install(plugin: Plug<P, B>, configure: B.() -> Unit) {{\n\
+\x20   plugin.make().configure()\n\
+}}\n\
+fun box(): String {{\n\
+\x20   val cfg = Cfg()\n\
+\x20   App().install<Pipe, Cfg>(Negotiation) {{ json() }}\n\
+\x20   cfg.json()\n\
+\x20   return if (cfg.tag == \"json\") \"OK\" else \"FAIL: \" + cfg.tag\n\
+}}\n"
+    );
+    both_compilers_box(&main, "explicit_type_arguments");
+}
+
+/// The formal's declared BOUND still constrains a receiver that is the only evidence for it: a
+/// receiver outside the bound is rejected rather than widening the formal to admit it.
+///
+/// Both compilers reject at the same position; kotlinc's message additionally enumerates why the
+/// candidate did not apply. That wording difference is general and predates this change, so both
+/// texts are recorded rather than matched.
+#[test]
+fn a_receiver_outside_the_formals_bound_is_still_rejected() {
+    let main = format!(
+        "{DECLARATIONS}\
+fun <T : Pipe> T.piped(): String = \"piped\"\n\
+fun probe() {{\n\
+\x20   Cfg().piped()\n\
+}}\n"
+    );
+    let result = common::compiler_diagnostics(&[("Main.kt", &main)], &[]);
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+    assert_eq!(common::compiler_errors(&result.krusty_stdout), []);
+    assert_eq!(
+        common::compiler_errors(&result.krusty_stderr),
+        [common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: 23,
+            column: 11,
+            message: "unresolved reference 'piped'.".to_string(),
+        }]
+    );
+    assert_eq!(
+        common::compiler_errors(&result.reference_stderr),
+        [common::CompilerError {
+            file: "Main.kt".to_string(),
+            line: 23,
+            column: 11,
+            message: "unresolved reference. None of the following candidates is applicable \
+                      because of a receiver type mismatch:"
+                .to_string(),
+        }]
+    );
+}
