@@ -220,7 +220,7 @@ impl BodyFirChecker<'_> {
                 nested.body.add_capture(FirCapture {
                     origin,
                     enclosing_depth: depth,
-                    source: binding.value,
+                    source: FirCaptureSource::Value(binding.value),
                     ty: binding.ty,
                     shared_cell: capture.shared_cell,
                 });
