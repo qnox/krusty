@@ -17,19 +17,33 @@
 
 use super::common;
 
-/// Compare the COMPLETE diagnostic set of both compilers — count, file, line, column, message and
-/// order. A nonzero-exit or substring assertion passes on an unrelated rejection, which is how a
-/// "both compilers agree" claim goes stale.
+
+/// Require that BOTH compilers reject the fixture with the identical diagnostic set.
+///
+/// The exit code is pinned to exactly 1, not merely nonzero: a panic exits 101, and a nonzero
+/// assertion would accept that as a rejection whenever the expected diagnostic happened to be
+/// printed before the crash — which is precisely the failure this fixture exists to catch, since
+/// the production change it guards replaced an assertion. The complete rendered contract is
+/// compared too: same count, file, line, column, message and order, with nothing error-shaped on
+/// stdout where the comparison would not see it.
 fn expect_identical_rejection(result: &common::CompilerDiagnosticResult, tag: &str) {
-    let rendered = format!("{}{}", result.krusty_stdout, result.krusty_stderr);
-    let krusty = common::compiler_errors(&rendered);
-    let reference = common::compiler_errors(&result.reference_stderr);
-    assert_ne!(
-        result.reference_code, 0,
-        "{tag}: kotlinc accepted the fixture: {}",
-        result.reference_stderr
+    assert_eq!(
+        result.krusty_code, 1,
+        "{tag}: krusty exited {} rather than rejecting the fixture: {}{}",
+        result.krusty_code, result.krusty_stdout, result.krusty_stderr
     );
-    assert_ne!(result.krusty_code, 0, "{tag}: krusty accepted: {rendered}");
+    assert_eq!(
+        result.reference_code, 1,
+        "{tag}: kotlinc exited {} rather than rejecting the fixture: {}",
+        result.reference_code, result.reference_stderr
+    );
+    assert_eq!(
+        common::compiler_errors(&result.krusty_stdout),
+        [],
+        "{tag}: krusty wrote diagnostics to stdout, where the comparison would miss them"
+    );
+    let krusty = common::compiler_errors(&result.krusty_stderr);
+    let reference = common::compiler_errors(&result.reference_stderr);
     assert!(
         !reference.is_empty(),
         "{tag}: kotlinc rejected with no parseable diagnostic: {}",
