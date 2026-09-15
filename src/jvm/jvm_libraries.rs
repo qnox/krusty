@@ -2158,12 +2158,13 @@ impl JvmLibraries {
             // owner, so nothing physical changes: the provider keeps the source name and exact physical
             // name as separate facts on the normalized member.
             //
-            // NOT the remaining mapped builtins, and not for want of anything here: kotlinc does not
-            // hide every Java method on a mapped type either. `JvmBuiltInsCustomizer` re-admits an
-            // explicit whitelist (`JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES`) over the builtins
-            // scope, and krusty has no equivalent — so widening to `kotlin/CharSequence` would wrongly
-            // drop `chars`/`codePoints`, to `kotlin/Enum` `name`/`ordinal`, and to `kotlin/Throwable`
-            // `getStackTrace`/`initCause`/`fillInStackTrace`/… , every one of which kotlinc keeps.
+            // NOT the remaining mapped builtins: kotlinc does not hide every Java method on a mapped
+            // type either. `JvmBuiltInsCustomizer` re-admits an explicit whitelist
+            // (`JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES`) over the builtins scope; krusty's
+            // exact provider-boundary counterpart lives in `mapped_builtin_member_status`.
+            // Widening the authoritative scope to `kotlin/CharSequence` before that policy covers the
+            // whole classifier would wrongly drop `chars`/`codePoints`, and doing the same for
+            // `kotlin/Enum` or `kotlin/Throwable` would drop members kotlinc keeps.
             // Leaving `kotlin/CharSequence` joined is also why whatever `java.lang.CharSequence` declares
             // still reaches `String` one rung up — `charAt` on every JDK, plus `getChars` as of JDK 25,
             // which added it as a `default` method. That is the price of keeping `chars`/`codePoints`,
