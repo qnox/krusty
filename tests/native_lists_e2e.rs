@@ -351,3 +351,71 @@ fn joining_with_an_argument_still_declines() {
         "joinToString",
     );
 }
+
+#[test]
+fn with_index_pairs_each_element_with_its_position() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   var r = \"\"\n\
+         \x20   for (iv in listOf(\"a\", \"b\", \"c\").withIndex()) r += \"${iv.index}:${iv.value};\"\n\
+         \x20   return if (r == \"0:a;1:b;2:c;\") \"OK\" else \"fail: $r\"\n\
+         }\n",
+        "WithIndex",
+        "OK",
+    );
+}
+
+#[test]
+fn a_with_index_walk_destructures_and_stops_where_it_is_told() {
+    // The walk is LAZY, as Kotlin's is: this loop leaves after two elements, and the three behind
+    // it are never asked for. An eager `withIndex` would answer the same string here — what it
+    // would not do is stop.
+    expect_native_box(
+        "fun test(xs: List<String>): String {\n\
+         \x20   var r = \"\"\n\
+         \x20   for ((i, x) in xs.withIndex()) {\n\
+         \x20       if (i > 1) break\n\
+         \x20       r += \"$i:$x;\"\n\
+         \x20   }\n\
+         \x20   return r\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val t = test(listOf(\"a\", \"b\", \"c\", \"d\", \"e\"))\n\
+         \x20   return if (t == \"0:a;1:b;\") \"OK\" else \"fail: $t\"\n\
+         }\n",
+        "WithIndexBreak",
+        "OK",
+    );
+}
+
+#[test]
+fn a_range_walks_with_an_index_the_same_way_a_list_does() {
+    // `withIndex` is declared on `Iterable`, so the source is whatever the runtime's own iteration
+    // dispatch can walk — and the index counts positions, not the values being walked.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   var r = \"\"\n\
+         \x20   for ((i, n) in (10..12).withIndex()) r += \"$i=$n;\"\n\
+         \x20   return if (r == \"0=10;1=11;2=12;\") \"OK\" else \"fail: $r\"\n\
+         }\n",
+        "WithIndexRange",
+        "OK",
+    );
+}
+
+#[test]
+fn an_indexed_value_is_a_data_class() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val one = listOf(\"a\").withIndex().iterator().next()\n\
+         \x20   val other = listOf(\"a\").withIndex().iterator().next()\n\
+         \x20   if (one != other) return \"fail equal\"\n\
+         \x20   if (one.hashCode() != other.hashCode()) return \"fail hash\"\n\
+         \x20   val rendered = \"$one\"\n\
+         \x20   if (rendered != \"IndexedValue(index=0, value=a)\") return \"fail render: $rendered\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "IndexedValueIsAData",
+        "OK",
+    );
+}

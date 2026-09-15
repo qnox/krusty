@@ -1985,6 +1985,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_lists_e2e.rs`
   (`a_single_element_list_is_not_a_vararg_call_of_length_one`).
 
+- **`withIndex()` is lazy, and yields a data class.** It answers an ITERABLE rather than a list:
+  Kotlin's is lazy, and the loop consuming it may stop early. The object it makes keeps the source
+  until something asks it for an iterator, and that iterator counts as it walks — so the index is a
+  position in the walk and not a property of what is being walked, which is what makes
+  `(10..12).withIndex()` count from zero. `IndexedValue` is a Kotlin data class, so its `equals`,
+  `hashCode` and `toString` are the data class's and not identity's, and `component1`/`component2`
+  answer the same two questions a destructuring asks.
+  Only an `Iterable` source is realized so far — an array or a `CharSequence` is not one of the
+  runtime's iterables yet and keeps declining.
+  Tests: `tests/native_lists_e2e.rs` (`with_index_pairs_each_element_with_its_position`,
+  `a_with_index_walk_destructures_and_stops_where_it_is_told`,
+  `a_range_walks_with_an_index_the_same_way_a_list_does`, `an_indexed_value_is_a_data_class`).
+
 - **A floating-point field compares and hashes by its BITS.** Kotlin's `Double.equals` is not
   `==`, and it disagrees with it in both directions: `NaN` equals itself, and `0.0` does not equal
   `-0.0`. A data class holding one therefore reinterprets the value as an integer of the same width

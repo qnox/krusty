@@ -1275,9 +1275,141 @@ KRef kt_list_iterator_next(KRef iterator) {
 
    `next` answers a reference for the same reason the question arises: a receiver typed by the
    interface has its element type erased, so what a caller there expects is the boxed element. */
+/* ---- withIndex ------------------------------------------------------------------------------ */
+
+/* `IndexedValue(index, value)`, Kotlin's own data class. Only `value` is a reference; the index is
+   an `Int` and the collector is told so. */
+typedef struct KIndexedValue {
+    KObjectHeader header;
+    KRef value;
+    kt_int index;
+} KIndexedValue;
+
+static const uint32_t kt_indexed_value_offsets[] = {offsetof(KIndexedValue, value)};
+
+static kt_boolean kt_indexed_value_equals(KRef self, KRef other);
+static kt_int kt_indexed_value_hash_code(KRef self);
+static KRef kt_indexed_value_to_string(KRef self);
+
+static const kt_fn kt_indexed_value_vtable[] = {(kt_fn)kt_indexed_value_equals,
+                                                (kt_fn)kt_indexed_value_hash_code,
+                                                (kt_fn)kt_indexed_value_to_string};
+
+const KType kt_type_indexed_value = {"kotlin.collections.IndexedValue",
+                                     sizeof("kotlin.collections.IndexedValue") - 1,
+                                     sizeof(KIndexedValue),
+                                     1,
+                                     0,
+                                     kt_indexed_value_offsets,
+                                     &kt_type_any,
+                                     kt_indexed_value_vtable,
+                                     3,
+                                     0};
+
+KRef kt_indexed_value(kt_int index, KRef value) {
+    /* `value` stays in the parameter across the allocation: it is its root. */
+    KIndexedValue *indexed =
+        (KIndexedValue *)kt_gc_allocate(&kt_type_indexed_value, sizeof(KIndexedValue));
+    indexed->index = index;
+    indexed->value = value;
+    return (KRef)indexed;
+}
+
+kt_int kt_indexed_value_index(KRef self) {
+    if (self == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    return ((const KIndexedValue *)self)->index;
+}
+
+KRef kt_indexed_value_value(KRef self) {
+    if (self == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    return ((const KIndexedValue *)self)->value;
+}
+
+/* A data class: equal by its components, which is what a program comparing two of them means. */
+static kt_boolean kt_indexed_value_equals(KRef self, KRef other) {
+    if (other == NULL || other->header.type != &kt_type_indexed_value) {
+        return 0;
+    }
+    const KIndexedValue *mine = (const KIndexedValue *)self;
+    const KIndexedValue *theirs = (const KIndexedValue *)other;
+    return mine->index == theirs->index && kt_equals(mine->value, theirs->value);
+}
+
+static kt_int kt_indexed_value_hash_code(KRef self) {
+    const KIndexedValue *indexed = (const KIndexedValue *)self;
+    return indexed->index * 31 + kt_hash_code(indexed->value);
+}
+
+static KRef kt_indexed_value_to_string(KRef self) {
+    const KIndexedValue *indexed = (const KIndexedValue *)self;
+    KRef text = kt_string_utf8("IndexedValue(index=", 19);
+    text = kt_string_plus(text, kt_to_string(kt_box_int(indexed->index)));
+    text = kt_string_plus(text, kt_string_utf8(", value=", 8));
+    text = kt_string_plus(text, kt_to_string(indexed->value));
+    return kt_string_plus(text, kt_string_utf8(")", 1));
+}
+
+/* What `withIndex()` answers: the source iterable, kept until somebody asks it for an iterator.
+   Lazy, because Kotlin's is and because the loop that consumes it may stop early. */
+typedef struct KWithIndex {
+    KObjectHeader header;
+    KRef source;
+} KWithIndex;
+
+static const uint32_t kt_with_index_offsets[] = {offsetof(KWithIndex, source)};
+
+const KType kt_type_with_index = {"kotlin.collections.IndexingIterable",
+                                  sizeof("kotlin.collections.IndexingIterable") - 1,
+                                  sizeof(KWithIndex),
+                                  1,
+                                  0,
+                                  kt_with_index_offsets,
+                                  &kt_type_any,
+                                  kt_any_vtable,
+                                  3,
+                                  0};
+
+/* The iterator it hands out: the source's own, plus the count. */
+typedef struct KIndexingIterator {
+    KObjectHeader header;
+    KRef source;
+    kt_int at;
+} KIndexingIterator;
+
+static const uint32_t kt_indexing_iterator_offsets[] = {offsetof(KIndexingIterator, source)};
+
+const KType kt_type_indexing_iterator = {"kotlin.collections.IndexingIterator",
+                                         sizeof("kotlin.collections.IndexingIterator") - 1,
+                                         sizeof(KIndexingIterator),
+                                         1,
+                                         0,
+                                         kt_indexing_iterator_offsets,
+                                         &kt_type_any,
+                                         kt_any_vtable,
+                                         3,
+                                         0};
+
+KRef kt_iterable_with_index(KRef iterable) {
+    KWithIndex *wrapper = (KWithIndex *)kt_gc_allocate(&kt_type_with_index, sizeof(KWithIndex));
+    wrapper->source = iterable;
+    return (KRef)wrapper;
+}
+
 KRef kt_iterable_iterator(KRef iterable) {
     if (iterable != NULL && iterable->header.type == &kt_type_list) {
         return kt_list_iterator(iterable);
+    }
+    if (iterable != NULL && iterable->header.type == &kt_type_with_index) {
+        KRef source = kt_iterable_iterator(((const KWithIndex *)iterable)->source);
+        KIndexingIterator *counting = (KIndexingIterator *)kt_gc_allocate(
+            &kt_type_indexing_iterator, sizeof(KIndexingIterator));
+        counting->source = source;
+        counting->at = 0;
+        return (KRef)counting;
     }
     return kt_range_iterator(iterable);
 }
@@ -1285,6 +1417,9 @@ KRef kt_iterable_iterator(KRef iterable) {
 kt_boolean kt_iterator_has_next(KRef iterator) {
     if (iterator != NULL && iterator->header.type == &kt_type_list_iterator) {
         return kt_list_iterator_has_next(iterator);
+    }
+    if (iterator != NULL && iterator->header.type == &kt_type_indexing_iterator) {
+        return kt_iterator_has_next(((const KIndexingIterator *)iterator)->source);
     }
     return kt_range_iterator_has_next(iterator);
 }
@@ -1376,6 +1511,15 @@ KRef kt_iterator_next(KRef iterator) {
     }
     if (iterator->header.type == &kt_type_list_iterator) {
         return kt_list_iterator_next(iterator);
+    }
+    if (iterator->header.type == &kt_type_indexing_iterator) {
+        KIndexingIterator *counting = (KIndexingIterator *)iterator;
+        /* The element is fetched BEFORE the index is bumped, and it stays in a local across the
+           allocation below so the collector sees it as a root. */
+        KRef element = kt_iterator_next(counting->source);
+        kt_int at = counting->at;
+        counting->at = at + 1;
+        return kt_indexed_value(at, element);
     }
     kt_long value = kt_range_iterator_next(iterator);
     if (iterator->header.type == &kt_type_long_iterator) {

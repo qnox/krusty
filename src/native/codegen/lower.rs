@@ -1251,6 +1251,22 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 target,
                 receiver: Some(receiver),
                 ..
+            }) if self.indexed_value_getter(target, receiver).is_some() => {
+                let name = self
+                    .indexed_value_getter(target, receiver)
+                    .expect("checked by the guard");
+                let answer = lists::indexed_value_getter_ty(&name);
+                match self.list_member(&name, receiver, &[], answer) {
+                    Some(realized) => realized,
+                    None => Err(format!(
+                        "`{name}` of a receiver that is not an indexed value"
+                    )),
+                }
+            }
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
             }) if self.list_getter(target, receiver).is_some() => {
                 let name = self
                     .list_getter(target, receiver)
@@ -1565,6 +1581,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                                 || self.pair_getter(*target, *receiver).is_some() =>
                         {
                             any()
+                        }
+                        Some(receiver)
+                            if self.indexed_value_getter(*target, *receiver).is_some() =>
+                        {
+                            let name = self
+                                .indexed_value_getter(*target, *receiver)
+                                .expect("checked by the guard");
+                            lists::indexed_value_getter_ty(&name)
                         }
                         Some(receiver) if self.list_getter(*target, *receiver).is_some() => Ty::Int,
                         _ => self.range_getter(*target)?.2,

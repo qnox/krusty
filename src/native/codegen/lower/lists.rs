@@ -103,6 +103,10 @@ fn interface_symbol(
         (IterationRole::Iterable, "forEach", 1) => {
             ("kt_iterable_for_each", vec![any(), any()], Ty::Unit)
         }
+        // `withIndex()` answers an ITERABLE, not a list: Kotlin's is lazy, and the loop consuming
+        // it may stop early. The object it makes keeps the source until something asks it for an
+        // iterator, and that iterator counts as it walks.
+        (IterationRole::Iterable, "withIndex", 0) => ("kt_iterable_with_index", vec![any()], any()),
         // `joinToString()` with every parameter left at its default, and no other form of it. The
         // stdlib declares six, all defaulted, and this backend has no `$default` synthetic of a
         // dependency to call — so the defaults would have to be written here, and the only one
@@ -115,6 +119,36 @@ fn interface_symbol(
         ),
         _ => return None,
     })
+}
+
+/// Whether a type is the `IndexedValue` a `withIndex` walk yields.
+fn is_indexed_value(ty: Ty) -> bool {
+    ty.non_null()
+        .obj_internal()
+        .is_some_and(|internal| internal.matches("kotlin/collections/IndexedValue"))
+}
+
+/// The runtime function answering one member of an `IndexedValue`.
+///
+/// `component1`/`component2` are what a destructuring reads, and are the same two questions under
+/// the names the convention uses. The index is an `Int` the generator must not box to ask about,
+/// which is why each signature is spelled out.
+fn indexed_value_symbol(name: &str, arity: usize) -> Option<(&'static str, Vec<Ty>, Ty)> {
+    Some(match (name, arity) {
+        ("getIndex" | "index" | "component1", 0) => {
+            ("kt_indexed_value_index", vec![any()], Ty::Int)
+        }
+        ("getValue" | "value" | "component2", 0) => ("kt_indexed_value_value", vec![any()], any()),
+        _ => return None,
+    })
+}
+
+/// The type one of those reads answers with: the index is an `Int`, the value a reference.
+pub(super) fn indexed_value_getter_ty(name: &str) -> Ty {
+    match indexed_value_symbol(name, 0) {
+        Some((_, _, answer)) => answer,
+        None => any(),
+    }
 }
 
 /// The runtime function answering one list member, with the types it is carried at.
@@ -277,6 +311,24 @@ impl BodyLowering<'_, '_, '_> {
     ///
     /// The receiver settles which objects the getter may be asked of, exactly as it does for a
     /// call. Returns the getter's name, so the caller answers it as an explicit call would.
+    /// `iv.index` / `iv.value` — a checked read of a dependency property the runtime answers.
+    ///
+    /// Returns the getter's name, so the caller can route it through [`Self::list_member`] exactly
+    /// as an explicit call to it would be.
+    pub(super) fn indexed_value_getter(
+        &self,
+        target: crate::fir::ExternalPropertyId,
+        receiver: u32,
+    ) -> Option<String> {
+        if !self.type_of(receiver).is_some_and(is_indexed_value) {
+            return None;
+        }
+        let property = self.file.classpath.external_property(target)?;
+        let getter = self.file.classpath.external_callable(property.getter)?;
+        indexed_value_symbol(&getter.callable.name, 0)?;
+        Some(getter.callable.name.clone())
+    }
+
     pub(super) fn list_getter(
         &self,
         target: crate::fir::ExternalPropertyId,
@@ -311,6 +363,10 @@ impl BodyLowering<'_, '_, '_> {
         }
         if is_pair(ty) {
             let (symbol, carried, answer) = pair_symbol(name, args.len())?;
+            return Some(self.list_call(symbol, &carried, answer, receiver, args, ret));
+        }
+        if is_indexed_value(ty) {
+            let (symbol, carried, answer) = indexed_value_symbol(name, args.len())?;
             return Some(self.list_call(symbol, &carried, answer, receiver, args, ret));
         }
         let role = ty

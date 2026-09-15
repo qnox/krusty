@@ -213,6 +213,16 @@ KRef kt_iterable_map(KRef iterable, KRef transform);
    is realized; a call that passes anything declines at the call site, where the argument it passed
    is still visible. */
 KRef kt_iterable_join_to_string(KRef iterable);
+
+/* `xs.withIndex()` and the pair it yields.
+   The result is an ITERABLE, not a list: `withIndex` is lazy in Kotlin, and the walk it wraps may
+   be one a program stops early. Iterating it counts as it goes and yields one `IndexedValue` per
+   element — a Kotlin data class, so its `equals`, `hashCode` and `toString` are the data class's
+   and not identity's. */
+KRef kt_iterable_with_index(KRef iterable);
+KRef kt_indexed_value(kt_int index, KRef value);
+kt_int kt_indexed_value_index(KRef self);
+KRef kt_indexed_value_value(KRef self);
 void kt_iterable_for_each(KRef iterable, KRef action);
 
 /* ---- lazy ---------------------------------------------------------------------------------- */

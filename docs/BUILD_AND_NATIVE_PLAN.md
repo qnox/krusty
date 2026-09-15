@@ -1566,6 +1566,13 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **`withIndex`, for 2599.** Lazy rather than eager, which cost nothing to do properly: the
+   object keeps the source and the iterator it hands out counts as it walks, so a loop that breaks
+   never asks for the rest. The four that came back are the `Iterable` sources; the array and
+   `CharSequence` ones want an array iterator and a string iterator this runtime does not have yet,
+   which is the next increment and unlocks more than `withIndex` — every `Iterable` member would
+   reach an array through the same dispatch.
+
    **A stale decline, for 2595.** A data class holding a `Double` had been declined with a reason
    that had stopped being true: "the runtime cannot render the value". It can — `krusty_fp.c`
    landed since, and `"${1.5}"` had been answering `1.5` for a while. The whole increment was
