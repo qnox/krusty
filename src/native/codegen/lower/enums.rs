@@ -42,7 +42,13 @@ impl<'a> FileLowering<'a> {
     /// Declare a slot per constant, plus the enum's own initializer, before any body is compiled.
     pub(super) fn declare_enum_entries(&mut self) -> Result<(), Unsupported> {
         for class in 0..self.ir.classes.len() as ClassId {
-            if self.ir.classes[class as usize].enum_entries.is_empty() {
+            // Enum-NESS, not "has constants". `enum class Empty` is a real Kotlin declaration with
+            // no entries, and keying off the entry list made it indistinguishable from a class
+            // that is not an enum at all — so it was skipped here and then panicked the moment
+            // `Empty.values()` looked itself up. Registering it gives the natural answers: no
+            // slots, so `values()` builds a zero-length array and `valueOf` finds no candidate and
+            // takes the failure path, which is what Kotlin specifies for both.
+            if !super::super::super::classes::is_enum(&self.ir.classes[class as usize]) {
                 continue;
             }
             let base = self.class_base(class).to_string();

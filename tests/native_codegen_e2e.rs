@@ -2291,6 +2291,27 @@ fn a_construction_may_leave_arguments_out() {
 }
 
 #[test]
+fn an_enum_with_no_constants_is_still_an_enum() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `enum class Empty` declares no constants and is a real Kotlin declaration all the same.
+    // Enum-ness was being read off the CONSTANT LIST, which makes this one indistinguishable from
+    // a class that is not an enum: it was skipped when slots were declared and then panicked the
+    // moment `values()` looked itself up. The answers fall out once it is registered — a
+    // zero-length array, and a `valueOf` with no candidate to find.
+    assert_eq!(
+        run("enum class Empty\n\
+             fun main() {\n\
+             \x20   println(Empty.values().size)\n\
+             \x20   println(Empty.values() === Empty.values())\n\
+             }\n"),
+        "0\nfalse\n"
+    );
+}
+
+#[test]
 fn an_enum_constant_may_have_a_body() {
     if host().is_none() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
