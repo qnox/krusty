@@ -859,6 +859,7 @@ pub(super) fn compact(file: &mut File) {
 
     remap_declarations(file, &expressions);
     file.retained_expr_spans.clear();
+    file.return_label_spans.remap(&statements, &expressions);
     file.value_operator_spans =
         remap_u32_map(std::mem::take(&mut file.value_operator_spans), &expressions);
     file.annotation_arg_names =

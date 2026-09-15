@@ -17,6 +17,7 @@ mod expressions;
 mod incdec;
 mod lexical_type_parameters;
 mod nesting;
+mod return_labels;
 pub(crate) use declaration_stream::visit_declaration_units_with_features;
 use lexical_type_parameters::LexicalTypeParameters;
 
@@ -6296,31 +6297,7 @@ impl<'a> Parser<'a> {
                     start,
                 )
             }
-            TokenKind::KwReturn => {
-                self.bump();
-                // `return@label` — a local return from the lambda carrying `label` (`return@forEach`).
-                let label = if self.at(TokenKind::At) {
-                    self.bump(); // '@'
-                    if self.at(TokenKind::Ident) {
-                        let l = self.text().to_string();
-                        self.bump();
-                        Some(l)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                let e = if self.at(TokenKind::Newline)
-                    || self.at(TokenKind::RBrace)
-                    || self.at(TokenKind::Eof)
-                {
-                    None
-                } else {
-                    Some(self.parse_expr())
-                };
-                self.finish_stmt(Stmt::Return(e, label), start)
-            }
+            TokenKind::KwReturn => self.parse_return_statement(start),
             TokenKind::Ident if self.keyword_text("break") => {
                 self.bump();
                 let label = self.parse_loop_label_ref();

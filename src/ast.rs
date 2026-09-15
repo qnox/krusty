@@ -1,9 +1,13 @@
 //! Index-based arena AST (data-oriented: no `Box`/`Rc` graph, all edges are `u32` ids into
 //! parallel `Vec`s, so a file's whole AST is one bulk-freeable allocation block).
 
+mod retained_defaults;
+mod return_labels;
 use crate::diag::Span;
 use crate::kt_string::{KtString, KtStringBuf};
 use crate::types::Visibility;
+use retained_defaults::{retain_class_default_spans, retain_param_default_spans};
+pub(crate) use return_labels::ReturnLabelSpans;
 
 mod call_shape;
 pub(crate) use call_shape::explicit_call_receiver;
@@ -1516,6 +1520,8 @@ pub struct File {
     /// Labels written on declaration statements (`label@ val …`, `label@ fun …`), keyed by the
     /// declaration statement. The value retains both spelling and exact label-token span.
     pub statement_labels: std::collections::HashMap<StmtId, (String, Span)>,
+    /// `@` token spans of this file's `return@label`s.
+    pub(crate) return_label_spans: ReturnLabelSpans,
     /// Parser-desugared member/index inc/dec value blocks whose access operands are deliberately
     /// shared between the read and write. Lowering spills the operands that semantic resolution
     /// proved are runtime values; package/classifier/`super` qualifiers have no value type and stay
@@ -1745,45 +1751,6 @@ pub struct File {
     pub data_copy_respects_ctor_visibility: bool,
 }
 
-fn retain_default_span(
-    default: Option<ExprId>,
-    expr_spans: &[Span],
-    retained: &mut std::collections::HashMap<ExprId, Span>,
-) {
-    let Some(default) = default else {
-        return;
-    };
-    if let Some(&span) = expr_spans.get(default.0 as usize) {
-        retained.insert(default, span);
-    }
-}
-
-fn retain_param_default_spans(
-    params: &[Param],
-    expr_spans: &[Span],
-    retained: &mut std::collections::HashMap<ExprId, Span>,
-) {
-    for param in params {
-        retain_default_span(param.default, expr_spans, retained);
-    }
-}
-
-fn retain_class_default_spans(
-    class: &ClassDecl,
-    expr_spans: &[Span],
-    retained: &mut std::collections::HashMap<ExprId, Span>,
-) {
-    for param in &class.props {
-        retain_default_span(param.default, expr_spans, retained);
-    }
-    for function in &class.methods {
-        retain_param_default_spans(&function.params, expr_spans, retained);
-    }
-    for constructor in &class.secondary_ctors {
-        retain_param_default_spans(&constructor.params, expr_spans, retained);
-    }
-}
-
 impl File {
     /// Release body arenas while retaining declaration metadata.
     pub fn release_body_arenas(&mut self) {
@@ -1812,6 +1779,8 @@ impl File {
         self.expr_end_lines = Vec::new();
         self.stmt_lines = Vec::new();
         self.value_operator_spans = Default::default();
+        // Both return-label span tables are keyed by the arenas released here.
+        self.return_label_spans.clear();
         self.assignment_target_spans = Default::default();
         self.incdec_access_operands = Default::default();
         self.call_arg_names = Default::default();

@@ -237,6 +237,16 @@ impl File {
         for (index, value) in self.stmt_spans.iter().copied().enumerate() {
             span(source, &format!("statement {index}"), value)?;
         }
+        // The return-label spans are an arena-keyed SIDE table, so they can dangle in a way the
+        // arenas themselves cannot: a key that outlived compaction names a slot that now belongs to
+        // another node, and the diagnostic would underline it.
+        if let Some(error) = self.return_label_spans.integrity_error(
+            self.stmt_arena.len(),
+            self.expr_arena.len(),
+            source.len(),
+        ) {
+            return Err(error);
+        }
         for (index, declaration) in self.decl_arena.iter().enumerate() {
             let label = format!("declaration {index}");
             match declaration {

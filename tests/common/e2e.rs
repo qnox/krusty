@@ -40,6 +40,41 @@ pub fn expect_true_e2e(tag: &str, src: &str, extra_cp: &[PathBuf]) {
     }
 }
 
+/// Assert that both compilers REJECT the fixture with the identical diagnostic set: same count, and
+/// the same file, line, column, message and order.
+///
+/// A nonzero-exit assertion is not enough on its own — it passes when krusty rejects the fixture for
+/// an unrelated reason, which is exactly how a "both compilers agree" claim goes stale.
+pub fn expect_identical_rejection(result: &CompilerDiagnosticResult, tag: &str) {
+    let stdout_errors = compiler_errors(&result.krusty_stdout);
+    let krusty = compiler_errors(&result.krusty_stderr);
+    let reference = compiler_errors(&result.reference_stderr);
+    assert_eq!(
+        result.reference_code, 1,
+        "{tag}: kotlinc exited {} rather than rejecting the fixture: {}",
+        result.reference_code, result.reference_stderr
+    );
+    assert_eq!(
+        result.krusty_code, 1,
+        "{tag}: krusty exited {} rather than rejecting the fixture: {}{}",
+        result.krusty_code, result.krusty_stdout, result.krusty_stderr
+    );
+    assert_eq!(
+        stdout_errors,
+        [],
+        "{tag}: krusty emitted errors on stdout instead of stderr"
+    );
+    assert!(
+        !reference.is_empty(),
+        "{tag}: kotlinc rejected without a parseable diagnostic: {}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        krusty, reference,
+        "{tag}: diagnostics differ.\nkrusty:    {krusty:#?}\nkotlinc:   {reference:#?}"
+    );
+}
+
 pub struct CompilerDiagnosticResult {
     pub krusty_code: i32,
     pub krusty_stdout: String,

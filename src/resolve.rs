@@ -34787,13 +34787,10 @@ impl<'a> Checker<'a> {
                 label,
                 self.lambda_returns.active_labels()
             );
-            self.diags.error(
-                self.file.stmt_spans[s.0 as usize],
-                format!(
-                    "return label '{}' does not denote an enclosing lambda",
-                    label.as_deref().unwrap_or_default()
-                ),
-            );
+            // The reference compiler reports an unresolvable label at the `@` token and words it
+            // `unresolved label.`, for an unknown name and for a name whose lambda does not enclose
+            // the return alike.
+            self.report_unresolved_statement_label(s);
             return;
         };
         self.stmt_return_targets.insert(s, target);
@@ -75590,13 +75587,7 @@ impl<'a> Checker<'a> {
                             label,
                             self.lambda_returns.active_labels()
                         );
-                        self.diags.error(
-                            self.span(e),
-                            format!(
-                                "return label '{}' does not denote an enclosing lambda",
-                                label.as_deref().unwrap_or_default()
-                            ),
-                        );
+                        self.report_unresolved_expression_label(e);
                         return self.set(e, Ty::Error);
                     }
                 };
