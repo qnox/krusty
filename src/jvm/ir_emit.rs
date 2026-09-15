@@ -20078,6 +20078,12 @@ fn ref_internal(t: Ty) -> String {
         Ty::Fun(signature) => crate::jvm::names::function_interface_internal_name(
             signature.params.len() + usize::from(signature.suspend),
         ),
+        // `Unit` is a real class with one instance, so `x is Unit` is a real question about the
+        // object. Without this arm it fell to the erasure below and asked `instanceof
+        // java/lang/Object`, which every non-null value passes.
+        Ty::Unit => "kotlin/Unit".to_string(),
+        // Everything left is erased: an unbounded type parameter tests against `Object`, which is
+        // what Kotlin's erasure means and what kotlinc emits.
         _ => "java/lang/Object".to_string(),
     }
 }
