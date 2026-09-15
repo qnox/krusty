@@ -1985,6 +1985,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_lists_e2e.rs`
   (`a_single_element_list_is_not_a_vararg_call_of_length_one`).
 
+- **A primitive's member, asked of a value that arrived as an object.** Two shapes on the native
+  target, and what separates them is who knows which primitive is in the box.
+  `n.toInt()` where `n` is a `Number`: the site could type it only as `Number`, so the DESCRIPTOR
+  is the only thing that knows, and the runtime reads it. Kotlin's own conversion rules hold —
+  a floating-point source saturates to the target's nearest end, `NaN` answers zero, and a
+  narrower integer target goes through `Int` first — none of which is a C cast.
+  `x++` where `x` is an `Int?`: the frontend selected `Int.inc()`, so the owner already says what
+  is in the box and the receiver is taken at that type directly. It must NOT make the round trip
+  through a reference: boxing reads the source's own type and unboxing reads the target's, so a
+  disagreement between them comes back as changed bits rather than as a decline.
+  A step wraps in the width of the type it steps, `Byte.MAX_VALUE.inc()` being `Byte.MIN_VALUE`.
+  Tests: `tests/native_boxed_numbers_e2e.rs`
+  (`a_number_holding_a_double_saturates_and_answers_zero_for_nan`,
+  `a_number_narrows_through_int_the_way_kotlin_defines_it`,
+  `a_boxed_int_steps_through_the_member_it_selected`,
+  `a_step_wraps_in_the_width_of_the_type_it_steps`,
+  `the_conversion_table_agrees_with_the_jvm_backend`).
+
 - **The small-value box cache is keyed by the whole value.** Kotlin lets a program observe box
   identity in -128..127, so the native runtime keeps one static object per value in that range. The
   slot has to be chosen from the value itself and not from its low word: `Long.MIN_VALUE`'s low

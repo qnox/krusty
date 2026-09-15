@@ -299,8 +299,51 @@ pub(super) fn scalar_member(
         ("kotlin/String" | "kotlin/CharSequence", "get", [Ty::Int]) => {
             Some(("kt_string_get", vec![reference, Ty::Int], Ty::Char))
         }
+        // `kotlin.Number`'s six conversions. A site that could type its value only as a `Number`
+        // hands over a box, and which primitive is inside is the descriptor's answer — so the
+        // runtime reads it rather than the generator guessing from the static type.
+        ("kotlin/Number", "toByte", []) => Some(("kt_number_to_byte", vec![reference], Ty::Byte)),
+        ("kotlin/Number", "toShort", []) => {
+            Some(("kt_number_to_short", vec![reference], Ty::Short))
+        }
+        ("kotlin/Number", "toInt", []) => Some(("kt_number_to_int", vec![reference], Ty::Int)),
+        ("kotlin/Number", "toLong", []) => Some(("kt_number_to_long", vec![reference], Ty::Long)),
+        ("kotlin/Number", "toFloat", []) => {
+            Some(("kt_number_to_float", vec![reference], Ty::Float))
+        }
+        ("kotlin/Number", "toDouble", []) => {
+            Some(("kt_number_to_double", vec![reference], Ty::Double))
+        }
         _ => None,
     }
+}
+
+/// `x++` on a primitive that arrived as an OBJECT, as the type it steps and the step itself.
+///
+/// `var i: Int? = 10; i++` selects `Int.inc()`, which the provider presents as a member of
+/// `java/lang/Integer` — the receiver is a box only because the site's static type was nullable,
+/// and what is in it is the very primitive the member was selected on. So this needs no descriptor
+/// read, unlike [`scalar_member`]'s `Number` conversions: the owner already says.
+pub(super) fn boxed_step(owner: &str, name: &str, params: &[Ty]) -> Option<(Ty, i64)> {
+    if !params.is_empty() {
+        return None;
+    }
+    let step = match name {
+        "inc" => 1,
+        "dec" => -1,
+        _ => return None,
+    };
+    let ty = match owner {
+        "java/lang/Byte" => Ty::Byte,
+        "java/lang/Short" => Ty::Short,
+        "java/lang/Integer" => Ty::Int,
+        "java/lang/Long" => Ty::Long,
+        "java/lang/Character" => Ty::Char,
+        "java/lang/Float" => Ty::Float,
+        "java/lang/Double" => Ty::Double,
+        _ => return None,
+    };
+    Some((ty, step))
 }
 
 /// The unsigned integer a value-class member is declared on, for an owner that names one.

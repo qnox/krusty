@@ -1593,3 +1593,6 @@ mod file_private_extension_scope_e2e;
 
 #[path = "native_callable_name_e2e.rs"]
 mod native_callable_name_e2e;
+
+#[path = "native_boxed_numbers_e2e.rs"]
+mod native_boxed_numbers_e2e;

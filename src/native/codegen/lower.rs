@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 mod arrays;
+mod boxed;
 mod defaults;
 mod enums;
 mod functions;
@@ -2188,6 +2189,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         if let Some(realized) =
                             self.pair_construction(&owner, &name, receiver, args)
                         {
+                            return realized;
+                        }
+                        // `x++` where `x` is an `Int?`: the member is the primitive's, and so is
+                        // the value, whatever it arrived carried as.
+                        if let Some(realized) = self.boxed_step(&owner, &name, params, receiver) {
                             return realized;
                         }
                         // A member that asks about a NUMBER rather than an object, carried as one:

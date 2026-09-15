@@ -1566,6 +1566,13 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **A primitive reached as an object, for 2538.** `Number.toInt()` and `x++` on an `Int?` look
+   like one problem and are two: the first has to read the descriptor because the site knows only
+   `Number`, the second must not, because the owner the member was selected on already says. The
+   first draft did the same thing for both — box the receiver, then unbox it at the owner's type —
+   and that is how `Long.MAX_VALUE.inc()` answered zero: the box was written by the source's type
+   and read by the target's, and nothing objected when they disagreed.
+
    **A box cache that lost the top half of a `Long`.** Found while bringing up `inc`/`dec` on a
    boxed primitive: a corpus case answered `Fail decLong`, and the reduction had no `inc` in it at
    all — two interpolated `Long`s were enough. The cache slot was picked with `(int)value`, so

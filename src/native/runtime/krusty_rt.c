@@ -483,6 +483,95 @@ KT_UNBOX(double, double_value, kt_double)
 
 #undef KT_UNBOX
 
+/* What is in a `Number` box, read through its descriptor. A floating-point source is kept as one
+   rather than folded into the integer, because `Double.toLong()` saturates where a cast would not
+   and `(long)NaN` is not a value C defines at all. */
+typedef struct KNumber {
+    kt_boolean is_real;
+    kt_long integer;
+    kt_double real;
+} KNumber;
+
+static KNumber kt_number_of(KRef value) {
+    if (value == NULL) {
+        KT_FAIL("krusty: null cannot be cast to a non-null type\n");
+    }
+    const KType *type = value->header.type;
+    KNumber number = {0, 0, 0.0};
+    if (type == &kt_type_byte) {
+        number.integer = value->as.byte_value;
+    } else if (type == &kt_type_short) {
+        number.integer = value->as.short_value;
+    } else if (type == &kt_type_int) {
+        number.integer = value->as.int_value;
+    } else if (type == &kt_type_long) {
+        number.integer = value->as.long_value;
+    } else if (type == &kt_type_float) {
+        number.is_real = 1;
+        number.real = value->as.float_value;
+    } else if (type == &kt_type_double) {
+        number.is_real = 1;
+        number.real = value->as.double_value;
+    } else {
+        KT_FAIL("krusty: a kotlin.Number member on a value that is not a number\n");
+    }
+    return number;
+}
+
+/* Kotlin's floating-point to integer conversion: `NaN` is zero and everything outside the target's
+   range clamps to its nearest end. C would make both of those undefined, so neither is a cast. */
+static kt_long kt_saturate_long(kt_double value) {
+    if (value != value) {
+        return 0;
+    }
+    if (value >= 9223372036854775808.0) {
+        return (kt_long)0x7fffffffffffffffLL;
+    }
+    if (value <= -9223372036854775808.0) {
+        return (kt_long)(-0x7fffffffffffffffLL - 1);
+    }
+    return (kt_long)value;
+}
+
+static kt_int kt_saturate_int(kt_double value) {
+    if (value != value) {
+        return 0;
+    }
+    if (value >= 2147483648.0) {
+        return (kt_int)0x7fffffff;
+    }
+    if (value <= -2147483648.0) {
+        return (kt_int)(-0x7fffffff - 1);
+    }
+    return (kt_int)value;
+}
+
+kt_long kt_number_to_long(KRef value) {
+    KNumber number = kt_number_of(value);
+    return number.is_real ? kt_saturate_long(number.real) : number.integer;
+}
+
+kt_int kt_number_to_int(KRef value) {
+    KNumber number = kt_number_of(value);
+    return number.is_real ? kt_saturate_int(number.real) : (kt_int)number.integer;
+}
+
+/* `Double.toShort()` is `toInt().toShort()` in Kotlin, and a wider integer simply truncates —
+   the same answer either way, which is why both go through `toInt` here. */
+kt_short kt_number_to_short(KRef value) { return (kt_short)kt_number_to_int(value); }
+
+kt_byte kt_number_to_byte(KRef value) { return (kt_byte)kt_number_to_int(value); }
+
+kt_float kt_number_to_float(KRef value) {
+    KNumber number = kt_number_of(value);
+    return number.is_real ? (kt_float)number.real : (kt_float)number.integer;
+}
+
+kt_double kt_number_to_double(KRef value) {
+    KNumber number = kt_number_of(value);
+    return number.is_real ? number.real : (kt_double)number.integer;
+}
+
 /* ---- lazy ---------------------------------------------------------------------------------- */
 
 typedef struct KLazy {

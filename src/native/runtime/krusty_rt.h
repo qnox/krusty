@@ -371,6 +371,19 @@ kt_short   kt_unbox_ushort(KRef value);
 kt_int     kt_unbox_uint(KRef value);
 kt_long    kt_unbox_ulong(KRef value);
 
+/* `kotlin.Number`'s six conversions, on a value reached as an OBJECT.
+   The site could type it only as a `Number`, so which primitive is in the box is the DESCRIPTOR's
+   answer and not the call's — reading the bits as the wrong one is what these exist to prevent.
+   Kotlin's own rules are kept: a floating-point source saturates and `NaN` answers zero, and a
+   narrower integer target goes through `Int` first. Not a number at all is a loud failure; the
+   frontend selected a member of `kotlin.Number`, so nothing else can be in the box. */
+kt_byte   kt_number_to_byte(KRef value);
+kt_short  kt_number_to_short(KRef value);
+kt_int    kt_number_to_int(KRef value);
+kt_long   kt_number_to_long(KRef value);
+kt_float  kt_number_to_float(KRef value);
+kt_double kt_number_to_double(KRef value);
+
 /* `toString` on each of the four, reading the bits as the value they stand for. */
 KRef kt_ubyte_to_string(kt_byte value);
 KRef kt_ushort_to_string(kt_short value);
