@@ -1566,6 +1566,30 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **Unsigned arrays: attempted, backed out, and why.** `an array of UInt`/`UByte` is seven
+   declines and looked like the cleanest increment left — four more `KT_ARRAY_TYPE` descriptors with
+   the strides the signed ones already use, four arms in `array_type`, done. Writing the tests first
+   is what stopped it, and this is the entry that says so rather than a branch nobody can see.
+   Two of the four programs fail on krusty's JVM BACKEND before the native one is reached.
+   `UByteArray(1)` is allocated as `int[]` and its element stored with `aastore`, so the verifier
+   rejects `box()` outright:
+
+       VerifyError: Bad type on operand stack … @9: aastore
+       Type integer (current frame, stack[2]) is not assignable to 'java/lang/Object'
+       locals: { '[I' }
+
+   Kotlin's `UByteArray` is a `byte[]`, so both the width and the opcode are wrong. A second program
+   dies earlier still, with `ClassFormatError: Illegal class name "Lkotlin/UByteArray;"` — a
+   descriptor where an internal name belongs, which is the same shape of defect as the `Unit`/
+   `Nothing` erasure #938 fixes.
+   And the semantics are not mine to settle. `(UIntArray(1) as Any) is IntArray` is FALSE on
+   Kotlin/Native, where the two are distinct classes, and on the JVM a `UIntArray` genuinely IS an
+   `int[]` at run time. Which answer a box test should expect is a question for the reference
+   compiler, and no kotlinc is provisioned in the environment I am working in — so writing the
+   expectation down would have been recording a guess as a fact.
+   So: not a small increment, and blocked on something I cannot measure here. The JVM defects want
+   their own change; the identity question wants kotlinc.
+
    **A ledger entry #897 retired, for 2647 — and a lesson about what CI actually builds.** Both
    conformance lanes went red on a head whose native lane is green locally, with one line of
    explanation: `super/kt4173_2.kt: listed in native_box_expected_failures.txt but passes now`.
