@@ -378,7 +378,12 @@ pub(super) fn scalar_member(
         };
     }
     match (kotlin_owner(owner), name, params) {
-        ("kotlin/String" | "kotlin/CharSequence", "get", [Ty::Int]) => {
+        // `s[i]`. It arrives under EITHER name for the reason [`kotlin_owner`] exists: a mapped
+        // builtin whose realization names a different physical member hands over that physical
+        // name, and `kotlin.CharSequence.get` is realized as `java.lang.CharSequence.charAt`. The
+        // Kotlin spelling still reaches here from a source that did not go through a realization,
+        // so both are the same member rather than one replacing the other.
+        ("kotlin/String" | "kotlin/CharSequence", "get" | "charAt", [Ty::Int]) => {
             Some(("kt_string_get", vec![reference, Ty::Int], Ty::Char))
         }
         // `s.subSequence(a, b)` is `s.substring(a, b)`; the return type only says less about the
