@@ -403,6 +403,15 @@ extern const KType kt_type_exception;
 extern const KType kt_type_runtime_exception;
 extern const KType kt_type_illegal_state_exception;
 extern const KType kt_type_illegal_argument_exception;
+extern const KType kt_type_assertion_error;
+extern const KType kt_type_null_pointer_exception;
+extern const KType kt_type_class_cast_exception;
+extern const KType kt_type_index_out_of_bounds_exception;
+extern const KType kt_type_arithmetic_exception;
+extern const KType kt_type_unsupported_operation_exception;
+extern const KType kt_type_number_format_exception;
+extern const KType kt_type_no_such_element_exception;
+extern const KType kt_type_concurrent_modification_exception;
 
 /* Allocate one. `message` may be NULL, which is Kotlin's `null` message. */
 KRef kt_throwable_new(const KType *type, KRef message);

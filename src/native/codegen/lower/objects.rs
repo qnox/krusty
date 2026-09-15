@@ -1427,19 +1427,40 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         args: &[u32],
         selected: Option<&[Ty]>,
     ) -> Result<Option<Value>, Unsupported> {
+        use super::super::super::intrinsics::ThrowableMessage;
         let message = match (args, selected) {
             ([], _) => None,
-            ([argument], Some([only])) if super::super::super::intrinsics::is_string(only) => {
-                Some(*argument)
+            ([argument], Some([only])) => {
+                match super::super::super::intrinsics::throwable_message(only) {
+                    Some(kind) => Some((*argument, *only, kind)),
+                    None => return Err(format!("this constructor of `{name}`")),
+                }
             }
             _ => return Err(format!("this constructor of `{name}`")),
         };
         let message = match message {
-            Some(argument) => {
-                let Some(value) = self.expression(argument)? else {
-                    if self.terminated {
-                        return Ok(None);
+            Some((argument, declared, kind)) => {
+                // A `Rendered` message is its `toString`, which is what the runtime's own renderer
+                // answers — so a scalar overload (`AssertionError(42)`) crosses as the box that
+                // renderer takes, and a reference goes straight to it.
+                let value = match kind {
+                    ThrowableMessage::Verbatim => self.expression(argument)?,
+                    ThrowableMessage::Rendered => {
+                        let value = self.coerce(argument, Ty::nullable(Ty::obj("kotlin/Any")))?;
+                        if self.terminated {
+                            return Ok(None);
+                        }
+                        let Some(value) = value else {
+                            return Err(format!("a `Unit` message for `{name}`"));
+                        };
+                        let _ = declared;
+                        self.runtime_call("kt_to_string", &[any()], any(), &[value])?
                     }
+                };
+                if self.terminated {
+                    return Ok(None);
+                }
+                let Some(value) = value else {
                     return Err(format!("a `Unit` message for `{name}`"));
                 };
                 value

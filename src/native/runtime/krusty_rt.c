@@ -2417,6 +2417,24 @@ KT_THROWABLE_TYPE(kt_type_illegal_state_exception, "kotlin.IllegalStateException
                   &kt_type_runtime_exception)
 KT_THROWABLE_TYPE(kt_type_illegal_argument_exception, "kotlin.IllegalArgumentException",
                   &kt_type_runtime_exception)
+KT_THROWABLE_TYPE(kt_type_assertion_error, "kotlin.AssertionError", &kt_type_error)
+KT_THROWABLE_TYPE(kt_type_null_pointer_exception, "kotlin.NullPointerException",
+                  &kt_type_runtime_exception)
+KT_THROWABLE_TYPE(kt_type_class_cast_exception, "kotlin.ClassCastException",
+                  &kt_type_runtime_exception)
+KT_THROWABLE_TYPE(kt_type_index_out_of_bounds_exception, "kotlin.IndexOutOfBoundsException",
+                  &kt_type_runtime_exception)
+KT_THROWABLE_TYPE(kt_type_arithmetic_exception, "kotlin.ArithmeticException",
+                  &kt_type_runtime_exception)
+KT_THROWABLE_TYPE(kt_type_unsupported_operation_exception, "kotlin.UnsupportedOperationException",
+                  &kt_type_runtime_exception)
+/* `NumberFormatException` is Kotlin's `IllegalArgumentException`, not a sibling of it. */
+KT_THROWABLE_TYPE(kt_type_number_format_exception, "kotlin.NumberFormatException",
+                  &kt_type_illegal_argument_exception)
+KT_THROWABLE_TYPE(kt_type_no_such_element_exception, "kotlin.NoSuchElementException",
+                  &kt_type_runtime_exception)
+KT_THROWABLE_TYPE(kt_type_concurrent_modification_exception,
+                  "kotlin.ConcurrentModificationException", &kt_type_runtime_exception)
 
 KRef kt_throwable_new(const KType *type, KRef message) {
     /* `message` stays in this parameter across the allocation: it is its root. */

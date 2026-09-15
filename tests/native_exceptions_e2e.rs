@@ -62,3 +62,50 @@ fn a_program_that_does_not_throw_is_unaffected() {
         "OK",
     );
 }
+
+#[test]
+fn an_assertion_error_reports_what_it_was_given() {
+    // `AssertionError` is the corpus's own failure signal, and its one-argument form takes `Any?`
+    // rather than `String?` — so the message is that value's `toString`, not the value itself.
+    expect_native_exit(
+        "fun box(): String = throw AssertionError(42)\n",
+        "AssertionErrorRendered",
+        134,
+        "kotlin.AssertionError: 42",
+    );
+}
+
+#[test]
+fn an_assertion_error_without_a_message_names_only_itself() {
+    expect_native_exit(
+        "fun box(): String = throw AssertionError()\n",
+        "AssertionErrorBare",
+        134,
+        "kotlin.AssertionError",
+    );
+}
+
+#[test]
+fn the_wider_hierarchy_is_chained_the_way_kotlin_chains_it() {
+    // Each of these is reachable by name and sits where Kotlin puts it. `NumberFormatException`
+    // under `IllegalArgumentException` rather than beside it is the one a `catch` will notice.
+    expect_native_exit(
+        "fun box(): String = throw NumberFormatException(\"not a number\")\n",
+        "NumberFormatThrown",
+        134,
+        "kotlin.NumberFormatException: not a number",
+    );
+}
+
+#[test]
+fn a_message_that_is_any_renders_where_a_string_message_passes_through() {
+    // The difference between the two constructor shapes, made observable: `Exception(null)` has NO
+    // message and reports the type alone, while `AssertionError(null)` reports the text `null`,
+    // because its parameter is `Any?` and the message is that value's `toString`.
+    expect_native_exit(
+        "fun box(): String = throw AssertionError(null)\n",
+        "AssertionErrorNullMessage",
+        134,
+        "kotlin.AssertionError: null",
+    );
+}

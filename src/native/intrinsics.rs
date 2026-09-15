@@ -32,6 +32,15 @@ fn kotlin_owner(owner: &str) -> &str {
         "java/lang/RuntimeException" => "kotlin/RuntimeException",
         "java/lang/IllegalStateException" => "kotlin/IllegalStateException",
         "java/lang/IllegalArgumentException" => "kotlin/IllegalArgumentException",
+        "java/lang/AssertionError" => "kotlin/AssertionError",
+        "java/lang/NullPointerException" => "kotlin/NullPointerException",
+        "java/lang/ClassCastException" => "kotlin/ClassCastException",
+        "java/lang/IndexOutOfBoundsException" => "kotlin/IndexOutOfBoundsException",
+        "java/lang/ArithmeticException" => "kotlin/ArithmeticException",
+        "java/lang/UnsupportedOperationException" => "kotlin/UnsupportedOperationException",
+        "java/lang/NumberFormatException" => "kotlin/NumberFormatException",
+        "java/util/NoSuchElementException" => "kotlin/NoSuchElementException",
+        "java/util/ConcurrentModificationException" => "kotlin/ConcurrentModificationException",
         "java/lang/Enum" => "kotlin/Enum",
         other => other,
     }
@@ -64,19 +73,49 @@ pub(super) fn throwable_descriptor(owner: crate::types::TypeName) -> Option<&'st
         "kotlin/IllegalStateException" => "kt_type_illegal_state_exception",
         "kotlin/IllegalArgumentException" => "kt_type_illegal_argument_exception",
         "kotlin/NotImplementedError" => "kt_type_not_implemented_error",
+        "kotlin/AssertionError" => "kt_type_assertion_error",
+        "kotlin/NullPointerException" => "kt_type_null_pointer_exception",
+        "kotlin/ClassCastException" => "kt_type_class_cast_exception",
+        "kotlin/IndexOutOfBoundsException" => "kt_type_index_out_of_bounds_exception",
+        "kotlin/ArithmeticException" => "kt_type_arithmetic_exception",
+        "kotlin/UnsupportedOperationException" => "kt_type_unsupported_operation_exception",
+        "kotlin/NumberFormatException" => "kt_type_number_format_exception",
+        "kotlin/NoSuchElementException" => "kt_type_no_such_element_exception",
+        "kotlin/ConcurrentModificationException" => "kt_type_concurrent_modification_exception",
         _ => return None,
     })
 }
 
-/// Is this `kotlin.String`, under either spelling and at either nullability?
+/// How a `Throwable` constructor's single parameter supplies the message.
+pub(super) enum ThrowableMessage {
+    /// `message: String?` — the string IS the message, and a `null` stays `null`.
+    Verbatim,
+    /// `message: Any?` — the message is its `toString`, which for `null` is `"null"`. This is
+    /// `AssertionError`'s only one-argument form, and the difference from [`Self::Verbatim`] is
+    /// observable exactly there: `AssertionError(null)` reports `null` where `Exception(null)`
+    /// reports no message at all.
+    Rendered,
+}
+
+/// Which message a one-argument `Throwable` constructor takes, or `None` for one that is not a
+/// message at all.
 ///
-/// `Throwable`'s constructors are told apart by their one parameter — a `message: String?` from a
-/// `cause: Throwable?` — and only the message one is realized here.
-pub(super) fn is_string(ty: &Ty) -> bool {
+/// `Throwable`'s constructors are told apart by this one parameter. A `cause: Throwable?` is the
+/// other one-argument form and answers `None`, because this `Throwable` has no cause field and
+/// accepting it would silently drop what the program passed.
+pub(super) fn throwable_message(ty: &Ty) -> Option<ThrowableMessage> {
     match ty {
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => is_string(inner),
-        Ty::Obj(owner, _) => kotlin_owner(&owner.render()) == "kotlin/String",
-        _ => false,
+        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => throwable_message(inner),
+        Ty::Obj(owner, _) => match kotlin_owner(&owner.render()) {
+            "kotlin/String" => Some(ThrowableMessage::Verbatim),
+            // A `cause`, under any name in the hierarchy.
+            name if throwable_descriptor(crate::types::type_name(name)).is_some() => None,
+            _ => Some(ThrowableMessage::Rendered),
+        },
+        // `AssertionError(42)` and its siblings: Java gives each width its own overload, and every
+        // one of them reports the value's text.
+        _ if ty.is_jvm_scalar() => Some(ThrowableMessage::Rendered),
+        _ => None,
     }
 }
 
