@@ -501,6 +501,7 @@ macro_rules! cache_stat {
 
 mod inline_plan_cache;
 
+pub(super) use inline_plan_cache::InlinePlanCacheInput;
 use inline_plan_cache::{global_plan_cache, PlanCache, PlanKey};
 
 /// Hit/miss counter for one cache, aggregated across every `Classpath` and worker thread (per-instance

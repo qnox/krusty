@@ -717,30 +717,25 @@ impl JvmLibraries {
         // Every candidate overload the provider builds computes a plan, so the decode below is
         // memoized per declaration. The key carries every physical input read by the decoder.
         let parameter_slots = callable_parameter_slots(&callable.physical_params);
-        let default_target = callable.default_realization.as_deref().map(|realization| {
-            (
-                realization.declaration_owner,
-                realization.name.as_str(),
-                realization.descriptor.as_str(),
-            )
-        });
         let generic_signature = callable
             .generic_sig
             .as_deref()
             .map(|signature| (signature.receiver, signature.ret));
-        if let Some(plan) = self.cp.cached_inline_plan(
-            callable.owner,
-            &callable.name,
-            &body_descriptor,
-            &parameter_slots,
-            callable.context_count,
-            callable.source_receiver,
-            &callable.params,
-            callable.ret,
-            callable.suspend,
+        let cache_input = crate::jvm::classpath::InlinePlanCacheInput {
+            owner: callable.owner,
+            name: &callable.name,
+            body_descriptor: &body_descriptor,
+            parameter_slots: &parameter_slots,
+            physical_parameters: &callable.physical_params,
+            context_count: callable.context_count,
+            source_receiver: callable.source_receiver,
+            semantic_parameters: &callable.params,
+            semantic_result: callable.ret,
+            suspend: callable.suspend,
             generic_signature,
-            default_target,
-        ) {
+            default_realization: callable.default_realization.as_deref(),
+        };
+        if let Some(plan) = self.cp.cached_inline_plan(cache_input) {
             return plan.map(|boxed| *boxed);
         }
         let mut decode_unavailable = false;
@@ -753,20 +748,8 @@ impl JvmLibraries {
         // Failed body or required metadata/member reads are transient. Do not globally cache one as
         // the stable declaration fact "this inline body has no recognized plan".
         if !decode_unavailable {
-            self.cp.memoize_inline_plan(
-                callable.owner,
-                &callable.name,
-                &body_descriptor,
-                &parameter_slots,
-                callable.context_count,
-                callable.source_receiver,
-                &callable.params,
-                callable.ret,
-                callable.suspend,
-                generic_signature,
-                default_target,
-                plan.clone().map(Box::new),
-            );
+            self.cp
+                .memoize_inline_plan(cache_input, plan.clone().map(Box::new));
         }
         plan
     }
