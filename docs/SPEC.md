@@ -1985,6 +1985,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_lists_e2e.rs`
   (`a_single_element_list_is_not_a_vararg_call_of_length_one`).
 
+- **A `fun interface` method may be an extension, and that changes nothing about the object.**
+  Kotlin lets the single abstract method take a receiver (`fun String.foo(): String`), and inside
+  the lambda implementing it `this` is that receiver. The receiver is a declared PARAMETER of the
+  interface method, so it arrives where every other argument does and the SAM thunk forwards it
+  with the rest. The generator used to decline the shape on the strength of a flag saying a
+  receiver was present, without asking whether that made any difference to it — it did not. Context
+  parameters still decline, because those are operands the object genuinely does not carry.
+  Tests: `tests/native_sam_e2e.rs`.
+
 - **What a parameter is CARRIED as comes from the record, not from reading the body.** A `var` a
   closure captures is replaced by a cell, and the parameter still says `Int` because `Int` is what
   the programmer wrote; believing the declaration truncates a pointer into a 32-bit parameter.

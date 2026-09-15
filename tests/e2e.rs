@@ -996,6 +996,8 @@ mod native_property_reference_e2e;
 mod native_ranges_e2e;
 #[path = "native_receiver_property_e2e.rs"]
 mod native_receiver_property_e2e;
+#[path = "native_sam_e2e.rs"]
+mod native_sam_e2e;
 #[path = "native_strings_e2e.rs"]
 mod native_strings_e2e;
 #[path = "native_tailrec_e2e.rs"]

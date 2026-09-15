@@ -1552,6 +1552,13 @@ before:**
    nor compares, and then the emitted Cranelift function, which is what the new `native` trace
    category exists for.
 
+   **The cheapest increment of the lane so far, for 2484.** A `fun interface` whose single abstract
+   method is an EXTENSION was declined by a flag — `has_receiver` — that nothing downstream needed:
+   the receiver is a declared parameter of the interface method, so the thunk was already forwarding
+   it with every other argument. Deleting the condition was the whole change, and 12 files passed.
+   Worth recording as a kind of decline to go looking for: one that tests a PROPERTY of a construct
+   rather than a capability the code lacks.
+
 #### Decided: Kotlin/Native's memory model, not the JVM's
 
 The native target reproduces **Kotlin/Native's** concurrency contract, not the JVM's. That follows
