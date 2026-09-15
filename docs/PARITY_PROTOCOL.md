@@ -2474,3 +2474,44 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   identically under krusty and kotlinc.
   `tests/same_file_custom_serializer_e2e.rs::a_class_valued_custom_serializer_is_constructed_with_its_argument_serializer`,
   `a_constructed_custom_serializer_composes_below_a_collection`.
+- **A class id is written literally when the descriptor shortcut cannot round-trip (fix).**
+  Every class id went into the string table as a descriptor carrying `DESC_TO_CLASS_ID`. A reader
+  expands that by stripping `L`/`;` and replacing EVERY `$` with `.`, which reproduces the class id
+  only while no simple name contains a `$` of its own. The serialization plugin generates a nested
+  class named `$serializer`, so krusty recorded `LOwner$$serializer;`, which expands to
+  `Owner..serializer` — a class id with a doubled separator, naming nothing. kotlinc writes
+  `Owner.$serializer` literally for exactly that reason. Metadata now consumes the resolved
+  `TypeName` identity: the name tree remembers each exact nested-child relation, including a simple
+  name that begins with `$`, and the encoder walks those relations to build the class id. It uses the
+  descriptor shortcut only when no actual name segment contains a literal `$`; otherwise the class
+  id is interned verbatim. The old descriptor-string-to-class-id recovery API is deleted, including
+  for sealed-subclass metadata. Ordinary nested classes (`Outer$Inner`) keep the shortcut and their
+  bytes are unchanged.
+  `src/metadata/type_encoder.rs::class_id_tests::a_nesting_separator_becomes_a_dot`,
+  `a_simple_name_may_begin_with_a_dollar`, `the_shortcut_is_taken_only_when_it_round_trips`,
+  `tests/serializer_metadata_class_id_e2e.rs::a_generated_serializer_records_kotlincs_class_id`,
+  `the_serializable_class_itself_still_records_its_own_class_id`.
+- **Every single-operand node hoists its suspension, not a subset (fix).** The suspend hoister
+  recurses through one IR node kind per arm. Source-reachable gaps included an enum lookup's name
+  (`enumValueOf<Level>(pickName())`) and the construction of the `Ref` holder that boxes a captured
+  mutable local (`var total = count()` where a closure captures `total`). Either left the suspension
+  where the state-machine flattener cannot split it, so the backend declined the whole function with
+  `this suspend-function shape is not yet supported by the IR backend` — a per-FILE verdict. The
+  second shape is ordinary Kotlin: a `var` initialized from a suspend call and captured by any lambda.
+  Both operands evaluate unconditionally before the node they feed, so both hoist to a preceding temp
+  exactly as the neighbouring arms do. Assigning the same captured local from a suspension LATER
+  needed nothing: that is a holder write, which already had its arm, and it is the control that
+  isolates the holder's construction as the gap. Found by listing every `IrExpr` variant, diffing it
+  against the arms the hoister handles, and compiling one fixture per variant that can carry a
+  sub-expression. `NewArray(size)` and bound `KClassLiteral(value)` are covered too; the remaining
+  unconditional one-child nodes (`RefGet`, `EnclosingInstance`, `LateinitInitialized`) now recurse
+  directly rather than relying on their current source constructors to supply pure operands. Before
+  hoisting, a suspending body also expands shared common-IR DAG operands into private per-use nodes.
+  That ownership step happens before lexical-scope and debug-line capture, so every cloned suspension
+  keeps authoritative side-table identity and a temp inserted for one parent never leaks into another.
+  `tests/suspend_single_operand_hoist_e2e.rs::an_enum_lookup_hoists_a_suspending_name`,
+  `a_captured_local_hoists_a_suspending_initializer`,
+  `a_captured_local_assigned_from_a_suspension_later_still_works`,
+  `an_enum_lookup_with_no_suspension_still_works`,
+  `src/jvm/suspend/hoisting.rs::tests::a_shared_operand_is_hoisted_independently_at_each_use`,
+  `every_remaining_single_operand_node_recurses`.

@@ -67,10 +67,15 @@ struct NameNode {
     parent: Option<NameId>,
     sep: u8,
     segment: std::sync::Arc<str>,
-    /// Lookup of the classifier owner encoded in this node's final segment. A successful lookup is
+    /// Exact classifier owner supplied by [`NameTree::nested_child_of`], encoded as `id + 1` (zero
+    /// means the node was not created through an explicit nested relation). Kept separate from the
+    /// textual cache below: a flattened spelling such as `Outer$$serializer` is ambiguous, while the
+    /// construction operation is not.
+    exact_nested_owner: AtomicU32,
+    /// Lookup of a classifier owner inferred from this node's final segment. A successful lookup is
     /// stored as `id + 1`, zero means not yet resolved, and [`NO_NESTED_OWNER`] means the segment has
-    /// no nested separator and therefore can never acquire an owner. A segment that does contain a
-    /// separator but whose owner is not interned remains uncached: another thread may intern it later.
+    /// no known textual relation. A separator whose owner is not interned remains uncached: another
+    /// thread may intern it later.
     nested_owner: AtomicU32,
 }
 
@@ -82,6 +87,7 @@ impl Clone for NameNode {
             parent: self.parent,
             sep: self.sep,
             segment: self.segment.clone(),
+            exact_nested_owner: AtomicU32::new(self.exact_nested_owner.load(Ordering::Relaxed)),
             nested_owner: AtomicU32::new(self.nested_owner.load(Ordering::Relaxed)),
         }
     }
@@ -335,6 +341,7 @@ impl Default for NameTree {
             parent: None,
             sep: 0,
             segment: std::sync::Arc::from(""),
+            exact_nested_owner: AtomicU32::new(0),
             nested_owner: AtomicU32::new(0),
         });
         let table = Box::new(Table::new(BASE as usize));
@@ -435,7 +442,14 @@ impl NameTree {
         segment.push_str(&owner_node.segment);
         segment.push('$');
         segment.push_str(nested);
-        self.child_or_insert(parent, owner_node.sep, &segment)
+        let child = self.child_or_insert(parent, owner_node.sep, &segment);
+        // This call carries an exact semantic relation that the flattened JVM segment alone cannot
+        // always recover: `Outer` + `$serializer` becomes `Outer$$serializer`, whose last `$` is
+        // part of the nested simple name. Publish that relation separately from the heuristic cache.
+        let encoded = owner.0 + 1;
+        let exact = &self.node(child).exact_nested_owner;
+        let _ = exact.compare_exchange(0, encoded, Ordering::Release, Ordering::Acquire);
+        child
     }
 
     /// Read-only counterpart of [`Self::nested_child_of`].
@@ -468,6 +482,12 @@ impl NameTree {
         for (sep, segment) in parts.into_iter().rev() {
             parent = self.child_or_insert(parent, sep, segment);
         }
+        let exact = other.node(id).exact_nested_owner.load(Ordering::Acquire);
+        if exact != 0 {
+            let owner = self.insert_from(other, NameId(exact - 1));
+            let cache = &self.node(parent).exact_nested_owner;
+            let _ = cache.compare_exchange(0, owner.0 + 1, Ordering::Release, Ordering::Acquire);
+        }
         parent
     }
 
@@ -484,6 +504,20 @@ impl NameTree {
         let mut parent = Self::ROOT;
         for segment in parts.into_iter().rev() {
             parent = self.existing_child_of(parent, segment)?;
+        }
+        let exact = other.node(id).exact_nested_owner.load(Ordering::Acquire);
+        if exact != 0 {
+            let existing = self.node(parent).exact_nested_owner.load(Ordering::Acquire);
+            // A read-only path lookup cannot attach semantic nesting metadata to the destination.
+            // A tree populated from classfile paths may therefore have the same identity with no
+            // recorded relation. Accept that path; reject only a relation that is explicitly known
+            // to name a different owner.
+            if existing != 0 {
+                let owner = self.existing_from(other, NameId(exact - 1))?;
+                if existing != owner.0 + 1 {
+                    return None;
+                }
+            }
         }
         Some(parent)
     }
@@ -672,6 +706,10 @@ impl NameTree {
     #[inline]
     pub fn nested_owner(&self, nested: NameId) -> Option<NameId> {
         let node = self.node(nested);
+        let exact = node.exact_nested_owner.load(Ordering::Acquire);
+        if exact != 0 {
+            return Some(NameId(exact - 1));
+        }
         let cached = node.nested_owner.load(Ordering::Acquire);
         if cached == NO_NESTED_OWNER {
             return None;
@@ -815,6 +853,7 @@ impl NameTree {
             parent: Some(parent),
             sep,
             segment,
+            exact_nested_owner: AtomicU32::new(0),
             nested_owner: AtomicU32::new(0),
         });
         table.install(h, id);
@@ -935,6 +974,17 @@ mod tests {
             Some("Nested$With$Dollars")
         );
 
+        let generated = names.nested_child_of(map, "$serializer");
+        assert_eq!(
+            names.render(generated),
+            "kotlin/collections/Map$$serializer"
+        );
+        assert_eq!(names.nested_owner(generated), Some(map));
+        assert_eq!(
+            names.nested_segment_within(generated, map),
+            Some("$serializer")
+        );
+
         let external_nested = names.insert("external/Outer$Inner");
         assert_eq!(
             names.jvm_nested_parts(external_nested),
@@ -986,10 +1036,28 @@ mod tests {
     fn insert_from_maps_ids_across_trees() {
         let src = NameTree::default();
         let id = src.insert("a/b/C");
+        let generated = src.nested_child_of(id, "$serializer");
         let dst = NameTree::default();
         dst.insert("unrelated/Name");
         let moved = dst.insert_from(&src, id);
+        let moved_generated = dst.insert_from(&src, generated);
         assert_eq!(dst.render(moved), "a/b/C");
+        assert_eq!(dst.render(moved_generated), "a/b/C$$serializer");
+        assert_eq!(dst.nested_owner(moved_generated), Some(moved));
+        assert_eq!(
+            dst.nested_segment_within(moved_generated, moved),
+            Some("$serializer")
+        );
+        assert_eq!(dst.existing_from(&src, generated), Some(moved_generated));
+
+        // A provider tree may index only the physical classfile path. Read-only identity mapping
+        // must not require it to have copied the global tree's supplemental nesting relation first.
+        let provider = NameTree::default();
+        let provider_generated = provider.insert("a/b/C$$serializer");
+        assert_eq!(
+            provider.existing_from(&src, generated),
+            Some(provider_generated)
+        );
         assert_eq!(dst.insert_from(&src, NameTree::ROOT), NameTree::ROOT);
         // Re-inserting the same source id is idempotent in the destination.
         assert_eq!(dst.insert_from(&src, id), moved);

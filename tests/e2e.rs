@@ -1426,6 +1426,8 @@ mod suspend_prologue_cast_e2e;
 mod suspend_receiver_lambda_e2e;
 #[path = "suspend_return_type_recovery_e2e.rs"]
 mod suspend_return_type_recovery_e2e;
+#[path = "suspend_single_operand_hoist_e2e.rs"]
+mod suspend_single_operand_hoist_e2e;
 #[path = "suspend_spill_slot_reuse_e2e.rs"]
 mod suspend_spill_slot_reuse_e2e;
 #[path = "suspend_throw_operand_e2e.rs"]
@@ -1644,6 +1646,9 @@ mod native_builtin_supertypes_e2e;
 #[path = "native_class_literals_e2e.rs"]
 mod native_class_literals_e2e;
 
+mod serializer_metadata_class_id_e2e;
+#[path = "common/kotlin_metadata.rs"]
+mod serializer_metadata_test_support;
 #[path = "settled_instance_check_e2e.rs"]
 mod settled_instance_check_e2e;
 #[path = "unsigned_arrays_e2e.rs"]
