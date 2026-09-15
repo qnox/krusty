@@ -35033,7 +35033,7 @@ impl<'a> Checker<'a> {
                 Some(expression) => self.check_lambda_return_value(scope, expression, lambda),
                 None => Ty::Unit,
             };
-            self.lambda_returns.record_returned_type(lambda, returned);
+            self.record_lambda_returned_type(lambda, returned);
             return;
         }
         let rt = self.ret_ty;
@@ -76894,7 +76894,7 @@ impl<'a> Checker<'a> {
                         }
                     };
                     if let ReturnTarget::Lambda(lambda) = target {
-                        self.lambda_returns.record_returned_type(lambda, returned);
+                        self.record_lambda_returned_type(lambda, returned);
                     }
                 }
                 Ty::Nothing
@@ -85182,42 +85182,6 @@ impl<'a> Checker<'a> {
             "lambda return scope exit expression={e:?} label={label:?}"
         );
         out
-    }
-
-    /// The RETURN of the function type a lambda expression carries. An anonymous function's declared
-    /// return type (`fun (…): T`) wins over the body type: a block body ending in `return` types as
-    /// `Nothing`, which would otherwise erase the result (and make the lowered closure emit a void
-    /// `return` where its caller expects a value). Falls back to the body type when undeclared.
-    fn lambda_ret_ty(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        e: ExprId,
-        bret: Ty,
-        coerce_return_to_unit: bool,
-    ) -> Ty {
-        match self.file.anon_fun_ret.get(&e.0).cloned() {
-            Some(declared) => self.type_ref_ty(scope, &declared),
-            None if coerce_return_to_unit => Ty::Unit,
-            None => match self.lambda_returns.take_returned_type(e) {
-                None => bret,
-                Some(returned) if bret == Ty::Nothing => returned,
-                Some(_) if bret == Ty::Error => Ty::Error,
-                // A lambda leaves through its labelled returns AND its tail, and those exits can
-                // have different but related types: `flatMap`'s expected `Iterable<T>` against a
-                // tail that produced `List<T>`. The type-only merge falls straight to `Any` for any
-                // pair that is not equal, which then fails against the very expectation that
-                // produced one of them. Join them through the symbol source so a subtype yields its
-                // supertype, exactly as the surrounding inference already does.
-                Some(returned) => {
-                    let source = self.fed_source();
-                    crate::symbol_resolver::merge_inferred_ty_from_symbols(
-                        Some(&source),
-                        returned,
-                        bret,
-                    )
-                }
-            },
-        }
     }
 
     fn check_lambda_body(

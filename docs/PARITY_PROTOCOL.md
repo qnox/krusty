@@ -2267,8 +2267,10 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   (`inferred type is Any but Iterable<Item> was expected`). `map` was unaffected because both of its
   exits are the element type itself and were therefore equal, which is what kept the gap narrow. The
   surrounding inference already joins through the symbol source, where a subtype yields its
-  supertype; this exit join now uses the same merge. Exits with no useful common supertype still join
-  to `Any` and are still rejected.
+  supertype; every labelled-return contribution and the tail now use that same merge. Joining only
+  the accumulated returns with the tail is insufficient because two related labelled returns may
+  already have collapsed to `Any`. Exits with no useful common supertype remain rejected.
   `tests/lambda_exit_join_e2e.rs::a_labeled_return_and_a_tail_join_to_their_supertype`,
-  `a_char_sequence_expectation_joins_with_a_string_tail`, `the_equal_exit_shapes_still_infer`,
+  `a_char_sequence_expectation_joins_with_a_string_tail`,
+  `several_labeled_returns_join_before_the_tail`, `the_equal_exit_shapes_still_infer`,
   `unrelated_exits_are_still_rejected`.
