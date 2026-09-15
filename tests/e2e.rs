@@ -738,6 +738,8 @@ mod inline_deep_coverage_e2e;
 mod inline_e2e;
 #[path = "inline_end_branch_e2e.rs"]
 mod inline_end_branch_e2e;
+#[path = "inline_lambda_result_boxing_e2e.rs"]
+mod inline_lambda_result_boxing_e2e;
 #[path = "inline_lambda_value_return_e2e.rs"]
 mod inline_lambda_value_return_e2e;
 #[path = "inline_return_bound_context_e2e.rs"]
@@ -1414,6 +1416,8 @@ mod suspend_receiver_lambda_e2e;
 mod suspend_return_type_recovery_e2e;
 #[path = "suspend_spill_slot_reuse_e2e.rs"]
 mod suspend_spill_slot_reuse_e2e;
+#[path = "suspend_throw_operand_e2e.rs"]
+mod suspend_throw_operand_e2e;
 #[path = "suspend_try_catch_shapes_e2e.rs"]
 mod suspend_try_catch_shapes_e2e;
 #[path = "suspend_try_finally_body_e2e.rs"]

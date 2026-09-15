@@ -544,13 +544,6 @@ impl SemanticPlatform for DependencyPlatform {
         self.platform.builtin_type_internal(simple_name)
     }
 
-    fn mapped_interface_members(
-        &self,
-        supertype: Ty,
-    ) -> Vec<crate::libraries::MappedInterfaceMember> {
-        self.platform.mapped_interface_members(supertype)
-    }
-
     fn signature_formal_names(&self, signature: &str) -> Vec<String> {
         self.platform.signature_formal_names(signature)
     }

@@ -722,11 +722,6 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         None
     }
 
-    /// Source-to-physical member mappings required by an applied platform interface.
-    fn mapped_interface_members(&self, _supertype: Ty) -> Vec<MappedInterfaceMember> {
-        Vec::new()
-    }
-
     /// The reified type-parameter formal NAMES a compiled generic signature declares, in order. The
     /// source parses its own metadata/signature format; consumers bind names without parsing backend text.
     fn signature_formal_names(&self, _signature: &str) -> Vec<String> {
@@ -741,15 +736,6 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
     fn iterable_element_type_name(&self, _internal: TypeName) -> Option<Ty> {
         None
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct MappedInterfaceMember {
-    pub source_name: String,
-    pub physical_name: String,
-    pub params: Vec<Ty>,
-    pub ret: Ty,
-    pub is_property: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
