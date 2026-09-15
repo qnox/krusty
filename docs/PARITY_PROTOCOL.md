@@ -2212,3 +2212,17 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `a_suspending_safe_map_receiver_threads_every_traversal_identity`,
   `receiver_spellings_and_iterator_shadow_keep_the_declaration_plan`,
   `a_user_defined_same_named_call_remains_an_ordinary_call`.
+- **A smart cast survives a path rooted at the receiver's own property (fix).**
+  `if (config.path != null) { config.path.length }`, where `config` is the class's own `val`, was
+  never narrowed: the stable-path reader declined ANY non-local root that carried further segments,
+  so no proof was recorded at all. The failure wore two faces — a nullable receiver where the value
+  was dereferenced, and candidate applicability where it was passed on — which is why one cause
+  produced two unrelated-looking diagnostics in the same file. Kotlin's stability rule is per
+  PROPERTY (a `val` with the default getter, not open, not delegated, no context parameters), and the
+  member reader already enforced exactly that for a single-segment path; a longer path now walks on
+  from the same decision instead of bailing. The identical body with the root as a PARAMETER always
+  worked, which is what isolated the root's binding kind rather than the path's shape. A `var` in the
+  path and a custom getter are still refused, asserted against both compilers.
+  `tests/receiver_property_path_smartcast_e2e.rs::a_receiver_property_path_narrows_for_a_dereference`,
+  `a_receiver_property_path_narrows_for_an_argument`, `a_parameter_rooted_path_still_narrows`,
+  `a_mutable_property_in_the_path_is_still_refused`, `a_custom_getter_in_the_path_is_still_refused`.
