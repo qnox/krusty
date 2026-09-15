@@ -129,6 +129,10 @@ extern const KType kt_type_unit;
    machine integer it wraps, so a descriptor of its own is the only thing keeping a BOXED one from
    being an `Int`: `1u as? Int` must fail, and printing one must not print the signed number sharing
    its bits. */
+/* `kotlin.Number` and `kotlin.Comparable` exist only as descriptors to point at: no value has one
+   as its own type, and an `is` against either is answered by the interface list of the box. */
+extern const KType kt_type_number;
+extern const KType kt_type_comparable;
 extern const KType kt_type_ubyte;
 extern const KType kt_type_ushort;
 extern const KType kt_type_uint;

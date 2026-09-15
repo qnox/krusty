@@ -150,6 +150,21 @@ impl<'a> FileLowering<'a> {
             // the element WIDTH, which is Kotlin's own erasure: `Array<String>` and `Array<Foo>`
             // are one type here, and `IntArray` is neither of them. An element the runtime lays
             // out no array for has no descriptor to name, which is what the `None` says.
+            // Kotlin's two built-in supertypes of the value types. Neither has instances of its
+            // own, so each is a descriptor the boxes point at — which is why naming one here is
+            // enough for `is` and needs nothing at the site.
+            _ if target
+                .obj_internal()
+                .is_some_and(|name| name.matches("kotlin/Number")) =>
+            {
+                "kt_type_number"
+            }
+            _ if target
+                .obj_internal()
+                .is_some_and(|name| name.matches("kotlin/Comparable")) =>
+            {
+                "kt_type_comparable"
+            }
             // `Unit` reaches a type check spelled as the object it is rather than as the carrier
             // `Ty::Unit` names, and it is one type either way.
             _ if target

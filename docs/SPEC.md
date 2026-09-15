@@ -6410,6 +6410,16 @@ and behavior is checked by RUNNING the emitted program.
   `any_is_the_question_of_whether_there_is_a_value_at_all`,
   `a_settled_check_still_evaluates_its_receiver`, `unit_is_asked_about_as_the_object_it_is`).
 
+- **`Number` and `Comparable` are descriptors the value types POINT AT, not types anything wears.**
+  Neither has an instance of its own — every value that is one is a boxed primitive or a string — so
+  each is a runtime descriptor named by the boxes' interface lists, which are flattened and
+  transitive because `is` scans them at each step of the super chain rather than walking an interface
+  hierarchy. Which box points at which is Kotlin's own asymmetry and not a rule about machine width:
+  `Char` and `Boolean` are `Comparable` and not `Number`, and an unsigned integer is `Comparable` and
+  not `Number` either, being a value class rather than a `java.lang.Number`. Every one of those
+  answers is the reference compiler's, asked of it directly.
+  Tests: `tests/native_builtin_supertypes_e2e.rs`.
+
 - **A top-level property is a global slot, initialized before the entry function, and rooted in the
   collector if it holds a reference.** The JVM realizes a top-level property as a private static
   field plus a `getX`/`setX` pair (and an `access$get<X>$p` bridge when a sibling class reads a

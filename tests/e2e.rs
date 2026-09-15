@@ -1620,5 +1620,8 @@ mod native_type_checks_e2e;
 #[path = "native_annotations_e2e.rs"]
 mod native_annotations_e2e;
 
+#[path = "native_builtin_supertypes_e2e.rs"]
+mod native_builtin_supertypes_e2e;
+
 #[path = "native_class_literals_e2e.rs"]
 mod native_class_literals_e2e;

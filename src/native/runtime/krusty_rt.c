@@ -51,6 +51,29 @@ static const kt_fn kt_any_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_c
 const KType kt_type_any = {"kotlin.Any", 10,   sizeof(KObjectHeader), 0, 0, NULL, NULL,
                            kt_any_vtable, 3, 0};
 
+/* `kotlin.Number` and `kotlin.Comparable` have no instances of their OWN — every value that is one
+   is a boxed primitive or a string. They exist as descriptors for those to point at, so that an `is`
+   against them has something to compare. Kotlin's own hierarchy decides which points at which, and
+   it is asymmetric: `Char` and `Boolean` are `Comparable` and not `Number`, and an unsigned integer
+   is `Comparable` and not `Number` either (it is a value class, not a `java.lang.Number`). */
+const KType kt_type_number = {"kotlin.Number", 13,  sizeof(KObjectHeader), 0, 0, NULL, &kt_type_any,
+                              kt_any_vtable,   3,   0};
+const KType kt_type_comparable = {"kotlin.Comparable", 17, sizeof(KObjectHeader), 0, 0, NULL,
+                                  &kt_type_any,        kt_any_vtable, 3, 0};
+
+/* Flattened and transitive, as `KType.interfaces` requires: a `Number` is also `Comparable`, so a
+   numeric box names both rather than relying on a walk that does not exist. */
+static const KType *const kt_number_interfaces[] = {&kt_type_number, &kt_type_comparable};
+static const KType *const kt_comparable_interfaces[] = {&kt_type_comparable};
+
+#define KT_TYPE_WITH(identifier, kotlin_name, size, count, offsets, ifaces)                        \
+    const KType identifier = {kotlin_name,       sizeof(kotlin_name) - 1,                          \
+                              size,              count,                                            \
+                              0,                 offsets,                                          \
+                              &kt_type_any,      kt_builtin_vtable,                                \
+                              3,                 0,                                                \
+                              ifaces,            (uint32_t)(sizeof(ifaces) / sizeof((ifaces)[0]))};
+
 #define KT_TYPE(identifier, kotlin_name, size, count, offsets)                                     \
     const KType identifier = {kotlin_name, sizeof(kotlin_name) - 1, size,  count,                  \
                               0,           offsets,                 &kt_type_any,                  \
@@ -152,15 +175,15 @@ struct KObject {
 
 static const uint32_t kt_string_references[] = {offsetof(KObject, as.string.storage)};
 
-KT_TYPE(kt_type_string, "kotlin.String", sizeof(KObject), 1, kt_string_references)
-KT_TYPE(kt_type_byte, "kotlin.Byte", sizeof(KObject), 0, NULL)
-KT_TYPE(kt_type_short, "kotlin.Short", sizeof(KObject), 0, NULL)
-KT_TYPE(kt_type_int, "kotlin.Int", sizeof(KObject), 0, NULL)
-KT_TYPE(kt_type_long, "kotlin.Long", sizeof(KObject), 0, NULL)
-KT_TYPE(kt_type_char, "kotlin.Char", sizeof(KObject), 0, NULL)
-KT_TYPE(kt_type_boolean, "kotlin.Boolean", sizeof(KObject), 0, NULL)
-KT_TYPE(kt_type_float, "kotlin.Float", sizeof(KObject), 0, NULL)
-KT_TYPE(kt_type_double, "kotlin.Double", sizeof(KObject), 0, NULL)
+KT_TYPE_WITH(kt_type_string, "kotlin.String", sizeof(KObject), 1, kt_string_references, kt_comparable_interfaces)
+KT_TYPE_WITH(kt_type_byte, "kotlin.Byte", sizeof(KObject), 0, NULL, kt_number_interfaces)
+KT_TYPE_WITH(kt_type_short, "kotlin.Short", sizeof(KObject), 0, NULL, kt_number_interfaces)
+KT_TYPE_WITH(kt_type_int, "kotlin.Int", sizeof(KObject), 0, NULL, kt_number_interfaces)
+KT_TYPE_WITH(kt_type_long, "kotlin.Long", sizeof(KObject), 0, NULL, kt_number_interfaces)
+KT_TYPE_WITH(kt_type_char, "kotlin.Char", sizeof(KObject), 0, NULL, kt_comparable_interfaces)
+KT_TYPE_WITH(kt_type_boolean, "kotlin.Boolean", sizeof(KObject), 0, NULL, kt_comparable_interfaces)
+KT_TYPE_WITH(kt_type_float, "kotlin.Float", sizeof(KObject), 0, NULL, kt_number_interfaces)
+KT_TYPE_WITH(kt_type_double, "kotlin.Double", sizeof(KObject), 0, NULL, kt_number_interfaces)
 KT_TYPE(kt_type_unit, "kotlin.Unit", sizeof(KObject), 0, NULL)
 
 /* Kotlin's four unsigned integers. Each is a value class over a signed primitive, and the generated
@@ -168,10 +191,10 @@ KT_TYPE(kt_type_unit, "kotlin.Unit", sizeof(KObject), 0, NULL)
    ask questions of, since `4294967295u` is that `Int`'s bits and not its value. A descriptor of its
    own is what keeps `1u as? Int` false and makes a boxed one render its value; the bits live in the
    signed field of the matching width, and only the descriptor says how to read them. */
-KT_TYPE(kt_type_ubyte, "kotlin.UByte", sizeof(KObject), 0, NULL)
-KT_TYPE(kt_type_ushort, "kotlin.UShort", sizeof(KObject), 0, NULL)
-KT_TYPE(kt_type_uint, "kotlin.UInt", sizeof(KObject), 0, NULL)
-KT_TYPE(kt_type_ulong, "kotlin.ULong", sizeof(KObject), 0, NULL)
+KT_TYPE_WITH(kt_type_ubyte, "kotlin.UByte", sizeof(KObject), 0, NULL, kt_comparable_interfaces)
+KT_TYPE_WITH(kt_type_ushort, "kotlin.UShort", sizeof(KObject), 0, NULL, kt_comparable_interfaces)
+KT_TYPE_WITH(kt_type_uint, "kotlin.UInt", sizeof(KObject), 0, NULL, kt_comparable_interfaces)
+KT_TYPE_WITH(kt_type_ulong, "kotlin.ULong", sizeof(KObject), 0, NULL, kt_comparable_interfaces)
 
 #undef KT_TYPE
 

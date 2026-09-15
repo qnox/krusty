@@ -1566,6 +1566,17 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **The two built-in supertypes, for 2652.** `is Number` and `is Comparable<*>` were declining for
+   the reason the array check did: no descriptor to compare against. Neither type has an instance of
+   its own, so each is a descriptor the boxes POINT AT — the interface list the runtime's `is`
+   already scans at every step of the super chain, and which until now every runtime type left
+   empty.
+   Which box points at which is not a rule anyone would guess from the representation: `Char` and
+   `Boolean` are `Comparable` and not `Number`, and an unsigned integer is `Comparable` and not
+   `Number` either. I asked the reference compiler rather than reasoning about it — `false` for
+   `1u is Number`, `true` for `1u is Comparable<*>` — which is the first increment written under the
+   oracle rule with the oracle actually available.
+
    **Unsigned arrays: attempted, backed out, and why.** `an array of UInt`/`UByte` is seven
    declines and looked like the cleanest increment left — four more `KT_ARRAY_TYPE` descriptors with
    the strides the signed ones already use, four arms in `array_type`, done. Writing the tests first
