@@ -80,18 +80,25 @@ impl<'a> SymbolResolver<'a> {
         }
         if let Some(declared_receiver) = semantic.receiver {
             unify_ty(declared_receiver, binding_receiver, &mut bindings);
+            // A caller-owned symbolic receiver is a real binding fact. Extension result
+            // specialization used to preserve it in a second, return-only binder; retain it in
+            // the one call-site binding set instead.
+            preserve_receiver_identity_bindings(declared_receiver, binding_receiver, &mut bindings);
         }
         let receiver_bindings = bindings.clone();
         let value_params = &semantic.params[selected.context_count.min(semantic.params.len())..];
         let mut argument_bindings = GSigBinds::new();
-        for (&parameter, argument) in value_params.iter().zip(args) {
-            if !argument.is_lambda_literal()
-                && !argument.is_expected_type_callable()
-                && !argument.is_omitted_default()
+        for (index, (&parameter, argument)) in value_params.iter().zip(args).enumerate() {
+            let parameter_index = selected.context_count + index;
+            if selected
+                .call_sig
+                .parameter_contributes_to_inference(parameter_index)
+                && argument.contributes_type_to_inference()
             {
-                unify_inferred_ty(
+                unify_inferred_ty_with_source(
+                    &self.src,
                     parameter,
-                    argument.type_for(parameter),
+                    argument.inference_type(&self.src, parameter),
                     &mut argument_bindings,
                 );
             }
@@ -121,7 +128,9 @@ impl<'a> SymbolResolver<'a> {
                 }
             }
         }
-        complete_bottom_constraint_bindings(&semantic, &mut bindings, type_args.len());
+        if selected.is_extension() || expected_result.is_some() {
+            complete_bottom_constraint_bindings(&semantic, &mut bindings, type_args.len());
+        }
         crate::trace_compiler!(
             "fir",
             "receiver call application receiver={receiver:?} name={name} semantic={semantic:?} bindings={bindings:?}",
@@ -154,8 +163,9 @@ impl<'a> SymbolResolver<'a> {
                 .unwrap_or(receiver),
             _ => receiver,
         };
-        let inferred = specialize_final_signature_output_type(&self.src, semantic.ret, &bindings);
         let ret = if selected.is_extension() {
+            let inferred =
+                specialize_final_signature_output_type(&self.src, semantic.ret, &bindings);
             specialized_extension_return(self.lib, &selected, inferred)
         } else {
             let provider = resolved_member_from_info(
@@ -167,6 +177,11 @@ impl<'a> SymbolResolver<'a> {
                 selected.clone(),
             )
             .ret;
+            let inferred = if expected_result.is_some() {
+                specialize_final_signature_output_type(&self.src, semantic.ret, &bindings)
+            } else {
+                ty_subst_keep_unbound(semantic.ret, &bindings)
+            };
             merge_specialized_return(provider, inferred)
         };
         CandidateSelection::Selected((selected, params, ret, applied_receiver))
