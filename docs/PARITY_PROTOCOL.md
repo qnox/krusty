@@ -2314,3 +2314,20 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `tests/inline_lambda_result_boxing_e2e.rs::a_labeled_return_in_map_boxes_a_primitive_result`,
   `every_primitive_element_carrier_is_boxed`, `an_unsigned_element_keeps_its_semantic_box`,
   `non_local_returns_and_reference_elements_are_unchanged`.
+- **A spliced inline body types its values from its OWN declarations (fix).** Value indices are
+  numbered per body, while `collect_var_types` builds ONE index-keyed map by walking every root — so
+  a nested lambda's declarations sit in it beside the enclosing body's under the same numbers and
+  whichever was inserted last wins. `emit_fn_body_inline` swapped the parameter SLOTS for a spliced
+  body but left that map ambient, so a value read inside the body could be typed from the caller's
+  same-numbered local: a primitive carrier looked like a reference and its box was skipped, which the
+  verifier rejects. The emitter now installs the body's own declaration map alongside its slots, and
+  restores both afterwards. Recovering the type from the syntax AROUND one expression was the earlier
+  shape of this fix and is retired: it patched the one container that happened to be reported, and it
+  returned the raw declared type where `value_ty` answers a JVM-PHYSICAL question — bypassing the
+  `ir_ty_to_jvm` normalization every other entry carries, which is wrong for unsigned and value-class
+  carriers. Scoping the map keeps that normalization by construction.
+  `tests/inline_lambda_result_boxing_e2e.rs::a_labeled_return_in_map_boxes_a_primitive_result`,
+  `every_primitive_element_carrier_is_boxed` (all eight primitives),
+  `an_unsigned_element_keeps_its_semantic_box`,
+  `non_local_returns_and_reference_elements_are_unchanged` — each runs the identical fixture under
+  the reference compiler too, since these shapes are about matching ITS carrier decisions.

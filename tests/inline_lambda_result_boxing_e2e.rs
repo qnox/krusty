@@ -25,6 +25,20 @@
 
 use super::common;
 
+/// Run one fixture under BOTH compilers and require the same `box()` value.
+///
+/// `expect_box_ok_files_with_stdlib` alone only proves krusty agrees with itself: it compiles and
+/// runs krusty's output and checks for `OK`. These shapes are about matching the reference
+/// compiler's carrier decisions, so the reference must run the identical source.
+fn both_compilers_box(main: &str, stem: &str) {
+    let reference = common::kotlinc_box_result(main);
+    assert_eq!(
+        reference, "OK",
+        "{stem}: the reference compiler disagrees: {reference}"
+    );
+    common::expect_box_ok_files_with_stdlib(&[("Main.kt", main)], stem);
+}
+
 /// The failing shape: a labelled return inside `map`, with a PRIMITIVE element type.
 #[test]
 fn a_labeled_return_in_map_boxes_a_primitive_result() {
@@ -38,27 +52,51 @@ fun box(): String {\n\
 \x20   if (mapped(listOf(\"ab\", \"c\"), true) != listOf(0, 0)) return \"FAIL: skipped\"\n\
 \x20   return \"OK\"\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "map_labeled_return_boxing");
+    both_compilers_box(MAIN, "map_labeled_return_boxing");
 }
 
-/// Every primitive carrier takes the same route, and a `Long` occupies two slot words — a wrong
-/// carrier width would corrupt the frame rather than merely skip a box.
+/// ALL EIGHT primitive carriers take the same route. `Long` and `Double` occupy two slot words, so a
+/// wrong carrier width corrupts the frame rather than merely skipping a box; `Byte`, `Short` and
+/// `Char` are the narrow cases whose boxed and unboxed spellings differ.
 #[test]
 fn every_primitive_element_carrier_is_boxed() {
-    const MAIN: &str = "fun longs(keys: List<String>, skip: Boolean): List<Long> =\n\
+    const MAIN: &str = "fun bytes(keys: List<String>, skip: Boolean): List<Byte> =\n\
+\x20   keys.map { key -> if (skip) return@map 0; key.length.toByte() }\n\
+fun shorts(keys: List<String>, skip: Boolean): List<Short> =\n\
+\x20   keys.map { key -> if (skip) return@map 0; key.length.toShort() }\n\
+fun ints(keys: List<String>, skip: Boolean): List<Int> =\n\
+\x20   keys.map { key -> if (skip) return@map 0; key.length }\n\
+fun longs(keys: List<String>, skip: Boolean): List<Long> =\n\
 \x20   keys.map { key -> if (skip) return@map 0L; key.length.toLong() }\n\
+fun floats(keys: List<String>, skip: Boolean): List<Float> =\n\
+\x20   keys.map { key -> if (skip) return@map 0.0f; key.length.toFloat() }\n\
+fun doubles(keys: List<String>, skip: Boolean): List<Double> =\n\
+\x20   keys.map { key -> if (skip) return@map 0.0; key.length.toDouble() }\n\
 fun flags(keys: List<String>, skip: Boolean): List<Boolean> =\n\
 \x20   keys.map { key -> if (skip) return@map false; key.isNotEmpty() }\n\
 fun chars(keys: List<String>, skip: Boolean): List<Char> =\n\
 \x20   keys.map { key -> if (skip) return@map 'x'; key[0] }\n\
 fun box(): String {\n\
-\x20   if (longs(listOf(\"ab\"), false) != listOf(2L)) return \"FAIL: long kept\"\n\
-\x20   if (longs(listOf(\"ab\"), true) != listOf(0L)) return \"FAIL: long skipped\"\n\
-\x20   if (flags(listOf(\"ab\"), false) != listOf(true)) return \"FAIL: boolean\"\n\
-\x20   if (chars(listOf(\"ab\"), true) != listOf('x')) return \"FAIL: char\"\n\
+\x20   val one = listOf(\"ab\")\n\
+\x20   if (bytes(one, false) != listOf<Byte>(2)) return \"FAIL: byte kept\"\n\
+\x20   if (bytes(one, true) != listOf<Byte>(0)) return \"FAIL: byte skipped\"\n\
+\x20   if (shorts(one, false) != listOf<Short>(2)) return \"FAIL: short kept\"\n\
+\x20   if (shorts(one, true) != listOf<Short>(0)) return \"FAIL: short skipped\"\n\
+\x20   if (ints(one, false) != listOf(2)) return \"FAIL: int kept\"\n\
+\x20   if (ints(one, true) != listOf(0)) return \"FAIL: int skipped\"\n\
+\x20   if (longs(one, false) != listOf(2L)) return \"FAIL: long kept\"\n\
+\x20   if (longs(one, true) != listOf(0L)) return \"FAIL: long skipped\"\n\
+\x20   if (floats(one, false) != listOf(2.0f)) return \"FAIL: float kept\"\n\
+\x20   if (floats(one, true) != listOf(0.0f)) return \"FAIL: float skipped\"\n\
+\x20   if (doubles(one, false) != listOf(2.0)) return \"FAIL: double kept\"\n\
+\x20   if (doubles(one, true) != listOf(0.0)) return \"FAIL: double skipped\"\n\
+\x20   if (flags(one, false) != listOf(true)) return \"FAIL: boolean kept\"\n\
+\x20   if (flags(one, true) != listOf(false)) return \"FAIL: boolean skipped\"\n\
+\x20   if (chars(one, false) != listOf('a')) return \"FAIL: char kept\"\n\
+\x20   if (chars(one, true) != listOf('x')) return \"FAIL: char skipped\"\n\
 \x20   return \"OK\"\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "primitive_element_boxing");
+    both_compilers_box(MAIN, "primitive_element_boxing");
 }
 
 /// An UNSIGNED element keeps its semantic box: the carrier stays physical, so the adapter still
@@ -72,7 +110,7 @@ fun box(): String {\n\
 \x20   if (codes(listOf(\"ab\"), true) != listOf(0u)) return \"FAIL: skipped\"\n\
 \x20   return \"OK\"\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "unsigned_element_boxing");
+    both_compilers_box(MAIN, "unsigned_element_boxing");
 }
 
 /// A non-local `return` still leaves the enclosing function for real, and a reference element still
@@ -95,5 +133,5 @@ fun box(): String {\n\
 \x20   if (plain(listOf(\"ab\")) != listOf(2)) return \"FAIL: plain\"\n\
 \x20   return \"OK\"\n\
 }\n";
-    common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "unchanged_lambda_exits");
+    both_compilers_box(MAIN, "unchanged_lambda_exits");
 }

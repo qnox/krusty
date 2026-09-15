@@ -13520,13 +13520,28 @@ impl<'a> Emitter<'a> {
         param_slots: &[(u16, Ty)],
         code: &mut CodeBuilder,
     ) -> Ty {
+        // Value indices are numbered PER BODY. `self.var_types` is one index-keyed map built by
+        // walking every root, so a nested lambda's declarations sit in it beside the enclosing
+        // body's under the same numbers, and whichever was inserted last wins. Emitting a spliced
+        // body therefore has to install that body's OWN declarations, not just its parameter slots
+        // — otherwise a value read inside it can be typed from the caller's same-numbered local.
+        //
+        // Scoping the map is what makes the answer unambiguous; recovering a type from the syntax
+        // around one expression only patched the shape that happened to be reported. The map is
+        // built by the same `collect_var_types`, so declarations keep their JVM-physical
+        // normalization rather than being read raw off the declaration.
         let saved_slots = std::mem::take(&mut self.slots);
+        let saved_var_types = std::mem::replace(
+            &mut self.var_types,
+            collect_var_types(self.ir, std::iter::once(inline_body)),
+        );
         for (i, &(slot, ty)) in param_slots.iter().enumerate() {
             self.slots.insert(i as u32, (slot, ty));
         }
         let result = self.value_ty(inline_body);
         self.emit_value(inline_body, code);
         self.slots = saved_slots;
+        self.var_types = saved_var_types;
         result
     }
 
@@ -20054,29 +20069,10 @@ impl<'a> Emitter<'a> {
                 }
             }
             IrExpr::BottomValue { .. } => Ty::Nothing,
-            IrExpr::Block { stmts, value } => {
+            IrExpr::Block { value, .. } => {
                 let Some(value) = *value else {
                     return Ty::Unit;
                 };
-                // A block that carries its result through a local it DECLARES answers for that
-                // local itself. Value indices are numbered per body, so asking the ambient slot and
-                // variable tables for one resolves whichever body last claimed that number — the
-                // enclosing caller, when this block is a lambda template emitted into a scratch
-                // frame. The declaration is right here and is not ambiguous.
-                if let IrExpr::GetValue(index) = self.ir.expr(value) {
-                    for &statement in stmts {
-                        if let IrExpr::Variable {
-                            index: declared,
-                            ty,
-                            ..
-                        } = self.ir.expr(statement)
-                        {
-                            if declared == index {
-                                return *ty;
-                            }
-                        }
-                    }
-                }
                 self.value_ty(value)
             }
             IrExpr::TypeOp {
