@@ -128,11 +128,10 @@ fun bad(): P<String, String, Int, Int> =\n\
 \x20       set = { source: String, _: Int -> source },\n\
 \x20   )\n";
     let result = common::compiler_diagnostics(&[("Main.kt", MAIN)], &[]);
-    // Both compilers reject, with the same message FORM. They differ in where they place the blame:
-    // kotlinc pinpoints the offending lambda's own result, krusty reports the composed type at the
-    // function's return. That granularity difference is general and predates this change — it
-    // reproduces identically on a binary built without it — so it is recorded rather than matched
-    // loosely. Narrowing krusty's blame to the argument is its own diagnostic-parity change.
+    // Both compilers now blame the offending lambda on the same LINE. They still word the
+    // mismatch differently and point at different columns — kotlinc at the lambda's result
+    // expression, krusty at the lambda itself — so the exact texts are recorded rather than
+    // matched loosely. Converging the wording is its own diagnostic-parity change.
     assert_eq!(
         common::compiler_errors(&result.krusty_stdout),
         [],
@@ -142,11 +141,9 @@ fun bad(): P<String, String, Int, Int> =\n\
         common::compiler_errors(&result.krusty_stderr),
         [common::CompilerError {
             file: "Main.kt".to_string(),
-            line: 9,
-            column: 5,
-            message: "return type mismatch: expected 'P<String, String, Int, Int>', actual \
-                      'P<String, String, String, Int>'."
-                .to_string(),
+            line: 10,
+            column: 15,
+            message: "type mismatch: inferred type is String but Int was expected".to_string(),
         }]
     );
     assert_eq!(
@@ -158,4 +155,119 @@ fun bad(): P<String, String, Int, Int> =\n\
             message: "return type mismatch: expected 'Int', actual 'String'.".to_string(),
         }]
     );
+}
+
+/// Review follow-up 1: the expectation must reach the lambda's formals BEFORE its body is typed.
+///
+/// `T` appears only as the lambda's PARAMETER, so nothing in the argument fixes it — and the body
+/// reads `s.length`, which resolves only once the parameter is known to be `String`. A seeding that
+/// arrives after the body is typed leaves `s` unresolved and the member lookup fails.
+#[test]
+fn a_companion_invoke_body_reads_the_expected_parameter() {
+    const MAIN: &str = "class Folder<T>(val step: (T) -> Int) {\n\
+\x20   fun apply(seed: T): Int = step(seed)\n\
+}\n\
+\n\
+interface Fold<T> {\n\
+\x20   companion object {\n\
+\x20       operator fun <T> invoke(step: (T) -> Int): Folder<T> = Folder(step)\n\
+\x20   }\n\
+}\n\
+\n\
+fun lengths(): Folder<String> = Fold { s -> s.length }\n\
+fun box(): String {\n\
+\x20   if (lengths().apply(\"abcd\") != 4) return \"FAIL: apply\"\n\
+\x20   return \"OK\"\n\
+}\n";
+    both_compilers_box(MAIN, "companion_invoke_body_expectation");
+}
+
+/// The same shape with a RECEIVER formal: the body spells `length` bare, so the lambda's implicit
+/// receiver must already be `String` when the block is typed.
+#[test]
+fn a_receiver_companion_invoke_body_reads_the_expected_receiver() {
+    const MAIN: &str = "class Folder<T>(val step: T.() -> Int) {\n\
+\x20   fun apply(seed: T): Int = seed.step()\n\
+}\n\
+\n\
+interface Fold<T> {\n\
+\x20   companion object {\n\
+\x20       operator fun <T> invoke(step: T.() -> Int): Folder<T> = Folder(step)\n\
+\x20   }\n\
+}\n\
+\n\
+fun lengths(): Folder<String> = Fold { length }\n\
+fun box(): String {\n\
+\x20   if (lengths().apply(\"abcde\") != 5) return \"FAIL: apply\"\n\
+\x20   return \"OK\"\n\
+}\n";
+    both_compilers_box(MAIN, "receiver_companion_invoke_body_expectation");
+}
+
+/// Review follow-up 2: a SAFE call's expectation describes the nullable whole (`Folder<String>?`)
+/// while the invoke's own result is `Folder<T>`. Lifting one nullable layer is what fixes `T`; a
+/// safe-call layer that drops the expectation leaves `T` with no source at all.
+///
+/// This is the callable-PROPERTY spelling: `h?.fold()` reads `fold` under the null guard and then
+/// applies the invoke convention to its value. `T` appears in no parameter, so only the expectation
+/// can bind it — and `box()` then calls a `T`-taking member with a `String`, which compiles only if
+/// it bound to `String` rather than collapsing to `Nothing`.
+#[test]
+fn a_safe_property_invoke_lifts_the_nullable_expectation() {
+    const MAIN: &str = "class Folder<T>(val items: List<T>) {\n\
+\x20   fun with(item: T): Folder<T> = Folder(items + item)\n\
+\x20   fun joined(): String = items.joinToString(\"\")\n\
+}\n\
+\n\
+class Fold {\n\
+\x20   operator fun <T> invoke(): Folder<T> = Folder(emptyList())\n\
+}\n\
+\n\
+class Holder(val fold: Fold)\n\
+\n\
+fun empty(holder: Holder?): Folder<String>? = holder?.fold()\n\
+fun box(): String {\n\
+\x20   if (empty(null) != null) return \"FAIL: guarded\"\n\
+\x20   val built = empty(Holder(Fold())) ?: return \"FAIL: absent\"\n\
+\x20   if (built.with(\"ab\").with(\"cd\").joined() != \"abcd\") return \"FAIL: joined\"\n\
+\x20   return \"OK\"\n\
+}\n";
+    both_compilers_box(MAIN, "safe_property_invoke_expectation");
+}
+
+/// The function-VALUE safe-call spelling `nullableCallable?.invoke(…)`. A function type carries a
+/// concrete result, so the lifted expectation can only ever confirm what the value already
+/// declares — the case is covered to pin that the lift changes no result and the guard still
+/// yields `null`.
+#[test]
+fn a_safe_function_value_invoke_keeps_its_declared_result() {
+    const MAIN: &str = "fun call(f: ((String) -> Int)?): Int? = f?.invoke(\"abcd\")\n\
+fun box(): String {\n\
+\x20   if (call(null) != null) return \"FAIL: guarded\"\n\
+\x20   val length: (String) -> Int = { s -> s.length }\n\
+\x20   if (call(length) != 4) return \"FAIL: applied\"\n\
+\x20   return \"OK\"\n\
+}\n";
+    both_compilers_box(MAIN, "safe_function_value_invoke");
+}
+
+/// Review follow-up 3: a member EXTENSION `operator fun Recv.invoke` reached through the implicit
+/// dispatch receiver. `T` is supplied only by the declared result of the enclosing function, and the
+/// lambda body reads `s.length`, so the expectation must reach this selection too.
+#[test]
+fn a_member_extension_invoke_binds_the_expected_formal() {
+    const MAIN: &str = "class Folder<T>(val step: (T) -> Int) {\n\
+\x20   fun apply(seed: T): Int = step(seed)\n\
+}\n\
+\n\
+class Registry {\n\
+\x20   operator fun <T> String.invoke(step: (T) -> Int): Folder<T> = Folder(step)\n\
+\n\
+\x20   fun lengths(): Folder<String> = \"key\" { s -> s.length }\n\
+}\n\
+fun box(): String {\n\
+\x20   if (Registry().lengths().apply(\"abcdefg\") != 7) return \"FAIL: apply\"\n\
+\x20   return \"OK\"\n\
+}\n";
+    both_compilers_box(MAIN, "member_extension_invoke_expectation");
 }
