@@ -2528,21 +2528,23 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `a_declared_but_non_enclosing_return_label_matches_the_reference_diagnostic`,
   `an_unresolved_label_in_expression_position_matches_the_reference_diagnostic`,
   `a_resolvable_return_label_still_works`.
-- **An extension's type-parameter receiver is a lower bound, not an equation (fix).** For
-  `fun <P : Pipe, B : Any> P.install(plugin: Plug<P, B>, configure: B.() -> Unit)`, the pre-lambda
-  applicability probe bound the RECEIVER first and the arguments second. A value parameter mentions a
-  formal in an INVARIANT position and therefore fixes it exactly, while an extension receiver only
-  requires that the receiver be assignable to the formal's instantiation. Binding the receiver first
-  pinned `P` to the receiver's own class, so `App().install(pluginOfPipe) { … }` judged
-  `Plug<Pipe, Cfg>` against `Plug<App, B>`, declined the overload, and left its lambda unshaped — the
-  lambda then kept the ENCLOSING receiver and every member reached through it was reported missing
-  (`unresolved reference 'json'`), a per-FILE failure. Arguments now bind first and the receiver
-  supplies only the formals they leave open. Five shapes separate it: a receiver declared as the exact
-  supertype, an argument declared at the exact receiver type, the receiver passed as an ordinary
-  parameter, and a concrete extension receiver all worked already; only a type-parameter receiver
-  whose argument needs a SUPERTYPE binding failed.
+- **An extension's type-parameter receiver is solved with the arguments, not before or after them
+  (fix).** For `fun <P : Pipe, B : Any> P.install(plugin: Plug<P, B>, configure: B.() -> Unit)`, the
+  pre-lambda applicability probe first unified the receiver in a separate pass. That pinned `P` to
+  the receiver's concrete class, so `App().install(pluginOfPipe) { … }` judged `Plug<Pipe, Cfg>`
+  against `Plug<App, B>`, declined the overload, and left its lambda unshaped. Simply reversing the
+  passes was also wrong: once argument inference occupied a formal, the old unifier discarded the
+  receiver evidence. The receiver now contributes an assignability constraint to the SAME set as
+  the mapped arguments. The ordinary constraint solver therefore applies each parameter position's
+  variance, joins compatible lower bounds, honors explicit arguments and declared bounds, and rejects
+  incompatible invariant evidence without making call-site ordering decide the answer.
   `tests/generic_receiver_extension_lambda_shape_e2e.rs::a_generic_receiver_extension_still_shapes_its_lambda_receiver`,
   `a_generic_receiver_extension_still_shapes_a_plain_lambda_parameter`,
+  `a_receiver_and_an_argument_join_into_one_formal`,
+  `a_formal_inside_a_variant_shell_still_admits_the_receiver`,
+  `a_receiver_the_invariant_argument_excludes_is_still_rejected`,
+  `explicit_type_arguments_still_fix_both_formals`,
+  `a_receiver_outside_the_formals_bound_is_still_rejected`,
   `an_ordinary_parameter_of_the_same_shape_still_shapes_its_lambda`,
   `a_concrete_receiver_extension_still_shapes_its_lambda`,
   `a_member_the_shaped_receiver_lacks_is_still_rejected`.
