@@ -2357,16 +2357,12 @@ pub(crate) struct ClassModel {
 /// The symbolic declaration shape of a generic member method.
 #[derive(Clone, Debug)]
 pub struct GenericMethod {
-    /// The method's own type parameters (`fun <R>` → `["R"]`), inferred from the argument types.
-    pub method_tparams: Vec<String>,
-    pub method_tparam_bounds: Vec<Ty>,
-    /// Declared parameter types, in order, with type parameters preserved.
-    pub param_shapes: Vec<Ty>,
+    /// The declaration's one normalized generic contract. Keeping the full [`GenericSig`] avoids
+    /// flattening an absent or intersection bound into a second member-only representation.
+    pub signature: GenericSig,
     /// Erased checker parameter types used to identify the selected overload.
     pub params: Vec<Ty>,
     pub param_names: Vec<String>,
-    /// Declared return type with type parameters preserved.
-    pub ret_shape: Ty,
 }
 
 struct GenericMemberPlan {
@@ -2486,7 +2482,7 @@ fn generic_member_lambda_params(
     plan: &GenericMemberPlan,
     parameter: usize,
 ) -> Option<Vec<Ty>> {
-    let shape = *plan.method.param_shapes.get(parameter)?;
+    let shape = *plan.method.signature.params.get(parameter)?;
     let target = apply_inference_bindings(shape, &plan.call_bindings);
     match target.non_null() {
         Ty::Fun(signature) => Some(signature.params.clone()),
@@ -2544,8 +2540,8 @@ impl ClassSig {
                 .iter_mut()
                 .find(|method| same_erased_params(&method.params, params))
         }) {
-            changed |= method.ret_shape != ret;
-            method.ret_shape = ret;
+            changed |= method.signature.ret != ret;
+            method.signature.ret = ret;
         }
         changed
     }
@@ -10639,46 +10635,17 @@ fn collect_signatures_with_cp_impl(
                                     .entry(method_header.name.clone())
                                     .or_default()
                                     .push(GenericMethod {
-                                        method_tparams: method_header
-                                            .type_parameters
-                                            .iter()
-                                            .map(|source| {
-                                                symbolic_mtp
-                                                    .bound(source)
-                                                    .ty_param_name()
-                                                    .unwrap_or(source)
-                                                    .to_string()
-                                            })
-                                            .collect(),
-                                        method_tparam_bounds: method_header
-                                            .type_parameters
-                                            .iter()
-                                            .map(|parameter| {
-                                                symbolic_mtp
-                                                    .bound(parameter)
-                                                    .ty_param_bound()
-                                                    .unwrap_or_else(|| Ty::obj("kotlin/Any"))
-                                            })
-                                            .collect(),
-                                        param_shapes: method_header
-                                            .parameters
-                                            .iter()
-                                            .map(|parameter| {
-                                                ty_of_ref(
-                                                    &parameter.ty,
-                                                    &class_names,
-                                                    &symbolic_mtp,
-                                                    diags,
-                                                )
-                                            })
-                                            .collect(),
+                                        signature: signature
+                                            .generic_sig
+                                            .as_ref()
+                                            .expect("a generic member must retain its declaration signature")
+                                            .clone(),
                                         params: signature.params.clone(),
                                         param_names: method_header
                                             .parameters
                                             .iter()
                                             .map(|parameter| parameter.name.clone())
                                             .collect(),
-                                        ret_shape,
                                     });
                             }
                         }
@@ -13569,7 +13536,8 @@ fn module_member_lambda_shape(
                 generic_member
                     .and_then(|plan| {
                         plan.method
-                            .param_shapes
+                            .signature
+                            .params
                             .get(parameter)
                             .copied()
                             .map(|shape| {
@@ -13588,7 +13556,8 @@ fn module_member_lambda_shape(
                 let semantic = generic_member
                     .and_then(|plan| {
                         plan.method
-                            .param_shapes
+                            .signature
+                            .params
                             .get(parameter)
                             .copied()
                             .map(|shape| {
@@ -16070,8 +16039,8 @@ fn fail_undetermined_returns(table: &mut SymbolTable) {
         }
         for overloads in class.generic_methods.values_mut() {
             for method in overloads.iter_mut() {
-                if method.ret_shape == Ty::Pending {
-                    method.ret_shape = Ty::Error;
+                if method.signature.ret == Ty::Pending {
+                    method.signature.ret = Ty::Error;
                 }
             }
         }
@@ -16196,16 +16165,19 @@ fn module_signatures_mention_pending(table: &SymbolTable) -> bool {
                         .any(Ty::mentions_pending)
             })
             || class.generic_methods.values().flatten().any(|method| {
-                method.ret_shape.mentions_pending()
+                method.signature.ret.mentions_pending()
                     || method.params.iter().copied().any(Ty::mentions_pending)
                     || method
-                        .param_shapes
+                        .signature
+                        .params
                         .iter()
                         .copied()
                         .any(Ty::mentions_pending)
                     || method
-                        .method_tparam_bounds
+                        .signature
+                        .formal_bounds
                         .iter()
+                        .flatten()
                         .copied()
                         .any(Ty::mentions_pending)
             })
@@ -26839,7 +26811,7 @@ impl<'a> Checker<'a> {
                     crate::trace_compiler!(
                         "resolve",
                         "generic member return {name} args={logical_arg_tys:?} shape={:?} -> {inferred:?}",
-                        plan.method.ret_shape,
+                        plan.method.signature.ret,
                     );
                     inferred
                 } else {
@@ -85509,21 +85481,9 @@ impl<'a> Checker<'a> {
                         .filter_map(|candidate| {
                             let signature = candidate.generic_sig.as_ref()?;
                             Some(GenericMethod {
-                                method_tparams: signature.formals.clone(),
-                                method_tparam_bounds: signature
-                                    .formal_bounds
-                                    .iter()
-                                    .map(|bounds| {
-                                        bounds
-                                            .first()
-                                            .copied()
-                                            .unwrap_or_else(|| Ty::obj("kotlin/Any"))
-                                    })
-                                    .collect(),
-                                param_shapes: signature.params.clone(),
+                                signature: signature.clone(),
                                 params: candidate.callable.params.clone(),
                                 param_names: candidate.call_sig.param_names.clone(),
-                                ret_shape: signature.ret,
                             })
                         })
                         .collect::<Vec<_>>();
@@ -85582,59 +85542,40 @@ impl<'a> Checker<'a> {
                         })?
                         .clone();
                     let has_symbolic_signature =
-                        gm.param_shapes.iter().any(|parameter| {
+                        gm.signature.params.iter().any(|parameter| {
                             matches!(parameter, Ty::Fun(_))
                                 || ty_mentions_param(*parameter, class.type_params())
-                                || ty_mentions_param(*parameter, &gm.method_tparams)
-                        }) || ty_mentions_param(gm.ret_shape, class.type_params())
-                            || ty_mentions_param(gm.ret_shape, &gm.method_tparams);
+                                || ty_mentions_param(*parameter, &gm.signature.formals)
+                        }) || ty_mentions_param(gm.signature.ret, class.type_params())
+                            || ty_mentions_param(gm.signature.ret, &gm.signature.formals);
                     crate::trace_compiler!(
                         "expected_call",
                         "generic member plan name={name} ret_shape={:?} method_tparams={:?} class_tparams={:?} symbolic={has_symbolic_signature} expected={expected_result:?}",
-                        gm.ret_shape,
-                        gm.method_tparams,
+                        gm.signature.ret,
+                        gm.signature.formals,
                         class.type_params(),
                     );
                     if !has_symbolic_signature && !self.symbolic_signature_inference {
                         continue;
                     }
                     let mut input_subst = class_binds.clone();
-                    for (formal, actual) in gm.method_tparams.iter().zip(explicit_type_args) {
+                    for (formal, actual) in gm.signature.formals.iter().zip(explicit_type_args) {
                         input_subst.insert(formal.clone(), *actual);
                     }
                     if let Some(expected) =
                         expected_result.filter(|expected| *expected != Ty::Error)
                     {
-                        let signature = crate::libraries::GenericSig {
-                            formals: gm.method_tparams.clone(),
-                            formal_bounds: gm
-                                .method_tparams
-                                .iter()
-                                .enumerate()
-                                .map(|(index, _)| {
-                                    vec![gm
-                                        .method_tparam_bounds
-                                        .get(index)
-                                        .copied()
-                                        .unwrap_or_else(|| Ty::obj("kotlin/Any"))]
-                                })
-                                .collect(),
-                            receiver: None,
-                            params: gm.param_shapes.clone(),
-                            ret: gm.ret_shape,
-                            return_policy: Default::default(),
-                        };
                         let contextual =
                             crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
                                 &self.fed_source(),
-                                &signature,
+                                &gm.signature,
                                 expected,
                                 |actual, bound| self.receiver_is_assignable(actual, bound),
                             );
                         crate::trace_compiler!(
                             "expected_call",
                             "generic member result shape={:?} expected={expected:?} contextual={contextual:?}",
-                            gm.ret_shape,
+                            gm.signature.ret,
                         );
                         if let Some(bindings) = contextual {
                             for (formal, actual) in bindings {
@@ -85655,13 +85596,13 @@ impl<'a> Checker<'a> {
                                     .position(|parameter| parameter == name)
                             })
                             .unwrap_or(source_index);
-                        let Some(shape) = gm.param_shapes.get(parameter_index) else {
+                        let Some(shape) = gm.signature.params.get(parameter_index) else {
                             continue;
                         };
                         unify_ty_common(
                             *shape,
                             *actual,
-                            &gm.method_tparams,
+                            &gm.signature.formals,
                             &mut input_subst,
                             &|left, right| {
                                 if left == right {
@@ -85844,10 +85785,10 @@ impl<'a> Checker<'a> {
         arg_tys: &[Ty],
     ) -> Ty {
         let mut binds = class_binds.clone();
-        for parameter in &gm.method_tparams {
+        for parameter in &gm.signature.formals {
             binds.remove(parameter);
         }
-        for (i, shape) in gm.param_shapes.iter().enumerate() {
+        for (i, shape) in gm.signature.params.iter().enumerate() {
             if let Some(a) = arg_tys.get(i) {
                 let join = |left, right| {
                     if left == right {
@@ -85856,13 +85797,15 @@ impl<'a> Checker<'a> {
                     self.semantic_common_supertype(left, right)
                         .unwrap_or_else(|| Ty::obj("kotlin/Any"))
                 };
-                unify_ty_common(*shape, *a, &gm.method_tparams, &mut binds, &join);
+                unify_ty_common(*shape, *a, &gm.signature.formals, &mut binds, &join);
             }
         }
-        for (parameter, bound) in gm.method_tparams.iter().zip(&gm.method_tparam_bounds) {
-            binds.entry(parameter.clone()).or_insert(*bound);
+        for (index, parameter) in gm.signature.formals.iter().enumerate() {
+            binds
+                .entry(parameter.clone())
+                .or_insert_with(|| gm.signature.primary_formal_bound(index));
         }
-        crate::symbol_resolver::ty_subst(gm.ret_shape, &binds)
+        crate::symbol_resolver::ty_subst(gm.signature.ret, &binds)
     }
 
     /// Commit the one semantic target of a construction call. Rechecking during inference may have

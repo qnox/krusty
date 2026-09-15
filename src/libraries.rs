@@ -1,11 +1,13 @@
 //! Library metadata shared by symbol sources.
 
 mod array_factories;
+mod generic_signature;
 mod inline_body;
 
 pub use crate::types::Visibility;
 use crate::types::{Ty, TypeName, TypeNameList};
 pub(crate) use array_factories::kotlin_array_factory_kind;
+pub use generic_signature::{GenericReturnPolicy, GenericSig};
 pub use inline_body::{
     InlineBodyCall, InlineBodyCallReceiver, InlineBodyDefault, InlineBodyPlan, InlineBodyRecovery,
     InlineBodyValue, InlineCollectionAppend, InlineCollectionCapacity, InlineCollectionLocalNames,
@@ -95,73 +97,6 @@ impl ClassifierAccess {
             Self::Internal => Visibility::Internal,
             Self::Protected => Visibility::Protected,
             Self::Private | Self::PackagePrivate => Visibility::Private,
-        }
-    }
-}
-
-/// A parsed generic signature in Kotlin's logical shape: formal type-parameter names, an OPTIONAL
-/// receiver, the value parameters, and the return. Every node is a plain [`Ty`] — a type variable is a
-/// [`Ty::TyParam`] (name + `kotlin/Any` bound), a generic class carries its arguments in [`Ty::Obj`], a
-/// function type is [`Ty::Fun`]. A backend parses its own signature format straight into `Ty`; call
-/// resolution unifies and substitutes over it with [`crate::symbol_resolver::unify_ty`] /
-/// [`crate::symbol_resolver::ty_subst`] without knowing which backend produced it. The receiver is an
-/// ATTRIBUTE — never a value parameter — because at resolve/check level a member `A.foo(b): C` and an
-/// extension `fun A.foo(b): C` are the same shape (receiver `A`, one param `b`, return `C`); that an
-/// extension emits the receiver as a leading JVM argument, and a `suspend` fun emits a trailing
-/// `Continuation`, are EMIT concerns the backend adds — they are absent here. `params` therefore holds
-/// only the source value parameters.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GenericSig {
-    pub formals: Vec<String>,
-    /// Declared upper bounds, parallel to [`Self::formals`].
-    pub formal_bounds: Vec<Vec<Ty>>,
-    /// The dispatch/extension receiver's type (member self-type or extension receiver), if any.
-    pub receiver: Option<Ty>,
-    pub params: Vec<Ty>,
-    pub ret: Ty,
-    /// How the declaration asks consumers to realize a call-site substitution of [`Self::ret`].
-    /// This records a semantic property of the signature rather than the provider or file format that
-    /// supplied it: an unannotated reference return may remain null-capable after its outer method type
-    /// parameter specializes to a source primitive. Exact source signatures use the default policy.
-    pub return_policy: GenericReturnPolicy,
-}
-
-/// Post-substitution policy for a generic callable's return. Keeping this on [`GenericSig`] gives member,
-/// static, and top-level resolution one authoritative fact; consumers do not need parallel provenance
-/// flags or branches for a particular class-file/module provider.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum GenericReturnPolicy {
-    /// The substituted source type is the complete semantic result.
-    #[default]
-    Exact,
-    /// An unannotated reference contract remains null-capable when its outer method type parameter binds
-    /// to a primitive. The primitive is therefore carried in the platform's boxed reference form.
-    FlexibleReference,
-}
-
-impl GenericSig {
-    /// Rebuild the declaration's source parameters in the order used by a static realization:
-    /// `(contexts..., extension receiver, values...)`. An ordinary member has no signature receiver
-    /// here, so its dispatch receiver remains separate from this vector.
-    pub fn parameters_with_receiver(&self, context_count: usize) -> Box<[Ty]> {
-        let mut parameters = self.params.clone();
-        if let Some(receiver) = self.receiver {
-            parameters.insert(context_count.min(parameters.len()), receiver);
-        }
-        parameters.into_boxed_slice()
-    }
-
-    /// Apply the declaration's return policy after ordinary generic binding. Only a primitive needs a
-    /// representation change: reference substitutions are already null-capable, while nested occurrences
-    /// such as `Container<T>` keep their outer reference shape. The platform supplies wrapper identity so
-    /// this shared model never names a target runtime class.
-    pub fn apply_return_policy(&self, platform: &dyn SemanticPlatform, specialized: Ty) -> Ty {
-        match self.return_policy {
-            GenericReturnPolicy::Exact => specialized,
-            GenericReturnPolicy::FlexibleReference => specialized
-                .boxed_ref()
-                .map(|boxed| platform.library_value_form(boxed))
-                .unwrap_or(specialized),
         }
     }
 }

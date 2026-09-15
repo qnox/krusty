@@ -21554,7 +21554,7 @@ impl<'a> Lower<'a> {
                 .get(fname)?
                 .iter()
                 .find(|method| method.params == member.params)
-                .map(|method| method.param_shapes.clone())
+                .map(|method| method.signature.params.clone())
         });
         let active_depth = self.inline_active.len();
         self.inline_active.push(call_id);
