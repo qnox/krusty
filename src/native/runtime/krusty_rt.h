@@ -178,6 +178,10 @@ extern const KType kt_type_char_array;
 extern const KType kt_type_boolean_array;
 extern const KType kt_type_float_array;
 extern const KType kt_type_double_array;
+extern const KType kt_type_ubyte_array;
+extern const KType kt_type_ushort_array;
+extern const KType kt_type_uint_array;
+extern const KType kt_type_ulong_array;
 
 /* ---- lists --------------------------------------------------------------------------------- */
 

@@ -200,3 +200,57 @@ fn two_boxed_unsigned_values_compare_by_the_value_they_stand_for() {
         "OK",
     );
 }
+
+/// The four unsigned ARRAYS, each at the top value of its width.
+///
+/// An unsigned array is a value class over the signed array of the same width, so the elements are
+/// the signed array's bits and only the reading of them is unsigned — the same erasure the scalars
+/// above go through, one level out. Every element here is the one a SIGNED read of the same bits
+/// answers as `-1`, so a wrong stride or a signed load cannot be right by accident.
+#[test]
+fn every_unsigned_array_width_reads_back_what_it_stored() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val b = UByteArray(2); b[0] = 255u; b[1] = 7u\n\
+         \x20   val s = UShortArray(2); s[0] = 65535u; s[1] = 7u\n\
+         \x20   val i = UIntArray(2); i[0] = 4294967295u; i[1] = 7u\n\
+         \x20   val l = ULongArray(2); l[0] = 18446744073709551615uL; l[1] = 7u\n\
+         \x20   if (b[0].toString() != \"255\") return \"fail ubyte \" + b[0].toString()\n\
+         \x20   if (s[0].toString() != \"65535\") return \"fail ushort \" + s[0].toString()\n\
+         \x20   if (i[0].toString() != \"4294967295\") return \"fail uint \" + i[0].toString()\n\
+         \x20   if (l[0].toString() != \"18446744073709551615\") return \"fail ulong \" + l[0].toString()\n\
+         \x20   if (b[1].toString() != \"7\" || s[1].toString() != \"7\") return \"fail second\"\n\
+         \x20   if (i[1].toString() != \"7\" || l[1].toString() != \"7\") return \"fail second\"\n\
+         \x20   if (b.size != 2 || s.size != 2 || i.size != 2 || l.size != 2) return \"fail size\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "UnsignedArrays",
+        "OK",
+    );
+}
+
+/// A stride is not a name: an unsigned array carries its OWN type, not the signed array's.
+///
+/// `UIntArray` and `IntArray` hold the same bits four at a time, so sharing one runtime descriptor
+/// would make every program above pass — and would answer `is IntArray` with `true`, where the
+/// reference compiler answers `false` because the two are distinct classes. Each unsigned width
+/// therefore gets its own descriptor with the signed one's stride.
+///
+/// NOTE: krusty's JVM backend answers `true` here, which is a separate known defect — it does not
+/// box a value class at the `Any` boundary (`docs/BUILD_AND_NATIVE_PLAN.md`). The native answer is
+/// the reference compiler's.
+#[test]
+fn an_unsigned_array_is_not_the_signed_array_it_is_laid_out_as() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val u: Any = UIntArray(1)\n\
+         \x20   if (u is IntArray) return \"fail: a UIntArray answered as an IntArray\"\n\
+         \x20   if (u !is UIntArray) return \"fail: a UIntArray did not answer as itself\"\n\
+         \x20   val i: Any = IntArray(1)\n\
+         \x20   if (i is UIntArray) return \"fail: an IntArray answered as a UIntArray\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "UnsignedArrayIdentity",
+        "OK",
+    );
+}

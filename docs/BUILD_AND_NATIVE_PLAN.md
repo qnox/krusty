@@ -1566,6 +1566,22 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **The four unsigned arrays, and a stride that is not a name.** `an array of UInt`/`UByte` was
+   the increment backed out earlier in this log, blocked on krusty's JVM backend allocating a
+   `UByteArray` as `int[]`. #940 fixed that, and the native side is four descriptors and four arms.
+   The rule is the same one the JVM change settled: an unsigned array is a value class over the
+   SIGNED array of the same width, so it takes that array's stride — the elements are those bits and
+   only the reading of them is unsigned.
+   What the stride does NOT give it is a name. Sharing `kt_type_int_array` would read and write
+   every element correctly and make every ordinary program pass, while answering
+   `(UIntArray(1) as Any) is IntArray` with `true` — and the reference compiler answers `false`,
+   because the two are distinct classes. So each width gets its own descriptor carrying the signed
+   one's stride, and a test asks both directions of that question rather than only the arithmetic.
+   This is the first place the native backend is deliberately MORE correct than krusty's JVM one:
+   the JVM backend answers `true` there because it does not box a value class at the `Any` boundary,
+   which is the separate open defect recorded above. The native answer is kotlinc's, and the JVM
+   defect keeps its own pinned test on the other side.
+
    **A mapped builtin arrives under its physical name — a base move, not an increment.** `s[i]`
    stopped lowering on a head that had changed nothing about strings: both string-indexing tests
    failed with `the native backend does not support the member java.lang.String.charAt yet`.

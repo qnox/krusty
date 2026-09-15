@@ -38,6 +38,14 @@ pub(super) fn array_type(array: Ty) -> Result<(&'static str, u32), Unsupported> 
         Ty::Boolean => ("kt_type_boolean_array", 1),
         Ty::Float => ("kt_type_float_array", 4),
         Ty::Double => ("kt_type_double_array", 8),
+        // An unsigned array is a value class over the signed array of the same width, so it takes
+        // that array's STRIDE — the elements are those bits and only the reading of them is
+        // unsigned — and its OWN descriptor, because `UIntArray` and `IntArray` are distinct
+        // classes and `is IntArray` has to be able to tell them apart.
+        Ty::UByte => ("kt_type_ubyte_array", 1),
+        Ty::UShort => ("kt_type_ushort_array", 2),
+        Ty::UInt => ("kt_type_uint_array", 4),
+        Ty::ULong => ("kt_type_ulong_array", 8),
         other => return Err(format!("an array of `{other:?}`")),
     })
 }

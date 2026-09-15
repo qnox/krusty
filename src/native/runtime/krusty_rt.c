@@ -98,6 +98,14 @@ KT_ARRAY_TYPE(kt_type_boolean_array, "kotlin.BooleanArray", 1, 0)
 KT_ARRAY_TYPE(kt_type_float_array, "kotlin.FloatArray", 4, 0)
 KT_ARRAY_TYPE(kt_type_double_array, "kotlin.DoubleArray", 8, 0)
 
+/* An unsigned array is a value class over the signed array of the same width, so it takes that
+   array's STRIDE and its own NAME. Sharing the signed descriptor would read and write the same
+   bytes correctly and answer `is IntArray` with `true`, where the two are distinct classes. */
+KT_ARRAY_TYPE(kt_type_ubyte_array, "kotlin.UByteArray", 1, 0)
+KT_ARRAY_TYPE(kt_type_ushort_array, "kotlin.UShortArray", 2, 0)
+KT_ARRAY_TYPE(kt_type_uint_array, "kotlin.UIntArray", 4, 0)
+KT_ARRAY_TYPE(kt_type_ulong_array, "kotlin.ULongArray", 8, 0)
+
 KRef kt_array_new(const KType *type, kt_int length) {
     if (length < 0) {
         KT_FAIL("krusty: negative array size\n");
@@ -1357,12 +1365,14 @@ static kt_boolean kt_walk_is(KRef iterator) {
                || iterator->header.type == &kt_type_chars_iterator);
 }
 
-/* Whether a descriptor is one of the nine array shapes. */
+/* Whether a descriptor is one of the thirteen array shapes. */
 static kt_boolean kt_is_array(const KType *type) {
     return type == &kt_type_array || type == &kt_type_byte_array || type == &kt_type_short_array
            || type == &kt_type_int_array || type == &kt_type_long_array
            || type == &kt_type_char_array || type == &kt_type_boolean_array
-           || type == &kt_type_float_array || type == &kt_type_double_array;
+           || type == &kt_type_float_array || type == &kt_type_double_array
+           || type == &kt_type_ubyte_array || type == &kt_type_ushort_array
+           || type == &kt_type_uint_array || type == &kt_type_ulong_array;
 }
 
 static KRef kt_walk_of(const KType *type, KRef over) {
