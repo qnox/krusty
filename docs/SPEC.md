@@ -1985,6 +1985,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_lists_e2e.rs`
   (`a_single_element_list_is_not_a_vararg_call_of_length_one`).
 
+- **`super.p` on a property is the base class's own realization, reached without dispatch.** A
+  `super` access on a PROPERTY names the property and not an accessor, and a class whose accessors
+  are the default ones declares no method for it at all — so the method search the native generator
+  does for `super.f()` finds nothing to call. What the program asked for is still well defined: the
+  NAMED class's implementation. A source-written accessor of that class is called directly; a
+  default one is the field that class contributes, which is a distinct field from the override's
+  because an overriding `var` declares storage of its own — and `super.b` is exactly how a program
+  can tell the two apart.
+  Nothing on this path may dispatch. `super.p` is written inside the override of `p`, so reaching
+  the slot would reach the accessor doing the asking and the program would not finish.
+  Tests: `tests/native_classes_e2e.rs`
+  (`a_super_property_read_reaches_the_base_classs_own_storage`,
+  `a_super_property_write_reaches_the_base_classs_own_storage`,
+  `a_super_property_reaches_a_written_accessor_without_dispatching`,
+  `a_super_property_of_an_interface_reaches_its_default_accessor`).
+
 - **A class literal is one type descriptor, and `KClass` is equal by the type it stands for.**
   `String::class` names a type statically; `x::class` reads the descriptor the OBJECT is wearing, so
   `val x: CharSequence = ""` answers `String::class`. A scalar receiver is boxed first — there is no

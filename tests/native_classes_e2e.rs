@@ -580,3 +580,93 @@ fn a_companion_object_is_initialized_when_its_class_is_first_constructed() {
         "the companion initializes once, before the first instance, and never again"
     );
 }
+
+#[test]
+fn a_super_property_read_reaches_the_base_classs_own_storage() {
+    if !available() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A `super` access on a PROPERTY names the property, not an accessor, and a class with default
+    // accessors declares no method for it — so there is nothing to call and the field is the
+    // answer. It must be the BASE's field: an overriding `var` declares storage of its own, and
+    // `super.b` is how a program can tell the two apart.
+    assert_eq!(
+        run("open class Base { open var b: Int = 1 }\n\
+             class Derived : Base() {\n\
+             \x20   override var b: Int = 9\n\
+             \x20   fun ofBase(): Int = super.b\n\
+             }\n\
+             fun main() {\n\
+             \x20   val d = Derived()\n\
+             \x20   println(d.b)\n\
+             \x20   println(d.ofBase())\n\
+             }\n"),
+        "9\n1\n"
+    );
+}
+
+#[test]
+fn a_super_property_write_reaches_the_base_classs_own_storage() {
+    if !available() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // The write half, and the read that proves it went where it was aimed: the override's own
+    // field is untouched by it.
+    assert_eq!(
+        run("open class Base { open var b: Int = 1 }\n\
+             class Derived : Base() {\n\
+             \x20   override var b: Int = 9\n\
+             \x20   fun bumpBase(): Int {\n\
+             \x20       super.b = super.b + 5\n\
+             \x20       return super.b\n\
+             \x20   }\n\
+             }\n\
+             fun main() {\n\
+             \x20   val d = Derived()\n\
+             \x20   println(d.bumpBase())\n\
+             \x20   println(d.b)\n\
+             }\n"),
+        "6\n9\n"
+    );
+}
+
+#[test]
+fn a_super_property_reaches_a_written_accessor_without_dispatching() {
+    if !available() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // When the base wrote its own accessor, that body is what `super.p` runs — called directly.
+    // Dispatching would reach the override, which is the accessor doing the asking, and the
+    // program would not finish.
+    assert_eq!(
+        run("open class Base {\n\
+             \x20   open val label: String get() = \"base\"\n\
+             }\n\
+             class Derived : Base() {\n\
+             \x20   override val label: String get() = super.label + \"+derived\"\n\
+             }\n\
+             fun main() { println(Derived().label) }\n"),
+        "base+derived\n"
+    );
+}
+
+#[test]
+fn a_super_property_of_an_interface_reaches_its_default_accessor() {
+    if !available() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    assert_eq!(
+        run("interface Named {\n\
+             \x20   val label: String get() = \"named\"\n\
+             }\n\
+             class Thing : Named {\n\
+             \x20   override val label: String get() = super.label + \"!\"\n\
+             }\n\
+             fun main() { println(Thing().label) }\n"),
+        "named!\n"
+    );
+}

@@ -1566,6 +1566,13 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **`super` on a property, for 2590.** The decline read "a `super` call to an unknown method",
+   and the method really was unknown — because it does not exist. A property with default accessors
+   contributes no method to its class, so the search had nothing to find, and the eighteen corpus
+   cases behind it were all `super.p` rather than `super.f()`. The fix is the definition: the named
+   class's own accessor when it wrote one, its own field otherwise, and never the dispatch slot —
+   which is the override that wrote `super.p` in the first place.
+
    **Class literals, for 2576.** Every type already carries a descriptor with its Kotlin name, so
    a `KClass` is that pointer with a header on it, and equality is the pointer. Two things came out
    of it. The first was a link failure I nearly missed: `kt_class_for` is already the collector's

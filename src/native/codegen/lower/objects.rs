@@ -1652,6 +1652,123 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         self.dispatch(object, slot, &carried, ret, &arguments)
     }
 
+    /// `super.p` and `super.p = v` — the named class's own realization of a PROPERTY.
+    ///
+    /// Returns `None` when the class declares no such property, so the caller keeps its decline.
+    ///
+    /// Nothing here may dispatch. `super.p` is written inside the override of `p`, and reaching the
+    /// slot would reach that override — which is the accessor doing the asking. So a source-written
+    /// accessor of the named class is called directly, and a default one is the field that class
+    /// contributes: a distinct field from the override's, because an overriding `var` declares
+    /// storage of its own and `super.b` is the reason a program can tell.
+    fn direct_property(
+        &mut self,
+        class: ClassId,
+        name: &str,
+        receiver: u32,
+        args: &[u32],
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        let index = self.file.ir.classes[class as usize]
+            .properties
+            .iter()
+            .position(|property| property.name == name)?;
+        Some(match args {
+            [] => self.direct_property_read(class, index, receiver),
+            [value] => self
+                .direct_property_write(class, index, receiver, *value)
+                .map(|()| None),
+            _ => Err(format!(
+                "a `super` access to `{name}` with {} operands",
+                args.len()
+            )),
+        })
+    }
+
+    fn direct_property_read(
+        &mut self,
+        class: ClassId,
+        index: usize,
+        receiver: u32,
+    ) -> Result<Option<Value>, Unsupported> {
+        let property = self.file.ir.classes[class as usize].properties[index].clone();
+        let Some(object) = self.receiver(receiver)? else {
+            return Ok(None);
+        };
+        if let Some(getter) = property.getter {
+            let Some(id) = self.file.functions[getter as usize] else {
+                return Err(format!(
+                    "a `super` read of the abstract `{}`",
+                    property.name
+                ));
+            };
+            let func_ref = self.func_ref(id);
+            let call = self.builder.ins().call(func_ref, &[object]);
+            return Ok(self.builder.inst_results(call).first().copied());
+        }
+        let Some(field) = property.backing_field else {
+            return Err(format!(
+                "a `super` read of `{}`, which has neither storage nor a getter",
+                property.name
+            ));
+        };
+        let ty = self.file.ir.classes[class as usize].fields[field as usize].ty;
+        let offset = self.file.model.layout(class).fields[field as usize].offset as i32;
+        let clif = carrier(ty).clif().expect("fields are never `Unit`");
+        Ok(Some(self.builder.ins().load(
+            clif,
+            trusted(),
+            object,
+            offset,
+        )))
+    }
+
+    fn direct_property_write(
+        &mut self,
+        class: ClassId,
+        index: usize,
+        receiver: u32,
+        value: u32,
+    ) -> Result<(), Unsupported> {
+        let property = self.file.ir.classes[class as usize].properties[index].clone();
+        // The setter takes the property's own type; a direct store takes the FIELD's, which is the
+        // same rule `written_property_ty` states for an ordinary write.
+        let target = match (property.setter, property.backing_field) {
+            (Some(_), _) => property.ty,
+            (None, Some(field)) => self.file.ir.classes[class as usize].fields[field as usize].ty,
+            (None, None) => {
+                return Err(format!(
+                    "a `super` write of `{}`, which has neither storage nor a setter",
+                    property.name
+                ));
+            }
+        };
+        let Some(object) = self.receiver(receiver)? else {
+            return Ok(());
+        };
+        let value = self.coerce(value, target)?;
+        if self.terminated {
+            return Ok(());
+        }
+        let Some(value) = value else {
+            return Err(format!("a `Unit` value assigned to `{}`", property.name));
+        };
+        if let Some(setter) = property.setter {
+            let Some(id) = self.file.functions[setter as usize] else {
+                return Err(format!(
+                    "a `super` write of the abstract `{}`",
+                    property.name
+                ));
+            };
+            let func_ref = self.func_ref(id);
+            self.builder.ins().call(func_ref, &[object, value]);
+            return Ok(());
+        }
+        let field = property.backing_field.expect("checked above");
+        let offset = self.file.model.layout(class).fields[field as usize].offset as i32;
+        self.builder.ins().store(trusted(), value, object, offset);
+        Ok(())
+    }
+
     /// A non-virtual call to the named class's own implementation: `super.f()`.
     pub(super) fn direct_call(
         &mut self,
@@ -1681,7 +1798,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         let class = self.file.class_of(owner, "a `super` call to a method of")?;
         let ir = self.file.ir;
-        let fid = source
+        let found = source
             .and_then(|callable| ir.checked_callable_functions.get(&callable).copied())
             .or_else(|| {
                 ir.classes[class as usize]
@@ -1693,8 +1810,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         function.name == name
                             && params.is_none_or(|params| function.params == params)
                     })
-            })
-            .ok_or_else(|| format!("a `super` call to an unknown method (`{name}`)"))?;
+            });
+        // `super.p` on a PROPERTY names the property, not an accessor, and a class whose accessors
+        // are the default ones declares no method at all for it — so the search above finds
+        // nothing to call. What the program asked for is still perfectly well defined: the named
+        // class's own realization, reached without dispatch.
+        let Some(fid) = found else {
+            if let Some(realized) = self.direct_property(class, name, receiver, args) {
+                return realized;
+            }
+            return Err(format!("a `super` call to an unknown method (`{name}`)"));
+        };
         let Some(id) = self.file.functions[fid as usize] else {
             return Err(format!("a `super` call to the abstract method `{name}`"));
         };
