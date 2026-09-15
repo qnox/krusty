@@ -374,6 +374,20 @@ KRef kt_string_remove_suffix(KRef self, KRef suffix);
 /* `Any?.toString()` — also what a string template calls on each interpolated value. */
 KRef kt_to_string(KRef value);
 
+/* `x::class` and `String::class`: a `kotlin.reflect.KClass` over one type descriptor.
+   Two objects are EQUAL when they describe the same type, which is what Kotlin promises and what
+   `x::class == String::class` asks; identity is not promised and is not relied on, so no table of
+   canonical instances has to exist. The descriptor itself lives in static storage, so the object
+   holds a pointer the collector neither traces nor needs to. */
+extern const KType kt_type_kclass;
+KRef kt_class_of(KRef value);
+/* Named for the FORM rather than for what it takes: `kt_class_for` is the collector's own
+   size-class helper, and a freestanding program links one namespace. */
+KRef kt_class_literal(const KType *type);
+/* `simpleName` and `qualifiedName`, read off the descriptor's own Kotlin name. */
+KRef kt_class_simple_name(KRef self);
+KRef kt_class_qualified_name(KRef self);
+
 /* `Double.toString`/`Float.toString`: the shortest decimal that reads back as exactly this value,
    written into `out` (32 bytes is always enough). Returns the number of bytes written. Defined in
    `krusty_fp.c`, which is where the whole of that question lives. */

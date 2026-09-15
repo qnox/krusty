@@ -1566,6 +1566,18 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **Class literals, for 2576.** Every type already carries a descriptor with its Kotlin name, so
+   a `KClass` is that pointer with a header on it, and equality is the pointer. Two things came out
+   of it. The first was a link failure I nearly missed: `kt_class_for` is already the collector's
+   size-class helper, and a freestanding program links one namespace — the build WARNED and turned
+   every native target off, which silently turns every native test into a skip, so the probes that
+   "passed" had not run at all. Read the build warnings.
+   The second is a shared defect this increment made visible rather than caused:
+   `sam/constructors/sameWrapperClass2.kt` wants two SAM conversions of one lambda to be instances
+   of ONE wrapper class, and both backends emit a type per conversion SITE. It was invisible while
+   `::class` declined. Ledgered with the JVM's identical failure; fixing it is common lowering's,
+   keyed on (interface, implementation, capture shape) rather than on the site index.
+
    **`TODO`, `error`, `require`, `check`, for 2570.** These throw, and this target has no
    exceptions — but it already answers `!!` on null and a failed cast with a diagnosable exit, and
    these are the same thing with the program's own message. Nothing is decided about `try` by

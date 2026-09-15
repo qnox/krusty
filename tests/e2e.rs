@@ -1599,3 +1599,6 @@ mod native_boxed_numbers_e2e;
 
 #[path = "native_throws_e2e.rs"]
 mod native_throws_e2e;
+
+#[path = "native_class_literals_e2e.rs"]
+mod native_class_literals_e2e;

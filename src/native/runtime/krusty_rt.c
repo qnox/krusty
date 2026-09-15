@@ -705,6 +705,91 @@ kt_double kt_number_to_double(KRef value) {
     return number.is_real ? number.real : (kt_double)number.integer;
 }
 
+/* ---- class literals -------------------------------------------------------------------------- */
+
+/* The descriptor is STATIC storage, not a heap object: the collector resolves a candidate address
+   to its chunk and drops one that belongs to none, so this field is neither traced nor needs to be
+   — which is why the type below declares no references. */
+typedef struct KClass {
+    KObjectHeader header;
+    const KType *described;
+} KClass;
+
+static kt_boolean kt_class_equals(KRef self, KRef other);
+static kt_int kt_class_hash_code(KRef self);
+static KRef kt_class_to_string(KRef self);
+
+static const kt_fn kt_class_vtable[] = {(kt_fn)kt_class_equals, (kt_fn)kt_class_hash_code,
+                                        (kt_fn)kt_class_to_string};
+
+const KType kt_type_kclass = {"kotlin.reflect.KClass",
+                              sizeof("kotlin.reflect.KClass") - 1,
+                              sizeof(KClass),
+                              0,
+                              0,
+                              NULL,
+                              &kt_type_any,
+                              kt_class_vtable,
+                              3,
+                              0};
+
+KRef kt_class_literal(const KType *type) {
+    KClass *literal = (KClass *)kt_gc_allocate(&kt_type_kclass, sizeof(KClass));
+    literal->described = type;
+    return (KRef)literal;
+}
+
+KRef kt_class_of(KRef value) {
+    if (value == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    return kt_class_literal(value->header.type);
+}
+
+/* Equality is the TYPE, not the object. Kotlin's `KClass` is equal by the class it stands for —
+   `x::class == String::class` is the question programs actually ask — and answering it this way is
+   what lets a literal be an ordinary allocation instead of a canonical instance the runtime would
+   have to keep a table of. */
+static kt_boolean kt_class_equals(KRef self, KRef other) {
+    if (other == NULL || other->header.type != &kt_type_kclass) {
+        return 0;
+    }
+    return ((const KClass *)self)->described == ((const KClass *)other)->described;
+}
+
+static kt_int kt_class_hash_code(KRef self) {
+    /* The descriptor's address, which is stable: it is static storage and the collector never
+       moves anything. Folded to 32 bits the way the object hash already is. */
+    uintptr_t address = (uintptr_t)((const KClass *)self)->described;
+    return (kt_int)(uint32_t)((address >> 4) ^ (address >> 36));
+}
+
+/* `class kotlin.String`, which is what Kotlin's own `KClass.toString` prints. */
+static KRef kt_class_to_string(KRef self) {
+    const KType *described = ((const KClass *)self)->described;
+    KRef prefix = kt_string_utf8("class ", 6);
+    KRef name = kt_string_utf8(described->name, (kt_int)described->name_length);
+    return kt_string_plus(prefix, name);
+}
+
+KRef kt_class_qualified_name(KRef self) {
+    const KType *described = ((const KClass *)self)->described;
+    return kt_string_utf8(described->name, (kt_int)described->name_length);
+}
+
+/* The last dot-separated segment of the qualified name. A name with no dot is its own simple name,
+   which is what a class in the root package has. */
+KRef kt_class_simple_name(KRef self) {
+    const KType *described = ((const KClass *)self)->described;
+    kt_int start = 0;
+    for (kt_int at = 0; at < (kt_int)described->name_length; at++) {
+        if (described->name[at] == '.') {
+            start = at + 1;
+        }
+    }
+    return kt_string_utf8(described->name + start, (kt_int)described->name_length - start);
+}
+
 /* ---- lazy ---------------------------------------------------------------------------------- */
 
 typedef struct KLazy {

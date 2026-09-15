@@ -15,6 +15,7 @@ use std::rc::Rc;
 
 mod arrays;
 mod boxed;
+mod classes_literal;
 mod defaults;
 mod enums;
 mod functions;
@@ -1192,6 +1193,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             }) if self.reference_property(target, receiver).is_some() => self
                 .reference_property(target, receiver)
                 .expect("checked by the guard"),
+            // `k.simpleName` / `k.qualifiedName`: the descriptor's own Kotlin name.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.class_name_accessor(target).is_some() => {
+                let symbol = self
+                    .class_name_accessor(target)
+                    .expect("checked by the guard");
+                self.class_name(symbol, receiver)
+            }
             // `cs.length` where the receiver is typed `CharSequence`: a string, on this target.
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
                 target,
@@ -1289,6 +1301,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.property_reference(id)
             }
             IrExpr::LocalPropertyReference { .. } => self.local_property_reference(id),
+            IrExpr::KClassLiteral { classifier, value } => self.class_literal(classifier, value),
             IrExpr::Checked(IrCheckedOperation::RangeConstruction {
                 operation,
                 start,
@@ -1531,6 +1544,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 if self.is_char_sequence_length(*target) {
                     return Some(Ty::Int);
                 }
+                if self.class_name_accessor(*target).is_some() {
+                    return Some(Ty::nullable(Ty::String));
+                }
                 if let Some(receiver) = receiver {
                     if self.callable_reference_name(*target, *receiver).is_some() {
                         return Some(Ty::String);
@@ -1565,6 +1581,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             // A local delegated property's metadata wears the interface Kotlin gives it, which is
             // what sends its `name` through the reference machinery.
             IrExpr::LocalPropertyReference { .. } => Ty::obj("kotlin/reflect/KProperty"),
+            // A class literal is an object of the reflection type Kotlin gives it, which is what
+            // makes an equality between two of them an equality between references.
+            IrExpr::KClassLiteral { .. } => classes_literal::kclass(),
             IrExpr::Checked(IrCheckedOperation::PropertyReference { mutable, .. }) => self
                 .file
                 .ir

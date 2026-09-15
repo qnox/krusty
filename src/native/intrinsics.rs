@@ -431,6 +431,24 @@ pub(super) fn is_char_sequence_length(owner: crate::types::TypeName, name: &str)
             .any(|candidate| owner.matches(candidate))
 }
 
+/// The runtime function answering a `KClass` name accessor, or `None` for anything else.
+///
+/// Both spellings of each are taken for the reason `is_char_sequence_length` takes both: which one
+/// a provider presents a property's accessor under is the provider's business, not this table's.
+pub(super) fn class_name_accessor(
+    owner: crate::types::TypeName,
+    name: &str,
+) -> Option<&'static str> {
+    if !owner.matches("kotlin/reflect/KClass") {
+        return None;
+    }
+    match name {
+        "simpleName" | "getSimpleName" => Some("kt_class_simple_name"),
+        "qualifiedName" | "getQualifiedName" => Some("kt_class_qualified_name"),
+        _ => None,
+    }
+}
+
 /// The Kotlin name of a value-class member, with kotlinc's mangling removed.
 ///
 /// A member whose signature mentions a value class is emitted as `name-<suffix>`: `-impl` for the

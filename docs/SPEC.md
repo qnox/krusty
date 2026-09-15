@@ -1985,6 +1985,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_lists_e2e.rs`
   (`a_single_element_list_is_not_a_vararg_call_of_length_one`).
 
+- **A class literal is one type descriptor, and `KClass` is equal by the type it stands for.**
+  `String::class` names a type statically; `x::class` reads the descriptor the OBJECT is wearing, so
+  `val x: CharSequence = ""` answers `String::class`. A scalar receiver is boxed first — there is no
+  descriptor on a machine integer — which is also why `(n++)::class` answers `Int::class` and not
+  the class of something that has no object; the receiver still runs, exactly once.
+  The object is an ordinary allocation rather than a canonical instance, because Kotlin promises
+  `KClass` equality by the class and not identity: the runtime compares descriptors, so
+  `x::class == String::class` is true without a table of canonical instances existing anywhere.
+  `simpleName` and `qualifiedName` come off the descriptor's own Kotlin name, which every type
+  already carries for `toString`. `KClass.toString` prints `class <qualified name>` — what a JVM
+  WITH `kotlin-reflect` prints; a JVM without it appends "(Kotlin reflection is not available)",
+  which is a fact about that dependency rather than about either backend, so the cross-backend
+  differential covers the two names and not the rendering.
+  Tests: `tests/native_class_literals_e2e.rs` (`a_bound_literal_answers_the_runtime_class`,
+  `two_literals_of_one_type_are_equal_without_being_the_same_object`,
+  `a_bound_literal_evaluates_its_receiver_exactly_once`,
+  `a_literal_over_a_primitive_names_the_boxed_type`, `the_names_agree_with_the_jvm_backend`).
+
 - **A throw a program writes on purpose is a diagnosable exit on the native target.** `TODO()`,
   `error(message)` and a failed `require`/`check` all throw in Kotlin. Nothing on this target can
   catch one — `try` declines whole — so each is realized as the loud exit the runtime already gives

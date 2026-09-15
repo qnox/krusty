@@ -119,7 +119,7 @@ impl<'a> FileLowering<'a> {
     }
 
     /// The runtime descriptor for a type an `is`/`as` names: an in-file class or a built-in.
-    fn type_descriptor(&mut self, ty: Ty) -> Result<Option<DataId>, Unsupported> {
+    pub(super) fn type_descriptor(&mut self, ty: Ty) -> Result<Option<DataId>, Unsupported> {
         let target = ty.non_null();
         if let Some(class) = target
             .obj_internal()
