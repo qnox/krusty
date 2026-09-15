@@ -392,6 +392,28 @@ KRef kt_string_remove_suffix(KRef self, KRef suffix);
 /* `Any?.toString()` — also what a string template calls on each interpolated value. */
 KRef kt_to_string(KRef value);
 
+/* ---- exceptions ---------------------------------------------------------------------------- */
+
+/* The `Throwable` hierarchy a `catch` clause names. Each link is Kotlin's own, so matching a clause
+   is `kt_is_instance` against the clause's type and nothing more. */
+extern const KType kt_type_throwable;
+extern const KType kt_type_error;
+extern const KType kt_type_not_implemented_error;
+extern const KType kt_type_exception;
+extern const KType kt_type_runtime_exception;
+extern const KType kt_type_illegal_state_exception;
+extern const KType kt_type_illegal_argument_exception;
+
+/* Allocate one. `message` may be NULL, which is Kotlin's `null` message. */
+KRef kt_throwable_new(const KType *type, KRef message);
+
+/* Its `message`, or NULL. */
+KRef kt_throwable_message(KRef self);
+
+/* Report an uncaught throw and end the program. See the note on the definition for why every throw
+   is uncaught today. */
+void kt_throw(KRef thrown);
+
 /* `x::class` and `String::class`: a `kotlin.reflect.KClass` over one type descriptor.
    Two objects are EQUAL when they describe the same type, which is what Kotlin promises and what
    `x::class == String::class` asks; identity is not promised and is not relied on, so no table of

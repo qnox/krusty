@@ -1,15 +1,15 @@
-//! The throws a Kotlin program writes on purpose, on a target that has no exceptions.
+//! The throws a Kotlin program writes on purpose, through the stdlib rather than with `throw`.
 //!
-//! `TODO()`, `error(message)` and a failed `require`/`check` all throw in Kotlin. There is nothing
-//! here to catch one — `try` declines whole — so the honest realization is the diagnosable exit
-//! this runtime already gives for `!!` on null, a failed cast and an out-of-bounds index. No
-//! program that could OBSERVE the difference compiles on this target, which is what makes the
-//! substitution sound rather than convenient.
+//! `TODO()`, `error(message)` and a failed `require`/`check` all throw in Kotlin, and each builds
+//! the exception Kotlin specifies and hands it to the same `kt_throw` a `throw` the program wrote
+//! itself takes. That is not tidiness: `error(m)` IS `throw IllegalStateException(m)` in Kotlin, so
+//! once a `catch` exists it must not be able to tell them apart, and the surest way to keep that
+//! true is for there to be one object and one report rather than two mechanisms.
 //!
 //! Two halves, and both matter: the path that does not throw must run normally, and the one that
-//! does must stop the program rather than carry on with a value it does not have.
+//! does must stop the program, reporting the exception Kotlin names.
 
-use super::common::{expect_native_box, expect_native_decline};
+use super::common::{expect_native_box, expect_native_decline, expect_native_exit};
 
 #[test]
 fn an_unreached_todo_leaves_the_program_alone() {
@@ -75,5 +75,65 @@ fn a_message_lambda_still_declines() {
          }\n",
         "RequireWithAMessage",
         "require",
+    );
+}
+
+#[test]
+fn a_reached_todo_reports_kotlins_own_exception() {
+    // `NotImplementedError`, with the message the stdlib gives it — not a `krusty:` line of the
+    // runtime's own, which is what these reported while there was no `Throwable` to report.
+    expect_native_exit(
+        "fun box(): String = TODO()\n",
+        "ReachedTodo",
+        134,
+        "kotlin.NotImplementedError: An operation is not implemented.",
+    );
+}
+
+#[test]
+fn a_reached_todo_carries_its_reason() {
+    expect_native_exit(
+        "fun box(): String = TODO(\"the reason\")\n",
+        "ReachedTodoReason",
+        134,
+        "kotlin.NotImplementedError: An operation is not implemented: the reason",
+    );
+}
+
+#[test]
+fn a_reached_error_is_an_illegal_state_exception() {
+    expect_native_exit(
+        "fun box(): String = error(\"gone wrong\")\n",
+        "ReachedError",
+        134,
+        "kotlin.IllegalStateException: gone wrong",
+    );
+}
+
+#[test]
+fn a_failed_requirement_is_an_illegal_argument_exception() {
+    // Kotlin's two guards differ in the exception they raise, which a `catch` will be able to see:
+    // `require` is about the caller's argument and `check` about the receiver's state.
+    expect_native_exit(
+        "fun box(): String {\n\
+         \x20   require(1 > 2)\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "FailedRequirement",
+        134,
+        "kotlin.IllegalArgumentException: Failed requirement.",
+    );
+}
+
+#[test]
+fn a_failed_check_is_an_illegal_state_exception() {
+    expect_native_exit(
+        "fun box(): String {\n\
+         \x20   check(1 > 2)\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "FailedCheck",
+        134,
+        "kotlin.IllegalStateException: Check failed.",
     );
 }

@@ -2122,21 +2122,43 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_bound_literal_evaluates_its_receiver_exactly_once`,
   `a_literal_over_a_primitive_names_the_boxed_type`, `the_names_agree_with_the_jvm_backend`).
 
-- **A throw a program writes on purpose is a diagnosable exit on the native target.** `TODO()`,
-  `error(message)` and a failed `require`/`check` all throw in Kotlin. Nothing on this target can
-  catch one — `try` declines whole — so each is realized as the loud exit the runtime already gives
-  for `!!` on null, a failed cast and an out-of-bounds index, naming the exception the JVM would
-  raise and the program's own message. No program that could OBSERVE the difference compiles here,
-  which is what makes the substitution sound rather than convenient; when exceptions arrive these
-  become throws, and nothing about the `try` design is settled by this.
+- **`throw` on the native target reports the exception and ends the program — and that is Kotlin's
+  answer, not a stopgap.** A file containing any `try` is declined WHOLE, so inside a file this
+  backend emits there is no handler and no `finally` between a throw and the end of the program. An
+  exception nothing handles ends the program in Kotlin, so terminating at the throw is the correct
+  behaviour for every program this backend accepts today. It exits 134, the code the JVM backend
+  uses for an abnormal end and the one a failed cast already uses here, and writes
+  `Exception in thread "main" ` followed by the exception's `toString`.
+  `Throwable` is an ordinary object with ONE reference field (`message`), a real `super` chain and
+  Kotlin's own `toString` — the qualified name, and `: message` after it when there is one. Six
+  classes are provided by the runtime with Kotlin's own chain: `Throwable`; `Error` and `Exception`
+  under it; `RuntimeException` under `Exception`; `IllegalStateException` and
+  `IllegalArgumentException` under `RuntimeException`; plus `NotImplementedError` under `Error`.
+  The chain is what a `catch` clause will match against, by the `kt_is_instance` that already walks
+  `super` — so the design of `catch` is fixed by this, and nothing about it is settled by the
+  reporting behaviour above.
+  These classes are declared in no file krusty compiles, so constructing one takes the path `Any()`
+  already took: no layout and no constructor to call, the runtime allocates it. The no-argument and
+  `message: String?` constructors are realized; a `cause` DECLINES, because this `Throwable` has no
+  cause field and answering `null` to a program that passed one is worse than refusing it.
+  `throw` is `Nothing`, so nothing reads a value from it.
+  Tests: `tests/native_exceptions_e2e.rs` (all).
+
+- **The stdlib functions that throw raise Kotlin's own exception, through the same path a written
+  `throw` takes.** `TODO()` raises `NotImplementedError`, `error(message)` and a failed `check`
+  raise `IllegalStateException`, and a failed `require` raises `IllegalArgumentException` — each
+  with the message the stdlib specifies, and each handed to the same runtime entry point as
+  `throw e`. The realization is not a convenience: `error(m)` IS `throw IllegalStateException(m)` in
+  Kotlin, so a `catch` must not be able to tell them apart, and one object with one report is what
+  keeps that true. (These reported a `krusty:` line of the runtime's own while there was no
+  `Throwable` to report.)
   `TODO()` is a `Nothing`, so the caller's bottom-value contract takes over from the call.
   The forms taking a `lazyMessage` still DECLINE. That parameter is a lambda of an `inline`
   declaration whose body is not here to splice, and Kotlin lets such a lambda return from the
   enclosing function — so invoking it as an ordinary function value would be a miscompile rather
   than a slower answer.
-  Tests: `tests/native_throws_e2e.rs` (`a_todo_is_a_bottom_value_the_caller_never_reads`,
-  `a_satisfied_requirement_is_not_a_failure`, `a_message_lambda_still_declines`),
-  `tests/native_codegen_e2e.rs` (`a_throw_a_program_wrote_stops_it_and_says_what_happened`).
+  Tests: `tests/native_throws_e2e.rs` (all), `tests/native_codegen_e2e.rs`
+  (`a_throw_a_program_wrote_stops_it_and_says_what_happened`).
 
 - **`joinToString()` is realized only with every parameter at its default.** The stdlib declares
   six parameters, all defaulted, and the native backend has no `$default` synthetic of a dependency
@@ -2328,8 +2350,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   krusty's native target realizes that decision in BOTH positions rather than re-deciding by
   position: a substituted result is handed to whatever asked and discarded in statement position,
   and a genuine one ends the path with a runtime failure. The JVM throws
-  `KotlinNothingValueException` there; there are no exceptions on this target yet, and no program
-  that could catch one compiles here.
+  `KotlinNothingValueException` there; this target does NOT raise it as a `Throwable`, unlike the
+  stdlib's own throwers, because reaching it means a callee lied about its type — a defect in what
+  was emitted rather than something a program is entitled to catch.
   Tests: `tests/native_bottom_value_e2e.rs`.
 
 - **An unbroken `while (true)` is not left.** Nothing branches to the exit of a loop whose condition

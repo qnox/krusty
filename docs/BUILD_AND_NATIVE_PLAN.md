@@ -1605,6 +1605,33 @@ before:**
    `Throw` lowering without needing the call-site checks at all. Those arrive with `try`/`catch`,
    which is when a handler first exists for a check to find.
 
+   **`throw`, landed.** The hierarchy is six `KType`s in the runtime over one struct with one
+   reference field, chained exactly as Kotlin chains them — `IllegalStateException` under
+   `RuntimeException` under `Exception` under `Throwable` — so matching a `catch` clause, when there
+   is one, will be the `kt_is_instance` that already walks `super`. `toString` is Kotlin's: the
+   qualified name, and `: message` after it when there is one. These classes are declared in no file
+   krusty compiles, so construction goes the way `Any()` already did — no layout, no constructor to
+   call, the runtime allocates one — with the two constructors Kotlin gives them realized and a
+   `cause` declined, because this `Throwable` has no cause field and answering `null` to a program
+   that passed one is worse than refusing it.
+
+   **The stdlib's throwers were folded onto the same path, and that is the point.** `TODO()`,
+   `error`, `require` and `check` reported a `krusty:` line of the runtime's own while there was no
+   `Throwable` to report. Each now builds the exception Kotlin specifies, with Kotlin's message, and
+   hands it to the same `kt_throw`. `error(m)` IS `throw IllegalStateException(m)` in Kotlin, so a
+   `catch` must not be able to tell them apart; the surest way to keep that true before the `catch`
+   exists is for there to be one object and one report rather than two mechanisms that happen to
+   agree today. Five tests pin the exception each one raises, which is the half of that file that
+   could not be written before.
+
+   **A test-harness asymmetry found on the way, worth naming.** The native e2e helper compiled
+   against the stdlib jar alone where its JVM counterpart also carries the JDK jimage. Every
+   `kotlin.Throwable` is a typealias for a `java.lang` class, so the whole hierarchy was
+   unresolvable — and a cross-check whose native half cannot NAME what its JVM half named reports
+   agreement rather than a skip. Nothing about the emitted program changes; it still links only
+   against the runtime. It is the same temporary bridge `native/intrinsics` documents, and it goes
+   when the provider becomes klib-based.
+
    **The four unsigned arrays, and a stride that is not a name.** `an array of UInt`/`UByte` was
    the increment backed out earlier in this log, blocked on krusty's JVM backend allocating a
    `UByteArray` as `int[]`. #940 fixed that, and the native side is four descriptors and four arms.

@@ -27,6 +27,11 @@ fn kotlin_owner(owner: &str) -> &str {
         "java/lang/Comparable" => "kotlin/Comparable",
         "java/lang/Number" => "kotlin/Number",
         "java/lang/Throwable" => "kotlin/Throwable",
+        "java/lang/Error" => "kotlin/Error",
+        "java/lang/Exception" => "kotlin/Exception",
+        "java/lang/RuntimeException" => "kotlin/RuntimeException",
+        "java/lang/IllegalStateException" => "kotlin/IllegalStateException",
+        "java/lang/IllegalArgumentException" => "kotlin/IllegalArgumentException",
         "java/lang/Enum" => "kotlin/Enum",
         other => other,
     }
@@ -39,6 +44,40 @@ fn kotlin_owner(owner: &str) -> &str {
 /// arrives as `java/lang/Object` when the signature came out of a JVM jar.
 pub(super) fn is_any(owner: crate::types::TypeName) -> bool {
     matches!(kotlin_owner(&owner.render()), "kotlin/Any")
+}
+
+/// The runtime type descriptor for a `Throwable` the runtime provides, if this is one.
+///
+/// These classes are declared in no file krusty compiles, so there is no layout and no constructor
+/// to call — the runtime carries the descriptor, the one reference field and the `toString` Kotlin
+/// specifies, and `kt_throwable_new` builds one. The chain is Kotlin's, so a `catch` clause naming
+/// any of them is an ordinary `kt_is_instance` against the descriptor named here.
+///
+/// A class the PROGRAM declares that extends one of these is not this: it has its own layout and
+/// its own constructor, and is emitted like any other class.
+pub(super) fn throwable_descriptor(owner: crate::types::TypeName) -> Option<&'static str> {
+    Some(match kotlin_owner(&owner.render()) {
+        "kotlin/Throwable" => "kt_type_throwable",
+        "kotlin/Error" => "kt_type_error",
+        "kotlin/Exception" => "kt_type_exception",
+        "kotlin/RuntimeException" => "kt_type_runtime_exception",
+        "kotlin/IllegalStateException" => "kt_type_illegal_state_exception",
+        "kotlin/IllegalArgumentException" => "kt_type_illegal_argument_exception",
+        "kotlin/NotImplementedError" => "kt_type_not_implemented_error",
+        _ => return None,
+    })
+}
+
+/// Is this `kotlin.String`, under either spelling and at either nullability?
+///
+/// `Throwable`'s constructors are told apart by their one parameter — a `message: String?` from a
+/// `cause: Throwable?` — and only the message one is realized here.
+pub(super) fn is_string(ty: &Ty) -> bool {
+    match ty {
+        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => is_string(inner),
+        Ty::Obj(owner, _) => kotlin_owner(&owner.render()) == "kotlin/String",
+        _ => false,
+    }
 }
 
 /// The Kotlin package a JVM file facade stands for: `kotlin/io/ConsoleKt` → `kotlin/io`.
@@ -475,6 +514,19 @@ pub(super) fn is_char_sequence_length(owner: crate::types::TypeName, name: &str)
         && ["kotlin/CharSequence", "java/lang/CharSequence"]
             .iter()
             .any(|candidate| owner.matches(candidate))
+}
+
+/// Whether an accessor is `Throwable.message`.
+///
+/// The property is declared on `kotlin.Throwable` itself, so a subclass reading it — the program's
+/// own or one of the runtime's — arrives here under the root's owner. Both spellings are taken for
+/// the reason [`is_char_sequence_length`] gives: which one a provider uses is its business.
+///
+/// `cause` is deliberately NOT here. This `Throwable` has no cause field, so answering it would be
+/// answering `null` to a program that passed one, and that declines instead.
+pub(super) fn is_throwable_message(owner: crate::types::TypeName, name: &str) -> bool {
+    matches!(name, "message" | "getMessage")
+        && matches!(kotlin_owner(&owner.render()), "kotlin/Throwable")
 }
 
 /// The runtime function answering a `KClass` name accessor, or `None` for anything else.

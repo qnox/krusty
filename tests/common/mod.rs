@@ -1777,7 +1777,10 @@ fn also_run_natively(src: &str, stem: &str, expected: &str) {
         NativeBox::Answered(answer) => panic!(
             "{stem}: the native backend answered {answer:?} where the JVM answered {expected:?}"
         ),
-        NativeBox::Failed(reason) => panic!("{stem}: the native backend ran it wrong — {reason}"),
+        failure => panic!(
+            "{stem}: the native backend ran it wrong — {}",
+            failure.as_failure()
+        ),
     }
 }
 
@@ -1801,7 +1804,10 @@ pub fn expect_native_box(src: &str, stem: &str, expected: &str) {
         NativeBox::Declined(reason) => {
             panic!("{stem}: the native backend must lower this program — {reason}")
         }
-        NativeBox::Failed(reason) => panic!("{stem}: the native backend ran it wrong — {reason}"),
+        failure => panic!(
+            "{stem}: the native backend ran it wrong — {}",
+            failure.as_failure()
+        ),
     }
 }
 
@@ -1828,7 +1834,50 @@ pub fn expect_native_decline(src: &str, stem: &str, reason: &str) {
         NativeBox::Answered(answer) => {
             panic!("{stem}: the native backend emitted this program, answering {answer:?}")
         }
-        NativeBox::Failed(said) => panic!("{stem}: the native backend ran it — {said}"),
+        failure => panic!(
+            "{stem}: the native backend ran it — {}",
+            failure.as_failure()
+        ),
+    }
+}
+
+/// Require the native backend to LOWER `src` and the program to END ABNORMALLY, with `code` and
+/// `said` somewhere on stderr.
+///
+/// For a program whose whole point is that it does not finish, [`expect_native_box`] has no answer
+/// to compare: the entry never prints one. This is the form those tests take — the exit code and
+/// the report ARE the observable behaviour, so they are what gets pinned.
+#[allow(dead_code)]
+pub fn expect_native_exit(src: &str, stem: &str, code: i32, said: &str) {
+    let Some(target) = krusty::native::NativeTarget::host() else {
+        return;
+    };
+    if !krusty::native::can_link(target) {
+        return;
+    }
+    match native_box_outcome(src, stem, target) {
+        NativeBox::Unavailable => {}
+        NativeBox::Exited {
+            code: ended,
+            stderr,
+            ..
+        } => {
+            assert_eq!(ended, Some(code), "{stem}: stderr {stderr:?}");
+            assert!(
+                stderr.contains(said),
+                "{stem}: stderr {stderr:?} does not name {said:?}"
+            );
+        }
+        NativeBox::Declined(reason) => {
+            panic!("{stem}: the native backend must lower this program — {reason}")
+        }
+        NativeBox::Answered(answer) => {
+            panic!("{stem}: it ran to completion, answering {answer:?}")
+        }
+        failure => panic!(
+            "{stem}: the native backend ran it wrong — {}",
+            failure.as_failure()
+        ),
     }
 }
 
@@ -1842,7 +1891,33 @@ enum NativeBox {
     /// This build cannot reach the native target at all: no host target, no linker, no stdlib jar.
     /// Every native check is a skip, not a verdict.
     Unavailable,
+    /// It ran and ended ABNORMALLY. Separate from [`NativeBox::Failed`] because for a program whose
+    /// point is that it ends abnormally — an uncaught throw — the exit code and what it said on
+    /// stderr are the answer, not the evidence of a broken test.
+    Exited {
+        code: Option<i32>,
+        stdout: String,
+        stderr: String,
+    },
     Failed(String),
+}
+
+impl NativeBox {
+    /// How an abnormal end reads when a test did not ask for one.
+    fn as_failure(&self) -> String {
+        match self {
+            NativeBox::Exited {
+                code,
+                stdout,
+                stderr,
+            } => format!(
+                "it ended abnormally: exit {code:?}; stdout {stdout:?}; stderr {:?}",
+                stderr.trim()
+            ),
+            NativeBox::Failed(reason) => reason.clone(),
+            _ => unreachable!("only an abnormal end reads as a failure"),
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -1855,7 +1930,13 @@ fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarge
     let Some(jar) = krusty::toolchain::stdlib_jar() else {
         return NativeBox::Unavailable;
     };
-    let classpath = std::rc::Rc::new(Classpath::new(vec![jar]));
+    // Stdlib AND JDK, the same pair the JVM helpers compile against. The bridge `native/intrinsics`
+    // describes runs through here: signatures are read out of JVM artifacts until the provider is
+    // klib-based, and `kotlin.RuntimeException` is a typealias for `java.lang.RuntimeException`, so
+    // without the jimage the exception hierarchy has no declaration to resolve to. Nothing about
+    // the EMITTED program changes — it still links only against the runtime — but a cross-check
+    // whose native half cannot name what its JVM half named is a skip dressed as agreement.
+    let classpath = std::rc::Rc::new(Classpath::new(vec![jar, jdk_modules()]));
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(
         classpath.clone(),
     ));
@@ -1914,12 +1995,11 @@ fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarge
     let _ = std::fs::remove_file(&executable);
     match output {
         Err(error) => NativeBox::Failed(format!("running it: {error}")),
-        Ok(output) if !output.status.success() => NativeBox::Failed(format!(
-            "exit {}; stdout {:?}; stderr {:?}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )),
+        Ok(output) if !output.status.success() => NativeBox::Exited {
+            code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        },
         // The entry prints what `box()` returned, as the LAST line. Anything before it is the
         // program's own output — `when (b) { true -> println("t") … }` prints `t` and then answers
         // `OK` — which the JVM path never sees, because there the answer is a return value rather

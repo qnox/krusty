@@ -2067,45 +2067,46 @@ KRef kt_not_null(KRef value) {
     return value;
 }
 
-/* A `throw` the program wrote itself: the prefix names the exception the JVM would raise and the
-   rest is the program's own message. `kt_render` needs its storage kept alive across the call that
-   reads it, which is what the local is for. */
-static void kt_throw_with(const char *prefix, size_t prefix_length, KRef message) {
-    kt_write(2, prefix, prefix_length);
-    if (message != NULL) {
-        kt_int length = 0;
-        KRef storage = NULL;
-        const char *bytes = kt_render(message, &length, &storage);
-        kt_write(2, bytes, (size_t)length);
-    }
-    kt_write(2, "\n", 1);
-    kt_exit(134);
-}
+/* The stdlib functions that throw. Each builds the exception Kotlin specifies, with Kotlin's own
+   message, and hands it to `kt_throw` — the same path a `throw` the program wrote itself takes.
+   That matters beyond tidiness: `error(m)` and `throw IllegalStateException(m)` are the same
+   exception in Kotlin, so a `catch` must not be able to tell them apart, and the surest way to
+   keep that true is for there to be only one object and one report.
 
-#define KT_THROW(prefix, message) kt_throw_with(prefix, sizeof(prefix) - 1, message)
+   These report the exception rather than a `krusty:` line of their own, which they did while there
+   was no `Throwable` to report. */
+#define KT_THROW(type, message) kt_throw(kt_throwable_new(&(type), message))
+
+/* A literal Kotlin message. */
+#define KT_MESSAGE(text) kt_string_utf8(text, (kt_int)(sizeof(text) - 1))
 
 void kt_not_implemented(void) {
-    KT_THROW("krusty: An operation is not implemented.", NULL);
+    KT_THROW(kt_type_not_implemented_error, KT_MESSAGE("An operation is not implemented."));
 }
 
 void kt_not_implemented_reason(KRef reason) {
-    KT_THROW("krusty: An operation is not implemented: ", reason);
+    KT_THROW(kt_type_not_implemented_error,
+             kt_string_plus(KT_MESSAGE("An operation is not implemented: "), kt_to_string(reason)));
 }
 
-void kt_illegal_state(KRef message) { KT_THROW("krusty: ", message); }
+/* `error(message)` takes an `Any`, and the exception carries its `toString`. */
+void kt_illegal_state(KRef message) {
+    KT_THROW(kt_type_illegal_state_exception, kt_to_string(message));
+}
 
 void kt_require(kt_boolean value) {
     if (!value) {
-        KT_THROW("krusty: Failed requirement.", NULL);
+        KT_THROW(kt_type_illegal_argument_exception, KT_MESSAGE("Failed requirement."));
     }
 }
 
 void kt_check(kt_boolean value) {
     if (!value) {
-        KT_THROW("krusty: Check failed.", NULL);
+        KT_THROW(kt_type_illegal_state_exception, KT_MESSAGE("Check failed."));
     }
 }
 
+#undef KT_MESSAGE
 #undef KT_THROW
 
 void kt_abstract_method_called(void) { KT_FAIL("krusty: abstract method called\n"); }
@@ -2113,9 +2114,10 @@ void kt_abstract_method_called(void) { KT_FAIL("krusty: abstract method called\n
 void kt_null_receiver(void) { KT_FAIL("krusty: member access on a null receiver\n"); }
 
 /* A callable whose Kotlin type is `Nothing` returned instead of diverging, and the path that reads
-   its value has no value to read. The JVM throws `KotlinNothingValueException` here; there are no
-   exceptions on this target yet, so the failure is the loud one — and no program that could catch
-   it compiles here anyway. */
+   its value has no value to read. The JVM throws `KotlinNothingValueException` here. This one is
+   NOT raised as a `Throwable`, unlike the stdlib's own throwers: reaching it means a callee lied
+   about its type, which is a defect in what was emitted rather than something a program is entitled
+   to catch, so it stays the loud, uncatchable failure a failed cast is. */
 void kt_nothing_value_returned(void) {
     KT_FAIL("krusty: a `Nothing`-typed callable returned a value\n");
 }
@@ -2367,6 +2369,77 @@ kt_int kt_compare_double(kt_double a, kt_double b) {
 }
 
 /* ---- kotlin.io ----------------------------------------------------------------------------- */
+
+/* ---- exceptions ----------------------------------------------------------------------------
+
+   A `Throwable` is an ordinary object with one reference field and a real `super` chain, which is
+   the whole of what a `catch` needs: matching a clause is `kt_is_instance` against the clause's
+   type, and that already walks this chain.
+
+   `toString` is Kotlin's: the qualified name, and `: message` after it when there is one. A
+   subclass declared in Kotlin source inherits this slot like any other. */
+
+typedef struct KThrowable {
+    KObjectHeader header;
+    KRef message;
+} KThrowable;
+
+static const uint32_t kt_throwable_offsets[] = {offsetof(KThrowable, message)};
+
+static KRef kt_throwable_to_string(KRef self) {
+    const KType *type = self->header.type;
+    KRef name = kt_string_utf8(type->name, (kt_int)type->name_length);
+    KRef message = ((KThrowable *)self)->message;
+    if (message == NULL) {
+        return name;
+    }
+    return kt_string_plus(kt_string_plus(name, kt_string_utf8(": ", 2)), message);
+}
+
+static const kt_fn kt_throwable_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
+                                            (kt_fn)kt_throwable_to_string};
+
+/* The hierarchy a `catch` clause names. Each link is the one Kotlin declares, so
+   `catch (e: Exception)` takes an `IllegalStateException` and does not take a bare `Throwable`. */
+#define KT_THROWABLE_TYPE(identifier, kotlin_name, base)                                           \
+    const KType identifier = {kotlin_name,           sizeof(kotlin_name) - 1,                      \
+                              sizeof(KThrowable),    1,                                            \
+                              0,                     kt_throwable_offsets,                         \
+                              base,                  kt_throwable_vtable,                          \
+                              3,                     0};
+
+KT_THROWABLE_TYPE(kt_type_throwable, "kotlin.Throwable", &kt_type_any)
+KT_THROWABLE_TYPE(kt_type_error, "kotlin.Error", &kt_type_throwable)
+KT_THROWABLE_TYPE(kt_type_not_implemented_error, "kotlin.NotImplementedError", &kt_type_error)
+KT_THROWABLE_TYPE(kt_type_exception, "kotlin.Exception", &kt_type_throwable)
+KT_THROWABLE_TYPE(kt_type_runtime_exception, "kotlin.RuntimeException", &kt_type_exception)
+KT_THROWABLE_TYPE(kt_type_illegal_state_exception, "kotlin.IllegalStateException",
+                  &kt_type_runtime_exception)
+KT_THROWABLE_TYPE(kt_type_illegal_argument_exception, "kotlin.IllegalArgumentException",
+                  &kt_type_runtime_exception)
+
+KRef kt_throwable_new(const KType *type, KRef message) {
+    /* `message` stays in this parameter across the allocation: it is its root. */
+    KThrowable *thrown = (KThrowable *)kt_gc_allocate(type, sizeof(KThrowable));
+    thrown->message = message;
+    return (KRef)thrown;
+}
+
+KRef kt_throwable_message(KRef self) { return ((KThrowable *)self)->message; }
+
+/* An uncaught throw. Until a `try` exists to catch one, every throw is uncaught by construction —
+   a file containing a `try` is declined whole — so reporting and exiting here IS the propagation,
+   and it is what Kotlin does with an exception nothing handles. The exit code matches the one a
+   failed cast already uses, which is the JVM backend's for an abnormal end. */
+void kt_throw(KRef thrown) {
+    kt_int length = 0;
+    KRef storage = NULL;
+    const char *bytes = kt_render(thrown, &length, &storage);
+    kt_write(2, "Exception in thread \"main\" ", 27);
+    kt_write(2, bytes, (size_t)length);
+    kt_write(2, "\n", 1);
+    kt_sys_exit(134);
+}
 
 static void kt_emit(KRef value, bool newline) {
     kt_int length = 0;

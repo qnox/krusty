@@ -594,6 +594,31 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         self.builder.switch_to_block(dead);
     }
 
+    /// `throw e`.
+    ///
+    /// Every throw is uncaught today, by construction rather than by omission: a file containing
+    /// any `try` is declined WHOLE, so inside a file this backend emits there is no handler and no
+    /// `finally` between the throw and the end of the program. Reporting the exception and ending
+    /// is therefore what Kotlin says happens, not a stand-in for it. The handler stack and the
+    /// call-site checks that let a throw reach a `catch` arrive with `try` — see "How an exception
+    /// propagates" in `docs/BUILD_AND_NATIVE_PLAN.md`.
+    ///
+    /// `throw` is `Nothing`, so nothing reads a value from it. `kt_throw` does not return, but a
+    /// block still needs a terminator — hence the trap, exactly as [`Self::bottom_value`] does.
+    fn throw(&mut self, operand: u32) -> Result<Option<Value>, Unsupported> {
+        let thrown = self.expression(operand)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let Some(thrown) = thrown else {
+            return Err("a `throw` of a `Unit` value".to_string());
+        };
+        self.runtime_call("kt_throw", &[any()], Ty::Unit, &[thrown])?;
+        self.builder.ins().trap(TrapCode::unwrap_user(4));
+        self.terminate();
+        Ok(None)
+    }
+
     /// A checked bottom value: a producer whose Kotlin type is `Nothing` but which still has a
     /// physical fallthrough, which the target has to say something about.
     ///
@@ -1204,6 +1229,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     .expect("checked by the guard");
                 self.class_name(symbol, receiver)
             }
+            // `e.message`: the one field a runtime `Throwable` carries.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.is_throwable_message(target) => self.throwable_message(receiver),
             // `cs.length` where the receiver is typed `CharSequence`: a string, on this target.
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
                 target,
@@ -1335,6 +1366,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 negated,
                 counter,
             }) => self.range_contains(operation, value, start, end, negated, counter),
+            IrExpr::Throw { operand } => self.throw(operand),
             IrExpr::Return(_)
             | IrExpr::Variable { .. }
             | IrExpr::SetValue { .. }

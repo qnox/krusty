@@ -992,6 +992,8 @@ mod native_codegen_e2e;
 mod native_concurrency_e2e;
 #[path = "native_delegation_e2e.rs"]
 mod native_delegation_e2e;
+#[path = "native_exceptions_e2e.rs"]
+mod native_exceptions_e2e;
 #[path = "native_gc_e2e.rs"]
 mod native_gc_e2e;
 #[path = "native_gc_stress_e2e.rs"]

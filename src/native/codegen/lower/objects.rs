@@ -1315,6 +1315,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             let descriptor = self.file.import_data("kt_type_any")?;
             return Ok(Some(self.allocate(descriptor, model::HEADER_SIZE)?));
         }
+        // A `Throwable` the RUNTIME provides. Same reasoning as `Any()` above and one step
+        // further: these classes are declared in no file either, but they do carry state — the
+        // message — so the runtime allocates and fills one rather than the generator doing it.
+        if let Some(descriptor) = super::super::super::intrinsics::throwable_descriptor(internal) {
+            return self.runtime_throwable(descriptor, &name, args, selected);
+        }
         let class = self.file.class_of(internal, "construction of")?;
         let declaration = &self.file.ir.classes[class as usize];
         if declaration.is_object {
@@ -1407,6 +1413,81 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let func_ref = self.func_ref(constructor);
         self.builder.ins().call(func_ref, &arguments);
         Ok(Some(object))
+    }
+
+    /// `Throwable(message)` and its subclasses, as the runtime declares them.
+    ///
+    /// Only the no-argument and `message: String?` constructors are realized. A `cause` is the
+    /// other one-argument form and this `Throwable` has no `cause` field, so accepting it would
+    /// silently drop what the program passed; it declines instead.
+    fn runtime_throwable(
+        &mut self,
+        descriptor: &str,
+        name: &str,
+        args: &[u32],
+        selected: Option<&[Ty]>,
+    ) -> Result<Option<Value>, Unsupported> {
+        let message = match (args, selected) {
+            ([], _) => None,
+            ([argument], Some([only])) if super::super::super::intrinsics::is_string(only) => {
+                Some(*argument)
+            }
+            _ => return Err(format!("this constructor of `{name}`")),
+        };
+        let message = match message {
+            Some(argument) => {
+                let Some(value) = self.expression(argument)? else {
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    return Err(format!("a `Unit` message for `{name}`"));
+                };
+                value
+            }
+            // Kotlin's `null` message, which `toString` reports as the type name alone.
+            None => self.builder.ins().iconst(types::I64, 0),
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let descriptor = self.file.import_data(descriptor)?;
+        let descriptor = self.data_address(descriptor);
+        let thrown = self.runtime_call(
+            "kt_throwable_new",
+            &[any(), any()],
+            any(),
+            &[descriptor, message],
+        )?;
+        Ok(Some(
+            thrown.expect("`kt_throwable_new` returns the exception"),
+        ))
+    }
+
+    /// Is this accessor `Throwable.message`?
+    pub(super) fn is_throwable_message(&self, target: crate::fir::ExternalPropertyId) -> bool {
+        let Some(property) = self.file.classpath.external_property(target) else {
+            return false;
+        };
+        let Some(getter) = self.file.classpath.external_callable(property.getter) else {
+            return false;
+        };
+        super::super::super::intrinsics::is_throwable_message(
+            getter.callable.owner,
+            &getter.callable.name,
+        )
+    }
+
+    /// `e.message` — the one field a `Throwable` carries, read by the runtime rather than by an
+    /// offset here, because the class is the runtime's and so is its layout.
+    pub(super) fn throwable_message(
+        &mut self,
+        receiver: u32,
+    ) -> Result<Option<Value>, Unsupported> {
+        let value = self.reference(receiver)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.runtime_call("kt_throwable_message", &[any()], any(), &[value])
     }
 
     pub(super) fn method_call(
