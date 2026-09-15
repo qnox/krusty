@@ -26,7 +26,7 @@ impl Checker<'_> {
         // lambda. Both feed the same parameter mapping, so they travel together.
         written_arguments: (Option<&[Option<String>]>, bool),
         type_args: &[Ty],
-        expected_result: Option<Ty>,
+        result_constraint: CallResultConstraint,
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
         let (args, arg_tys) = args_and_partial;
         let (arg_names, trailing_lambda) = written_arguments;
@@ -68,7 +68,7 @@ impl Checker<'_> {
                     &named_whole_array_varargs(&argument_map, arg_names, &overload.call_sig),
                 ),
                 type_args,
-                expected_result,
+                result_constraint,
             ) {
                 return Some(shape);
             }
@@ -88,7 +88,7 @@ impl Checker<'_> {
         receiver: ExprId,
         receiver_ty: Ty,
         span: Span,
-        expected: Option<Ty>,
+        result_constraint: CallResultConstraint,
     ) -> InvokeResolution {
         let CallArgs {
             call,
@@ -157,7 +157,7 @@ impl Checker<'_> {
                     },
                     &explicit_type_args,
                     None,
-                    expected,
+                    result_constraint,
                     overloads.clone(),
                 );
                 if let Some(CallableCandidateSelection::Ambiguous(candidates)) = &member_selection {
@@ -261,7 +261,7 @@ impl Checker<'_> {
                     receiver_ty,
                     CALLABLE_INVOKE_OPERATOR,
                     (MemberExtensionSelection::Operators, None),
-                    expected,
+                    result_constraint,
                 ) {
                     // A member EXTENSION `operator fun Recv.invoke(...)` on an implicit receiver
                     // (`"case" { … }` inside a receiver-DSL lambda). Keep the selected member-
@@ -314,7 +314,7 @@ impl Checker<'_> {
                         },
                         &[],
                         Some(receiver_ty),
-                        expected,
+                        result_constraint,
                         extensions.clone(),
                     );
                     if let Some(CallableCandidateSelection::Ambiguous(candidates)) =
@@ -444,9 +444,16 @@ impl Checker<'_> {
         receiver: ExprId,
         receiver_ty: Ty,
         span: Span,
-        expected: Option<Ty>,
+        result_constraint: CallResultConstraint,
     ) -> Option<Ty> {
-        match self.record_invoke(scope, call_args, receiver, receiver_ty, span, expected) {
+        match self.record_invoke(
+            scope,
+            call_args,
+            receiver,
+            receiver_ty,
+            span,
+            result_constraint,
+        ) {
             InvokeResolution::Selected(ret) => Some(ret),
             InvokeResolution::Ambiguous(candidates) => {
                 self.diags.error(

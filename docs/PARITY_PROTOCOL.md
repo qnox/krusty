@@ -2418,10 +2418,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   The expectation now reaches every spelling of the convention: member and extension selection, the
   companion factory's lambda SHAPE (so an expected-only formal is bound before the lambda body is
   typed, which is what lets the body read `s.length`), and a member EXTENSION
-  `operator fun Recv.invoke` on an implicit dispatch receiver. A SAFE call lifts one nullable layer
-  rather than dropping the expectation: `a?.invoke(…)` has type `R?` where `R` is the invoke's own
-  result, so an expected `R?` constrains `R`. Seeding is a constraint and not a commitment — the
-  receiver and the arguments still refine it, and a mismatched expectation is still rejected.
+  `operator fun Recv.invoke` on an implicit dispatch receiver. A SAFE call now carries an explicit
+  `SafeLifted` result constraint: inference compares the nullable lift of the DECLARED result with
+  the expectation for the whole safe-call expression. It never guesses the declaration type by
+  stripping nullability from that expectation, which cannot distinguish `R` from an already-nullable
+  `R?`. The lift is idempotent, so both forms retain their exact selected result. Seeding remains a
+  constraint and not a commitment — the receiver and arguments still refine it, and a mismatched
+  expectation is still rejected.
   A CONSTRUCTOR of the same shape was never affected, which is what kept the defect narrow.
   The local-extension sibling has no expectation to thread: it performs no generic instantiation
   from arguments or context, binding formals from `unify_ty(generic.receiver, receiver)` alone.
@@ -2430,6 +2433,9 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `a_companion_invoke_body_reads_the_expected_parameter`,
   `a_receiver_companion_invoke_body_reads_the_expected_receiver`,
   `a_safe_property_invoke_lifts_the_nullable_expectation`,
+  `a_safe_property_invoke_preserves_an_already_nullable_result`,
   `a_safe_function_value_invoke_keeps_its_declared_result`,
   `a_member_extension_invoke_binds_the_expected_formal`,
-  `a_constructor_of_the_same_shape_still_infers`, `a_mismatched_expectation_is_still_rejected`.
+  `a_constructor_of_the_same_shape_still_infers`, `a_mismatched_expectation_is_still_rejected`;
+  `src/fir/body_check/invoke_tests.rs::safe_property_invoke_keeps_an_already_nullable_selected_result`
+  asserts the exact selected FIR result that a null-returning runtime fixture cannot observe.

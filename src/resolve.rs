@@ -28,6 +28,7 @@ use crate::types::{
 };
 use scope::{ContextReceiver, ContextValue, FlowExclusion, NarrowPath, Ns, ScopeKind};
 
+mod call_result_constraint;
 mod callable_reference_selection;
 mod capture_analysis;
 mod capture_storage;
@@ -66,6 +67,7 @@ mod type_join;
 
 // The capture storage-kind contract and the write analysis behind it. Imported by name so the call
 // sites read as they did when these lived here: what moved is the responsibility, not the spelling.
+use call_result_constraint::CallResultConstraint;
 pub use callable_reference_selection::AdaptedRefArgument;
 use callable_reference_selection::CallableRefSpecialization;
 use capture_analysis::{local_class_declarations, local_fun_body_uses_any, used_names};
@@ -21996,7 +21998,7 @@ fn instantiate_member_extension_with(
     is_spread_arg: &dyn Fn(usize) -> bool,
     unit_coerced_lambda: &dyn Fn(usize, Ty, Ty) -> Option<Ty>,
     score_candidate: &dyn Fn(&[Ty], &CallSig, ArgSlots<'_>) -> Option<CallCandidateScore>,
-    expected_result: Option<Ty>,
+    result_constraint: CallResultConstraint,
     shape: &MemberExtensionFunctionShape,
     call: MemberExtensionCall<'_>,
 ) -> Option<InstantiatedMemberExtension> {
@@ -22104,8 +22106,9 @@ fn instantiate_member_extension_with(
         crate::symbol_resolver::unify_ty(applied, actual, &mut bindings);
         crate::symbol_resolver::unify_ty(declared, actual, &mut bindings);
     }
-    if let Some(expected) = expected_result {
+    if let Some(expected) = result_constraint.expected() {
         let declared_ret = generic.map_or(function.signature.ret, |signature| signature.ret);
+        let declared_ret = result_constraint.declaration_result(declared_ret);
         let applied = apply_inference_bindings(declared_ret, &bindings);
         crate::symbol_resolver::unify_ty(applied, expected, &mut bindings);
         crate::symbol_resolver::unify_ty(declared_ret, expected, &mut bindings);
@@ -22324,7 +22327,7 @@ impl<'a> Checker<'a> {
             extension_receiver,
             name,
             (MemberExtensionSelection::All, None),
-            None,
+            CallResultConstraint::direct(None),
         )
     }
 
@@ -22343,7 +22346,7 @@ impl<'a> Checker<'a> {
         // Which candidates this selection may consider: the declaration kinds it admits, and the
         // implicit-receiver tower to search when one other than the scope's own applies.
         selection: (MemberExtensionSelection, Option<&[ImplicitReceiver]>),
-        expected_result: Option<Ty>,
+        result_constraint: CallResultConstraint,
     ) -> Option<Ty> {
         let (selection, receivers) = selection;
         let CallArgs {
@@ -22363,7 +22366,7 @@ impl<'a> Checker<'a> {
             .collect::<Vec<_>>();
         let request = MemberExtensionFunctionCall {
             extension_receiver,
-            expected_result,
+            result_constraint,
             name,
             args,
             arg_tys,
@@ -23672,7 +23675,7 @@ impl<'a> Checker<'a> {
             },
             &type_arguments,
             Some(rt),
-            expected,
+            CallResultConstraint::direct(expected),
             overloads,
         );
         let selected = match selection {
@@ -24416,7 +24419,7 @@ impl<'a> Checker<'a> {
             },
             &type_args,
             None,
-            expected,
+            CallResultConstraint::direct(expected),
             candidates.clone(),
         );
         if let Some(selected) = selection.and_then(CallableCandidateSelection::available) {
@@ -24581,7 +24584,7 @@ impl<'a> Checker<'a> {
                     callee,
                     value_ty,
                     self.span(call),
-                    expected,
+                    CallResultConstraint::direct(expected),
                 ) {
                     return ClassifierValueCall::Checked(ret);
                 }
@@ -24649,7 +24652,7 @@ impl<'a> Checker<'a> {
             callee,
             receiver,
             span,
-            expected,
+            CallResultConstraint::direct(expected),
         ))
     }
 
@@ -27113,7 +27116,7 @@ impl<'a> Checker<'a> {
                 },
                 &[],
                 classifier.map(Ty::obj_name),
-                expected,
+                CallResultConstraint::direct(expected),
                 companion_candidates,
             )
         });
@@ -27217,7 +27220,7 @@ impl<'a> Checker<'a> {
                 },
                 &[],
                 None,
-                expected,
+                CallResultConstraint::direct(expected),
                 candidates,
             );
             match selection {
@@ -27721,7 +27724,7 @@ impl<'a> Checker<'a> {
                                 },
                                 &targs,
                                 None,
-                                expected,
+                                CallResultConstraint::direct(expected),
                                 candidates,
                             )
                             .and_then(CallableCandidateSelection::candidate)
@@ -28363,7 +28366,7 @@ impl<'a> Checker<'a> {
                                 },
                                 &explicit_type_args,
                                 Some(classifier_receiver),
-                                expected,
+                                CallResultConstraint::direct(expected),
                                 companion_extensions,
                             )
                             .and_then(CallableCandidateSelection::available)
@@ -28443,7 +28446,7 @@ impl<'a> Checker<'a> {
                             },
                             &explicit_type_args,
                             Some(classifier_receiver),
-                            expected,
+                            CallResultConstraint::direct(expected),
                             candidates,
                         )
                         .and_then(CallableCandidateSelection::available)
@@ -28538,7 +28541,7 @@ impl<'a> Checker<'a> {
                             callee,
                             value_ty,
                             span,
-                            expected,
+                            CallResultConstraint::direct(expected),
                         ) {
                             return ret;
                         }
@@ -28994,7 +28997,7 @@ impl<'a> Checker<'a> {
                         receiver,
                         invoke_ty,
                         span,
-                        expected,
+                        CallResultConstraint::direct(expected),
                     ) {
                         return ret;
                     }
@@ -29199,7 +29202,7 @@ impl<'a> Checker<'a> {
                             callee,
                             value_ty,
                             span,
-                            expected,
+                            CallResultConstraint::direct(expected),
                         ) {
                             return ret;
                         }
@@ -29348,7 +29351,7 @@ impl<'a> Checker<'a> {
                         callee,
                         receiver_ty,
                         span,
-                        expected,
+                        CallResultConstraint::direct(expected),
                     ) {
                         return ret;
                     }
@@ -29437,7 +29440,7 @@ impl<'a> Checker<'a> {
                         callee,
                         receiver_ty,
                         span,
-                        expected,
+                        CallResultConstraint::direct(expected),
                     ) {
                         return ret;
                     }
@@ -30347,7 +30350,7 @@ impl<'a> Checker<'a> {
                                     self.file.call_has_trailing_lambda.contains(&call.0),
                                 ),
                                 &explicit_type_args,
-                                expected,
+                                CallResultConstraint::direct(expected),
                             )
                         })
                     });
@@ -32241,7 +32244,7 @@ impl<'a> Checker<'a> {
                                 bt,
                                 &fname,
                                 (MemberExtensionSelection::All, Some(&receivers)),
-                                expected,
+                                CallResultConstraint::direct(expected),
                             ) {
                                 self.narrowed_this_member.insert(call, bi);
                                 if let Some(receiver) = receivers.into_iter().find(|receiver| {
@@ -32320,7 +32323,7 @@ impl<'a> Checker<'a> {
                             },
                             &explicit_type_args,
                             None,
-                            expected,
+                            CallResultConstraint::direct(expected),
                             top_level_candidates.clone(),
                         )
                     });
@@ -32412,7 +32415,7 @@ impl<'a> Checker<'a> {
                         callee,
                         receiver_ty,
                         span,
-                        expected,
+                        CallResultConstraint::direct(expected),
                     ) {
                         return ret;
                     }
@@ -32438,7 +32441,7 @@ impl<'a> Checker<'a> {
                         callee,
                         receiver_ty,
                         span,
-                        expected,
+                        CallResultConstraint::direct(expected),
                     ) {
                         return ret;
                     }
@@ -32559,7 +32562,7 @@ impl<'a> Checker<'a> {
                         callee,
                         ct,
                         span,
-                        expected,
+                        CallResultConstraint::direct(expected),
                     ) {
                         InvokeResolution::Selected(t) => return t,
                         InvokeResolution::Ambiguous(candidates) => {
@@ -32906,7 +32909,7 @@ impl<'a> Checker<'a> {
                     callee,
                     callee_ty,
                     span,
-                    expected,
+                    CallResultConstraint::direct(expected),
                 ) {
                     return ret;
                 }
@@ -45526,7 +45529,7 @@ pub(crate) fn member_extension_function_with(
 ) -> Result<Option<MemberExtensionFunctionCandidate>, ()> {
     let MemberExtensionFunctionCall {
         extension_receiver,
-        expected_result,
+        result_constraint,
         name,
         args,
         arg_tys,
@@ -45543,7 +45546,7 @@ pub(crate) fn member_extension_function_with(
             is_spread_arg,
             unit_coerced_lambda,
             score_candidate,
-            expected_result,
+            result_constraint,
             &shape,
             MemberExtensionCall {
                 extension_receiver,
@@ -48657,7 +48660,7 @@ struct CtorDelegationSite<'a> {
 /// lambda-planning path works from PARTIAL types, this one runs after they are settled.
 pub(crate) struct MemberExtensionFunctionCall<'a> {
     extension_receiver: Ty,
-    expected_result: Option<Ty>,
+    result_constraint: CallResultConstraint,
     name: &'a str,
     args: &'a [ExprId],
     arg_tys: &'a [Ty],
@@ -52572,9 +52575,10 @@ impl<'a> Checker<'a> {
         call_args: CallArgs<'_>,
         type_args: &[Ty],
         extension_receiver: Option<Ty>,
-        expected: Option<Ty>,
+        result_constraint: CallResultConstraint,
         overloads: Vec<crate::libraries::FunctionInfo>,
     ) -> Option<CallableCandidateSelection> {
+        let expected = result_constraint.expected();
         let CallArgs {
             call,
             args,
@@ -52645,6 +52649,7 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let signature = candidate.semantic_signature().into_owned();
+            let result_signature = result_constraint.signature(&signature);
             let candidate_receiver = extension_receiver.map(|receiver| {
                 if candidate.kind == crate::libraries::FnKind::Member {
                     crate::symbol_resolver::member_scope_receiver(receiver)
@@ -53066,7 +53071,7 @@ impl<'a> Checker<'a> {
             let expected_result_bindings = expected.and_then(|expected| {
                 crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
                     &source,
-                    &signature,
+                    &result_signature,
                     expected,
                     |actual, bound| self.receiver_is_assignable(actual, bound),
                 )
@@ -53076,7 +53081,7 @@ impl<'a> Checker<'a> {
                 if let Some(result_bindings) = expected_result_bindings.as_ref() {
                     let unprojected = crate::symbol_resolver::unprojected_expected_result_formals(
                         &source,
-                        &signature,
+                        &result_signature,
                         expected.expect("bindings require an expected result"),
                         result_bindings,
                     );
@@ -53236,7 +53241,7 @@ impl<'a> Checker<'a> {
                 {
                     crate::symbol_resolver::widen_invariant_expected_bindings(
                         &source,
-                        &signature,
+                        &result_signature,
                         type_args,
                         &mut bindings,
                         &result_bindings,
@@ -53249,7 +53254,7 @@ impl<'a> Checker<'a> {
                     // contextual result, and never over fixed receiver/context evidence.
                     let fixed = crate::symbol_resolver::invariant_expected_result_formals(
                         &source,
-                        &signature,
+                        &result_signature,
                         expected,
                         &result_bindings,
                     );
@@ -53391,7 +53396,7 @@ impl<'a> Checker<'a> {
                 .collect::<Vec<_>>();
             if !crate::symbol_resolver::apply_only_input_type_bindings(
                 &source,
-                &signature,
+                &result_signature,
                 &candidate.call_sig.only_input_type_formals,
                 type_args,
                 candidate_receiver,
@@ -53408,7 +53413,7 @@ impl<'a> Checker<'a> {
                 continue;
             }
             if !crate::symbol_resolver::generic_bindings_admit_expected_return_intersection(
-                &signature,
+                &result_signature,
                 &bindings,
                 expected_return_intersection_bindings.as_ref(),
                 |actual, bound| {
@@ -53567,7 +53572,7 @@ impl<'a> Checker<'a> {
                     inferred_from_sam,
                 );
                 if !crate::symbol_resolver::generic_bindings_admit_expected_return_intersection(
-                    &signature,
+                    &result_signature,
                     &bindings,
                     expected_return_intersection_bindings.as_ref(),
                     |actual, bound| {
@@ -53722,7 +53727,8 @@ impl<'a> Checker<'a> {
             // the expected-result constraint approximates the expression to its consumer type. Keep
             // the bottom binding in `params` for applicability, but expose the contextual result just
             // as Kotlin's constraint system does (`Context<out T>` -> `Context<in Nothing>`, result T).
-            let specialized_ret = expected
+            let specialized_ret = result_constraint
+                .selected_result_approximation(signature.ret)
                 .filter(|expected| {
                     inferred_ret == Ty::Nothing
                         && matches!(signature.ret.non_null(), Ty::TyParam(..))
@@ -54700,12 +54706,13 @@ impl<'a> Checker<'a> {
         args_and_partial: (&[ExprId], &[Option<Ty>]),
         mapped_arguments: (&[usize], &[bool]),
         type_args: &[Ty],
-        expected_result: Option<Ty>,
+        result_constraint: CallResultConstraint,
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
         let (args, arg_tys) = args_and_partial;
         let (argument_map, whole_array_varargs) = mapped_arguments;
         let mut shape = crate::symbol_resolver::LambdaCallShape::default();
         let semantic = overload.semantic_signature();
+        let result_semantic = result_constraint.signature(&semantic);
         let argument_parameters = argument_map
             .iter()
             .enumerate()
@@ -54810,9 +54817,9 @@ impl<'a> Checker<'a> {
             !semantic.formals.iter().any(|declared| declared == formal)
                 || fixed_expectation_formals.contains(formal)
         });
-        if let Some(expected) = expected_result {
+        if let Some(expected) = result_constraint.expected() {
             for (formal, actual) in self
-                .contextual_lambda_result_bindings(&semantic, expected)
+                .contextual_lambda_result_bindings(&result_semantic, expected)
                 .ok()?
             {
                 if !fixed_expectation_formals.contains(&formal) {
@@ -55290,7 +55297,7 @@ impl<'a> Checker<'a> {
                     &named_whole_array_varargs(&argument_map, arg_names, &o.call_sig),
                 ),
                 type_args,
-                expected_result,
+                CallResultConstraint::direct(expected_result),
             ) else {
                 continue;
             };
@@ -55392,7 +55399,7 @@ impl<'a> Checker<'a> {
                     &named_whole_array_varargs(&argument_map, arg_names, &o.call_sig),
                 ),
                 type_args,
-                expected_result,
+                CallResultConstraint::direct(expected_result),
             ) {
                 crate::trace_compiler!(
                     "lambda_shape",
@@ -76231,7 +76238,7 @@ impl<'a> Checker<'a> {
                     // A subscript's expectation describes the ELEMENT the `get` yields, which is
                     // this selection's result; it is threadable, but `get` seeding is its own
                     // change with its own fixtures.
-                    None,
+                    CallResultConstraint::direct(None),
                 ) {
                     return self.set(e, ret);
                 }
@@ -77433,7 +77440,7 @@ impl<'a> Checker<'a> {
                         // expectation of `String?` constrains `R` to `String`. Lift one nullable
                         // layer rather than dropping the constraint: seeding is a constraint, not a
                         // commitment, and the receiver and arguments still refine it.
-                        expected.map(Ty::non_null),
+                        CallResultConstraint::safe_lifted(expected),
                     ) {
                         InvokeResolution::Selected(ty) => ty,
                         InvokeResolution::Ambiguous(_)
@@ -77653,7 +77660,7 @@ impl<'a> Checker<'a> {
                                 property_ty,
                                 self.span(e),
                                 // Nullable-wrapped expectation; see the invoke selection above.
-                                expected.map(Ty::non_null),
+                                CallResultConstraint::safe_lifted(expected),
                             ) {
                                 let invoke = self.expr_lowers.remove(&e);
                                 if let Some(ExprLowering::Invoke { params, kind, .. }) = invoke {
@@ -81728,7 +81735,7 @@ impl<'a> Checker<'a> {
     ) -> Result<Option<(Ty, ResolvedCall)>, ()> {
         let request = MemberExtensionFunctionCall {
             extension_receiver,
-            expected_result: None,
+            result_constraint: CallResultConstraint::direct(None),
             name,
             args,
             arg_tys,
@@ -81915,7 +81922,7 @@ impl<'a> Checker<'a> {
             },
             type_args,
             Some(rt),
-            expected,
+            CallResultConstraint::direct(expected),
             overloads.clone(),
         );
         ExtensionRungSelection {
@@ -83591,7 +83598,7 @@ impl<'a> Checker<'a> {
             scope,
             MemberExtensionFunctionCall {
                 extension_receiver: recv,
-                expected_result: None,
+                result_constraint: CallResultConstraint::direct(None),
                 name,
                 args: &[],
                 arg_tys: &[],
@@ -86942,7 +86949,7 @@ impl<'a> Checker<'a> {
                 self.unit_coerced_lambda_type(args[source], expected, actual)
             },
             &|params, call_sig, slots| self.call_candidate_score(scope, params, call_sig, slots),
-            None,
+            CallResultConstraint::direct(None),
             shape,
             call,
         )

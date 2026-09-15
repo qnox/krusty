@@ -235,6 +235,23 @@ fun box(): String {\n\
     both_compilers_box(MAIN, "safe_property_invoke_expectation");
 }
 
+/// Lifting is idempotent when the selected invoke already returns a nullable value. Stripping the
+/// outer expectation to `String` asks `T?` to match a non-null result and loses the only binding for
+/// `T`; constraining the actual safe-call result `T?` against `String?` binds it correctly.
+#[test]
+fn a_safe_property_invoke_preserves_an_already_nullable_result() {
+    const MAIN: &str = "class Fold {\n\
+\x20   operator fun <T> invoke(): T? = null\n\
+}\n\
+class Holder(val fold: Fold)\n\
+fun value(holder: Holder?): String? = holder?.fold()\n\
+fun box(): String {\n\
+\x20   if (value(null) != null) return \"FAIL: guarded\"\n\
+\x20   return if (value(Holder(Fold())) == null) \"OK\" else \"FAIL: value\"\n\
+}\n";
+    both_compilers_box(MAIN, "safe_property_invoke_nullable_result");
+}
+
 /// The function-VALUE safe-call spelling `nullableCallable?.invoke(…)`. A function type carries a
 /// concrete result, so the lifted expectation can only ever confirm what the value already
 /// declares — the case is covered to pin that the lift changes no result and the guard still
