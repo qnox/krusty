@@ -352,7 +352,7 @@ impl BodyFirChecker<'_> {
                 self.body.add_capture(FirCapture {
                     origin,
                     enclosing_depth: depth,
-                    source: storage.value,
+                    source: FirCaptureSource::Value(storage.value),
                     ty: storage.ty,
                     shared_cell: false,
                 });

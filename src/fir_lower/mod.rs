@@ -256,7 +256,7 @@ struct BodyLowering<'a> {
     capture_count: u32,
     class_constructor_capture_count: u32,
     class_constructor_context_count: u32,
-    capture_slots: HashMap<(u32, crate::fir::LocalValueId), CaptureSlot>,
+    capture_slots: HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
     implicit_receiver_capture_slots: Vec<(crate::fir::FirImplicitReceiverCapture, u32)>,
     shared_locals: HashMap<crate::fir::LocalValueId, crate::fir::ResolvedTy>,
     local_class_captures: HashMap<crate::types::TypeName, Vec<(ExprId, crate::types::Ty)>>,
@@ -297,7 +297,7 @@ impl<'a> BodyLowering<'a> {
         index: &'a ResolvedModuleIndex,
         ir: &'a mut IrFile,
         has_dispatch_receiver: bool,
-        capture_slots: HashMap<(u32, crate::fir::LocalValueId), CaptureSlot>,
+        capture_slots: HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
         local_callable_scopes: Vec<HashMap<crate::fir::LocalCallableId, LocalCallableRealization>>,
         published_local_callables: HashMap<
             crate::fir::BodyLocalCallableDeclarationId,
@@ -561,7 +561,9 @@ fn directly_shared_locals(
             .iter()
             .filter(|capture| capture.enclosing_depth == 0 && capture.shared_cell)
         {
-            shared.insert(capture.source, capture.ty);
+            if let Some(source) = capture.source.value() {
+                shared.insert(source, capture.ty);
+            }
         }
     };
     let add_class = |shared: &mut HashMap<_, _>, captures: &[crate::fir::FirLocalClassCapture]| {
@@ -691,3 +693,8 @@ fn consume_trailing_unit_result(ir: &mut IrFile, roots: &mut Vec<ExprId>) {
 
 #[cfg(test)]
 mod tests;
+
+// A sibling of `tests` rather than a child of it: the root test module is already over the size
+// this repository lets a file reach, so a new responsibility is declared here instead of growing it.
+#[cfg(test)]
+mod constructor_capture_tests;

@@ -1229,8 +1229,9 @@ impl BodyLowering<'_> {
                 owner,
                 field,
                 shared_cell,
+                site,
             } => {
-                let holder = self.constructor_capture_parameter(*owner, *field)?;
+                let holder = self.constructor_capture_parameter(*owner, *field, *site)?;
                 if *shared_cell {
                     self.ir.add_expr(IrExpr::RefGet {
                         elem: expression.ty.get(),
@@ -1272,8 +1273,14 @@ impl BodyLowering<'_> {
                 element,
                 value,
                 conversion,
+                site,
             } => {
-                let holder = self.constructor_capture_parameter(*owner, *field)?;
+                // `site` says WHICH captured cell — the coordinate this change carries — and
+                // `element` says what the cell holds, which the checker settled when it made the
+                // node. Neither stands in for the other: recovering the element from the value
+                // being written would read the RHS's type where the CELL's is meant, and the two
+                // differ the moment a subtype is assigned into it.
+                let holder = self.constructor_capture_parameter(*owner, *field, *site)?;
                 let value = self.expression_with_conversion(*value, *conversion)?;
                 self.ir.add_expr(IrExpr::RefSet {
                     elem: element.get(),
@@ -1339,11 +1346,14 @@ impl BodyLowering<'_> {
             } => {
                 let capture = self
                     .capture_slots
-                    .get(&(*enclosing_depth, *source))
+                    .get(&(
+                        *enclosing_depth,
+                        crate::fir::FirCaptureSource::Value(*source),
+                    ))
                     .copied()
                     .ok_or(FirLoweringFailure::MissingCapture {
                         enclosing_depth: *enclosing_depth,
-                        source: *source,
+                        source: crate::fir::FirCaptureSource::Value(*source),
                     })?;
                 let value = self.expression_with_conversion(*value, *conversion)?;
                 if capture.shared_cell {
@@ -1726,18 +1736,39 @@ impl BodyLowering<'_> {
         &mut self,
         owner: crate::fir::DeclarationId,
         field: u32,
+        site: crate::fir::FirConstructorCaptureSite,
     ) -> Result<ExprId, FirLoweringFailure> {
-        let declaration = crate::fir::DeclarationId::from_raw(self.body.owner().raw());
-        let valid_owner = self
-            .index
-            .declaration_anchor(declaration)
-            .filter(|anchor| anchor.kind == crate::fir::DeclarationKind::Constructor)
-            .and_then(|anchor| anchor.owner)
-            == Some(owner);
-        if !valid_owner || field >= self.class_constructor_capture_count {
-            return Err(FirLoweringFailure::InvalidConstructorCapture { owner, field });
-        }
-        Ok(self.ir.add_expr(IrExpr::GetValue(field + 1)))
+        // WHICH of the two this is, is the checker's answer and travels on the node. There is no
+        // search and no fallback here on purpose: a body can hold several captures of the same
+        // owner's fields, so a search keyed on anything less than the exact coordinate binds
+        // whichever the map yielded first, and "try the capture, else read the parameter"
+        // rediscovers a binding the checker already made.
+        let source = crate::fir::FirCaptureSource::ConstructorPrefix { owner, field };
+        let enclosing_depth = match site {
+            crate::fir::FirConstructorCaptureSite::Captured { enclosing_depth } => enclosing_depth,
+            crate::fir::FirConstructorCaptureSite::Parameter => {
+                let declaration = crate::fir::DeclarationId::from_raw(self.body.owner().raw());
+                let valid_owner = self
+                    .index
+                    .declaration_anchor(declaration)
+                    .filter(|anchor| anchor.kind == crate::fir::DeclarationKind::Constructor)
+                    .and_then(|anchor| anchor.owner)
+                    == Some(owner);
+                if !valid_owner || field >= self.class_constructor_capture_count {
+                    return Err(FirLoweringFailure::InvalidConstructorCapture { owner, field });
+                }
+                return Ok(self.ir.add_expr(IrExpr::GetValue(field + 1)));
+            }
+        };
+        let capture = self
+            .capture_slots
+            .get(&(enclosing_depth, source))
+            .copied()
+            .ok_or(FirLoweringFailure::MissingCapture {
+                enclosing_depth,
+                source,
+            })?;
+        Ok(self.ir.add_expr(IrExpr::GetValue(capture.slot)))
     }
 
     fn constructor_context_parameter(

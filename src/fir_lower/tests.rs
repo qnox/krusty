@@ -1602,7 +1602,7 @@ fn local_function_is_lifted_once_and_receives_its_checked_capture() {
     nested.add_capture(FirCapture {
         origin,
         enclosing_depth: 0,
-        source: captured,
+        source: crate::fir::FirCaptureSource::Value(captured),
         ty: resolved(Ty::Int),
         shared_cell: false,
     });
@@ -3520,6 +3520,6 @@ fn lower_source_from_set(sources: &[(&str, &str)], active_source: usize) -> IrFi
     ir
 }
 
-fn resolved(ty: Ty) -> ResolvedTy {
+pub(super) fn resolved(ty: Ty) -> ResolvedTy {
     ResolvedTy::new(ty).unwrap()
 }

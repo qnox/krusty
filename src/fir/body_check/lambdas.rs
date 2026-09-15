@@ -253,7 +253,10 @@ impl BodyFirChecker<'_> {
             outer_receiver_frames: std::iter::once(receiver_frame)
                 .chain(self.outer_receiver_frames.iter().cloned())
                 .collect(),
-            constructor_prefix_capture_access: false,
+            // A lambda written INSIDE a constructor prefix runs there too: its capture values are
+            // bound at the construction site, before the instance exists. The prefix rule therefore
+            // follows the lambda in, and the capture it needs is carried in as a capture parameter.
+            constructor_prefix_capture_access: self.constructor_prefix_capture_access,
         };
         for (name, ty) in context_parameter_names
             .iter()

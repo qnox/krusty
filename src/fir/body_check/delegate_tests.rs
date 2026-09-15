@@ -195,7 +195,7 @@ fn lambda_read_of_local_delegate_captures_storage_identity() {
             FirExprKind::CapturedValueRead {
                 enclosing_depth: 0,
                 source,
-            } if source == capture.source
+            } if crate::fir::FirCaptureSource::Value(source) == capture.source
         )
     }));
 }

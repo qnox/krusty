@@ -145,7 +145,7 @@ impl BodyFirChecker<'_> {
                     self.body.add_capture(FirCapture {
                         origin: origin_id,
                         enclosing_depth,
-                        source: binding.value,
+                        source: FirCaptureSource::Value(binding.value),
                         ty: binding.ty,
                         shared_cell: false,
                     });
@@ -454,7 +454,7 @@ impl BodyFirChecker<'_> {
                     self.body.add_capture(FirCapture {
                         origin: cause,
                         enclosing_depth,
-                        source: binding.value,
+                        source: FirCaptureSource::Value(binding.value),
                         ty: binding.ty,
                         shared_cell: false,
                     });

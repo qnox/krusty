@@ -270,14 +270,14 @@ fn inapplicable_inner_local_overload_falls_through_to_enclosing_rung() {
                 .expect("FIR expression");
             if let FirExprKind::Lambda { body, .. } = &expression.kind {
                 let forwards_result = body.captures().iter().any(|capture| {
-                    capture.source == result_value
+                    capture.source == crate::fir::FirCaptureSource::Value(result_value)
                         && capture.enclosing_depth == 1
                         && capture.shared_cell
                 });
-                let forwards_foo = body
-                    .captures()
-                    .iter()
-                    .any(|capture| capture.source == foo_value && capture.enclosing_depth == 1);
+                let forwards_foo = body.captures().iter().any(|capture| {
+                    capture.source == crate::fir::FirCaptureSource::Value(foo_value)
+                        && capture.enclosing_depth == 1
+                });
                 if forwards_result && forwards_foo {
                     return true;
                 }
@@ -658,7 +658,10 @@ fn local_function_capture_keeps_value_identity_type_and_shared_cell_decision() {
         panic!("second statement must be the local function")
     };
     assert_eq!(local_body.captures().len(), 1);
-    assert_eq!(local_body.captures()[0].source, target);
+    assert_eq!(
+        local_body.captures()[0].source,
+        crate::fir::FirCaptureSource::Value(target)
+    );
     assert!(local_body.captures()[0].shared_cell);
 }
 
@@ -697,7 +700,10 @@ fn enclosing_local_function_carries_a_descendant_capture_across_a_lambda() {
         panic!("enclosing local function must carry its descendant's capture")
     };
     assert_eq!(enclosing_capture.enclosing_depth, 0);
-    assert_eq!(enclosing_capture.source, source_parameter.value);
+    assert_eq!(
+        enclosing_capture.source,
+        crate::fir::FirCaptureSource::Value(source_parameter.value)
+    );
 }
 
 #[test]

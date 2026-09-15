@@ -69,7 +69,7 @@ pub enum FirLoweringFailure {
     },
     MissingCapture {
         enclosing_depth: u32,
-        source: LocalValueId,
+        source: crate::fir::FirCaptureSource,
     },
     UnsharedCaptureWrite {
         origin: OriginId,
