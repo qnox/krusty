@@ -59,6 +59,7 @@ mod stable_path_legacy_bridge;
 mod streaming_signature_bridge;
 #[cfg(test)]
 mod streaming_signature_tests;
+mod tailrec_declarations;
 mod type_join;
 
 // The capture storage-kind contract and the write analysis behind it. Imported by name so the call
@@ -65757,36 +65758,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// `tailrec` on a member that can still be OVERRIDDEN.
-    ///
-    /// The modifier promises a loop, and a loop is only sound when the self-call cannot dispatch
-    /// somewhere else. In an overridable member `f(n - 1)` on `this` is a virtual call a subclass
-    /// may answer, so rewriting it would devirtualize the call into the base frame and silently run
-    /// the wrong body. kotlinc rejects the declaration rather than skipping the rewrite, and points
-    /// at the modifier:
-    ///
-    /// ```text
-    /// error: tailrec is prohibited on open members.
-    /// ```
-    ///
-    /// Overridability is the member AND its class: `open`/`abstract` is overridable, a bare
-    /// `override` is too (it stays open unless marked `final`) — but only while something can
-    /// subclass the owner. kotlinc accepts `class D : B() { tailrec override fun … }` for exactly
-    /// that reason, and rejects the same member once `D` is `open`, both verified against 2.4.10.
-    fn check_tailrec_members(&mut self, class: &ClassDecl) {
-        if !(class.is_open() || class.is_abstract() || class.is_interface()) {
-            return;
-        }
-        for method in &class.methods {
-            if !method.is_tailrec() || !method.is_open() {
-                continue;
-            }
-            let span = method.tailrec_span.unwrap_or(method.signature_span);
-            self.diags
-                .error(span, "tailrec is prohibited on open members.".to_string());
-        }
-    }
-
     fn check_operator_declaration(&mut self, function: &FunDecl, ret: Ty) {
         if function.is_operator()
             && function.name == "hasNext"
@@ -67859,7 +67830,7 @@ impl<'a> Checker<'a> {
                 ),
             );
         }
-        self.check_tailrec_members(cl);
+        tailrec_declarations::check_members(&mut self.diags, cl);
         let current_owner = self.active_classifier_internal(d, cl);
         // A retained default may make an `inner` classifier the bounded Pass-1 checker root. Its
         // enclosing class parser node is then intentionally not reopened, but the enclosing class
