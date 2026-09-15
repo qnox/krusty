@@ -4340,11 +4340,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   is this function's by construction. A slot that stops being a `Return` gives up its entry with it,
   because the side table's contract is that only a return node carries one.
 
-  **The rewrite happens in place, and one edge is the whole licence for that.** Common IR is a DAG:
-  lowering may hand one id to two parents, and the second parent may be the `try` or the inline body
-  the walk deliberately did not enter. Every edge from the body's roots is counted first — including
-  the ones the walk will not follow — and a `return` reached more than once is left alone. That
-  program keeps recursing, which is the answer this pass started from and is never a wrong one.
+  **The rewrite happens in place, and one root-to-node path is the whole licence for that.** Common
+  IR is a DAG: lowering may hand one ancestor id to two parents, so its descendants are observed on
+  both paths even when each has one direct parent node. Every structural edge is inventoried first —
+  including the ones the rewrite will not follow — and multiple reachability is propagated through
+  descendants. A `return` reached by more than one path is left alone. That program keeps recursing,
+  which is the answer this pass started from and is never a wrong one.
 
   A trailing LOOP is left as the statement it is rather than wrapped in a `return`: a loop is not a
   value and has no tail position of its own, and returning one is what a body ending in
@@ -4355,9 +4356,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_call_that_only_looks_like_a_tail_call_still_recurses`, and
   `tailrec_rewriting_agrees_with_kotlinc`, which asks the reference compiler the same questions);
   `src/fir_lower/tailrec.rs` (`a_return_the_dag_shares_with_a_try_is_left_alone`,
+  `a_return_below_a_shared_ancestor_is_left_alone`,
   `a_return_that_targets_an_outer_frame_is_left_alone`,
   `a_lambdas_capture_is_swept_and_its_inline_body_is_not`,
-  `a_return_reached_by_one_edge_becomes_a_loop_step`), which state the three rules above on the IR
+  `a_return_reached_by_one_path_becomes_a_loop_step`), which state the three rules above on the IR
   directly — a DAG edge crossing an opaque boundary has no Kotlin source that produces it.
 
 - **Element-form vararg calls select and lower against classpath extensions.** `"a.b".trim('.')`

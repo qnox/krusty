@@ -60,17 +60,18 @@ pub(super) fn finish_tailrec_body(
     ))
 }
 
-/// How many parent edges reach each node from the body's roots.
+/// Whether one or several root-to-node paths reach each node in the body.
 ///
-/// Counted over EVERY edge, including the ones the sweep will not follow — a `try`'s contents and a
-/// lambda's inline body. Common IR is a DAG: lowering may hand one id to two parents, and the
-/// second parent is exactly the one that must not see a rewrite made through the first. A node this
-/// says is reached once is one no other parent can observe changing.
-fn parent_edges(ir: &IrFile, roots: &[ExprId]) -> std::collections::HashMap<ExprId, u32> {
-    let mut edges: std::collections::HashMap<ExprId, u32> = std::collections::HashMap::new();
+/// Every structural edge is counted, including edges the rewrite itself will not follow — a `try`'s
+/// contents and a lambda's inline body. Sharing propagates through descendants: if two paths reach a
+/// block, they also reach the return stored inside that block even though the return has only one
+/// direct parent node. Counts are capped at two because the rewrite needs only a uniqueness proof.
+fn root_path_counts(ir: &IrFile, roots: &[ExprId]) -> std::collections::HashMap<ExprId, u8> {
+    let mut paths: std::collections::HashMap<ExprId, u8> = std::collections::HashMap::new();
     // A root is owned by the body itself, which is an edge like any other.
     for &root in roots {
-        *edges.entry(root).or_default() += 1;
+        let count = paths.entry(root).or_default();
+        *count = count.saturating_add(1).min(2);
     }
     let mut pending: Vec<ExprId> = roots.to_vec();
     let mut expanded = std::collections::HashSet::new();
@@ -83,11 +84,32 @@ fn parent_edges(ir: &IrFile, roots: &[ExprId]) -> std::collections::HashMap<Expr
         let mut children = Vec::new();
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
         for child in children {
-            *edges.entry(child).or_default() += 1;
+            let count = paths.entry(child).or_default();
+            *count = count.saturating_add(1).min(2);
             pending.push(child);
         }
     }
-    edges
+
+    // Direct incoming-edge counts do not expose sharing THROUGH an ancestor: expanding a shared
+    // block once records one edge to its child even though two root paths observe that child. Mark
+    // every descendant of a multiply reached node multiply reached as well.
+    let mut pending = paths
+        .iter()
+        .filter_map(|(&expression, &count)| (count > 1).then_some(expression))
+        .collect::<Vec<_>>();
+    let mut propagated = std::collections::HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !propagated.insert(expression) {
+            continue;
+        }
+        let mut children = Vec::new();
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
+        for child in children {
+            paths.insert(child, 2);
+            pending.push(child);
+        }
+    }
+    paths
 }
 
 /// Whether a `return` leaves THIS function.
@@ -120,10 +142,11 @@ fn returns_from_here(ir: &IrFile, expression: ExprId) -> bool {
 /// The rewrite happens IN PLACE, at the `return`'s own id, and two facts make that sound rather
 /// than convenient:
 ///
-/// * The node is reached by exactly ONE edge. A `return` the DAG shares is left alone — the program
-///   keeps recursing, which is the answer this pass started from and is never a wrong one. Rewriting
-///   it would change what the other parent sees, and that parent may be the `try` or the inline body
-///   this walk deliberately did not enter.
+/// * The node is reached by exactly ONE root-to-node path. A `return` below a shared ancestor is
+///   shared too even when it has one direct parent node. A multiply reached return is left alone —
+///   the program keeps recursing, which is the answer this pass started from and is never a wrong
+///   one. Rewriting it would change what another path sees, and that path may cross the `try` or
+///   inline-body boundary this walk deliberately did not enter.
 /// * The `return` is this function's, by its checked depth rather than by where it was found.
 ///
 /// A slot that stops being a `Return` gives up its `checked_return_depths` entry with it: that fact
@@ -136,7 +159,7 @@ fn rewrite_returned_tail_calls(
     result: Ty,
     origin: OriginId,
 ) -> Result<(), FirLoweringFailure> {
-    let edges = parent_edges(ir, roots);
+    let paths = root_path_counts(ir, roots);
     let mut pending: Vec<ExprId> = roots.to_vec();
     let mut seen = std::collections::HashSet::new();
     while let Some(expression) = pending.pop() {
@@ -152,7 +175,7 @@ fn rewrite_returned_tail_calls(
                 continue;
             }
             IrExpr::Return(Some(_))
-                if returns_from_here(ir, expression) && edges.get(&expression) == Some(&1) =>
+                if returns_from_here(ir, expression) && paths.get(&expression) == Some(&1) =>
             {
                 // The same rewriter the body's own tail goes through, asked about this `return`
                 // instead: it is a tail position too, so whatever it makes of the body's last
@@ -383,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn a_return_reached_by_one_edge_becomes_a_loop_step() {
+    fn a_return_reached_by_one_path_becomes_a_loop_step() {
         // The control for the two tests below: with nothing else pointing at it, the `return` is
         // rewritten, so a later "left alone" is the guard working and not the rewrite being off.
         let mut ir = file();
@@ -422,6 +445,32 @@ mod tests {
             matches!(ir.expr(shared), IrExpr::Return(Some(_))),
             "a `return` the DAG shares is left as it was"
         );
+        assert!(depths_describe_returns(&ir));
+    }
+
+    #[test]
+    fn a_return_below_a_shared_ancestor_is_left_alone() {
+        // The return has one DIRECT parent (the block), but the block itself is reached both as an
+        // ordinary root and through an opaque `try`. Path uniqueness must propagate through the
+        // shared ancestor; direct incoming-edge counting alone incorrectly rewrites the return.
+        let mut ir = file();
+        let returned = returned_self_call(&mut ir);
+        ir.checked_return_depths.insert(returned, 0);
+        let shared_block = ir.add_expr(IrExpr::Block {
+            stmts: vec![returned],
+            value: None,
+        });
+        let guarded = ir.add_expr(IrExpr::Try {
+            body: shared_block,
+            catches: Vec::new(),
+            finally: None,
+            result: Ty::Int,
+        });
+        let tail = ir.add_expr(IrExpr::Return(None));
+        finish(&mut ir, vec![shared_block, guarded, tail]);
+
+        assert!(matches!(ir.expr(returned), IrExpr::Return(Some(_))));
+        assert_eq!(ir.checked_return_depths.get(&returned), Some(&0));
         assert!(depths_describe_returns(&ir));
     }
 
