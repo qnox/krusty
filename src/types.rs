@@ -296,7 +296,8 @@ impl TypeName {
         type_names().same_or_nested_within(self.name_id(), owner.name_id())
     }
 
-    /// Immediate lexical classifier owner, decoded from the interned nested-class segment.
+    /// Immediate lexical classifier owner, retained by nested-child construction or decoded from an
+    /// already-interned nested-class segment.
     #[inline]
     pub fn nested_owner(self) -> Option<TypeName> {
         type_names().nested_owner(self.name_id()).map(TypeName)
