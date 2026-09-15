@@ -5156,7 +5156,7 @@ fn lower_file_at_reporting_impl(
             // The unsigned specialized arrays (`UIntArray`, `ULongArray`) are inline classes over
             // `[I`/`[J`, but the compiler models and emits them AS the primitive array — never boxing to
             // the wrapper object. Excluding them here keeps them out of the value-class erasure map.
-            if crate::types::prim_array_element(&fq.render()).is_some() {
+            if crate::types::prim_array_element(fq).is_some() {
                 continue;
             }
             let Some(t) = lo.syms.libraries.classifier(fq) else {
@@ -28878,34 +28878,21 @@ fn ref_elem_ir(t: Ty) -> Ty {
     }
 }
 
-/// The element `IrType` of an array `IrType` target — a reference `Array<E>` (its type argument) or a
-/// primitive specialized array (`kotlin/IntArray` → `kotlin/Int`). `None` for a non-array type. Used
-/// to materialize an empty array (`emptyArray<T>()`) of the target's element type.
+/// The element of an array target — a reference `Array<E>` (its type argument) or a primitive
+/// specialized array (`kotlin/IntArray` → `Int`). `None` for a non-array type. Used to materialize
+/// an empty array (`emptyArray<T>()`) of the target's element type.
+///
+/// Through [`crate::types::prim_array_element`] rather than a chain of its own: the chain this
+/// replaced listed the eight signed arrays and no unsigned one, so a `UIntArray` target was not an
+/// array here at all. The element comes back in its canonical form (`Ty::Int`, `Ty::UInt`) instead
+/// of the `Obj("kotlin/Int")` spelling the chain built, which is one type either way and one fewer
+/// place that has to know both.
 fn ir_array_element(t: &Ty) -> Option<Ty> {
     let fq_name = t.non_null().obj_internal()?;
     if fq_name.matches("kotlin/Array") {
         return t.non_null().type_args().first().copied();
     }
-    let prim = if fq_name.matches("kotlin/IntArray") {
-        "kotlin/Int"
-    } else if fq_name.matches("kotlin/LongArray") {
-        "kotlin/Long"
-    } else if fq_name.matches("kotlin/DoubleArray") {
-        "kotlin/Double"
-    } else if fq_name.matches("kotlin/FloatArray") {
-        "kotlin/Float"
-    } else if fq_name.matches("kotlin/BooleanArray") {
-        "kotlin/Boolean"
-    } else if fq_name.matches("kotlin/CharArray") {
-        "kotlin/Char"
-    } else if fq_name.matches("kotlin/ByteArray") {
-        "kotlin/Byte"
-    } else if fq_name.matches("kotlin/ShortArray") {
-        "kotlin/Short"
-    } else {
-        return None;
-    };
-    Some(Ty::obj(prim))
+    crate::types::prim_array_element(fq_name)
 }
 
 /// Per-parameter `Some(name)` when a non-null assertion (`Intrinsics.checkNotNullParameter`) should
