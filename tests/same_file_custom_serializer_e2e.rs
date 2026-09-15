@@ -24,88 +24,7 @@
 //! map, while a same-file class is expected to derive its own `$serializer` and its class-level
 //! `with =` was not consulted.
 
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-
-use super::common;
-
-fn walk(dir: &Path, prefix: &str, depth: usize, out: &mut Vec<PathBuf>) {
-    if depth > 10 {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            walk(&path, prefix, depth + 1, out);
-        } else if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
-            if name.starts_with(prefix) && name.ends_with(".jar") && !name.contains("sources") {
-                out.push(path.clone());
-            }
-        }
-    }
-}
-
-/// The numeric version embedded in a jar file name, for ordering. Sorting the PATHS as strings
-/// instead puts `1.9` above `1.10`; comparing the parsed components orders them properly.
-fn version_key(path: &Path) -> Vec<u64> {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .map(|stem| {
-            stem.rsplit('-')
-                .next()
-                .unwrap_or_default()
-                .split('.')
-                .map(|part| part.parse::<u64>().unwrap_or(0))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// The NEWEST matching jar. Taking the FIRST match encountered instead selects whichever version the
-/// directory walk happens to reach first, which can silently resolve to a runtime that predates the
-/// serializer under test — that failure mode produced a `NoClassDefFoundError` in a sibling suite,
-/// which reads as a compiler bug rather than a test-fixture bug.
-fn find(prefix: &str) -> PathBuf {
-    let home = std::env::var("HOME").expect("HOME must be set to locate the serialization runtime");
-    let mut found = Vec::new();
-    walk(&Path::new(&home).join(".gradle"), prefix, 0, &mut found);
-    found.sort_by_key(|path| version_key(path));
-    found.pop().unwrap_or_else(|| {
-        panic!(
-            "no {prefix}*.jar under ~/.gradle, so this test cannot run.\n\
-             It must not self-skip: a skipped serialization test passes on an unfixed compiler."
-        )
-    })
-}
-
-fn runtime_jars() -> Vec<PathBuf> {
-    static JARS: OnceLock<Vec<PathBuf>> = OnceLock::new();
-    JARS.get_or_init(|| {
-        vec![
-            common::stdlib_jar(),
-            find("kotlinx-serialization-core-jvm"),
-            find("kotlinx-serialization-json-jvm"),
-        ]
-    })
-    .clone()
-}
-
-/// Compile the program entirely in krusty and run its `box()`. Panics loudly on a compile failure —
-/// this defect IS a compile failure, so a skip here would report success on an unfixed compiler.
-fn run_box(src: &str, stem: &str) -> String {
-    let jars = runtime_jars();
-    let classes = common::compile_in_process(src, stem, &jars, None).unwrap_or_else(|| {
-        let outcome = common::backend_outcome_in_process(src, stem, &jars, None);
-        panic!("krusty failed to compile {stem}: {outcome:?}")
-    });
-    let box_class =
-        common::find_box_class(&classes).unwrap_or_else(|| panic!("no box class for {stem}"));
-    common::run_box(&classes, &box_class, &jars)
-        .unwrap_or_else(|| panic!("box() did not run for {stem}"))
-}
+use super::serialization_test_support::both_compilers_box;
 
 const SERIALIZER: &str = "import kotlinx.serialization.KSerializer\n\
 import kotlinx.serialization.Serializable\n\
@@ -143,7 +62,7 @@ fun box(): String {{\n\
 \x20   return if (json == \"{{\\\"payload\\\":\\\"deep\\\"}}\") \"OK\" else \"FAIL: \" + json\n\
 }}\n"
     );
-    assert_eq!(run_box(&main, "same_file_direct"), "OK");
+    assert_eq!(both_compilers_box(&main, "same_file_direct"), "OK");
 }
 
 /// The corpus shape: the annotated class reached through a collection ELEMENT.
@@ -158,7 +77,7 @@ fun box(): String {{\n\
 \x20   return if (json == \"{{\\\"fields\\\":{{\\\"k\\\":\\\"deep\\\"}}}}\") \"OK\" else \"FAIL: \" + json\n\
 }}\n"
     );
-    assert_eq!(run_box(&main, "same_file_map_value"), "OK");
+    assert_eq!(both_compilers_box(&main, "same_file_map_value"), "OK");
 }
 
 /// The control that isolates the same-file case: a LIST element behaves like the map value.
@@ -173,7 +92,7 @@ fun box(): String {{\n\
 \x20   return if (json == \"{{\\\"fields\\\":[\\\"deep\\\"]}}\") \"OK\" else \"FAIL: \" + json\n\
 }}\n"
     );
-    assert_eq!(run_box(&main, "same_file_list_element"), "OK");
+    assert_eq!(both_compilers_box(&main, "same_file_list_element"), "OK");
 }
 
 /// The control that shows nothing about ordinary derivation changed: a `@Serializable` class with no
@@ -192,7 +111,7 @@ fun box(): String {\n\
 \x20   val json = Json.encodeToString(Holder.serializer(), Holder(Inner(\"deep\")))\n\
 \x20   return if (json == \"{\\\"payload\\\":{\\\"raw\\\":\\\"deep\\\"}}\") \"OK\" else \"FAIL: \" + json\n\
 }\n";
-    assert_eq!(run_box(MAIN, "ordinary_derivation"), "OK");
+    assert_eq!(both_compilers_box(MAIN, "ordinary_derivation"), "OK");
 }
 
 /// A custom serializer declared as a CLASS takes one `KSerializer` per type parameter of the class
@@ -228,5 +147,51 @@ fun box(): String {\n\
 \x20   val json = Json.encodeToString(Holder.serializer(), Holder(Box(\"deep\")))\n\
 \x20   return if (json == \"{\\\"payload\\\":\\\"deep\\\"}\") \"OK\" else \"FAIL: \" + json\n\
 }\n";
-    assert_eq!(run_box(MAIN, "constructed_custom_serializer"), "OK");
+    assert_eq!(
+        both_compilers_box(MAIN, "constructed_custom_serializer"),
+        "OK"
+    );
+}
+
+/// Recursive composition retained from #886: the custom serializer's argument is itself generated,
+/// and the constructed serializer is reached both directly and below a map-value serializer.
+#[test]
+fn a_constructed_custom_serializer_composes_below_a_collection() {
+    const MAIN: &str = r#"import kotlinx.serialization.KSerializer
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.json.Json
+
+@Serializable(with = BoxSerializer::class)
+class Box<out T>(val item: T)
+
+class BoxSerializer<T>(private val inner: KSerializer<T>) : KSerializer<Box<T>> {
+    override val descriptor: SerialDescriptor = inner.descriptor
+    override fun serialize(encoder: Encoder, value: Box<T>) = inner.serialize(encoder, value.item)
+    override fun deserialize(decoder: Decoder): Box<T> = Box(inner.deserialize(decoder))
+}
+
+@Serializable
+data class Leaf(val value: String)
+
+@Serializable
+data class Holder(val direct: Box<Leaf>, val mapped: Map<String, Box<Leaf>>)
+
+fun box(): String {
+    val value = Holder(Box(Leaf("a")), mapOf("k" to Box(Leaf("b"))))
+    val json = Json.encodeToString(Holder.serializer(), value)
+    val decoded = Json.decodeFromString(Holder.serializer(), json)
+    return if (decoded.direct.item.value + decoded.mapped.getValue("k").item.value == "ab") {
+        "OK"
+    } else {
+        "FAIL: " + json
+    }
+}
+"#;
+    assert_eq!(
+        both_compilers_box(MAIN, "constructed_custom_serializer_collection"),
+        "OK"
+    );
 }

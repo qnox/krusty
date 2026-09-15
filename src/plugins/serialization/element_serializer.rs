@@ -3,7 +3,7 @@
 use super::{
     build_contextual_serializer, build_polymorphic_serializer, class_ty,
     collection_serializer_builder, generated_serializer_accessor, is_nullable, kserializer_of,
-    serializer_of_name, type_is_contextual, wrap_nullable_serializer,
+    serializer_of_name, type_is_contextual, wrap_nullable_serializer, KSERIALIZER_FQ,
 };
 use crate::ir::{Callee, ClassId, ExprId, IrExpr, IrFile};
 use crate::libraries::InlineKind;
@@ -21,10 +21,10 @@ pub(super) enum ElementSerializerPlan {
         arguments: Vec<ElementSerializerPlan>,
     },
     Nullable(Box<ElementSerializerPlan>),
-    /// A custom serializer declared as a CLASS, constructed with one `KSerializer` per type
-    /// parameter of the class it serves: `BoxSerializer(<serializer for the argument>)`.
-    Constructed {
-        serializer: TypeName,
+    /// A local custom serializer class, constructed with one `KSerializer` per type parameter of
+    /// the class it serves: `BoxSerializer(<serializer for the argument>)`.
+    LocalConstructed {
+        serializer: ClassId,
         arguments: Vec<ElementSerializerPlan>,
     },
     Contextual(TypeName),
@@ -339,19 +339,42 @@ pub(super) fn element_serializer_plan(
                 .iter()
                 .position(|class| class.fq_name_id() == custom)
             {
-                let parameters = &ir.classes[serializer_id].ctor_args;
-                let serves_each_argument = parameters.len() == type_args.len()
-                    && parameters.iter().all(|parameter| {
-                        parameter.ty.non_null().kotlin_class_internal()
-                            == Some(type_name("kotlinx/serialization/KSerializer"))
+                let serializer = &ir.classes[serializer_id];
+                let readable_arguments = type_args
+                    .iter()
+                    .map(|argument| match argument {
+                        Ty::OutProjection(inner) | Ty::StarProjection(inner) => Some(**inner),
+                        Ty::InProjection(_) => None,
+                        _ => Some(*argument),
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                // Each constructor parameter must be `KSerializer<P>` for a distinct DECLARED type
+                // parameter. Inspect the resolved `TyParam` identity carried by the type; the strings
+                // in `IrClass::type_params` are source labels and are deliberately used only for the
+                // declaration count, never to recover identity from spelling.
+                let mut parameter_type_parameters = std::collections::HashSet::new();
+                let parameters_match = serializer.constructor_prefix_count == 0
+                    && serializer.captured_type_params.is_empty()
+                    && !readable_arguments.is_empty()
+                    && serializer.type_params.len() == readable_arguments.len()
+                    && serializer.ctor_args.len() == readable_arguments.len()
+                    && serializer.ctor_args.iter().all(|parameter| {
+                        let declared = parameter.declared_ty.unwrap_or(parameter.ty).non_null();
+                        let Ty::Obj(classifier, [argument]) = declared else {
+                            return false;
+                        };
+                        classifier == type_name(KSERIALIZER_FQ)
+                            && argument
+                                .ty_param_name()
+                                .is_some_and(|identity| parameter_type_parameters.insert(identity))
                     });
-                if serves_each_argument && !type_args.is_empty() {
-                    let arguments = type_args
+                if parameters_match {
+                    let arguments = readable_arguments
                         .iter()
                         .map(|argument| element_serializer_plan(ir, ctx, argument))
                         .collect::<Option<Vec<_>>>()?;
-                    return Some(ElementSerializerPlan::Constructed {
-                        serializer: custom,
+                    return Some(ElementSerializerPlan::LocalConstructed {
+                        serializer: serializer_id as ClassId,
                         arguments,
                     });
                 }
@@ -431,17 +454,24 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
         ElementSerializerPlan::Polymorphic(classifier) => {
             build_polymorphic_serializer(ir, classifier)
         }
-        ElementSerializerPlan::Constructed {
+        ElementSerializerPlan::LocalConstructed {
             serializer,
             arguments,
         } => {
-            let arity = arguments.len();
+            let internal = ir.classes[serializer as usize].fq_name_id();
             let arguments = arguments
                 .into_iter()
                 .map(|argument| emit_element_serializer(ir, argument))
                 .collect::<Vec<_>>();
-            let descriptor = format!("({})V", "Lkotlinx/serialization/KSerializer;".repeat(arity));
-            ir.new_external(&serializer.render(), descriptor, arguments)
+            ir.add_expr(IrExpr::New {
+                internal,
+                args: arguments,
+                ctor_params: None,
+                ctor_desc: None,
+                external_target: None,
+                defaults: Box::new([]),
+                default_prefix_count: 0,
+            })
         }
         ElementSerializerPlan::LocalSingleton(class) => ir.add_expr(IrExpr::StaticInstance {
             owner: class,

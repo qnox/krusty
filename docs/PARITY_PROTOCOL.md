@@ -2448,16 +2448,13 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   sibling file always worked, because it resolves through the external map — the reverse of what a
   file split would suggest, and the reason this was previously recorded backwards. The plan now reads
   the declaring class's own `with =` before the external lookup, exactly as that class's `serializer()`
-  accessor already does: an `object` serializer through its `INSTANCE`, any other through the same
-  classpath singleton path — and ONLY an `object` serializer, since a custom serializer declared as a
-  CLASS takes constructor arguments (`ValueSerializer<T>(dataSerializer)`) and has no `INSTANCE` field
-  to read; that shape stays a clean refusal until a plan that CONSTRUCTS the serializer exists.
-  Ordinary derivation is unchanged.
+  accessor already does. An `object` serializer is represented by its resolved local `ClassId` and
+  read through `INSTANCE`; a serializer CLASS is handled by the construction plan below. Ordinary
+  derivation is unchanged.
   `tests/same_file_custom_serializer_e2e.rs::a_same_file_custom_serializer_serves_a_direct_property`,
   `a_same_file_custom_serializer_serves_a_map_value`,
   `a_same_file_custom_serializer_serves_a_list_element`,
-  `an_ordinary_serializable_property_still_derives`,
-  `a_class_valued_custom_serializer_is_still_declined_rather_than_miscompiled`.
+  `an_ordinary_serializable_property_still_derives`.
 - **A class-valued custom serializer is CONSTRUCTED with its argument serializers (fix).** A custom
   serializer declared as a CLASS takes one `KSerializer` per type parameter of the class it serves —
   `@Serializable(with = BoxSerializer::class) class Box<T>` with
@@ -2465,10 +2462,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `new BoxSerializer(<serializer for the argument>)`, derived recursively. The element plan had no
   such shape: it could read a singleton `INSTANCE` or nothing, so this declined and the residual
   plugin placeholder failed the whole FILE. The plan now constructs one, requiring the declared
-  constructor to match that convention exactly — one `KSerializer` parameter per type argument — so
-  any other constructor shape still declines cleanly instead of emitting a call that does not exist.
+  constructor to match that convention exactly — one `KSerializer` parameter over each distinct
+  resolved type-parameter identity, in declaration order — so any other constructor shape still
+  declines cleanly instead of emitting a call that does not exist. The plan carries the serializer's
+  local `ClassId`; common IR emits its ordinary typed `New` node and leaves the constructor descriptor
+  to the backend, rather than rendering the owner and hardcoding a JVM descriptor in plugin lowering.
   Reading an `INSTANCE` off such a class compiles and then dies at run time with
   `NoSuchFieldError: Class BoxSerializer does not have member field 'BoxSerializer INSTANCE'`, which
   is why every test here runs a real `Json.encodeToString` and asserts the exact JSON rather than
-  merely asserting that compilation succeeded.
-  `tests/same_file_custom_serializer_e2e.rs::a_class_valued_custom_serializer_is_constructed_with_its_argument_serializer`.
+  merely asserting that compilation succeeded. The fixtures provision one pinned runtime and run
+  identically under krusty and kotlinc.
+  `tests/same_file_custom_serializer_e2e.rs::a_class_valued_custom_serializer_is_constructed_with_its_argument_serializer`,
+  `a_constructed_custom_serializer_composes_below_a_collection`.
