@@ -10654,10 +10654,13 @@ fn collect_signatures_with_cp_impl(
                                             .type_parameters
                                             .iter()
                                             .map(|parameter| {
+                                                // An absent bound is Kotlin's implicit `Any?`.
                                                 symbolic_mtp
                                                     .bound(parameter)
                                                     .ty_param_bound()
-                                                    .unwrap_or_else(|| Ty::obj("kotlin/Any"))
+                                                    .unwrap_or_else(|| {
+                                                        Ty::nullable(Ty::obj("kotlin/Any"))
+                                                    })
                                             })
                                             .collect(),
                                         param_shapes: method_header
@@ -85514,10 +85517,11 @@ impl<'a> Checker<'a> {
                                     .formal_bounds
                                     .iter()
                                     .map(|bounds| {
+                                        // An absent bound is Kotlin's implicit `Any?`.
                                         bounds
                                             .first()
                                             .copied()
-                                            .unwrap_or_else(|| Ty::obj("kotlin/Any"))
+                                            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))
                                     })
                                     .collect(),
                                 param_shapes: signature.params.clone(),
@@ -85612,11 +85616,17 @@ impl<'a> Checker<'a> {
                                 .iter()
                                 .enumerate()
                                 .map(|(index, _)| {
+                                    // An ABSENT bound is Kotlin's implicit `Any?`, not `Any`.
+                                    // Return-binding inference narrows a nullable candidate
+                                    // whenever the nullable form violates the bound and the
+                                    // non-null form satisfies it; a spurious non-null `Any`
+                                    // manufactures exactly that condition and pins every
+                                    // result variable to its non-null form.
                                     vec![gm
                                         .method_tparam_bounds
                                         .get(index)
                                         .copied()
-                                        .unwrap_or_else(|| Ty::obj("kotlin/Any"))]
+                                        .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")))]
                                 })
                                 .collect(),
                             receiver: None,
