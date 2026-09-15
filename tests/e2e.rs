@@ -1386,6 +1386,8 @@ mod suspend_prologue_cast_e2e;
 mod suspend_receiver_lambda_e2e;
 #[path = "suspend_return_type_recovery_e2e.rs"]
 mod suspend_return_type_recovery_e2e;
+#[path = "suspend_single_operand_hoist_e2e.rs"]
+mod suspend_single_operand_hoist_e2e;
 #[path = "suspend_spill_slot_reuse_e2e.rs"]
 mod suspend_spill_slot_reuse_e2e;
 #[path = "suspend_throw_operand_e2e.rs"]

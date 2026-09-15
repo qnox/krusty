@@ -32,6 +32,29 @@ pub fn clone_expression_dag(ir: &mut IrFile, root: ExprId) -> (ExprId, HashMap<E
     (root, cloned)
 }
 
+/// Give every child edge below `root` its own expression nodes while retaining `root` itself.
+///
+/// Common IR is a DAG: one operand may deliberately be referenced by several parents. A transform
+/// that rewrites descendants in place must first make each USE private, or a rewrite reached through
+/// one parent also changes the other parent without putting its prerequisites in scope. Keeping the
+/// root identity lets callers preserve function-body and side-table ownership while all mutable
+/// descendants become a tree.
+pub(crate) fn make_expression_children_unique(ir: &mut IrFile, root: ExprId) {
+    fn clone_use(ir: &mut IrFile, source: ExprId) -> ExprId {
+        let mut expression = ir.exprs[source as usize].clone();
+        remap_direct_children(&mut expression, |child| clone_use(ir, child));
+        let target = ir.add_expr(expression);
+        copy_expression_facts(ir, source, target);
+        target
+    }
+
+    crate::wide_stack::on_wide_stack(|| {
+        let mut expression = ir.exprs[root as usize].clone();
+        remap_direct_children(&mut expression, |child| clone_use(ir, child));
+        ir.exprs[root as usize] = expression;
+    });
+}
+
 fn map_option(value: &mut Option<ExprId>, map: &mut impl FnMut(ExprId) -> ExprId) {
     if let Some(value) = value {
         *value = map(*value);
@@ -299,8 +322,10 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
         };
     }
     copy_map!(fir_origins);
+    copy_map!(expression_owners);
     copy_map!(checked_return_depths);
     copy_map!(annotation_constructions);
+    copy_map!(generated_secondary_constructor_calls);
     copy_map!(expr_lines);
     copy_map!(expr_source_lines);
     copy_map!(expr_end_lines);
@@ -315,6 +340,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(suspend_calls);
     copy_map!(value_class_suspend_calls);
     copy_map!(intrinsic_suspension_points);
+    copy_map!(erased_value_constructions);
     if let Some(provenance) = ir.debug_local_provenance(source) {
         ir.set_debug_local_provenance(target, provenance);
     }
@@ -326,5 +352,8 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     }
     if ir.inline_call_sites.contains(&source) {
         ir.inline_call_sites.insert(target);
+    }
+    if ir.module_inline_calls.contains(&source) {
+        ir.module_inline_calls.insert(target);
     }
 }
