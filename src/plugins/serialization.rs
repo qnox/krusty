@@ -1631,6 +1631,13 @@ impl IrPlugin for SerializationPlugin {
             let n_tp = type_params.len();
             let is_generic = n_tp > 0;
             let mut ser = synthetic_class(&ser_fq);
+            // The generated class stands where the annotated declaration does: kotlinc roots its
+            // constructor's `LineNumberTable` there, and the local-variable table naming `this`
+            // rides on the same record. Every other generated member already carried both through
+            // `record_debug_tables`; the constructor is emitted from the CLASS, so the class needs
+            // the line.
+            ser.decl_line = owner_line;
+            ser.decl_start_line = owner_line;
             ser.applied_annotations = generated_serializer_annotations();
             ser.is_object = !is_generic; // non-generic `$serializer` is a singleton object (INSTANCE)
                                          // Implement `GeneratedSerializer` (extends `KSerializer`) — it declares `childSerializers()`

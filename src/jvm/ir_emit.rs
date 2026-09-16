@@ -2970,7 +2970,18 @@ fn attach_synth_debug_tables(
     }
     // Property accessors: getter has only `this`; a `var` setter also has its value parameter (named
     // `<set-?>` by kotlinc), guarded when the property type is a non-null reference.
-    for f in &c.fields {
+    for (field_index, f) in c.fields.iter().enumerate() {
+        // A property that declares its accessor as a real function carries that function's own debug
+        // contract — a plugin-generated `descriptor` reads its field with NO line table, which this
+        // class-level synthesis would overwrite with the declaration line.
+        let declared_accessors = c
+            .properties
+            .iter()
+            .find(|property| property.backing_field == Some(field_index as u32))
+            .is_some_and(|property| property.getter.is_some());
+        if declared_accessors {
+            continue;
+        }
         // A CTOR-parameter property's accessors sit on the class-declaration line; a BODY property's
         // sit on its own `val`/`var` line.
         let pline = ir
