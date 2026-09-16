@@ -1644,11 +1644,14 @@ impl IrPlugin for SerializationPlugin {
             // serializer adds one `KSerializer` field per type parameter (`typeSerial0..N` at fields 1..=N),
             // set from the constructor parameters.
             // Field 0 `descriptor` + each `typeSerial{k}` are `final` private fields.
-            ser.fields = vec![crate::ir::IrField::new(
-                "descriptor".to_string(),
-                class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
-            )
-            .with_is_final(true)];
+            let descriptor_field = ser.fields.len() as u32;
+            ser.fields.push(
+                crate::ir::IrField::new(
+                    "descriptor".to_string(),
+                    class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+                )
+                .with_is_final(true),
+            );
             for (k, parameter) in type_parameter_tys.iter().copied().enumerate() {
                 ser.fields.push(
                     crate::ir::IrField::new(format!("typeSerial{k}"), kserializer_of(parameter))
@@ -1688,7 +1691,7 @@ impl IrPlugin for SerializationPlugin {
                 described.push(type_params_ser);
             }
             let descriptor_order = described.len() as u32;
-            ser.published_generated_functions = described;
+            ser.published_generated_functions = Some(described);
             ser.properties.push(crate::ir::IrProperty {
                 name: "descriptor".to_string(),
                 context_params: Vec::new(),
@@ -1699,7 +1702,7 @@ impl IrPlugin for SerializationPlugin {
                 annotations: Box::new([]),
                 initializer: None,
                 storage_ty: None,
-                backing_field: Some(0),
+                backing_field: Some(descriptor_field),
                 is_var: false,
                 is_open: false,
                 is_private: false,

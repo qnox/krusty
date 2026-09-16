@@ -1120,8 +1120,7 @@ fn build_class_metadata(
     // A GENERATED class states its own function record on itself: which of its members Kotlin
     // metadata describes, and in which order. The two differ from what the class emits — a
     // non-generic `$serializer` emits `typeParametersSerializers` but does not describe it.
-    let published = (!c.published_generated_functions.is_empty())
-        .then_some(c.published_generated_functions.as_slice());
+    let published = c.published_generated_functions.as_deref();
     if let Some(described) = published {
         declared_fids.retain(|fid| described.contains(fid));
         declared_fids.sort_by_key(|fid| described.iter().position(|described| described == fid));

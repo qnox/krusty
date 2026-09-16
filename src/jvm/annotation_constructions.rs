@@ -164,7 +164,7 @@ fn annotation_implementation(
         is_companion: false,
         companion_class: None,
         published_nested_classifiers: Vec::new(),
-        published_generated_functions: Vec::new(),
+        published_generated_functions: None,
         secondary_ctors: Vec::new(),
         has_primary_ctor: true,
         applied_annotations: crate::ir::DeclarationAnnotations::default(),
