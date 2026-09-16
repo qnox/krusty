@@ -1407,7 +1407,7 @@ impl BodyLowering<'_> {
             }
         };
         self.ir.logical_types.insert(lowered, expression.ty.get());
-        let lowered = crate::ir::complete_bottom_value(&mut self.ir, lowered, expression.ty.get());
+        let lowered = crate::ir::complete_bottom_value(self.ir, lowered, expression.ty.get());
         self.ir.logical_types.insert(lowered, expression.ty.get());
         let debug = self.body.expression_debug_lines(expression_id);
         if debug.source != 0 {

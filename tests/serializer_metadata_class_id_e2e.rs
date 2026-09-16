@@ -63,7 +63,7 @@ fn reference_classes(src: &str, stem: &str) -> PathBuf {
         "{stem}: the reference serialization plugin is missing at {}",
         plugin.display()
     );
-    let joined = std::env::join_paths(&runtime_jars()).expect("join the reference classpath");
+    let joined = std::env::join_paths(runtime_jars()).expect("join the reference classpath");
     let (code, diagnostics) = common::kotlinc_compile(&[
         format!("-Xplugin={}", plugin.display()),
         "-jvm-target".to_string(),

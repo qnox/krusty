@@ -901,9 +901,7 @@ impl JvmLibraries {
                         && lambda.params.as_slice() == [callable.params[0]]
             );
         if cause_finally_shape {
-            let Some(first_local) = slot_after_parameters(&callable.physical_params) else {
-                return None;
-            };
+            let first_local = slot_after_parameters(&callable.physical_params)?;
             if let Some((target, caught)) = recovery::decode_cause_finally_cleanup(
                 &instructions,
                 &body.source_cp,

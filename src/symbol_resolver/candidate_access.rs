@@ -22,9 +22,9 @@ impl SymbolResolver<'_> {
         self.receiver_callable_inventory(receiver, name).accessible
     }
 
-    pub(super) fn retain_accessible_extensions<'a>(
+    pub(super) fn retain_accessible_extensions(
         &self,
-        candidates: &mut Vec<(u32, Ty, &'a FunctionInfo)>,
+        candidates: &mut Vec<(u32, Ty, &FunctionInfo)>,
         inaccessible: &mut Vec<FunctionInfo>,
         hides_members: bool,
     ) {

@@ -410,7 +410,7 @@ mod tests {
             assert!(!decoded(&fixture, &fixture.instructions, &handlers));
         }
         let mut handlers = fixture.handlers.clone();
-        handlers.push(handlers[0].clone());
+        handlers.push(handlers[0]);
         assert!(!decoded(&fixture, &fixture.instructions, &handlers));
 
         let mut instructions = fixture.instructions.clone();

@@ -60,11 +60,12 @@ fmt:
 clippy-findings:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Cached crates do not re-emit diagnostics, so rebuild first-party crates before fingerprinting.
-    # Keep Clippy in its own target: cleaning the shared target here discarded the gate-profile test
-    # binaries immediately before the pre-push test phase and forced an otherwise unnecessary rebuild.
+    # Cached crates do not re-emit diagnostics, so fingerprint from a clean Clippy target. A
+    # package-scoped `cargo clean -p` is not sufficient for a restored CI target: Cargo can report
+    # `Removed 0 files` and then reuse every cached first-party artifact, producing a false-empty
+    # diagnostic set. Keep Clippy in its own target so the clean cannot discard gate-profile tests.
     clippy_target="$PWD/target/clippy-baseline"
-    CARGO_TARGET_DIR="$clippy_target" cargo clean -p krusty -p krusty-cli -p krusty-lsp >/dev/null
+    cargo clean --target-dir "$clippy_target" >/dev/null
     output=$(mktemp)
     trap 'rm -f "$output"' EXIT
     if ! CARGO_TARGET_DIR="$clippy_target" cargo clippy --workspace --all-targets --all-features --message-format=short >"$output" 2>&1; then
@@ -240,10 +241,16 @@ box-corpus VERSION=`just max-version`:
     if [ -d "$box" ]; then echo "$box"; exit 0; fi
     echo "cloning Kotlin codegen/box corpus (v${ver})…" >&2
     rm -rf "$root"
+    # Git hooks export repository-local GIT_* variables. Without clearing them, `git -C "$root"`
+    # still operates on the outer krusty worktree and can replace its sparse-checkout definition.
+    while read -r name; do unset "$name"; done < <(git rev-parse --local-env-vars)
     git clone --depth 1 --filter=blob:none --sparse --branch "v${ver}" \
         https://github.com/JetBrains/kotlin.git "$root" >&2 \
         || { echo "failed to clone JetBrains/kotlin v${ver}" >&2; rm -rf "$root"; exit 1; }
-    git -C "$root" sparse-checkout set --no-cone compiler/testData/codegen/box >&2
+    # Keep cone mode: a fresh sparse clone checks out the repository-root files that cone mode
+    # owns. Switching to non-cone while excluding them can leave those paths in place and abort the
+    # update before the requested corpus directory is materialized.
+    git -C "$root" sparse-checkout set compiler/testData/codegen/box >&2
     [ -d "$box" ] || { echo "box dir missing after sparse checkout: $box" >&2; exit 1; }
     echo "$box"
 
@@ -260,6 +267,7 @@ ser-corpus VERSION=`just max-version`:
     if [ -d "$box" ]; then echo "$box"; exit 0; fi
     echo "cloning kotlinx.serialization boxIr corpus (v${ver})…" >&2
     rm -rf "$root"
+    while read -r name; do unset "$name"; done < <(git rev-parse --local-env-vars)
     git clone --depth 1 --filter=blob:none --sparse --branch "v${ver}" \
         https://github.com/JetBrains/kotlin.git "$root" >&2 \
         || { echo "failed to clone JetBrains/kotlin v${ver}" >&2; rm -rf "$root"; exit 1; }
@@ -280,6 +288,7 @@ ksp-corpus KSP_REF="main":
     if [ -d "$td" ]; then echo "$td"; exit 0; fi
     echo "cloning google/ksp test corpus (${ref})…" >&2
     rm -rf "$root"
+    while read -r name; do unset "$name"; done < <(git rev-parse --local-env-vars)
     git clone --depth 1 --filter=blob:none --sparse --branch "$ref" \
         https://github.com/google/ksp.git "$root" >&2 \
         || { echo "failed to clone google/ksp ${ref}" >&2; rm -rf "$root"; exit 1; }
