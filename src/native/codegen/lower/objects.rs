@@ -1342,6 +1342,26 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(value)
     }
 
+    /// A `lateinit` read whose storage is not an instance field — a local slot or a top-level
+    /// property — where common lowering names the guard as its own node instead of leaving it to
+    /// be inferred from the field. The guard is the field read's, because it is the same guard:
+    /// null is the evidence either way.
+    pub(super) fn lateinit_check(
+        &mut self,
+        operand: u32,
+        name: &str,
+    ) -> Result<Option<Value>, Unsupported> {
+        let value = self.expression(operand)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let Some(value) = value else {
+            return Err("a `lateinit` read of a `Unit` value".to_string());
+        };
+        self.lateinit_guard(value, name)?;
+        Ok(Some(value))
+    }
+
     /// The throw-if-null every read of a `lateinit` property carries.
     ///
     /// Kotlin puts the guard at the READ rather than tracking initialization, because the field
