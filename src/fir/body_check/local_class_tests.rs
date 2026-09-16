@@ -27,7 +27,7 @@ fn checked_streamed_bodies(source: &str) -> (ResolvedModuleIndex, Vec<FirBody>) 
     crate::resolve::publish_checked_local_signatures(
         &analysis.files[0],
         SourceFileId::from_raw(0),
-        &mut analysis.symbols,
+        &analysis.symbols,
         info,
         &mut index,
     )
