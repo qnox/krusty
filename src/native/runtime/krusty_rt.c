@@ -1845,7 +1845,10 @@ static KRef kt_walk_of(const KType *type, KRef over) {
 }
 
 /* One element of an array, boxed by the descriptor the ARRAY carries — the only thing that knows
-   how wide the element is and how to read its bits. */
+   how wide the element is and how to read its bits.
+   Every descriptor `kt_is_array` accepts is answered here by name and the chain ends in a failure
+   rather than in a widest-element read: a descriptor this does not recognise is a routing mistake,
+   and reading its element as a `Double` would take eight bytes from an array that may hold one. */
 static KRef kt_array_element(KRef array, kt_int at) {
     const KType *type = array->header.type;
     const void *elements = (const void *)((const KArray *)array + 1);
@@ -1873,7 +1876,25 @@ static KRef kt_array_element(KRef array, kt_int at) {
     if (type == &kt_type_float_array) {
         return kt_box_float(((const kt_float *)elements)[at]);
     }
-    return kt_box_double(((const kt_double *)elements)[at]);
+    if (type == &kt_type_double_array) {
+        return kt_box_double(((const kt_double *)elements)[at]);
+    }
+    /* An unsigned array holds the signed array's bits; only the BOX differs, because it is the box
+       that decides whether `toString` reads them as the maximum or as `-1`. */
+    if (type == &kt_type_ubyte_array) {
+        return kt_box_ubyte(((const kt_byte *)elements)[at]);
+    }
+    if (type == &kt_type_ushort_array) {
+        return kt_box_ushort(((const kt_short *)elements)[at]);
+    }
+    if (type == &kt_type_uint_array) {
+        return kt_box_uint(((const kt_int *)elements)[at]);
+    }
+    if (type == &kt_type_ulong_array) {
+        return kt_box_ulong(((const kt_long *)elements)[at]);
+    }
+    KT_FAIL("krusty: this is not an array whose elements can be read\n");
+    return NULL;
 }
 
 static kt_boolean kt_walk_has_next(KRef iterator) {
@@ -1917,6 +1938,22 @@ static kt_long kt_walk_next_long(KRef iterator) {
     }
     if (type == &kt_type_boolean_array) {
         return ((const kt_boolean *)elements)[at];
+    }
+    /* The unsigned widths, read through their own C types so the 64 bits this protocol carries hold
+       the VALUE and not its sign extension: a `UByteArray`'s `255u` arrives as 255, where a signed
+       read of the same byte would arrive as -1 and render that way anywhere the consumer widens
+       before it narrows again. */
+    if (type == &kt_type_ubyte_array) {
+        return ((const uint8_t *)elements)[at];
+    }
+    if (type == &kt_type_ushort_array) {
+        return ((const uint16_t *)elements)[at];
+    }
+    if (type == &kt_type_uint_array) {
+        return ((const uint32_t *)elements)[at];
+    }
+    if (type == &kt_type_ulong_array) {
+        return (kt_long)((const uint64_t *)elements)[at];
     }
     KT_FAIL("krusty: this iterator does not answer a number\n");
     return 0;

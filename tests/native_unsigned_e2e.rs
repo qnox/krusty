@@ -254,3 +254,60 @@ fn an_unsigned_array_is_not_the_signed_array_it_is_laid_out_as() {
         "OK",
     );
 }
+
+/// Walking an unsigned array through the ITERATOR protocol, which is where its descriptor stops
+/// being the receiver of an indexed load and becomes the only record of how wide an element is.
+///
+/// `withIndex()` is lazy and general: it wraps the array in an iterable and asks that for elements
+/// one at a time, so each element is read by the runtime from the array's descriptor alone rather
+/// than by generated code that still knows the static type. A descriptor the reader does not
+/// recognise falls through to whatever the last arm of the chain happens to be — which reads a
+/// four-byte element eight bytes wide, and answers the next element, or garbage past the end, for
+/// values the indexed path gets right. Every element here is distinct and in range, so a wrong
+/// stride shows up as a shifted or invented value rather than as a crash.
+#[test]
+fn an_unsigned_array_walks_at_its_own_width() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   var s = \"\"\n\
+         \x20   for ((i, u) in ubyteArrayOf(1u, 2u, 255u).withIndex()) s += \"$i:$u;\"\n\
+         \x20   if (s != \"0:1;1:2;2:255;\") return \"fail ubyte: $s\"\n\
+         \x20   s = \"\"\n\
+         \x20   for ((i, u) in ushortArrayOf(1u, 2u, 65535u).withIndex()) s += \"$i:$u;\"\n\
+         \x20   if (s != \"0:1;1:2;2:65535;\") return \"fail ushort: $s\"\n\
+         \x20   s = \"\"\n\
+         \x20   for ((i, u) in uintArrayOf(1u, 2u, 4294967295u).withIndex()) s += \"$i:$u;\"\n\
+         \x20   if (s != \"0:1;1:2;2:4294967295;\") return \"fail uint: $s\"\n\
+         \x20   s = \"\"\n\
+         \x20   for ((i, u) in ulongArrayOf(1u, 2u, 18446744073709551615uL).withIndex()) s += \"$i:$u;\"\n\
+         \x20   if (s != \"0:1;1:2;2:18446744073709551615;\") return \"fail ulong: $s\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "UnsignedArrayWalk",
+        "OK",
+    );
+}
+
+/// The same walk with nothing counting it: `joinToString` asks the array itself for an iterator.
+///
+/// This is the shorter route to the same reader — no `IndexedValue` in between — and it is the one
+/// that renders each element through its own `toString`, so an element read at the right width but
+/// as the SIGNED number of those bits renders as `-1` rather than as the maximum.
+#[test]
+fn an_unsigned_array_renders_each_element_unsigned_when_it_is_walked() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val b = ubyteArrayOf(255u).joinToString()\n\
+         \x20   if (b != \"255\") return \"fail ubyte: $b\"\n\
+         \x20   val s = ushortArrayOf(65535u).joinToString()\n\
+         \x20   if (s != \"65535\") return \"fail ushort: $s\"\n\
+         \x20   val i = uintArrayOf(4294967295u).joinToString()\n\
+         \x20   if (i != \"4294967295\") return \"fail uint: $i\"\n\
+         \x20   val l = ulongArrayOf(18446744073709551615uL).joinToString()\n\
+         \x20   if (l != \"18446744073709551615\") return \"fail ulong: $l\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "UnsignedArrayJoin",
+        "OK",
+    );
+}
