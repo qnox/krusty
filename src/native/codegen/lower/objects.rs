@@ -1355,6 +1355,37 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 _ => Err(format!("this constructor of `{name}`")),
             };
         }
+        // `StringBuilder()`, the runtime's growable text buffer. Declared in no file either, for
+        // the same reason the list above is not. The capacity overload is a HINT; `StringBuilder(s)`
+        // COPIES the text, because a builder is about to be written through and the string it was
+        // handed is a value.
+        if super::super::super::intrinsics::is_string_builder(internal) {
+            return match (args, selected) {
+                ([], _) => self.runtime_call("kt_string_builder_new", &[], any(), &[]),
+                ([argument], Some([only])) if only.non_null() == Ty::Int => {
+                    let Some(capacity) = self.coerce(*argument, Ty::Int)? else {
+                        return Ok(None);
+                    };
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call(
+                        "kt_string_builder_with_capacity",
+                        &[Ty::Int],
+                        any(),
+                        &[capacity],
+                    )
+                }
+                ([argument], _) => {
+                    let text = self.reference(*argument)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call("kt_string_builder_with_text", &[any()], any(), &[text])
+                }
+                _ => Err(format!("this constructor of `{name}`")),
+            };
+        }
         let class = self.file.class_of(internal, "construction of")?;
         let declaration = &self.file.ir.classes[class as usize];
         if declaration.is_object {

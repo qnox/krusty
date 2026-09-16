@@ -23,7 +23,6 @@ fn kotlin_owner(owner: &str) -> &str {
     match owner {
         "java/lang/String" => "kotlin/String",
         "java/lang/Object" => "kotlin/Any",
-        "java/lang/CharSequence" => "kotlin/CharSequence",
         "java/lang/Comparable" => "kotlin/Comparable",
         "java/lang/Number" => "kotlin/Number",
         "java/lang/Throwable" => "kotlin/Throwable",
@@ -49,6 +48,10 @@ fn kotlin_owner(owner: &str) -> &str {
         "java/util/Collection" => "kotlin/collections/Collection",
         "java/util/Iterator" => "kotlin/collections/Iterator",
         "java/lang/Iterable" => "kotlin/collections/Iterable",
+        // Kotlin has no `java.lang.StringBuilder` either: `kotlin.text.StringBuilder` is the type,
+        // and on the JVM it is an alias for this spelling.
+        "java/lang/StringBuilder" | "java/lang/AbstractStringBuilder" => "kotlin/text/StringBuilder",
+        "java/lang/CharSequence" => "kotlin/CharSequence",
         other => other,
     }
 }
@@ -514,6 +517,14 @@ pub(super) fn is_array_list(internal: crate::types::TypeName) -> bool {
     kotlin_owner(&internal.render()) == "kotlin/collections/ArrayList"
 }
 
+/// The string builder the runtime provides, if this names one.
+///
+/// Like [`is_array_list`], `kotlin.text.StringBuilder` is declared in no file krusty compiles, so
+/// constructing one is the runtime's job rather than the generator's.
+pub(super) fn is_string_builder(internal: crate::types::TypeName) -> bool {
+    kotlin_owner(&internal.render()) == "kotlin/text/StringBuilder"
+}
+
 /// `x.indices` — the range of an indexable value's positions, which the provider presents as an
 /// extension property of the arrays or text file facade rather than a member.
 ///
@@ -563,7 +574,7 @@ pub(super) fn scalar_member(
         // name, and `kotlin.CharSequence.get` is realized as `java.lang.CharSequence.charAt`. The
         // Kotlin spelling still reaches here from a source that did not go through a realization,
         // so both are the same member rather than one replacing the other.
-        ("kotlin/String" | "kotlin/CharSequence", "get" | "charAt", [Ty::Int]) => {
+        ("kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder", "get" | "charAt", [Ty::Int]) => {
             Some(("kt_string_get", vec![reference, Ty::Int], Ty::Char))
         }
         // `s.subSequence(a, b)` is `s.substring(a, b)`; the return type only says less about the
@@ -665,9 +676,12 @@ pub(super) fn is_char_sequence_length(owner: crate::types::TypeName, name: &str)
     // `length`, where `kotlin.Enum`'s two arrive as `getName`/`getOrdinal`. Both spellings are
     // taken because which one a provider uses is the provider's business, not this table's.
     matches!(name, "length" | "getLength")
-        && ["kotlin/CharSequence", "java/lang/CharSequence"]
+        && (["kotlin/CharSequence", "java/lang/CharSequence"]
             .iter()
             .any(|candidate| owner.matches(candidate))
+            // A builder's `length` is the same question about the same text, and the runtime
+            // answers both from one place; see `kt_text_of`.
+            || kotlin_owner(&owner.render()) == "kotlin/text/StringBuilder")
 }
 
 /// Whether an accessor is `Throwable.message`.
@@ -714,14 +728,27 @@ pub(super) fn value_class_member(name: &str) -> &str {
 pub(super) fn runtime_member(owner: &str, name: &str, params: &[Ty]) -> Option<&'static str> {
     // `removeSuffix` is a top-level extension of `kotlin.text`, so it arrives as a member of that
     // package's file facade; everything it takes and answers is a reference, which is this path.
-    if facade_package(kotlin_owner(owner)) == Some("kotlin/text")
-        && name == "removeSuffix"
-        && params.len() == 1
-    {
-        return Some("kt_string_remove_suffix");
+    if facade_package(kotlin_owner(owner)) == Some("kotlin/text") {
+        match (name, params) {
+            ("removeSuffix", [_]) => return Some("kt_string_remove_suffix"),
+            // `appendLine` is Kotlin's own, declared beside the builder rather than on it, so it
+            // arrives as a member of the facade with the builder as its receiver.
+            ("appendLine", [_]) => return Some("kt_string_builder_append_line"),
+            ("appendLine", []) => return Some("kt_string_builder_append_new_line"),
+            ("append", [_]) => return Some("kt_string_builder_append"),
+            _ => {}
+        }
     }
     match (kotlin_owner(owner), name, params) {
         ("kotlin/String", "plus", [_]) => Some("kt_string_plus"),
+        // A builder's `append` takes one of a dozen overloads on the JVM and one function here:
+        // every operand is rendered through its own `toString`, which is the same answer for all of
+        // them, and the reference path has already boxed whichever primitive arrived.
+        ("kotlin/text/StringBuilder", "append", [_]) => Some("kt_string_builder_append"),
+        ("kotlin/text/StringBuilder", "appendLine", [_]) => Some("kt_string_builder_append_line"),
+        ("kotlin/text/StringBuilder", "appendLine", []) => {
+            Some("kt_string_builder_append_new_line")
+        }
 
         (_, "toString", []) => Some("kt_to_string"),
         // `kotlin.Any`'s other two members, dispatched through the receiver's vtable.

@@ -445,6 +445,33 @@ KRef kt_string_literal(const char *bytes, kt_int length, KRef *slot);
 /* `Any?.toString()` — also what a string template calls on each interpolated value. */
 KRef kt_to_string(KRef value);
 
+/* ---- string builders ------------------------------------------------------------------------ */
+
+/* `kotlin.text.StringBuilder`: a growable UTF-8 buffer. Its `equals` and `hashCode` are identity,
+   which is what Kotlin answers -- only `toString` is its own. Every question about its CONTENT --
+   `length`, `sb[i]`, iterating it, comparing it -- goes through the `String` entry points, which
+   answer for either shape. */
+extern const KType kt_type_string_builder;
+
+/* `StringBuilder()` and `StringBuilder(capacity)`. The capacity is a hint. */
+KRef kt_string_builder_new(void);
+KRef kt_string_builder_with_capacity(kt_int capacity);
+
+/* `StringBuilder(text)`: a builder holding a COPY of it. */
+KRef kt_string_builder_with_text(KRef text);
+
+/* `sb.append(value)`, answering the RECEIVER so a chain of them reads as one expression. The value
+   is rendered the way `"$value"` would render it, through its own `toString`. */
+KRef kt_string_builder_append(KRef self, KRef value);
+
+/* `sb.appendLine(value)` and `sb.appendLine()`. The line separator is `\n` on every target, which
+   is what Kotlin specifies rather than the platform's. */
+KRef kt_string_builder_append_line(KRef self, KRef value);
+KRef kt_string_builder_append_new_line(KRef self);
+
+/* Whether a value is one, for the entry points that serve both shapes. */
+kt_boolean kt_is_string_builder(KRef value);
+
 /* ---- exceptions ---------------------------------------------------------------------------- */
 
 /* The `Throwable` hierarchy a `catch` clause names. Each link is Kotlin's own, so matching a clause

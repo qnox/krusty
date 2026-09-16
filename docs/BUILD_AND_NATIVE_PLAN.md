@@ -1597,6 +1597,27 @@ before:**
    conformance corpus exists for: no unit test anyone writes by hand reaches for the widest walk a
    type has.
 
+   **`StringBuilder`, for 3652 — the largest remaining decline at 166.** A builder is a growable
+   UTF-8 buffer laid out like the growable list, with one reference field the collector traces. The
+   decision worth recording is `toString`: `substring` SHARES its receiver's storage, because a
+   string is a value and nothing can write through it, and a builder is exactly the thing that can
+   be written through — so a view handed out before an `append` would change under a program already
+   holding it, and would change only sometimes, since a write within the current capacity rewrites
+   bytes in place while a write past it moves them. `toString` copies. `equals` and `hashCode` stay
+   identity, which is what Kotlin answers here and not an omission.
+   Everything a builder is ASKED — `length`, `sb[i]`, iterating it — now goes through one accessor
+   that reads the text off either shape, so the string entry points serve both unchanged; that is
+   the same sharing `kt_list_size` makes between the two list shapes. `append` renders its operand
+   through the operand's own `toString`, which is one answer for all dozen JVM overloads and is why
+   they need one runtime function rather than twelve.
+   Two corpus cases newly COMPILED and then ran wrong, and both turned out to be the frontend's:
+   `objectExpression/expr3.kt` is the smart-cast defect `casts/kt83324.kt` already ledgers — a `var`
+   the loop reassigns keeps the smart cast from its initializer — and `function/defaultsWithVarArg2.kt`
+   never applies a `vararg` parameter's default. krusty's JVM backend fails both identically, which
+   is the ledger's whole criterion. Reduced, the first is four lines: `var x: Any = ""` with
+   `x = 42` inside a loop, where krusty resolves `x.length` and kotlinc reports `unresolved
+   reference 'length'`. Each wants its own fix against core.
+
    **How an exception propagates: a pending slot, not an unwinder.** This is the second of the
    three low-IR decisions the risks section says must be answered by design rather than inherited.
 

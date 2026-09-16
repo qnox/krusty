@@ -152,6 +152,8 @@ void kt_no_such_enum_constant(KRef name) {
 
 typedef KArray KByteArray;
 
+static kt_int kt_length_of(KRef array) { return ((const KArray *)array)->length; }
+
 static char *kt_bytes_of(KByteArray *array) { return (char *)(array + 1); }
 
 static KByteArray *kt_bytes_new(kt_int length) {
@@ -222,6 +224,12 @@ KRef kt_string_utf8(const char *bytes, kt_int byte_length) {
     return kt_string_of(NULL, bytes, byte_length);
 }
 
+/* The text a value holds, for the questions Kotlin asks about a string's CONTENT.
+   Answering for a `StringBuilder` as well as a `String` is what lets `length`, `s[i]`, iteration
+   and comparison serve both from one implementation, in the way `kt_list_size` already serves both
+   list shapes: the question is about the text, and a builder has text. */
+static const char *kt_text_of(KRef self, kt_int *byte_length);
+
 /* Kotlin's `String.length` counts UTF-16 CODE UNITS; a krusty string holds UTF-8. The byte length
    is therefore not the answer, and neither is the code-point count. In UTF-8 a byte that is not a
    continuation byte (`10xxxxxx`) starts exactly one code point, so counting those counts code
@@ -231,8 +239,8 @@ KRef kt_string_utf8(const char *bytes, kt_int byte_length) {
    This walks the bytes on every call, which is what a string that stores UTF-8 costs; it is also
    what makes the answer right for text a JVM-shaped length would have to be stored alongside. */
 kt_int kt_string_length(KRef self) {
-    const char *bytes = self->as.string.bytes;
-    kt_int byte_length = self->as.string.byte_length;
+    kt_int byte_length = 0;
+    const char *bytes = kt_text_of(self, &byte_length);
     kt_int units = 0;
     for (kt_int index = 0; index < byte_length; index++) {
         unsigned char byte = (unsigned char)bytes[index];
@@ -252,8 +260,8 @@ kt_int kt_string_length(KRef self) {
    costs, and it is the same cost `length` already pays; a program that wants to iterate cheaply
    iterates the string rather than its indices. */
 kt_char kt_string_get(KRef self, kt_int index) {
-    const char *bytes = self->as.string.bytes;
-    kt_int byte_length = self->as.string.byte_length;
+    kt_int byte_length = 0;
+    const char *bytes = kt_text_of(self, &byte_length);
     kt_int unit = 0;
     for (kt_int at = 0; at < byte_length;) {
         unsigned char lead = (unsigned char)bytes[at];
@@ -297,7 +305,9 @@ typedef struct KUnits {
 } KUnits;
 
 static KUnits kt_units_of(KRef self) {
-    KUnits units = {self->as.string.bytes, self->as.string.byte_length, 0, 0};
+    kt_int byte_length = 0;
+    const char *bytes = kt_text_of(self, &byte_length);
+    KUnits units = {bytes, byte_length, 0, 0};
     return units;
 }
 
@@ -568,6 +578,153 @@ KRef kt_string_plus(KRef a, KRef b) {
     memcpy(kt_bytes_of(joined), left, (size_t)left_length);
     memcpy(kt_bytes_of(joined) + left_length, right, (size_t)right_length);
     return kt_string_of((KRef)joined, kt_bytes_of(joined), left_length + right_length);
+}
+
+/* ---- string builders ------------------------------------------------------------------------
+
+   `kotlin.text.StringBuilder` is a growable UTF-8 buffer, laid out like the growable list above and
+   for the same reasons: one reference field the collector traces, a written length beside it, and
+   doubling so that repeated `append` stays linear. The capacity is the storage array's length; the
+   text is its first `byte_length` bytes.
+
+   `toString` COPIES rather than sharing the storage the way `substring` does. A string is a value
+   and a builder is not: hand out a view and the next `append` rewrites text a program already
+   holds. */
+
+typedef struct KStringBuilder {
+    KObjectHeader header;
+    KRef storage;
+    kt_int byte_length;
+} KStringBuilder;
+
+static const uint32_t kt_string_builder_offsets[] = {offsetof(KStringBuilder, storage)};
+
+static KRef kt_string_builder_to_string(KRef self);
+
+/* `equals` and `hashCode` are IDENTITY, which is what Kotlin answers here: `StringBuilder` does not
+   override either, so two builders holding the same text are different objects and stay that way.
+   Only `toString` is its own. */
+static const kt_fn kt_string_builder_vtable[] = {
+    (kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code, (kt_fn)kt_string_builder_to_string};
+
+const KType kt_type_string_builder = {"kotlin.text.StringBuilder",
+                                      sizeof("kotlin.text.StringBuilder") - 1,
+                                      sizeof(KStringBuilder),
+                                      1,
+                                      0,
+                                      kt_string_builder_offsets,
+                                      &kt_type_any,
+                                      kt_string_builder_vtable,
+                                      3,
+                                      0};
+
+static const char *kt_text_of(KRef self, kt_int *byte_length) {
+    if (self->header.type == &kt_type_string_builder) {
+        const KStringBuilder *builder = (const KStringBuilder *)self;
+        *byte_length = builder->byte_length;
+        /* An empty builder has a zero-length array, whose body is still a valid address to name. */
+        return kt_bytes_of((KByteArray *)builder->storage);
+    }
+    *byte_length = self->as.string.byte_length;
+    return self->as.string.bytes;
+}
+
+KRef kt_string_builder_with_capacity(kt_int capacity) {
+    KStringBuilder *builder =
+        (KStringBuilder *)kt_gc_allocate(&kt_type_string_builder, sizeof(KStringBuilder));
+    builder->byte_length = 0;
+    /* Stored before the array is allocated, so a collection triggered by that allocation never
+       traces an uninitialized field. */
+    builder->storage = NULL;
+    builder->storage = (KRef)kt_bytes_new(capacity > 0 ? capacity : 0);
+    return (KRef)builder;
+}
+
+KRef kt_string_builder_new(void) { return kt_string_builder_with_capacity(0); }
+
+/* `StringBuilder(text)`: a builder that starts out holding it. A COPY, for the reason `toString`
+   copies -- the text is a value and the builder is about to be written through. */
+KRef kt_string_builder_with_text(KRef text) {
+    kt_int length = 0;
+    (void)kt_text_of(text, &length);
+    /* `text` stays live in this parameter across the allocation. */
+    KRef builder = kt_string_builder_with_capacity(length);
+    const char *bytes = kt_text_of(text, &length);
+    memcpy(kt_bytes_of((KByteArray *)((KStringBuilder *)builder)->storage), bytes, (size_t)length);
+    ((KStringBuilder *)builder)->byte_length = length;
+    return builder;
+}
+
+/* Grow to hold `additional` more bytes, doubling so repeated `append` stays linear overall. */
+static void kt_string_builder_reserve(KRef self, kt_int additional) {
+    KStringBuilder *builder = (KStringBuilder *)self;
+    kt_int capacity = kt_length_of(builder->storage);
+    kt_int needed = builder->byte_length + additional;
+    if (needed <= capacity) {
+        return;
+    }
+    kt_int grown = capacity == 0 ? 16 : capacity;
+    while (grown < needed) {
+        grown *= 2;
+    }
+    /* `self` is a root in the caller's frame, so the OLD array stays reachable through it until the
+       new one is stored. */
+    KRef replacement = kt_array_new(&kt_type_byte_array, grown);
+    memcpy(kt_bytes_of((KByteArray *)replacement), kt_bytes_of((KByteArray *)builder->storage),
+           (size_t)builder->byte_length);
+    builder->storage = replacement;
+}
+
+KRef kt_string_builder_append(KRef self, KRef value) {
+    /* The rendering goes through `kt_to_string` rather than `kt_render`, because a value whose type
+       overrides `toString` must answer with ITS text and only the vtable knows that. It allocates,
+       and the result is held in a local across the reserve below so the collector sees the root. */
+    KRef text = kt_to_string(value);
+    kt_int length = 0;
+    const char *bytes = kt_text_of(text, &length);
+    kt_string_builder_reserve(self, length);
+    KStringBuilder *builder = (KStringBuilder *)self;
+    /* `bytes` is re-read after the reserve: it may point into storage the reserve replaced, when a
+       builder is appended to itself. */
+    bytes = kt_text_of(text, &length);
+    memcpy(kt_bytes_of((KByteArray *)builder->storage) + builder->byte_length, bytes,
+           (size_t)length);
+    builder->byte_length += length;
+    return self;
+}
+
+/* `appendLine(value)` — the value then a newline, which is what Kotlin's own appends on every
+   target: `StringBuilder.appendLine` is specified as `\n` and not as the platform separator. */
+KRef kt_string_builder_append_line(KRef self, KRef value) {
+    self = kt_string_builder_append(self, value);
+    kt_string_builder_reserve(self, 1);
+    KStringBuilder *builder = (KStringBuilder *)self;
+    kt_bytes_of((KByteArray *)builder->storage)[builder->byte_length] = '\n';
+    builder->byte_length += 1;
+    return self;
+}
+
+/* `appendLine()` with nothing to append: the newline alone, NOT the text `"null"` that
+   `appendLine(null)` would add. */
+KRef kt_string_builder_append_new_line(KRef self) {
+    kt_string_builder_reserve(self, 1);
+    KStringBuilder *builder = (KStringBuilder *)self;
+    kt_bytes_of((KByteArray *)builder->storage)[builder->byte_length] = '\n';
+    builder->byte_length += 1;
+    return self;
+}
+
+static KRef kt_string_builder_to_string(KRef self) {
+    const KStringBuilder *builder = (const KStringBuilder *)self;
+    kt_int length = builder->byte_length;
+    /* `self` stays a root in the caller's frame across this allocation. */
+    KByteArray *copied = kt_bytes_new(length);
+    memcpy(kt_bytes_of(copied), kt_bytes_of((KByteArray *)builder->storage), (size_t)length);
+    return kt_string_of((KRef)copied, kt_bytes_of(copied), length);
+}
+
+kt_boolean kt_is_string_builder(KRef value) {
+    return value != NULL && value->header.type == &kt_type_string_builder;
 }
 
 /* ---- boxing -------------------------------------------------------------------------------- */
@@ -1367,8 +1524,6 @@ const KType kt_type_list_iterator = {"kotlin.collections.Iterator",
                                      0};
 
 static KRef *kt_elements_of(KRef array) { return (KRef *)((KArray *)array + 1); }
-
-static kt_int kt_length_of(KRef array) { return ((const KArray *)array)->length; }
 
 KRef kt_list_of(KRef elements) {
     /* The allocation can collect, so the array has to be reachable across it; it is, in this

@@ -6583,6 +6583,25 @@ and behavior is checked by RUNNING the emitted program.
   Tests: `tests/native_ranges_e2e.rs` (`a_progression_spanning_the_whole_range_reaches_every_step`);
   the corpus cases are `codegen/box/ranges/stepped/**/…StepMaxValue.kt`.
 
+- **`StringBuilder` is a growable UTF-8 buffer whose `toString` COPIES, and whose `equals` and
+  `hashCode` stay identity.** `substring` shares its receiver's storage because a string is a value
+  and nothing can write through it; a builder can be written through, so a view handed out before an
+  `append` would change under a program already holding it — and would change only sometimes, since
+  a write within the current capacity rewrites bytes in place while a write past it moves them. The
+  copy is what makes the snapshot a value. `equals`/`hashCode` are NOT overridden, here or on any
+  Kotlin target: two builders holding the same text are different objects.
+  Every question about a builder's CONTENT — `length`, `sb[i]`, iterating it — is answered by the
+  same runtime entry points a `String`'s questions reach, which read the text through one accessor
+  rather than off a string's fields. `append` renders its operand through the operand's own
+  `toString`, which is the same answer for all dozen JVM overloads and is why they need one
+  function. `appendLine` appends `\n` and not the host's line separator, which is what Kotlin
+  specifies on every target. `sb.append(null)` is an overload AMBIGUITY in Kotlin — kotlinc rejects
+  it too — so a bare `null` needs a type.
+  The class is declared in no file krusty compiles, so constructing one takes the path `Any()` and
+  `ArrayList()` already take: the runtime allocates it. `StringBuilder(capacity)` is a hint nothing
+  observable depends on; `StringBuilder(text)` copies the text.
+  Tests: `tests/native_string_builders_e2e.rs` (all).
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
