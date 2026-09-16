@@ -87,3 +87,22 @@ pub(super) fn prim_array_carrier(internal: impl crate::types::InternalName) -> O
     let element = crate::types::prim_array_element(internal)?;
     Some(Ty::array(scalar_element(element, "carrier")))
 }
+
+/// The `java.util.Arrays.toString` overload an array of this type takes.
+///
+/// The method is overloaded once per PRIMITIVE array plus a single `Object[]`. There is no
+/// `Integer[]` overload and no `String[]` one, so a reference array — of any element type,
+/// nullable or not — takes the `Object[]` form. Naming the field's own erasure instead produces a
+/// methodref to a method that does not exist: the class LOADS, and fails at the call with
+/// `NoSuchMethodError`.
+///
+/// Here rather than at the one call site for the reason this module exists: it is a fact about how
+/// an array is represented on the JVM, and the emitter should not be the place that knows it.
+pub(super) fn arrays_to_string_descriptor(array: Ty) -> String {
+    let parameter = if array.non_null().is_reference_array() {
+        "[Ljava/lang/Object;".to_string()
+    } else {
+        crate::jvm::names::type_descriptor(array.non_null())
+    };
+    format!("({parameter})Ljava/lang/String;")
+}

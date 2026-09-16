@@ -278,7 +278,10 @@ fn synthesize_to_string(
         // is defined by the declared Kotlin field type. Keep that checked type on the generated read
         // so a target can choose the value class's semantic string conversion.
         ir.logical_types.insert(value, field.ty);
-        if field.ty.is_array() {
+        // A NULLABLE array field renders its contents too — `A(x=[0, 1])` for an `Array<Int>?`
+        // holding one, `A(x=null)` for one holding null. Asking `is_array` of the declared type
+        // answers `false` for `Array<Int>?`, so the nullable field used to render by identity.
+        if field.ty.non_null().is_array() {
             value = intrinsic(
                 ir,
                 crate::ir::IrIntrinsic::DataClassArrayToString { ty: field.ty },

@@ -16393,7 +16393,8 @@ impl<'a> Emitter<'a> {
                     }
                     crate::ir::IrIntrinsic::DataClassArrayToString { ty } => {
                         self.emit_value(args[0], code);
-                        let descriptor = format!("({})Ljava/lang/String;", type_descriptor(*ty));
+                        let descriptor =
+                            crate::jvm::array_representation::arrays_to_string_descriptor(*ty);
                         let method = self
                             .cw
                             .methodref("java/util/Arrays", "toString", &descriptor);
