@@ -2780,3 +2780,61 @@ fn only_an_array_of_a_star_projection_records_its_descriptor() {
     );
     assert_eq!(metadata_d2(&built.krusty_bytes), want, "Probe d2");
 }
+
+/// One member's disassembly, from its declaration to the next one, with pool indices erased.
+fn member_body(disassembly: &str, member: &str) -> Vec<String> {
+    let declaration = |line: &str| {
+        line.ends_with(';') && line.contains('(') && !line.contains(':') && !line.starts_with('#')
+    };
+    let mut lines = disassembly
+        .lines()
+        .map(str::trim)
+        .skip_while(|line| !(declaration(line) && line.contains(member)));
+    let mut body = vec![lines.next().unwrap_or_default().to_string()];
+    for line in lines {
+        if declaration(line) {
+            break;
+        }
+        body.push(line.to_string());
+    }
+    structure(&body.join("\n"))
+}
+
+/// A generated serializer's `<init>` carries kotlinc's debug tables: a line table rooted at the
+/// annotated owner's declaration and a local-variable table naming `this`. Every other generated
+/// member already did; the constructor is emitted from the class declaration rather than from a
+/// generated `IrFunction`, and the synthesized class had no declaration line to root them at.
+#[test]
+fn a_generated_serializer_constructor_carries_its_debug_tables() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               \n\
+               @Serializable\n\
+               data class Retention(val days: Int)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "SerializerInitDebug",
+        src,
+        "Retention$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = member_body(&built.reference, "Retention$$serializer()");
+    assert!(
+        want.iter().any(|line| line == "line 3: 0")
+            && want.iter().any(|line| line.contains("this")),
+        "kotlinc roots the constructor at the annotated declaration: {want:?}"
+    );
+    assert_eq!(
+        member_body(&built.krusty, "Retention$$serializer()"),
+        want,
+        "generated serializer constructor"
+    );
+}
