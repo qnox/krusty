@@ -33011,6 +33011,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::Return(e, label) => self.stmt_return(scope, s, e, label),
             Stmt::While { cond, body, label } => {
+                self.clear_narrowings_a_loop_invalidates(scope, &[cond, body]);
                 let ct = self.expr(scope, cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "while condition");
                 // `while (x != null) …` — the condition holds on body entry, so narrow stable
@@ -33026,6 +33027,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::DoWhile { body, cond, label } => {
+                self.clear_narrowings_a_loop_invalidates(scope, &[body, cond]);
                 // Unlike a while body, a do-while block and its condition share one lexical scope:
                 // `do { val x = ... } while (x)` is legal Kotlin. Keep that scope alive through
                 // condition checking instead of rebuilding declarations from typed syntax.
@@ -33059,13 +33061,19 @@ impl<'a> Checker<'a> {
                 range,
                 body,
                 label,
-            } => self.stmt_for(scope, s, name, range, body, label),
+            } => {
+                self.clear_narrowings_a_loop_invalidates(scope, &[body]);
+                self.stmt_for(scope, s, name, range, body, label)
+            }
             Stmt::ForEach {
                 name,
                 iterable,
                 body,
                 label,
-            } => self.stmt_for_each(scope, s, name, iterable, body, label),
+            } => {
+                self.clear_narrowings_a_loop_invalidates(scope, &[body]);
+                self.stmt_for_each(scope, s, name, iterable, body, label)
+            }
             Stmt::Expr(e) => {
                 // A `kotlin.contracts.contract { … }` statement is erased metadata: it is never
                 // executed and produces no bytecode (kotlinc drops it). Its lambda body uses the
@@ -50308,6 +50316,42 @@ impl<'a> Checker<'a> {
         self.ret_ty = prev;
         self.return_allowed = previous_return_allowed;
         r
+    }
+
+    /// Drop every flow narrowing a loop's own writes invalidate, before the loop is checked.
+    ///
+    /// A straight-line proof is a proof about ONE edge. A loop has a back edge, so a body that
+    /// reassigns `x` reaches its own start — and its condition — with whatever that assignment
+    /// left, not with what the code before the loop proved:
+    ///
+    /// ```kotlin
+    /// var x: Any = ""     // proves `String`
+    /// while (true) {
+    ///     x.length        // kotlinc: unresolved reference 'length'
+    ///     x = 42
+    /// }
+    /// ```
+    ///
+    /// The clearing happens on the ENCLOSING scope and before the condition is checked, which is
+    /// what makes all four of kotlinc's answers here come out right at once: the condition sees it
+    /// (`while (x.length > 0) { x = 42 }` is rejected), the body sees it, the code after the loop
+    /// sees it, and a `do…while` sees it even though its first iteration precedes any back edge.
+    ///
+    /// What it deliberately does NOT touch is the narrowing the loop's own CONDITION proves, which
+    /// [`Self::condition_narrowings`] computes afterwards and applies to the body scope. That one
+    /// survives the back edge because the condition is re-evaluated on every iteration, so
+    /// `while (x != null) { x.length; x = null }` stays legal — as it is in Kotlin.
+    ///
+    /// The scan is [`collect_all_reassigned`], which descends into nested lambdas and local
+    /// functions: a write that only a closure performs still reaches this loop's next iteration.
+    fn clear_narrowings_a_loop_invalidates(&mut self, scope: &CheckerScope<'_>, parts: &[ExprId]) {
+        let mut written = std::collections::HashSet::new();
+        for &part in parts {
+            collect_all_reassigned(self.file, part, &mut written);
+        }
+        for name in &written {
+            self.set_local_narrow(scope, name, None);
+        }
     }
 
     fn check_loop_body(&mut self, scope: &CheckerScope<'_>, body: ExprId, label: &Option<String>) {
