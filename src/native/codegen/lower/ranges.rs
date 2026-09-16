@@ -40,11 +40,12 @@ fn element(start: Ty, end: Ty) -> Option<(&'static str, Ty)> {
 /// The element type of a runtime range, by the name of the type declaring the member.
 ///
 /// `first` and `last` are declared on the PROGRESSION each range extends, not on the range, so a
-/// read of one names that owner. Listing the progressions here is sound because nothing else can
-/// produce one: `step` and `downTo` are declined, so the only progression a lowered program holds
-/// is a range. The two members a range gets from `ClosedRange` — `start` and `endInclusive` — are
-/// overridden by each concrete range and so arrive under its own name; the interface is left out,
-/// because a user class may implement it and would not be one of these objects.
+/// read of one names that owner. Listing the progressions here is sound because this runtime builds
+/// ONE object for a range and a progression alike — a pair of bounds with a step beside them — so
+/// whichever of the two a program holds, its members answer at the same element width. The two
+/// members a range gets from `ClosedRange` — `start` and `endInclusive` — are overridden by each
+/// concrete range and so arrive under its own name; the interface is left out, because a user class
+/// may implement it and would not be one of these objects.
 fn range_element(owner: TypeName) -> Option<Ty> {
     [
         ("kotlin/ranges/IntRange", Ty::Int),
@@ -234,6 +235,116 @@ impl BodyLowering<'_, '_, '_> {
         let element = range_element(crate::types::type_name(owner))?;
         let (symbol, carried) = range_symbol(name, args.len())?;
         Some(self.range_call(symbol, carried, element, receiver, args, ret))
+    }
+
+    /// `for (i in 1u..5u)` — a counted loop the checker left as its BOUNDS rather than as a range.
+    ///
+    /// Common lowering turns a SIGNED counted loop into a plain `while` before this backend sees
+    /// it; an unsigned one arrives here instead, because every comparison and the step itself have
+    /// to be read on the unsigned ring. Nothing is constructed: the node carries the two ends, and
+    /// the loop is the ordinary header/body/update/exit graph over a counter local.
+    ///
+    /// The correctness trap is the step. A closed range stops AT its last element, by asking
+    /// whether the counter has REACHED the end before advancing it — not by advancing and
+    /// comparing, which on `UInt.MAX_VALUE` wraps to zero and starts the walk over. A half-open
+    /// range needs no such guard: its header already stops one short of the end, so the counter
+    /// never leaves the type.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn counted_loop(
+        &mut self,
+        variable: u32,
+        counter: Ty,
+        operation: FirRangeOperation,
+        start: u32,
+        end: u32,
+        body: u32,
+        label: String,
+    ) -> Result<(), Unsupported> {
+        let counter = counter.non_null();
+        if carrier(counter).clif().is_none() {
+            return Err(format!("a counted loop over `{counter:?}`"));
+        }
+        // Both ends are evaluated ONCE, in source order, before the loop runs: `a..b` builds a
+        // range before anything walks it, so a body that assigns to what named an end cannot move
+        // it, and an end with an effect has that effect exactly once even on an empty range.
+        let Some(start) = self.coerce(start, counter)? else {
+            return Err("a `Unit` range bound".to_string());
+        };
+        if self.terminated {
+            return Ok(());
+        }
+        let Some(end) = self.coerce(end, counter)? else {
+            return Err("a `Unit` range bound".to_string());
+        };
+        if self.terminated {
+            return Ok(());
+        }
+
+        let slot = self.declare_value(variable, counter)?;
+        self.builder.def_var(slot, start);
+
+        let header = self.builder.create_block();
+        let body_block = self.builder.create_block();
+        let update_block = self.builder.create_block();
+        let exit = self.builder.create_block();
+        self.builder.ins().jump(header, &[]);
+
+        // `Char` and the unsigned integers read their top bit as a value; every other counter is a
+        // signed number. A checked range loop only ever arrives unsigned today, but the counter is
+        // what decides that, not the fact that it arrived.
+        let signed = !counter.is_unsigned() && counter != Ty::Char;
+        let entry = match (operation, signed) {
+            (FirRangeOperation::Through, true) => IntCC::SignedLessThanOrEqual,
+            (FirRangeOperation::Through, false) => IntCC::UnsignedLessThanOrEqual,
+            (FirRangeOperation::OpenEnd | FirRangeOperation::Until, true) => IntCC::SignedLessThan,
+            (FirRangeOperation::OpenEnd | FirRangeOperation::Until, false) => {
+                IntCC::UnsignedLessThan
+            }
+            (FirRangeOperation::DownTo, true) => IntCC::SignedGreaterThanOrEqual,
+            (FirRangeOperation::DownTo, false) => IntCC::UnsignedGreaterThanOrEqual,
+        };
+        self.continue_in(header);
+        let current = self.builder.use_var(slot);
+        let inside = self.builder.ins().icmp(entry, current, end);
+        self.builder.ins().brif(inside, body_block, &[], exit, &[]);
+
+        self.loops.push(LoopFrame {
+            label: Some(label),
+            break_block: exit,
+            continue_block: update_block,
+            broken: false,
+        });
+        self.continue_in(body_block);
+        self.statement(body)?;
+        if !self.terminated {
+            self.builder.ins().jump(update_block, &[]);
+        }
+
+        self.continue_in(update_block);
+        let closed = !matches!(
+            operation,
+            FirRangeOperation::OpenEnd | FirRangeOperation::Until
+        );
+        if closed {
+            let step_block = self.builder.create_block();
+            let current = self.builder.use_var(slot);
+            let last = self.builder.ins().icmp(IntCC::Equal, current, end);
+            self.builder.ins().brif(last, exit, &[], step_block, &[]);
+            self.continue_in(step_block);
+        }
+        let current = self.builder.use_var(slot);
+        let stepped = if operation == FirRangeOperation::DownTo {
+            self.builder.ins().iadd_imm_s(current, -1)
+        } else {
+            self.builder.ins().iadd_imm_s(current, 1)
+        };
+        self.builder.def_var(slot, stepped);
+        self.builder.ins().jump(header, &[]);
+        self.loops.pop();
+
+        // The header always has a false edge, so the exit is always reached from somewhere.
+        self.continue_in(exit);
+        Ok(())
     }
 
     /// `x in a..b` — a membership test the checker left as its BOUNDS rather than as a range.

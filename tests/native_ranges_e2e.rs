@@ -478,3 +478,121 @@ fn a_stepped_unsigned_range_walks_on_the_unsigned_ring() {
         "OK",
     );
 }
+
+/// A counted loop over an UNSIGNED range: `for (i in 1u..5u)`.
+///
+/// Common lowering turns a signed `for` over a range into a plain `while` before this backend sees
+/// it, but an unsigned one arrives as a checked range loop instead, because the comparison and the
+/// step both have to be read on the unsigned ring. The bound cases are what make that visible: a
+/// walk up to `UInt.MAX_VALUE` must stop THERE rather than wrap past it, and a descending pair of
+/// bounds must run zero times rather than every value on the ring.
+///
+/// Every expectation is kotlinc's, taken by compiling and running this same `box()` under it.
+#[test]
+fn a_counted_loop_over_an_unsigned_range_walks_on_the_unsigned_ring() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   var sum = 0u\n\
+         \x20   for (i in 1u..5u) sum += i\n\
+         \x20   if (sum != 15u) return \"fail sum: $sum\"\n\
+         \x20   var half = \"\"\n\
+         \x20   for (i in 1u..<4u) half += \"$i,\"\n\
+         \x20   if (half != \"1,2,3,\") return \"fail half: $half\"\n\
+         \x20   var top = 0\n\
+         \x20   for (i in (UInt.MAX_VALUE - 2u)..UInt.MAX_VALUE) top++\n\
+         \x20   if (top != 3) return \"fail top: $top\"\n\
+         \x20   var big = 0\n\
+         \x20   for (i in (ULong.MAX_VALUE - 1uL)..ULong.MAX_VALUE) big++\n\
+         \x20   if (big != 2) return \"fail big: $big\"\n\
+         \x20   var none = 0\n\
+         \x20   for (i in 5u..1u) none++\n\
+         \x20   if (none != 0) return \"fail none: $none\"\n\
+         \x20   var zero = 0\n\
+         \x20   for (i in 0u..<0u) zero++\n\
+         \x20   if (zero != 0) return \"fail zero: $zero\"\n\
+         \x20   var lo = 0\n\
+         \x20   for (i in 0uL..2uL) lo++\n\
+         \x20   if (lo != 3) return \"fail lo: $lo\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "UnsignedCountedLoop",
+        "OK",
+    );
+}
+
+/// What control flow a counted unsigned loop has to answer: `break`, `continue`, their labelled
+/// forms, nesting, a `return` out of the body, and a bound whose effect must happen exactly once.
+///
+/// The counted loop advances its counter at the `continue` target rather than at the end of the
+/// body, so a `continue` that skips the rest of the body must still step — and a `break` out of an
+/// outer loop must leave both. The `return` case is the one that leaves the step unreachable.
+///
+/// Every expectation is kotlinc's, taken by compiling and running this same `box()` under it.
+#[test]
+fn a_counted_unsigned_loop_answers_break_continue_and_labels() {
+    expect_native_box(
+        "fun returning(): UInt {\n\
+         \x20   for (i in 1u..10u) return i\n\
+         \x20   return 99u\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   var s = \"\"\n\
+         \x20   for (i in 1u..6u) {\n\
+         \x20       if (i == 3u) continue\n\
+         \x20       if (i == 5u) break\n\
+         \x20       s += \"$i,\"\n\
+         \x20   }\n\
+         \x20   if (s != \"1,2,4,\") return \"fail plain: $s\"\n\
+         \x20   var t = \"\"\n\
+         \x20   outer@ for (i in 1u..3u) {\n\
+         \x20       for (j in 1u..3u) {\n\
+         \x20           if (j == 2u) continue@outer\n\
+         \x20           if (i == 3u) break@outer\n\
+         \x20           t += \"$i$j,\"\n\
+         \x20       }\n\
+         \x20   }\n\
+         \x20   if (t != \"11,21,\") return \"fail labelled: $t\"\n\
+         \x20   var n = \"\"\n\
+         \x20   for (i in 1uL..3uL) for (j in 1u..2u) n += \"$i$j,\"\n\
+         \x20   if (n != \"11,12,21,22,31,32,\") return \"fail nested: $n\"\n\
+         \x20   if (returning() != 1u) return \"fail returning: ${returning()}\"\n\
+         \x20   var effects = 0\n\
+         \x20   fun end(): UInt { effects++; return 0u }\n\
+         \x20   for (i in 1u..end()) { }\n\
+         \x20   if (effects != 1) return \"fail effects: $effects\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "UnsignedCountedLoopControl",
+        "OK",
+    );
+}
+
+/// The DESCENDING counted loop, `for (i in 5u downTo 1u)`.
+///
+/// It arrives as the same checked range loop, with the ends written the other way round, and it
+/// has the mirror of the ascending trap: the walk must stop AT `0u` rather than step below it and
+/// wrap round to the maximum.
+///
+/// Every expectation is kotlinc's, taken by compiling and running this same `box()` under it.
+#[test]
+fn a_descending_counted_unsigned_loop_stops_at_zero() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   var d = \"\"\n\
+         \x20   for (i in 5u downTo 1u) d += \"$i,\"\n\
+         \x20   if (d != \"5,4,3,2,1,\") return \"fail down: $d\"\n\
+         \x20   var z = 0\n\
+         \x20   for (i in 2u downTo 0u) z++\n\
+         \x20   if (z != 3) return \"fail zero-floor: $z\"\n\
+         \x20   var none = 0\n\
+         \x20   for (i in 1u downTo 5u) none++\n\
+         \x20   if (none != 0) return \"fail empty down: $none\"\n\
+         \x20   var l = 0\n\
+         \x20   for (i in 1uL downTo 0uL) l++\n\
+         \x20   if (l != 2) return \"fail ulong down: $l\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "DescendingUnsignedCountedLoop",
+        "OK",
+    );
+}

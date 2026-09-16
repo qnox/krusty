@@ -822,6 +822,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 post_test,
                 label,
             } => self.loop_statement(cond, body, update, post_test, label)?,
+            IrExpr::Checked(IrCheckedOperation::RangeLoop {
+                variable,
+                counter,
+                operation,
+                start,
+                end,
+                body,
+                label,
+            }) => self.counted_loop(variable, counter, operation, start, end, body, label)?,
             IrExpr::BottomValue {
                 producer,
                 completion,

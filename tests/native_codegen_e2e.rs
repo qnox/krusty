@@ -441,24 +441,28 @@ fn an_unsupported_construct_is_declined_with_a_diagnostic() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
         return;
     };
-    // An UNSIGNED range stands in here: `UIntRange` is not among the runtime's range types yet, and
-    // it is the largest remaining cluster on the backlog. The contract under test is not WHICH
-    // construct is refused but that the backend SAYS so — emitting a partial object that links and
-    // misbehaves would be far worse than refusing.
+    // An unsigned `downTo` stands in here, because the extension-naming gap it runs into is the
+    // largest remaining cluster on the backlog. The contract under test is not WHICH construct is
+    // refused but that the backend SAYS so — emitting a partial object that links and misbehaves
+    // would be far worse than refusing.
     //
-    // It has been `try`/`finally` and then an unsigned RANGE, both of which now lower. A decline
-    // test has to name something still declined, so this moves as the backlog does — and it moving
-    // is the point: each time, the thing it named became supported.
+    // It has been `try`/`finally`, then an unsigned RANGE, then an unsigned `downTo` written as a
+    // loop HEADER — each of which now lowers. A decline test has to name something still declined,
+    // so this moves as the backlog does, and it moving is the point: each time, the thing it named
+    // became supported.
     //
-    // `downTo` on an unsigned receiver is the current one. It is an EXTENSION of the unsigned
-    // ranges facade, realized as `URangesKt.downTo-J1ME1BU`, and the declaration contract publishes
-    // no Kotlin name for an extension — so the member arrives spelled in a way no table is written
-    // in. The range itself lowers; only this way of building one does not.
+    // `downTo` as a VALUE is the current one, and it is the loop header's near neighbour rather
+    // than the same thing: a header is a counted loop the checker hands over as its two BOUNDS,
+    // with no range built, while a value is an ordinary call to an EXTENSION of the unsigned ranges
+    // facade. That call is realized as `URangesKt.downTo-J1ME1BU`, and the declaration contract
+    // publishes no Kotlin name for an extension — so the member arrives spelled in a way no table
+    // is written in. Walking the progression is fine; only this way of building one is not.
     let (artifacts, diagnostics) = compile(
         &[(
             "Main",
             "fun main() {\n\
-             \x20   for (i in 3u downTo 1u) println(i)\n\
+             \x20   val p = 3u downTo 1u\n\
+             \x20   for (i in p) println(i)\n\
              }\n",
         )],
         target,

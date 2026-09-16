@@ -1947,6 +1947,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A `Char` bound is compared UNSIGNED, so a code point above `0x7FFF` is not a negative number:
   `'\uFF00' in '\uF000'..'\uFFFF'` is true. Tests: `tests/native_ranges_e2e.rs`.
 
+- **An UNSIGNED `for` over a range is a counted loop on the unsigned ring, and it stops at its last
+  element.** A signed `for (i in a..b)` is turned into a plain `while` by common lowering before any
+  backend sees it, but an unsigned one is left as a checked range loop carrying its two BOUNDS —
+  because the comparison and the step both have to be read unsigned, which is a target decision and
+  not a spelling. Nothing is constructed: krusty's native target realizes it as the ordinary
+  header/body/step/exit graph over one counter local, with `icmp` unsigned rather than signed.
+  - Both bounds are evaluated ONCE, in source order, before the loop runs: `a..b` builds a range
+    before anything walks it, so a bound with an effect has that effect exactly once even when the
+    range turns out to be empty, and a body assigning to what named a bound cannot move it.
+  - A CLOSED range (`a..b`, `a downTo b`) stops AT its last element: the step asks whether the
+    counter has REACHED the bound and leaves the loop if it has, rather than advancing and
+    comparing. `for (i in (UInt.MAX_VALUE - 2u)..UInt.MAX_VALUE)` runs three times; advancing first
+    would wrap the counter to `0u` and start the walk over. `for (i in 2u downTo 0u)` is the mirror,
+    and runs three times rather than stepping below `0u` round to the maximum.
+  - A HALF-OPEN range (`a..<b`) needs no such guard: its header already stops one short of the
+    bound, so the counter never leaves the type. `0u..<0u` runs zero times, as does `5u..1u`.
+  - The step advances at the `continue` target, so a `continue` that skips the rest of the body
+    still advances the counter, and a labelled `break` leaves every loop up to the one it names.
+  Tests: `tests/native_ranges_e2e.rs`.
+
 - **A string is indexed by UTF-16 code unit, whatever it is stored as.** krusty's native runtime
   stores text as UTF-8, and Kotlin's `String` is a sequence of UTF-16 code units, so `s.length`,
   `s[i]` and `s.indices` all answer in units and not in bytes or code points. A character outside
