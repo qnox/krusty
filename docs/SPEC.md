@@ -157,6 +157,43 @@ Correctness/compat layers, strongest first (1–2 are the **primary gate** for l
    (e.g., concat strategy). Not a gate — shape may legitimately differ.
 5. **Verifier (always).** Every `.class` must pass `java -Xverify:all`; non-verifying = fail.
 
+**kotlinc is the oracle, INCLUDING where it is wrong.** Where the reference compiler's behaviour
+departs from the language specification, krusty matches the reference compiler, not the
+specification. A consumer links against what kotlinc actually emits and a program runs against what
+kotlinc actually does, so a krusty that were "more correct" would be less compatible — and
+compatibility is the goal. The differential harness already encodes this: the expectation is
+kotlinc's answer, never a reading of the spec.
+
+Such a divergence is never followed silently. Each one is:
+
+- **written down** as an entry in §7 saying what the specification implies, what kotlinc does
+  instead, and that krusty follows kotlinc;
+- **pinned by a test** that runs the shape under both compilers and asserts the EXACT answer rather
+  than only that the two agree — equality alone would keep passing if krusty and kotlinc drifted
+  together, and it records nothing a reader can see;
+- **revisited when the reference version moves**, since a bug fixed upstream becomes a behaviour
+  change krusty has to follow in the same direction.
+
+The same rule decides an unspecified case: whatever kotlinc does is the answer, recorded the same
+way, rather than a choice krusty is free to make. Kotlin's own box corpus is a lower bound on this
+and not a substitute for it — it is upstream's regression suite, so a behaviour it never observes
+can still be one consumers depend on (`typeMapping/nothing.kt` asks `"" is Nothing` and never reads
+the result).
+
+This is already how the §7 entries are written where the question has come up — see the cross-file
+`suspend` extension entry, which follows kotlinc's emitted CPS pair and splice boundary rather than
+reasoning about what an `inline suspend` declaration ought to produce. The rule above states the
+practice so it is a requirement rather than a habit.
+
+A caution that costs real time: what looks like a kotlinc divergence is usually krusty's own defect,
+so establish the reference answer before concluding anything about it. `(UIntArray(1) as Any) is
+IntArray` looked like a free choice — the box corpus never asks it, and Kotlin/Native answers the
+opposite — but `kotlin.UIntArray` carries `box-impl`/`unbox-impl`, so the value class boxes at the
+`Any` boundary and kotlinc answers `false true false` for `is IntArray`/`is UIntArray`/`is
+LongArray`. krusty answers `true` there because it does not box; that is krusty's bug to fix, not a
+kotlinc bug to match. Running the reference compiler is what separated the two, which is why
+`docs/TEST_HARNESS.md` now insists on provisioning it.
+
 The harness (`harness/`) is a Rust integration test shelling out to the reference compiler,
 `javap`/a class-file parser, and `java`. Edge-case suite (§7) lives in `tests/cases/`.
 
@@ -2904,11 +2941,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   supertypes, replacing the JVM class's rather than joining them — the supertypes too, or `java/util/List`
   re-enters one rung up the receiver walk and re-supplies everything. The class file still states the kind
   and constructors. Nothing physical changes: the builtins decode to the same erased descriptors and the
-  same JVM owner, member names stay in SOURCE terms, and the Kotlin → JVM rename happens where it always
-  did, at emit (`names::mapped_builtin_virtual_name`, `removeAt` → `remove`). No filter subtracts from the
-  Java scope and no reverse table exists — the correct set is simply the declared one. The OVERRIDE
-  direction is unchanged: a class realizing `MutableList` writes `removeAt`, and `mapped_interface_members`
-  emits the `remove(int)` bridge. Tests: `tests/mapped_collection_scope_e2e.rs`, corpus
+  same JVM owner, and member names stay in SOURCE terms while the provider attaches the exact physical
+  owner/name/descriptor realization (`removeAt` → `remove`). No filter subtracts from the Java scope and
+  no reverse table exists — the correct set is simply the declared one. The OVERRIDE direction is
+  unchanged: a class realizing `MutableList` writes `removeAt`, and the resolved override edge carries
+  the external declaration's `remove(int)` realization into bridge derivation. Tests:
+  `tests/mapped_collection_scope_e2e.rs`, corpus
   `specialBuiltins/irrelevantRemoveAtOverride.kt`.
 
   A CONCRETE `java.util` class (`ArrayList`, `AbstractList`) is the other half, and needs the other
@@ -2916,8 +2954,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   including its own `remove(int)`. kotlinc handles exactly this in `LazyJavaClassMemberScope`
   (`isVisibleAsFunction` / `doesOverrideRenamedBuiltins` / `createRenamedCopy`): a Java method whose
   signature matches a renamed builtin is hidden under its JVM name and re-exposed under the Kotlin one.
-  krusty derives this read-side rename from the same `mapped_interface_members` semantic handoff used
-  for bridge emission. The selected mapping must match the JVM name AND full erased descriptor (only
+  krusty derives this read-side rename from the same provider-normalized builtin declaration used by
+  bridge emission. The selected mapping must match the JVM name AND full erased descriptor (only
   `remove(int)` is renamed, not `remove(Object)`) and its declaring mapped interface must occur in the
   concrete receiver's hierarchy. There is therefore no second reverse table to drift, and an unrelated
   class declaring `remove(index: Int): Any` is untouched. Verified against kotlinc:
@@ -3748,8 +3786,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     owner's declared accessor; with no class file that returned `None` and the backend invented the
     JavaBean getter (`getSize`, `getEntries`). `Classpath::property_read_access` now falls back to
     `builtin_property_read_access`, which walks the builtins supertype closure and answers with the
-    mapped `java.util` spelling (`size`, `keySet`, `entrySet`) from the same
-    `builtin_property_jvm_name` mapping the member table uses — one definition, so a call and a
+    mapped `java.util` spelling (`size`, `keySet`, `entrySet`) from the same exact, declaration-owned
+    mapped-builtin realization policy the member table uses — one definition, so a call and a
     property read of the same builtin cannot disagree.
   - **Return erasure.** That fallback also supplies the member's OWN (already erased) descriptor, so a
     type-parameter-typed property emits `getKey:()Ljava/lang/Object;` + `checkcast`, not a descriptor
@@ -3777,12 +3815,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `metadata::builtin_class_access_tests` for the flag-word mapping.
 - **`MutableList.removeAt(Int)` IS `java.util.List.remove(int)`** — the function half of kotlinc's
   `BuiltinMethodsWithDifferentJvmName`/special-builtin renaming whose property half is
-  `size`/`keys`/`values`/`entries`. A call through a `MutableList` receiver emits the JVM name
-  (`names::mapped_builtin_virtual_name`), and a class implementing `MutableList` gets a `remove(int)`
-  bridge forwarding to its `removeAt` override (`mapped_interface_members` →
-  `bridges::mapped_interface_bridges`) — needed when the override is inherited from a NON-collection
-  supertype, which is the only place the two names can diverge. Unlike the `size` entry beside it, this
-  one is keyed on the KOTLIN name `kotlin/collections/MutableList`, not the erased `java/util/List`:
+  `size`/`keys`/`values`/`entries`. The builtin provider records the source name and exact JVM
+  realization separately, so a call through a `MutableList` receiver invokes `remove(I)Object`, and a
+  class implementing `MutableList` gets the same bridge from its resolved override edge — needed when
+  the override is inherited from a NON-collection supertype, which is the only place the two names can
+  diverge. Unlike the `size` entry beside it, this
+  one is keyed on the KOTLIN declaration identity `kotlin/collections/MutableList` plus its full erased
+  descriptor, not merely the erased `java/util/List` owner:
   the renaming exists only on the mutable side, so a READ-ONLY `List` implementation that happens to
   declare an unrelated `removeAt` must not acquire a `remove(int)` bridge. Tests: box corpus
   `codegen/box/specialBuiltins/irrelevantRemoveAtOverride.kt`, and
@@ -4316,6 +4355,43 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **Modifier-prefixed local functions parse in any body.** `tailrec fun`/`suspend fun` local
   declarations are statements everywhere, not only in scripts; the soft-keyword prefix no longer
   parses as an expression name (`src/frontend.rs::modifier_prefixed_local_functions_parse_in_bodies`).
+
+- **What `tailrec` loops is a FRAME, not a top-level function.** A tail self-call can be stepped
+  whenever the next turn reads only slots the step reassigns. That is true of more than a top-level
+  `fun` called by name, and the three shapes differ only in where the caller's values sit:
+
+  **An extension** steps its receiver like any other parameter. The receiver is inserted into the
+  function's parameter list at its own position and passed as an ordinary argument, so
+  `tailrec fun Int.down(acc: Int): Int = if (this == 0) acc else (this - 1).down(acc + 1)` re-binds
+  it by assigning that slot. A self-call to a *different* receiver is therefore a loop step rather
+  than a shape to decline — the opposite of the member rule below, because here the receiver is part
+  of the frame rather than the identity of it.
+
+  **A member** steps when the call dispatches on `this`: the instance does not change, so only the
+  parameters are reassigned and the receiver slot is left alone. `Other().f(n - 1)` is a different
+  frame, stays an ordinary call, and keeps recursing.
+
+  **The parameters are not always slots `0..n`.** A body's dispatch receiver sits below them, so a
+  member's first parameter is one above its `this`; captures and a local class's constructor values
+  take slots before that. The lowering is the authority (`BodyLowering::value_slot`) and reports the
+  layout it used, rather than the rewrite deriving it a second time and being wrong when the two
+  disagree.
+
+  **A member call does not read `this` at the call node.** The lowering spills the receiver and each
+  argument into generated temporaries first — evaluation order being the point — so the shape
+  reaching the rewrite is `{ t0 = this; t1 = n - 1; this.f(t0, t1) }` with the call reading `t0`. The
+  rewrite follows those aliases to a fixed point through unnamed temporaries only, and drops any slot
+  the body reassigns. A source `val` is never followed: what stays in it is the programmer's
+  business. Being conservative costs only a missed rewrite, and a missed rewrite is the program that
+  was compiled before.
+
+  A CONTEXT PARAMETER is still left recursing: it takes slots between the receiver and the
+  parameters, and nothing here tests that layout.
+  Tests: `tests/tailrec_e2e.rs` (`a_member_tailrec_runs_flat`, `an_extension_tailrec_runs_flat`,
+  `a_member_call_on_another_instance_still_recurses`, and
+  `member_and_extension_tailrec_agree_with_kotlinc`, which asks the reference compiler the same
+  questions — a `StackOverflowError` on one side and an answer on the other is the divergence it
+  reports).
 
 - **A `return` is a tail position wherever it stands.** `tailrec` rewrites a tail self-call into a
   loop step, and the tail positions of a function are not only its last expression: nothing of the
@@ -5347,6 +5423,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   like a written argument; omitting that left an `int` in an `Object` slot, which is a `VerifyError`
   at class load rather than a wrong answer.
   Tests: `tests/context_parameter_signature_order_e2e.rs`.
+
+- **A flow narrowing does not survive a loop that writes its subject.** A straight-line proof is a
+  proof about ONE edge, and a loop has a back edge: a body that reassigns `x` reaches its own start
+  with whatever that assignment left. So the writes a loop performs anywhere inside it — including
+  in nested lambdas and local functions, which run on that same edge — clear the narrowing before
+  the loop is checked at all. Four of kotlinc's answers follow from doing it there rather than on
+  the body scope: the CONDITION sees it (`while (x.length > 0) { x = 42 }` is rejected), the body
+  sees it, the code after the loop sees it, and a `do…while` sees it even though its first
+  iteration precedes any back edge. What must NOT be cleared is the narrowing the loop's own
+  condition proves — that one is re-evaluated on every iteration, so `while (x != null) { x.length;
+  x = null }` stays legal — and it survives because condition narrowings are computed after this
+  clearing and applied to the body scope. Narrowing within one iteration is unaffected: the
+  loop's own assignment proves the new type from that point on.
+  krusty used to keep the stale proof and emit a cast from it, which failed at run time on both
+  backends (`codegen/box/casts/kt83324.kt`, `codegen/box/objectExpression/expr3.kt`).
+  Tests: `tests/loop_backedge_narrowing_e2e.rs` (all eight, each answer taken from kotlinc 2.4.10
+  first).
 
 ## 8. Success criteria for the PoC
 

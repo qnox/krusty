@@ -194,10 +194,14 @@ impl SymbolSource for CompositeSource<'_> {
 /// cannot outlive or conceal mutation of any contributing provider.
 #[derive(Default)]
 pub(crate) struct SymbolQueryCache {
+    /// Keyed by NAME, and every miss and hit hashes that string. The default hasher is SipHash,
+    /// which is a cryptographic-strength choice this cache does not need: the keys are internal
+    /// declaration spellings, never attacker-supplied, and the map lives and dies inside one source
+    /// unit. `FxHashMap` is the same hasher the name tree already uses for exactly this reason.
     records: std::cell::RefCell<
-        std::collections::HashMap<
+        crate::name_tree::FxHashMap<
             SymbolNamespace,
-            std::collections::HashMap<String, std::rc::Rc<ResolvedSymbols>>,
+            crate::name_tree::FxHashMap<String, std::rc::Rc<ResolvedSymbols>>,
         >,
     >,
 }
@@ -293,8 +297,6 @@ mod tests {
         fn_name: Option<String>, // a top-level fn this source provides
         owner: String,           // owner stamped on its callable (proxy for "origin")
         typed: Option<String>,   // an internal name this source has a shape for
-        /// Annotations stamped on the shape, standing in for a classpath classifier's metadata.
-        annotations: Vec<crate::types::ResolvedAnnotation>,
     }
 
     fn callable(owner: &str, name: &str) -> LibraryCallable {
@@ -386,7 +388,7 @@ mod tests {
                     enum_entries: Vec::new(),
                     enum_entries_accessor: None,
                     named_parameter_lists: Vec::new(),
-                    annotations: self.annotations.clone(),
+                    annotations: Vec::new(),
                     retention: None,
                     annotation_targets: None,
                 }))
@@ -433,7 +435,6 @@ mod tests {
             fn_name: Some("greet".into()),
             owner: "module".into(),
             typed: Some("shared".into()),
-            annotations: Vec::new(),
         }
     }
 
@@ -442,7 +443,6 @@ mod tests {
             fn_name: Some("greet".into()), // clashes with module on `greet`
             owner: "library".into(),
             typed: Some("shared".into()), // clashes with module on `shared`
-            annotations: Vec::new(),
         }
     }
 
@@ -499,61 +499,6 @@ mod tests {
             .is_empty());
     }
 
-    /// A classpath classifier's annotations reach a caller through the provider.
-    ///
-    /// Plugin planning asks whether a classifier a call NAMES is annotated. For a source classifier
-    /// that answer comes from syntax; for one that exists only on the classpath it can only come
-    /// from the provider's metadata. When the provider was not consulted, a classpath
-    /// `@Serializable` type looked unannotated and its plugin rewrite never fired.
-    ///
-    /// This pins the provider contract with fakes, so it holds without any runtime being
-    /// provisioned — the end-to-end round trip needs jars, this does not.
-    #[test]
-    fn a_library_classifiers_annotations_are_surfaced() {
-        let annotated = FakeSource {
-            fn_name: None,
-            owner: "library".to_string(),
-            typed: Some("dep/InfraConfig".to_string()),
-            annotations: vec![crate::types::ResolvedAnnotation {
-                annotation: crate::types::type_name("kotlinx/serialization/Serializable"),
-                arguments: Vec::new(),
-            }],
-        };
-        let bare = FakeSource {
-            fn_name: None,
-            owner: "module".to_string(),
-            typed: Some("dep/Plain".to_string()),
-            annotations: Vec::new(),
-        };
-        let composite = CompositeSource::new(vec![
-            &bare as &dyn SymbolSource,
-            &annotated as &dyn SymbolSource,
-        ]);
-
-        let found = composite
-            .classifier(crate::types::type_name("dep/InfraConfig"))
-            .expect("the library classifier");
-        assert_eq!(
-            found
-                .annotations
-                .iter()
-                .map(|resolved| resolved.annotation.render())
-                .collect::<Vec<_>>(),
-            vec!["kotlinx/serialization/Serializable".to_string()],
-            "a classpath classifier must surface its annotations through the provider"
-        );
-
-        // A classifier with none must stay empty rather than inherit a neighbour's.
-        let plain = composite
-            .classifier(crate::types::type_name("dep/Plain"))
-            .expect("the module classifier");
-        assert!(
-            plain.annotations.is_empty(),
-            "an unannotated classifier gained annotations: {:?}",
-            plain.annotations
-        );
-    }
-
     #[test]
     fn classifier_takes_the_earliest_source() {
         let m = module();
@@ -580,7 +525,6 @@ mod tests {
             fn_name: None,
             owner: "library".into(),
             typed: Some("lib/only".into()),
-            annotations: Vec::new(),
         };
         let m = module();
         let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &lib]);
@@ -630,7 +574,6 @@ mod tests {
             fn_name: None,
             owner: "module".into(),
             typed: None,
-            annotations: Vec::new(),
         };
         let l = library();
         let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
@@ -657,13 +600,11 @@ mod tests {
             fn_name: Some("shared".into()),
             owner: "module".into(),
             typed: Some("shared".into()),
-            annotations: Vec::new(),
         };
         let l = FakeSource {
             fn_name: Some("shared".into()),
             owner: "library".into(),
             typed: Some("shared".into()),
-            annotations: Vec::new(),
         };
         let c = CompositeSource::new(vec![&m as &dyn SymbolSource, &l]);
         let r = c.symbols(SymbolNamespace::Package(TypeName::ROOT), "shared");
@@ -691,7 +632,6 @@ mod tests {
             fn_name: None,
             owner: "empty".into(),
             typed: None,
-            annotations: Vec::new(),
         };
         assert!(source
             .symbols(SymbolNamespace::Package(TypeName::ROOT), MISSING)

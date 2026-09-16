@@ -347,7 +347,6 @@ pub fn kotlin_test_jar() -> Option<PathBuf> {
         .or_else(|| ensure_maven("org.jetbrains.kotlin", "kotlin-test", &kotlin_version()))
 }
 
-/// Locate the coroutines runtime jar used by classpath suspend tests.
 /// The pinned kotlinx.serialization runtime version. The compiler plugin ships with the reference
 /// distribution, so the runtime must be a version that plugin emits calls against.
 pub const SERIALIZATION_VERSION: &str = "1.9.0";
@@ -378,6 +377,7 @@ pub fn serialization_json_jar() -> Option<PathBuf> {
     })
 }
 
+/// Locate the coroutines runtime jar used by classpath suspend tests.
 pub fn coroutines_jar() -> Option<PathBuf> {
     dist_jar("kotlinx-coroutines-core-jvm.jar").or_else(|| {
         ensure_maven(

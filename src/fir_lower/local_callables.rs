@@ -943,7 +943,7 @@ impl BodyLowering<'_> {
         retain_inline_template: bool,
     ) -> Result<NestedCallableBodies, FirLoweringFailure> {
         #[cfg(feature = "trace")]
-        super::trace_checked_body(body, self.index);
+        super::body_trace::trace_checked_body(body, self.index);
         let capture_slots = body
             .captures()
             .iter()

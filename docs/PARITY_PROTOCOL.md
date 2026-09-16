@@ -2340,10 +2340,241 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   the reified inline call survived to the backend with an EMPTY reified substitution map, and
   `splice_unified` declined it (`reified_inline=true reified_map_len=0`) — a per-FILE failure that
   costs a module every class. The same declaration in the same file, or in a sibling file of the same
-  module, always worked, since both are source. The plugin context's annotation map is now completed
-  for exactly the classifiers the planned calls NAME, bounded by the call set rather than scanning the
-  classpath. Still unsupported and deliberately out of scope: a WRAPPING type argument
+  module, always worked, since both are source. A dedicated provider boundary now combines finalized
+  source annotation identities with metadata for exactly the classifiers the selected calls name in
+  their type arguments, parameters, receiver, and result. Plugins consume that closed map and do no
+  lookup of their own; the work stays bounded by the call set rather than scanning the classpath.
+  Still unsupported and deliberately out of scope: a WRAPPING type argument
   (`decodeFromString<List<T>>`), which needs a composed `ListSerializer(T.serializer())`.
   `tests/classpath_serializable_round_trip_e2e.rs::a_classpath_serializable_type_round_trips_through_the_reified_helpers`,
   `the_driver_accepts_a_classpath_serializable_round_trip`,
   `same_file_and_sibling_file_declarations_still_round_trip`.
+- **A suspension inside a `throw` operand is hoisted (fix).** `throw classify(status, body())`, where
+  `body()` suspends, left the suspension buried in the thrown expression. The state-machine flattener
+  cannot split a suspension there, so it declined the whole function and the backend reported
+  `this suspend-function shape is not yet supported by the IR backend` — a per-FILE verdict, so one
+  such `throw` cost a module every class in the file. `throw` evaluates its operand unconditionally
+  and to completion before control leaves, exactly like the single-operand statements beside it in the
+  hoister (`!!`, a `lateinit` check, arithmetic negation), each of which already hoisted its operand;
+  `Throw` simply had no arm. Two controls isolate it: binding the same call to a local first, and
+  returning the identical expression instead of throwing it, both always worked.
+  `tests/suspend_throw_operand_e2e.rs::a_suspension_inside_a_thrown_expression_is_hoisted`,
+  `a_conditional_throw_hoists_its_suspension_too`,
+  `the_same_suspension_bound_to_a_local_still_works`,
+  `the_same_expression_returned_instead_of_thrown_still_works`.
+- **`kotlin.time.Instant` has a builtin element serializer (fix).** The builtin table mapped the
+  primitives, `String` and `kotlin.uuid.Uuid`, but not `kotlin.time.Instant`, so a `@Serializable`
+  class with an `Instant` property could derive no element serializer, the plugin left its
+  `serialize-body` placeholder, and the residual node failed the whole FILE. The runtime ships
+  `kotlinx/serialization/internal/InstantSerializer`, exactly parallel to the `UuidSerializer` entry
+  already present. Both the key mapping and the serializer name are added, so a property and a
+  collection ELEMENT are served alike. The tests round-trip through a real `Json` and assert the exact
+  ISO-8601 text, which is what proves the serializer is wired to the right runtime class rather than
+  merely present.
+  A builtin mapping is only usable when the ACTIVE runtime carries that serializer:
+  `InstantSerializer` ships in newer kotlinx.serialization cores and not in supported older ones, and
+  emitting a reference to an absent class fails at CLASS-LOAD rather than at compile time. The plugin
+  context records which runtime-dependent serializers the classpath actually provides, and a mapping
+  to one it does not declines — the same clean bail as any other underivable element. Only the
+  genuinely version-dependent serializers are probed; the primitives ship in every supported version.
+  `tests/instant_builtin_serializer_e2e.rs::an_instant_property_serializes_through_the_builtin`,
+  `an_instant_collection_element_serializes_through_the_builtin`, `the_uuid_builtin_still_works`.
+- **A branching inline body may be a vararg element (fix).** Vararg packing evaluates each element
+  with `[array, index]` already on the operand stack. A spliced BRANCHY inline body needs an empty
+  stack — its relocated frames carry no stack prefix — so the splicer declined, and because a
+  required stdlib inline body that cannot be spliced bails the whole FILE, one such argument cost a
+  module every class in it: `sink("A".takeUnless { xs.isEmpty() })` reported
+  `JVM backend inline error: inline splice failed`. Branchy elements are now evaluated into temps
+  first, on a clean stack, exactly as the constructor and `Ref`-holder paths already do for their own
+  held pairs; element evaluation stays left to right. This applies to packed arrays and to both
+  reference and primitive spread builders: the old spread path otherwise kept `[builder, builder]`
+  live across the same branch. The new path is gated on the same `records_frame` predicate those
+  paths use, so a vararg whose elements are all ordinary keeps its existing emission byte for byte;
+  the ordinary packed form is also asserted byte-identical to kotlinc. Three controls separate the
+  cause: the identical calls in a
+  FIXED-ARITY parameter list always worked (that path already spills), a straight-line inline body
+  (`let { it.size }`) always worked as a vararg element, and a user-declared `vararg` function fails
+  identically to `listOf`, so nothing here is stdlib-specific. NOT yet byte-identical for this shape:
+  kotlinc keeps the stack prefix and emits frames that include it, which would need the frame
+  relocator to carry a stack prefix.
+  `tests/vararg_inline_argument_splice_e2e.rs::a_branching_inline_call_may_be_the_only_vararg_element`,
+  `several_branching_inline_calls_may_share_one_vararg_call`,
+  `a_branching_ordinary_element_may_follow_a_spread`,
+  `a_branching_expression_may_supply_the_spread_array`,
+  `branching_spread_elements_are_evaluated_once_from_left_to_right`,
+  `primitive_branching_spread_and_element_use_the_same_frame_safe_path`,
+  `ordinary_packed_vararg_stays_byte_identical_to_kotlinc`,
+  `the_same_calls_in_a_fixed_arity_call_still_work`,
+  `a_straight_line_inline_body_still_works_as_a_vararg_element`.
+- **An operator's shared formal is seeded from the call's expected result (fix).**
+  `Iterable<T>.plus(Iterable<T>): List<T>` shares one `T` between the receiver, the argument and the
+  result. The argument expectation was derived from the RECEIVER alone, so
+  `fun pick(): List<P> = listOf(A()) + listOf(B())` committed the receiver call to `List<A>` and then
+  judged the argument against `Iterable<A>`. Kotlin solves receiver, argument and expected result
+  together. Selection is untouched — the same candidate wins — and only what the arguments are
+  CHECKED AGAINST is re-derived, with the expected result seeded before the receiver so the receiver
+  still fixes whatever it leaves open and an explicit type argument still wins. This does not let an
+  ARGUMENT widen a receiver-fixed formal: that rule is what keeps `Comparable<T>.compareTo` sound and
+  is unchanged. Every other operator convention passes no expectation, since a comparison's result is
+  `Boolean` and a range's is a range — neither says anything about the operand formals.
+  KNOWN LIMIT: a chained `a + b + c` still fixes the inner operator from its own receiver, because the
+  inner call sits in receiver position and receives no expectation; the corpus shape is a `fold`
+  accumulator, which this covers.
+  `tests/operator_expected_result_seeding_e2e.rs::a_declared_result_seeds_a_plus_over_two_inferred_operands`,
+  `a_fold_accumulator_seeds_its_operator`, `an_explicit_type_argument_on_the_receiver_still_works`,
+  `a_declared_receiver_val_still_works`,
+  `an_operand_that_does_not_fit_the_expectation_is_still_rejected`.
+- **An `invoke` operator selection receives the call's expected type (fix).** Every other callable
+  selection in the checker forwards the expression's expectation to `select_callable_candidate`;
+  the `invoke` operator path passed `None`, so a companion `operator fun invoke` inferred its type
+  parameters from the argument list alone. A formal that appears only as a lambda RESULT was then
+  pinned by whatever that lambda happened to produce — a `set` that throws fixed it to `Nothing` —
+  and a formal that appears only as a lambda PARAMETER was never bound at all, yielding
+  `expected 'P<String, String, A, A>', actual 'P<String, Nothing, A, B>'`.
+  The expectation now reaches every spelling of the convention: member and extension selection, the
+  companion factory's lambda SHAPE (so an expected-only formal is bound before the lambda body is
+  typed, which is what lets the body read `s.length`), and a member EXTENSION
+  `operator fun Recv.invoke` on an implicit dispatch receiver. A SAFE call now carries an explicit
+  `SafeLifted` result constraint: inference compares the nullable lift of the DECLARED result with
+  the expectation for the whole safe-call expression. It never guesses the declaration type by
+  stripping nullability from that expectation, which cannot distinguish `R` from an already-nullable
+  `R?`. The lift is idempotent, so both forms retain their exact selected result. Seeding remains a
+  constraint and not a commitment — the receiver and arguments still refine it, and a mismatched
+  expectation is still rejected.
+  A CONSTRUCTOR of the same shape was never affected, which is what kept the defect narrow.
+  The local-extension sibling has no expectation to thread: it performs no generic instantiation
+  from arguments or context, binding formals from `unify_ty(generic.receiver, receiver)` alone.
+  `tests/expected_type_seeds_invoke_e2e.rs::a_companion_invoke_binds_formals_only_the_expectation_supplies`,
+  `a_throwing_argument_does_not_pin_a_formal_the_expectation_fixes`,
+  `a_companion_invoke_body_reads_the_expected_parameter`,
+  `a_receiver_companion_invoke_body_reads_the_expected_receiver`,
+  `a_safe_property_invoke_lifts_the_nullable_expectation`,
+  `a_safe_property_invoke_preserves_an_already_nullable_result`,
+  `a_safe_function_value_invoke_keeps_its_declared_result`,
+  `a_member_extension_invoke_binds_the_expected_formal`,
+  `a_constructor_of_the_same_shape_still_infers`, `a_mismatched_expectation_is_still_rejected`;
+  `src/fir/body_check/invoke_tests.rs::safe_property_invoke_keeps_an_already_nullable_selected_result`
+  asserts the exact selected FIR result that a null-returning runtime fixture cannot observe.
+- **A class-level `@Serializable(with = …)` declared in the SAME file is honored for an element (fix).**
+  The element-serializer plan looked for a generated `$serializer`, then for an EXTERNAL serializer —
+  a map that deliberately covers only types this compilation does NOT declare. A class this file
+  declares that names its own serializer has neither, so the plan came back empty, the plugin left its
+  `serialize-body` placeholder rather than emit a half-built serializer, and the residual node failed
+  the whole FILE (`this construct is not yet supported by the IR backend`). The IDENTICAL class in a
+  sibling file always worked, because it resolves through the external map — the reverse of what a
+  file split would suggest, and the reason this was previously recorded backwards. The plan now reads
+  the declaring class's own `with =` before the external lookup, exactly as that class's `serializer()`
+  accessor already does. An `object` serializer is represented by its resolved local `ClassId` and
+  read through `INSTANCE`; a serializer CLASS is handled by the construction plan below. Ordinary
+  derivation is unchanged.
+  `tests/same_file_custom_serializer_e2e.rs::a_same_file_custom_serializer_serves_a_direct_property`,
+  `a_same_file_custom_serializer_serves_a_map_value`,
+  `a_same_file_custom_serializer_serves_a_list_element`,
+  `an_ordinary_serializable_property_still_derives`.
+- **A class-valued custom serializer is CONSTRUCTED with its argument serializers (fix).** A custom
+  serializer declared as a CLASS takes one `KSerializer` per type parameter of the class it serves —
+  `@Serializable(with = BoxSerializer::class) class Box<T>` with
+  `class BoxSerializer<T>(itemSerializer: KSerializer<T>)` — so an element of that type needs
+  `new BoxSerializer(<serializer for the argument>)`, derived recursively. The element plan had no
+  such shape: it could read a singleton `INSTANCE` or nothing, so this declined and the residual
+  plugin placeholder failed the whole FILE. The plan now constructs one, requiring the declared
+  constructor to match that convention exactly — one `KSerializer` parameter over each distinct
+  resolved type-parameter identity, in declaration order — so any other constructor shape still
+  declines cleanly instead of emitting a call that does not exist. The plan carries the serializer's
+  local `ClassId`; common IR emits its ordinary typed `New` node and leaves the constructor descriptor
+  to the backend, rather than rendering the owner and hardcoding a JVM descriptor in plugin lowering.
+  Reading an `INSTANCE` off such a class compiles and then dies at run time with
+  `NoSuchFieldError: Class BoxSerializer does not have member field 'BoxSerializer INSTANCE'`, which
+  is why every test here runs a real `Json.encodeToString` and asserts the exact JSON rather than
+  merely asserting that compilation succeeded. The fixtures provision one pinned runtime and run
+  identically under krusty and kotlinc.
+  `tests/same_file_custom_serializer_e2e.rs::a_class_valued_custom_serializer_is_constructed_with_its_argument_serializer`,
+  `a_constructed_custom_serializer_composes_below_a_collection`.
+- **A class id is written literally when the descriptor shortcut cannot round-trip (fix).**
+  Every class id went into the string table as a descriptor carrying `DESC_TO_CLASS_ID`. A reader
+  expands that by stripping `L`/`;` and replacing EVERY `$` with `.`, which reproduces the class id
+  only while no simple name contains a `$` of its own. The serialization plugin generates a nested
+  class named `$serializer`, so krusty recorded `LOwner$$serializer;`, which expands to
+  `Owner..serializer` — a class id with a doubled separator, naming nothing. kotlinc writes
+  `Owner.$serializer` literally for exactly that reason. Metadata now consumes the resolved
+  `TypeName` identity: the name tree remembers each exact nested-child relation, including a simple
+  name that begins with `$`, and the encoder walks those relations to build the class id. It uses the
+  descriptor shortcut only when no actual name segment contains a literal `$`; otherwise the class
+  id is interned verbatim. The old descriptor-string-to-class-id recovery API is deleted, including
+  for sealed-subclass metadata. Ordinary nested classes (`Outer$Inner`) keep the shortcut and their
+  bytes are unchanged.
+  `src/metadata/type_encoder.rs::class_id_tests::a_nesting_separator_becomes_a_dot`,
+  `a_simple_name_may_begin_with_a_dollar`, `the_shortcut_is_taken_only_when_it_round_trips`,
+  `tests/serializer_metadata_class_id_e2e.rs::a_generated_serializer_records_kotlincs_class_id`,
+  `the_serializable_class_itself_still_records_its_own_class_id`.
+- **Every single-operand node hoists its suspension, not a subset (fix).** The suspend hoister
+  recurses through one IR node kind per arm. Source-reachable gaps included an enum lookup's name
+  (`enumValueOf<Level>(pickName())`) and the construction of the `Ref` holder that boxes a captured
+  mutable local (`var total = count()` where a closure captures `total`). Either left the suspension
+  where the state-machine flattener cannot split it, so the backend declined the whole function with
+  `this suspend-function shape is not yet supported by the IR backend` — a per-FILE verdict. The
+  second shape is ordinary Kotlin: a `var` initialized from a suspend call and captured by any lambda.
+  Both operands evaluate unconditionally before the node they feed, so both hoist to a preceding temp
+  exactly as the neighbouring arms do. Assigning the same captured local from a suspension LATER
+  needed nothing: that is a holder write, which already had its arm, and it is the control that
+  isolates the holder's construction as the gap. Found by listing every `IrExpr` variant, diffing it
+  against the arms the hoister handles, and compiling one fixture per variant that can carry a
+  sub-expression. `NewArray(size)` and bound `KClassLiteral(value)` are covered too; the remaining
+  unconditional one-child nodes (`RefGet`, `EnclosingInstance`, `LateinitInitialized`) now recurse
+  directly rather than relying on their current source constructors to supply pure operands. Before
+  hoisting, a suspending body also expands shared common-IR DAG operands into private per-use nodes.
+  That ownership step happens before lexical-scope and debug-line capture, so every cloned suspension
+  keeps authoritative side-table identity and a temp inserted for one parent never leaks into another.
+  `tests/suspend_single_operand_hoist_e2e.rs::an_enum_lookup_hoists_a_suspending_name`,
+  `a_captured_local_hoists_a_suspending_initializer`,
+  `a_captured_local_assigned_from_a_suspension_later_still_works`,
+  `an_enum_lookup_with_no_suspension_still_works`,
+  `src/jvm/suspend/hoisting.rs::tests::a_shared_operand_is_hoisted_independently_at_each_use`,
+  `every_remaining_single_operand_node_recurses`.
+- **An unresolvable `return@label` reports the reference diagnostic, at its span (fix).** krusty wrote
+  its own wording at the `return` keyword; the reference compiler writes `unresolved label.` at the
+  `@` token. Both the message and the column differed, for an unknown name and for a name whose
+  lambda does not enclose the return alike. The label survives on the node only as a bare `String`,
+  so the span cannot be recovered afterwards: the parser now records the `@` span for the statement
+  and expression forms, and both report sites read it. Shared test helpers
+  (`common::expect_identical_rejection`) compares the COMPLETE diagnostic
+  set of both compilers — count, file, line, column, message and order — since a nonzero-exit
+  assertion passes on an unrelated rejection, which is how a "both compilers agree" claim goes stale.
+  `tests/unresolved_label_diagnostic_e2e.rs::an_unknown_return_label_matches_the_reference_diagnostic`,
+  `a_declared_but_non_enclosing_return_label_matches_the_reference_diagnostic`,
+  `an_unresolved_label_in_expression_position_matches_the_reference_diagnostic`,
+  `a_resolvable_return_label_still_works`.
+- **An extension's type-parameter receiver is solved with the arguments, not before or after them
+  (fix).** For `fun <P : Pipe, B : Any> P.install(plugin: Plug<P, B>, configure: B.() -> Unit)`, the
+  pre-lambda applicability probe first unified the receiver in a separate pass. That pinned `P` to
+  the receiver's concrete class, so `App().install(pluginOfPipe) { … }` judged `Plug<Pipe, Cfg>`
+  against `Plug<App, B>`, declined the overload, and left its lambda unshaped. Simply reversing the
+  passes was also wrong: once argument inference occupied a formal, the old unifier discarded the
+  receiver evidence. The receiver now contributes an assignability constraint to the SAME set as
+  the mapped arguments. The ordinary constraint solver therefore applies each parameter position's
+  variance, joins compatible lower bounds, honors explicit arguments and declared bounds, and rejects
+  incompatible invariant evidence without making call-site ordering decide the answer.
+  `tests/generic_receiver_extension_lambda_shape_e2e.rs::a_generic_receiver_extension_still_shapes_its_lambda_receiver`,
+  `a_generic_receiver_extension_still_shapes_a_plain_lambda_parameter`,
+  `a_receiver_and_an_argument_join_into_one_formal`,
+  `a_formal_inside_a_variant_shell_still_admits_the_receiver`,
+  `a_receiver_the_invariant_argument_excludes_is_still_rejected`,
+  `explicit_type_arguments_still_fix_both_formals`,
+  `a_receiver_outside_the_formals_bound_is_still_rejected`,
+  `an_ordinary_parameter_of_the_same_shape_still_shapes_its_lambda`,
+  `a_concrete_receiver_extension_still_shapes_its_lambda`,
+  `a_member_the_shaped_receiver_lacks_is_still_rejected`.
+- **An inline member no longer crashes its siblings' annotation checking (fix).** Preparing a class's
+  inline members re-enters the class and walks the members it did NOT select, purely to rebuild their
+  lexical scopes. Those members' annotation ARGUMENT expressions belong to a source fragment that pass
+  no longer retains, and the checker asserted that only Pass-1 default checking could ever observe
+  released syntax. Any argument-bearing annotation on an ordinary member therefore CRASHED the
+  compiler as soon as the same class also declared an `inline` member — `@Suppress("UNCHECKED_CAST")`
+  beside an `inline fun` is the everyday case, and five lines reproduce it with no classpath. Two
+  passes are restricted this way, not one: Pass-1 default checking and inline preparation, which
+  selects only the inline declarations it must expand. Skipping released syntax is correct in each,
+  and the assertion now says so; an UNRESTRICTED pass, which has every expression, still trips it.
+  `tests/inline_preparation_sibling_annotation_e2e.rs::an_inline_member_does_not_crash_an_annotated_sibling`,
+  `any_argument_bearing_annotation_on_the_sibling_behaves_the_same`,
+  `a_class_with_no_inline_member_still_compiles`,
+  `a_bad_annotation_argument_is_still_rejected_beside_an_inline_member`.

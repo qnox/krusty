@@ -1,46 +1,17 @@
 use crate::backend::{Artifact, Backend};
 use crate::diag::DiagSink;
-use crate::frontend::CheckedFile;
-use crate::runtime::TargetRuntime;
 
-pub struct JsBackend<R> {
-    runtime: R,
-}
+#[derive(Default)]
+pub struct JsBackend;
 
-impl<R> JsBackend<R> {
-    pub fn new(runtime: R) -> Self {
-        Self { runtime }
+impl JsBackend {
+    pub fn new() -> Self {
+        Self
     }
 }
 
-impl<R> Backend for JsBackend<R>
-where
-    R: TargetRuntime,
-{
+impl Backend for JsBackend {
     type State = ();
-
-    fn lower_file(
-        &self,
-        checked: CheckedFile<'_>,
-        stem: &str,
-        _state: &mut Self::State,
-        diags: &mut DiagSink,
-    ) -> Vec<Artifact> {
-        let Some(ir) = crate::ir_lower::lower_file_at(
-            checked.file,
-            checked.file_index,
-            checked.info,
-            checked.symbols,
-            &self.runtime,
-        ) else {
-            diags.error(
-                crate::diag::Span::new(0, 0),
-                "krusty: this construct is not yet supported by the IR backend".to_string(),
-            );
-            return Vec::new();
-        };
-        vec![(format!("{stem}.js"), super::emit_file(&ir).into_bytes())]
-    }
 
     fn lower_ir_file(
         &self,
@@ -98,7 +69,7 @@ mod tests {
         let outputs = crate::compiler::emit_analyzed(
             analysis,
             &stems,
-            &super::JsBackend::new(EmptySymbolSource),
+            &super::JsBackend::new(),
             "main",
             &mut diags,
         );
@@ -181,7 +152,16 @@ mod tests {
         assert_eq!(diagnostic_messages(&diags), Vec::<&str>::new());
         assert_eq!(outputs.len(), 1);
         let source = String::from_utf8(outputs[0].1.clone()).expect("JavaScript must be UTF-8");
-        assert!(source.contains("return v2.f(v3);"), "{source}");
+        // What this test is about: a call whose receiver and arguments are spilled into
+        // temporaries is a checked BLOCK expression, and emitting one as a VALUE needs the
+        // block-expression path rather than the statement one. `box()`'s `C().f(3)` is that shape.
+        assert!(source.contains("return v0.f(v1);"), "{source}");
         assert!(!source.contains("cannot emit Block"), "{source}");
+        // `f`'s own body used to be the marker above, as a `return v2.f(v3);` — it is a loop now,
+        // because a member `tailrec` whose self-call dispatches on `this` is the same frame and
+        // steps (docs/SPEC.md, "What `tailrec` loops is a FRAME"). Asserted rather than dropped:
+        // this backend renders the rewrite's output directly, so it is the cheapest place to see
+        // that the member rewrite reaches every backend and not only the JVM one.
+        assert!(source.contains("continue $tailrec;"), "{source}");
     }
 }

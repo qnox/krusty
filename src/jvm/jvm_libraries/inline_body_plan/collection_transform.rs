@@ -176,10 +176,7 @@ fn recognize<'a>(
     // This decoder's bytecode template has exactly one extension receiver and one function
     // argument. Their indices are still discovered from the normalized signature below; the
     // cardinality guard prevents a different body shape from being partially decoded.
-    let Some(lambda_parameter) = collection_transform_lambda_parameter(callable, parameter_slots)
-    else {
-        return None;
-    };
+    let lambda_parameter = collection_transform_lambda_parameter(callable, parameter_slots)?;
     if !body.handlers.is_empty() {
         return None;
     }

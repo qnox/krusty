@@ -1,24 +1,23 @@
-//! `krusty-ir` → JVM bytecode. The JVM backend's lowering of the backend-agnostic IR — it maps
-//! Kotlin FqNames to JVM descriptors here (the IR never carries descriptors). Covers the core
-//! subset (functions, simple classes); shares `CodeBuilder`/`ClassWriter` with the AST emitter.
+//! `krusty-ir` → JVM bytecode. The JVM backend's lowering of backend-agnostic IR maps Kotlin
+//! identities to JVM descriptors here; common IR never carries descriptors.
 
 use std::collections::HashMap;
 
-use crate::backend::{BackendClassifierSource, SymbolSourceClassifiers};
+use crate::backend::BackendClassifierSource;
 use crate::ir::{
     Callee, IrBinOp, IrClass, IrConst, IrCtorArg, IrExpr, IrField, IrFile, IrFunction, IrTypeOp,
 };
+use crate::jvm::array_representation::{array_load_op, array_store_op, prim_newarray_atype};
 use crate::jvm::classfile::{
     ClassWriter, CodeBuilder, InnerClassResolver, Label, VerifType, MAJOR_JAVA8,
 };
 use crate::jvm::classreader::{MethodCode, C};
 use crate::jvm::inline::MethodBodies;
 use crate::jvm::names::{
-    method_descriptor, property_getter_name, property_setter_name, reference_array_element,
-    type_descriptor,
+    mapped_builtin_virtual_name, method_descriptor, property_getter_name, property_setter_name,
+    reference_array_element, type_descriptor,
 };
 use crate::kt_string::{KtString, KtStringBuf};
-use crate::symbol_source::CompositeSource;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 
 mod bottom_values;
@@ -125,11 +124,11 @@ fn has_ctor_marker_accessor(ir: &IrFile, class: &IrClass) -> bool {
 }
 
 /// Mutable per-emit-run accumulators, owned by the caller and shared (by `&`, via interior mutability)
-/// down the emit callgraph — formerly three thread-locals. The caller reads `inline_bail`/`emit_bail`
-/// after `emit_all_with_opts` returns `None` to distinguish an inline-splice failure (a backend bug to
-/// fix) from an unsupported construct (skip the file).
+/// down the emit callgraph — formerly three thread-locals. The checked backend reads
+/// `inline_bail`/`emit_bail` after emission returns `None` to distinguish an inline-splice failure
+/// (a backend bug to fix) from an unsupported construct (skip the file).
 #[derive(Default)]
-pub struct EmitRun {
+pub(crate) struct EmitRun {
     /// The reason an inline splice failed during emission (a required stdlib-inline call the backend
     /// could not splice), else `None`.
     inline_bail: std::cell::RefCell<Option<String>>,
@@ -226,7 +225,7 @@ struct LambdaClassPlan {
 
 impl EmitRun {
     /// The inline-splice failure reason recorded this run, if any (read by the caller after `None`).
-    pub fn inline_bail(&self) -> Option<String> {
+    pub(crate) fn inline_bail(&self) -> Option<String> {
         self.inline_bail.borrow().clone()
     }
     /// Record a stable public failure category. Concrete owners, callable names, and descriptors are
@@ -237,7 +236,7 @@ impl EmitRun {
     }
 
     /// The malformed-IR / missing-emission-context reason recorded this run, if any.
-    pub fn emit_error(&self) -> Option<String> {
+    pub(crate) fn emit_error(&self) -> Option<String> {
         self.emit_error.borrow().clone()
     }
 
@@ -255,7 +254,7 @@ impl EmitRun {
 /// `bodies` provider: the bytecode provider plus the mutable run accumulators, so the deep `Emitter`
 /// records a used lambda / an emit-or-inline bail without an ambient thread-local. Replacing `bodies`
 /// keeps every function's argument count unchanged.
-pub struct EmitEnv<'a> {
+pub(super) struct EmitEnv<'a> {
     bodies: &'a dyn MethodBodies,
     run: &'a EmitRun,
     continuation_metadata: &'a crate::jvm::suspend::ContinuationMetadataMap,
@@ -2054,12 +2053,7 @@ fn build_class_metadata(
     } else {
         Vec::new()
     };
-    let sealed_descs: Vec<String> = sealed_sorted
-        .iter()
-        .map(|subclass| format!("L{};", subclass.render()))
-        .collect();
     let nested_refs: Vec<&str> = nested_names.iter().map(String::as_str).collect();
-    let sealed_refs: Vec<&str> = sealed_descs.iter().map(String::as_str).collect();
     let class_type_parameters = ir
         .class_signature(&c.fq_name())
         .map(|signature| signature.type_params.as_slice())
@@ -2172,7 +2166,7 @@ fn build_class_metadata(
         .map(|retained| retained.annotation.clone())
         .collect();
     let (d1_bytes, d2) = build_class(
-        &c.fq_name(),
+        c.fq_name_id(),
         &ctor_params,
         vc_ctor_desc.as_deref().unwrap_or(&ctor_desc),
         &props,
@@ -2233,7 +2227,7 @@ fn build_class_metadata(
             nested: &nested_refs,
             member_order: &member_order,
             type_aliases: &type_aliases,
-            sealed_subclasses: &sealed_refs,
+            sealed_subclasses: &sealed_sorted,
             supertypes: &supertypes,
             annotations: &metadata_annotations,
             primary_ctor_annotations: &primary_ctor_annotations(c),
@@ -2433,7 +2427,7 @@ fn data_class_hashcode_owner(ir: &IrFile, bodies: &dyn MethodBodies, ty: Ty) -> 
     let mut owner = if ty.is_nullable() && ty.non_null().is_jvm_scalar() {
         "java/lang/Object".to_owned()
     } else {
-        ref_internal(ty.non_null())
+        crate::jvm::names::instanceof_internal_name(ty.non_null())
     };
     if ty
         .non_null()
@@ -3787,130 +3781,10 @@ pub fn mark_must_inline_lambdas(ir: &mut IrFile) {
     }
 }
 
-pub fn emit_all(
-    ir: &IrFile,
-    facade: &str,
-    bodies: &dyn MethodBodies,
-    metadata: Option<&KotlinMetadata>,
-    symbols: &crate::frontend::FrontendSymbols,
-) -> Option<Vec<(String, Vec<u8>)>> {
-    // [`EmitOptions::default`]: per-class `@Metadata` ON, as on the shipping path — what this default
-    // lacks is the `SourceFile`, the inner-class resolver and any `-jvm-target` class version, so it is
-    // NOT the artifact `krusty -d …` writes. A caller that must emit the shipping bytes (the
-    // byte-identity gates, the conformance corpus, `survey`) goes through
-    // [`crate::jvm::backend::shipping_emit_options`] and the `emit_all_with_opts*` entry points; a
-    // caller that must attach a per-class `@Metadata` it computed elsewhere uses
-    // [`emit_all_with_class_meta`], which this passes a provider returning `None` for every class. The
-    // run accumulators are discarded here (callers that need the inline-bail reason use
-    // `emit_all_with_opts` with their own `EmitRun`).
-    let run = EmitRun::default();
-    let empty_continuation_metadata = crate::jvm::suspend::ContinuationMetadataMap::default();
-    let module = crate::module_symbols::ModuleSymbols::new(symbols);
-    let signature_symbols = CompositeSource::new(vec![&module, &*symbols.libraries]);
-    let signature_symbols = SymbolSourceClassifiers::new(&signature_symbols);
-    let property_realizations = Default::default();
-    let env = EmitEnv {
-        bodies,
-        run: &run,
-        continuation_metadata: &empty_continuation_metadata,
-        signature_symbols: &signature_symbols,
-        jvm_default: JvmDefaultMode::default(),
-        lambda_modes: LambdaModes::default(),
-        java_parameters: false,
-        property_realizations: &property_realizations,
-        inner_classes: crate::jvm::inner_classes::InnerClasses::new(ir),
-    };
-    emit_all_with_class_meta(ir, facade, &env, metadata, &EmitOptions::default(), &|_| {
-        None
-    })
-}
-
-/// Like [`emit_all`], but with explicit per-file [`EmitOptions`] (class version, source name) and a
-/// caller-owned [`EmitRun`] the caller inspects after a `None` return (the inline-bail reason). Every
-/// shipping-bytes path uses this — the CLI backend, `survey`, the conformance corpus and the
-/// in-process test helpers — so `-jvm-target`, the `SourceFile` name and the inner-class resolver reach
-/// every emitted class.
-pub fn emit_all_with_opts(
-    ir: &IrFile,
-    facade: &str,
-    bodies: &dyn MethodBodies,
-    metadata: Option<&KotlinMetadata>,
-    opts: &EmitOptions,
-    run: &EmitRun,
-    symbols: &crate::frontend::FrontendSymbols,
-) -> Option<Vec<(String, Vec<u8>)>> {
-    let continuation_metadata = Default::default();
-    emit_all_with_opts_and_metadata(
-        ir,
-        facade,
-        bodies,
-        EmitMetadata {
-            facade: metadata,
-            continuations: &continuation_metadata,
-        },
-        opts,
-        run,
-        symbols,
-    )
-}
-
 /// Semantic metadata emitted beside one file's JVM classes.
-pub struct EmitMetadata<'a> {
+pub(crate) struct EmitMetadata<'a> {
     pub facade: Option<&'a KotlinMetadata>,
     pub continuations: &'a crate::jvm::suspend::ContinuationMetadataMap,
-}
-
-pub(crate) struct LegacyEmitContext<'a> {
-    pub symbols: &'a crate::frontend::FrontendSymbols,
-    pub property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
-}
-
-/// Emit classes with continuation metadata produced by the JVM suspend pass.
-pub fn emit_all_with_opts_and_metadata(
-    ir: &IrFile,
-    facade: &str,
-    bodies: &dyn MethodBodies,
-    metadata: EmitMetadata<'_>,
-    opts: &EmitOptions,
-    run: &EmitRun,
-    symbols: &crate::frontend::FrontendSymbols,
-) -> Option<Vec<(String, Vec<u8>)>> {
-    emit_all_with_opts_and_metadata_and_realizations(
-        ir,
-        facade,
-        bodies,
-        metadata,
-        opts,
-        run,
-        LegacyEmitContext {
-            symbols,
-            property_realizations: &Default::default(),
-        },
-    )
-}
-
-pub(crate) fn emit_all_with_opts_and_metadata_and_realizations(
-    ir: &IrFile,
-    facade: &str,
-    bodies: &dyn MethodBodies,
-    metadata: EmitMetadata<'_>,
-    opts: &EmitOptions,
-    run: &EmitRun,
-    context: LegacyEmitContext<'_>,
-) -> Option<Vec<(String, Vec<u8>)>> {
-    let module = crate::module_symbols::ModuleSymbols::new(context.symbols);
-    let signature_symbols = CompositeSource::new(vec![&module, &*context.symbols.libraries]);
-    let signature_symbols = SymbolSourceClassifiers::new(&signature_symbols);
-    emit_all_with_checked_classifiers(
-        ir,
-        facade,
-        bodies,
-        metadata,
-        opts,
-        run,
-        &signature_symbols,
-        context.property_realizations,
-    )
 }
 
 pub(crate) fn emit_all_with_checked_classifiers(
@@ -3937,12 +3811,9 @@ pub(crate) fn emit_all_with_checked_classifiers(
     emit_all_with_class_meta(ir, facade, &env, metadata.facade, opts, &|_| None)
 }
 
-/// Like [`emit_all`], but `class_meta` may supply a per-class `@kotlin.Metadata` (keyed by the class's
-/// internal/fq name) attached to that emitted class. This lets a separately-compiled module expose its
-/// classes' Kotlin signatures (member source params, etc.) so a dependent module resolves them — the
-/// cross-module analogue of the facade `metadata`. OPT-IN: the default [`emit_all`] passes a provider
-/// that returns `None` for every class, so krusty-core's emit is unchanged.
-pub fn emit_all_with_class_meta(
+/// `class_meta` may supply per-class `@kotlin.Metadata` keyed by the class's internal name. This
+/// lets a separately compiled module expose its Kotlin member signatures to dependent modules.
+fn emit_all_with_class_meta(
     ir: &IrFile,
     facade: &str,
     env: &EmitEnv,
@@ -5335,7 +5206,7 @@ fn emit_backing_field_read_adaptation(
         if field_jvm.is_jvm_scalar() {
             box_prim_free(cw, code, field_jvm);
         } else {
-            let internal = ref_internal(accessor_jvm);
+            let internal = crate::jvm::names::instanceof_internal_name(accessor_jvm);
             if internal != "java/lang/Object" {
                 let class = cw.class_ref(&internal);
                 code.checkcast(class);
@@ -5372,7 +5243,7 @@ fn emit_backing_field_write_adaptation(
     } else if accessor_jvm.is_jvm_scalar() && field_jvm.is_reference() {
         box_prim_free(cw, code, accessor_jvm);
     } else if accessor_jvm.is_reference() && field_jvm.is_reference() {
-        let internal = ref_internal(field_jvm);
+        let internal = crate::jvm::names::instanceof_internal_name(field_jvm);
         if internal != "java/lang/Object" {
             let class = cw.class_ref(&internal);
             code.checkcast(class);
@@ -7910,7 +7781,7 @@ fn emit_func_ref_class(
             reflection_name
         }
         FrDispatch::VirtualUnbound | FrDispatch::VirtualBound => {
-            crate::jvm::names::mapped_builtin_virtual_name(&call_owner, reflection_name)
+            mapped_builtin_virtual_name(&call_owner, reflection_name, &signature_desc)
         }
     };
     let signature = format!("{signature_name}{signature_desc}");
@@ -8141,7 +8012,7 @@ fn emit_func_ref_class(
             inv.checkcast(wref);
             unbox_prim(&mut cw, &mut inv, adapter);
         } else if jt.is_jvm_scalar() && target_jt.is_reference() {
-            let target = ref_internal(target_jt);
+            let target = crate::jvm::names::instanceof_internal_name(target_jt);
             if target != "java/lang/Object" {
                 let cref = cw.class_ref(&target);
                 inv.checkcast(cref);
@@ -8197,12 +8068,12 @@ fn emit_func_ref_class(
         // A bound reference to a mapped-builtin member (`"KOTLIN"::get`) invokes the same PHYSICAL JVM
         // method a direct call would (`String.get` → `charAt`) — apply the backend's name mapping here too.
         _ if fr.call_interface => {
-            let vn = crate::jvm::names::mapped_builtin_virtual_name(&call_owner, &fr.call_name);
+            let vn = mapped_builtin_virtual_name(&call_owner, &fr.call_name, &call_desc);
             let m = cw.interface_methodref(&call_owner, vn, &call_desc);
             inv.invokeinterface(m, call_arg_words, ret_words);
         }
         _ => {
-            let vn = crate::jvm::names::mapped_builtin_virtual_name(&call_owner, &fr.call_name);
+            let vn = mapped_builtin_virtual_name(&call_owner, &fr.call_name, &call_desc);
             let m = cw.methodref(&call_owner, vn, &call_desc);
             inv.invokevirtual(m, call_arg_words, ret_words);
         }
@@ -8479,7 +8350,7 @@ fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
                 code.ifnull(dispatch);
             }
             code.aload(parameter_slot);
-            let concrete = ref_internal(cp[barrier.parameter]);
+            let concrete = crate::jvm::names::instanceof_internal_name(cp[barrier.parameter]);
             let concrete_class = cw.class_ref(&concrete);
             code.instance_of(concrete_class);
             code.ifne(dispatch);
@@ -8527,7 +8398,7 @@ fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
                 code.invokevirtual(m, 0, slot_words(*ct) as i32);
             } else if et != ct {
                 if et.is_reference() && ct.is_reference() {
-                    let ci = cw.class_ref(&ref_internal(*ct));
+                    let ci = cw.class_ref(&crate::jvm::names::instanceof_internal_name(*ct));
                     code.checkcast(ci);
                 } else if et.is_reference() && ct.is_jvm_scalar() {
                     unbox_prim(cw, &mut code, *ct);
@@ -8564,10 +8435,13 @@ fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
             // A CPS target returns Object while this bridge must recover a reference value-class
             // carrier before `box-impl`. Scalar carriers arrive already boxed and never take this path.
             debug_assert!(tr.is_reference() && cr.is_reference());
-            let carrier = cw.class_ref(&ref_internal(cr));
+            let carrier = cw.class_ref(&crate::jvm::names::instanceof_internal_name(cr));
             code.checkcast(carrier);
         }
-        if cr.is_reference() && ref_internal(cr) == "java/lang/Void" && !er.is_reference() {
+        if cr.is_reference()
+            && crate::jvm::names::instanceof_internal_name(cr) == "java/lang/Void"
+            && !er.is_reference()
+        {
             // A `Nothing` override may have a `java/lang/Void` descriptor while the value-class
             // supertype bridge returns the unboxed primitive. The target must diverge; if it ever
             // falls through, discard the null-only Void result and throw to keep the bridge verifiable.
@@ -8612,14 +8486,18 @@ fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
                 // `kotlin/Unit` singleton the erased bridge must return.
                 let f = cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
                 code.getstatic(f, 1);
-            } else if er.is_reference() && cr.is_reference() && ref_internal(cr) == "java/lang/Void"
+            } else if er.is_reference()
+                && cr.is_reference()
+                && crate::jvm::names::instanceof_internal_name(cr) == "java/lang/Void"
             {
                 // `Nothing?` has only the value `null`, but its concrete JVM descriptor is
                 // `java/lang/Void`. A bridge returning a narrower reference (for example a nullable
                 // value class box) must refine the verifier type before `areturn`.
-                let ci = cw.class_ref(&ref_internal(er));
+                let ci = cw.class_ref(&crate::jvm::names::instanceof_internal_name(er));
                 code.checkcast(ci);
-            } else if er.is_reference() && !er.is_array() && ref_internal(cr) == "java/lang/Object"
+            } else if er.is_reference()
+                && !er.is_array()
+                && crate::jvm::names::instanceof_internal_name(cr) == "java/lang/Object"
             {
                 // Covariant generic DIAMOND: the inherited concrete getter returns the erased
                 // `Object` (`val x: T` in a generic base), but an interface in the hierarchy requires
@@ -8629,7 +8507,7 @@ fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
                 // direction (concrete is a SUBtype of erased) needs no cast; this is the inverse.
                 // Restricted to a plain object type (`Ty::Obj`): an array `er` would need a descriptor-
                 // form class ref, and that narrowing direction doesn't arise here.
-                let ci = cw.class_ref(&ref_internal(er));
+                let ci = cw.class_ref(&crate::jvm::names::instanceof_internal_name(er));
                 code.checkcast(ci);
             } // reference→reference (concrete is a subtype of erased): no cast needed
         }
@@ -9975,8 +9853,8 @@ fn emit_enum_class(
     let mut store_lines: Vec<(u16, u32)> = Vec::new();
     let mut max_locals = 1 + ctor_words;
     // Store constructor-property parameters unless lowering already represented those stores in the
-    // init body. The existence of a body property is not that contract: legacy lowering can emit an
-    // init body containing only the body-property stores while leaving `explicit_param_stores` false.
+    // init body. The existence of a body property is not that contract: an init body can contain
+    // only body-property stores while leaving `explicit_param_stores` false.
     if !c.explicit_param_stores {
         let mut slot = 3u16;
         let mut field_i = 0usize;
@@ -15472,7 +15350,7 @@ impl<'a> Emitter<'a> {
             // A generic Java field's descriptor erases to its formal bound (`CharSequence` for
             // `T : CharSequence`), while this applied read may be `String`. Preserve the selected
             // field descriptor for `getfield`, then narrow its result to the logical binding.
-            let internal = ref_internal(logical);
+            let internal = crate::jvm::names::instanceof_internal_name(logical);
             if internal != "java/lang/Object" {
                 let class = self.cw.class_ref(&internal);
                 code.checkcast(class);
@@ -15504,7 +15382,7 @@ impl<'a> Emitter<'a> {
         if !exp.is_reference() || type_descriptor(s) == type_descriptor(exp) {
             return;
         }
-        let internal = ref_internal(exp);
+        let internal = crate::jvm::names::instanceof_internal_name(exp);
         if internal != "java/lang/Object" {
             let ci = self.cw.class_ref(&internal);
             code.checkcast(ci);
@@ -16167,7 +16045,7 @@ impl<'a> Emitter<'a> {
                 args,
             } => match callee {
                 // `jvm::module_calls::realize` rewrites every `super` call into
-                // `Callee::Special` before emission; the legacy lowerer never builds one.
+                // `Callee::Special` before emission.
                 Callee::Super { .. } => {
                     unreachable!("a super call must be realized before JVM emission")
                 }
@@ -16860,7 +16738,7 @@ impl<'a> Emitter<'a> {
                     );
                     let aw: i32 = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
                     let ret = ty_from_descriptor_ret(&descriptor);
-                    let jvm_name = crate::jvm::names::mapped_builtin_virtual_name(&owner, &name);
+                    let jvm_name = mapped_builtin_virtual_name(&owner, &name, &descriptor);
                     if interface {
                         let m = self.cw.interface_methodref(&owner, jvm_name, &descriptor);
                         code.invokeinterface(m, aw, slot_words(ret) as i32);
@@ -16928,10 +16806,10 @@ impl<'a> Emitter<'a> {
                 let internal = if jvm_ty.is_jvm_scalar() {
                     semantic_scalar_adapter(*type_operand, jvm_ty)
                         .boxed_ref()
-                        .map(ref_internal)
-                        .unwrap_or_else(|| ref_internal(jvm_ty))
+                        .map(crate::jvm::names::instanceof_internal_name)
+                        .unwrap_or_else(|| crate::jvm::names::instanceof_internal_name(jvm_ty))
                 } else {
-                    ref_internal(jvm_ty)
+                    crate::jvm::names::instanceof_internal_name(jvm_ty)
                 };
                 crate::trace_compiler!(
                     "value_classes",
@@ -17001,10 +16879,9 @@ impl<'a> Emitter<'a> {
                             );
                         }
                         let redundant = if physical_arg.is_jvm_scalar() {
-                            semantic_arg
-                                .non_null()
-                                .boxed_ref()
-                                .is_some_and(|source| ref_internal(source) == internal)
+                            semantic_arg.non_null().boxed_ref().is_some_and(|source| {
+                                crate::jvm::names::instanceof_internal_name(source) == internal
+                            })
                         } else {
                             type_descriptor(physical_arg) == type_descriptor(jvm_ty)
                         };
@@ -17107,7 +16984,7 @@ impl<'a> Emitter<'a> {
                             && target.is_reference()
                             && type_descriptor(at) != type_descriptor(target)
                         {
-                            let internal = ref_internal(target);
+                            let internal = crate::jvm::names::instanceof_internal_name(target);
                             if internal != "java/lang/Object" {
                                 let class = self.cw.class_ref(&internal);
                                 code.checkcast(class);
@@ -17686,95 +17563,7 @@ impl<'a> Emitter<'a> {
                 array_type,
                 elements,
                 spreads,
-            } => {
-                let et = array_jvm_element(array_type);
-                let elements = elements.clone();
-                let spreads = spreads.clone();
-                if spreads.len() != elements.len() {
-                    self.run.set_emit_error(
-                        "vararg spread flags do not match the element list".to_string(),
-                    );
-                    return;
-                }
-                if spreads.iter().any(|&spread| spread) {
-                    if et.is_jvm_scalar() {
-                        let Some((builder, add_desc, array_desc)) = primitive_spread_builder(et)
-                        else {
-                            self.run.set_emit_error(
-                                "primitive vararg spread has no platform builder".to_string(),
-                            );
-                            return;
-                        };
-                        let class = self.cw.class_ref(builder);
-                        code.new_obj(class);
-                        code.dup();
-                        code.push_int(elements.len() as i32, self.cw);
-                        let init = self.cw.methodref(builder, "<init>", "(I)V");
-                        code.invokespecial(init, 1, 0);
-                        // `[builder, builder]` stays live across each element (the `dup` is the `add`
-                        // receiver), so a branchy element must frame them — see `emit_value_over`.
-                        let held = self.held_pair(builder);
-                        for (index, &element) in elements.iter().enumerate() {
-                            code.dup();
-                            self.emit_value_over(element, &held, code);
-                            if spreads.get(index).copied().unwrap_or(false) {
-                                let add_spread = self.cw.methodref(
-                                    "kotlin/jvm/internal/PrimitiveSpreadBuilder",
-                                    "addSpread",
-                                    "(Ljava/lang/Object;)V",
-                                );
-                                code.invokevirtual(add_spread, 1, 0);
-                            } else {
-                                let add = self.cw.methodref(builder, "add", add_desc);
-                                code.invokevirtual(add, slot_words(et) as i32, 0);
-                            }
-                        }
-                        let to_array =
-                            self.cw
-                                .methodref(builder, "toArray", &format!("(){array_desc}"));
-                        code.invokevirtual(to_array, 0, 1);
-                    } else {
-                        let builder = "kotlin/jvm/internal/SpreadBuilder";
-                        let class = self.cw.class_ref(builder);
-                        code.new_obj(class);
-                        code.dup();
-                        code.push_int(elements.len() as i32, self.cw);
-                        let init = self.cw.methodref(builder, "<init>", "(I)V");
-                        code.invokespecial(init, 1, 0);
-                        let box_elem = reference_array_scalar_adapter(et);
-                        let held = self.held_pair(builder);
-                        for (index, &element) in elements.iter().enumerate() {
-                            code.dup();
-                            self.emit_value_over(element, &held, code);
-                            let method = if spreads.get(index).copied().unwrap_or(false) {
-                                self.cw
-                                    .methodref(builder, "addSpread", "(Ljava/lang/Object;)V")
-                            } else {
-                                if let Some(primitive) = box_elem {
-                                    box_prim_free(self.cw, code, primitive);
-                                }
-                                self.cw.methodref(builder, "add", "(Ljava/lang/Object;)V")
-                            };
-                            code.invokevirtual(method, 1, 0);
-                        }
-                        code.push_int(0, self.cw);
-                        let element_class = self.cw.class_ref(&ref_internal(et.non_null()));
-                        code.anewarray(element_class);
-                        let to_array = self.cw.methodref(
-                            builder,
-                            "toArray",
-                            "([Ljava/lang/Object;)[Ljava/lang/Object;",
-                        );
-                        code.invokevirtual(to_array, 1, 1);
-                        let array_class = self
-                            .cw
-                            .class_ref(&type_descriptor(ir_ty_to_jvm(array_type)));
-                        code.checkcast(array_class);
-                    }
-                    return;
-                }
-                vararg::emit_packed_array(self, array_type, &elements, code);
-            }
+            } => vararg::emit(self, array_type, elements, spreads, code),
             IrExpr::NewArray { array_type, size } => {
                 let et = array_jvm_element(array_type);
                 self.emit_value(*size, code);
@@ -17783,7 +17572,9 @@ impl<'a> Emitter<'a> {
                 } else {
                     // Peel a nullable element's `?`: `Array<Int?>` = `Integer[]`, so the `anewarray` class
                     // is `java/lang/Integer` (the `?` only tells `Array.get`/`.set` to keep it boxed).
-                    let ci = self.cw.class_ref(&ref_internal(et.non_null()));
+                    let ci = self
+                        .cw
+                        .class_ref(&crate::jvm::names::instanceof_internal_name(et.non_null()));
                     code.anewarray(ci);
                 }
             }
@@ -17834,8 +17625,12 @@ impl<'a> Emitter<'a> {
                 let ejvm = ir_ty_to_jvm(elem);
                 code.getfield(f, slot_words(ejvm) as i32);
                 // An `ObjectRef.element` is typed `Object`; narrow to the boxed value's reference type.
-                if ejvm.is_reference() && ref_internal(ejvm) != "java/lang/Object" {
-                    let cc = self.cw.class_ref(&ref_internal(ejvm));
+                if ejvm.is_reference()
+                    && crate::jvm::names::instanceof_internal_name(ejvm) != "java/lang/Object"
+                {
+                    let cc = self
+                        .cw
+                        .class_ref(&crate::jvm::names::instanceof_internal_name(ejvm));
                     code.checkcast(cc);
                 }
             }
@@ -19196,7 +18991,13 @@ impl<'a> Emitter<'a> {
         {
             if matches!(to, IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf) {
                 let jvm_ty = ir_ty_to_jvm(type_operand);
-                (!jvm_ty.is_jvm_scalar()).then(|| (*to, *arg, ref_internal(jvm_ty)))
+                (!jvm_ty.is_jvm_scalar()).then(|| {
+                    (
+                        *to,
+                        *arg,
+                        crate::jvm::names::instanceof_internal_name(jvm_ty),
+                    )
+                })
             } else {
                 None
             }
@@ -19847,7 +19648,9 @@ impl<'a> Emitter<'a> {
             Ty::Obj(n, _) => {
                 VerifType::ObjectName(crate::jvm::names::classfile_internal_name(&n.render()))
             }
-            Ty::Nullable(_) | Ty::PlatformNullable(_) => VerifType::ObjectName(ref_internal(ty)),
+            Ty::Nullable(_) | Ty::PlatformNullable(_) => {
+                VerifType::ObjectName(crate::jvm::names::instanceof_internal_name(ty))
+            }
             Ty::Null => VerifType::Null,
             _ => VerifType::Top,
         }
@@ -20176,36 +19979,6 @@ fn emit_num_conv(from: Ty, to: Ty, code: &mut CodeBuilder) {
     }
 }
 
-fn ref_internal(t: Ty) -> String {
-    match t {
-        Ty::String => "java/lang/String".to_string(),
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) if inner.is_unsigned() => match *inner {
-            Ty::UByte => "kotlin/UByte".to_string(),
-            Ty::UShort => "kotlin/UShort".to_string(),
-            Ty::UInt => "kotlin/UInt".to_string(),
-            Ty::ULong => "kotlin/ULong".to_string(),
-            _ => unreachable!("is_unsigned accepts only the four unsigned scalar types"),
-        },
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner
-            .boxed_ref()
-            .and_then(Ty::obj_internal)
-            .map(|name| crate::jvm::names::classfile_internal_name(&name.render()))
-            .unwrap_or_else(|| ref_internal(*inner)),
-        // An array's reference identity is its descriptor (`[I`, `[Ljava/lang/String;`) — checked before
-        // the `Obj` arm since arrays are now `Obj("kotlin/Array")`/`Obj("kotlin/IntArray")` too.
-        t if t.is_array() => type_descriptor(t),
-        // Erase a Kotlin built-in name (`kotlin/collections/MutableList`) to its JVM identity here at the
-        // bytecode boundary, so `instanceof`/`checkcast`/method-owner refs never leak a Kotlin-only name.
-        Ty::Obj(n, _) => crate::jvm::names::classfile_internal_name(&n.render()),
-        // A function type's reference identity is its `kotlin/jvm/functions/FunctionN` interface, so
-        // `x is Function1<*, *>` / `x as (A) -> B` test/cast against that class, not `Object`.
-        Ty::Fun(signature) => crate::jvm::names::function_interface_internal_name(
-            signature.params.len() + usize::from(signature.suspend),
-        ),
-        _ => "java/lang/Object".to_string(),
-    }
-}
-
 /// `(opcode, value-words)` for an array element load (`Xaload`).
 /// If `t` is the boxed-reference form of a primitive (the element of a `Array<Int>` etc., carried as
 /// `Obj("kotlin/Int")`), the underlying primitive `Ty`. Used to insert box/unbox at the boxed-array
@@ -20222,24 +19995,6 @@ fn reference_array_scalar_adapter(element: Ty) -> Option<Ty> {
         .is_unsigned()
         .then_some(element.non_null())
         .or_else(|| boxed_prim_of(element))
-}
-
-fn array_load_op(elem: Ty, reference_array: bool) -> (u8, i32) {
-    if reference_array {
-        return (0x32, 1);
-    }
-    match elem {
-        // Unsigned arrays are the unboxed underlying primitive array (`UIntArray` = `[I`,
-        // `ULongArray` = `[J`), so they load with `iaload`/`laload`.
-        Ty::Int | Ty::UInt => (0x2e, 1),
-        Ty::Long | Ty::ULong => (0x2f, 2),
-        Ty::Float => (0x30, 1),
-        Ty::Double => (0x31, 2),
-        Ty::Boolean | Ty::Byte => (0x33, 1),
-        Ty::Char => (0x34, 1),
-        Ty::Short => (0x35, 1),
-        _ => (0x32, 1), // aaload
-    }
 }
 
 /// `(opcode, value-words)` for an array element store (`Xastore`).
@@ -20292,37 +20047,6 @@ fn numeric_cmp_int_category(lt: Ty, rt: Ty) -> bool {
          reference shapes belong on the identity/null/areEqual paths"
     );
     !matches!(lt, Ty::Long | Ty::Double | Ty::Float)
-}
-
-fn array_store_op(elem: Ty, reference_array: bool) -> (u8, i32) {
-    if reference_array {
-        return (0x53, 1);
-    }
-    match elem {
-        // Unsigned arrays store into the unboxed underlying primitive array (`[I`/`[J`).
-        Ty::Int | Ty::UInt => (0x4f, 1),
-        Ty::Long | Ty::ULong => (0x50, 2),
-        Ty::Float => (0x51, 1),
-        Ty::Double => (0x52, 2),
-        Ty::Boolean | Ty::Byte => (0x54, 1),
-        Ty::Char => (0x55, 1),
-        Ty::Short => (0x56, 1),
-        _ => (0x53, 1), // aastore
-    }
-}
-
-/// `newarray` atype for a primitive element (JVMS Table 6.5.newarray-A).
-fn prim_newarray_atype(elem: Ty) -> u8 {
-    match elem {
-        Ty::Boolean => 4,
-        Ty::Char => 5,
-        Ty::Float => 6,
-        Ty::Double => 7,
-        Ty::Byte => 8,
-        Ty::Short => 9,
-        Ty::Long => 11,
-        _ => 10, // int
-    }
 }
 
 /// Normalize a call's return JVM-type: a Kotlin `Nothing` is carried as an object whose JVM mapping is
@@ -20430,7 +20154,7 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         // `null` has its own JVM verification type. Preserve it through slot lowering so loop and
         // resume frames describe an always-null local as `Null`, not as the unusable `Top` type.
         Ty::Null => Ty::Null,
-        // Bare scalar/`String` variants are already JVM types — pass through. (Front-end/`ir_lower` types
+        // Bare scalar/`String` variants are already JVM types — pass through. (Checked/common-IR types
         // can arrive either as these variants or as their `Obj("kotlin/…")` spelling; both must map here.)
         Ty::Int => Ty::Int,
         Ty::Long => Ty::Long,
@@ -20443,67 +20167,62 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         Ty::String => Ty::String,
         // Unsigned scalars are inline classes over the signed primitive; unboxed they ARE that primitive
         // (`UInt` = `int`, `ULong` = `long`) — same JVM slots and `istore`/`iload`/arithmetic. Unsigned
-        // semantics live in the intrinsic calls (`Integer.compareUnsigned`, …) ir_lower already inserted.
+        // semantics live in the intrinsic calls (`Integer.compareUnsigned`, …) common lowering inserted.
         Ty::UByte => Ty::Byte,
         Ty::UShort => Ty::Short,
         Ty::UInt => Ty::Int,
         Ty::ULong => Ty::Long,
-        Ty::Obj(fq_name, type_args) => match () {
-            _ if fq_name.matches("kotlin/Int") => Ty::Int,
-            _ if fq_name.matches("kotlin/Long") => Ty::Long,
-            _ if fq_name.matches("kotlin/Short") => Ty::Short,
-            _ if fq_name.matches("kotlin/Byte") => Ty::Byte,
-            _ if fq_name.matches("kotlin/Boolean") => Ty::Boolean,
-            _ if fq_name.matches("kotlin/Char") => Ty::Char,
-            _ if fq_name.matches("kotlin/Double") => Ty::Double,
-            _ if fq_name.matches("kotlin/Float") => Ty::Float,
-            _ if fq_name.matches("kotlin/String") => Ty::String,
-            // Arrays are regular class types the JVM backend lowers to JVM array types here.
-            _ if fq_name.matches("kotlin/IntArray") => Ty::array(Ty::Int),
-            _ if fq_name.matches("kotlin/LongArray") => Ty::array(Ty::Long),
-            _ if fq_name.matches("kotlin/DoubleArray") => Ty::array(Ty::Double),
-            _ if fq_name.matches("kotlin/FloatArray") => Ty::array(Ty::Float),
-            _ if fq_name.matches("kotlin/BooleanArray") => Ty::array(Ty::Boolean),
-            _ if fq_name.matches("kotlin/CharArray") => Ty::array(Ty::Char),
-            _ if fq_name.matches("kotlin/ByteArray") => Ty::array(Ty::Byte),
-            _ if fq_name.matches("kotlin/ShortArray") => Ty::array(Ty::Short),
-            // Unsigned arrays are `inline class`es over the signed primitive array; at the JVM level they
-            // ARE that array (`UIntArray` = `[I`). The unsigned element semantics are a source/checker
-            // concern already resolved before emit, so collapse to the physical signed array here.
-            _ if fq_name.matches("kotlin/UIntArray") => Ty::array(Ty::Int),
-            _ if fq_name.matches("kotlin/ULongArray") => Ty::array(Ty::Long),
-            // A `kotlin/Array<T>` is a JVM reference array: a primitive element `T` is BOXED
-            // (`Array<Int>` = `[Ljava/lang/Integer;`, distinct from the unboxed `IntArray` = `[I`).
-            _ if fq_name.matches("kotlin/Array") => Ty::array(
-                type_args
-                    .first()
-                    .map(|e| {
-                        // A projection is valid here as the ARRAY classifier's type argument, even
-                        // though it is never a value type of its own. Erase it at this boundary:
-                        // `out X` has the readable element `X`; `in X` can only be read as `Any`.
-                        let semantic = match e.non_null() {
-                            Ty::OutProjection(inner) | Ty::StarProjection(inner) => *inner,
-                            Ty::InProjection(_) => Ty::obj("kotlin/Any"),
-                            _ => *e,
-                        };
-                        let boxed = jvm_reference_array_element(semantic);
-                        // Keep a NULLABLE element's `?`: `Array<Int?>` = `Integer[]` whose `get` yields the
-                        // BOXED element (it can be `null`), UNLIKE `Array<Int>` whose `get` unboxes.
-                        // `boxed_prim_of` returns `None` for a `Nullable(..)`, so the emitter's `Array.get`
-                        // keeps it boxed and `.set` skips the extra box — matching the value the front end
-                        // supplies (boxed for a nullable element, unboxed for a non-null one).
-                        if e.is_nullable() {
-                            Ty::nullable(boxed)
-                        } else {
-                            boxed
-                        }
-                    })
-                    .unwrap_or(Ty::obj("java/lang/Object")),
-            ),
-            _ => Ty::obj(&crate::jvm::names::classfile_internal_name(
-                &fq_name.render(),
-            )),
-        },
+        Ty::Obj(fq_name, type_args) => {
+            // Arrays are regular class types the JVM backend lowers to JVM array types here. Every
+            // primitive specialized array, signed and unsigned alike, goes through the one operation
+            // that identifies them and the one that decides an element's width — see
+            // `jvm::array_representation`.
+            if let Some(carrier) = crate::jvm::array_representation::prim_array_carrier(fq_name) {
+                return carrier;
+            }
+            match () {
+                _ if fq_name.matches("kotlin/Int") => Ty::Int,
+                _ if fq_name.matches("kotlin/Long") => Ty::Long,
+                _ if fq_name.matches("kotlin/Short") => Ty::Short,
+                _ if fq_name.matches("kotlin/Byte") => Ty::Byte,
+                _ if fq_name.matches("kotlin/Boolean") => Ty::Boolean,
+                _ if fq_name.matches("kotlin/Char") => Ty::Char,
+                _ if fq_name.matches("kotlin/Double") => Ty::Double,
+                _ if fq_name.matches("kotlin/Float") => Ty::Float,
+                _ if fq_name.matches("kotlin/String") => Ty::String,
+                // A `kotlin/Array<T>` is a JVM reference array: a primitive element `T` is BOXED
+                // (`Array<Int>` = `[Ljava/lang/Integer;`, distinct from the unboxed `IntArray` = `[I`).
+                _ if fq_name.matches("kotlin/Array") => Ty::array(
+                    type_args
+                        .first()
+                        .map(|e| {
+                            // A projection is valid here as the ARRAY classifier's type argument, even
+                            // though it is never a value type of its own. Erase it at this boundary:
+                            // `out X` has the readable element `X`; `in X` can only be read as `Any`.
+                            let semantic = match e.non_null() {
+                                Ty::OutProjection(inner) | Ty::StarProjection(inner) => *inner,
+                                Ty::InProjection(_) => Ty::obj("kotlin/Any"),
+                                _ => *e,
+                            };
+                            let boxed = jvm_reference_array_element(semantic);
+                            // Keep a NULLABLE element's `?`: `Array<Int?>` = `Integer[]` whose `get` yields the
+                            // BOXED element (it can be `null`), UNLIKE `Array<Int>` whose `get` unboxes.
+                            // `boxed_prim_of` returns `None` for a `Nullable(..)`, so the emitter's `Array.get`
+                            // keeps it boxed and `.set` skips the extra box — matching the value the front end
+                            // supplies (boxed for a nullable element, unboxed for a non-null one).
+                            if e.is_nullable() {
+                                Ty::nullable(boxed)
+                            } else {
+                                boxed
+                            }
+                        })
+                        .unwrap_or(Ty::obj("java/lang/Object")),
+                ),
+                _ => Ty::obj(&crate::jvm::names::classfile_internal_name(
+                    &fq_name.render(),
+                )),
+            }
+        }
         // The JVM representation of a function type is `kotlin/jvm/functions/FunctionN`. A `suspend`
         // function type carries a trailing `Continuation` parameter, so its arity is one greater.
         Ty::Fun(s) => Ty::obj(&crate::jvm::names::function_interface_internal_name(
@@ -20839,6 +20558,36 @@ mod fail_soft_tests {
         }
     }
 
+    struct NoClassifiers;
+
+    impl BackendClassifierSource for NoClassifiers {
+        fn classifier(
+            &self,
+            _classifier: crate::types::TypeName,
+        ) -> Option<std::sync::Arc<crate::backend::BackendClassifierFact>> {
+            None
+        }
+    }
+
+    fn emit_for_test(ir: &IrFile, facade: &str, run: &EmitRun) -> Option<Vec<(String, Vec<u8>)>> {
+        let continuations = crate::jvm::suspend::ContinuationMetadataMap::default();
+        let property_realizations =
+            crate::jvm::property_realizations::PropertyRealizations::default();
+        emit_all_with_checked_classifiers(
+            ir,
+            facade,
+            &NoBodies,
+            EmitMetadata {
+                facade: None,
+                continuations: &continuations,
+            },
+            &EmitOptions::default(),
+            run,
+            &NoClassifiers,
+            &property_realizations,
+        )
+    }
+
     #[test]
     fn member_metadata_flags_keep_inline_operator_and_infix_capabilities() {
         let mut ir = IrFile::default();
@@ -20988,10 +20737,9 @@ mod fail_soft_tests {
 
     // A `GetValue` of a value slot that was never allocated is malformed IR (e.g. an unsupported
     // suspend shape the lowering should have bailed on). The emitter must SKIP the file
-    // (`emit_all` -> `None`), never panic — a compiler must not crash on its own IR.
+    // (checked emission returns `None`), never panic — a compiler must not crash on its own IR.
     #[test]
     fn getvalue_of_unallocated_slot_skips_not_panics() {
-        let symbols = crate::frontend::FrontendSymbols::default();
         let mut ir = IrFile::default();
         let body = ir.add_expr(IrExpr::GetValue(99));
         ir.add_fun(IrFunction {
@@ -21003,12 +20751,11 @@ mod fail_soft_tests {
             dispatch_receiver: None,
             param_checks: vec![],
         });
-        assert!(emit_all(&ir, "TestKt", &NoBodies, None, &symbols).is_none());
+        assert!(emit_for_test(&ir, "TestKt", &EmitRun::default()).is_none());
     }
 
     #[test]
     fn arity_failure_exposes_category_without_owner_or_callable_name() {
-        let symbols = crate::frontend::FrontendSymbols::default();
         let mut ir = IrFile::default();
         let unit = ir.add_expr(IrExpr::Block {
             stmts: vec![],
@@ -21041,16 +20788,7 @@ mod fail_soft_tests {
         // The trace may identify `SensitiveFacade.realCallableName`, but the result read by the CLI
         // and survey is deliberately a stable category with neither source nor JVM owner spelling.
         let run = EmitRun::default();
-        assert!(emit_all_with_opts(
-            &ir,
-            "SensitiveFacade",
-            &NoBodies,
-            None,
-            &EmitOptions::default(),
-            &run,
-            &symbols,
-        )
-        .is_none());
+        assert!(emit_for_test(&ir, "SensitiveFacade", &run).is_none());
         assert_eq!(run.inline_bail().as_deref(), Some("call arity mismatch"));
     }
 }

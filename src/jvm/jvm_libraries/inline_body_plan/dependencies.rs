@@ -37,9 +37,11 @@ impl JvmLibraries {
         let physical_owner = type_name(physical_owner_text);
         let mapped_owners =
             crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_metadata_declarations(physical_owner);
-        let owners = (!mapped_owners.is_empty())
-            .then_some(mapped_owners)
-            .unwrap_or(std::slice::from_ref(&physical_owner));
+        let owners = if !mapped_owners.is_empty() {
+            mapped_owners
+        } else {
+            std::slice::from_ref(&physical_owner)
+        };
         // Decode every semantic declaration in the physical owner's erasure group directly.
         // Going through `classifier_record` here can observe a recursively-building cache entry
         // while the enclosing top-level inline declaration is being normalized. For collections,
@@ -53,8 +55,11 @@ impl JvmLibraries {
                     .physical_name
                     .as_deref()
                     .unwrap_or(member.name.as_str());
-                (crate::jvm::names::mapped_builtin_virtual_name(physical_owner_text, declared_name)
-                    == name
+                (crate::jvm::names::mapped_builtin_virtual_name(
+                    physical_owner_text,
+                    declared_name,
+                    descriptor,
+                ) == name
                     && physical_descriptor(member) == descriptor)
                     .then(|| (*owner, member.clone()))
             }));

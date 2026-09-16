@@ -11,11 +11,13 @@ use crate::types::Visibility;
 use std::collections::HashMap;
 
 mod debug_lines;
+mod declaration_modifiers;
 mod declaration_stream;
 mod expressions;
 mod incdec;
 mod lexical_type_parameters;
 mod nesting;
+mod return_labels;
 pub(crate) use declaration_stream::visit_declaration_units_with_features;
 use lexical_type_parameters::LexicalTypeParameters;
 
@@ -3266,28 +3268,11 @@ impl<'a> Parser<'a> {
         let annotations = self.take_pending_annotations();
         let annotation_args = self.take_pending_annotation_args();
         let start = self.tok().span;
-        let override_span = modifiers
-            .iter()
-            .any(|modifier| modifier == "override")
-            .then(|| {
-                self.t[..self.i]
-                    .iter()
-                    .rev()
-                    .find(|token| self.token_keyword_text(**token, "override"))
-                    .map(|token| token.span)
-                    .expect("an override modifier must retain its source token")
-            });
-        let operator_span = modifiers
-            .iter()
-            .any(|modifier| modifier == "operator")
-            .then(|| {
-                self.t[..self.i]
-                    .iter()
-                    .rev()
-                    .find(|token| self.token_keyword_text(**token, "operator"))
-                    .map(|token| token.span)
-                    .expect("an operator modifier must retain its source token")
-            });
+        let override_span = declaration_modifiers::span(self, modifiers, "override");
+        let operator_span = declaration_modifiers::span(self, modifiers, "operator");
+        // `tailrec` keeps its own span for the same reason `operator` does: the diagnostic that
+        // rejects it points at the modifier, not at the function's name.
+        let tailrec_span = declaration_modifiers::span(self, modifiers, "tailrec");
         self.bump(); // 'fun'
         let (type_params, non_null_type_params, reified_type_params, type_param_bounds, _) =
             if self.at(TokenKind::Lt) {
@@ -3359,6 +3344,7 @@ impl<'a> Parser<'a> {
             signature_span: Span::new(start.lo, signature_end),
             override_span,
             operator_span,
+            tailrec_span,
             flags: function_flags(modifiers),
             visibility: visibility_of(modifiers),
             annotations,
@@ -6311,31 +6297,7 @@ impl<'a> Parser<'a> {
                     start,
                 )
             }
-            TokenKind::KwReturn => {
-                self.bump();
-                // `return@label` — a local return from the lambda carrying `label` (`return@forEach`).
-                let label = if self.at(TokenKind::At) {
-                    self.bump(); // '@'
-                    if self.at(TokenKind::Ident) {
-                        let l = self.text().to_string();
-                        self.bump();
-                        Some(l)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                let e = if self.at(TokenKind::Newline)
-                    || self.at(TokenKind::RBrace)
-                    || self.at(TokenKind::Eof)
-                {
-                    None
-                } else {
-                    Some(self.parse_expr())
-                };
-                self.finish_stmt(Stmt::Return(e, label), start)
-            }
+            TokenKind::KwReturn => self.parse_return_statement(start),
             TokenKind::Ident if self.keyword_text("break") => {
                 self.bump();
                 let label = self.parse_loop_label_ref();

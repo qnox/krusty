@@ -61,6 +61,7 @@ impl Checker<'_> {
             &[argument_ty],
             &[argument],
             span,
+            None,
         ) else {
             crate::trace_compiler!(
                 "resolve",
@@ -78,7 +79,6 @@ impl Checker<'_> {
         if result != Ty::Unit {
             return false;
         }
-        let capabilities = call.capabilities();
         if !matches!(
             call,
             ResolvedCall::Member(_) | ResolvedCall::Extension(_) | ResolvedCall::LocalFunction(_)
@@ -89,7 +89,6 @@ impl Checker<'_> {
             statement,
             StmtLowering::PlusAssign(CompoundAssignmentTarget {
                 call: Box::new(call),
-                capabilities,
             }),
         );
         true

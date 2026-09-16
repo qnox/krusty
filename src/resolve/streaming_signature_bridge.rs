@@ -23,6 +23,7 @@ mod postponed_calls;
 mod qualified_calls;
 mod semantics;
 mod source_contracts;
+mod stable_function_index;
 
 pub(super) use declaration_aliases::publish_compact_nested_aliases;
 pub(crate) use declaration_conflicts::finalize_streamed_top_level_conflicts;
@@ -73,6 +74,7 @@ struct ProductionSignatureSemantics<'a> {
         RefCell<HashMap<crate::fir::DeclarationId, Vec<crate::symbol_resolver::GSigBinds>>>,
     completed_scoped_constraints:
         RefCell<HashMap<crate::fir::DeclarationId, crate::symbol_resolver::GSigBinds>>,
+    stable_functions: stable_function_index::StableFunctionIndex,
     diagnostics: RefCell<Vec<ProductionSignatureDiagnostic>>,
     /// The contract of the callable selected for each top-level call, by call origin, so a
     /// [`crate::fir::SigExpr::ContractNarrowed`] read can ask what the statement proved.
@@ -354,11 +356,6 @@ impl ProductionSignatureSemantics<'_> {
         ))
         .map(Some)
         .map_err(|_| Self::failure())
-    }
-
-    fn callable_signature(&self, declaration: crate::fir::DeclarationId) -> Option<&Signature> {
-        stable_function_signature(self.table, self.headers, self.classifier_types, declaration)
-            .map(|(signature, _)| signature)
     }
 
     fn declaration_extension_receiver(&self, declaration: crate::fir::DeclarationId) -> Option<Ty> {
@@ -2942,6 +2939,7 @@ impl ProductionSignatureSemantics<'_> {
                     &selected_arguments,
                     type_arguments,
                     &callables,
+                    None,
                 )
                 else {
                     return None;
@@ -4617,6 +4615,7 @@ pub(crate) fn finalized_streamed_signature_index(
         scoped_constraint_inputs: RefCell::new(HashMap::new()),
         scoped_constraints: RefCell::new(HashMap::new()),
         completed_scoped_constraints: RefCell::new(HashMap::new()),
+        stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_call_contracts: RefCell::new(HashMap::new()),
         source_contracts: RefCell::new(HashMap::new()),
@@ -5288,6 +5287,7 @@ pub(crate) fn finalized_streamed_signature_index(
         scoped_constraint_inputs: RefCell::new(HashMap::new()),
         scoped_constraints: RefCell::new(HashMap::new()),
         completed_scoped_constraints: RefCell::new(HashMap::new()),
+        stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_call_contracts: RefCell::new(HashMap::new()),
         source_contracts: RefCell::new(HashMap::new()),

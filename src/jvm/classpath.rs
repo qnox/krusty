@@ -11,6 +11,7 @@
 //! - Kotlin type aliases from `@kotlin.Metadata` `d2` arrays in `*TypeAliasesKt.class` files
 
 mod candidate_union;
+mod mapped_builtin_realizations;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -104,7 +105,6 @@ struct MetaNameIds {
     /// descriptor while `@Metadata` keeps the primitive's own name, and the alignment path compares
     /// the two — keyed by `TypeName` so the comparison stays a pointer compare.
     prim_wrapper: crate::name_tree::FxHashMap<crate::types::TypeName, crate::types::TypeName>,
-    prim_array: crate::name_tree::FxHashMap<crate::types::TypeName, &'static str>,
     array: crate::types::TypeName,
     any: crate::types::TypeName,
     object: crate::types::TypeName,
@@ -157,25 +157,9 @@ fn meta_ids() -> &'static MetaNameIds {
             ))
         })
         .collect();
-        let prim_array = [
-            ("kotlin/BooleanArray", "[Z"),
-            ("kotlin/ByteArray", "[B"),
-            ("kotlin/ShortArray", "[S"),
-            ("kotlin/IntArray", "[I"),
-            ("kotlin/LongArray", "[J"),
-            ("kotlin/ULongArray", "[J"),
-            ("kotlin/CharArray", "[C"),
-            ("kotlin/FloatArray", "[F"),
-            ("kotlin/DoubleArray", "[D"),
-            ("kotlin/UIntArray", "[I"),
-        ]
-        .into_iter()
-        .map(|(name, desc)| (tn(name), desc))
-        .collect();
         MetaNameIds {
             prim,
             prim_wrapper,
-            prim_array,
             array: tn("kotlin/Array"),
             any: tn("kotlin/Any"),
             object: tn("java/lang/Object"),
@@ -187,8 +171,16 @@ fn meta_ids() -> &'static MetaNameIds {
     })
 }
 
-fn primitive_array_descriptor_name(internal: TypeName) -> Option<&'static str> {
-    meta_ids().prim_array.get(&internal).copied()
+/// The ELEMENT WIDTH a primitive specialized array carries, or `None` for a name that is not one.
+///
+/// Width rather than name is what this boundary compares, and it is what makes an unsigned array
+/// align with the signed array it is an inline class over: `UByteArray` and `ByteArray` are both
+/// `byte[]`, so both answer `Byte`. The answer comes from the interned identity through the
+/// canonical element table, so nothing here enumerates the classes — the list that used to, named
+/// `UIntArray` and `ULongArray` only, which left `UByteArray` and `UShortArray` with no answer at
+/// this boundary at all.
+fn prim_array_width(internal: TypeName) -> Option<crate::types::Ty> {
+    crate::types::prim_array_element(internal)?.scalar_value_repr()
 }
 
 fn ty_erases_to_object(desc: Ty) -> bool {
@@ -336,11 +328,8 @@ fn meta_param_compat(
     if name == ids.array {
         return desc.is_reference_array();
     }
-    if let Some(meta_desc) = primitive_array_descriptor_name(name) {
-        return desc
-            .obj_internal()
-            .and_then(primitive_array_descriptor_name)
-            == Some(meta_desc);
+    if let Some(width) = prim_array_width(name) {
+        return desc.obj_internal().and_then(prim_array_width) == Some(width);
     }
     if let Some(prim) = ids.prim.get(&name) {
         if nullable {
@@ -398,11 +387,8 @@ fn meta_param_exact(
         return matches!(desc, Ty::Obj(n, args)
             if *n == ids.array && args.first().copied().is_some_and(ty_erases_to_object));
     }
-    if let Some(meta_desc) = primitive_array_descriptor_name(name) {
-        return desc
-            .obj_internal()
-            .and_then(primitive_array_descriptor_name)
-            == Some(meta_desc);
+    if let Some(width) = prim_array_width(name) {
+        return desc.obj_internal().and_then(prim_array_width) == Some(width);
     }
     if let Some(prim) = ids.prim.get(&name) {
         if nullable {
@@ -3107,62 +3093,6 @@ impl Classpath {
         Some((jvm_outer.to_string(), simple.to_string(), class.access))
     }
 
-    /// How reading a builtin PROPERTY is realized on its mapped JVM owner, when that owner has no class
-    /// file to read the realization off (no JDK on the classpath). Takes the JVM owner
-    /// (`java/util/List`) and the Kotlin property name (`size`, `keys`, `key`), and answers with the
-    /// physical accessor the mapped `java.util`/`java.lang` type actually declares — the same
-    /// name/descriptor/interface facts [`Self::builtin_members_name`] puts on the member, so the two
-    /// cannot disagree. Walks the builtins supertype closure, because a property is often declared on a
-    /// supertype (`List.size` on `Collection`).
-    ///
-    /// `None` for a non-builtin owner or a property no builtin declares — the caller then keeps its
-    /// existing behaviour.
-    fn builtin_property_read_access(
-        &self,
-        owner: &str,
-        property: &str,
-    ) -> Option<super::inline::PropertyAccess> {
-        // Normalize to the JVM owner exactly as `inherited_property_access` does, so a read resolved
-        // against the KOTLIN name (`kotlin/collections/List`) still dispatches on the mapped type and
-        // never emits a reference to a class that does not exist at runtime.
-        let jvm_owner_id = super::jvm_class_map::to_jvm_type_name(type_name(owner));
-        let jvm_owner = jvm_owner_id.render();
-        let kotlin = super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(jvm_owner_id)
-            .unwrap_or(jvm_owner_id);
-        let mut queue = std::collections::VecDeque::from([kotlin]);
-        let mut seen = std::collections::HashSet::new();
-        while let Some(current) = queue.pop_front() {
-            if !seen.insert(current) {
-                continue;
-            }
-            let file = self.builtins_file_for_package(Self::builtins_package_for(current));
-            let Some(class) = file.get_name(current) else {
-                continue;
-            };
-            if let Some(member) = class
-                .members
-                .iter()
-                .find(|m| m.is_property && m.name == property)
-            {
-                return Some(super::inline::PropertyAccess::Accessor {
-                    // The dispatch owner stays the one the read was resolved against (mapped to its
-                    // JVM name); only the accessor spelling and descriptor come from the declaring
-                    // builtin, exactly as an inherited class-file accessor keeps the receiver's owner.
-                    owner: jvm_owner.clone(),
-                    name: builtin_property_jvm_name(current, &member.name),
-                    // The member's OWN descriptor, which is already erased (`Map.Entry.key: K` is
-                    // `()Ljava/lang/Object;`). Rebuilding it from the use-site logical type would emit
-                    // `getKey:()Ljava/lang/String;`, a method no class declares.
-                    descriptor: builtin_descriptor(&member.generic_sig),
-                    is_static: false,
-                    is_interface: class.kind == crate::libraries::TypeKind::Interface,
-                });
-            }
-            queue.extend(class.supertypes.iter_ids());
-        }
-        None
-    }
-
     /// Kotlin BUILTIN members (`String.length`, `List.get`, `Number.toInt`, …) as regular
     /// `LibraryMember` facts. The source name stays in `name`; JVM realization details stay in the JVM
     /// backend/provider and descriptor data.
@@ -3230,11 +3160,22 @@ impl Classpath {
                         .find_name(owner)
                         .map(|ci| ci.is_interface())
                         .unwrap_or(class.kind == crate::libraries::TypeKind::Interface);
-                    let member_name = if m.is_property {
-                        builtin_property_jvm_name(internal_id, &m.name)
+                    let kind = if m.is_property {
+                        super::mapped_builtin_declarations::MappedBuiltinMemberKind::Property
                     } else {
-                        m.name.clone()
+                        super::mapped_builtin_declarations::MappedBuiltinMemberKind::Function
                     };
+                    let physical_name = self
+                        .mapped_builtin_realization(internal_id, &m.name, &descriptor, kind)
+                        .map(|(_, name)| name.to_string())
+                        .unwrap_or_else(|| {
+                            if m.is_property {
+                                ordinary_builtin_property_jvm_name(internal_id, &m.name)
+                            } else {
+                                m.name.clone()
+                            }
+                        });
+                    let physical_name = (physical_name != m.name).then_some(physical_name);
                     let builtin_scalar = |name: TypeName| {
                         [
                             ("kotlin/Int", Ty::Int),
@@ -3383,9 +3324,9 @@ impl Classpath {
                         external_default_provider: None,
                         external_property_identity: None,
                         singleton_dispatch: None,
-                        name: member_name,
+                        name: m.name.clone(),
                         owner: Some(owner),
-                        physical_name: None,
+                        physical_name,
                         physical_params: params.clone(),
                         params,
                         ret,
@@ -5895,21 +5836,11 @@ fn companion_owner_field_access(
     })
 }
 
-/// The physical method a Kotlin BUILTIN property is realized as on its mapped JVM type — the READ
-/// direction of the property-accessor mapping (the WRITE direction is the bridge synthesis in
-/// `names::collection_property_stub_name`, reused here): a special `JavaToKotlinClassMap` collection
-/// stub (`keys` → `keySet`), the `CharSequence.length` plain method, else the JavaBean getter
-/// (`is`-prefix kept, otherwise `get<Name>`).
-///
-/// One definition shared by the member table (`Classpath::builtin_members_name`) and the realization
-/// seam (`Classpath::builtin_property_read_access`), so a call and a property read of the same builtin
-/// can never disagree about which method they name.
-fn builtin_property_jvm_name(owner: TypeName, property: &str) -> String {
-    if let Some(stub) = crate::jvm::names::collection_property_stub_name(property) {
-        stub.to_string()
-    } else if property == "length"
-        || owner.matches("kotlin/Enum") && matches!(property, "name" | "ordinal")
-    {
+/// Conventional JVM getter for a builtin property that has no declaration-owned special
+/// realization. Special properties are resolved through `Classpath::mapped_builtin_realization`
+/// before this fallback is reached.
+fn ordinary_builtin_property_jvm_name(owner: TypeName, property: &str) -> String {
+    if owner.matches("kotlin/Enum") && matches!(property, "name" | "ordinal") {
         property.to_string()
     } else {
         crate::jvm::names::property_getter_name(property)
@@ -6033,12 +5964,21 @@ fn class_property_read_access(
             return Some(accessor(method));
         }
     } else {
-        // A Java class has no property declarations: Kotlin sees a SYNTHETIC property for a `getX()` /
-        // `isX()` bean accessor. The Kotlin-name → JVM-name mapping for a mapped builtin (`size` →
-        // `size()`, `keys` → `keySet()`) is applied first, since those are not bean-shaped.
-        let mapped = super::names::mapped_builtin_virtual_name(&owner, property);
+        // A Java class has no property declarations. Pair a method with a special builtin property
+        // only by its exact physical owner/name/descriptor; an unrelated `keySet(): Set` must not
+        // acquire the Kotlin `keys` property merely because its spelling happens to match.
+        if let Some(method) = ci.methods.iter().find(|method| {
+            super::mapped_builtin_declarations::is_property_realization(
+                ci.this_class,
+                property,
+                &method.name,
+                &method.descriptor,
+            )
+        }) {
+            return Some(accessor(method));
+        }
+        // Ordinary JavaBean properties keep their accessor convention.
         for candidate in [
-            mapped.to_string(),
             crate::names::property_getter_name(property),
             format!("is{}", capitalize(property)),
             // A zero-arg method read under its own name. Kotlin has no synthetic property for this, but
@@ -8470,10 +8410,13 @@ mod fq_tests {
     #[test]
     fn enum_builtin_properties_use_their_plain_jvm_methods() {
         let owner = type_name("kotlin/Enum");
-        assert_eq!(builtin_property_jvm_name(owner, "name"), "name");
-        assert_eq!(builtin_property_jvm_name(owner, "ordinal"), "ordinal");
+        assert_eq!(ordinary_builtin_property_jvm_name(owner, "name"), "name");
         assert_eq!(
-            builtin_property_jvm_name(owner, "declaringClass"),
+            ordinary_builtin_property_jvm_name(owner, "ordinal"),
+            "ordinal"
+        );
+        assert_eq!(
+            ordinary_builtin_property_jvm_name(owner, "declaringClass"),
             "getDeclaringClass"
         );
     }

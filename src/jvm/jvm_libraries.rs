@@ -1,12 +1,13 @@
 //! The JVM implementation of the [`SymbolSource`] abstraction: resolves symbols from a `.class`-jar
 //! classpath (the bytecode target). All classpath reads, JVM method-descriptor parsing, and
-//! `java/lang ↔ kotlin` name normalization live here — the front end (`resolve`, `ir_lower`) sees
+//! `java/lang ↔ kotlin` name normalization live here — resolution and checked FIR see
 //! only Kotlin-level `Ty`s and opaque descriptor tokens through the trait.
 
 mod inline_body_plan;
 mod inline_capability;
 mod mapped_builtin_member_status;
 
+use super::mapped_builtin_declarations::MappedBuiltinMember;
 use inline_capability::{metadata_inline, property_accessor_inline};
 use mapped_builtin_member_status::mapped_builtin_member_status;
 
@@ -17,17 +18,14 @@ use super::classreader::{ConstVal, FieldSig, JavaNullability};
 use super::jvm_class_map::to_kotlin_internal;
 use super::metadata;
 use crate::jvm::names::same_mapped_virtual_name;
-use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
+use crate::jvm::names::{property_getter_name, type_descriptor};
 use crate::libraries::{
     AnnotationParameterPolicy, AnnotationPositionalPolicy, CallSig, EmptySymbolSource, FnFlags,
     FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy, GenericSig, InlineKind, LibConst,
     LibraryCallable, LibraryConst, LibraryMember, LibraryType, ParamList, PropKind, PropertyInfo,
     PropertySet, ReturnInfo, SemanticPlatform, Visibility,
 };
-use crate::runtime::{
-    CountedLoopInfo, PlatformAccessor, PlatformCtor, PlatformField, PlatformRangeCtor,
-    RangeConstruction, RuntimeCtor, RuntimeOp,
-};
+use crate::runtime::{CountedLoopInfo, PlatformAccessor, PlatformRangeCtor, RangeConstruction};
 use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{existing_type_name, type_name, Ty, TypeName, TypeNameList};
@@ -124,34 +122,6 @@ fn align_mapped_owner_type_parameters(
                 *bound = ty_subst_keep_unbound(*bound, &bindings);
             }
         }
-    }
-}
-
-/// The `kotlin/…Array` classifier name for an array `Ty` — a primitive specialized array
-/// (`kotlin/IntArray`) or the boxed `Array<T>` (`kotlin/Array`). `None` for a non-array type. Arrays are
-/// `Obj` types carrying their class name directly, so this is a straight class-name match.
-fn array_kotlin_fq(ty: Ty) -> Option<&'static str> {
-    let n = ty.non_null().obj_internal()?;
-    if n.matches("kotlin/BooleanArray") {
-        Some("kotlin/BooleanArray")
-    } else if n.matches("kotlin/CharArray") {
-        Some("kotlin/CharArray")
-    } else if n.matches("kotlin/ByteArray") {
-        Some("kotlin/ByteArray")
-    } else if n.matches("kotlin/ShortArray") {
-        Some("kotlin/ShortArray")
-    } else if n.matches("kotlin/IntArray") {
-        Some("kotlin/IntArray")
-    } else if n.matches("kotlin/LongArray") {
-        Some("kotlin/LongArray")
-    } else if n.matches("kotlin/FloatArray") {
-        Some("kotlin/FloatArray")
-    } else if n.matches("kotlin/DoubleArray") {
-        Some("kotlin/DoubleArray")
-    } else if n.matches("kotlin/Array") {
-        Some("kotlin/Array")
-    } else {
-        None
     }
 }
 
@@ -593,7 +563,7 @@ impl JvmLibraries {
         &self,
         internal: TypeName,
         classifier: &LibraryType,
-        mapped_members: &[crate::libraries::MappedInterfaceMember],
+        mapped_members: &[MappedBuiltinMember],
     ) -> Vec<String> {
         let mut names = Vec::new();
         let mut push = |name: String| {
@@ -669,9 +639,7 @@ impl JvmLibraries {
             }
             let is_default = c.name.ends_with("$default");
             let meta_name = c.name.strip_suffix("$default").unwrap_or(&c.name);
-            let Some((mut params, physical_ret)) =
-                parse_method_desc_with_field_params(&c.descriptor)
-            else {
+            let Some((mut params, physical_ret)) = parse_method_desc(&c.descriptor) else {
                 continue;
             };
             if is_default && params.len() >= 2 {
@@ -1078,7 +1046,7 @@ impl JvmLibraries {
                     params,
                     ret,
                     physical_ret,
-                    desc.to_string(),
+                    desc,
                 )
             };
             overloads.push(FunctionInfo {
@@ -1158,7 +1126,7 @@ impl JvmLibraries {
                         params,
                         ret,
                         physical,
-                        desc.to_string(),
+                        desc,
                     )
                 }
             };
@@ -1328,7 +1296,7 @@ impl JvmLibraries {
                 .is_some_and(|(_, companion)| companion == semantic)
             {
                 return Self::const_fields(&ci.fields, |field| {
-                    Some(field_desc_to_ty(&field.descriptor))
+                    Some(declared_desc_to_ty(&field.descriptor))
                 });
             }
             if let Some(outer) = self.cp.find_name(owner) {
@@ -1360,15 +1328,10 @@ impl JvmLibraries {
         self.cp.builtin_members_name(kotlin)
     }
 
-    /// Members declared by the mapped collection interfaces a concrete JVM class realizes. This is
-    /// the read-side counterpart of [`SymbolSource::mapped_interface_members`], which already owns
-    /// the source name, physical name, erased callable shape, and property/function distinction used
-    /// for bridge emission. Deriving both callable names and concrete property realizations from that
-    /// semantic handoff avoids a second reverse mapping table in the classpath provider.
-    fn mapped_collection_members(
-        &self,
-        internal: TypeName,
-    ) -> Vec<crate::libraries::MappedInterfaceMember> {
+    /// Metadata declarations realized by the mapped collection interfaces in a concrete JVM class's
+    /// hierarchy. The provider walks the physical hierarchy only to discover applied interfaces; the
+    /// member set and Kotlin inheritance come from `.kotlin_builtins`.
+    fn mapped_collection_members(&self, internal: TypeName) -> Vec<MappedBuiltinMember> {
         let mut mappings = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let mut pending = std::collections::VecDeque::new();
@@ -1380,19 +1343,11 @@ impl JvmLibraries {
             if let Some(kotlin) =
                 super::jvm_class_map::jvm_collection_to_kotlin_mutable_type_name(owner)
             {
-                for mapping in
-                    <Self as SemanticPlatform>::mapped_interface_members(self, Ty::obj_name(kotlin))
-                {
-                    if !mappings
-                        .iter()
-                        .any(|existing: &crate::libraries::MappedInterfaceMember| {
-                            existing.source_name == mapping.source_name
-                                && existing.physical_name == mapping.physical_name
-                                && existing.params == mapping.params
-                                && existing.ret == mapping.ret
-                                && existing.is_property == mapping.is_property
-                        })
-                    {
+                for mapping in self.cp.mapped_builtin_members_name(kotlin) {
+                    if mapping.physical_owner != owner {
+                        continue;
+                    }
+                    if !mappings.contains(&mapping) {
                         mappings.push(mapping);
                     }
                 }
@@ -1407,13 +1362,12 @@ impl JvmLibraries {
     /// Kotlin source renames for function members only. Property mappings are consumed separately
     /// by `declared_callables_for`, where they become `PropertyInfo` declarations backed by the
     /// concrete class's physical zero-argument method.
-    fn mapped_collection_function_renames(
-        &self,
-        internal: TypeName,
-    ) -> Vec<crate::libraries::MappedInterfaceMember> {
+    fn mapped_collection_function_renames(&self, internal: TypeName) -> Vec<MappedBuiltinMember> {
         self.mapped_collection_members(internal)
             .into_iter()
-            .filter(|mapping| !mapping.is_property && mapping.source_name != mapping.physical_name)
+            .filter(|mapping| {
+                !mapping.is_property() && mapping.source_name != mapping.physical_name
+            })
             .collect()
     }
 
@@ -1572,7 +1526,7 @@ impl JvmLibraries {
         // overload the WRONG signature). Only when `@Metadata` has no FUNCTION for the name (a Java method,
         // a synthetic, or a PROPERTY getter — recorded as a property, not a function) do we read the JVM
         // `Signature`, which uses the legacy receiver-in-`params[0]` shape.
-        let (desc_params, desc_ret) = parse_method_desc_with_field_params(jvm_desc)?;
+        let (desc_params, desc_ret) = parse_method_desc(jvm_desc)?;
         if let Some(gsig) =
             self.cp
                 .aligned_generic_sig_name(owner, jvm_name, &desc_params, &desc_ret, &|name| {
@@ -2168,15 +2122,16 @@ impl JvmLibraries {
             // `java/util/List` as a supertype. That is what let `list.remove(10)` bind remove-BY-INDEX,
             // and what let `"abcdef".split("c")` bind `java.lang.String.split`, which splits on a REGEX
             // and returns an array. The builtins decode to the same erased descriptors and the same JVM
-            // owner, so nothing physical changes: names stay in source terms and the Kotlin → JVM rename
-            // happens at emit (`names::mapped_builtin_virtual_name`), as for every other mapped member.
+            // owner, so nothing physical changes: the provider keeps the source name and exact physical
+            // name as separate facts on the normalized member.
             //
-            // NOT the remaining mapped builtins, and not for want of anything here: kotlinc does not
-            // hide every Java method on a mapped type either. `JvmBuiltInsCustomizer` re-admits an
-            // explicit whitelist (`JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES`) over the builtins
-            // scope, and krusty has no equivalent — so widening to `kotlin/CharSequence` would wrongly
-            // drop `chars`/`codePoints`, to `kotlin/Enum` `name`/`ordinal`, and to `kotlin/Throwable`
-            // `getStackTrace`/`initCause`/`fillInStackTrace`/… , every one of which kotlinc keeps.
+            // NOT the remaining mapped builtins: kotlinc does not hide every Java method on a mapped
+            // type either. `JvmBuiltInsCustomizer` re-admits an explicit whitelist
+            // (`JvmBuiltInsSignatures.VISIBLE_METHOD_SIGNATURES`) over the builtins scope; krusty's
+            // exact provider-boundary counterpart lives in `mapped_builtin_member_status`.
+            // Widening the authoritative scope to `kotlin/CharSequence` before that policy covers the
+            // whole classifier would wrongly drop `chars`/`codePoints`, and doing the same for
+            // `kotlin/Enum` or `kotlin/Throwable` would drop members kotlinc keeps.
             // Leaving `kotlin/CharSequence` joined is also why whatever `java.lang.CharSequence` declares
             // still reaches `String` one rung up — `charAt` on every JDK, plus `getChars` as of JDK 25,
             // which added it as a `default` method. That is the price of keeping `chars`/`codePoints`,
@@ -2644,9 +2599,8 @@ impl JvmLibraries {
             // name `removeAt`. The `.kotlin_builtins` declaration IS the Kotlin API, and it decodes to
             // the same erased descriptors and JVM owner — so for a mapped name it REPLACES the JVM
             // class's members rather than being unioned with them. The class file still supplies the
-            // kind and constructors. Names stay in source terms; the Kotlin → JVM
-            // rename happens at emit (`names::mapped_builtin_virtual_name`), as it does for every
-            // other mapped member.
+            // kind and constructors. The normalized member retains its Kotlin source name and exact JVM
+            // realization separately.
             // The members half of the same decision (see the supertype block below): for a mapped
             // collection the builtins REPLACE the JVM class's members; every other mapped builtin still
             // joins them, with anything the class file already states under a physical name dropped.
@@ -2669,8 +2623,12 @@ impl JvmLibraries {
                             .physical_name
                             .as_deref()
                             .unwrap_or(builtin.name.as_str());
-                        same_mapped_virtual_name(internal, member_physical, builtin_physical)
-                            && member.descriptor == builtin.descriptor
+                        same_mapped_virtual_name(
+                            internal,
+                            member_physical,
+                            builtin_physical,
+                            &member.descriptor,
+                        ) && member.descriptor == builtin.descriptor
                     })
                 });
             }
@@ -3402,6 +3360,10 @@ pub(crate) fn descriptor_narrowing(desc: &str) -> usize {
 
 /// Parse a JVM field/return descriptor to a `Ty`, normalizing a JVM built-in name to its Kotlin
 /// identity (`java/lang/Object` → `kotlin/Any`) so the front end compares types in Kotlin terms.
+///
+/// This is the STACK reading: `B` and `S` answer `Int`, because that is the slot the JVM holds one
+/// in. It is the right answer to a physical question and the wrong one for a declaration's type,
+/// which is what [`declared_desc_to_ty`] is for — see the note there.
 pub fn desc_to_ty(d: &str) -> Ty {
     match d {
         "I" | "B" | "S" => Ty::Int,
@@ -3412,7 +3374,7 @@ pub fn desc_to_ty(d: &str) -> Ty {
         "C" => Ty::Char,
         "V" => Ty::Unit,
         s if s == type_descriptor(Ty::String) => Ty::String,
-        s if s.starts_with('[') => Ty::array(field_desc_to_ty(&s[1..])),
+        s if s.starts_with('[') => Ty::array(declared_desc_to_ty(&s[1..])),
         s if s.starts_with('L') && s.ends_with(';') => {
             let raw_internal = &s[1..s.len() - 1];
             Ty::obj(to_kotlin_internal(raw_internal))
@@ -3421,11 +3383,20 @@ pub fn desc_to_ty(d: &str) -> Ty {
     }
 }
 
-pub(super) fn field_desc_to_ty(d: &str) -> Ty {
+/// The SEMANTIC reading of the same descriptor: `B` is `Byte` and `S` is `Short`, because that is
+/// what the declaration says, whatever slot the JVM carries one in.
+///
+/// Method parameters and results are read this way too. `java.lang.Number.byteValue()B` declares
+/// `Byte`, and reading it the stack’s way made Kotlin’s `Number.toByte()` a `kotlin.Int` — invisible
+/// on the JVM backend, where a byte and an int share a slot, and wrong everywhere the result is asked
+/// as a TYPE. The same carrier reading made a Java `accept(byte)` declaration look like
+/// `accept(Int)` to overload selection. Stack-slot normalization belongs in the backend, after the
+/// source declaration has been selected.
+pub(super) fn declared_desc_to_ty(d: &str) -> Ty {
     match d {
         "B" => Ty::Byte,
         "S" => Ty::Short,
-        s if s.starts_with('[') => Ty::array(field_desc_to_ty(&s[1..])),
+        s if s.starts_with('[') => Ty::array(declared_desc_to_ty(&s[1..])),
         _ => desc_to_ty(d),
     }
 }
@@ -3454,7 +3425,7 @@ fn java_annotation_parameter_list(class: &crate::jvm::classreader::ClassInfo) ->
             if !parameters.is_empty() {
                 return None;
             }
-            let erased = field_desc_to_ty(ret);
+            let erased = declared_desc_to_ty(ret);
             let generic = method
                 .signature
                 .as_deref()
@@ -3665,41 +3636,7 @@ fn parse_class_gsig(sig: &str) -> Option<(Vec<String>, Vec<Vec<Ty>>, Vec<Ty>)> {
     Some((formals, formal_bounds, supers))
 }
 
-/// The field descriptor of the CPS `Continuation` parameter kotlinc appends to a `suspend` method.
 const CONTINUATION_PARAM_DESCRIPTOR: &str = "Lkotlin/coroutines/Continuation;";
-
-/// Read a JVM method descriptor once into the complete call-boundary layout common lowering needs.
-///
-/// Exactly one position may be the synthetic CPS continuation. A descriptor spelling it more than
-/// once is not a shape kotlinc emits, and guessing between them would align a caller's arguments to
-/// the wrong slots. Its representation facts are still valid, so retain those while reporting no
-/// continuation position and let the caller stay conservative if its value count does not align.
-fn method_layout(descriptor: &str) -> Option<crate::runtime::PlatformMethodLayout> {
-    let (params, ret) = crate::jvm::names::parse_method_descriptor(descriptor)?;
-    let mut found = params
-        .iter()
-        .enumerate()
-        .filter(|&(_, &p)| p == CONTINUATION_PARAM_DESCRIPTOR);
-    let continuation_slot = found
-        .next()
-        .and_then(|(index, _)| found.next().is_none().then_some(index));
-    Some(crate::runtime::PlatformMethodLayout {
-        // A JVM parameter is a reference exactly when its field descriptor is an object (`L…;`) or
-        // an array (`[…`); everything else is a primitive carrier (`I`, `J`, `Z`, …).
-        reference_slots: params
-            .iter()
-            .map(|p| p.starts_with('L') || p.starts_with('['))
-            .collect(),
-        continuation_slot,
-        // Only an object return names a class. A primitive carrier (`I`, `J`, ...), array (`[...`),
-        // or `V` makes no reference-class claim, which keeps a carrier-returning call from reading as
-        // an already boxed value.
-        return_class: ret
-            .strip_prefix('L')
-            .and_then(|ret| ret.strip_suffix(';'))
-            .map(type_name),
-    })
-}
 
 /// Parse a method descriptor `(p…)ret` into parameter `Ty`s and the return `Ty`.
 /// The LOGICAL descriptor of a `suspend fun`'s physical CPS method: drop the trailing
@@ -3751,16 +3688,8 @@ fn interface_holder_method(
 pub(crate) fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
     let (params, ret) = crate::jvm::names::parse_method_descriptor(desc)?;
     Some((
-        params.into_iter().map(desc_to_ty).collect(),
-        desc_to_ty(ret),
-    ))
-}
-
-fn parse_method_desc_with_field_params(desc: &str) -> Option<(Vec<Ty>, Ty)> {
-    let (params, ret) = crate::jvm::names::parse_method_descriptor(desc)?;
-    Some((
-        params.into_iter().map(field_desc_to_ty).collect(),
-        desc_to_ty(ret),
+        params.into_iter().map(declared_desc_to_ty).collect(),
+        declared_desc_to_ty(ret),
     ))
 }
 
@@ -4077,8 +4006,8 @@ impl JvmLibraries {
         &self,
         recv: Ty,
         name: &str,
-        mapped_members: &[crate::libraries::MappedInterfaceMember],
-        function_renames: &[crate::libraries::MappedInterfaceMember],
+        mapped_members: &[MappedBuiltinMember],
+        function_renames: &[MappedBuiltinMember],
     ) -> crate::libraries::Callables {
         let functions = self.member_functions_with_renames(recv, name, function_renames);
         // Exact declarations on this classifier. The resolver owns the one inheritance walk.
@@ -4089,7 +4018,7 @@ impl JvmLibraries {
         let cn = internal;
         let mapped_property = mapped_members
             .iter()
-            .find(|mapping| mapping.is_property && mapping.source_name == name);
+            .find(|mapping| mapping.is_property() && mapping.source_name == name);
         if let Some(ci) = self.cp.find_name(cn) {
             for mp in metadata::class_properties(&ci) {
                 if mp.name != name {
@@ -4396,7 +4325,7 @@ impl JvmLibraries {
                 .filter(|_| Ty::obj_name(cn).scalar_value_repr().is_none())
                 .filter(|field| !field.is_private() || overloads.is_empty())
             {
-                let erased_ty = field_desc_to_ty(&field.descriptor);
+                let erased_ty = declared_desc_to_ty(&field.descriptor);
                 let field_ty = field
                     .signature
                     .as_deref()
@@ -4487,8 +4416,7 @@ impl JvmLibraries {
                 function.callable.params.is_empty()
                     && mapped_property.as_ref().is_none_or(|mapping| {
                         function.callable.name == mapping.physical_name
-                            && function.callable.descriptor
-                                == method_descriptor(&mapping.params, mapping.ret)
+                            && function.callable.descriptor == mapping.descriptor
                     })
             }) {
                 let mut getter = function.callable.clone();
@@ -4663,7 +4591,7 @@ impl JvmLibraries {
                     let function_renames = mapped_members
                         .iter()
                         .filter(|mapping| {
-                            !mapping.is_property && mapping.source_name != mapping.physical_name
+                            !mapping.is_property() && mapping.source_name != mapping.physical_name
                         })
                         .cloned()
                         .collect::<Vec<_>>();
@@ -5433,7 +5361,7 @@ impl JvmLibraries {
         callable: &LibraryCallable,
     ) -> Option<crate::libraries::DefaultCallRealization> {
         let bridge_name = format!("{}$default", callable.name);
-        let (base_params, _) = parse_method_desc_with_field_params(&callable.descriptor)?;
+        let (base_params, _) = parse_method_desc(&callable.descriptor)?;
         let is_continuation = |ty: Ty| {
             ty.obj_internal()
                 .is_some_and(|name| name.matches("kotlin/coroutines/Continuation"))
@@ -5462,7 +5390,7 @@ impl JvmLibraries {
                 if !method.is_static() || method.name != bridge_name {
                     return None;
                 }
-                let (params, ret) = parse_method_desc_with_field_params(&method.descriptor)?;
+                let (params, ret) = parse_method_desc(&method.descriptor)?;
                 if !params.starts_with(&base_params) {
                     return None;
                 }
@@ -5509,7 +5437,7 @@ impl JvmLibraries {
         let class = self.cp.find_name(owner)?;
         let physical_name = member.physical_name.as_deref().unwrap_or(&member.name);
         let bridge_name = format!("{physical_name}$default");
-        let (base_params, _) = parse_method_desc_with_field_params(&member.descriptor)?;
+        let (base_params, _) = parse_method_desc(&member.descriptor)?;
         let is_continuation = |ty: Ty| {
             ty.obj_internal()
                 .is_some_and(|name| name.matches("kotlin/coroutines/Continuation"))
@@ -5531,7 +5459,7 @@ impl JvmLibraries {
                     if !method.is_static() || method.name != bridge_name {
                         return None;
                     }
-                    let (params, ret) = parse_method_desc_with_field_params(&method.descriptor)?;
+                    let (params, ret) = parse_method_desc(&method.descriptor)?;
                     // A dispatched member's base descriptor excludes its receiver while its static
                     // `$default` bridge prepends one. A direct interface-holder or value-class
                     // realization already carries that receiver in the base descriptor.
@@ -5587,7 +5515,7 @@ impl JvmLibraries {
         &self,
         receiver: Ty,
         name: &str,
-        function_renames: &[crate::libraries::MappedInterfaceMember],
+        function_renames: &[MappedBuiltinMember],
     ) -> FunctionSet {
         // Exact declarations on this classifier. The resolver assigns inheritance distance.
         let mut overloads = Vec::new();
@@ -5622,19 +5550,13 @@ impl JvmLibraries {
                                 .iter()
                                 .find(|mapping| {
                                     mapping.physical_name == m.name
-                                        && method_descriptor(&mapping.params, mapping.ret)
-                                            == m.descriptor
+                                        && mapping.descriptor == m.descriptor
                                 })
                                 .map_or(m.name.as_str(), |mapping| mapping.source_name.as_str())
                         },
                         |_| m.name.as_str(),
                     );
-                    if scope_name == name
-                        || matches!(
-                            (scope_name, name),
-                            ("keySet", "keys") | ("entrySet", "entries")
-                        )
-                    {
+                    if scope_name == name {
                         let cn_rendered = cn.render();
                         crate::trace_compiler!(
                             "resolve",
@@ -5910,7 +5832,7 @@ impl JvmLibraries {
                             })
                             .map(|ty| self.semanticize_jvm_type(ty))
                     })
-                    .unwrap_or_else(|| field_desc_to_ty(&f.descriptor));
+                    .unwrap_or_else(|| declared_desc_to_ty(&f.descriptor));
                 let ty = if ci.meta.is_present() {
                     ty
                 } else {
@@ -6433,72 +6355,6 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         Some(crate::jvm::jvm_class_map::to_kotlin_internal(internal).to_string())
     }
 
-    fn mapped_interface_members(
-        &self,
-        supertype: Ty,
-    ) -> Vec<crate::libraries::MappedInterfaceMember> {
-        let Some(internal) = supertype.obj_internal() else {
-            return Vec::new();
-        };
-        let mut members = Vec::new();
-        let jvm_internal = crate::jvm::jvm_class_map::to_jvm_type_name(internal);
-        let collection_properties: &[&str] = if jvm_internal.matches("java/util/Map") {
-            &["size", "values", "keys", "entries"]
-        } else if jvm_internal.matches("java/util/Collection")
-            || jvm_internal.matches("java/util/List")
-            || jvm_internal.matches("java/util/Set")
-        {
-            &["size"]
-        } else {
-            &[]
-        };
-        for &property in collection_properties {
-            let Some((physical, ret)) = crate::jvm::names::collection_property_stub(property)
-            else {
-                continue;
-            };
-            members.push(crate::libraries::MappedInterfaceMember {
-                source_name: property.to_string(),
-                physical_name: physical.to_string(),
-                params: Vec::new(),
-                ret,
-                is_property: true,
-            });
-        }
-        // `MutableList.removeAt(Int): E` IS `java.util.List.remove(int)` — the function half of the
-        // same special-builtin renaming the properties above cover, so a class implementing
-        // `MutableList` must expose its `removeAt` override under the JVM name too. Keyed on the
-        // KOTLIN name, not the erased `java/util/List`: unlike `size`, this member exists only on the
-        // MUTABLE side, so a read-only `List` implementation that happens to declare an unrelated
-        // `removeAt` must not acquire a `remove(int)` bridge kotlinc would never emit.
-        if internal.matches("kotlin/collections/MutableList") {
-            members.push(crate::libraries::MappedInterfaceMember {
-                source_name: "removeAt".to_string(),
-                physical_name: "remove".to_string(),
-                params: vec![Ty::Int],
-                ret: Ty::obj("kotlin/Any"),
-                is_property: false,
-            });
-        }
-        if internal.matches("kotlin/CharSequence") || internal.matches("java/lang/CharSequence") {
-            members.push(crate::libraries::MappedInterfaceMember {
-                source_name: "length".to_string(),
-                physical_name: "length".to_string(),
-                params: Vec::new(),
-                ret: Ty::Int,
-                is_property: true,
-            });
-            members.push(crate::libraries::MappedInterfaceMember {
-                source_name: "get".to_string(),
-                physical_name: "charAt".to_string(),
-                params: vec![Ty::Int],
-                ret: Ty::Char,
-                is_property: false,
-            });
-        }
-        members
-    }
-
     fn signature_formal_names(&self, signature: &str) -> Vec<String> {
         signature_formals(signature)
     }
@@ -6514,116 +6370,8 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 }
 
-impl crate::runtime::TargetRuntime for JvmLibraries {
-    fn property_reference_impl(&self, arity: usize, mutable: bool) -> Option<PlatformCtor> {
-        let internal = match (arity, mutable) {
-            (0, false) => "kotlin/jvm/internal/PropertyReference0Impl",
-            (0, true) => "kotlin/jvm/internal/MutablePropertyReference0Impl",
-            (1, false) => "kotlin/jvm/internal/PropertyReference1Impl",
-            (1, true) => "kotlin/jvm/internal/MutablePropertyReference1Impl",
-            _ => return None,
-        };
-        Some(PlatformCtor {
-            internal: internal.to_string(),
-            ctor_desc: "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)V".to_string(),
-        })
-    }
-
-    fn property_reference_signature(&self, getter_name: &str, ret: Ty) -> Option<String> {
-        Some(format!("{getter_name}(){}", type_descriptor(ret)))
-    }
-
-    fn type_descriptor(&self, ty: Ty) -> Option<String> {
-        Some(type_descriptor(crate::jvm::ir_emit::ir_ty_to_jvm(&ty)))
-    }
-
-    fn ir_type_descriptor(&self, ty: Ty) -> Option<String> {
-        Some(type_descriptor(crate::jvm::ir_emit::ir_ty_to_jvm(&ty)))
-    }
-
-    fn ir_value_type(&self, ty: Ty) -> Ty {
-        crate::jvm::ir_emit::ir_ty_to_jvm(&ty)
-    }
-
-    fn method_descriptor(&self, params: &[Ty], ret: Ty) -> Option<String> {
-        let params = crate::jvm::ir_emit::jvm_tys(params);
-        let ret = crate::jvm::ir_emit::ir_ty_to_jvm(&ret);
-        Some(method_descriptor(&params, ret))
-    }
-
-    fn descriptor_method_layout(
-        &self,
-        descriptor: &str,
-    ) -> Option<crate::runtime::PlatformMethodLayout> {
-        method_layout(descriptor)
-    }
-
-    fn function_reference_impl_type(&self) -> Option<Ty> {
-        Some(Ty::obj("kotlin/jvm/internal/FunctionReferenceImpl"))
-    }
-
-    fn object_instance_field(&self, internal: &str) -> Option<PlatformField> {
-        let physical = super::names::classfile_internal_name(internal);
-        Some(PlatformField {
-            owner: physical.clone(),
-            name: "INSTANCE".to_string(),
-            descriptor: format!("L{physical};"),
-        })
-    }
-
-    fn companion_instance_field(
-        &self,
-        class_internal: &str,
-        companion_internal: &str,
-        field_name: &str,
-    ) -> Option<PlatformField> {
-        let physical_companion = super::names::classfile_internal_name(companion_internal);
-        if super::jvm_class_map::intrinsic_companion_to_jvm(companion_internal).is_some() {
-            return Some(PlatformField {
-                owner: physical_companion.clone(),
-                name: "INSTANCE".to_string(),
-                descriptor: format!("L{physical_companion};"),
-            });
-        }
-        Some(PlatformField {
-            owner: super::names::classfile_internal_name(class_internal),
-            name: field_name.to_string(),
-            descriptor: format!("L{physical_companion};"),
-        })
-    }
-
-    fn mutable_local_ref_type(&self, elem: Ty) -> Option<Ty> {
-        let internal = match elem {
-            Ty::Int | Ty::UInt => "kotlin/jvm/internal/Ref$IntRef",
-            Ty::Long | Ty::ULong => "kotlin/jvm/internal/Ref$LongRef",
-            Ty::Float => "kotlin/jvm/internal/Ref$FloatRef",
-            Ty::Double => "kotlin/jvm/internal/Ref$DoubleRef",
-            Ty::Boolean => "kotlin/jvm/internal/Ref$BooleanRef",
-            Ty::Char => "kotlin/jvm/internal/Ref$CharRef",
-            Ty::Byte | Ty::UByte => "kotlin/jvm/internal/Ref$ByteRef",
-            Ty::Short | Ty::UShort => "kotlin/jvm/internal/Ref$ShortRef",
-            _ => "kotlin/jvm/internal/Ref$ObjectRef",
-        };
-        Some(Ty::obj(internal))
-    }
-
-    fn scalar_value_repr(&self, ty: Ty) -> Option<Ty> {
-        ty.scalar_value_repr()
-    }
-
-    fn unsigned_integer_box_type(&self, ty: Ty) -> Option<Ty> {
-        ty.boxed_ref().filter(|_| ty.is_unsigned())
-    }
-
-    fn counted_loop_info(&self, internal: &str) -> Option<CountedLoopInfo> {
-        self.counted_loop_info_for_type(internal)
-    }
-
-    fn counted_loop_info_name(&self, internal: TypeName) -> Option<CountedLoopInfo> {
-        self.counted_loop_info_for_name(internal)
-    }
-
-    fn range_construction(&self, lo: Ty, hi: Ty) -> Option<RangeConstruction> {
+impl JvmLibraries {
+    pub(super) fn range_construction(&self, lo: Ty, hi: Ty) -> Option<RangeConstruction> {
         let (internal, elem, trailing_nulls) = match (lo, hi) {
             (Ty::Char, Ty::Char) => ("kotlin/ranges/CharRange", Ty::Char, 0),
             (Ty::UInt, Ty::UInt) => ("kotlin/ranges/UIntRange", Ty::UInt, 1),
@@ -6703,350 +6451,20 @@ impl crate::runtime::TargetRuntime for JvmLibraries {
         })
     }
 
-    fn suspend_cps_descriptor(&self, logical_descriptor: &str) -> Option<String> {
-        let close = logical_descriptor.rfind(')')?;
-        Some(format!(
-            "{}Lkotlin/coroutines/Continuation;)Ljava/lang/Object;",
-            &logical_descriptor[..close]
-        ))
-    }
-
-    fn runtime_callable(&self, op: RuntimeOp, ty: Ty) -> Option<LibraryCallable> {
-        let callable = |owner: &str,
-                        name: &str,
-                        params: Vec<Ty>,
-                        ret: Ty,
-                        physical_ret: Ty,
-                        descriptor: String| {
-            Some(LibraryCallable::library(
-                type_name(owner),
-                name,
-                params,
-                ret,
-                physical_ret,
-                descriptor,
-            ))
+    pub(super) fn unsigned_compare_callable(&self, ty: Ty) -> Option<LibraryCallable> {
+        let (owner, primitive, physical) = match ty {
+            Ty::UInt => ("java/lang/Integer", "I", Ty::Int),
+            Ty::ULong => ("java/lang/Long", "J", Ty::Long),
+            _ => return None,
         };
-
-        match op {
-            RuntimeOp::UnsignedBox | RuntimeOp::UnsignedUnbox | RuntimeOp::UnsignedEquals => {
-                // Every unsigned type boxes through its OWN inline class (`kotlin/UByte`, …) over the
-                // signed primitive it erases to — one row derived from the `Ty`, not a per-type table.
-                if !ty.is_unsigned() {
-                    return None;
-                }
-                let owner = &ty.kotlin_class_internal()?.render();
-                let prim = crate::jvm::names::type_descriptor(ty);
-                let repr = ty.scalar_value_repr()?;
-                match op {
-                    RuntimeOp::UnsignedBox => callable(
-                        owner,
-                        "box-impl",
-                        vec![ty],
-                        Ty::obj(owner),
-                        Ty::obj(owner),
-                        format!("({prim})L{owner};"),
-                    ),
-                    RuntimeOp::UnsignedUnbox => callable(
-                        owner,
-                        "unbox-impl",
-                        vec![Ty::obj(owner)],
-                        ty,
-                        repr,
-                        format!("(){prim}"),
-                    ),
-                    // The compiled form of `override fun equals(other: Any?)` on the inline class: the
-                    // receiver is the CARRIER in a primitive slot, so nothing boxes to make the call.
-                    RuntimeOp::UnsignedEquals => callable(
-                        owner,
-                        "equals-impl",
-                        // Kotlin declares `equals(other: Any?)`. The descriptor still erases the
-                        // nullable reference to `Object`; retain nullability in the semantic row so
-                        // target-independent lowering and JVM realization describe the same call.
-                        vec![ty, Ty::nullable(Ty::obj("kotlin/Any"))],
-                        Ty::Boolean,
-                        Ty::Boolean,
-                        format!("({prim}Ljava/lang/Object;)Z"),
-                    ),
-                    _ => unreachable!(),
-                }
-            }
-            RuntimeOp::UnsignedCompare
-            | RuntimeOp::UnsignedDivide
-            | RuntimeOp::UnsignedRemainder
-            | RuntimeOp::UnsignedToString => {
-                let (owner, prim, repr) = match ty {
-                    Ty::UInt => ("java/lang/Integer", "I", Ty::Int),
-                    Ty::ULong => ("java/lang/Long", "J", Ty::Long),
-                    _ => return None,
-                };
-                let (name, params, ret, descriptor) = match op {
-                    RuntimeOp::UnsignedCompare => (
-                        "compareUnsigned",
-                        vec![ty, ty],
-                        Ty::Int,
-                        format!("({prim}{prim})I"),
-                    ),
-                    RuntimeOp::UnsignedDivide => (
-                        "divideUnsigned",
-                        vec![ty, ty],
-                        ty,
-                        format!("({prim}{prim}){prim}"),
-                    ),
-                    RuntimeOp::UnsignedRemainder => (
-                        "remainderUnsigned",
-                        vec![ty, ty],
-                        ty,
-                        format!("({prim}{prim}){prim}"),
-                    ),
-                    RuntimeOp::UnsignedToString => (
-                        "toUnsignedString",
-                        vec![ty],
-                        Ty::String,
-                        format!("({prim})Ljava/lang/String;"),
-                    ),
-                    _ => unreachable!(),
-                };
-                callable(owner, name, params, ret, repr, descriptor)
-            }
-            RuntimeOp::UIntToLong if ty == Ty::UInt => callable(
-                "java/lang/Integer",
-                "toUnsignedLong",
-                vec![Ty::UInt],
-                Ty::Long,
-                Ty::Long,
-                "(I)J".to_string(),
-            ),
-            RuntimeOp::UIntToLong => None,
-            RuntimeOp::UnsignedToDouble if ty == Ty::UInt => callable(
-                "kotlin/UnsignedKt",
-                "uintToDouble",
-                vec![Ty::UInt],
-                Ty::Double,
-                Ty::Double,
-                "(I)D".to_string(),
-            ),
-            RuntimeOp::UnsignedToDouble if ty == Ty::ULong => callable(
-                "kotlin/UnsignedKt",
-                "ulongToDouble",
-                vec![Ty::ULong],
-                Ty::Double,
-                Ty::Double,
-                "(J)D".to_string(),
-            ),
-            RuntimeOp::UnsignedToDouble => None,
-            RuntimeOp::PrimitiveCompare if ty != Ty::Boolean => {
-                let cmp_ty = ty.int_arithmetic_repr();
-                let (cmp_owner, cmp_prim) = match cmp_ty {
-                    Ty::Int => ("java/lang/Integer", "I"),
-                    Ty::Long => ("java/lang/Long", "J"),
-                    Ty::Float => ("java/lang/Float", "F"),
-                    Ty::Double => ("java/lang/Double", "D"),
-                    _ => return None,
-                };
-                callable(
-                    cmp_owner,
-                    "compare",
-                    vec![cmp_ty, cmp_ty],
-                    Ty::Int,
-                    Ty::Int,
-                    format!("({cmp_prim}{cmp_prim})I"),
-                )
-            }
-            RuntimeOp::PrimitiveCompare => None,
-            RuntimeOp::FloatingIsNaN | RuntimeOp::FloatingIsInfinite => {
-                let (owner, primitive) = match ty {
-                    Ty::Float => ("java/lang/Float", "F"),
-                    Ty::Double => ("java/lang/Double", "D"),
-                    _ => return None,
-                };
-                let name = match op {
-                    RuntimeOp::FloatingIsNaN => "isNaN",
-                    RuntimeOp::FloatingIsInfinite => "isInfinite",
-                    _ => unreachable!(),
-                };
-                callable(
-                    owner,
-                    name,
-                    vec![ty],
-                    Ty::Boolean,
-                    Ty::Boolean,
-                    format!("({primitive})Z"),
-                )
-            }
-            RuntimeOp::HashCode => {
-                let (owner, desc, param) = match ty {
-                    Ty::Int => ("java/lang/Integer", "(I)I", Ty::Int),
-                    Ty::Short => ("java/lang/Short", "(S)I", Ty::Short),
-                    Ty::Byte => ("java/lang/Byte", "(B)I", Ty::Byte),
-                    Ty::Char => ("java/lang/Character", "(C)I", Ty::Char),
-                    Ty::Boolean => ("java/lang/Boolean", "(Z)I", Ty::Boolean),
-                    Ty::Long => ("java/lang/Long", "(J)I", Ty::Long),
-                    Ty::Double => ("java/lang/Double", "(D)I", Ty::Double),
-                    Ty::Float => ("java/lang/Float", "(F)I", Ty::Float),
-                    _ => (
-                        "java/util/Objects",
-                        "(Ljava/lang/Object;)I",
-                        Ty::obj("kotlin/Any"),
-                    ),
-                };
-                callable(
-                    owner,
-                    "hashCode",
-                    vec![param],
-                    Ty::Int,
-                    Ty::Int,
-                    desc.to_string(),
-                )
-            }
-            RuntimeOp::ArrayToString => {
-                let desc = match array_kotlin_fq(ty.non_null())? {
-                    "kotlin/BooleanArray" => "([Z)Ljava/lang/String;",
-                    "kotlin/CharArray" => "([C)Ljava/lang/String;",
-                    "kotlin/ByteArray" => "([B)Ljava/lang/String;",
-                    "kotlin/ShortArray" => "([S)Ljava/lang/String;",
-                    "kotlin/IntArray" => "([I)Ljava/lang/String;",
-                    "kotlin/LongArray" => "([J)Ljava/lang/String;",
-                    "kotlin/FloatArray" => "([F)Ljava/lang/String;",
-                    "kotlin/DoubleArray" => "([D)Ljava/lang/String;",
-                    "kotlin/Array" => "([Ljava/lang/Object;)Ljava/lang/String;",
-                    _ => return None,
-                };
-                callable(
-                    "java/util/Arrays",
-                    "toString",
-                    vec![ty],
-                    Ty::String,
-                    Ty::String,
-                    desc.to_string(),
-                )
-            }
-            RuntimeOp::ArrayHashCode => {
-                // A data class CONTENT-hashes an array field via `java.util.Arrays.hashCode([X)I`
-                // (kotlinc's shape), not the array's identity `Object.hashCode`. An UNSIGNED array
-                // is a stdlib value class over the signed carrier — kotlinc routes its hash through
-                // the class's own static `hashCode-impl(<carrier>)I` instead of `Arrays`.
-                let internal = ty.non_null().obj_internal();
-                if let Some(n) = internal {
-                    let unsigned = if n.matches("kotlin/UIntArray") {
-                        Some(("kotlin/UIntArray", "([I)I"))
-                    } else if n.matches("kotlin/ULongArray") {
-                        Some(("kotlin/ULongArray", "([J)I"))
-                    } else if n.matches("kotlin/UByteArray") {
-                        Some(("kotlin/UByteArray", "([B)I"))
-                    } else if n.matches("kotlin/UShortArray") {
-                        Some(("kotlin/UShortArray", "([S)I"))
-                    } else {
-                        None
-                    };
-                    if let Some((owner, desc)) = unsigned {
-                        return callable(
-                            owner,
-                            "hashCode-impl",
-                            vec![ty],
-                            Ty::Int,
-                            Ty::Int,
-                            desc.to_string(),
-                        );
-                    }
-                }
-                let desc = match array_kotlin_fq(ty.non_null())? {
-                    "kotlin/BooleanArray" => "([Z)I",
-                    "kotlin/CharArray" => "([C)I",
-                    "kotlin/ByteArray" => "([B)I",
-                    "kotlin/ShortArray" => "([S)I",
-                    "kotlin/IntArray" => "([I)I",
-                    "kotlin/LongArray" => "([J)I",
-                    "kotlin/FloatArray" => "([F)I",
-                    "kotlin/DoubleArray" => "([D)I",
-                    "kotlin/Array" => "([Ljava/lang/Object;)I",
-                    _ => return None,
-                };
-                callable(
-                    "java/util/Arrays",
-                    "hashCode",
-                    vec![ty],
-                    Ty::Int,
-                    Ty::Int,
-                    desc.to_string(),
-                )
-            }
-            RuntimeOp::ArrayCopyOf => {
-                let desc = match array_kotlin_fq(ty.non_null())? {
-                    "kotlin/BooleanArray" => "([ZI)[Z",
-                    "kotlin/CharArray" => "([CI)[C",
-                    "kotlin/ByteArray" => "([BI)[B",
-                    "kotlin/ShortArray" => "([SI)[S",
-                    "kotlin/IntArray" => "([II)[I",
-                    "kotlin/LongArray" => "([JI)[J",
-                    "kotlin/FloatArray" => "([FI)[F",
-                    "kotlin/DoubleArray" => "([DI)[D",
-                    "kotlin/Array" => "([Ljava/lang/Object;I)[Ljava/lang/Object;",
-                    _ => return None,
-                };
-                callable(
-                    "java/util/Arrays",
-                    "copyOf",
-                    vec![ty, Ty::Int],
-                    ty,
-                    ty,
-                    desc.to_string(),
-                )
-            }
-            RuntimeOp::StartCoroutine => callable(
-                "kotlin/coroutines/ContinuationKt",
-                "startCoroutine",
-                vec![
-                    Ty::obj("kotlin/Function1"),
-                    Ty::obj("kotlin/coroutines/Continuation"),
-                ],
-                Ty::Unit,
-                Ty::Unit,
-                "(Lkotlin/jvm/functions/Function1;Lkotlin/coroutines/Continuation;)V".to_string(),
-            ),
-            RuntimeOp::StartCoroutineReceiver => callable(
-                "kotlin/coroutines/ContinuationKt",
-                "startCoroutine",
-                vec![
-                    Ty::obj("kotlin/Function2"),
-                    Ty::obj("kotlin/Any"),
-                    Ty::obj("kotlin/coroutines/Continuation"),
-                ],
-                Ty::Unit,
-                Ty::Unit,
-                "(Lkotlin/jvm/functions/Function2;Ljava/lang/Object;Lkotlin/coroutines/Continuation;)V"
-                    .to_string(),
-            ),
-            RuntimeOp::ThrowOnFailure => callable(
-                "kotlin/ResultKt",
-                "throwOnFailure",
-                vec![Ty::obj("kotlin/Any")],
-                Ty::Unit,
-                Ty::Unit,
-                "(Ljava/lang/Object;)V".to_string(),
-            ),
-            RuntimeOp::CoroutineSuspended => callable(
-                "kotlin/coroutines/intrinsics/IntrinsicsKt",
-                "getCOROUTINE_SUSPENDED",
-                vec![],
-                Ty::obj("kotlin/Any"),
-                Ty::obj("kotlin/Any"),
-                "()Ljava/lang/Object;".to_string(),
-            ),
-        }
-    }
-
-    fn runtime_ctor(&self, ctor: RuntimeCtor) -> Option<PlatformCtor> {
-        match ctor {
-            RuntimeCtor::IllegalStateException => Some(PlatformCtor {
-                internal: "java/lang/IllegalStateException".to_string(),
-                ctor_desc: "(Ljava/lang/String;)V".to_string(),
-            }),
-            RuntimeCtor::AssertionError => Some(PlatformCtor {
-                internal: "java/lang/AssertionError".to_string(),
-                ctor_desc: "(Ljava/lang/String;)V".to_string(),
-            }),
-        }
+        Some(LibraryCallable::library(
+            type_name(owner),
+            "compareUnsigned",
+            vec![ty, ty],
+            Ty::Int,
+            physical,
+            format!("({primitive}{primitive})I"),
+        ))
     }
 }
 
@@ -7085,7 +6503,7 @@ fn classpath_annotation_targets(
 #[cfg(test)]
 mod tests {
     use super::{
-        desc_to_ty, java_method_has_operator_convention, java_type_nullability, method_layout,
+        desc_to_ty, java_method_has_operator_convention, java_type_nullability,
         overlay_metadata_collection_names, parse_class_gsig, parse_concrete_field_gsig,
         parse_field_gsig, parse_formals, parse_method_desc, parse_method_gsig,
     };
@@ -7862,44 +7280,6 @@ mod tests {
         );
     }
 
-    /// Common lowering aligns a `suspend` `$default` call by this position, so it has to name the
-    /// slot the backend fills and nothing else.
-    #[test]
-    fn descriptor_layout_reports_representation_and_one_continuation_from_one_parse() {
-        // `withLock$default` — the continuation sits BEFORE the mask/marker tail, not at the end.
-        let layout = method_layout(
-            "(Lkotlinx/coroutines/sync/Mutex;Ljava/lang/Object;Lkotlin/jvm/functions/Function0;\
-                 Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;",
-        )
-        .expect("valid descriptor");
-        assert_eq!(layout.continuation_slot, Some(3));
-        assert_eq!(layout.return_class, Some(type_name("java/lang/Object")));
-        assert_eq!(
-            layout.reference_slots,
-            vec![true, true, true, true, false, true]
-        );
-        // A plain suspend method's trailing continuation.
-        assert_eq!(
-            method_layout("(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;")
-                .and_then(|layout| layout.continuation_slot),
-            Some(1)
-        );
-        assert_eq!(
-            method_layout("(ILjava/lang/String;)V")
-                .expect("valid descriptor")
-                .continuation_slot,
-            None
-        );
-        // Two of them: no position is derivable, so the caller must not be handed a guess.
-        assert_eq!(
-            method_layout("(Lkotlin/coroutines/Continuation;Lkotlin/coroutines/Continuation;)V")
-                .expect("the parameter representations remain readable")
-                .continuation_slot,
-            None
-        );
-        assert!(method_layout("not a descriptor").is_none());
-    }
-
     #[test]
     fn inherited_access_finds_self_entry_when_member_name_contains_dollar() {
         let stubs = crate::jvm::java_stub::stub_classes(
@@ -8203,6 +7583,16 @@ mod tests {
                 "accepted malformed descriptor {invalid}"
             );
         }
+    }
+
+    #[test]
+    fn method_descriptor_preserves_declared_primitive_width() {
+        assert_eq!(parse_method_desc("()B"), Some((Vec::new(), Ty::Byte)));
+        assert_eq!(parse_method_desc("()S"), Some((Vec::new(), Ty::Short)));
+        assert_eq!(
+            parse_method_desc("(BS)S"),
+            Some((vec![Ty::Byte, Ty::Short], Ty::Short))
+        );
     }
 
     #[test]
@@ -8542,45 +7932,5 @@ mod tests {
             parse_concrete_field_gsig("Ljava/util/List<TT;>;", "Ljava/util/List;"),
             None
         );
-    }
-
-    #[test]
-    fn start_coroutine_receiver_maps_to_the_function2_overload() {
-        // `(suspend R.() -> T).startCoroutine(receiver, completion)` → the stdlib's
-        // three-argument `ContinuationKt.startCoroutine(Function2, Object, Continuation)`.
-        use crate::runtime::{RuntimeOp, TargetRuntime};
-        let libs = super::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(Vec::new()),
-        ));
-        let c = libs
-            .runtime_callable(RuntimeOp::StartCoroutineReceiver, Ty::Unit)
-            .expect("mapped");
-        assert_eq!(c.owner.render(), "kotlin/coroutines/ContinuationKt");
-        assert_eq!(c.name, "startCoroutine");
-        assert_eq!(
-            c.descriptor,
-            "(Lkotlin/jvm/functions/Function2;Ljava/lang/Object;Lkotlin/coroutines/Continuation;)V"
-        );
-    }
-
-    /// Lowering asks the provider what a call LEAVES on the stack so it never parses a JVM
-    /// descriptor itself. Only an object return names a class: `kotlin/UInt.box-impl` is how an
-    /// unsigned value becomes a reference, and its carrier-returning siblings (`constructor-impl`,
-    /// `unbox-impl`) must answer `None` or a value still in its primitive slot would read as boxed.
-    #[test]
-    fn descriptor_method_layout_names_only_an_object_return_class() {
-        assert_eq!(
-            method_layout("(I)Lkotlin/UInt;").and_then(|layout| layout.return_class),
-            Some(type_name("kotlin/UInt"))
-        );
-        for carrier in ["(I)I", "()I", "(Lkotlin/UInt;)V", "(I)[Ljava/lang/String;"] {
-            assert_eq!(
-                method_layout(carrier).and_then(|layout| layout.return_class),
-                None,
-                "{carrier}"
-            );
-        }
-        // A descriptor the platform cannot read is not a claim about anything.
-        assert!(method_layout("nonsense").is_none());
     }
 }

@@ -1,7 +1,7 @@
 use super::*;
 use crate::backend::{Artifact, CheckedIrFile};
 use crate::features::LangFeatures;
-use crate::frontend::{analyze_source_set_with_features_and_prepare, CheckedFile};
+use crate::frontend::analyze_source_set_with_features_and_prepare;
 use crate::libraries::EmptySymbolSource;
 use crate::source::SourceInput;
 use crate::types::Ty;
@@ -14,16 +14,6 @@ struct RecoveryMustNotLowerBackend;
 
 impl Backend for RecoveryMustNotLowerBackend {
     type State = ();
-
-    fn lower_file(
-        &self,
-        _checked: CheckedFile<'_>,
-        _stem: &str,
-        _state: &mut Self::State,
-        _diags: &mut DiagSink,
-    ) -> Vec<Artifact> {
-        panic!("diagnostic recovery must not invoke legacy syntax lowering")
-    }
 
     fn lower_ir_file(
         &self,
@@ -124,16 +114,6 @@ fn attributed_signature_failure_is_not_duplicated_by_recovery() {
 impl Backend for SharedClassCaptureBackend {
     type State = u8;
 
-    fn lower_file(
-        &self,
-        _checked: CheckedFile<'_>,
-        _stem: &str,
-        _state: &mut Self::State,
-        _diags: &mut DiagSink,
-    ) -> Vec<Artifact> {
-        panic!("production streaming emission must not invoke legacy syntax lowering")
-    }
-
     fn lower_ir_file(
         &self,
         file: CheckedIrFile<'_>,
@@ -183,16 +163,6 @@ impl Backend for SharedClassCaptureBackend {
 
 impl Backend for PackageDeclarationBackend {
     type State = u8;
-
-    fn lower_file(
-        &self,
-        _checked: CheckedFile<'_>,
-        _stem: &str,
-        _state: &mut Self::State,
-        _diags: &mut DiagSink,
-    ) -> Vec<Artifact> {
-        panic!("production streaming emission must not invoke legacy syntax lowering")
-    }
 
     fn lower_ir_file(
         &self,

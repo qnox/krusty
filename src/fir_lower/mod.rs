@@ -6,6 +6,8 @@
 mod array_references;
 mod arrays;
 mod assertions;
+#[cfg(feature = "trace")]
+mod body_trace;
 #[cfg(test)]
 mod bottom_value_tests;
 mod checked;
@@ -55,6 +57,25 @@ pub struct LoweredFirBody {
     pub implicit_return: bool,
     pub property_storage_type: Option<crate::types::Ty>,
     pub property_delegate: Option<crate::fir::FirPropertyDelegatePlan>,
+    /// Where this body put its receiver and parameters.
+    pub slots: BodySlots,
+}
+
+/// The value slots a body assigned to the things a CALLER supplies.
+///
+/// `BodyLowering::value_slot` is the authority on this layout, and it has more contributors than
+/// "`this`, then the parameters": captures, a local class's constructor captures and context values,
+/// context parameters and an extension receiver all take slots first. A pass that REASSIGNS
+/// parameters — the `tailrec` loop rewrite is the only one — must write the slots the body actually
+/// read, so the lowering reports them here rather than leaving them to be derived a second time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BodySlots {
+    /// The dispatch receiver's slot, for a member.
+    pub dispatch_receiver: Option<u32>,
+    /// The slot of the first entry of the IR function's parameter list — which includes an
+    /// extension receiver, inserted at its own position, so this is that receiver's slot for an
+    /// extension.
+    pub first_parameter: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,44 +83,6 @@ enum LoweringState {
     Uncomputed,
     Computing,
     Lowered(ExprId),
-}
-
-#[cfg(feature = "trace")]
-fn trace_checked_body(body: &FirBody, index: &ResolvedModuleIndex) {
-    if !crate::trace::enabled("fir") {
-        return;
-    }
-    let receiver_expressions = (0..body.expression_count())
-        .filter_map(|raw| {
-            let id = FirExprId::from_raw(u32::try_from(raw).ok()?);
-            let expression = body.expr(id)?;
-            matches!(
-                expression.kind,
-                crate::fir::FirExprKind::ImplicitReceiver { .. }
-                    | crate::fir::FirExprKind::EnclosingReceiver { .. }
-                    | crate::fir::FirExprKind::CapturedImplicitReceiver { .. }
-                    | crate::fir::FirExprKind::ClassStorageRead { .. }
-                    | crate::fir::FirExprKind::ConstructorCaptureRead { .. }
-                    | crate::fir::FirExprKind::ConstructorContextRead { .. }
-                    | crate::fir::FirExprKind::CapturedClassStorageRead { .. }
-            )
-            .then_some((id, expression.origin, expression.ty, &expression.kind))
-        })
-        .collect::<Vec<_>>();
-    crate::trace_compiler!(
-        "fir",
-        "lower checked body owner={:?} declaration_name={:?} anchor={:?} local={:?} name={:?} receiver={:?} context={:?} context_values={} captures={:?} implicit_receiver_captures={:?} receiver_expressions={receiver_expressions:?}",
-        body.owner(),
-        index.declaration_name(crate::fir::DeclarationId::from_raw(body.owner().raw())),
-        index.declaration_anchor(crate::fir::DeclarationId::from_raw(body.owner().raw())),
-        body.local_callable(),
-        body.debug_name(),
-        body.receiver_type(),
-        body.context_receiver_types(),
-        body.context_value_count(),
-        body.captures(),
-        body.implicit_receiver_captures(),
-    );
 }
 
 pub fn lower_body(
@@ -129,7 +112,7 @@ pub(crate) fn lower_body_with_context(
     let owner = body.owner();
     ir.source_line_count = ir.source_line_count.max(body.source_line_count());
     #[cfg(feature = "trace")]
-    trace_checked_body(&body, index);
+    body_trace::trace_checked_body(&body, index);
     let declaration = crate::fir::DeclarationId::from_raw(owner.raw());
     let enclosing_classifier = index
         .enclosing_classifier(declaration)
@@ -229,6 +212,7 @@ pub(crate) fn lower_body_with_context(
             .property_storage_type()
             .map(crate::fir::ResolvedTy::get),
         property_delegate: body.property_delegate().cloned(),
+        slots: lowering.body_slots(),
     };
     local_callables.realizations = lowering.published_local_callables;
     if let Some(classifier) = enclosing_classifier {
@@ -264,6 +248,9 @@ struct BodyLowering<'a> {
     published_local_callables:
         HashMap<crate::fir::BodyLocalCallableDeclarationId, LocalCallableRealization>,
     control_path: Vec<crate::fir::LocalCallableId>,
+    /// Nesting depth of the recursive expression funnel, used to decide when to re-check the
+    /// remaining stack. See [`BodyLowering::expression`].
+    expression_depth: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -357,6 +344,7 @@ impl<'a> BodyLowering<'a> {
             local_callable_scopes,
             published_local_callables,
             control_path: Vec::new(),
+            expression_depth: 0,
         }
     }
 
@@ -529,6 +517,17 @@ impl<'a> BodyLowering<'a> {
 
     fn dispatch_receiver_slot(&self) -> Option<u32> {
         self.has_dispatch_receiver.then_some(self.capture_count)
+    }
+
+    /// The slots a caller's values occupy — see [`BodySlots`].
+    fn body_slots(&self) -> BodySlots {
+        BodySlots {
+            dispatch_receiver: self.dispatch_receiver_slot(),
+            first_parameter: self.capture_count
+                + self.class_constructor_capture_count
+                + self.class_constructor_context_count
+                + u32::from(self.has_dispatch_receiver),
+        }
     }
 
     fn record_expression_origins(

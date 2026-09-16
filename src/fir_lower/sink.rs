@@ -18,7 +18,7 @@ use super::{
     },
     lower_body_with_context,
     properties::{accept_property_body, finalize_properties, predeclare_properties},
-    tailrec::finish_tailrec_body,
+    tailrec::{finish_tailrec_body, Frame as TailrecFrame},
     FirLoweringFailure, LocalCallableLoweringContext,
 };
 
@@ -1263,21 +1263,58 @@ impl<'a> CommonIrBodySink<'a> {
             );
         }
         let roots = lowered.roots.into_vec();
-        let body = if declaration_header
+        // The rewrite below covers a tail self-call whose whole frame is the parameter list it
+        // reassigns, which is more shapes than "a top-level `fun` called by name".
+        //
+        // An EXTENSION qualifies: its receiver is inserted into that parameter list (at
+        // `extension_position`) and passed as an ordinary argument, so `(this - 1).f(acc)` steps by
+        // reassigning it like any other parameter — a self-call to a DIFFERENT receiver is a loop
+        // step rather than a shape to decline.
+        //
+        // A MEMBER qualifies when the call dispatches on `this`, which is the same frame: the
+        // instance does not change, so only the parameters are reassigned. `Other().f(n - 1)` is a
+        // different instance, `is_self_call` says so, and it stays a call.
+        //
+        // A context parameter is still left recursing: it takes slots between the receiver and the
+        // parameters, and nothing here tests that layout.
+        //
+        // An OVERRIDABLE member is never rewritten, and that is a soundness gate rather than a
+        // limitation. A self-call on `this` in such a member is a VIRTUAL call: a subclass override
+        // must win, and a loop step would devirtualize it into this frame and silently run the base
+        // body. kotlinc rejects the declaration outright (`tailrec is prohibited on open members.`),
+        // which krusty now reports too — this gate keeps the LOWERING safe if that diagnostic is
+        // ever incomplete, because the cost of being wrong here is a miscompile rather than a
+        // missed optimization.
+        //
+        // Overridable is the member AND its owner, which is the rule the reference compiler draws:
+        // a bare `override` stays open, but only while something can subclass the class holding it,
+        // so `class D : B() { tailrec override fun f(…) }` is accepted and looped while the same
+        // member in an `open class D` is refused. Reading only the member's own flag would decline
+        // that first program — legal, loopable, and looped by kotlinc.
+        //
+        // An owner that cannot be found is assumed subclassable: this errs toward not rewriting.
+        let owner_is_subclassable = index
+            .enclosing_classifier(declaration)
+            .and_then(|classifier| index.declaration_header(classifier.declaration))
+            .is_none_or(|owner| !owner.flags.has(crate::fir::DeclarationFlags::FINAL));
+        let overridable = owner_is_subclassable
+            && (declaration_header
+                .flags
+                .has(crate::fir::DeclarationFlags::OPEN)
+                || declaration_header
+                    .flags
+                    .has(crate::fir::DeclarationFlags::ABSTRACT));
+        let tailrec = declaration_header
             .flags
             .has(crate::fir::DeclarationFlags::TAILREC)
-            && self.ir.functions[function as usize].is_static
-            && callable.shape.extension_receiver.is_none()
             && callable.shape.context_parameter_count == 0
-        {
-            finish_tailrec_body(
-                self.ir,
-                roots,
-                function,
-                self.ir.functions[function as usize].params.len(),
-                origin,
-            )
-            .map_err(FirFileLoweringFailure::Body)?
+            && !overridable;
+        let parameter_count = self.ir.functions[function as usize].params.len();
+        let frame =
+            tailrec.then(|| TailrecFrame::of_body(function, lowered.slots, parameter_count));
+        let body = if let Some(frame) = frame {
+            finish_tailrec_body(self.ir, roots, frame, origin)
+                .map_err(FirFileLoweringFailure::Body)?
         } else {
             finish_callable_body(
                 self.ir,

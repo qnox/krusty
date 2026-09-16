@@ -85,33 +85,18 @@ pub fn classfile_internal_name(internal: &str) -> String {
     }
 }
 
-/// The `java.util` method name a mapped `kotlin.collections` interface declares for a Kotlin *property*
-/// member (`Map.keys` → `keySet()`, `Collection.size` → `size()`), from `JavaToKotlinClassMap`'s
-/// SpecialBuiltinMembers. `None` for a property with no special stub (its interface method is the plain
-/// `get<Name>` getter). A class implementing such an interface must emit this method as a bridge that
-/// forwards to the Kotlin getter, or the `java.util` abstract stays unimplemented. The READ direction of
-/// this same mapping lives in `Classpath::member` (the classpath member-name resolution).
-pub fn collection_property_stub_name(prop: &str) -> Option<&'static str> {
-    collection_property_stub(prop).map(|(name, _)| name)
-}
-
-pub fn collection_property_stub(prop: &str) -> Option<(&'static str, crate::types::Ty)> {
-    use crate::types::Ty;
-    match prop {
-        "size" => Some(("size", Ty::Int)),
-        "values" => Some(("values", Ty::obj("kotlin/collections/Collection"))),
-        "keys" => Some(("keySet", Ty::obj("kotlin/collections/Set"))),
-        "entries" => Some(("entrySet", Ty::obj("kotlin/collections/Set"))),
-        _ => None,
-    }
-}
-
 pub use crate::names::property_setter_name;
 
 /// Physical JVM name for a mapped Kotlin virtual member.
-pub fn mapped_builtin_virtual_name<'a>(owner: &str, name: &'a str) -> &'a str {
+pub fn mapped_builtin_virtual_name<'a>(owner: &str, name: &'a str, descriptor: &str) -> &'a str {
+    if let Some(owner) = crate::types::existing_type_name(owner) {
+        if let Some(physical) =
+            super::mapped_builtin_declarations::physical_name_for_call(owner, name, descriptor)
+        {
+            return physical;
+        }
+    }
     match (owner, name) {
-        ("java/lang/CharSequence" | "kotlin/CharSequence", "get") => "charAt",
         ("java/lang/String", "get") | ("kotlin/String", "get") => "charAt",
         ("java/lang/StringBuilder", "get") | ("kotlin/text/StringBuilder", "get") => "charAt",
         (
@@ -122,13 +107,6 @@ pub fn mapped_builtin_virtual_name<'a>(owner: &str, name: &'a str) -> &'a str {
             "kotlin/ranges/IntRange" | "kotlin/ranges/LongRange" | "kotlin/ranges/CharRange",
             "endInclusive",
         ) => "getLast",
-        ("java/util/Map" | "kotlin/collections/Map" | "kotlin/collections/MutableMap", "keys") => {
-            "keySet"
-        }
-        (
-            "java/util/Map" | "kotlin/collections/Map" | "kotlin/collections/MutableMap",
-            "entries",
-        ) => "entrySet",
         (
             "kotlin/reflect/KCallable"
             | "kotlin/reflect/KProperty"
@@ -138,11 +116,6 @@ pub fn mapped_builtin_virtual_name<'a>(owner: &str, name: &'a str) -> &'a str {
             | "kotlin/reflect/KMutableProperty1",
             "name",
         ) => "getName",
-        // `MutableList.removeAt(Int)` is `java.util.List.remove(int)` — kotlinc's
-        // `BuiltinMethodsWithDifferentJvmName`, the same table as `CharSequence.get`/`Number.toInt`.
-        // The read-only `List` has no `removeAt`, so only the mutable Kotlin name and the erased JVM
-        // owner a `MutableList` call carries need an entry.
-        ("java/util/List" | "kotlin/collections/MutableList", "removeAt") => "remove",
         ("java/lang/Number", "toByte") => "byteValue",
         ("java/lang/Number", "toShort") => "shortValue",
         ("java/lang/Number", "toInt") => "intValue",
@@ -154,8 +127,14 @@ pub fn mapped_builtin_virtual_name<'a>(owner: &str, name: &'a str) -> &'a str {
 }
 
 /// Whether two semantic member spellings address one mapped JVM method.
-pub(super) fn same_mapped_virtual_name(owner: &str, left: &str, right: &str) -> bool {
-    mapped_builtin_virtual_name(owner, left) == mapped_builtin_virtual_name(owner, right)
+pub(super) fn same_mapped_virtual_name(
+    owner: &str,
+    left: &str,
+    right: &str,
+    descriptor: &str,
+) -> bool {
+    mapped_builtin_virtual_name(owner, left, descriptor)
+        == mapped_builtin_virtual_name(owner, right, descriptor)
 }
 
 pub fn mapped_builtin_virtual_source_name<'a>(owner: &str, name: &'a str) -> &'a str {
@@ -230,30 +209,17 @@ pub fn params_descriptor(params: &[Ty]) -> String {
 }
 
 /// The JVM array descriptor for a primitive-array class name (`kotlin/IntArray` → `[I`), or `None`.
-fn primitive_array_descriptor(internal: impl InternalName) -> Option<&'static str> {
-    if internal.internal_matches("kotlin/IntArray") {
-        Some("[I")
-    } else if internal.internal_matches("kotlin/LongArray")
-        || internal.internal_matches("kotlin/ULongArray")
-    {
-        Some("[J")
-    } else if internal.internal_matches("kotlin/ShortArray") {
-        Some("[S")
-    } else if internal.internal_matches("kotlin/ByteArray") {
-        Some("[B")
-    } else if internal.internal_matches("kotlin/BooleanArray") {
-        Some("[Z")
-    } else if internal.internal_matches("kotlin/CharArray") {
-        Some("[C")
-    } else if internal.internal_matches("kotlin/FloatArray") {
-        Some("[F")
-    } else if internal.internal_matches("kotlin/DoubleArray") {
-        Some("[D")
-    } else if internal.internal_matches("kotlin/UIntArray") {
-        Some("[I")
-    } else {
-        None
-    }
+/// The JVM array descriptor for a primitive specialized array class name (`kotlin/IntArray` → `[I`).
+///
+/// Two existing operations composed, and no table of its own: [`crate::types::prim_array_element`]
+/// identifies the element — it documents itself as "the single canonical table" that "the backend
+/// descriptor logic" routes through — and [`type_descriptor`] already erases an unsigned element to
+/// the signed primitive it is an inline class over. The hand-written list this replaced was the copy
+/// that made that documentation untrue: it named `UIntArray` and `ULongArray` and not `UByteArray`
+/// or `UShortArray`, so those two descriptored as `Lkotlin/UByteArray;` and would not load at all.
+fn primitive_array_descriptor(internal: impl InternalName) -> Option<String> {
+    let element = crate::types::prim_array_element(internal)?;
+    Some(format!("[{}", type_descriptor(element)))
 }
 
 /// JVM class-constant spelling for a Kotlin array classifier. Array classes use their descriptor as
@@ -263,7 +229,7 @@ pub fn array_class_descriptor(internal: impl InternalName) -> Option<String> {
     if internal.internal_matches("kotlin/Array") {
         Some("[Ljava/lang/Object;".to_string())
     } else {
-        primitive_array_descriptor(internal).map(str::to_string)
+        primitive_array_descriptor(internal)
     }
 }
 
@@ -307,8 +273,8 @@ pub fn type_descriptor(ty: Ty) -> String {
                 .unwrap_or_else(|| Ty::obj("kotlin/Any"));
             format!("[{}", type_descriptor(reference_array_element(e)))
         }
-        Ty::Obj(n, _) if primitive_array_descriptor(n).is_some() => {
-            primitive_array_descriptor(n).unwrap().into()
+        Ty::Obj(n, _) if crate::types::prim_array_element(n).is_some() => {
+            primitive_array_descriptor(n).expect("checked in the guard")
         }
         Ty::Obj(n, _) => obj_desc(&n.render()),
         // `Nothing` is uninhabited, so no value ever has this descriptor — but it IS written into
@@ -336,6 +302,56 @@ pub fn type_descriptor(ty: Ty) -> String {
         // An `in X` occurrence says a caller may WRITE an `X` there; a value read back through it
         // is only known to be `Any?`, so it erases to `Object` rather than to `X`.
         Ty::InProjection(_) => obj_desc("java/lang/Object"),
+    }
+}
+
+/// The class an `instanceof`/`checkcast` names for `t`.
+///
+/// One mapping, because the two instructions must agree: a value that passes the check is exactly a
+/// value the cast admits. It is a REPRESENTATION question — which runtime class stands for a Kotlin
+/// type — so it belongs with the other naming here rather than inside the emitter.
+///
+/// The fallback is erasure and not a default: an unbounded type parameter genuinely tests against
+/// `Object`, which is what Kotlin's erasure means and what kotlinc emits. A type that merely has no
+/// arm therefore erases silently, which is how `Unit` came to answer `true` for every non-null
+/// value, so a Kotlin type with a runtime class of its own is named explicitly.
+///
+/// `kotlin.Nothing` is deliberately absent: it has no runtime class at all (there is no
+/// `kotlin/Nothing.class` in kotlin-stdlib), so no name here could be right. Common lowering
+/// settles `is Nothing` before a backend sees it.
+pub(crate) fn instanceof_internal_name(t: Ty) -> String {
+    match t {
+        Ty::String => "java/lang/String".to_string(),
+        Ty::Nullable(inner) | Ty::PlatformNullable(inner) if inner.is_unsigned() => match *inner {
+            Ty::UByte => "kotlin/UByte".to_string(),
+            Ty::UShort => "kotlin/UShort".to_string(),
+            Ty::UInt => "kotlin/UInt".to_string(),
+            Ty::ULong => "kotlin/ULong".to_string(),
+            _ => unreachable!("is_unsigned accepts only the four unsigned scalar types"),
+        },
+        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner
+            .boxed_ref()
+            .and_then(Ty::obj_internal)
+            .map(|name| crate::jvm::names::classfile_internal_name(&name.render()))
+            .unwrap_or_else(|| instanceof_internal_name(*inner)),
+        // An array's reference identity is its descriptor (`[I`, `[Ljava/lang/String;`) — checked before
+        // the `Obj` arm since arrays are now `Obj("kotlin/Array")`/`Obj("kotlin/IntArray")` too.
+        t if t.is_array() => type_descriptor(t),
+        // Erase a Kotlin built-in name (`kotlin/collections/MutableList`) to its JVM identity here at the
+        // bytecode boundary, so `instanceof`/`checkcast`/method-owner refs never leak a Kotlin-only name.
+        Ty::Obj(n, _) => crate::jvm::names::classfile_internal_name(&n.render()),
+        // A function type's reference identity is its `kotlin/jvm/functions/FunctionN` interface, so
+        // `x is Function1<*, *>` / `x as (A) -> B` test/cast against that class, not `Object`.
+        Ty::Fun(signature) => crate::jvm::names::function_interface_internal_name(
+            signature.params.len() + usize::from(signature.suspend),
+        ),
+        // `Unit` is a real class with one instance, so `x is Unit` is a real question about the
+        // object. Without this arm it fell to the erasure below and asked `instanceof
+        // java/lang/Object`, which every non-null value passes.
+        Ty::Unit => "kotlin/Unit".to_string(),
+        // Everything left is erased: an unbounded type parameter tests against `Object`, which is
+        // what Kotlin's erasure means and what kotlinc emits.
+        _ => "java/lang/Object".to_string(),
     }
 }
 

@@ -52,7 +52,7 @@ fn class_member_value_params_round_trip() {
         Ty::String,
     )];
     let (d1, d2) = build_class(
-        "com/example/Greeter",
+        type_name("com/example/Greeter"),
         &[("name".to_string(), Ty::String)], // primary ctor
         "(Ljava/lang/String;)V",
         &[],
@@ -83,7 +83,7 @@ fn class_member_value_params_round_trip() {
 #[test]
 fn value_class_constructor_realization_name_round_trips() {
     let (d1, d2) = build_class(
-        "sample/Name",
+        type_name("sample/Name"),
         &[("value".to_string(), Ty::String)],
         "(Ljava/lang/String;)Ljava/lang/String;",
         &[],
@@ -125,7 +125,7 @@ fn secondary_constructor_default_flags_round_trip() {
         annotations: &[],
     }];
     let (d1, d2) = build_class(
-        "sample/Secondary",
+        type_name("sample/Secondary"),
         &[],
         "()V",
         &[],
@@ -154,7 +154,7 @@ fn class_member_equality_bound_round_trips() {
     );
     equals.equality_bound = Some(owner);
     let (d1, d2) = build_class(
-        "sample/Base",
+        type_name("sample/Base"),
         &[],
         "()V",
         &[],
@@ -181,7 +181,7 @@ fn synthesized_data_equals_recovers_its_implicit_equality_bound() {
     );
     equals.flags = EQUALS_FN_FLAGS;
     let (d1, d2) = build_class(
-        "sample/Data",
+        type_name("sample/Data"),
         &[],
         "()V",
         &[],
@@ -212,7 +212,7 @@ fn class_type_parameter_bound_and_variance_round_trip() {
     };
     let names = vec!["T".to_string()];
     let (d1, d2) = build_class(
-        "com/example/Producer",
+        type_name("com/example/Producer"),
         &[],
         "()V",
         &[],
@@ -285,7 +285,7 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
     let own_names = vec!["U".to_string()];
     let captured = vec![outer];
     let (d1, d2) = build_class(
-        "sample/Outer$Inner",
+        type_name("sample/Outer$Inner"),
         &[],
         "(Lsample/Outer;)V",
         &[],
@@ -350,7 +350,7 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
     let own_names = vec!["V".to_string()];
     let captured = vec![outer, middle];
     let (d1, d2) = build_class(
-        "sample/Outer$Middle$Inner",
+        type_name("sample/Outer$Middle$Inner"),
         &[],
         "(Lsample/Outer$Middle;)V",
         &[],
@@ -398,7 +398,7 @@ fn member_type_parameter_bounds_can_reference_later_parameters() {
     get.type_param_bounds = vec![vec![t_bound], vec![any]];
 
     let (d1, d2) = build_class(
-        "sample/ErrorTest",
+        type_name("sample/ErrorTest"),
         &[],
         "()V",
         &[],

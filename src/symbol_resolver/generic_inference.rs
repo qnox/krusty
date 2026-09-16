@@ -1257,8 +1257,38 @@ pub(crate) fn infer_generic_call_bindings_from_symbols(
     actuals: impl IntoIterator<Item = (usize, Ty, bool)>,
     vararg_index: Option<usize>,
 ) -> GSigBinds {
-    let mut inferred =
-        infer_generic_call_constraints_from_symbols(source, generic_sig, actuals, vararg_index);
+    infer_generic_call_bindings_with_receiver_from_symbols(
+        source,
+        generic_sig,
+        None,
+        actuals,
+        vararg_index,
+    )
+}
+
+/// The same solve with an extension RECEIVER contributing to it.
+///
+/// The receiver belongs in the constraint set, not in a second pass over the result. Each value
+/// argument contributes constraints according to the variance of its parameter position; an
+/// extension receiver adds the requirement that the actual receiver be assignable to the formal
+/// receiver's instantiation. Unifying the receiver after the arguments have already bound a formal
+/// cannot express their combined evidence — it either overwrites an argument binding or is
+/// discarded by it, depending on which ran last. Solving both together lets the ordinary constraint
+/// solver apply the declared variance and bounds to all evidence at once.
+pub(crate) fn infer_generic_call_bindings_with_receiver_from_symbols(
+    source: &dyn SymbolSource,
+    generic_sig: &GenericSig,
+    actual_receiver: Option<Ty>,
+    actuals: impl IntoIterator<Item = (usize, Ty, bool)>,
+    vararg_index: Option<usize>,
+) -> GSigBinds {
+    let mut inferred = infer_generic_call_constraints_with_receiver_from_symbols(
+        source,
+        generic_sig,
+        actual_receiver,
+        actuals,
+        vararg_index,
+    );
     let tightest_upper = inferred.tightest_upper_bindings(source);
     for formal in inferred.upper_only {
         let binding = tightest_upper.get(&formal).copied().unwrap_or(Ty::Nothing);

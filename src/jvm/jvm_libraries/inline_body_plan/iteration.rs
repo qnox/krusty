@@ -980,7 +980,7 @@ fn zero_argument_instance_call<'a>(
 }
 
 fn erased_cast_matches_element(cast: Option<&str>, element: Ty) -> bool {
-    cast.map_or(true, |cast| {
+    cast.is_none_or(|cast| {
         let physical = type_name(cast);
         let semantic = crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(physical)
             .unwrap_or(physical);
@@ -1298,7 +1298,7 @@ mod tests {
             (
                 "map",
                 "(Ljava/lang/Iterable;Lkotlin/jvm/functions/Function1;)Ljava/util/List;",
-                &[("iterator", "()Ljava/util/Iterator;")][..],
+                &[("iterator", None, "()Ljava/util/Iterator;")][..],
                 "(I)V",
                 Some("(Ljava/lang/Iterable;I)I"),
                 "(Ljava/lang/Object;)Z",
@@ -1307,7 +1307,7 @@ mod tests {
             (
                 "flatMap",
                 "(Ljava/lang/Iterable;Lkotlin/jvm/functions/Function1;)Ljava/util/List;",
-                &[("iterator", "()Ljava/util/Iterator;")][..],
+                &[("iterator", None, "()Ljava/util/Iterator;")][..],
                 "()V",
                 None,
                 "(Ljava/util/Collection;Ljava/lang/Iterable;)Z",
@@ -1317,8 +1317,8 @@ mod tests {
                 "map",
                 "(Ljava/util/Map;Lkotlin/jvm/functions/Function1;)Ljava/util/List;",
                 &[
-                    ("entrySet", "()Ljava/util/Set;"),
-                    ("iterator", "()Ljava/util/Iterator;"),
+                    ("entries", Some("entrySet"), "()Ljava/util/Set;"),
+                    ("iterator", None, "()Ljava/util/Iterator;"),
                 ][..],
                 "(I)V",
                 Some("()I"),
@@ -1346,7 +1346,13 @@ mod tests {
             assert_eq!(
                 prepare
                     .iter()
-                    .map(|member| (member.name.as_str(), member.descriptor.as_str()))
+                    .map(|member| {
+                        (
+                            member.name.as_str(),
+                            member.physical_name.as_deref(),
+                            member.descriptor.as_str(),
+                        )
+                    })
                     .collect::<Vec<_>>(),
                 prepare_members
             );

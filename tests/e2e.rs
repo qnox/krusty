@@ -542,6 +542,8 @@ mod error_receiver_cascade_e2e;
 mod expected_return_invariant_binding_e2e;
 #[path = "expected_type_propagation_e2e.rs"]
 mod expected_type_propagation_e2e;
+#[path = "expected_type_seeds_invoke_e2e.rs"]
+mod expected_type_seeds_invoke_e2e;
 #[path = "explicit_backing_field_e2e.rs"]
 mod explicit_backing_field_e2e;
 #[path = "explicit_import_shadows_same_package_e2e.rs"]
@@ -680,6 +682,8 @@ mod generic_inferred_primitive_return_e2e;
 mod generic_inferred_return_e2e;
 #[path = "generic_member_extension_lambda_result_e2e.rs"]
 mod generic_member_extension_lambda_result_e2e;
+#[path = "generic_receiver_extension_lambda_shape_e2e.rs"]
+mod generic_receiver_extension_lambda_shape_e2e;
 #[path = "generic_return_inference_e2e.rs"]
 mod generic_return_inference_e2e;
 #[path = "generic_signature_e2e.rs"]
@@ -738,6 +742,8 @@ mod inline_end_branch_e2e;
 mod inline_lambda_result_boxing_e2e;
 #[path = "inline_lambda_value_return_e2e.rs"]
 mod inline_lambda_value_return_e2e;
+#[path = "inline_preparation_sibling_annotation_e2e.rs"]
+mod inline_preparation_sibling_annotation_e2e;
 #[path = "inline_return_bound_context_e2e.rs"]
 mod inline_return_bound_context_e2e;
 #[path = "inline_splice_e2e.rs"]
@@ -752,6 +758,8 @@ mod inner_class_construction_e2e;
 mod inner_class_name_pool_order_e2e;
 #[path = "inner_class_outer_tparam_e2e.rs"]
 mod inner_class_outer_tparam_e2e;
+#[path = "instant_builtin_serializer_e2e.rs"]
+mod instant_builtin_serializer_e2e;
 #[path = "interface_companion_e2e.rs"]
 mod interface_companion_e2e;
 #[path = "interface_default_args_e2e.rs"]
@@ -1085,6 +1093,10 @@ mod one_armed_when_fallthrough_e2e;
 mod extension_receiver_specificity_e2e;
 #[path = "int_when_switch_e2e.rs"]
 mod int_when_switch_e2e;
+#[path = "loop_backedge_narrowing_e2e.rs"]
+mod loop_backedge_narrowing_e2e;
+#[path = "operator_expected_result_seeding_e2e.rs"]
+mod operator_expected_result_seeding_e2e;
 #[path = "operator_inc_dec_e2e.rs"]
 mod operator_inc_dec_e2e;
 #[path = "operator_index_e2e.rs"]
@@ -1247,6 +1259,8 @@ mod sam_conversion_e2e;
 mod sam_generic_lambda_param_e2e;
 #[path = "sam_lambda_expected_result_e2e.rs"]
 mod sam_lambda_expected_result_e2e;
+#[path = "same_file_custom_serializer_e2e.rs"]
+mod same_file_custom_serializer_e2e;
 #[path = "same_package_classpath_e2e.rs"]
 mod same_package_classpath_e2e;
 #[path = "samefile_nested_object_value_e2e.rs"]
@@ -1275,6 +1289,8 @@ mod serialization_coverage_e2e;
 mod serialization_krusty_only_e2e;
 #[path = "serialization_roundtrip_e2e.rs"]
 mod serialization_roundtrip_e2e;
+#[path = "common/serialization.rs"]
+mod serialization_test_support;
 #[path = "session_subsystems_e2e.rs"]
 mod session_subsystems_e2e;
 #[path = "shadowed_method_tparam_e2e.rs"]
@@ -1378,8 +1394,12 @@ mod suspend_prologue_cast_e2e;
 mod suspend_receiver_lambda_e2e;
 #[path = "suspend_return_type_recovery_e2e.rs"]
 mod suspend_return_type_recovery_e2e;
+#[path = "suspend_single_operand_hoist_e2e.rs"]
+mod suspend_single_operand_hoist_e2e;
 #[path = "suspend_spill_slot_reuse_e2e.rs"]
 mod suspend_spill_slot_reuse_e2e;
+#[path = "suspend_throw_operand_e2e.rs"]
+mod suspend_throw_operand_e2e;
 #[path = "suspend_try_catch_shapes_e2e.rs"]
 mod suspend_try_catch_shapes_e2e;
 #[path = "suspend_try_finally_body_e2e.rs"]
@@ -1482,6 +1502,8 @@ mod unit_vararg_e2e;
 mod unqualified_enum_entry_e2e;
 #[path = "unreachable_trailing_block_ty_e2e.rs"]
 mod unreachable_trailing_block_ty_e2e;
+#[path = "unresolved_label_diagnostic_e2e.rs"]
+mod unresolved_label_diagnostic_e2e;
 #[path = "unresolved_supertype_diag_e2e.rs"]
 mod unresolved_supertype_diag_e2e;
 #[path = "unsigned_array_e2e.rs"]
@@ -1536,6 +1558,8 @@ mod vararg_element_default_e2e;
 mod vararg_elements_before_named_e2e;
 #[path = "vararg_extension_overload_e2e.rs"]
 mod vararg_extension_overload_e2e;
+#[path = "vararg_inline_argument_splice_e2e.rs"]
+mod vararg_inline_argument_splice_e2e;
 #[path = "vararg_lambda_element_shape_e2e.rs"]
 mod vararg_lambda_element_shape_e2e;
 #[path = "vararg_member_overload_clash_e2e.rs"]
@@ -1570,3 +1594,11 @@ mod reified_value_class_splice_e2e;
 
 #[path = "file_private_extension_scope_e2e.rs"]
 mod file_private_extension_scope_e2e;
+
+mod serializer_metadata_class_id_e2e;
+#[path = "common/kotlin_metadata.rs"]
+mod serializer_metadata_test_support;
+#[path = "settled_instance_check_e2e.rs"]
+mod settled_instance_check_e2e;
+#[path = "unsigned_arrays_e2e.rs"]
+mod unsigned_arrays_e2e;

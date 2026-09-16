@@ -13,7 +13,7 @@
 
 mod deserialization_constructor;
 mod deserialize_body;
-mod element_serializer;
+pub(super) mod element_serializer;
 mod enum_serializer;
 mod generated_members;
 mod serialize_body;
@@ -881,64 +881,6 @@ fn build_polymorphic_serializer(ir: &mut IrFile, classifier: TypeName) -> ExprId
     )
 }
 
-fn builtin_element_key(ty: &Ty) -> Option<&'static str> {
-    let fq = match ty.non_null() {
-        Ty::Int => type_name("kotlin/Int"),
-        Ty::Long => type_name("kotlin/Long"),
-        Ty::Boolean => type_name("kotlin/Boolean"),
-        Ty::Double => type_name("kotlin/Double"),
-        Ty::Float => type_name("kotlin/Float"),
-        Ty::Char => type_name("kotlin/Char"),
-        Ty::Byte => type_name("kotlin/Byte"),
-        Ty::Short => type_name("kotlin/Short"),
-        Ty::String => type_name("kotlin/String"),
-        semantic => semantic.kotlin_class_internal()?,
-    };
-    Some(if fq.matches("kotlin/Int") {
-        "kotlin/Int"
-    } else if fq.matches("kotlin/Long") {
-        "kotlin/Long"
-    } else if fq.matches("kotlin/Boolean") {
-        "kotlin/Boolean"
-    } else if fq.matches("kotlin/Double") {
-        "kotlin/Double"
-    } else if fq.matches("kotlin/Float") {
-        "kotlin/Float"
-    } else if fq.matches("kotlin/Char") {
-        "kotlin/Char"
-    } else if fq.matches("kotlin/Byte") {
-        "kotlin/Byte"
-    } else if fq.matches("kotlin/Short") {
-        "kotlin/Short"
-    } else if fq.matches("kotlin/String") {
-        "kotlin/String"
-    } else if fq.matches("kotlin/uuid/Uuid") {
-        "kotlin/uuid/Uuid"
-    } else {
-        return None;
-    })
-}
-
-fn builtin_element_serializer(ty: &Ty) -> Option<&'static str> {
-    Some(match builtin_element_key(ty)? {
-        "kotlin/String" => "kotlinx/serialization/internal/StringSerializer",
-        "kotlin/Int" => "kotlinx/serialization/internal/IntSerializer",
-        "kotlin/Long" => "kotlinx/serialization/internal/LongSerializer",
-        "kotlin/Boolean" => "kotlinx/serialization/internal/BooleanSerializer",
-        "kotlin/Double" => "kotlinx/serialization/internal/DoubleSerializer",
-        "kotlin/Float" => "kotlinx/serialization/internal/FloatSerializer",
-        "kotlin/Char" => "kotlinx/serialization/internal/CharSerializer",
-        "kotlin/Byte" => "kotlinx/serialization/internal/ByteSerializer",
-        "kotlin/Short" => "kotlinx/serialization/internal/ShortSerializer",
-        "kotlin/uuid/Uuid" => "kotlinx/serialization/internal/UuidSerializer",
-        _ => return None,
-    })
-}
-
-/// If `ty` names a `@JvmInline value class` defined in this IR, its TERMINAL underlying type — how
-/// krusty represents a value-class-typed field/value. Recurses through a value-class chain
-/// (`A(val b: B)`, `B(val i: Int)` → `Int`), depth-bounded against a malformed cycle. `None` for any
-/// type that isn't (transitively) a value class.
 fn value_class_underlying(ir: &IrFile, ty: &Ty) -> Option<Ty> {
     fn rec(ir: &IrFile, ty: &Ty, depth: u32) -> Option<Ty> {
         if depth > 32 {
@@ -968,22 +910,32 @@ fn value_class_underlying(ir: &IrFile, ty: &Ty) -> Option<Ty> {
 fn inline_prim_methods(
     ty: &Ty,
 ) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
-    Some(match builtin_element_key(ty)? {
-        "kotlin/Int" => ("encodeInt", "(I)V", "decodeInt", "()I"),
-        "kotlin/Long" => ("encodeLong", "(J)V", "decodeLong", "()J"),
-        "kotlin/Boolean" => ("encodeBoolean", "(Z)V", "decodeBoolean", "()Z"),
-        "kotlin/Double" => ("encodeDouble", "(D)V", "decodeDouble", "()D"),
-        "kotlin/Float" => ("encodeFloat", "(F)V", "decodeFloat", "()F"),
-        "kotlin/Char" => ("encodeChar", "(C)V", "decodeChar", "()C"),
-        "kotlin/Byte" => ("encodeByte", "(B)V", "decodeByte", "()B"),
-        "kotlin/Short" => ("encodeShort", "(S)V", "decodeShort", "()S"),
-        "kotlin/String" => (
+    let classifier = element_serializer::builtin_element_key(ty)?;
+    Some(if classifier == type_name("kotlin/Int") {
+        ("encodeInt", "(I)V", "decodeInt", "()I")
+    } else if classifier == type_name("kotlin/Long") {
+        ("encodeLong", "(J)V", "decodeLong", "()J")
+    } else if classifier == type_name("kotlin/Boolean") {
+        ("encodeBoolean", "(Z)V", "decodeBoolean", "()Z")
+    } else if classifier == type_name("kotlin/Double") {
+        ("encodeDouble", "(D)V", "decodeDouble", "()D")
+    } else if classifier == type_name("kotlin/Float") {
+        ("encodeFloat", "(F)V", "decodeFloat", "()F")
+    } else if classifier == type_name("kotlin/Char") {
+        ("encodeChar", "(C)V", "decodeChar", "()C")
+    } else if classifier == type_name("kotlin/Byte") {
+        ("encodeByte", "(B)V", "decodeByte", "()B")
+    } else if classifier == type_name("kotlin/Short") {
+        ("encodeShort", "(S)V", "decodeShort", "()S")
+    } else if classifier == type_name("kotlin/String") {
+        (
             "encodeString",
             "(Ljava/lang/String;)V",
             "decodeString",
             "()Ljava/lang/String;",
-        ),
-        _ => return None,
+        )
+    } else {
+        return None;
     })
 }
 
@@ -1490,7 +1442,7 @@ impl IrPlugin for SerializationPlugin {
                     _ if operation == "encodeToString" => call.params[0].kotlin_class_internal(),
                     _ => None,
                 }?;
-                if !ctx.has_source_annotation(classifier, serializable_annotation) {
+                if !ctx.has_classifier_annotation(classifier, serializable_annotation) {
                     return None;
                 }
                 let format = receiver_ty.kotlin_class_internal()?;
@@ -1555,7 +1507,8 @@ impl IrPlugin for SerializationPlugin {
             let Some(classifier) = classifier else {
                 continue;
             };
-            if !declaration_owned && !ctx.has_source_annotation(classifier, serializable_annotation)
+            if !declaration_owned
+                && !ctx.has_classifier_annotation(classifier, serializable_annotation)
             {
                 continue;
             }
@@ -1795,9 +1748,13 @@ impl IrPlugin for SerializationPlugin {
                 let name = ir.add_expr(IrExpr::Const(IrConst::String(serial_name(ir, class_id))));
                 let under_ser = foo_fields
                     .first()
-                    .and_then(|(_, t)| builtin_element_serializer(t));
+                    .and_then(|(_, t)| element_serializer::always_available_builtin_serializer(t));
                 let ser_inst = match under_ser {
-                    Some(s) => ir.external_static_instance(s, s, "INSTANCE"),
+                    Some(serializer) => ir.add_expr(IrExpr::ExternalStaticInstance {
+                        owner: serializer,
+                        ty: serializer,
+                        field: "INSTANCE".to_string(),
+                    }),
                     // Unsupported underlying (e.g. a nested @Serializable) — leave the default below.
                     None => ir.add_expr(IrExpr::Const(IrConst::Null)),
                 };
@@ -2527,7 +2484,7 @@ mod tests {
                 type_arguments: vec![Some(inner)],
                 argument_slots: vec![Some(argument)],
             }],
-            source_annotations: std::collections::HashMap::new(),
+            classifier_annotations: std::collections::HashMap::new(),
         };
         let mut plans = Vec::new();
         SerializationPlugin::default().plan_frontend_expressions(&context, &mut plans);
@@ -2649,10 +2606,30 @@ mod tests {
     #[test]
     fn runtime_wrapper_name_is_not_a_semantic_builtin_identity() {
         assert_eq!(
-            builtin_element_key(&Ty::obj("java/lang/Integer")),
+            element_serializer::builtin_element_key(&Ty::obj("java/lang/Integer")),
             None,
             "plugins must not recover Kotlin semantics from a JVM carrier name"
         );
+    }
+
+    #[test]
+    fn runtime_dependent_builtin_requires_the_active_declaration() {
+        let ir = IrFile::default();
+        let instant = Ty::obj("kotlin/time/Instant");
+        assert!(element_serializer::element_serializer_plan(
+            &ir,
+            &PluginContext::default(),
+            &instant
+        )
+        .is_none());
+
+        let serializer = type_name("kotlinx/serialization/internal/InstantSerializer");
+        let ctx = PluginContext::default()
+            .with_runtime_serializers(std::collections::HashSet::from([serializer]));
+        assert!(matches!(
+            element_serializer::element_serializer_plan(&ir, &ctx, &instant),
+            Some(element_serializer::ElementSerializerPlan::Builtin(found)) if found == serializer
+        ));
     }
 
     #[test]

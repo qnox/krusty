@@ -26,6 +26,28 @@ use std::sync::OnceLock;
 
 use super::common;
 
+fn serialization_core_jar() -> PathBuf {
+    krusty::toolchain::serialization_core_jar().unwrap_or_else(|| {
+        panic!(
+            "no kotlinx-serialization-core-jvm jar; the serialization tests cannot run.\n\
+             It is provisioned on demand from Maven Central (version {}); check network access or \
+             set KRUSTY_DEPS_CACHE to a directory that already holds it.",
+            krusty::toolchain::SERIALIZATION_VERSION
+        )
+    })
+}
+
+fn serialization_json_jar() -> PathBuf {
+    krusty::toolchain::serialization_json_jar().unwrap_or_else(|| {
+        panic!(
+            "no kotlinx-serialization-json-jvm jar; the serialization tests cannot run.\n\
+             It is provisioned on demand from Maven Central (version {}); check network access or \
+             set KRUSTY_DEPS_CACHE to a directory that already holds it.",
+            krusty::toolchain::SERIALIZATION_VERSION
+        )
+    })
+}
+
 /// The pinned kotlinx.serialization runtime, provisioned like every other dependency.
 ///
 /// This used to search the local caches for "the newest jar whose name starts with …" and SKIP the
@@ -38,8 +60,8 @@ fn runtime() -> Vec<PathBuf> {
     JARS.get_or_init(|| {
         vec![
             common::stdlib_jar(),
-            common::serialization_core_jar(),
-            common::serialization_json_jar(),
+            serialization_core_jar(),
+            serialization_json_jar(),
         ]
     })
     .clone()

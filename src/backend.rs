@@ -7,12 +7,10 @@ mod module_facts;
 
 pub use module_facts::{
     BackendClassifierFact, BackendClassifierSource, BackendFactError, BackendMemberFact,
-    BackendMemberName, BackendModuleFacts, CheckedBackendClassifiers, SymbolSourceClassifiers,
-    UndeterminedType,
+    BackendMemberName, BackendModuleFacts, CheckedBackendClassifiers, UndeterminedType,
 };
 
 use crate::diag::DiagSink;
-use crate::frontend::CheckedFile;
 use crate::ir::IrFile;
 
 /// One streamed common-IR unit plus the compact module facts a backend may use for physical
@@ -34,15 +32,6 @@ pub type Artifact = (String, Vec<u8>);
 pub trait Backend {
     /// Cross-file state accumulated while lowering.
     type State: Default;
-
-    /// Lower one checked file to artifacts.
-    fn lower_file(
-        &self,
-        checked: CheckedFile<'_>,
-        stem: &str,
-        state: &mut Self::State,
-        diags: &mut DiagSink,
-    ) -> Vec<Artifact>;
 
     /// Consume one checked common-IR file produced by the streaming FIR path. No parsed source or
     /// AST-keyed semantic table crosses this boundary; target realization consumes only checked IR

@@ -181,6 +181,46 @@ fn instanceof_and_cast() {
 }
 
 #[test]
+fn unit_is_the_target_s_own_representation_of_it() {
+    // `Unit` is `undefined` here rather than a class, so `is Unit` is an identity test against that
+    // value. It answered `false` for everything while the target's own representation rule was
+    // missing, and reaching the class path instead would be a ReferenceError: there is no `Unit`
+    // class in the emitted JavaScript for `instanceof` to name.
+    //
+    // The value comes from a `Unit`-returning call rather than the `Unit` object, because this
+    // backend's target-neutral builtin provider does not resolve that name — a separate gap, and
+    // not one this rule needs in order to be stated.
+    check(
+        "fun record() {}\n\
+         fun box(): String {\n\
+         \x20   val unit: Any = record()\n\
+         \x20   val other: Any = \"a\"\n\
+         \x20   if (unit !is Unit) return \"fail: Unit is not Unit\"\n\
+         \x20   if (other is Unit) return \"fail: a String is Unit\"\n\
+         \x20   return \"OK\"\n\
+         }",
+        "OK",
+    );
+}
+
+#[test]
+fn no_value_is_an_instance_of_nothing_in_js() {
+    // The `Nothing` rule is settled in common lowering, so this target gets it without a rule of
+    // its own — which is the point of settling it there. The test is what makes that a claim.
+    check(
+        "fun box(): String {\n\
+         \x20   val present: Any? = \"a\"\n\
+         \x20   val absent: Any? = null\n\
+         \x20   if (present is Nothing) return \"fail: a value is Nothing\"\n\
+         \x20   if (present is Nothing?) return \"fail: a value is Nothing?\"\n\
+         \x20   if (absent !is Nothing?) return \"fail: null is not Nothing?\"\n\
+         \x20   return \"OK\"\n\
+         }",
+        "OK",
+    );
+}
+
+#[test]
 fn string_concat_and_tostring() {
     check(
         "fun box(): String { val n = 42; val s = \"ab\" + \"cd\"; return s + \"=\" + n.toString() }",
