@@ -1445,6 +1445,17 @@ KRef kt_char_range_down_to(kt_char first, kt_char last) {
     return kt_range_new_stepped(&kt_type_char_range, first, last, -1);
 }
 
+/* The unsigned descending forms. Their bounds arrive already ZERO-EXTENDED, like every other
+   unsigned bound here, so `UInt.MAX_VALUE downTo 0u` keeps a first bound above the signed maximum
+   instead of reading as -1 and answering empty. */
+KRef kt_uint_range_down_to(kt_int first, kt_int last) {
+    return kt_range_new_stepped(&kt_type_uint_range, (uint32_t)first, (uint32_t)last, -1);
+}
+
+KRef kt_ulong_range_down_to(kt_long first, kt_long last) {
+    return kt_range_new_stepped(&kt_type_ulong_range, first, last, -1);
+}
+
 /* Defined with the array and string walks below. A program that asks a primitive array for an
    iterator is handed one of those, and its STATIC type is `IntIterator`/`LongIterator`/
    `CharIterator` — the narrow protocol these two functions implement. So the walk has to answer

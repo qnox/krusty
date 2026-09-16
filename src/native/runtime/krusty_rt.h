@@ -363,6 +363,8 @@ KRef kt_range_reversed(KRef range);
 KRef kt_int_range_down_to(kt_int first, kt_int last);
 KRef kt_long_range_down_to(kt_long first, kt_long last);
 KRef kt_char_range_down_to(kt_char first, kt_char last);
+KRef kt_uint_range_down_to(kt_int first, kt_int last);
+KRef kt_ulong_range_down_to(kt_long first, kt_long last);
 kt_boolean kt_range_iterator_has_next(KRef iterator);
 kt_long kt_range_iterator_next(KRef iterator);
 

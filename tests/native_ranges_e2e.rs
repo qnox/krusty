@@ -596,3 +596,47 @@ fn a_descending_counted_unsigned_loop_stops_at_zero() {
         "OK",
     );
 }
+
+/// `downTo` and `until` on an UNSIGNED receiver, as VALUES.
+///
+/// Both are extensions of the unsigned ranges facade rather than members of the range they answer,
+/// so the type each RETURNS is what says which runtime range to build — and `downTo` answers a
+/// progression, which this runtime builds as the range it already had with a negative step beside
+/// it. The bound cases are the unsigned ring again: a walk that begins at `UInt.MAX_VALUE` reads
+/// its first bound above the signed maximum, and one that ends at `0u` must stop there rather than
+/// step below it and wrap.
+///
+/// Every expectation is kotlinc's, taken by compiling and running this same `box()` under it.
+#[test]
+fn unsigned_down_to_and_until_answer_values() {
+    expect_native_box(
+        "fun walk(p: UIntProgression): String {\n\
+         \x20   var s = \"\"\n\
+         \x20   for (i in p) s += \"$i,\"\n\
+         \x20   return s\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val d = 5u downTo 1u\n\
+         \x20   if (walk(d) != \"5,4,3,2,1,\") return \"fail down walk: ${walk(d)}\"\n\
+         \x20   if (d.first != 5u) return \"fail down first: ${d.first}\"\n\
+         \x20   if (d.last != 1u) return \"fail down last: ${d.last}\"\n\
+         \x20   val u = 1u until 4u\n\
+         \x20   if (u.toString() != \"1..3\") return \"fail until toString: $u\"\n\
+         \x20   if (!u.contains(3u)) return \"fail until contains\"\n\
+         \x20   if (u.last != 3u) return \"fail until last: ${u.last}\"\n\
+         \x20   val top = UInt.MAX_VALUE downTo (UInt.MAX_VALUE - 2u)\n\
+         \x20   if (walk(top).length != 33) return \"fail top: ${walk(top)}\"\n\
+         \x20   if (top.first != UInt.MAX_VALUE) return \"fail top first: ${top.first}\"\n\
+         \x20   var m = 0\n\
+         \x20   for (i in 18446744073709551615uL downTo 18446744073709551613uL) m++\n\
+         \x20   if (m != 3) return \"fail big: $m\"\n\
+         \x20   val lu = 0uL until 3uL\n\
+         \x20   if (lu.toString() != \"0..2\") return \"fail ulong until: $lu\"\n\
+         \x20   if ((1u downTo 5u).isEmpty() != true) return \"fail empty\"\n\
+         \x20   if (walk(9u downTo 1u step 3) != \"9,6,3,\") return \"fail stepped\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "UnsignedDownToAndUntil",
+        "OK",
+    );
+}

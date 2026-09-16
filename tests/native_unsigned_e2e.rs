@@ -257,30 +257,38 @@ fn an_unsigned_array_is_not_the_signed_array_it_is_laid_out_as() {
 
 /// Walking an unsigned array through the ITERATOR protocol, paired with a count.
 ///
-/// `withIndex()` on an unsigned array DECLINES, and this pins that rather than the walk, because
-/// the reason is not this backend's to fix. The extension is realized as
-/// `UArraysKt.withIndex-GBYM_sE` — value-class-mangled, because the JVM needs two signatures that
-/// erase alike to stay distinct — and the declaration contract publishes no Kotlin name beside it
-/// for an extension, as it does for a classifier member. So the member arrives spelled in a way no
-/// table is written in.
+/// This DECLINED until the declaration contract published an extension's Kotlin name. The
+/// extension is realized as `UArraysKt.withIndex-GBYM_sE` — value-class-mangled, because the JVM
+/// needs two signatures that erase alike to stay distinct — and while only that spelling reached
+/// the call, no table could be written in it. Reading the Kotlin name back out of the spelling is
+/// what this backend used to do, and it was unsound: nothing in a name says the `-` is kotlinc's
+/// rather than part of a Java method's, so a spelling pattern cannot establish declaration origin.
 ///
-/// Reading the Kotlin name back out of that spelling is what this backend used to do, and it was
-/// unsound: nothing in a name says the `-` is kotlinc's rather than part of a Java method's, so a
-/// spelling pattern cannot establish declaration origin. Declining is the honest answer until the
-/// contract publishes the name.
+/// The contract publishes the name now, so this is the walk again, at every width: the count comes
+/// from `IndexedValue` and the element renders through its own `toString`, which is what makes a
+/// `UByte` of 255 render as 255 rather than as the signed number of those bits.
 ///
-/// When it does, this test fails — which is the point. Restore it to the walk it was: every width
-/// indexed and paired, `"0:1;1:2;2:255;"` and its three siblings.
+/// Every expectation is kotlinc's, taken by compiling and running this same `box()` under it.
 #[test]
-fn a_counted_walk_of_an_unsigned_array_declines_until_the_contract_names_it() {
-    expect_native_decline(
+fn a_counted_walk_of_an_unsigned_array_pairs_every_width_with_its_index() {
+    expect_native_box(
         "fun box(): String {\n\
+         \x20   var b = \"\"\n\
+         \x20   for ((i, u) in ubyteArrayOf(1u, 2u, 255u).withIndex()) b += \"$i:$u;\"\n\
+         \x20   if (b != \"0:1;1:2;2:255;\") return \"fail ubyte: $b\"\n\
          \x20   var s = \"\"\n\
-         \x20   for ((i, u) in ubyteArrayOf(1u, 2u, 255u).withIndex()) s += \"$i:$u;\"\n\
-         \x20   return if (s == \"0:1;1:2;2:255;\") \"OK\" else \"fail: $s\"\n\
+         \x20   for ((i, u) in ushortArrayOf(1u, 2u, 65535u).withIndex()) s += \"$i:$u;\"\n\
+         \x20   if (s != \"0:1;1:2;2:65535;\") return \"fail ushort: $s\"\n\
+         \x20   var n = \"\"\n\
+         \x20   for ((i, u) in uintArrayOf(1u, 4294967295u).withIndex()) n += \"$i:$u;\"\n\
+         \x20   if (n != \"0:1;1:4294967295;\") return \"fail uint: $n\"\n\
+         \x20   var l = \"\"\n\
+         \x20   for ((i, u) in ulongArrayOf(1uL, 18446744073709551615uL).withIndex()) l += \"$i:$u;\"\n\
+         \x20   if (l != \"0:1;1:18446744073709551615;\") return \"fail ulong: $l\"\n\
+         \x20   return \"OK\"\n\
          }\n",
-        "UnsignedArrayWalkDeclines",
-        "withIndex",
+        "UnsignedArrayCountedWalk",
+        "OK",
     );
 }
 

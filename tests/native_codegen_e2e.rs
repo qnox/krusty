@@ -441,28 +441,19 @@ fn an_unsupported_construct_is_declined_with_a_diagnostic() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
         return;
     };
-    // An unsigned `downTo` stands in here, because the extension-naming gap it runs into is the
-    // largest remaining cluster on the backlog. The contract under test is not WHICH construct is
-    // refused but that the backend SAYS so — emitting a partial object that links and misbehaves
-    // would be far worse than refusing.
+    // `kotlin.Result` stands in here, because it is the largest remaining cluster on the backlog.
+    // The contract under test is not WHICH construct is refused but that the backend SAYS so —
+    // emitting a partial object that links and misbehaves would be far worse than refusing.
     //
-    // It has been `try`/`finally`, then an unsigned RANGE, then an unsigned `downTo` written as a
-    // loop HEADER — each of which now lowers. A decline test has to name something still declined,
-    // so this moves as the backlog does, and it moving is the point: each time, the thing it named
-    // became supported.
-    //
-    // `downTo` as a VALUE is the current one, and it is the loop header's near neighbour rather
-    // than the same thing: a header is a counted loop the checker hands over as its two BOUNDS,
-    // with no range built, while a value is an ordinary call to an EXTENSION of the unsigned ranges
-    // facade. That call is realized as `URangesKt.downTo-J1ME1BU`, and the declaration contract
-    // publishes no Kotlin name for an extension — so the member arrives spelled in a way no table
-    // is written in. Walking the progression is fine; only this way of building one is not.
+    // It has been `try`/`finally`, then an unsigned RANGE, then an unsigned `downTo` as a loop
+    // HEADER, then `downTo` as a VALUE — each of which now lowers. A decline test has to name
+    // something still declined, so this moves as the backlog does, and it moving is the point:
+    // each time, the thing it named became supported.
     let (artifacts, diagnostics) = compile(
         &[(
             "Main",
             "fun main() {\n\
-             \x20   val p = 3u downTo 1u\n\
-             \x20   for (i in p) println(i)\n\
+             \x20   println(runCatching { 1 }.getOrNull())\n\
              }\n",
         )],
         target,
