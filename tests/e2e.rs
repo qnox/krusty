@@ -622,6 +622,8 @@ mod feature_coverage_x_e2e;
 mod finally_e2e;
 #[path = "float_range_nan_e2e.rs"]
 mod float_range_nan_e2e;
+#[path = "float_rendering_e2e.rs"]
+mod float_rendering_e2e;
 #[path = "fn_typed_default_e2e.rs"]
 mod fn_typed_default_e2e;
 #[path = "for_destructuring_components_e2e.rs"]
