@@ -150,4 +150,3 @@ fn a_capacity_is_a_hint_and_nothing_a_program_can_see() {
         "OK",
     );
 }
-

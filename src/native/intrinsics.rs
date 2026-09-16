@@ -48,9 +48,13 @@ fn kotlin_owner(owner: &str) -> &str {
         "java/util/Collection" => "kotlin/collections/Collection",
         "java/util/Iterator" => "kotlin/collections/Iterator",
         "java/lang/Iterable" => "kotlin/collections/Iterable",
-        // Kotlin has no `java.lang.StringBuilder` either: `kotlin.text.StringBuilder` is the type,
-        // and on the JVM it is an alias for this spelling.
-        "java/lang/StringBuilder" | "java/lang/AbstractStringBuilder" => "kotlin/text/StringBuilder",
+        // The text types, on the same footing. Kotlin has no `java.lang.StringBuilder` and no
+        // `java.lang.CharSequence`: `kotlin.text.StringBuilder` and `kotlin.CharSequence` are the
+        // types, and these spellings are only how a JVM jar presents them. `AbstractStringBuilder`
+        // is where the JVM declares the builder's own members, so it arrives under that name too.
+        "java/lang/StringBuilder" | "java/lang/AbstractStringBuilder" => {
+            "kotlin/text/StringBuilder"
+        }
         "java/lang/CharSequence" => "kotlin/CharSequence",
         other => other,
     }
@@ -574,9 +578,11 @@ pub(super) fn scalar_member(
         // name, and `kotlin.CharSequence.get` is realized as `java.lang.CharSequence.charAt`. The
         // Kotlin spelling still reaches here from a source that did not go through a realization,
         // so both are the same member rather than one replacing the other.
-        ("kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder", "get" | "charAt", [Ty::Int]) => {
-            Some(("kt_string_get", vec![reference, Ty::Int], Ty::Char))
-        }
+        (
+            "kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder",
+            "get" | "charAt",
+            [Ty::Int],
+        ) => Some(("kt_string_get", vec![reference, Ty::Int], Ty::Char)),
         // `s.subSequence(a, b)` is `s.substring(a, b)`; the return type only says less about the
         // result, which the call site already knows.
         ("kotlin/String" | "kotlin/CharSequence", "subSequence", [Ty::Int, Ty::Int]) => Some((

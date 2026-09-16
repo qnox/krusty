@@ -223,9 +223,7 @@ fn list_symbol(name: &str, arity: usize, physical: &[Ty]) -> Option<(&'static st
         // the ELEMENT, the others take something to walk. The physical parameter is what tells
         // them apart, as it does for `remove`/`removeAt` above — after substitution an element of
         // type `List<T>` and a collection of them read alike.
-        ("plusAssign", 1) if walkable => {
-            ("kt_mutable_list_add_all", vec![any(), any()], Ty::Unit)
-        }
+        ("plusAssign", 1) if walkable => ("kt_mutable_list_add_all", vec![any(), any()], Ty::Unit),
         ("plusAssign", 1) => ("kt_mutable_list_plus_assign", vec![any(), any()], Ty::Unit),
         _ => return None,
     })
