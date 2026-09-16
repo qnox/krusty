@@ -153,22 +153,26 @@ impl DeserializeBody<'_> {
             });
             ir.functions[fid as usize].body = Some(body);
             return;
-        }
-        // Field-local slot for each property — `this`=0, decoder=1, c=2, i=3, then the
-        // field locals from slot 4, advancing by each type's JVM width (Long/Double=2).
+        } // Local layout, in kotlinc's order: the descriptor is read ONCE into a local, the loop is
+          // driven by a `flag` the `-1` case clears (rather than a `break`), and the element index
+          // has NO initializer — only the loop assigns it. The composite decoder comes LAST, after
+          // the masks and the field locals, because `beginStructure` runs after they are zeroed.
+        const SERIAL_DESC_SLOT: u32 = 2;
+        const FLAG_SLOT: u32 = 3;
+        const INDEX_SLOT: u32 = 4;
+        let mask_count = fields.len() / 32 + 1;
+        // The producer records the exact deserialization constructor identity; consuming
+        // `synthetic` or arity would accidentally select an unrelated generated constructor.
+        let seen_slots = (0..mask_count)
+            .map(|word| INDEX_SLOT + 1 + word as u32)
+            .collect::<Vec<_>>();
         let mut slots: Vec<u32> = Vec::with_capacity(fields.len());
-        let mut next = 4u32;
+        let mut next = INDEX_SLOT + 1 + mask_count as u32;
         for (_, ty) in fields {
             slots.push(next);
             next += slot_width(ty);
         }
-        let mask_count = fields.len() / 32 + 1;
-        // Mask locals follow the field locals. The producer records the exact
-        // deserialization constructor identity; consuming `synthetic` or arity would
-        // accidentally select an unrelated generated constructor.
-        let seen_slots = (0..mask_count)
-            .map(|word| next + word as u32)
-            .collect::<Vec<_>>();
+        let composite_slot = next;
         let constructor = ir
             .generated_secondary_constructor(
                 foo_id,
@@ -187,43 +191,52 @@ impl DeserializeBody<'_> {
             (1..=2).contains(&marker_count),
             "deserialization constructor retains its marker parameter(s)"
         );
-        let this_desc = |ir: &mut IrFile| -> ExprId {
-            let r = ir.add_expr(IrExpr::GetValue(0));
-            ir.add_expr(IrExpr::GetField {
-                receiver: r,
+        // Every use of the descriptor and of the composite decoder reads its LOCAL.
+        let this_desc =
+            |ir: &mut IrFile| -> ExprId { ir.add_expr(IrExpr::GetValue(SERIAL_DESC_SLOT)) };
+        let composite =
+            |ir: &mut IrFile| -> ExprId { ir.add_expr(IrExpr::GetValue(composite_slot)) };
+        let body = {
+            let this0 = ir.add_expr(IrExpr::GetValue(0));
+            let descriptor_field = ir.add_expr(IrExpr::GetField {
+                receiver: this0,
                 class: ser_cid,
                 index: 0,
-            })
-        };
-        let body = {
-            let d0 = this_desc(ir);
-            let dec = ir.add_expr(IrExpr::GetValue(1));
-            let begin = ir.add_expr(IrExpr::Call {
-                callee: virtual_iface(
-                    "kotlinx/serialization/encoding/Decoder",
-                    "beginStructure",
-                    "(Lkotlinx/serialization/descriptors/SerialDescriptor;)Lkotlinx/serialization/encoding/CompositeDecoder;",
-                ),
-                dispatch_receiver: Some(dec),
-                args: vec![d0],
             });
-            let cvar = ir.add_expr(IrExpr::Variable {
-                index: 2,
-                ty: class_ty("kotlinx/serialization/encoding/CompositeDecoder"),
-                init: Some(begin),
+            let mut stmts = vec![ir.add_expr(IrExpr::Variable {
+                index: SERIAL_DESC_SLOT,
+                ty: class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+                init: Some(descriptor_field),
                 named: false,
-            });
-            let mut stmts = vec![cvar];
-            // index local (3) — declared before the field locals so emit's slot order
-            // (by declaration) matches the explicit indices (this=0, decoder=1, c=2,
-            // i=3, f0=4, f1=5, …).
-            let izero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+            })];
+            let flag_init = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
             stmts.push(ir.add_expr(IrExpr::Variable {
-                index: 3,
-                ty: class_ty("kotlin/Int"),
-                init: Some(izero),
+                index: FLAG_SLOT,
+                ty: Ty::Boolean,
+                init: Some(flag_init),
                 named: false,
             }));
+            // The element index exists only inside the loop. kotlinc leaves the slot UNINITIALIZED
+            // and its verifier frames carry `top` there; krusty computes frame locals from the
+            // declarations in scope rather than by merging edges, so an unstored slot cannot be
+            // typed `top` without rejecting every frame that follows. Zeroing it costs the two
+            // bytes kotlinc does not emit and keeps the rest of the layout exact.
+            let index_init = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+            stmts.push(ir.add_expr(IrExpr::Variable {
+                index: INDEX_SLOT,
+                ty: class_ty("kotlin/Int"),
+                init: Some(index_init),
+                named: false,
+            }));
+            for &seen_slot in &seen_slots {
+                let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+                stmts.push(ir.add_expr(IrExpr::Variable {
+                    index: seen_slot,
+                    ty: class_ty("kotlin/Int"),
+                    init: Some(zero),
+                    named: false,
+                }));
+            }
             // Field locals start at their JVM zero. Optional defaults belong solely to
             // the synthetic constructor and must not be evaluated before decoding.
             for (k, (_, ty)) in fields.iter().enumerate() {
@@ -236,18 +249,26 @@ impl DeserializeBody<'_> {
                     named: false,
                 }));
             }
-            for &seen_slot in &seen_slots {
-                let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-                stmts.push(ir.add_expr(IrExpr::Variable {
-                    index: seen_slot,
-                    ty: class_ty("kotlin/Int"),
-                    init: Some(zero),
-                    named: false,
-                }));
-            }
-            // loop body: i = c.decodeElementIndex(desc); when(i){…}
+            let d0 = this_desc(ir);
+            let dec = ir.add_expr(IrExpr::GetValue(1));
+            let begin = ir.add_expr(IrExpr::Call {
+                callee: virtual_iface(
+                    "kotlinx/serialization/encoding/Decoder",
+                    "beginStructure",
+                    "(Lkotlinx/serialization/descriptors/SerialDescriptor;)Lkotlinx/serialization/encoding/CompositeDecoder;",
+                ),
+                dispatch_receiver: Some(dec),
+                args: vec![d0],
+            });
+            stmts.push(ir.add_expr(IrExpr::Variable {
+                index: composite_slot,
+                ty: class_ty("kotlinx/serialization/encoding/CompositeDecoder"),
+                init: Some(begin),
+                named: false,
+            }));
+            // loop body: index = composite.decodeElementIndex(serialDesc); when (index) { … }
             let didx = this_desc(ir);
-            let cdi = ir.add_expr(IrExpr::GetValue(2));
+            let cdi = composite(ir);
             let dei = ir.add_expr(IrExpr::Call {
                 callee: virtual_iface(
                     "kotlinx/serialization/encoding/CompositeDecoder",
@@ -257,29 +278,34 @@ impl DeserializeBody<'_> {
                 dispatch_receiver: Some(cdi),
                 args: vec![didx],
             });
-            let set_i = ir.add_expr(IrExpr::SetValue { var: 3, value: dei });
-            // A sequence of single-branch `if` statements (each a Unit statement — no
-            // value mixing): `if (i == -1) break`, then `if (i == k) f_k = decode…`.
-            let mut loop_stmts = vec![set_i];
-            let iref = ir.add_expr(IrExpr::GetValue(3));
+            let set_i = ir.add_expr(IrExpr::SetValue {
+                var: INDEX_SLOT,
+                value: dei,
+            });
+            // ONE `when` over the index, not a chain of `if`s: every branch compares the same
+            // `Int` local against a distinct constant, which is the shape the emitter turns into
+            // kotlinc's `tableswitch`. `-1` clears the loop flag instead of breaking, so the loop
+            // exits through its own condition; an index that names no element is an
+            // `UnknownFieldException`, which krusty previously ignored in silence.
+            let iref = ir.add_expr(IrExpr::GetValue(INDEX_SLOT));
             let neg1 = ir.add_expr(IrExpr::Const(IrConst::Int(-1)));
             let is_done = ir.add_expr(IrExpr::PrimitiveBinOp {
                 op: crate::ir::IrBinOp::Eq,
                 lhs: iref,
                 rhs: neg1,
             });
-            let brk = ir.add_expr(IrExpr::Break {
-                label: Some("deser".to_string()),
+            let stop = ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
+            let clear_flag = ir.add_expr(IrExpr::SetValue {
+                var: FLAG_SLOT,
+                value: stop,
             });
-            let brk_blk = ir.add_expr(IrExpr::Block {
-                stmts: vec![brk],
+            let done_blk = ir.add_expr(IrExpr::Block {
+                stmts: vec![clear_flag],
                 value: None,
             });
-            loop_stmts.push(ir.add_expr(IrExpr::When {
-                branches: vec![(Some(is_done), brk_blk)],
-            }));
+            let mut branches = vec![(Some(is_done), done_blk)];
             for (k, (_, ty)) in fields.iter().enumerate() {
-                let iref = ir.add_expr(IrExpr::GetValue(3));
+                let iref = ir.add_expr(IrExpr::GetValue(INDEX_SLOT));
                 let kc = ir.add_expr(IrExpr::Const(IrConst::Int(k as i32)));
                 let is_k = ir.add_expr(IrExpr::PrimitiveBinOp {
                     op: crate::ir::IrBinOp::Eq,
@@ -288,7 +314,7 @@ impl DeserializeBody<'_> {
                 });
                 let dk = this_desc(ir);
                 let idxc = ir.add_expr(IrExpr::Const(IrConst::Int(k as i32)));
-                let cdk = ir.add_expr(IrExpr::GetValue(2));
+                let cdk = composite(ir);
                 let decoded = if let Some(inst) = contextual_serializer_for(
                     ir,
                     property_is_contextual(ctx, ir, class_id, &fields[k].0),
@@ -435,26 +461,38 @@ impl DeserializeBody<'_> {
                     stmts: decoded_stmts,
                     value: None,
                 });
-                loop_stmts.push(ir.add_expr(IrExpr::When {
-                    branches: vec![(Some(is_k), setk_blk)],
-                }));
+                branches.push((Some(is_k), setk_blk));
             }
-            let loop_body = ir.add_expr(IrExpr::Block {
-                stmts: loop_stmts,
+            // The `else` of that `when`: an index naming no element of this descriptor.
+            let unknown_index = ir.add_expr(IrExpr::GetValue(INDEX_SLOT));
+            let unknown = ir.new_external(
+                "kotlinx/serialization/UnknownFieldException",
+                "(I)V",
+                vec![unknown_index],
+            );
+            let raise = ir.add_expr(IrExpr::Throw { operand: unknown });
+            let raise_blk = ir.add_expr(IrExpr::Block {
+                stmts: vec![raise],
                 value: None,
             });
-            let cond = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+            branches.push((None, raise_blk));
+            let dispatch = ir.add_expr(IrExpr::When { branches });
+            let loop_body = ir.add_expr(IrExpr::Block {
+                stmts: vec![set_i, dispatch],
+                value: None,
+            });
+            let cond = ir.add_expr(IrExpr::GetValue(FLAG_SLOT));
             let whilexpr = ir.add_expr(IrExpr::While {
                 cond,
                 body: loop_body,
                 update: None,
                 post_test: false,
-                label: Some("deser".to_string()),
+                label: None,
             });
             stmts.push(whilexpr);
             // endStructure
             let dend = this_desc(ir);
-            let cend = ir.add_expr(IrExpr::GetValue(2));
+            let cend = composite(ir);
             stmts.push(ir.add_expr(IrExpr::Call {
                 callee: virtual_iface(
                     "kotlinx/serialization/encoding/CompositeDecoder",

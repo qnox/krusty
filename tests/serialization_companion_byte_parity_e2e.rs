@@ -2794,16 +2794,19 @@ fn only_an_array_of_a_star_projection_records_its_descriptor() {
 /// One member's disassembly, from its declaration to the next one, with pool indices erased.
 fn member_body(disassembly: &str, member: &str) -> Vec<String> {
     let declaration = opens_a_member;
+    // Raw lines, because INDENTATION is what separates the class body's closing `}` (column 0)
+    // from a `}` inside a member — a `tableswitch` block ends with one, and trimming first made
+    // this stop there and silently return a truncated body.
     let mut lines = disassembly
         .lines()
-        .map(str::trim)
-        .skip_while(|line| !(declaration(line) && line.contains(member)));
-    let mut body = vec![lines.next().unwrap_or_default().to_string()];
+        .skip_while(|line| !(declaration(line.trim()) && line.contains(member)));
+    let mut body = vec![lines.next().unwrap_or_default().trim().to_string()];
     for line in lines {
-        if declaration(line) || line == "}" {
+        // The LAST member ends at the class body's close, not at another declaration.
+        if line == "}" || declaration(line.trim()) {
             break;
         }
-        body.push(line.to_string());
+        body.push(line.trim().to_string());
     }
     structure(&body.join("\n"))
 }
@@ -2986,5 +2989,112 @@ fn a_singleton_serializers_class_initializer_matches_kotlinc() {
         member_body(&built.krusty, "static {}"),
         want,
         "generated serializer class initializer"
+    );
+}
+
+/// What `deserialize` opens before it decodes anything, and how it dispatches on the element index.
+///
+/// The local layout is kotlinc's: the descriptor read ONCE into a local, then the loop flag, the
+/// element index, the seen-mask, the field locals, and the composite decoder LAST — `beginStructure`
+/// runs after the rest are zeroed. krusty had kept the composite decoder at slot 2 and re-read
+/// `this.descriptor` at every use, which put every subsequent local one place off.
+///
+/// The dispatch is one `tableswitch` over `-1..=n-1` with a default, not a chain of comparisons.
+///
+/// Only the prologue is compared instruction for instruction. The whole method is not yet
+/// byte-identical: kotlinc opens with a `decodeSequentially()` fast path, and leaves the element
+/// index slot UNINITIALIZED where krusty must zero it — its frame locals come from the declarations
+/// in scope rather than from merging edges, so an unstored slot cannot be typed `top`.
+#[test]
+fn deserialize_opens_kotlincs_locals_and_switches_on_the_index() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class Point(val x: Int, val y: String)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "DeserializeDispatch",
+        src,
+        "Point$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // Which local each value lands in, up to the `beginStructure` result — the layout every later
+    // instruction indexes into. Offsets are not compared: they shift by the one documented extra
+    // instruction below.
+    let stores = |text: &str| {
+        let body = member_body(text, "deserialize(kotlinx.serialization.encoding.Decoder)");
+        let end = body
+            .iter()
+            .position(|line| line.contains("beginStructure"))
+            .unwrap_or_else(|| panic!("no beginStructure in deserialize: {body:?}"));
+        body[..=end]
+            .iter()
+            .filter_map(|line| line.split_once(": "))
+            .map(|(_, instruction)| instruction.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|instruction| {
+                instruction.starts_with("astore") || instruction.starts_with("istore")
+            })
+            .collect::<Vec<_>>()
+    };
+    let want = stores(&built.reference);
+    assert_eq!(
+        want,
+        ["astore_2", "istore_3", "istore 5", "istore 6", "astore 7"],
+        "kotlinc's locals: the descriptor, the loop flag, the seen mask, then the fields"
+    );
+    // Slot 4 is the element index, which kotlinc never initializes — it is assigned only by the
+    // loop, and kotlinc's verifier frames carry `top` for it until then.
+    let got = stores(&built.krusty);
+    assert_eq!(
+        got.iter()
+            .filter(|instruction| *instruction != "istore 4")
+            .cloned()
+            .collect::<Vec<_>>(),
+        want,
+        "deserialize local layout"
+    );
+    assert_eq!(
+        got.len(),
+        want.len() + 1,
+        "the element-index zeroing is the ONLY extra store: {got:?}"
+    );
+
+    let dispatch = |text: &str| {
+        member_body(text, "deserialize(kotlinx.serialization.encoding.Decoder)")
+            .into_iter()
+            .filter(|line| {
+                line.contains("tableswitch")
+                    || line.contains("lookupswitch")
+                    || line.contains("UnknownFieldException")
+            })
+            // Offsets move with the extra store above; the instruction and its key range do not.
+            .map(|line| {
+                line.split_once(": ")
+                    .map_or(line.clone(), |(_, rest)| rest.to_string())
+            })
+            .collect::<Vec<_>>()
+    };
+    let want_dispatch = dispatch(&built.reference);
+    assert!(
+        want_dispatch
+            .iter()
+            .any(|line| line.contains("tableswitch"))
+            && want_dispatch
+                .iter()
+                .any(|line| line.contains("UnknownFieldException")),
+        "kotlinc switches on the element index and throws on an unknown one: {want_dispatch:?}"
+    );
+    assert_eq!(
+        dispatch(&built.krusty),
+        want_dispatch,
+        "element-index dispatch"
     );
 }
