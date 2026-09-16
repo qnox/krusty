@@ -18353,10 +18353,6 @@ impl ResolvedCall {
         Self::Extension(Box::new(ResolvedExtensionCall::library(callable)))
     }
 
-    fn top_level(callable: crate::libraries::LibraryCallable) -> Self {
-        Self::TopLevel(Box::new(ResolvedTopLevelCall::library(callable)))
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn source_extension(
         callable: crate::libraries::LibraryCallable,
@@ -18954,25 +18950,6 @@ pub struct ResolvedTopLevelCall {
     /// The callee's declared contract (from same-module source or classpath `@Metadata`) — the
     /// effects the checker applies at this call site.
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
-}
-
-impl ResolvedTopLevelCall {
-    fn library(callable: crate::libraries::LibraryCallable) -> Self {
-        let vararg_index = callable.vararg_index;
-        Self {
-            callable,
-            call_sig: CallSig::default(),
-            context_args: Vec::new(),
-            source_file: None,
-            source_decl: None,
-            stable_declaration: None,
-            vararg_index,
-            param_meta: Vec::new(),
-            param_default_values: Vec::new(),
-            projected_return_hazard: false,
-            contract: None,
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -23316,54 +23293,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Score a mapped call's slots against the candidate's parameters. At the vararg slot the
-    /// ELEMENT form (a positional first element) and the ARRAY form (a spread, or the named
-    /// whole-array assignment) both score — the slot map keeps element-form arguments.
-    fn call_slot_score_vararg(
-        &self,
-        params: &[Ty],
-        slots: &[Option<ExprId>],
-        vararg_index: Option<usize>,
-    ) -> Option<usize> {
-        if params.len() != slots.len() {
-            return None;
-        }
-        let mut score = 0usize;
-        for (i, slot) in slots.iter().enumerate() {
-            let Some(arg) = slot else { continue };
-            let aty = self.expr_types[arg.0 as usize];
-            let argument = call_arg_kind(self.file, *arg, aty);
-            // At the vararg slot the ELEMENT form (a positional first element) and the ARRAY form
-            // (a spread, or the named whole-array assignment `parts = values`) are both admissible.
-            let expected = if vararg_index == Some(i)
-                && !argument.is_spread()
-                && !self.receiver_is_assignable(aty, params[i])
-            {
-                params[i].array_read_elem().unwrap_or(params[i])
-            } else {
-                params[i]
-            };
-            // Kotlin contextually discards a lambda literal's value when the selected parameter
-            // returns `Unit`. Mapped calls used to miss the shared adaptation and happened to pass
-            // only while provider parameters stayed erased `FunctionN` objects; publishing a
-            // concrete `(T) -> Unit` correctly exposed the drift. Score the same coerced semantic
-            // type used by member-extension and source-call planning, irrespective of where the
-            // candidate was declared or whether this slot came from a name, default, or vararg.
-            let aty = self
-                .unit_coerced_lambda_type(*arg, expected, aty)
-                .unwrap_or(aty);
-            if aty != Ty::Error
-                && !self.receiver_is_assignable(aty, expected)
-                && !argument.adapts_integer_literal_to(expected)
-                && !self.erased_function_param_fits(expected, aty)
-            {
-                return None;
-            }
-            score += if expected == aty { 4 } else { 1 };
-        }
-        Some(score)
-    }
-
     /// Walk one qualified spelling exactly once, left-to-right. Root classification is scope-tower
     /// work; subsequent package/classifier edges are symbol-source work. A value root commits the
     /// entire spelling to ordinary expression checking, and this walk never performs call/constructor
@@ -24654,29 +24583,6 @@ impl<'a> Checker<'a> {
         // variables belonging to a nested generic argument, and those are not ours to bind.
         binds.retain(|name, ty| plan.type_params.contains(name) && *ty != Ty::Error);
         binds
-    }
-
-    /// The vararg parameter slot of a selected TOP-LEVEL callable, recovered from the candidate set it
-    /// was picked out of. A [`crate::libraries::LibraryCallable`] records `vararg_index` only for the
-    /// `$default` form, but a positional argument check needs the slot for EVERY vararg call — without
-    /// it the first packed element is measured against the array parameter itself.
-    fn top_level_vararg_slot(
-        &self,
-        pkg_scope: &[TypeName],
-        name: &str,
-        selected: &crate::libraries::LibraryCallable,
-    ) -> Option<usize> {
-        if let Some(index) = selected.vararg_index {
-            return Some(index);
-        }
-        self.resolver_in_scope(pkg_scope)
-            .top_level_candidates(name)
-            .into_iter()
-            .find(|candidate| {
-                candidate.callable.owner == selected.owner
-                    && candidate.callable.descriptor == selected.descriptor
-            })
-            .and_then(|candidate| candidate.call_sig.vararg_index)
     }
 
     /// Resolve and type-check a call to a MODULE (user) class's instance member on receiver type `rt`.
@@ -27210,7 +27116,6 @@ impl<'a> Checker<'a> {
                         .top_level_candidates(&name)
                         .is_empty()
                     {
-                        let pkg = package.render();
                         let pkg_scope = [package];
                         // A dotted package path is only a TOP-LEVEL-FUNCTION candidate when the
                         // semantic provider actually exposes that name in the package. Do this
@@ -27250,237 +27155,41 @@ impl<'a> Checker<'a> {
                         let candidates = self
                             .resolver_in_scope(&pkg_scope)
                             .top_level_candidates(&name);
-                        if let Some(selected) = self
-                            .select_callable_candidate(
-                                scope,
-                                CallArgs {
+                        let selection = self.select_callable_candidate(
+                            scope,
+                            CallArgs {
+                                call,
+                                args,
+                                arg_tys: &arg_tys,
+                            },
+                            &targs,
+                            None,
+                            CallResultConstraint::direct(expected),
+                            candidates.clone(),
+                        );
+                        match selection {
+                            Some(
+                                CallableCandidateSelection::Selected(selected)
+                                | CallableCandidateSelection::MissingContext(selected),
+                            ) => {
+                                self.retire_selected_lambda_probe(call, args, probe_mark);
+                                return self.finish_top_level_call(
+                                    scope,
                                     call,
                                     args,
-                                    arg_tys: &arg_tys,
-                                },
-                                &targs,
-                                None,
-                                CallResultConstraint::direct(expected),
-                                candidates,
-                            )
-                            .and_then(CallableCandidateSelection::candidate)
-                        {
-                            self.retire_selected_lambda_probe(call, args, probe_mark);
-                            return self.finish_top_level_call(
-                                scope,
-                                call,
-                                args,
-                                &arg_tys,
-                                arg_names.as_deref(),
-                                selected,
-                                &targs,
-                                None,
-                            );
-                        }
-                        let mut selected_arg_tys = arg_tys.clone();
-                        let mut resolved_slots = None;
-                        if let Some(names) = arg_names
-                            .as_deref()
-                            .filter(|names| names.iter().any(Option::is_some))
-                        {
-                            let candidates = self
-                                .resolver_in_scope(&pkg_scope)
-                                .top_level_candidates(&name);
-                            let trailing_lambda =
-                                self.file.call_has_trailing_lambda.contains(&call.0);
-                            match self.map_named_qualified_top_level_args(
-                                scope,
-                                call,
-                                &name,
-                                args,
-                                names,
-                                trailing_lambda,
-                                candidates,
-                            ) {
-                                Ok(Some((_, mapped_types, slots))) => {
-                                    selected_arg_tys = mapped_types;
-                                    resolved_slots = Some(slots);
-                                }
-                                Ok(None) => {}
-                                Err(()) => return Ty::Error,
-                            }
-                        }
-                        if let Some(mut c) = self
-                            .resolver_in_scope(&pkg_scope)
-                            .resolve_symbol(
-                                crate::symbol_resolver::SymRecv::TopLevel,
-                                &name,
-                                &selected_arg_tys,
-                                &targs,
-                            )
-                            .and_then(crate::symbol_resolver::Symbol::top_level_call)
-                        {
-                            if c.owner_package_matches_name(pkg_scope[0]) {
-                                crate::trace_compiler!(
-                                    "resolve",
-                                    "fully-qualified top-level call {pkg}.{name} -> {}",
-                                    c.owner.render()
+                                    &arg_tys,
+                                    arg_names.as_deref(),
+                                    *selected,
+                                    &targs,
+                                    None,
                                 );
-                                if let Some(slots) = &resolved_slots {
-                                    for (parameter, argument) in c.params.iter().zip(slots) {
-                                        if let Some(argument) = argument {
-                                            self.expect_assignable(
-                                                *parameter,
-                                                self.expr_types[argument.0 as usize],
-                                                self.span(*argument),
-                                                "argument",
-                                            );
-                                        }
-                                    }
-                                } else {
-                                    // A VARARG callee packs every trailing argument into ONE array
-                                    // parameter, so index-for-index pairing would measure the first
-                                    // element against `Array<Any>`. Check those arguments against the
-                                    // array's ELEMENT type — the representation-neutral rule the
-                                    // bare-name, member and local-function paths already apply. An
-                                    // explicit spread passes the array itself and keeps the array type.
-                                    let vararg = self
-                                        .top_level_vararg_slot(&pkg_scope, &name, &c)
-                                        .filter(|&slot| slot + 1 == c.params.len());
-                                    for (i, a) in args.iter().enumerate() {
-                                        let expected = match vararg {
-                                            Some(slot)
-                                                if i >= slot && !self.file.is_spread_arg(*a) =>
-                                            {
-                                                c.params.get(slot).and_then(|p| p.array_read_elem())
-                                            }
-                                            Some(slot) if i >= slot => c.params.get(slot).copied(),
-                                            _ => c.params.get(i).copied(),
-                                        };
-                                        if let Some(p) = expected {
-                                            self.expect_assignable(
-                                                p,
-                                                arg_tys[i],
-                                                self.span(*a),
-                                                "argument",
-                                            );
-                                        }
-                                    }
-                                    // The lowerer must pack the same trailing arguments, and a
-                                    // `LibraryCallable` alone cannot say which slot is the vararg —
-                                    // record the slot the checker selected on (sole resolver). A
-                                    // single trailing argument that already IS the array (a spread,
-                                    // or the array itself) passes straight through, so it is not a
-                                    // packing site.
-                                    if let Some(slot) = vararg {
-                                        let packs = args.len() != slot + 1
-                                            || args.get(slot).is_some_and(|&a| {
-                                                !self.file.is_spread_arg(a)
-                                                    && Some(arg_tys[slot])
-                                                        != c.params.get(slot).copied()
-                                            });
-                                        if packs {
-                                            c.vararg_elem = c
-                                                .params
-                                                .get(slot)
-                                                .and_then(|p| p.array_read_elem());
-                                            c.vararg_index = Some(slot);
-                                        }
-                                    }
-                                }
-                                if let Some(slots) = resolved_slots {
-                                    self.resolved_call_arg_slots.insert(call, slots);
-                                }
-                                // Record for the lowerer (sole resolver): a FQ top-level call.
-                                let ret = c.ret;
-                                self.resolved_calls.insert(call, ResolvedCall::top_level(c));
-                                return ret;
                             }
-                        }
-                        // A FQ call with a SYNTACTIC trailing lambda where the preceding parameters
-                        // DEFAULT (`kotlinx.coroutines.runBlocking { … }`): the lambda binds the LAST
-                        // parameter and the leading (defaulted) parameters are omitted, so the positional
-                        // front-to-back resolution above saw the wrong arity and missed it.
-                        if self.file.call_has_trailing_lambda.contains(&call.0)
-                            && !arg_tys.is_empty()
-                        {
-                            // The trailing lambda was typed WITHOUT the expected-parameter hint
-                            // (`{ … }` → arity 0), but the callee's block parameter is a receiver /
-                            // suspend SAM (`kotlinx.coroutines.runBlocking`'s `CoroutineScope.() -> T`).
-                            // Re-type the lambda against that parameter — the same shape data (aligned
-                            // for the default-omitted trailing lambda) the bare-name (`import`ed) path
-                            // uses — so it takes the right arity/receiver and overload resolution then
-                            // binds its result type-parameter (`T = String`).
-                            let last = args.len() - 1;
-                            let mut partial: Vec<Option<Ty>> =
-                                arg_tys.iter().map(|t| Some(*t)).collect();
-                            partial[last] = None;
-                            let explicit_type_args = self.resolved_explicit_type_args(scope, call);
-                            let shape = self.top_level_lambda_shape_in_scope(
-                                scope,
-                                &name,
-                                (args, &partial),
-                                arg_names.as_deref(),
-                                true,
-                                Some(&pkg_scope),
-                                &explicit_type_args,
-                                None,
-                            );
-                            if let Some(pt) = shape
-                                .as_ref()
-                                .and_then(|s| s.param_types.as_ref())
-                                .and_then(|p| p.get(last))
-                                .cloned()
-                            {
-                                // A RECEIVER function-type block parameter (`CoroutineScope.() -> T`):
-                                // `pt[0]` is the receiver bound as the lambda's `this`, `pt[1..]` its
-                                // value params — matching the bare-name path's `lambda_param_types` use.
-                                let recv = shape
-                                    .as_ref()
-                                    .and_then(|s| s.receivers.as_ref())
-                                    .and_then(|r| r.get(last).copied().flatten());
-                                let lam_ty = if let Some(recv) = recv {
-                                    self.check_lambda_with_receiver_labeled(
-                                        scope,
-                                        args[last],
-                                        recv,
-                                        if !pt.is_empty() { &pt[1..] } else { &[] },
-                                        None,
-                                    )
-                                } else {
-                                    self.check_lambda_with_types_labeled(
-                                        scope,
-                                        args[last],
-                                        &pt,
-                                        Some(&name),
-                                    )
-                                };
-                                let mut full = arg_tys.clone();
-                                full[last] = lam_ty;
-                                if let Some(c) = self
-                                    .resolver_in_scope(&pkg_scope)
-                                    .resolve_symbol(
-                                        crate::symbol_resolver::SymRecv::TopLevel,
-                                        &name,
-                                        &full,
-                                        &targs,
-                                    )
-                                    .and_then(crate::symbol_resolver::Symbol::top_level_call)
-                                {
-                                    if c.owner_package_matches_name(pkg_scope[0]) {
-                                        crate::trace_compiler!(
-                                                "resolve",
-                                                "fully-qualified trailing-lambda call {pkg}.{name} -> {}",
-                                                c.owner.render()
-                                            );
-                                        // Record the resolved callable so the lowerer emits it (the
-                                        // non-trailing-lambda FQ path above records the same way).
-                                        let ret = c.ret;
-                                        self.resolved_calls
-                                            .insert(call, ResolvedCall::top_level(c));
-                                        return ret;
-                                    }
-                                }
+                            Some(CallableCandidateSelection::Ambiguous(candidates)) => {
+                                self.report_callable_ambiguity(call, &name, &candidates);
+                                return Ty::Error;
                             }
+                            None => {}
                         }
-                        let candidates = self
-                            .resolver_in_scope(&pkg_scope)
-                            .top_level_candidates(&name);
                         if self.report_inapplicable_callable_candidates(
                             InapplicableTopLevelCall {
                                 call,

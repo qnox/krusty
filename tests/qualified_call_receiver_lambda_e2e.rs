@@ -216,3 +216,19 @@ fun <T> shape(seed: T, vararg numbers: Int, block: T.() -> String): String =\n\
         "MainKt",
     );
 }
+
+/// A package qualifier changes candidate collection, not overload semantics. The shared selector
+/// must preserve an ambiguity instead of retrying through a second symbol resolver that can choose
+/// an arbitrary overload.
+#[test]
+fn a_package_qualified_ambiguous_call_stays_ambiguous() {
+    const MAIN: &str = "package app.dsl\n\
+\n\
+import java.util.function.Consumer\n\
+\n\
+fun choose(r: Runnable): String = \"runnable\"\n\
+fun choose(c: Consumer<String>): String = \"consumer\"\n\
+fun bad(): String = app.dsl.choose { }\n";
+    let result = common::compiler_diagnostics(&[("Main.kt", MAIN)], &[]);
+    expect_identical_rejection(&result, "a package-qualified ambiguous call");
+}
