@@ -2515,3 +2515,50 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `an_enum_lookup_with_no_suspension_still_works`,
   `src/jvm/suspend/hoisting.rs::tests::a_shared_operand_is_hoisted_independently_at_each_use`,
   `every_remaining_single_operand_node_recurses`.
+- **An unresolvable `return@label` reports the reference diagnostic, at its span (fix).** krusty wrote
+  its own wording at the `return` keyword; the reference compiler writes `unresolved label.` at the
+  `@` token. Both the message and the column differed, for an unknown name and for a name whose
+  lambda does not enclose the return alike. The label survives on the node only as a bare `String`,
+  so the span cannot be recovered afterwards: the parser now records the `@` span for the statement
+  and expression forms, and both report sites read it. Shared test helpers
+  (`common::expect_identical_rejection`) compares the COMPLETE diagnostic
+  set of both compilers — count, file, line, column, message and order — since a nonzero-exit
+  assertion passes on an unrelated rejection, which is how a "both compilers agree" claim goes stale.
+  `tests/unresolved_label_diagnostic_e2e.rs::an_unknown_return_label_matches_the_reference_diagnostic`,
+  `a_declared_but_non_enclosing_return_label_matches_the_reference_diagnostic`,
+  `an_unresolved_label_in_expression_position_matches_the_reference_diagnostic`,
+  `a_resolvable_return_label_still_works`.
+- **An extension's type-parameter receiver is solved with the arguments, not before or after them
+  (fix).** For `fun <P : Pipe, B : Any> P.install(plugin: Plug<P, B>, configure: B.() -> Unit)`, the
+  pre-lambda applicability probe first unified the receiver in a separate pass. That pinned `P` to
+  the receiver's concrete class, so `App().install(pluginOfPipe) { … }` judged `Plug<Pipe, Cfg>`
+  against `Plug<App, B>`, declined the overload, and left its lambda unshaped. Simply reversing the
+  passes was also wrong: once argument inference occupied a formal, the old unifier discarded the
+  receiver evidence. The receiver now contributes an assignability constraint to the SAME set as
+  the mapped arguments. The ordinary constraint solver therefore applies each parameter position's
+  variance, joins compatible lower bounds, honors explicit arguments and declared bounds, and rejects
+  incompatible invariant evidence without making call-site ordering decide the answer.
+  `tests/generic_receiver_extension_lambda_shape_e2e.rs::a_generic_receiver_extension_still_shapes_its_lambda_receiver`,
+  `a_generic_receiver_extension_still_shapes_a_plain_lambda_parameter`,
+  `a_receiver_and_an_argument_join_into_one_formal`,
+  `a_formal_inside_a_variant_shell_still_admits_the_receiver`,
+  `a_receiver_the_invariant_argument_excludes_is_still_rejected`,
+  `explicit_type_arguments_still_fix_both_formals`,
+  `a_receiver_outside_the_formals_bound_is_still_rejected`,
+  `an_ordinary_parameter_of_the_same_shape_still_shapes_its_lambda`,
+  `a_concrete_receiver_extension_still_shapes_its_lambda`,
+  `a_member_the_shaped_receiver_lacks_is_still_rejected`.
+- **An inline member no longer crashes its siblings' annotation checking (fix).** Preparing a class's
+  inline members re-enters the class and walks the members it did NOT select, purely to rebuild their
+  lexical scopes. Those members' annotation ARGUMENT expressions belong to a source fragment that pass
+  no longer retains, and the checker asserted that only Pass-1 default checking could ever observe
+  released syntax. Any argument-bearing annotation on an ordinary member therefore CRASHED the
+  compiler as soon as the same class also declared an `inline` member — `@Suppress("UNCHECKED_CAST")`
+  beside an `inline fun` is the everyday case, and five lines reproduce it with no classpath. Two
+  passes are restricted this way, not one: Pass-1 default checking and inline preparation, which
+  selects only the inline declarations it must expand. Skipping released syntax is correct in each,
+  and the assertion now says so; an UNRESTRICTED pass, which has every expression, still trips it.
+  `tests/inline_preparation_sibling_annotation_e2e.rs::an_inline_member_does_not_crash_an_annotated_sibling`,
+  `any_argument_bearing_annotation_on_the_sibling_behaves_the_same`,
+  `a_class_with_no_inline_member_still_compiles`,
+  `a_bad_annotation_argument_is_still_rejected_beside_an_inline_member`.

@@ -686,6 +686,8 @@ mod generic_inferred_primitive_return_e2e;
 mod generic_inferred_return_e2e;
 #[path = "generic_member_extension_lambda_result_e2e.rs"]
 mod generic_member_extension_lambda_result_e2e;
+#[path = "generic_receiver_extension_lambda_shape_e2e.rs"]
+mod generic_receiver_extension_lambda_shape_e2e;
 #[path = "generic_return_inference_e2e.rs"]
 mod generic_return_inference_e2e;
 #[path = "generic_signature_e2e.rs"]
@@ -744,6 +746,8 @@ mod inline_end_branch_e2e;
 mod inline_lambda_result_boxing_e2e;
 #[path = "inline_lambda_value_return_e2e.rs"]
 mod inline_lambda_value_return_e2e;
+#[path = "inline_preparation_sibling_annotation_e2e.rs"]
+mod inline_preparation_sibling_annotation_e2e;
 #[path = "inline_return_bound_context_e2e.rs"]
 mod inline_return_bound_context_e2e;
 #[path = "inline_splice_e2e.rs"]
@@ -1534,6 +1538,8 @@ mod unit_vararg_e2e;
 mod unqualified_enum_entry_e2e;
 #[path = "unreachable_trailing_block_ty_e2e.rs"]
 mod unreachable_trailing_block_ty_e2e;
+#[path = "unresolved_label_diagnostic_e2e.rs"]
+mod unresolved_label_diagnostic_e2e;
 #[path = "unresolved_supertype_diag_e2e.rs"]
 mod unresolved_supertype_diag_e2e;
 #[path = "unsigned_array_e2e.rs"]

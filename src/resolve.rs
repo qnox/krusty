@@ -28,6 +28,8 @@ use crate::types::{
 };
 use scope::{ContextReceiver, ContextValue, FlowExclusion, NarrowPath, Ns, ScopeKind};
 
+mod annotation_applications;
+mod annotation_legacy_bridge;
 mod call_result_constraint;
 mod callable_reference_selection;
 mod capture_analysis;
@@ -41,6 +43,7 @@ mod context_sensitive_resolution;
 mod delegated_properties;
 mod dependency_platform;
 mod finalized_projection;
+mod generic_call_bindings;
 mod interface_delegation;
 mod invoke_selection;
 mod lambda_expectation;
@@ -54,6 +57,8 @@ mod postponed_diagnostics;
 mod qualified_call_shaping;
 mod safe_call_flow;
 mod sam_constructors;
+mod source_fragment;
+use source_fragment::SourceFragmentMode;
 mod scope;
 mod singleton_receivers;
 mod source_constructors;
@@ -34787,13 +34792,10 @@ impl<'a> Checker<'a> {
                 label,
                 self.lambda_returns.active_labels()
             );
-            self.diags.error(
-                self.file.stmt_spans[s.0 as usize],
-                format!(
-                    "return label '{}' does not denote an enclosing lambda",
-                    label.as_deref().unwrap_or_default()
-                ),
-            );
+            // The reference compiler reports an unresolvable label at the `@` token and words it
+            // `unresolved label.`, for an unknown name and for a name whose lambda does not enclose
+            // the return alike.
+            self.report_unresolved_statement_label(s);
             return;
         };
         self.stmt_return_targets.insert(s, target);
@@ -45833,6 +45835,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         selected_body_declarations: None,
         selected_stable_body_declarations: None,
         signature_defaults_only: false,
+        fragment: SourceFragmentMode::Complete,
         expr_types: vec![Ty::Error; file.expr_arena.len()],
         #[cfg(feature = "trace")]
         expr_visits: vec![0; file.expr_arena.len()],
@@ -47071,7 +47074,7 @@ fn discover_anonymous_object_captures_at<S: CheckerSymbolEnvironment>(
         active_declarations,
         None,
         selected_stable_bodies,
-        false,
+        SourceFragmentMode::Complete,
         None,
         None,
     );
@@ -47312,7 +47315,7 @@ fn check_file_at_impl_mode(
         None,
         None,
         None,
-        false,
+        SourceFragmentMode::Complete,
         None,
         None,
     )
@@ -47331,7 +47334,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     active_declarations: Option<&crate::fir::ActiveSourceDeclarations>,
     selected_stable_roots: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
     selected_stable_bodies: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
-    signature_defaults_only: bool,
+    fragment: SourceFragmentMode,
     seeded_anonymous_captures: Option<&HashMap<DeclId, Vec<AnonymousObjectCapture>>>,
     streamed_cache: Option<&crate::fir::StreamedModuleProjectionCache>,
 ) -> TypeInfo {
@@ -47351,7 +47354,8 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     if let Some(captures) = seeded_anonymous_captures {
         c.discovered_anonymous_captures = captures.clone();
     }
-    c.signature_defaults_only = signature_defaults_only;
+    c.fragment = fragment;
+    c.signature_defaults_only = fragment.is_signature_defaults();
     if selected_stable_bodies.is_some_and(|declarations| {
         !declarations.is_empty()
             && declarations.iter().all(|declaration| {
@@ -47400,7 +47404,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     // same checked sidecar that will immediately hand this unit's declaration metadata to common
     // IR. Capture discovery and Pass-1 default preparation are scratch traversals whose results are
     // discarded; neither may become a second owner of the application.
-    if !capture_discovery && !signature_defaults_only {
+    if !capture_discovery && !fragment.is_signature_defaults() {
         let applications = file.file_annotations.clone();
         for (annotation, arguments) in applications {
             c.check_annotation_application(scope, &annotation, &arguments);
@@ -47410,7 +47414,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     // The streaming path already published contracts as stable, semantically resolved Pass-1
     // declaration facts. Only the legacy whole-file checker decodes them here; reparsing one Pass-2
     // body must neither rediscover a caller-visible signature fact nor patch the module table.
-    if !signature_defaults_only && resolved_index.is_none() {
+    if !fragment.is_signature_defaults() && resolved_index.is_none() {
         c.collect_source_contracts(scope, selected_body_declarations);
     }
 
@@ -47466,7 +47470,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         // Inline work selects the stable outer declaration root, while capture discovery selects
         // the exact nested classifier that owns the construction. During the scratch capture pass
         // those are the same bounded source region even when their declaration ranges differ.
-        let selected_stable_root = signature_defaults_only.then(|| {
+        let selected_stable_root = fragment.is_signature_defaults().then(|| {
             let stable = active_declarations.and_then(|active| active.file_declaration(file, d));
             crate::trace_compiler!(
                 "fir",
@@ -48266,7 +48270,7 @@ pub(crate) fn check_preinferred_inline_declarations_at_with_index(
             Some(active_declarations),
             None,
             Some(selected_stable_bodies),
-            false,
+            SourceFragmentMode::InlinePreparation,
             None,
             None,
         )
@@ -48300,7 +48304,7 @@ pub(crate) fn check_selected_declarations_in_pass_two(
             Some(active_declarations),
             None,
             Some(selected_stable_bodies),
-            false,
+            SourceFragmentMode::Complete,
             Some(anonymous_captures),
             Some(streamed_cache),
         )
@@ -48334,7 +48338,7 @@ pub(crate) fn check_signature_default_declarations_at_with_index(
             Some(active_declarations),
             Some(selected_stable_roots),
             Some(selected_stable_defaults),
-            true,
+            SourceFragmentMode::SignatureDefaults,
             None,
             None,
         )
@@ -48835,7 +48839,13 @@ struct Checker<'a> {
     selected_stable_body_declarations: Option<std::collections::HashSet<crate::fir::DeclarationId>>,
     /// This selected Pass-1 check owns only parameter-default expressions. Finalized signatures
     /// already supply callable result types, so no ordinary body may be reopened for inference.
+    ///
+    /// Derived from [`Checker::fragment`] and never set independently: the MODE is what a pass
+    /// declares about itself, and this is the one restriction many sites ask about directly.
     signature_defaults_only: bool,
+    /// How much of the file this pass actually holds — see [`source_fragment`]. A pass that
+    /// declares nothing is [`SourceFragmentMode::Complete`], which is fail-closed.
+    fragment: SourceFragmentMode,
     /// Resolve a module declaration whose own type is still being determined, ON DEMAND.
     ///
     /// Set only when the checker is typing ONE declaration on behalf of the resolution engine
@@ -54398,83 +54408,6 @@ impl<'a> Checker<'a> {
         )
     }
 
-    fn merge_mapped_generic_argument_bindings(
-        &self,
-        overload: &crate::libraries::FunctionInfo,
-        args_and_partial: (&[ExprId], &[Option<Ty>]),
-        argument_map: &[usize],
-        named_whole_array_varargs: &[bool],
-        explicit_type_arguments: &[Ty],
-        bindings: &mut crate::symbol_resolver::GSigBinds,
-    ) {
-        let (args, arg_tys) = args_and_partial;
-        let semantic = overload.semantic_signature();
-        let source = self.fed_source();
-        let inferred = crate::symbol_resolver::infer_generic_call_bindings_from_symbols(
-            &source,
-            &semantic,
-            argument_map
-                .iter()
-                .copied()
-                .zip(arg_tys)
-                .enumerate()
-                .filter_map(|(argument, (parameter, actual))| {
-                    if self
-                        .unbound_contextual_result_signature(*args.get(argument)?)
-                        .is_some()
-                    {
-                        return None;
-                    }
-                    let actual = (*actual)?;
-                    let whole_array = named_whole_array_varargs
-                        .get(argument)
-                        .copied()
-                        .unwrap_or(false)
-                        || self.file.is_spread_arg(args[argument]);
-                    Some((parameter, actual, whole_array))
-                }),
-            overload.call_sig.vararg_index,
-        );
-        crate::symbol_resolver::merge_generic_bindings(
-            &semantic,
-            explicit_type_arguments,
-            bindings,
-            inferred,
-        );
-    }
-
-    fn mapped_generic_call_bindings(
-        &self,
-        overload: &crate::libraries::FunctionInfo,
-        receiver: Option<Ty>,
-        args_and_partial: (&[ExprId], &[Option<Ty>]),
-        argument_map: &[usize],
-        named_whole_array_varargs: &[bool],
-        type_args: &[Ty],
-    ) -> crate::symbol_resolver::GSigBinds {
-        let (args, arg_tys) = args_and_partial;
-        let semantic = overload.semantic_signature();
-        let mut bindings = crate::symbol_resolver::seeded_gsig_binds(&semantic, type_args);
-        let source = self.fed_source();
-        if let (Some(receiver), Some(receiver_shape)) = (receiver, semantic.receiver) {
-            crate::symbol_resolver::unify_ty_from_symbols(
-                &source,
-                receiver_shape,
-                receiver,
-                &mut bindings,
-            );
-        }
-        self.merge_mapped_generic_argument_bindings(
-            overload,
-            (args, arg_tys),
-            argument_map,
-            named_whole_array_varargs,
-            type_args,
-            &mut bindings,
-        );
-        bindings
-    }
-
     fn lambda_overload_partially_applicable(
         &self,
         overload: &crate::libraries::FunctionInfo,
@@ -54832,6 +54765,7 @@ impl<'a> Checker<'a> {
         let fixed_before_argument_merge = expectation_binds.clone();
         self.merge_mapped_generic_argument_bindings(
             overload,
+            receiver,
             (args, arg_tys),
             argument_map,
             whole_array_varargs,
@@ -65364,87 +65298,6 @@ impl<'a> Checker<'a> {
             })
     }
 
-    fn check_annotation_application(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        annotation: &AnnotationRef,
-        arguments: &[ExprId],
-    ) {
-        if arguments
-            .iter()
-            .any(|argument| self.file.expr_span(*argument).is_none())
-        {
-            assert!(
-                self.signature_defaults_only,
-                "only Pass-1 default checking may observe released annotation syntax"
-            );
-            // Annotation applications were resolved and validated during header collection.
-            // Default checking re-enters this declaration solely to recreate its lexical type and
-            // value scopes; unrelated annotation expressions are outside the retained fragment.
-            return;
-        }
-        let legacy_prebound = self
-            .resolved_index
-            .is_none()
-            .then(|| {
-                self.module
-                    .legacy_symbols()?
-                    .resolved_annotation(self.file_index, annotation)
-            })
-            .flatten();
-        let internal = if let Some(internal) = legacy_prebound {
-            internal
-        } else {
-            // Pass 1 binds declaration-header annotations only. A local declaration first appears
-            // while its active Pass-2 body is checked, where the real lexical type scope is finally
-            // available; resolve it here instead of requiring a whole-body annotation inventory
-            // traversal during signature collection.
-            let reference = TypeRef {
-                name: annotation.name.clone(),
-                flags: TrFlags::default(),
-                arg: None,
-                targs: Vec::new(),
-                span: annotation.span,
-                fun_params: Vec::new(),
-                fun_context_count: 0,
-            };
-            let ty = self.type_ref_ty_reported(scope, &reference);
-            let Some(internal) = ty.kotlin_class_internal() else {
-                return;
-            };
-            internal
-        };
-        if !self.file.is_common
-            && self.is_optional_expectation_classifier(internal)
-            && !self.suppresses_diagnostic("OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE")
-        {
-            self.diags.error(
-                annotation.span,
-                format!("unresolved reference '{}'.", annotation.name),
-            );
-            return;
-        }
-        let Some(shape) = self.annotation_shape(internal) else {
-            self.diags.error(
-                annotation.span,
-                "resolved annotation has no semantic element declaration".to_string(),
-            );
-            return;
-        };
-        if !self.check_annotation_arguments(scope, annotation.span, &shape, arguments, None) {
-            return;
-        }
-        let Some(applied) = self.fold_annotation_application(internal, arguments) else {
-            self.diags.error(
-                annotation.span,
-                "annotation argument is not a supported compile-time constant".to_string(),
-            );
-            return;
-        };
-        self.applied_annotations
-            .insert((annotation.span.lo, annotation.span.hi), applied);
-    }
-
     /// Check annotation arguments for one declaration's type parameters after signature collection
     /// has committed every annotation occurrence to its qualified classifier identity. An absent
     /// identity is already an unresolved-reference diagnostic from that authoritative binding pass.
@@ -75590,13 +75443,7 @@ impl<'a> Checker<'a> {
                             label,
                             self.lambda_returns.active_labels()
                         );
-                        self.diags.error(
-                            self.span(e),
-                            format!(
-                                "return label '{}' does not denote an enclosing lambda",
-                                label.as_deref().unwrap_or_default()
-                            ),
-                        );
+                        self.report_unresolved_expression_label(e);
                         return self.set(e, Ty::Error);
                     }
                 };
