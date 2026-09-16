@@ -66,6 +66,12 @@ fn range_type(ty: Ty) -> Option<(&'static str, Ty)> {
         ("kotlin/ranges/IntRange", "int", Ty::Int),
         ("kotlin/ranges/LongRange", "long", Ty::Long),
         ("kotlin/ranges/CharRange", "char", Ty::Char),
+        // A PROGRESSION is what `downTo` answers — `10 downTo 1` is an `IntProgression`, not an
+        // `IntRange` — and this runtime builds one object for both, a range carrying its step. So
+        // the progression names map to the same constructors, and the step is what differs.
+        ("kotlin/ranges/IntProgression", "int", Ty::Int),
+        ("kotlin/ranges/LongProgression", "long", Ty::Long),
+        ("kotlin/ranges/CharProgression", "char", Ty::Char),
     ]
     .into_iter()
     .find_map(|(candidate, kind, element)| internal.matches(candidate).then_some((kind, element)))
@@ -177,6 +183,31 @@ impl BodyLowering<'_, '_, '_> {
                 receiver,
                 args[0],
             ));
+        }
+        // `a downTo b` — `until`'s descending counterpart, and the same shape: an extension of the
+        // facade, so the type it RETURNS says which range to build.
+        if super::super::super::intrinsics::is_range_down_to(owner, name, args.len()) {
+            let (kind, element) = range_type(ret)?;
+            return Some(self.range_of(
+                &format!("kt_{kind}_range_down_to"),
+                element,
+                ret,
+                receiver,
+                args[0],
+            ));
+        }
+        // `range step n` and `progression.reversed()`. Both answer a PROGRESSION, which this
+        // runtime represents as the range it already had with a step beside it — so the receiver
+        // carries its own width and there is nothing to pick from the result type. The step
+        // crosses as a `Long` because every bound here is kept at 64 bits.
+        if super::super::super::intrinsics::is_range_step(owner, name, args.len()) {
+            // The ANSWER is the progression, a reference; the ARGUMENT is the step, which crosses
+            // at the runtime's 64 bits like every other bound. `Long` as the argument type serves
+            // both widths: a step is never a `Char`, and an `Int` one widens into it.
+            return Some(self.range_call("kt_range_step", any(), Ty::Long, receiver, args, ret));
+        }
+        if super::super::super::intrinsics::is_range_reversed(owner, name, args.len()) {
+            return Some(self.range_call("kt_range_reversed", any(), any(), receiver, &[], ret));
         }
         if self.type_of(receiver).is_some_and(is_range_iterator) {
             let (symbol, carried) = range_iterator_symbol(name, args.len())?;

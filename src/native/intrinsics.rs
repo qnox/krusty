@@ -280,7 +280,28 @@ pub(super) fn scope_function(owner: &str, name: &str) -> Option<ScopeResult> {
 /// Recognized here rather than where ranges are lowered, for the same reason [`facade_package`]
 /// lives here: the facade is the JVM provider's spelling, not Kotlin's.
 pub(super) fn is_range_until(owner: &str, name: &str, arity: usize) -> bool {
-    facade_package(kotlin_owner(owner)) == Some("kotlin/ranges") && name == "until" && arity == 1
+    is_ranges_facade(owner, name, arity, "until")
+}
+
+/// Whether a declaration is `downTo` on the ranges facade — the descending counterpart of `until`,
+/// and built the same way: an extension of the facade rather than a member of what it answers.
+pub(super) fn is_range_down_to(owner: &str, name: &str, arity: usize) -> bool {
+    is_ranges_facade(owner, name, arity, "downTo")
+}
+
+/// Whether a declaration is `step` on the ranges facade. Its receiver is the range or progression
+/// being stepped, so unlike `until` and `downTo` the RECEIVER says which width this is.
+pub(super) fn is_range_step(owner: &str, name: &str, arity: usize) -> bool {
+    is_ranges_facade(owner, name, arity, "step")
+}
+
+/// Whether a declaration is `reversed` on the ranges facade.
+pub(super) fn is_range_reversed(owner: &str, name: &str, arity: usize) -> bool {
+    facade_package(kotlin_owner(owner)) == Some("kotlin/ranges") && name == "reversed" && arity == 0
+}
+
+fn is_ranges_facade(owner: &str, name: &str, arity: usize, wanted: &str) -> bool {
+    facade_package(kotlin_owner(owner)) == Some("kotlin/ranges") && name == wanted && arity == 1
 }
 
 /// Whether a getter is `KCallable.name` — the one member of the reflection surface whose answer a

@@ -318,3 +318,48 @@ fn a_range_membership_test_evaluates_its_bounds_before_its_subject() {
         "OK",
     );
 }
+
+#[test]
+fn a_progression_steps_descends_and_reverses() {
+    // A progression is a range with a step, and Kotlin's `last` is the last element actually
+    // REACHED — `(1..9 step 3).last` is 7, not 9. That is observable, and it is what makes
+    // `reversed()` start at 7 rather than at 9.
+    expect_native_box(
+        "fun walk(r: Iterable<Int>): String {\n\
+         \x20   var out = \"\"\n\
+         \x20   for (x in r) out += \"$x,\"\n\
+         \x20   return out\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   if (walk(1..10 step 3) != \"1,4,7,10,\") return \"fail step: ${walk(1..10 step 3)}\"\n\
+         \x20   if (walk(1..9 step 3) != \"1,4,7,\") return \"fail short step: ${walk(1..9 step 3)}\"\n\
+         \x20   if (walk(10 downTo 1) != \"10,9,8,7,6,5,4,3,2,1,\") return \"fail downTo\"\n\
+         \x20   if (walk(10 downTo 1 step 3) != \"10,7,4,1,\") return \"fail downTo step\"\n\
+         \x20   if (walk((1..9 step 3).reversed()) != \"7,4,1,\") return \"fail reversed\"\n\
+         \x20   if (walk((1..3).reversed()) != \"3,2,1,\") return \"fail reversed plain\"\n\
+         \x20   if (walk(1 downTo 10) != \"\") return \"fail empty downTo\"\n\
+         \x20   if (walk(10..1 step 2) != \"\") return \"fail empty step\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "Progressions",
+        "OK",
+    );
+}
+
+#[test]
+fn a_progression_answers_its_own_bounds() {
+    // `first` and `last` are the progression's, not the bounds it was written with.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val p = 1..9 step 3\n\
+         \x20   if (p.first != 1) return \"fail first\"\n\
+         \x20   if (p.last != 7) return \"fail last: ${p.last}\"\n\
+         \x20   val d = 10 downTo 2 step 3\n\
+         \x20   if (d.first != 10) return \"fail down first\"\n\
+         \x20   if (d.last != 4) return \"fail down last: ${d.last}\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "ProgressionBounds",
+        "OK",
+    );
+}

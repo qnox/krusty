@@ -992,11 +992,29 @@ KT_RANGE_TYPE(kt_type_long_range, "kotlin.ranges.LongRange", KRange, kt_range_vt
 KT_RANGE_TYPE(kt_type_char_range, "kotlin.ranges.CharRange", KRange, kt_range_vtable)
 
 
-static KRef kt_range_new(const KType *type, kt_long first, kt_long last) {
+/* The last element a walk from `first` by `step` actually reaches, which is what `last` holds; see
+   the note on `KRange`. Both differences are taken at 64 bits, and the quotient truncates toward
+   zero, which is what makes one expression serve an ascending and a descending walk: the numerator
+   and the step always share a sign here, so the count is non-negative either way. */
+static kt_long kt_range_last_element(kt_long first, kt_long last, kt_long step) {
+    if (step > 0 ? first > last : first < last) {
+        /* Empty. Kotlin keeps the bounds as written and answers `isEmpty`, rather than inventing a
+           last element that the walk would then have to avoid. */
+        return last;
+    }
+    return first + ((last - first) / step) * step;
+}
+
+static KRef kt_range_new_stepped(const KType *type, kt_long first, kt_long last, kt_long step) {
     KRange *range = (KRange *)kt_gc_allocate(type, sizeof(KRange));
     range->first = first;
-    range->last = last;
+    range->last = kt_range_last_element(first, last, step);
+    range->step = step;
     return (KRef)range;
+}
+
+static KRef kt_range_new(const KType *type, kt_long first, kt_long last) {
+    return kt_range_new_stepped(type, first, last, 1);
 }
 
 KRef kt_int_range(kt_int first, kt_int last) {
@@ -1036,7 +1054,10 @@ KRef kt_char_range_until(kt_char first, kt_char last) {
     return kt_char_range(first, (kt_char)(last - 1));
 }
 
-static kt_boolean kt_range_empty(const KRange *range) { return range->first > range->last; }
+/* Empty is direction-dependent once there is a step: `10 downTo 1` runs, `1 downTo 10` does not. */
+static kt_boolean kt_range_empty(const KRange *range) {
+    return range->step > 0 ? range->first > range->last : range->first < range->last;
+}
 
 kt_boolean kt_range_is_empty(KRef range) { return kt_range_empty((const KRange *)range); }
 
@@ -1088,6 +1109,7 @@ typedef struct KRangeIterator {
     KObjectHeader header;
     kt_long next;
     kt_long last;
+    kt_long step;
     kt_boolean has_next;
 } KRangeIterator;
 
@@ -1103,8 +1125,41 @@ KRef kt_range_iterator(KRef range) {
     KRangeIterator *iterator = (KRangeIterator *)kt_gc_allocate(type, sizeof(KRangeIterator));
     iterator->next = bounds->first;
     iterator->last = bounds->last;
-    iterator->has_next = bounds->first <= bounds->last;
+    iterator->step = bounds->step;
+    iterator->has_next = !kt_range_empty(bounds);
     return (KRef)iterator;
+}
+
+/* `range step n`. The magnitude is what is given; the receiver's direction is kept, which is why
+   `10 downTo 1 step 3` descends. A step of zero has no walk to describe and is Kotlin's
+   `IllegalArgumentException`. */
+KRef kt_range_step(KRef range, kt_long step) {
+    const KRange *bounds = (const KRange *)range;
+    if (step <= 0) {
+        kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception,
+                                  kt_string_utf8("Step must be positive, was: ", 27)));
+    }
+    return kt_range_new_stepped(range->header.type, bounds->first, bounds->last,
+                                bounds->step > 0 ? step : -step);
+}
+
+/* `reversed()`. The walk runs the other way from the LAST ELEMENT, which is already on the step —
+   so `(1..9 step 3).reversed()` is `7 downTo 1 step 3`, not `9 downTo 1 step 3`. */
+KRef kt_range_reversed(KRef range) {
+    const KRange *bounds = (const KRange *)range;
+    return kt_range_new_stepped(range->header.type, bounds->last, bounds->first, -bounds->step);
+}
+
+KRef kt_int_range_down_to(kt_int first, kt_int last) {
+    return kt_range_new_stepped(&kt_type_int_range, first, last, -1);
+}
+
+KRef kt_long_range_down_to(kt_long first, kt_long last) {
+    return kt_range_new_stepped(&kt_type_long_range, first, last, -1);
+}
+
+KRef kt_char_range_down_to(kt_char first, kt_char last) {
+    return kt_range_new_stepped(&kt_type_char_range, first, last, -1);
 }
 
 /* Defined with the array and string walks below. A program that asks a primitive array for an
@@ -1132,10 +1187,13 @@ kt_long kt_range_iterator_next(KRef iterator) {
         KT_FAIL("krusty: no more elements in this range\n");
     }
     kt_long value = self->next;
+    /* Stopping at the LAST ELEMENT rather than by comparing against the bound is what keeps this
+       correct at the extremes: `last` is already on the step, so one more step from it may
+       overflow, and asking whether the NEXT value is past the end would have to compute it first. */
     if (value == self->last) {
         self->has_next = false;
     } else {
-        self->next = value + 1;
+        self->next = value + self->step;
     }
     return value;
 }

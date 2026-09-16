@@ -295,7 +295,14 @@ KRef kt_pair_second(KRef pair);
 typedef struct KRange {
     KObjectHeader header;
     kt_long first;
+    /* The last ELEMENT, already brought onto the step: `1..10 step 3` ends at 10 and `1..9 step 3`
+       ends at 7, so iterating is "walk from `first` by `step` until past `last`" with no remainder
+       to think about at each turn. Kotlin normalizes the same way, and it is observable —
+       `(1..9 step 3).last` is 7. */
     kt_long last;
+    /* Never zero. `1` for a plain range, so one struct serves a range and a progression and every
+       reader below serves both; `a downTo b` and `reversed()` make it negative. */
+    kt_long step;
 } KRange;
 
 extern const KType kt_type_int_range;
@@ -326,6 +333,18 @@ kt_boolean kt_range_is_empty(KRef range);
    the loop reads it twice per step; a range iterated straight from a literal never becomes one,
    because common lowering turns that into a counted loop before this backend sees it. */
 KRef kt_range_iterator(KRef range);
+
+/* ---- progressions ---------------------------------------------------------------------------
+
+   `step`, `downTo` and `reversed` answer a PROGRESSION, which here is a range with a step: the
+   same object, so `first`, `last`, `isEmpty` and iteration are the ones above. A step of zero is
+   Kotlin's `IllegalArgumentException`, and the step given to `step` is its magnitude — `a downTo b
+   step 2` descends by two, because the receiver's direction is what decides. */
+KRef kt_range_step(KRef range, kt_long step);
+KRef kt_range_reversed(KRef range);
+KRef kt_int_range_down_to(kt_int first, kt_int last);
+KRef kt_long_range_down_to(kt_long first, kt_long last);
+KRef kt_char_range_down_to(kt_char first, kt_char last);
 kt_boolean kt_range_iterator_has_next(KRef iterator);
 kt_long kt_range_iterator_next(KRef iterator);
 
