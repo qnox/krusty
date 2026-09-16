@@ -46,3 +46,15 @@ fn a_dependency_property_reference_answers_the_property_name_whatever_realizes_i
         "DependencyPropertyReferenceName",
     );
 }
+
+#[test]
+fn an_import_alias_does_not_replace_the_dependency_propertys_declared_name() {
+    common::expect_box_same_as_kotlinc(
+        "import kotlin.text.indices as positions\n\n\
+         fun box(): String {\n\
+         \x20   val property = String::positions\n\
+         \x20   return if (property.name == \"indices\") \"OK\" else \"fail: ${property.name}\"\n\
+         }\n",
+        "DependencyPropertyReferenceAliasName",
+    );
+}
