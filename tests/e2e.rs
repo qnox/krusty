@@ -294,6 +294,8 @@ mod classpath_reified_named_default_vararg_e2e;
 mod classpath_relocated_facade_typealias_e2e;
 #[path = "classpath_runblocking_e2e.rs"]
 mod classpath_runblocking_e2e;
+#[path = "classpath_serializable_round_trip_e2e.rs"]
+mod classpath_serializable_round_trip_e2e;
 #[path = "classpath_static_call_inference_e2e.rs"]
 mod classpath_static_call_inference_e2e;
 #[path = "classpath_subtype_ctor_arg_e2e.rs"]
@@ -466,6 +468,8 @@ mod delegated_member_prop_e2e;
 mod delegated_prop_e2e;
 #[path = "dep_resolution.rs"]
 mod dep_resolution;
+#[path = "descriptor_arity_fails_closed_e2e.rs"]
+mod descriptor_arity_fails_closed_e2e;
 #[path = "destructure_component_extension_e2e.rs"]
 mod destructure_component_extension_e2e;
 #[path = "destructure_e2e.rs"]
@@ -474,8 +478,24 @@ mod destructure_e2e;
 mod diagnostic_duplication_e2e;
 #[path = "diagnostic_markers_e2e.rs"]
 mod diagnostic_markers_e2e;
-#[path = "diagnostics_match_kotlinc.rs"]
-mod diagnostics_match_kotlinc;
+#[path = "diagnostics_call_mapping_cases_e2e.rs"]
+mod diagnostics_call_mapping_cases_e2e;
+#[path = "diagnostics_classifier_cast_cases_e2e.rs"]
+mod diagnostics_classifier_cast_cases_e2e;
+#[path = "diagnostics_inference_parity_e2e.rs"]
+mod diagnostics_inference_parity_e2e;
+#[path = "diagnostics_java_access_parity_e2e.rs"]
+mod diagnostics_java_access_parity_e2e;
+#[path = "diagnostics_jvm_and_catch_parity_e2e.rs"]
+mod diagnostics_jvm_and_catch_parity_e2e;
+#[path = "diagnostics_language_parity_e2e.rs"]
+mod diagnostics_language_parity_e2e;
+#[path = "diagnostics_parity_support.rs"]
+mod diagnostics_parity_support;
+#[path = "diagnostics_receiver_reference_cases_e2e.rs"]
+mod diagnostics_receiver_reference_cases_e2e;
+#[path = "diagnostics_type_inference_cases_e2e.rs"]
+mod diagnostics_type_inference_cases_e2e;
 #[path = "diverging_init_e2e.rs"]
 mod diverging_init_e2e;
 #[path = "diverging_lambda_e2e.rs"]
@@ -566,6 +586,8 @@ mod extension_default_stub_e2e;
 mod extension_fun_e2e;
 #[path = "extension_property_e2e.rs"]
 mod extension_property_e2e;
+#[path = "extension_receiver_property_smartcast_e2e.rs"]
+mod extension_receiver_property_smartcast_e2e;
 #[path = "facade_emission_e2e.rs"]
 mod facade_emission_e2e;
 #[path = "feature_box_e2e.rs"]
@@ -622,6 +644,8 @@ mod finally_e2e;
 mod float_range_nan_e2e;
 #[path = "float_rendering_e2e.rs"]
 mod float_rendering_e2e;
+#[path = "floating_remainder_e2e.rs"]
+mod floating_remainder_e2e;
 #[path = "fn_typed_default_e2e.rs"]
 mod fn_typed_default_e2e;
 #[path = "for_destructuring_components_e2e.rs"]

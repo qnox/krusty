@@ -1,10 +1,11 @@
 //! One declaration whose signature cannot be finalized (an unresolved return type) must not take
 //! the inferred types of every OTHER declaration with it.
 //!
-//! The editor pipeline checks bodies through the legacy symbol table, and that table receives
-//! finalized signatures only by projection. A module with a single genuine error is the state an
-//! editor sits in most of the time, so these go through the editor entry point
-//! (`analyze_source_set_prefix_with_features`) rather than the batch compiler's streaming pass.
+//! The editor pipeline checks bodies against the partial finalized declaration index, while its
+//! source symbol projection retains successfully finalized signatures. A module with a single
+//! genuine error is the state an editor sits in most of the time, so these go through the editor
+//! entry point (`analyze_source_set_prefix_with_features`) rather than the batch compiler's
+//! streaming pass.
 
 use super::common;
 use krusty::jvm::classpath::Classpath;
@@ -87,7 +88,7 @@ fn an_unresolved_supertype_keeps_the_editor_analysis_alive() {
     let source = r#"
 package sample
 
-class Child : Missing()
+class Child<T> : Missing()
 interface Marker : AlsoMissing
 class Both : Missing(), AlsoMissing
 

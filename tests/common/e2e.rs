@@ -361,6 +361,19 @@ pub fn kotlinc_box_result(source: &str) -> String {
     kotlinc_box_result_with_classpath(source, &[])
 }
 
+/// Run the same `box()` fixture with kotlinc and krusty and require the exact same successful
+/// result. The explicit `OK` assertion prevents an identically wrong failure string from making a
+/// differential test pass.
+pub fn expect_box_same_as_kotlinc(source: &str, stem: &str) {
+    let reference = kotlinc_box_result(source);
+    assert_eq!(reference, "OK", "{stem}: kotlinc fixture must succeed");
+    assert_eq!(
+        common::expect_box_run_with_stdlib(source, stem),
+        reference,
+        "{stem}: krusty and kotlinc box results differ",
+    );
+}
+
 /// Compile one `Main.kt` fixture with kotlinc against caller-supplied dependencies and run its
 /// `box()` result on the shared JVM.
 pub fn kotlinc_box_result_with_classpath(source: &str, classpath: &[PathBuf]) -> String {

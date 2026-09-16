@@ -21,6 +21,7 @@ use crate::kt_string::{KtString, KtStringBuf};
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 
 mod bottom_values;
+mod call_operands;
 mod enum_metadata;
 mod field_write;
 mod inline_body_emission;
@@ -13922,7 +13923,15 @@ impl<'a> Emitter<'a> {
         if !probe.join_required {
             // Branchless: append the bytes, no frames. A DIVERGING body (ends in `athrow`, e.g.
             // `error(msg)`) leaves NOTHING on the stack — its post-splice height is the baseline.
-            self.emit_call_descriptor_operands(call_expression, args, &physical_params, code);
+            // A speculative splice DECLINES on a descriptor mismatch rather than bailing the file:
+            // nothing has been pushed, so the ordinary call path still gets its chance to emit this
+            // call correctly. Only the committed paths turn the mismatch into a bail.
+            if self
+                .emit_call_descriptor_operands(call_expression, args, &physical_params, code)
+                .is_err()
+            {
+                return false;
+            }
             let ret_words = if probe.falls_through { ret_words } else { 0 };
             code.splice_inline(
                 &probe.bytes,
@@ -13940,7 +13949,13 @@ impl<'a> Emitter<'a> {
         if code.stack_height() != 0 {
             return false;
         }
-        self.emit_call_descriptor_operands(call_expression, args, &physical_params, code);
+        // See the branchless arm above: decline, do not bail.
+        if self
+            .emit_call_descriptor_operands(call_expression, args, &physical_params, code)
+            .is_err()
+        {
+            return false;
+        }
         let splice_start = code.bytes.len();
         let Some(bs) = crate::jvm::inline::splice_unified(
             &body,
@@ -15965,24 +15980,14 @@ impl<'a> Emitter<'a> {
                 // An argument-count/descriptor mismatch can only come from a pass that rewrote the
                 // callee's ABI without fixing this call site (a suspend call the coroutine flattener
                 // failed to thread a continuation into — an unmodeled shape). Never emit the
-                // unverifiable call: bail the file (the gate SKIPS it), pushing a typed zero so the
-                // dead code that follows still assembles.
-                if call_args.len() != param_tys.len() {
-                    crate::trace_compiler!(
-                        "emit",
-                        "call arity mismatch for {owner}.{name} ({} args vs {} params)",
-                        call_args.len(),
-                        param_tys.len()
-                    );
-                    self.run.set_inline_bail("call arity mismatch");
-                    if ret != Ty::Unit {
-                        push_zero(ret, code, self.cw);
-                    }
+                // unverifiable call: the operand contract refuses, this arm bails the file (the gate
+                // SKIPS it) and pushes a typed zero so the dead code that follows still assembles.
+                if let Err(mismatch) = self.emit_descriptor_virtual_operands(
+                    e, &owner, *receiver, &call_args, &param_tys, code,
+                ) {
+                    self.bail_descriptor_arity(&mismatch, ret, code);
                     return;
                 }
-                self.emit_descriptor_virtual_operands(
-                    e, &owner, *receiver, &call_args, &param_tys, code,
-                );
                 let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
                 let desc = method_descriptor(&param_tys, ret);
                 crate::trace_compiler!(
@@ -16388,17 +16393,8 @@ impl<'a> Emitter<'a> {
                     }
                     crate::ir::IrIntrinsic::DataClassArrayToString { ty } => {
                         self.emit_value(args[0], code);
-                        // `java.util.Arrays.toString` is overloaded per PRIMITIVE array plus one
-                        // `Object[]`; there is no `Integer[]` overload, so a reference array — of
-                        // any element type, nullable or not — takes the `Object[]` one. Naming the
-                        // field's own erasure instead is a methodref to a method that does not
-                        // exist, which the class loads with and then fails on at the call.
-                        let parameter = if ty.non_null().is_reference_array() {
-                            "[Ljava/lang/Object;".to_string()
-                        } else {
-                            type_descriptor(ty.non_null())
-                        };
-                        let descriptor = format!("({parameter})Ljava/lang/String;");
+                        let descriptor =
+                            crate::jvm::array_representation::arrays_to_string_descriptor(*ty);
                         let method = self
                             .cw
                             .methodref("java/util/Arrays", "toString", &descriptor);
@@ -16417,7 +16413,12 @@ impl<'a> Emitter<'a> {
                     let ret = jvm_declared_ty(ret);
                     let (facade, name) = (facade.render(), name.clone());
                     let args = args.clone();
-                    self.emit_call_descriptor_operands(e, &args, &param_tys, code);
+                    if let Err(mismatch) =
+                        self.emit_call_descriptor_operands(e, &args, &param_tys, code)
+                    {
+                        self.bail_descriptor_arity(&mismatch, ret, code);
+                        return;
+                    }
                     let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
                     let desc = method_descriptor(&param_tys, ret);
                     // A static method declared on an INTERFACE (`@Serializable(with=X) interface I` whose
@@ -16535,9 +16536,17 @@ impl<'a> Emitter<'a> {
                         }
                         _ => args,
                     };
-                    self.emit_call_descriptor_operands(e, &physical_args, &physical_params, code);
-                    let aw: i32 = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
                     let ret = ty_from_descriptor_ret(&descriptor);
+                    if let Err(mismatch) = self.emit_call_descriptor_operands(
+                        e,
+                        &physical_args,
+                        &physical_params,
+                        code,
+                    ) {
+                        self.bail_descriptor_arity(&mismatch, ret, code);
+                        return;
+                    }
+                    let aw: i32 = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
                     // A static method DECLARED ON AN INTERFACE (a Kotlin interface's `foo$default` synthetic,
                     // reached when a call omits an interface-declared default) must be an `InterfaceMethodref`
                     // even for `invokestatic` — else the JVM throws `IncompatibleClassChangeError`. Classes
@@ -16618,12 +16627,17 @@ impl<'a> Emitter<'a> {
                             let mut operands = Vec::with_capacity(args.len() + 1);
                             operands.push(recv);
                             operands.extend(args.iter().copied());
-                            self.emit_descriptor_operands(&operands, &physical_params, code);
+                            let physical_ret = ty_from_descriptor_ret(&realization.descriptor);
+                            if let Err(mismatch) =
+                                self.emit_descriptor_operands(&operands, &physical_params, code)
+                            {
+                                self.bail_descriptor_arity(&mismatch, physical_ret, code);
+                                return;
+                            }
                             let argument_words: i32 = physical_params
                                 .iter()
                                 .map(|ty| slot_words(*ty) as i32)
                                 .sum();
-                            let physical_ret = ty_from_descriptor_ret(&realization.descriptor);
                             let method = self.cw.methodref(
                                 &realization.owner,
                                 &realization.name,
@@ -16708,9 +16722,14 @@ impl<'a> Emitter<'a> {
                         }
                         let physical_params = parse_descriptor_params(&descriptor)
                             .expect("static method descriptor must be valid");
-                        self.emit_descriptor_operands(&args, &physical_params, code);
-                        let aw: i32 = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
                         let ret = ty_from_descriptor_ret(&descriptor);
+                        if let Err(mismatch) =
+                            self.emit_descriptor_operands(&args, &physical_params, code)
+                        {
+                            self.bail_descriptor_arity(&mismatch, ret, code);
+                            return;
+                        }
+                        let aw: i32 = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
                         let m = self.cw.methodref(&owner, &name, &descriptor);
                         code.invokestatic(m, aw, slot_words(ret) as i32);
                         return;
@@ -16723,9 +16742,14 @@ impl<'a> Emitter<'a> {
                         physical_args.extend(args.iter().copied());
                         let physical_params = parse_descriptor_params(&descriptor)
                             .expect("static extension descriptor must be valid");
-                        self.emit_descriptor_operands(&physical_args, &physical_params, code);
-                        let aw: i32 = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
                         let ret = ty_from_descriptor_ret(&descriptor);
+                        if let Err(mismatch) =
+                            self.emit_descriptor_operands(&physical_args, &physical_params, code)
+                        {
+                            self.bail_descriptor_arity(&mismatch, ret, code);
+                            return;
+                        }
+                        let aw: i32 = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
                         let m = self.cw.methodref(&owner, &name, &descriptor);
                         code.invokestatic(m, aw, slot_words(ret) as i32);
                         return;
@@ -16738,16 +16762,19 @@ impl<'a> Emitter<'a> {
                         self.ir.expr(recv),
                         self.value_ty(recv),
                     );
-                    self.emit_descriptor_virtual_operands(
+                    let ret = ty_from_descriptor_ret(&descriptor);
+                    if let Err(mismatch) = self.emit_descriptor_virtual_operands(
                         e,
                         &owner,
                         recv,
                         &args,
                         &physical_params,
                         code,
-                    );
+                    ) {
+                        self.bail_descriptor_arity(&mismatch, ret, code);
+                        return;
+                    }
                     let aw: i32 = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
-                    let ret = ty_from_descriptor_ret(&descriptor);
                     let jvm_name = mapped_builtin_virtual_name(&owner, &name, &descriptor);
                     if interface {
                         let m = self.cw.interface_methodref(&owner, jvm_name, &descriptor);
@@ -16771,16 +16798,19 @@ impl<'a> Emitter<'a> {
                     let args = args.clone();
                     let physical_params = parse_descriptor_params(&descriptor)
                         .unwrap_or_else(|| panic!("special call descriptor must be valid: owner={owner} name={name} desc={descriptor:?}"));
-                    self.emit_descriptor_virtual_operands(
+                    let ret = ty_from_descriptor_ret(&descriptor);
+                    if let Err(mismatch) = self.emit_descriptor_virtual_operands(
                         e,
                         &owner,
                         recv,
                         &args,
                         &physical_params,
                         code,
-                    );
+                    ) {
+                        self.bail_descriptor_arity(&mismatch, ret, code);
+                        return;
+                    }
                     let aw: i32 = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
-                    let ret = ty_from_descriptor_ret(&descriptor);
                     // A diamond `super.f()` to a superinterface DEFAULT method: `invokespecial` on an
                     // `InterfaceMethodref` (JVM allows a direct-superinterface default this way) —
                     // unless `disable` moved that body to the holder, where it is a plain static.
@@ -18347,96 +18377,6 @@ impl<'a> Emitter<'a> {
             .cw
             .fieldref(owner, &field.name, &type_descriptor(physical));
         code.putstatic(reference, slot_words(physical) as i32);
-    }
-
-    fn emit_descriptor_operands(&mut self, ops: &[u32], physical: &[Ty], code: &mut CodeBuilder) {
-        assert_eq!(
-            ops.len(),
-            physical.len(),
-            "selected call argument count must match its JVM descriptor"
-        );
-        let mut index = 0usize;
-        self.emit_operands_adapted(ops, code, |this, source, code| {
-            let expression = ops[index];
-            let target = physical[index];
-            index += 1;
-            this.adapt_physical_operand_for(expression, source, target, code);
-        });
-    }
-
-    fn emit_call_descriptor_operands(
-        &mut self,
-        call_expression: u32,
-        ops: &[u32],
-        physical: &[Ty],
-        code: &mut CodeBuilder,
-    ) {
-        assert_eq!(
-            ops.len(),
-            physical.len(),
-            "selected call argument count must match its JVM descriptor"
-        );
-        let mut index = 0usize;
-        self.emit_operands_adapted(ops, code, |this, source, code| {
-            let parameter_index = index;
-            let expression = ops[parameter_index];
-            let target = physical[parameter_index];
-            index += 1;
-            this.adapt_physical_call_operand_for(
-                call_expression,
-                parameter_index,
-                expression,
-                source,
-                target,
-                code,
-            );
-        });
-    }
-
-    fn emit_descriptor_virtual_operands(
-        &mut self,
-        call_expression: u32,
-        owner: &str,
-        receiver: u32,
-        args: &[u32],
-        physical_params: &[Ty],
-        code: &mut CodeBuilder,
-    ) {
-        assert_eq!(
-            args.len(),
-            physical_params.len(),
-            "selected member call argument count must match its JVM descriptor: owner={owner}, call={call_expression}, expression={:?}, physical={physical_params:?}",
-            self.ir.expr(call_expression),
-        );
-        let mut ops = Vec::with_capacity(args.len() + 1);
-        ops.push(receiver);
-        ops.extend(args.iter().copied());
-        let mut physical = Vec::with_capacity(physical_params.len() + 1);
-        let owner_ty = Ty::obj(owner);
-        physical.push(if owner_ty.scalar_value_repr().is_some() {
-            Ty::nullable(owner_ty)
-        } else {
-            owner_ty
-        });
-        physical.extend_from_slice(physical_params);
-        let mut index = 0usize;
-        self.emit_operands_adapted(&ops, code, |this, source, code| {
-            let operand = ops[index];
-            let target = physical[index];
-            if index == 0 {
-                this.adapt_physical_operand_for(operand, source, target, code);
-            } else {
-                this.adapt_physical_call_operand_for(
-                    call_expression,
-                    index - 1,
-                    operand,
-                    source,
-                    target,
-                    code,
-                );
-            }
-            index += 1;
-        });
     }
 
     /// Frame-safe operand sequencing with one representation adapter applied immediately after each
@@ -20556,12 +20496,12 @@ fn methodref_owner<'a>(body: &'a MethodCode, name: &str, descriptor: &str) -> Op
 #[cfg(test)]
 mod fail_soft_tests {
     use super::*;
-    use crate::ir::{Callee, IrExpr, IrFile, IrFunction};
+    use crate::ir::{IrExpr, IrFile, IrFunction};
     use crate::jvm::classreader::MethodCode;
     use crate::jvm::inline::MethodBodies;
     use crate::types::Ty;
 
-    struct NoBodies;
+    pub(super) struct NoBodies;
     impl MethodBodies for NoBodies {
         fn body(&self, _o: &str, _n: &str, _d: &str) -> Option<MethodCode> {
             None
@@ -20579,7 +20519,11 @@ mod fail_soft_tests {
         }
     }
 
-    fn emit_for_test(ir: &IrFile, facade: &str, run: &EmitRun) -> Option<Vec<(String, Vec<u8>)>> {
+    pub(super) fn emit_for_test(
+        ir: &IrFile,
+        facade: &str,
+        run: &EmitRun,
+    ) -> Option<Vec<(String, Vec<u8>)>> {
         let continuations = crate::jvm::suspend::ContinuationMetadataMap::default();
         let property_realizations =
             crate::jvm::property_realizations::PropertyRealizations::default();
@@ -20762,43 +20706,5 @@ mod fail_soft_tests {
             param_checks: vec![],
         });
         assert!(emit_for_test(&ir, "TestKt", &EmitRun::default()).is_none());
-    }
-
-    #[test]
-    fn arity_failure_exposes_category_without_owner_or_callable_name() {
-        let mut ir = IrFile::default();
-        let unit = ir.add_expr(IrExpr::Block {
-            stmts: vec![],
-            value: None,
-        });
-        let callee = ir.add_fun(IrFunction {
-            name: "realCallableName".into(),
-            params: vec![Ty::Int],
-            ret: Ty::Unit,
-            body: Some(unit),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: vec![],
-        });
-        let mismatched_call = ir.add_expr(IrExpr::Call {
-            callee: Callee::Local(callee),
-            dispatch_receiver: None,
-            args: vec![],
-        });
-        ir.add_fun(IrFunction {
-            name: "box".into(),
-            params: vec![],
-            ret: Ty::Unit,
-            body: Some(mismatched_call),
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: vec![],
-        });
-
-        // The trace may identify `SensitiveFacade.realCallableName`, but the result read by the CLI
-        // and survey is deliberately a stable category with neither source nor JVM owner spelling.
-        let run = EmitRun::default();
-        assert!(emit_for_test(&ir, "SensitiveFacade", &run).is_none());
-        assert_eq!(run.inline_bail().as_deref(), Some("call arity mismatch"));
     }
 }

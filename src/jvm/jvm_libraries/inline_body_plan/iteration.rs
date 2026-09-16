@@ -980,7 +980,7 @@ fn zero_argument_instance_call<'a>(
 }
 
 fn erased_cast_matches_element(cast: Option<&str>, element: Ty) -> bool {
-    cast.map_or(true, |cast| {
+    cast.is_none_or(|cast| {
         let physical = type_name(cast);
         let semantic = crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(physical)
             .unwrap_or(physical);

@@ -2333,6 +2333,22 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `a_classpath_generic_member_uses_the_same_implicit_bound`,
   `a_top_level_generic_of_the_same_shape_still_works`, `an_explicit_type_argument_still_works`,
   `a_declared_non_null_bound_still_rejects_a_nullable_result`.
+- **A classpath classifier's annotations reach the plugins that ask (fix).** The serialization plugin
+  rewrites `decodeFromString<T>` / `encodeToString(v)` into their two-argument form, supplying
+  `T.serializer()` — but it could only see `T`'s `@Serializable` when the annotation was in the SOURCE
+  being checked. A type arriving on the classpath carries it in metadata, so the rewrite was skipped,
+  the reified inline call survived to the backend with an EMPTY reified substitution map, and
+  `splice_unified` declined it (`reified_inline=true reified_map_len=0`) — a per-FILE failure that
+  costs a module every class. The same declaration in the same file, or in a sibling file of the same
+  module, always worked, since both are source. A dedicated provider boundary now combines finalized
+  source annotation identities with metadata for exactly the classifiers the selected calls name in
+  their type arguments, parameters, receiver, and result. Plugins consume that closed map and do no
+  lookup of their own; the work stays bounded by the call set rather than scanning the classpath.
+  Still unsupported and deliberately out of scope: a WRAPPING type argument
+  (`decodeFromString<List<T>>`), which needs a composed `ListSerializer(T.serializer())`.
+  `tests/classpath_serializable_round_trip_e2e.rs::a_classpath_serializable_type_round_trips_through_the_reified_helpers`,
+  `the_driver_accepts_a_classpath_serializable_round_trip`,
+  `same_file_and_sibling_file_declarations_still_round_trip`.
 - **A suspension inside a `throw` operand is hoisted (fix).** `throw classify(status, body())`, where
   `body()` suspends, left the suspension buried in the thrown expression. The state-machine flattener
   cannot split a suspension there, so it declined the whole function and the backend reported
@@ -2363,6 +2379,29 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   genuinely version-dependent serializers are probed; the primitives ship in every supported version.
   `tests/instant_builtin_serializer_e2e.rs::an_instant_property_serializes_through_the_builtin`,
   `an_instant_collection_element_serializes_through_the_builtin`, `the_uuid_builtin_still_works`.
+- **A call whose operands disagree with its descriptor is REFUSED, never emitted (fix).** Three
+  operand emitters ASSERTED that a selected call's argument count matches its JVM descriptor, so a
+  mismatch took down the whole compilation instead of one file, with no diagnostic. Making them
+  return early was not enough and was briefly wrong: the operand helper stopped pushing, but every
+  caller went on to emit its `invoke*` with the argument-word count computed from the descriptor, so
+  the method claimed operands that were never pushed.
+  The contract is now a typed refusal. `src/jvm/ir_emit/call_operands.rs` owns it: every entry point
+  checks arity BEFORE pushing anything and returns `DescriptorArityMismatch`, leaving the operand
+  stack untouched. The compiler then forces each of the ten call sites to answer, and the answer
+  depends on the site. A speculative inline splice DECLINES, so the ordinary call path still gets to
+  emit the call correctly. A committed path abandons the whole call — never emitting the `invoke*` —
+  bails the file, and pushes a typed zero so the now-unreachable code still assembles.
+  Emission cannot repair the underlying defect and must not guess: a checked call whose argument
+  vector disagrees with its realized descriptor is a provider-normalization or call-realization
+  defect upstream, and choosing either side would write a method whose operand stack contradicts its
+  own invocation. The bail reason stays a fixed public category because it reaches CLI diagnostics
+  and survey buckets; the owner and counts go to the opt-in `emit` trace.
+  `src/jvm/ir_emit.rs::fail_soft_tests::a_cross_file_call_short_of_its_parameters_is_refused_not_emitted`,
+  `a_classpath_static_call_short_of_its_descriptor_is_refused_not_emitted`,
+  `a_virtual_call_short_of_its_descriptor_is_refused_not_emitted`,
+  `arity_failure_exposes_category_without_owner_or_callable_name`,
+  `tests/descriptor_arity_fails_closed_e2e.rs::ordinary_calls_at_every_arity_still_emit`,
+  `a_suspend_call_with_its_appended_continuation_still_emits`.
 - **A branching inline body may be a vararg element (fix).** Vararg packing evaluates each element
   with `[array, index]` already on the operand stack. A spliced BRANCHY inline body needs an empty
   stack — its relocated frames carry no stack prefix — so the splicer declined, and because a
@@ -2491,6 +2530,21 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `a_simple_name_may_begin_with_a_dollar`, `the_shortcut_is_taken_only_when_it_round_trips`,
   `tests/serializer_metadata_class_id_e2e.rs::a_generated_serializer_records_kotlincs_class_id`,
   `the_serializable_class_itself_still_records_its_own_class_id`.
+- **A bare property of an EXTENSION receiver smart-casts (fix).** `fun Yaml.expand() = if (ref != null)
+  take(ref) else …` reads `ref` through the extension receiver, so the proof is a fact about
+  `this.ref`. Two halves were missing. Stability resolution treated a bare name with no LEXICAL
+  binding as a top-level property and answered `None` — an extension receiver's property has no such
+  binding — so the proof was discarded before it was ever recorded; it now reads the property through
+  the implicit receiver that declares it, the same rule a bound dispatch property already used. And
+  the proof was FILED under the bare spelling while the read asks for the receiver-qualified path, so
+  the receiver-qualified key is recorded too. A MEMBER function was unaffected: its properties ARE
+  lexically bound, so they take the shadowing path and never consult this key.
+  `tests/extension_receiver_property_smartcast_e2e.rs::an_extension_receivers_property_smart_casts_under_a_bare_name`,
+  `the_proof_survives_a_supertype_result_and_a_sibling_read`,
+  `the_member_and_qualified_spellings_still_smart_cast`,
+  `a_mutable_extension_receiver_property_still_declines`,
+  `a_nearer_receiver_of_the_same_property_name_is_not_proven`,
+  `a_nearer_receiver_of_the_same_type_is_not_proven`.
 - **Every single-operand node hoists its suspension, not a subset (fix).** The suspend hoister
   recurses through one IR node kind per arm. Source-reachable gaps included an enum lookup's name
   (`enumValueOf<Level>(pickName())`) and the construction of the `Ref` holder that boxes a captured

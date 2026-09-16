@@ -11,6 +11,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 source "$script_dir/test-gate-defaults.sh"
 source "$script_dir/test-deadline.sh"
+source "$script_dir/libtest-shards.sh"
 
 bin="$1"
 v="$2"
@@ -22,19 +23,50 @@ export KRUSTY_KOTLINC="$kotlinc"
 export KRUSTY_KOTLIN_BOX_DIR="$box_dir"
 export RUST_MIN_STACK="${RUST_MIN_STACK:-134217728}"
 
-report="$(mktemp)"
-trap 'rm -f "$report"' EXIT
-set +e
-KRUSTY_CONFORMANCE_REPORT="$report" \
-  run_with_deadline "$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
-  "$bin" kotlin_codegen_box_conformance --nocapture >&2
-status=$?
-set -e
-if [ "$status" -eq 124 ]; then
-  echo "conformance-run: timed out after ${KRUSTY_CONFORMANCE_TIMEOUT_SECONDS}s: Kotlin $v" >&2
-fi
-if [ "$status" -ne 0 ]; then
-  exit "$status"
-fi
-[ -s "$report" ] || { echo "conformance test did not write its report" >&2; exit 1; }
-cat "$report"
+shards="$KRUSTY_CONFORMANCE_SHARDS"
+libtest_require_positive_shard_count \
+  "$shards" "conformance-run: KRUSTY_CONFORMANCE_SHARDS"
+
+report_dir="$(mktemp -d)"
+trap 'rm -rf "$report_dir"' EXIT
+passed=0
+scanned=0
+for ((shard = 0; shard < shards; shard++)); do
+  report="$report_dir/shard-$shard.report"
+  set +e
+  KRUSTY_CONFORMANCE_SHARD_INDEX="$shard" \
+    KRUSTY_CONFORMANCE_SHARD_COUNT="$shards" \
+    KRUSTY_CONFORMANCE_REPORT="$report" \
+    run_with_deadline "$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
+    "$bin" kotlin_codegen_box_conformance --nocapture >&2
+  status=$?
+  set -e
+  if [ "$status" -eq 124 ]; then
+    echo "conformance-run: timed out after ${KRUSTY_CONFORMANCE_TIMEOUT_SECONDS}s: Kotlin $v, shard $((shard + 1))/$shards" >&2
+  fi
+  if [ "$status" -ne 0 ]; then
+    exit "$status"
+  fi
+  [ -s "$report" ] || {
+    echo "conformance test did not write its report: shard $((shard + 1))/$shards" >&2
+    exit 1
+  }
+  read -r _pct shard_passed shard_scanned extra <"$report"
+  case "$shard_passed:$shard_scanned" in
+    *[!0-9:]* | *::* | :* | *:)
+      echo "conformance test wrote an invalid report: shard $((shard + 1))/$shards" >&2
+      exit 1
+      ;;
+  esac
+  if [ -n "${extra:-}" ]; then
+    echo "conformance test wrote an invalid report: shard $((shard + 1))/$shards" >&2
+    exit 1
+  fi
+  passed=$((passed + shard_passed))
+  scanned=$((scanned + shard_scanned))
+done
+
+awk -v passed="$passed" -v scanned="$scanned" 'BEGIN {
+  pct = scanned == 0 ? 0 : 100 * passed / scanned
+  printf "%.1f %d %d\n", pct, passed, scanned
+}'

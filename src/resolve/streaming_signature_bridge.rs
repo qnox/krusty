@@ -23,6 +23,8 @@ mod postponed_calls;
 mod qualified_calls;
 mod semantics;
 mod source_contracts;
+mod stable_function_index;
+mod type_parameter_publication;
 
 pub(super) use declaration_aliases::publish_compact_nested_aliases;
 pub(crate) use declaration_conflicts::finalize_streamed_top_level_conflicts;
@@ -73,6 +75,7 @@ struct ProductionSignatureSemantics<'a> {
         RefCell<HashMap<crate::fir::DeclarationId, Vec<crate::symbol_resolver::GSigBinds>>>,
     completed_scoped_constraints:
         RefCell<HashMap<crate::fir::DeclarationId, crate::symbol_resolver::GSigBinds>>,
+    stable_functions: stable_function_index::StableFunctionIndex,
     diagnostics: RefCell<Vec<ProductionSignatureDiagnostic>>,
     /// The contract of the callable selected for each top-level call, by call origin, so a
     /// [`crate::fir::SigExpr::ContractNarrowed`] read can ask what the statement proved.
@@ -354,11 +357,6 @@ impl ProductionSignatureSemantics<'_> {
         ))
         .map(Some)
         .map_err(|_| Self::failure())
-    }
-
-    fn callable_signature(&self, declaration: crate::fir::DeclarationId) -> Option<&Signature> {
-        stable_function_signature(self.table, self.headers, self.classifier_types, declaration)
-            .map(|(signature, _)| signature)
     }
 
     fn declaration_extension_receiver(&self, declaration: crate::fir::DeclarationId) -> Option<Ty> {
@@ -4618,6 +4616,7 @@ pub(crate) fn finalized_streamed_signature_index(
         scoped_constraint_inputs: RefCell::new(HashMap::new()),
         scoped_constraints: RefCell::new(HashMap::new()),
         completed_scoped_constraints: RefCell::new(HashMap::new()),
+        stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_call_contracts: RefCell::new(HashMap::new()),
         source_contracts: RefCell::new(HashMap::new()),
@@ -5289,6 +5288,7 @@ pub(crate) fn finalized_streamed_signature_index(
         scoped_constraint_inputs: RefCell::new(HashMap::new()),
         scoped_constraints: RefCell::new(HashMap::new()),
         completed_scoped_constraints: RefCell::new(HashMap::new()),
+        stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_call_contracts: RefCell::new(HashMap::new()),
         source_contracts: RefCell::new(HashMap::new()),
@@ -5426,10 +5426,8 @@ pub(crate) fn finalized_streamed_signature_index(
     for declaration in suppressed_generated_callables.iter().copied() {
         index.suppress_generated_callable(declaration);
     }
-    // Retained inline/default anonymous bodies need their captured values during the same Pass-1
-    // checked-FIR construction. Capture discovery synthesized these declarations after signature
-    // extraction, so publish their already-resolved semantic property types directly; they are not
-    // lazy graph nodes and contain no source syntax or target storage decision.
+    // Capture discovery synthesized retained inline/default capture properties after extraction;
+    // publish their resolved types directly for same-Pass-1 checked-FIR construction.
     for stub in headers.stubs.iter().filter(|stub| {
         stub.kind == DeclarationKind::Property
             && stub
@@ -5481,9 +5479,14 @@ pub(crate) fn finalized_streamed_signature_index(
             mutable,
         );
     }
-    // Classifier publication consumes exact own-member override facts while it closes interface
-    // delegation. Publish every declaration header first so source order cannot affect that query.
-    for stub in &headers.stubs {
+    // Publish classifier headers after the full declaration inventory so source order is irrelevant.
+    'classifier_publication: for stub in &headers.stubs {
+        macro_rules! skip_classifier {
+            ($declaration:expr) => {{
+                failed.push($declaration);
+                continue 'classifier_publication;
+            }};
+        }
         if stub.kind != DeclarationKind::Classifier {
             continue;
         }
@@ -5496,7 +5499,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 "signature finalization declined {:?}: classifier stub has no collected classifier signature",
                 stub.id,
             );
-            stop_with_failure!(stub.id);
+            skip_classifier!(stub.id);
         };
         if stub
             .flags
@@ -5515,7 +5518,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 )
                 .is_err()
             {
-                stop_with_failure!(stub.id);
+                skip_classifier!(stub.id);
             }
             continue;
         }
@@ -5540,13 +5543,8 @@ pub(crate) fn finalized_streamed_signature_index(
             resolved_classifier_parents.get(&stub.id),
             &compact_cycle_edges,
         ) else {
-            // An ordinary body-local classifier is not a Pass-1 semantic root. Its header can use
-            // statement-local aliases and other lexical declarations that intentionally exist
-            // only while the containing body is checked in Pass 2. Preserve its stable declaration
-            // inventory, but do not turn the absence of an undemanded semantic header into module
-            // finalization failure. A local classifier reached from an inferred non-local
-            // signature has compact parents in `resolved_classifier_parents` and must still
-            // finalize here.
+            // Preserve an undemanded body-local classifier for Pass 2; one demanded by a non-local
+            // inferred signature has compact parents and must finalize here.
             if stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
                 && !resolved_classifier_parents.contains_key(&stub.id)
             {
@@ -5565,7 +5563,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 stub.id,
                 classifier.internal,
             );
-            stop_with_failure!(stub.id);
+            skip_classifier!(stub.id);
         };
         let interface_delegations = headers
             .syntax
@@ -5590,7 +5588,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 "signature finalization declined {:?}: interface-delegation closure did not resolve",
                 stub.id,
             );
-            stop_with_failure!(stub.id);
+            skip_classifier!(stub.id);
         };
         deferred_interface_delegations.push((
             stub.id,
@@ -5627,7 +5625,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 "signature finalization declined {:?}: classifier context parameter did not resolve",
                 stub.id,
             );
-            stop_with_failure!(stub.id);
+            skip_classifier!(stub.id);
         };
         crate::trace_compiler!(
             "signature",
@@ -5652,7 +5650,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 "signature finalization declined {:?}: classifier header publication was rejected",
                 stub.id,
             );
-            stop_with_failure!(stub.id);
+            skip_classifier!(stub.id);
         }
     }
     for stub in &headers.stubs {
@@ -5718,6 +5716,18 @@ pub(crate) fn finalized_streamed_signature_index(
             );
             stop_with_failure!(stub.id);
         };
+        // Callable collection has already resolved the declaration in its complete lexical scope,
+        // including enclosing classifier formals. Reuse that semantic generic contract when it is
+        // available: rebuilding `fun <T : S>` from an isolated own-parameter scope erases `S`,
+        // while resolving `fun <T : Bound<T>>` through an already bounded `T` recursively expands
+        // the bound an extra level.
+        let stable_generic = matches!(
+            declaration.kind,
+            crate::fir::HeaderDeclarationKind::Callable { .. }
+        )
+        .then(|| stable_function(table, headers, &classifier_types, stub.id))
+        .flatten()
+        .and_then(|(signature, _)| signature.generic_sig.as_ref());
         let symbolic =
             super::TParams::symbolic_from_decl_with(&declared_names, &declared_bounds, &|name| {
                 table.class_names.get(name)
@@ -5730,11 +5740,15 @@ pub(crate) fn finalized_streamed_signature_index(
             );
         for (ordinal, (source_name, parameter)) in declared_names.iter().zip(packed).enumerate() {
             let semantic = symbolic.bound(source_name);
-            let semantic_name = semantic.ty_param_name().unwrap_or(source_name);
+            let semantic_name = type_parameter_publication::semantic_name(
+                stable_generic,
+                ordinal,
+                semantic.ty_param_name().unwrap_or(source_name),
+            );
             let has_explicit_bound = declared_bounds
                 .iter()
                 .any(|(owner, _)| owner == source_name);
-            let resolved_bounds = has_explicit_bound
+            let local_bounds = has_explicit_bound
                 .then(|| {
                     let mut bounds = vec![semantic
                         .ty_param_bound()
@@ -5742,40 +5756,16 @@ pub(crate) fn finalized_streamed_signature_index(
                     bounds.extend(symbolic.extra_bounds_of(source_name));
                     bounds
                 })
-                .unwrap_or_default()
-                .into_iter()
-                .map(|bound| {
-                    let is_interface = bound.non_null().obj_internal().is_some_and(|owner| {
-                        table
-                            .classes
-                            .get(&owner)
-                            .is_some_and(|classifier| classifier.is_interface())
-                            || table
-                                .libraries
-                                .classifier(owner)
-                                .is_some_and(|classifier| classifier.is_interface())
-                    });
-                    (bound, is_interface)
-                })
-                .collect::<Vec<_>>();
-            let variance = if parameter.flags.is_in() {
-                crate::types::TypeVariance::In
-            } else if parameter.flags.is_out() {
-                crate::types::TypeVariance::Out
-            } else {
-                crate::types::TypeVariance::Invariant
-            };
+                .unwrap_or_default();
+            let resolved_bounds =
+                type_parameter_publication::bounds(stable_generic, ordinal, local_bounds, table);
             if index
                 .publish_type_parameter(
                     stub.id,
                     u32::try_from(ordinal).expect("too many declaration type parameters"),
                     source_name,
                     semantic_name,
-                    crate::fir::ResolvedTypeParameterFlags::new(
-                        variance,
-                        parameter.flags.is_non_null(),
-                        parameter.flags.is_reified(),
-                    ),
+                    type_parameter_publication::flags(parameter.flags),
                     resolved_bounds,
                 )
                 .is_err()
@@ -6770,6 +6760,8 @@ pub(crate) fn finalized_streamed_signature_index(
             );
         }
     }
+    failed.sort_by_key(|declaration| declaration.raw());
+    failed.dedup();
     StreamedSignatureIndex {
         index,
         failures: failed,

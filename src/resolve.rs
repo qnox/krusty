@@ -44,6 +44,7 @@ mod delegated_properties;
 mod dependency_platform;
 mod finalized_projection;
 mod generic_call_bindings;
+mod inspection_analysis;
 mod interface_delegation;
 mod invoke_selection;
 mod lambda_expectation;
@@ -53,9 +54,13 @@ mod local_class_scope;
 mod local_method_dependencies;
 mod loop_flow;
 mod operator_calls;
+mod overload_diagnostics;
 mod override_plans;
+mod plugin_expression_annotations;
 mod postponed_diagnostics;
 mod qualified_call_shaping;
+mod receiver_flow;
+mod resolved_type_occurrences;
 mod safe_call_flow;
 mod sam_constructors;
 mod source_fragment;
@@ -86,11 +91,14 @@ use constant_evaluation::{
     checked_constant_expression, source_literal_constant, CheckedConstantExpression,
 };
 pub(crate) use context_capture::{selected_context_values, SelectedContextSources};
-use context_sensitive_resolution::expected_nested_classifier;
+use context_sensitive_resolution::{expected_nested_classifier, parameterized_class_literal_type};
 use delegated_properties::{select_delegate_operator, select_delegate_operator_return};
 pub(crate) use dependency_platform::DependencyPlatform;
 pub(crate) use finalized_projection::{
     project_finalized_signatures, publish_stable_declaration_metadata,
+};
+pub(crate) use inspection_analysis::{
+    check_preinferred_file_in_source_set_with_index, inspection_source_declaration_keys,
 };
 use lambda_expectation::{functional_argument_expectation, FunctionalArgumentExpectation};
 pub use lambda_returns::ReturnTarget;
@@ -13916,16 +13924,6 @@ fn delegated_getvalue_ret_for_signature(
     select_delegate_operator_return(&resolver, stored_ty, "getValue", &convention_args)
 }
 
-/// Select one delegated-property convention from the normalized member/extension family. Operator
-/// filtering happens before applicability and overload selection, so a same-named ordinary method
-/// can neither satisfy the convention nor displace a valid operator declaration.
-pub(crate) fn parameterized_class_literal_type(base: Ty, represented: Ty) -> Ty {
-    match base {
-        Ty::Obj(internal, []) => Ty::obj_args_name(internal, &[represented]),
-        _ => base,
-    }
-}
-
 /// Source identity for lightweight signature inference. The AST and its module file index are one
 /// semantic context: alias/import edges are file-scoped, so passing either independently invites a
 /// mismatched lookup and needlessly widens every inference helper's argument list.
@@ -18520,6 +18518,10 @@ pub struct TypeInfo {
     /// instances (and can invoke/read a dependency member on the anonymous object itself).
     pub implicit_receiver_selections: HashMap<ExprId, ImplicitReceiverSelection>,
     resolved_source_calls: HashMap<ExprId, (u32, u32)>,
+    /// Stable declaration identities mapped back to retained parser top-level declarations for
+    /// inspection consumers. Emission analysis leaves this shared map empty because parser
+    /// coordinates must not survive Pass 2.
+    inspection_source_declarations: std::sync::Arc<HashMap<crate::fir::DeclarationId, (u32, u32)>>,
     used_extension_receivers: std::collections::HashSet<(u32, u32)>,
     /// Synthetic operator calls selected while checking a source expression that does not itself contain
     /// a call node for every desugared operation. Example: reference `x in a..b` resolves both
@@ -19556,23 +19558,6 @@ impl TypeInfo {
         )
     }
 
-    pub fn callable_reference_source_key(&self, e: ExprId) -> Option<(u32, u32)> {
-        self.resolved_source_calls
-            .get(&e)
-            .copied()
-            .or_else(|| match self.expr_lowers.get(&e) {
-                Some(ExprLowering::CallableReference {
-                    target: CallableReferenceTarget::Property(property),
-                    ..
-                }) => property.source_key,
-                Some(ExprLowering::CallableReference {
-                    target: CallableReferenceTarget::TopLevelProperty(property),
-                    ..
-                }) => property.source_key,
-                _ => None,
-            })
-    }
-
     pub fn resolved_call_owner(&self, e: ExprId) -> Option<TypeName> {
         self.resolved_calls.get(&e).and_then(ResolvedCall::owner)
     }
@@ -19600,10 +19585,6 @@ impl TypeInfo {
             }
             _ => None,
         }
-    }
-
-    pub fn resolved_source_call(&self, e: ExprId) -> Option<(u32, u32)> {
-        self.resolved_source_calls.get(&e).copied()
     }
 
     pub fn is_discarded_expression(&self, e: ExprId) -> bool {
@@ -23041,14 +23022,16 @@ impl<'a> Checker<'a> {
                     .flatten()
             })?;
         let inferred = crate::symbol_resolver::ty_subst_keep_unbound(inferred, &bindings);
-        if let Some(parameters) = member
+        let parameters = member
             .generic_sig
             .as_ref()
             .map(|signature| signature.params.clone())
             .filter(|parameters| parameters.len() == member.params.len())
-        {
-            member.params = parameters;
-        }
+            .unwrap_or_else(|| member.params.clone());
+        member.params = parameters
+            .into_iter()
+            .map(|parameter| crate::symbol_resolver::ty_subst_keep_unbound(parameter, &bindings))
+            .collect();
         member.ret = inferred;
         member.physical_ret = inferred;
         Some(inferred)
@@ -47053,7 +47036,10 @@ fn discover_anonymous_object_captures_at<S: CheckerSymbolEnvironment>(
     discovered
 }
 
-pub fn discover_anonymous_object_captures(files: &[File], syms: &mut SymbolTable) {
+pub fn discover_anonymous_object_captures(
+    files: &[File],
+    syms: &mut SymbolTable,
+) -> Vec<HashMap<DeclId, Vec<AnonymousObjectCapture>>> {
     // Bracketed as a module mutation: installing capture fields and constructor parameters changes
     // the synthesized classes, and the table's derived indexes are rebuilt on `finish`. Without the
     // bracket the members are written but nothing rebuilds, so an anonymous object that captures a
@@ -47063,9 +47049,10 @@ pub fn discover_anonymous_object_captures(files: &[File], syms: &mut SymbolTable
     // On the CHECKER's own stack: this walks whole files through the checker, and the depth guard
     // that stops a deeply nested expression fires far later than a small caller stack runs out.
     // Every other entry into a file-wide check is reserved the same way.
-    crate::wide_stack::on_wide_stack(|| {
+    let discovered = crate::wide_stack::on_wide_stack(|| {
+        let mut discovered = Vec::with_capacity(files.len());
         for (file_index, file) in files.iter().enumerate() {
-            discover_anonymous_object_captures_at(
+            discovered.push(discover_anonymous_object_captures_at(
                 file,
                 file_index as u32,
                 syms,
@@ -47074,10 +47061,12 @@ pub fn discover_anonymous_object_captures(files: &[File], syms: &mut SymbolTable
                 None,
                 None,
                 None,
-            );
+            ));
         }
+        discovered
     });
     syms.finish_module_mutation();
+    discovered
 }
 
 /// Prepare only anonymous objects owned by retained inline body units. The root/body selections
@@ -47975,6 +47964,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_calls,
         implicit_receiver_selections,
         resolved_source_calls,
+        inspection_source_declarations: std::sync::Arc::default(),
         used_extension_receivers,
         resolved_operator_calls,
         resolved_in_range_comparisons,
@@ -48075,65 +48065,22 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                 })
             })
             .collect::<Vec<_>>();
-        let source_at = |index: u32| {
-            (index == file_index)
-                .then_some(file)
-                .or_else(|| source_files?.get(index as usize))
-        };
-        let source_annotations = if let Some(symbols) = syms.pass_one_symbols() {
-            symbols
-                .classes
-                .iter()
-                .filter_map(|(&classifier, class)| {
-                    let source = source_at(class.source_file)?;
-                    let declaration = match active_declarations {
-                        Some(active) if class.source_file == file_index => {
-                            active.class(source, class.stable_declaration?)?.1
-                        }
-                        Some(_) => return None,
-                        None => match source.decl(class.source_decl?) {
-                            Decl::Class(declaration) => declaration,
-                            Decl::Fun(_) | Decl::Property(_) => return None,
-                        },
-                    };
-                    let annotations = resolved_index.map_or_else(
-                        || {
-                            declaration
-                                .annotations
-                                .iter()
-                                .filter_map(|annotation| {
-                                    symbols.resolved_annotation(class.source_file, annotation)
-                                })
-                                .collect::<Vec<_>>()
-                        },
-                        |index| {
-                            class
-                                .stable_declaration
-                                .map(|declaration| {
-                                    index.declaration_annotations(declaration).to_vec()
-                                })
-                                .unwrap_or_default()
-                        },
-                    );
-                    Some((classifier, annotations))
-                })
-                .collect()
-        } else {
-            let index = resolved_index.expect("Pass 2 requires a finalized declaration index");
-            (0..index.declaration_count())
-                .filter_map(|raw| {
-                    let declaration = crate::fir::DeclarationId::from_raw(raw as u32);
-                    let classifier = index.classifier_header(declaration)?.classifier;
-                    Some((
-                        classifier,
-                        index.declaration_annotations(declaration).to_vec(),
-                    ))
-                })
-                .collect()
-        };
+        let classifier_annotations =
+            plugin_expression_annotations::classifier_annotations_for_calls(
+                plugin_expression_annotations::ClassifierAnnotationInputs {
+                    file,
+                    file_index,
+                    source_files,
+                    active_declarations,
+                    resolved_index,
+                    pass_one_symbols: syms.pass_one_symbols(),
+                    libraries: syms.libraries(),
+                },
+                &calls,
+            );
         let context = crate::plugins::FrontendExpressionContext {
             calls,
-            source_annotations,
+            classifier_annotations,
         };
         for (expression, plan) in
             crate::plugins::enabled_plugins("main").plan_frontend_expressions(&context)
@@ -48187,21 +48134,6 @@ pub fn check_file_in_source_set(
 ) -> TypeInfo {
     let file = &files[file_index as usize];
     check_file_on_checker_stack(file, file_index, Some(files), syms, diags)
-}
-
-/// Check one file after [`preinfer_module_returns`] has already established the source set's
-/// expression-body signatures. Production source-set analysis uses this entry point so it does not
-/// reopen the same bodies in a redundant per-file fixpoint before their authoritative check.
-pub(crate) fn check_preinferred_file_in_source_set(
-    files: &[File],
-    file_index: u32,
-    syms: &mut SymbolTable,
-    diags: &mut DiagSink,
-) -> TypeInfo {
-    let file = &files[file_index as usize];
-    crate::wide_stack::on_wide_stack(move || {
-        check_file_at_impl(file, file_index, Some(files), syms, diags)
-    })
 }
 
 /// Check only the active declaration fragment that owns inline body work. Every non-active source
@@ -58493,7 +58425,14 @@ impl<'a> Checker<'a> {
             }
         }
         if displays.is_empty() {
-            for candidate in &candidates {
+            for candidate in overload_diagnostics::visibility_diverse_candidate_indices(
+                &candidates,
+                self.file_index,
+                MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES,
+            )
+            .into_iter()
+            .map(|index| &candidates[index])
+            {
                 if displays.len() >= MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES {
                     break;
                 }
@@ -61873,9 +61812,18 @@ impl<'a> Checker<'a> {
             .call_type_args
             .get(&e.0)
             .is_some_and(|arguments| !arguments.is_empty());
-        if self.file.bare_array_class_literal && n == "Array" && !explicit_arguments {
+        if self.file.bare_array_class_literal && !explicit_arguments {
             let internal = self.select_classifier(scope, n).found()?;
-            if internal.matches("kotlin/Array") {
+            // A parameterless typealias may expand to a fully applied reference-array type. Keep
+            // that expansion intact; only the raw classifier selected directly from this scope
+            // receives Kotlin's implicit star projection for a bare class literal.
+            let source_alias = scope.type_alias(n).is_some()
+                || self
+                    .scoped_source_alias_identity(scope, n)
+                    .and_then(|identity| self.source_alias_expansion(identity))
+                    .is_some()
+                || self.selected_alias_expansion(n, internal, false).is_some();
+            if Ty::obj_name(internal).is_reference_array() && !source_alias {
                 return Some(Ty::obj_args_name(
                     internal,
                     &[Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any")))],
@@ -62235,26 +62183,6 @@ impl<'a> Checker<'a> {
         self.resolved_declaration_types
             .insert((reference.span.lo, reference.span.hi), declaration);
         declaration
-    }
-
-    /// Rebind a reparsed value-parameter annotation to the semantic type finalized in Pass 1.
-    /// Signatures store a vararg's callable-facing array type, while the annotation occurrence
-    /// denotes its element type; record that syntax-facing view and return the callable-facing type
-    /// used for the lexical parameter binding.
-    fn record_finalized_parameter_type(
-        &mut self,
-        reference: &TypeRef,
-        is_vararg: bool,
-        semantic: Ty,
-    ) -> Ty {
-        let declaration = if is_vararg {
-            semantic.non_null().array_read_elem().unwrap_or(semantic)
-        } else {
-            semantic
-        };
-        self.resolved_declaration_types
-            .insert((reference.span.lo, reference.span.hi), declaration);
-        semantic
     }
 
     fn check_associated_companion_receiver_type(
@@ -63652,35 +63580,6 @@ impl<'a> Checker<'a> {
         runtime_tt.is_reference().then_some(runtime_tt)
     }
 
-    /// The access path an expression denotes: a root name followed by property segments through
-    /// plain (`.`) and safe (`?.`) member reads. `None` for anything else (a call result, an
-    /// indexed read, a temporary) — a proof on it says nothing about a later re-read.
-    fn expr_access_path(&self, e: ExprId) -> Option<NarrowPath> {
-        match self.file.expr(e) {
-            Expr::Name(n) => Some(NarrowPath::root_only(n)),
-            Expr::Member { receiver, name } => {
-                let mut path = self.expr_access_path(*receiver)?;
-                path.segments.push(name.clone());
-                Some(path)
-            }
-            Expr::SafeCall {
-                receiver,
-                name,
-                args: None,
-            } => {
-                let mut path = self.expr_access_path(*receiver)?;
-                path.segments.push(name.clone());
-                Some(path)
-            }
-            Expr::As {
-                operand,
-                nullable: false,
-                ..
-            } => self.expr_access_path(*operand),
-            _ => None,
-        }
-    }
-
     /// The type a successful checked cast narrows a stable path to. A nullable target accepts null,
     /// so the proven type remains nullable.
     fn proven_narrowed_ty(
@@ -64506,91 +64405,9 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Apply one narrowing without the support gate: a root-only path shadows the binding in the
-    /// current scope (the classic mechanism — reads resolve to the narrowed `Local`), a property
-    /// path is recorded in the current [`Self::path_narrows`] frame for the read-time hook.
-    fn apply_narrowing_unchecked(&mut self, scope: &CheckerScope<'_>, path: &NarrowPath, ty: Ty) {
-        if path.segments.is_empty() {
-            let root = path.root.clone();
-            if root == "this" {
-                // `this` is a receiver coordinate, not a top-level property or lexical local. Its
-                // active type is carried by `with_this_narrow`; retain the path fact as well for
-                // explicit receiver reads and intersection projections.
-                self.record_path_narrowing(scope, path.clone(), ty);
-                return;
-            }
-            // Alias: a proof on the BARE name of an own member `val` (`if (p != null)`) also
-            // narrows the qualified `this.p` read form — same immutable property.
-            if matches!(
-                self.lookup(scope, &root).map(|local| local.origin),
-                Some(ReceiverFnValueOrigin::DispatchProperty { .. })
-            ) {
-                self.record_path_narrowing(
-                    scope,
-                    NarrowPath {
-                        root: "this".to_string(),
-                        segments: vec![root.clone()],
-                    },
-                    ty,
-                );
-            }
-            if self.lookup(scope, &root).is_some() {
-                crate::trace_compiler!("smartcast", "root narrowing shadows lexical value {root}");
-                self.declare_narrowing_shadow(scope, &root, ty);
-            } else {
-                // A stable top-level `val` has no lexical value binding to shadow. Retain its exact
-                // access path and let the selected property read consume the proven type.
-                self.record_path_narrowing(scope, path.clone(), ty);
-                crate::trace_compiler!(
-                    "smartcast",
-                    "root narrowing records property path {path:?}"
-                );
-            }
-        } else {
-            self.record_path_narrowing(scope, path.clone(), ty);
-            // Alias: a proof on `this.p` also narrows the BARE `p` read form (same property).
-            if path.root == "this" && path.segments.len() == 1 {
-                let name = path.segments[0].clone();
-                if matches!(
-                    self.lookup(scope, &name).map(|local| local.origin),
-                    Some(ReceiverFnValueOrigin::DispatchProperty { .. })
-                ) {
-                    self.declare_narrowing_shadow(scope, &name, ty);
-                }
-            }
-        }
-    }
-
     /// Record a property-path narrowing in the scope that proved it.
     fn record_path_narrowing(&mut self, scope: &CheckerScope<'_>, path: NarrowPath, ty: Ty) {
         scope.narrow_path(path, ty);
-    }
-
-    /// The active narrowing for a property path, if any. A proof recorded OUTSIDE the rung holding
-    /// the root's innermost binding describes an outer, now-shadowed binding; a `this`-rooted proof
-    /// was made against the receiver of the rung that established it, and crossing out of that rung
-    /// means `this` is a different object (a receiver lambda of the same type is still a different
-    /// object). Both are expressed by where the walk stops.
-    fn lookup_path_narrowing(&self, scope: &CheckerScope<'_>, path: &NarrowPath) -> Option<Ty> {
-        let rooted_at_this = path.root == "this";
-        for rung in scope.ancestors() {
-            if let Some(ty) = rung.path_narrowing(path) {
-                return Some(ty);
-            }
-            if rooted_at_this {
-                if matches!(
-                    rung.kind(),
-                    ScopeKind::Class { .. } | ScopeKind::Function { receiver: Some(_) }
-                ) {
-                    return None;
-                }
-            } else if rung.declared_here(&path.root, Ns::Value) {
-                // The rung declaring the root was just consulted; a proof recorded further out
-                // describes the binding this one shadows.
-                return None;
-            }
-        }
-        None
     }
 
     /// All incomparable smart-cast constituents currently proved for one access path. Like the
@@ -65594,6 +65411,10 @@ impl<'a> Checker<'a> {
                 )
             })
             .unwrap_or((None, None));
+        let finalized_extension_receiver = stable_declaration
+            .and_then(|declaration| self.resolved_index?.callable_for_declaration(declaration))
+            .and_then(|callable| callable.shape.extension_receiver)
+            .map(crate::fir::ResolvedTy::get);
         let parameter_types = match finalized_parameters
             .as_deref()
             .filter(|parameters| parameters.len() == f.params.len())
@@ -65625,7 +65446,9 @@ impl<'a> Checker<'a> {
         let prev_extension_receiver = self.this_extension_receiver;
         // `this` inside the body and inside every parameter default is the extension receiver.
         let extension_receiver = f.receiver.as_ref().map(|r| {
-            if f.is_companion_extension() {
+            if let Some(receiver) = finalized_extension_receiver {
+                self.record_finalized_declaration_type(r, receiver)
+            } else if f.is_companion_extension() {
                 self.check_associated_companion_receiver_type(scope, r)
             } else {
                 self.check_declaration_type(scope, r)
@@ -65650,9 +65473,7 @@ impl<'a> Checker<'a> {
             let want = parameter_types.clone();
             self.ret_ty = if let Some(ret) = &f.ret {
                 if let Some(result) = finalized_result {
-                    self.resolved_declaration_types
-                        .insert((ret.span.lo, ret.span.hi), result);
-                    result
+                    self.record_finalized_declaration_type(ret, result)
                 } else {
                     self.check_declaration_type(scope, ret)
                 }
@@ -65703,9 +65524,7 @@ impl<'a> Checker<'a> {
                 .collect::<Vec<_>>();
             let explicit_result = f.ret.as_ref().map(|ret| {
                 if let Some(result) = finalized_result {
-                    self.resolved_declaration_types
-                        .insert((ret.span.lo, ret.span.hi), result);
-                    result
+                    self.record_finalized_declaration_type(ret, result)
                 } else {
                     self.check_declaration_type(scope, ret)
                 }
@@ -66879,7 +66698,7 @@ impl<'a> Checker<'a> {
                 ),
             );
         }
-        tailrec_declarations::check_members(&mut self.diags, cl);
+        tailrec_declarations::check_members(self.diags, cl);
         let current_owner = self.active_classifier_internal(d, cl);
         // A retained default may make an `inner` classifier the bounded Pass-1 checker root. Its
         // enclosing class parser node is then intentionally not reopened, but the enclosing class
@@ -70064,7 +69883,20 @@ impl<'a> Checker<'a> {
         }
         let dispatch_this = scope.this_ty();
         let dispatch_extension_receiver = self.this_extension_receiver;
-        let extension_receiver = f.receiver.as_ref().map(|r| self.type_ref_ty(scope, r));
+        let stable_declaration = stable_declaration.or_else(|| {
+            source_member.and_then(|source| self.active_source_member_declaration(source))
+        });
+        let finalized_extension_receiver = stable_declaration
+            .and_then(|declaration| self.resolved_index?.callable_for_declaration(declaration))
+            .and_then(|callable| callable.shape.extension_receiver)
+            .map(crate::fir::ResolvedTy::get);
+        let extension_receiver = f.receiver.as_ref().map(|reference| {
+            if let Some(receiver) = finalized_extension_receiver {
+                self.record_finalized_declaration_type(reference, receiver)
+            } else {
+                self.type_ref_ty(scope, reference)
+            }
+        });
         if let Some(recv_ref) = &f.receiver {
             let receiver = extension_receiver.expect("receiver was resolved");
             self.this_labels.push((f.name.clone(), receiver, false));
@@ -70073,9 +69905,6 @@ impl<'a> Checker<'a> {
                 .push((label_index, recv_ref.span));
             self.this_extension_receiver = Some(recv_ref.span);
         }
-        let stable_declaration = stable_declaration.or_else(|| {
-            source_member.and_then(|source| self.active_source_member_declaration(source))
-        });
         let (finalized_result, finalized_parameters) = stable_declaration
             .and_then(|declaration| self.resolved_index?.signature(declaration))
             .map(|signature| {
@@ -70124,9 +69953,7 @@ impl<'a> Checker<'a> {
                 // header. Pass 2 records that finalized semantic type against the fresh syntax
                 // occurrence; reparsing must not perform a second scope-tower selection that can
                 // drift after the temporary signature graph has been destroyed.
-                self.resolved_declaration_types
-                    .insert((reference.span.lo, reference.span.hi), result);
-                result
+                self.record_finalized_declaration_type(reference, result)
             }
             (Some(reference), None) => self.check_declaration_type(scope, reference),
             (None, _) => {
