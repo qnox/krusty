@@ -658,6 +658,19 @@ fn record_mentioned_names(value: &str, names: &mut crate::name_tree::FxHashMap<S
     }
 }
 
+struct DescriptorMentionCache {
+    fields: usize,
+    methods: usize,
+    pool_entries: usize,
+    names: crate::name_tree::FxHashMap<String, ()>,
+}
+
+impl DescriptorMentionCache {
+    fn matches(&self, sizes: (usize, usize, usize)) -> bool {
+        (self.fields, self.methods, self.pool_entries) == sizes
+    }
+}
+
 pub struct ClassWriter {
     cp: ConstPool,
     /// Every internal class name mentioned in class-type position by a field/method descriptor or a
@@ -668,8 +681,7 @@ pub struct ClassWriter {
     /// formatted `L…;` needle each time. On a module of generated clients that search dominated the
     /// whole compile. The set answers the same question in one lookup, and the recorded sizes make
     /// a stale answer impossible: anything appended invalidates it.
-    mentioned_names:
-        std::cell::RefCell<Option<(usize, usize, usize, crate::name_tree::FxHashMap<String, ()>)>>,
+    mentioned_names: std::cell::RefCell<Option<DescriptorMentionCache>>,
     /// Emit (and therefore seed the pool for) `Intrinsics.checkNotNullParameter` guards. Cleared by
     /// `-Xno-param-assertions`.
     param_assertions: bool,
@@ -751,9 +763,9 @@ impl ClassWriter {
         read: impl Fn(&crate::name_tree::FxHashMap<String, ()>) -> T,
     ) -> T {
         let sizes = (self.fields.len(), self.methods.len(), self.cp.entries.len());
-        if let Some((fields, methods, entries, names)) = self.mentioned_names.borrow().as_ref() {
-            if (*fields, *methods, *entries) == sizes {
-                return read(names);
+        if let Some(cached) = self.mentioned_names.borrow().as_ref() {
+            if cached.matches(sizes) {
+                return read(&cached.names);
             }
         }
         let mut names = crate::name_tree::FxHashMap::default();
@@ -770,7 +782,12 @@ impl ClassWriter {
         }
         self.cp.record_typed_descriptor_names(&mut record);
         let answer = read(&names);
-        *self.mentioned_names.borrow_mut() = Some((sizes.0, sizes.1, sizes.2, names));
+        *self.mentioned_names.borrow_mut() = Some(DescriptorMentionCache {
+            fields: sizes.0,
+            methods: sizes.1,
+            pool_entries: sizes.2,
+            names,
+        });
         answer
     }
 
