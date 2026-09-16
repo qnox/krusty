@@ -14,6 +14,50 @@
 //! bridges both `serialize` and `deserialize`.
 use super::common;
 
+fn assert_code_and_debug_identical(name: &str, src: &str, class: &str) {
+    let Some(dir) = common::scratch_dir() else {
+        eprintln!("skipping: scratch directory unavailable");
+        return;
+    };
+    let reference = dir.join("reference");
+    let actual = dir.join("actual");
+    std::fs::create_dir_all(&reference).expect("create reference directory");
+    std::fs::create_dir_all(&actual).expect("create actual directory");
+    let source = dir.join(format!("{name}.kt"));
+    std::fs::write(&source, src).expect("write bridge fixture");
+    let args = vec![
+        "-d".to_string(),
+        reference.to_string_lossy().into_owned(),
+        source.to_string_lossy().into_owned(),
+    ];
+    let Some((status, stderr)) = common::kotlinc_compile(&args) else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    assert_eq!(status, 0, "{name}: kotlinc failed: {stderr}");
+    let classes = common::compile_in_process_metadata_cp(src, name, &[])
+        .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
+    let (_, bytes) = classes
+        .iter()
+        .find(|(candidate, _)| candidate == class)
+        .unwrap_or_else(|| panic!("{name}: krusty did not emit {class}"));
+    let actual_class = actual.join(format!("{class}.class"));
+    std::fs::write(&actual_class, bytes).expect("write actual class");
+    let reference_class = reference.join(format!("{class}.class"));
+    let disassemble = |path: &std::path::Path| {
+        common::javap(&["-c", "-l", "-p", &path.to_string_lossy()])
+            .expect("pooled javap unavailable")
+            .lines()
+            .filter(|line| !line.starts_with("Compiled from"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let actual = disassemble(&actual_class);
+    let expected = disassemble(&reference_class);
+    let _ = std::fs::remove_dir_all(dir);
+    assert_eq!(actual, expected, "{name}: code and debug tables differ");
+}
+
 /// The narrowest shape that produces one: a class implementing a generic interface at a concrete
 /// argument. `accept(Object)` bridges to `accept(String)`.
 #[test]
@@ -51,4 +95,21 @@ fn a_bridge_names_its_parameters_after_the_override() {
         return;
     };
     result.expect("NoteStore byte-identical to kotlinc");
+}
+
+/// Property bridges do not delegate through an `IrFunction`, so their setter parameter cannot get
+/// a source name from `fn_params`. It still has kotlinc's generated accessor spelling rather than a
+/// positional fallback.
+#[test]
+fn a_property_setter_bridge_uses_its_generated_parameter_name() {
+    let src = "interface Box<T> {\n\
+               \x20   var item: T\n\
+               }\n\
+               \n\
+               class StringBox : Box<String> {\n\
+               \x20   override var item: String = \"\"\n\
+               }\n";
+    // This source has a known unrelated metadata-flag delta, so compare the complete javap code +
+    // line/local-table projection rather than weakening the bridge assertion to substrings.
+    assert_code_and_debug_identical("PropertyBridge", src, "StringBox");
 }

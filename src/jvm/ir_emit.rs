@@ -8311,9 +8311,9 @@ fn emit_bridge_barrier_outcome(
 /// arguments (type barrier / checkcast / unbox / numeric convert), delegates to the concrete override,
 /// and adapts the return value back (box / numeric convert).
 fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
-    // `(name, erased descriptor, delegated target)` per bridge actually emitted, for the debug
-    // tables attached after the loop — `set_method_debug` describes a method that already exists.
-    let mut emitted: Vec<(String, String, Option<u32>)> = Vec::new();
+    // Exact bridge plus erased descriptor per method actually emitted. Retaining the selected IR
+    // bridge avoids re-identifying an overload by an incomplete name/target key after emission.
+    let mut emitted = Vec::new();
     for b in &c.bridges {
         let ep = jvm_tys(&b.erased_params);
         let static_target = b.target_function.and_then(|function| {
@@ -8341,7 +8341,7 @@ fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
         if cw.has_method(&b.name, &erased_desc) {
             continue;
         }
-        emitted.push((b.name.clone(), erased_desc.clone(), b.target_function));
+        emitted.push((b, erased_desc.clone()));
         let pw: u16 = ep.iter().map(|t| slot_words(*t)).sum();
         let mut code = CodeBuilder::new(1 + pw);
         if let Some(barrier) = crate::jvm::backend::bridge_barrier(b) {
@@ -8528,41 +8528,40 @@ fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
 /// The bridge has no source of its own — it exists because a supertype's erased signature differs
 /// from the override's — so the NAMES come from the override it delegates to, while the descriptors
 /// are the ERASED ones the bridge actually receives (`item Ljava/lang/Object;`, not `String`). A
-/// parameter the override does not name keeps the JVM's positional spelling.
+/// parameter the override does not name keeps the JVM's positional spelling. A property-setter
+/// bridge has no source function identity; its generated parameter uses kotlinc's accessor spelling.
 fn attach_bridge_debug_tables(
     ir: &IrFile,
     c: &crate::ir::IrClass,
     cw: &mut ClassWriter,
-    emitted: &[(String, String, Option<u32>)],
+    emitted: &[(&crate::ir::Bridge, String)],
 ) {
     if c.decl_line == 0 {
         return;
     }
     let this_desc = format!("L{};", c.fq_name());
-    for (name, erased_desc, target) in emitted {
-        let Some(bridge) = c
-            .bridges
-            .iter()
-            .find(|bridge| bridge.name == *name && bridge.target_function == *target)
-        else {
-            continue;
-        };
-        let names = target
+    for (bridge, erased_desc) in emitted {
+        let target_names = bridge
+            .target_function
             .and_then(|function| ir.fn_params.get(&function))
             .map(|parameters| parameters.names.as_slice())
             .unwrap_or_default();
         let mut locals = vec![(String::from("this"), this_desc.clone(), 0u16)];
         let mut slot = 1u16;
         for (index, parameter) in jvm_tys(&bridge.erased_params).iter().enumerate() {
-            let descriptor = type_descriptor(*parameter);
-            let spelling = names
+            let descriptor = local_variable_desc(*parameter);
+            let spelling = target_names
                 .get(index)
                 .cloned()
+                .or_else(|| {
+                    (bridge.kind == crate::ir::BridgeKind::PropertySetter)
+                        .then(|| "<set-?>".to_string())
+                })
                 .unwrap_or_else(|| format!("p{index}"));
             locals.push((spelling, descriptor, slot));
             slot += slot_words(*parameter);
         }
-        cw.set_method_debug(name, erased_desc, Some((0, c.decl_line)), &locals);
+        cw.set_method_debug(&bridge.name, erased_desc, Some((0, c.decl_line)), &locals);
     }
 }
 
