@@ -29,7 +29,6 @@ use crate::types::{
 use scope::{ContextReceiver, ContextValue, FlowExclusion, NarrowPath, Ns, ScopeKind};
 
 mod annotation_applications;
-mod annotation_legacy_bridge;
 mod call_result_constraint;
 mod callable_reference_selection;
 mod capture_analysis;
@@ -47391,10 +47390,6 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         let classifier_annotations =
             plugin_expression_annotations::classifier_annotations_for_calls(
                 plugin_expression_annotations::ClassifierAnnotationInputs {
-                    file,
-                    file_index,
-                    source_files,
-                    active_declarations,
                     resolved_index,
                     pass_one_symbols: syms.pass_one_symbols(),
                     libraries: syms.libraries(),

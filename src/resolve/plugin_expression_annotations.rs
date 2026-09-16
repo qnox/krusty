@@ -7,7 +7,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::File;
 use crate::libraries::SemanticPlatform;
 use crate::plugins::FrontendSelectedCall;
 use crate::types::{Ty, TypeName};
@@ -15,10 +14,6 @@ use crate::types::{Ty, TypeName};
 use super::SymbolTable;
 
 pub(super) struct ClassifierAnnotationInputs<'a> {
-    pub(super) file: &'a File,
-    pub(super) file_index: u32,
-    pub(super) source_files: Option<&'a [File]>,
-    pub(super) active_declarations: Option<&'a crate::fir::ActiveSourceDeclarations>,
     pub(super) resolved_index: Option<&'a crate::fir::ResolvedModuleIndex>,
     pub(super) pass_one_symbols: Option<&'a SymbolTable>,
     pub(super) libraries: &'a dyn SemanticPlatform,
@@ -29,15 +24,11 @@ pub(super) fn classifier_annotations_for_calls(
     calls: &[FrontendSelectedCall],
 ) -> HashMap<TypeName, Vec<TypeName>> {
     let ClassifierAnnotationInputs {
-        file,
-        file_index,
-        source_files,
-        active_declarations,
         resolved_index,
         pass_one_symbols,
         libraries,
     } = inputs;
-    let mut annotations = if let Some(index) = resolved_index {
+    let mut annotations: HashMap<TypeName, Vec<TypeName>> = if let Some(index) = resolved_index {
         (0..index.declaration_count())
             .filter_map(|raw| {
                 let declaration = crate::fir::DeclarationId::from_raw(raw as u32);
@@ -49,13 +40,12 @@ pub(super) fn classifier_annotations_for_calls(
             })
             .collect()
     } else {
-        super::annotation_legacy_bridge::classifier_annotations(
-            file,
-            file_index,
-            source_files,
-            active_declarations,
-            pass_one_symbols.expect("legacy analysis requires collected source symbols"),
-        )
+        pass_one_symbols
+            .expect("legacy analysis requires collected source symbols")
+            .classes
+            .iter()
+            .map(|(&classifier, class)| (classifier, class.annotations.clone()))
+            .collect()
     };
 
     // A selected call can name a classpath type in an inferred/explicit type argument, parameter,
@@ -98,4 +88,32 @@ pub(super) fn classifier_annotations_for_calls(
         );
     }
     annotations
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_checker_reads_collected_classifier_annotation_identities() {
+        let source = "package sample\nannotation class Mark\n@Mark class Target";
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let tokens = crate::lexer::lex(source, &mut diagnostics);
+        let file = crate::parser::parse(source, &tokens, &mut diagnostics);
+        let symbols = super::super::collect_signatures(&[file], &mut diagnostics);
+        assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+
+        let annotations = classifier_annotations_for_calls(
+            ClassifierAnnotationInputs {
+                resolved_index: None,
+                pass_one_symbols: Some(&symbols),
+                libraries: &crate::libraries::EmptySymbolSource,
+            },
+            &[],
+        );
+        assert_eq!(
+            annotations.get(&crate::types::type_name("sample/Target")),
+            Some(&vec![crate::types::type_name("sample/Mark")])
+        );
+    }
 }
