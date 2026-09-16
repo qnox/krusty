@@ -155,6 +155,174 @@ impl BodyLowering<'_, '_, '_> {
         Ok(None)
     }
 
+    /// One arm of a `try`, with its `finally` run on the way to the merge.
+    ///
+    /// Not [`Self::arm`] itself, because the arm's VALUE is computed before the finally runs and
+    /// the finally must not be able to change it: `try { return f() } finally { g() }` calls `f`
+    /// then `g`, and answers `f`'s value. A `finally` that leaves takes over, which is why the
+    /// jump to the merge is skipped when it does.
+    fn arm_through_finally(
+        &mut self,
+        body: u32,
+        result: Option<Ty>,
+        merge: Block,
+        reaches_merge: &mut bool,
+        finally: Option<u32>,
+    ) -> Result<(), Unsupported> {
+        let Some(cleanup) = finally else {
+            return self.arm(body, result, merge, reaches_merge);
+        };
+        let value = match result {
+            Some(ty) => self.coerce(body, ty)?,
+            None => {
+                self.statement(body)?;
+                None
+            }
+        };
+        if self.terminated {
+            return Ok(());
+        }
+        // Popped around its own body: a `return` inside the `finally` must not re-enter it, and
+        // the handler stack goes back to what it was so a throw inside it leaves this `try`.
+        let pending = self.finallys.pop().expect("this `try` pushed one");
+        let ran = self.run_cleanup(cleanup, pending.handlers_at_entry);
+        self.finallys.push(pending);
+        ran?;
+        if self.terminated {
+            return Ok(());
+        }
+        match (result, value) {
+            (Some(_), Some(value)) => {
+                self.builder.ins().jump(merge, &[BlockArg::Value(value)]);
+            }
+            (Some(_), None) => {
+                return Err("a `try` arm of no value where one is needed".to_string())
+            }
+            (None, _) => {
+                self.builder.ins().jump(merge, &[]);
+            }
+        }
+        *reaches_merge = true;
+        Ok(())
+    }
+
+    /// The `finally` on the path where an exception is still travelling.
+    ///
+    /// The slot is CLEARED first and the exception held in a local, because the finally's own
+    /// calls each check that slot: leaving it set would make the first of them turn straight round
+    /// and the block would not run. kotlinc agrees the block runs normally here — a `finally` may
+    /// call whatever it likes while an exception is in flight.
+    ///
+    /// Afterwards the exception resumes, unless the `finally` produced something that outranks it.
+    /// Both cases are Kotlin's, and both were taken from kotlinc rather than reasoned out: a
+    /// `finally` that THROWS replaces the exception in flight, and a `finally` that RETURNS
+    /// swallows it entirely.
+    fn propagate_through_finally(
+        &mut self,
+        cleanup: u32,
+        handlers_at_entry: usize,
+    ) -> Result<(), Unsupported> {
+        let saved = self
+            .runtime_call_unchecked("kt_pending_exception", &[], any(), &[])?
+            .expect("the pending exception is a reference");
+        self.runtime_call_unchecked("kt_clear_pending", &[], Ty::Unit, &[])?;
+
+        // Not popped from `finallys`: this runs AFTER the `try` left that stack, so the block is no
+        // longer pending and a `return` inside it has nothing of its own to re-enter. The HANDLER
+        // depth still has to go back, so a throw inside it leaves this `try` rather than arriving
+        // back at this very block.
+        self.run_cleanup(cleanup, handlers_at_entry)?;
+        if self.terminated {
+            return Ok(());
+        }
+
+        // Did the `finally` raise one of its own? Then it wins and the saved one is gone.
+        let replaced = self
+            .runtime_call_unchecked("kt_pending_exception", &[], any(), &[])?
+            .expect("the pending exception is a reference");
+        let resume = self.builder.create_block();
+        let carry_on = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(replaced, carry_on, &[], resume, &[]);
+
+        self.continue_in(resume);
+        self.builder.seal_block(resume);
+        let throw = self.file.import("kt_throw", &[any()], Ty::Unit)?;
+        let throw = self.func_ref(throw);
+        self.builder.ins().call(throw, &[saved]);
+        self.builder.ins().jump(carry_on, &[]);
+
+        self.continue_in(carry_on);
+        self.builder.seal_block(carry_on);
+        Ok(())
+    }
+
+    /// Run the `finally` blocks a jump out of here has to pass through, innermost first.
+    ///
+    /// `depth` is how many of them to leave ALONE: a `return` leaves none (it exits the frame, so
+    /// every one runs), and a `break` leaves those that belong to loops it is not leaving. kotlinc
+    /// verifies the rule — `for (i in 0..2) { try { if (i == 1) break … } finally { … } }` runs the
+    /// finally on the breaking turn as well as the others.
+    ///
+    /// Each body is re-lowered here rather than shared, which is what kotlinc emits too: the exit
+    /// paths are disjoint, so a copy on each runs exactly once.
+    ///
+    /// A `finally` that itself leaves — `try { return "body" } finally { return "finally" }` — ends
+    /// the jump that was in progress, and `finally` wins. That falls out of `terminated`: the
+    /// caller checks it and does not emit its own jump.
+    fn run_finallys_above(&mut self, depth: usize) -> Result<(), Unsupported> {
+        // Each one is popped around its own body, so a `return` written inside a `finally` does not
+        // run that same `finally` again — and they are held aside rather than pushed straight back,
+        // because putting one back inside the loop that reads the stack's height is a loop that
+        // never ends.
+        let mut ran_already = Vec::new();
+        let mut outcome = Ok(());
+        while self.finallys.len() > depth {
+            let pending = self.finallys.pop().expect("checked by the loop");
+            outcome = self.run_cleanup(pending.body, pending.handlers_at_entry);
+            ran_already.push(pending);
+            if outcome.is_err() || self.terminated {
+                break;
+            }
+        }
+        // The position this jump came from is still inside every one of them: a later exit on
+        // another path has to run them too.
+        for pending in ran_already.into_iter().rev() {
+            self.finallys.push(pending);
+        }
+        outcome
+    }
+
+    /// Lower a `finally` body with the handler stack its `try` was entered at.
+    ///
+    /// An exception raised inside a `finally` LEAVES the `try` that finally belongs to. It does not
+    /// reach that `try`'s own `catch` clauses, and — the part that bites — it must not re-enter the
+    /// same `finally`, which is what happens if the block is lowered while the `try`'s dispatch is
+    /// still the innermost handler. `finally/breakAndOuterFinally.kt` is the corpus case: a
+    /// `finally` that throws ran twice and the log read `… finally finally`.
+    fn run_cleanup(&mut self, body: u32, handlers_at_entry: usize) -> Result<(), Unsupported> {
+        let outer = self.handlers.split_off(handlers_at_entry);
+        let ran = self.statement(body);
+        self.handlers.extend(outer);
+        ran
+    }
+
+    /// The finallys a `return` runs: all of them, since it leaves the frame.
+    pub(super) fn run_finallys_for_return(&mut self) -> Result<(), Unsupported> {
+        self.run_finallys_above(0)
+    }
+
+    /// The finallys a `break` or `continue` runs: those entered inside the loop it names.
+    pub(super) fn run_finallys_for_jump(&mut self, loop_index: usize) -> Result<(), Unsupported> {
+        let depth = self
+            .finallys
+            .iter()
+            .take_while(|pending| pending.loops_at_entry <= loop_index)
+            .count();
+        self.run_finallys_above(depth)
+    }
+
     /// `assertFailsWith<T> { … }` — run the block, and answer the exception it had to throw.
     ///
     /// The reified `T` never reaches here as a type argument: kotlinc resolves it into the call's
@@ -299,9 +467,6 @@ impl BodyLowering<'_, '_, '_> {
         finally: Option<u32>,
         result: Ty,
     ) -> Result<Option<Value>, Unsupported> {
-        if finally.is_some() {
-            return Err("a `try` with a `finally`".to_string());
-        }
         let merge = self.builder.create_block();
         let result = Some(result).filter(|ty| carrier(*ty) != Carrier::Void);
         if let Some(ty) = result {
@@ -310,9 +475,32 @@ impl BodyLowering<'_, '_, '_> {
         }
         let dispatch = self.builder.create_block();
 
+        // A `try` with a `finally` needs a SECOND handler above the clause dispatch. An exception
+        // raised inside a `catch` clause is not offered to this `try`'s other clauses — it leaves —
+        // but it still has to run the `finally` on the way, and so does one no clause matched.
+        // That is what this block is: the exception exit, distinct from clause selection.
+        let cleanup_dispatch = finally.map(|_| self.builder.create_block());
+        let handlers_at_entry = self.handlers.len();
+        let entered = |lowering: &mut Self| {
+            if let Some(body) = finally {
+                lowering.finallys.push(super::PendingFinally {
+                    body,
+                    loops_at_entry: lowering.loops.len(),
+                    handlers_at_entry,
+                });
+            }
+        };
+        let left = |lowering: &mut Self| {
+            if finally.is_some() {
+                lowering.finallys.pop();
+            }
+        };
+
         let mut reaches_merge = false;
         self.handlers.push(dispatch);
-        let guarded = self.arm(body, result, merge, &mut reaches_merge);
+        entered(self);
+        let guarded = self.arm_through_finally(body, result, merge, &mut reaches_merge, finally);
+        left(self);
         self.handlers.pop();
         guarded?;
 
@@ -353,15 +541,45 @@ impl BodyLowering<'_, '_, '_> {
             self.runtime_call_unchecked("kt_clear_pending", &[], Ty::Unit, &[])?;
             let variable = self.declare_value(catch.var, Ty::obj_name(catch.exc_internal))?;
             self.builder.def_var(variable, thrown);
-            self.arm(catch.body, result, merge, &mut reaches_merge)?;
+            entered(self);
+            if let Some(cleanup_dispatch) = cleanup_dispatch {
+                self.handlers.push(cleanup_dispatch);
+            }
+            let handled =
+                self.arm_through_finally(catch.body, result, merge, &mut reaches_merge, finally);
+            if cleanup_dispatch.is_some() {
+                self.handlers.pop();
+            }
+            left(self);
+            handled?;
 
             self.continue_in(next);
             self.builder.seal_block(next);
         }
-        // No clause named it: it keeps going where it was going.
-        let onward = self.unwind_target();
-        self.builder.ins().jump(onward, &[]);
-        self.terminate();
+        // No clause named it: it keeps going where it was going — through the exception exit when
+        // there is a `finally`, and straight on when there is not.
+        match cleanup_dispatch {
+            Some(exit) => {
+                self.builder.ins().jump(exit, &[]);
+                self.terminate();
+                // Every edge into the exit exists by now: the clauses are lowered and so is the
+                // fall-through above.
+                self.continue_in(exit);
+                self.builder.seal_block(exit);
+                let cleanup = finally.expect("an exit block means a `finally`");
+                self.propagate_through_finally(cleanup, handlers_at_entry)?;
+                if !self.terminated {
+                    let onward = self.unwind_target();
+                    self.builder.ins().jump(onward, &[]);
+                    self.terminate();
+                }
+            }
+            None => {
+                let onward = self.unwind_target();
+                self.builder.ins().jump(onward, &[]);
+                self.terminate();
+            }
+        }
 
         if !reaches_merge {
             // Body and every handler left. Nothing follows the `try`.

@@ -1707,6 +1707,25 @@ before:**
    every NaN to one value; `hashCode` needed the same helper, since values that compare equal must
    hash equal.
 
+   **`finally`, for 3877.** Four exit edges — the body completing, each handler completing, an
+   exception no clause matched, and a `return`/`break`/`continue` written inside — with the block
+   re-lowered on each, as kotlinc emits it. Every rule was taken from the reference compiler rather
+   than from reading the construct, and several are not what reading suggests: a `finally` that
+   THROWS replaces the exception in flight, one that RETURNS swallows it, a `return` in a `finally`
+   beats a `return` in the body, and a `break` out of a `try` runs its `finally` on the breaking
+   turn.
+   The first cut passed every hand-written test and the corpus answered with 16 failures, all of
+   one shape: `… finally finally`. A `finally` that throws was arriving back at its own `try`'s
+   dispatch, which ran it again. An exception raised inside a `finally` LEAVES the `try` that
+   finally belongs to, so the block has to be lowered at the handler depth its `try` was entered
+   at — and a `catch` clause that throws needs somewhere to go that is not clause selection but is
+   not past the `finally` either, which is the second handler a try-with-finally now creates.
+   Two smaller ones on the way, both mine and both found by running: the helper that runs pending
+   finallys pushed each back onto the stack it was reading the height of, so it never terminated;
+   and the propagating path popped an entry the `try` had already popped. A hand-written
+   `continue` expectation was wrong too — I had written `0fff2f` where kotlinc says `0ff2f`, which
+   is the lesson of this branch in one line.
+
    **How an exception propagates: a pending slot, not an unwinder.** This is the second of the
    three low-IR decisions the risks section says must be answered by design rather than inherited.
 

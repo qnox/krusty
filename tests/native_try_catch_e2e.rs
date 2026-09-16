@@ -10,7 +10,7 @@
 //! the convenient ones. So most of these programs put the throw somewhere the check is easy to
 //! forget: behind a call, behind two, inside a constructor, inside a lambda, inside a loop.
 
-use super::common::{expect_native_box, expect_native_decline};
+use super::common::expect_native_box;
 
 #[test]
 fn a_catch_of_the_thrown_type_takes_it() {
@@ -211,23 +211,6 @@ fn an_uncaught_throw_past_a_try_still_ends_the_program() {
         "UncaughtPastTry",
         134,
         "IllegalStateException: unhandled",
-    );
-}
-
-#[test]
-fn a_try_with_a_finally_declines() {
-    // `finally` runs on every way out, including a `return` written inside the body. That is a
-    // separate piece of work, and answering it half-way would be a silent wrong answer.
-    expect_native_decline(
-        "fun box(): String {\n\
-         \x20   try {\n\
-         \x20       return \"OK\"\n\
-         \x20   } finally {\n\
-         \x20       println(\"cleanup\")\n\
-         \x20   }\n\
-         }\n",
-        "TryFinallyDeclines",
-        "a `try` with a `finally`",
     );
 }
 
@@ -499,6 +482,166 @@ fn a_supplied_message_is_a_prefix() {
          \x20   }\n\
          }\n",
         "AssertFailsWithMessage",
+        "OK",
+    );
+}
+
+// ---- `finally` ---------------------------------------------------------------------------------
+//
+// `finally` runs on EVERY way out of a `try`: normal completion, each handler, an exception nobody
+// caught, and a `return`, `break` or `continue` written inside the body. Every expectation below
+// was taken from kotlinc 2.4.10 first — several are not what reading the construct suggests.
+
+#[test]
+fn a_finally_runs_after_the_body_completes() {
+    expect_native_box(
+        "val log = StringBuilder()\n\
+         fun f(): String { try { log.append(\"t\"); return \"N\" } finally { log.append(\"f\") } }\n\
+         fun box(): String {\n\
+         \x20   val answer = f()\n\
+         \x20   return if (answer == \"N\" && log.toString() == \"tf\") \"OK\" else \"fail: $answer/$log\"\n\
+         }\n",
+        "FinallyNormal",
+        "OK",
+    );
+}
+
+#[test]
+fn a_finally_runs_after_the_handler_that_caught() {
+    expect_native_box(
+        "val log = StringBuilder()\n\
+         fun f(): String {\n\
+         \x20   try { log.append(\"t\"); throw IllegalStateException(\"x\") }\n\
+         \x20   catch (e: IllegalStateException) { log.append(\"c\"); return \"C\" }\n\
+         \x20   finally { log.append(\"f\") }\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val answer = f()\n\
+         \x20   return if (answer == \"C\" && log.toString() == \"tcf\") \"OK\" else \"fail: $answer/$log\"\n\
+         }\n",
+        "FinallyAfterCatch",
+        "OK",
+    );
+}
+
+#[test]
+fn a_finally_runs_while_an_exception_is_travelling_and_then_it_carries_on() {
+    // The slot has to be CLEARED around the block: the finally's own calls each check it, so
+    // leaving it set would make the first of them turn straight round and the block would not run.
+    // kotlinc confirms a finally may call whatever it likes here.
+    expect_native_box(
+        "val log = StringBuilder()\n\
+         fun f(): String { try { throw IllegalStateException(\"p\") } finally { log.append(\"f\") } }\n\
+         fun box(): String {\n\
+         \x20   val said = try { f() } catch (e: IllegalStateException) { e.message }\n\
+         \x20   return if (said == \"p\" && log.toString() == \"f\") \"OK\" else \"fail: $said/$log\"\n\
+         }\n",
+        "FinallyThenPropagate",
+        "OK",
+    );
+}
+
+#[test]
+fn a_finally_that_returns_takes_over_from_the_body() {
+    expect_native_box(
+        "fun f(): String { try { return \"body\" } finally { return \"finally\" } }\n\
+         fun box(): String = if (f() == \"finally\") \"OK\" else \"fail: ${f()}\"\n",
+        "FinallyReturnWins",
+        "OK",
+    );
+}
+
+#[test]
+fn a_finally_that_returns_swallows_the_exception() {
+    expect_native_box(
+        "fun f(): String { try { throw IllegalStateException(\"x\") } finally { return \"swallowed\" } }\n\
+         fun box(): String = if (f() == \"swallowed\") \"OK\" else \"fail: ${f()}\"\n",
+        "FinallySwallows",
+        "OK",
+    );
+}
+
+#[test]
+fn a_finally_that_throws_replaces_the_exception_in_flight() {
+    expect_native_box(
+        "fun f() { try { throw IllegalStateException(\"first\") }\n\
+         \x20        finally { throw NumberFormatException(\"second\") } }\n\
+         fun box(): String {\n\
+         \x20   return try { f(); \"fail: no throw\" }\n\
+         \x20          catch (e: NumberFormatException) { if (e.message == \"second\") \"OK\" else \"fail: ${e.message}\" }\n\
+         \x20          catch (e: IllegalStateException) { \"fail: the first one survived\" }\n\
+         }\n",
+        "FinallyThrowWins",
+        "OK",
+    );
+}
+
+#[test]
+fn a_break_out_of_a_try_runs_its_finally() {
+    // The finally belongs to a `try` INSIDE the loop, so the breaking turn runs it like the
+    // others: kotlinc logs `0ff` for three turns where the second breaks.
+    expect_native_box(
+        "val log = StringBuilder()\n\
+         fun f(): String {\n\
+         \x20   for (i in 0..2) {\n\
+         \x20       try { if (i == 1) break; log.append(\"$i\") } finally { log.append(\"f\") }\n\
+         \x20   }\n\
+         \x20   return \"L\"\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val answer = f()\n\
+         \x20   return if (answer == \"L\" && log.toString() == \"0ff\") \"OK\" else \"fail: $answer/$log\"\n\
+         }\n",
+        "FinallyOnBreak",
+        "OK",
+    );
+}
+
+#[test]
+fn a_continue_out_of_a_try_runs_its_finally() {
+    expect_native_box(
+        "val log = StringBuilder()\n\
+         fun box(): String {\n\
+         \x20   for (i in 0..2) {\n\
+         \x20       try { if (i == 1) continue; log.append(\"$i\") } finally { log.append(\"f\") }\n\
+         \x20   }\n\
+         \x20   // `0f` for the first turn, `f` alone for the one that continues, `2f` for the last.\n\
+         \x20   return if (log.toString() == \"0ff2f\") \"OK\" else \"fail: $log\"\n\
+         }\n",
+        "FinallyOnContinue",
+        "OK",
+    );
+}
+
+#[test]
+fn nested_finallys_run_innermost_first() {
+    expect_native_box(
+        "val log = StringBuilder()\n\
+         fun f(): String {\n\
+         \x20   try { try { return \"r\" } finally { log.append(\"inner\") } } finally { log.append(\"outer\") }\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val answer = f()\n\
+         \x20   return if (answer == \"r\" && log.toString() == \"innerouter\") \"OK\" else \"fail: $answer/$log\"\n\
+         }\n",
+        "NestedFinallys",
+        "OK",
+    );
+}
+
+#[test]
+fn a_try_finally_with_no_catch_still_propagates() {
+    expect_native_box(
+        "val log = StringBuilder()\n\
+         fun f(): Int { try { return 1 } finally { log.append(\"a\") } }\n\
+         fun box(): String {\n\
+         \x20   val n = f()\n\
+         \x20   val caught = try {\n\
+         \x20       try { throw IllegalStateException(\"z\") } finally { log.append(\"b\") }\n\
+         \x20   } catch (e: IllegalStateException) { e.message }\n\
+         \x20   return if (n == 1 && caught == \"z\" && log.toString() == \"ab\") \"OK\" else \"fail: $n/$caught/$log\"\n\
+         }\n",
+        "TryFinallyNoCatch",
         "OK",
     );
 }

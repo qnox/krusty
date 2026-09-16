@@ -441,14 +441,19 @@ fn an_unsupported_construct_is_declined_with_a_diagnostic() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
         return;
     };
-    // `try`/`catch` is not implemented — it needs an unwinder the runtime does not have. The
-    // contract is that the backend SAYS so: emitting a partial object that links and misbehaves
-    // would be far worse than refusing.
+    // An UNSIGNED range stands in here: `UIntRange` is not among the runtime's range types yet, and
+    // it is the largest remaining cluster on the backlog. The contract under test is not WHICH
+    // construct is refused but that the backend SAYS so — emitting a partial object that links and
+    // misbehaves would be far worse than refusing.
+    //
+    // It used to be `try`/`finally`, which now lowers. A decline test has to name something still
+    // declined, so this moves as the backlog does.
     let (artifacts, diagnostics) = compile(
         &[(
             "Main",
             "fun main() {\n\
-             \x20   try { println(\"body\") } finally { println(\"cleanup\") }\n\
+             \x20   val r = 1u..3u\n\
+             \x20   println(r.first)\n\
              }\n",
         )],
         target,

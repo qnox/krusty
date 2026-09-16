@@ -6640,10 +6640,28 @@ and behavior is checked by RUNNING the emitted program.
   each clause's type; a clause that matches CLEARS the slot before running, because from there the
   exception is handled and the handler's own calls check that slot like any others. No clause
   matching falls through to where the exception was already going.
-  `finally` DECLINES. It runs on every way out — normal completion, each handler, propagation, and
-  a `return` written inside the body — so it is a separate piece of work, and half-answering it
-  would be the silent wrong answer this backend declines instead of giving.
   Tests: `tests/native_try_catch_e2e.rs` (all).
+
+- **`finally` runs on FOUR exit edges, and an exception raised inside one LEAVES the `try` it
+  belongs to.** The edges are: the body completing, each handler completing, an exception no clause
+  matched, and a `return`, `break` or `continue` written inside. The block is re-lowered on each —
+  which is what kotlinc emits too, since the paths are disjoint and a copy on each runs once.
+  A `try` with a `finally` therefore needs a SECOND handler above clause selection: an exception
+  raised in a `catch` clause is not offered to that same `try`'s other clauses, but must still run
+  the `finally` on the way out. And the `finally` itself is lowered at the handler depth its `try`
+  was ENTERED at, because an exception raised inside a `finally` leaves that `try` — without that,
+  a throwing `finally` arrives back at its own dispatch and runs a second time
+  (`codegen/box/finally/breakAndOuterFinally.kt`, which logged `… finally finally`).
+  On the propagating edge the pending slot is CLEARED and the exception held in a local, because
+  the block's own calls each check that slot and the first would otherwise turn straight round.
+  Afterwards the exception resumes unless the `finally` outranked it. Every rule here came from
+  kotlinc 2.4.10 rather than from reading the construct: a `finally` that THROWS replaces the
+  exception in flight, one that RETURNS swallows it, a `return` in a `finally` beats a `return` in
+  the body, nested finallys run innermost first, and a `break` out of a `try` runs its `finally` on
+  the breaking turn.
+  A `break` runs the finallys entered INSIDE the loop it leaves and no others, which is what the
+  loop depth recorded at each `try` is for.
+  Tests: `tests/native_try_catch_e2e.rs` (the ten `finally` cases).
 
 - **The runtime's own failures are Kotlin exceptions a program can catch.** Each was a diagnosable
   exit while no handler could exist to see the difference; each is now the exception Kotlin

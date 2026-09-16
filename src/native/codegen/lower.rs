@@ -421,6 +421,7 @@ impl<'a> FileLowering<'a> {
                     terminated: false,
                     handlers: Vec::new(),
                     propagate: None,
+                    finallys: Vec::new(),
                 };
                 let params = body.builder.block_params(entry).to_vec();
                 fill(&mut body, &params)?;
@@ -606,6 +607,24 @@ struct BodyLowering<'a, 'b, 'c> {
     /// The block that leaves this frame with the exception still pending — created on first use,
     /// because a function whose body makes no call cannot observe one.
     propagate: Option<Block>,
+    /// The `finally` blocks the current position sits inside, innermost last. Every way out of a
+    /// `try` runs them, so `return`, `break` and `continue` consult this before jumping.
+    finallys: Vec<PendingFinally>,
+}
+
+/// One `finally` the current position is inside.
+pub(super) struct PendingFinally {
+    /// The block's body, re-lowered at each exit rather than shared. That is what kotlinc emits
+    /// too: the paths are disjoint, so a copy on each runs exactly once.
+    pub(super) body: u32,
+    /// How many loops were open when its `try` was entered. A `break` runs the finallys entered
+    /// INSIDE the loop it leaves and no others, and this is what tells them apart.
+    pub(super) loops_at_entry: usize,
+    /// How many handlers were open when its `try` was entered. Running the block restores this
+    /// depth first, because an exception raised INSIDE a `finally` leaves the `try` that finally
+    /// belongs to: it does not reach that `try`'s own `catch` clauses, and it must not re-enter
+    /// the same `finally`.
+    pub(super) handlers_at_entry: usize,
 }
 
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
@@ -698,6 +717,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         if self.terminated {
                             return Ok(());
                         }
+                        self.run_finallys_for_return()?;
+                        if self.terminated {
+                            return Ok(());
+                        }
                         self.builder.ins().return_(&[]);
                     }
                     (Some(value), Carrier::Ref) => {
@@ -706,6 +729,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // `FunctionN.invoke` answers with a reference whatever the lambda does.
                         // `reference` materializes the runtime's singleton for exactly that.
                         let value = self.reference(value)?;
+                        if self.terminated {
+                            return Ok(());
+                        }
+                        self.run_finallys_for_return()?;
                         if self.terminated {
                             return Ok(());
                         }
@@ -721,9 +748,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                                 "a `return` of no value from a non-`Unit` function".to_string()
                             );
                         };
+                        self.run_finallys_for_return()?;
+                        if self.terminated {
+                            return Ok(());
+                        }
                         self.builder.ins().return_(&[value]);
                     }
                     (None, _) => {
+                        self.run_finallys_for_return()?;
+                        if self.terminated {
+                            return Ok(());
+                        }
                         self.builder.ins().return_(&[]);
                     }
                 }
@@ -794,16 +829,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.bottom_value(producer, completion.diverges_when_discarded())?;
             }
             IrExpr::Break { label } => {
-                let frame = self.loop_frame(label.as_deref(), "break")?;
-                frame.broken = true;
-                let target = frame.break_block;
+                let index = self.loop_index(label.as_deref(), "break")?;
+                self.loops[index].broken = true;
+                let target = self.loops[index].break_block;
+                self.run_finallys_for_jump(index)?;
+                if self.terminated {
+                    return Ok(());
+                }
                 self.builder.ins().jump(target, &[]);
                 self.terminate();
             }
             IrExpr::Continue { label } => {
-                let target = self
-                    .loop_frame(label.as_deref(), "continue")?
-                    .continue_block;
+                let index = self.loop_index(label.as_deref(), "continue")?;
+                let target = self.loops[index].continue_block;
+                self.run_finallys_for_jump(index)?;
+                if self.terminated {
+                    return Ok(());
+                }
                 self.builder.ins().jump(target, &[]);
                 self.terminate();
             }
@@ -856,15 +898,21 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         label: Option<&str>,
         keyword: &str,
     ) -> Result<&mut LoopFrame, Unsupported> {
-        let frame = match label {
+        let index = self.loop_index(label, keyword)?;
+        Ok(&mut self.loops[index])
+    }
+
+    /// Which loop a `break`/`continue` names, as an index. The index is what decides how many
+    /// `finally` blocks the jump has to run through: those entered INSIDE this loop, and no more.
+    fn loop_index(&self, label: Option<&str>, keyword: &str) -> Result<usize, Unsupported> {
+        let found = match label {
             Some(label) => self
                 .loops
-                .iter_mut()
-                .rev()
-                .find(|frame| frame.label.as_deref() == Some(label)),
-            None => self.loops.last_mut(),
+                .iter()
+                .rposition(|frame| frame.label.as_deref() == Some(label)),
+            None => self.loops.len().checked_sub(1),
         };
-        frame.ok_or_else(|| format!("a `{keyword}` outside the loop it names"))
+        found.ok_or_else(|| format!("a `{keyword}` outside the loop it names"))
     }
 
     /// `while`, `do…while`, and the shape a lowered `for` takes: a loop whose `update` runs after
