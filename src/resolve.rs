@@ -38291,6 +38291,7 @@ fun box(): String {
                             setter: None,
                             setter_visibility: Visibility::Private,
                             is_const: false,
+                            implicit_integer_coercion: false,
                             compile_time_constant: None,
                             visibility: Visibility::Public,
                             owner: foo,
@@ -49377,28 +49378,6 @@ impl<'a> Checker<'a> {
         index.property(property)?.storage_type.map(|ty| ty.get())
     }
 
-    /// Whether a selected current-module constant carries Kotlin's compiler-known unsigned
-    /// integer-coercion marker. Both pieces are stable declaration-header facts. `None` means this
-    /// checker has no finalized index and is reserved for legacy same-parse entry points.
-    fn stable_const_has_implicit_integer_coercion(
-        &self,
-        declaration: Option<crate::fir::DeclarationId>,
-    ) -> Option<bool> {
-        let index = self.resolved_index?;
-        let declaration = declaration?;
-        Some(
-            index
-                .declaration_header(declaration)
-                .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::CONST))
-                && index
-                    .declaration_annotations(declaration)
-                    .iter()
-                    .any(|annotation| {
-                        annotation.matches("kotlin/internal/ImplicitIntegerCoercion")
-                    }),
-        )
-    }
-
     fn has_low_priority_annotation(
         &self,
         scope: &CheckerScope<'_>,
@@ -49447,14 +49426,7 @@ impl<'a> Checker<'a> {
         else {
             return false;
         };
-        self.stable_const_has_implicit_integer_coercion(access.property.stable_declaration)
-            .unwrap_or_else(|| {
-                access
-                    .property
-                    .source_key
-                    .and_then(|source| self.module.legacy_symbols()?.source_props.get(&source))
-                    .is_some_and(|property| property.is_const && property.implicit_integer_coercion)
-            })
+        access.property.is_const && access.property.implicit_integer_coercion
     }
 
     /// Declaration shape shared by semantic member-property reads and writes. The federated source
@@ -56435,36 +56407,8 @@ impl<'a> Checker<'a> {
         expression: ExprId,
         property: &crate::libraries::PropertyInfo,
     ) -> Option<Ty> {
-        let constant = property
-            .compile_time_constant
-            .clone()
-            .or_else(|| {
-                property.stable_declaration.and_then(|declaration| {
-                    self.resolved_index?
-                        .compile_time_constant(declaration)
-                        .cloned()
-                })
-            })
-            .or_else(|| {
-                self.resolved_index.is_none().then(|| {
-                    property.source_key.and_then(|source| {
-                        self.module
-                            .legacy_symbols()?
-                            .source_props
-                            .get(&source)
-                            .and_then(|property| property.compile_time_constant.clone())
-                    })
-                })?
-            })?;
-        let implicit_integer_coercion = self
-            .stable_const_has_implicit_integer_coercion(property.stable_declaration)
-            .unwrap_or_else(|| {
-                property
-                    .source_key
-                    .and_then(|source| self.module.legacy_symbols()?.source_props.get(&source))
-                    .is_some_and(|property| property.is_const && property.implicit_integer_coercion)
-            });
-        if implicit_integer_coercion {
+        let constant = property.compile_time_constant.clone()?;
+        if property.is_const && property.implicit_integer_coercion {
             self.constant_integer_coercion_reads.insert(expression);
         }
         let ty = constant.ty;
