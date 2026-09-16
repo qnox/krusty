@@ -100,6 +100,7 @@ impl ExistingLibrary {
                             setter_declaration: None,
                             source_member: None,
                             accessor_derived: false,
+                            read_stability: crate::libraries::PropertyReadStability::Unstable,
                         }],
                     }),
                 );
@@ -247,6 +248,7 @@ impl crate::symbol_source::SymbolSource for ExistingLibrary {
                         setter_declaration: None,
                         source_member: None,
                         accessor_derived: false,
+                        read_stability: crate::libraries::PropertyReadStability::Unstable,
                     }],
                 }),
                 importable_declaration: true,
@@ -359,6 +361,7 @@ impl SemanticPlatform for ExistingLibrary {
                 setter_declaration: None,
                 source_member: None,
                 accessor_derived: false,
+                read_stability: crate::libraries::PropertyReadStability::Unstable,
             }
         })
     }
