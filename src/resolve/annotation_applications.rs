@@ -34,38 +34,21 @@ impl Checker<'_> {
             );
             return;
         }
-        let legacy_prebound = self
-            .resolved_index
-            .is_none()
-            .then(|| {
-                super::annotation_legacy_bridge::resolved_annotation(
-                    &self.module,
-                    self.file_index,
-                    annotation,
-                )
-            })
-            .flatten();
-        let internal = if let Some(internal) = legacy_prebound {
-            internal
-        } else {
-            // Pass 1 binds declaration-header annotations only. A local declaration first appears
-            // while its active Pass-2 body is checked, where the real lexical type scope is finally
-            // available; resolve it here instead of requiring a whole-body annotation inventory
-            // traversal during signature collection.
-            let reference = TypeRef {
-                name: annotation.name.clone(),
-                flags: TrFlags::default(),
-                arg: None,
-                targs: Vec::new(),
-                span: annotation.span,
-                fun_params: Vec::new(),
-                fun_context_count: 0,
-            };
-            let ty = self.type_ref_ty_reported(scope, &reference);
-            let Some(internal) = ty.kotlin_class_internal() else {
-                return;
-            };
-            internal
+        // Resolve the application in its owning lexical scope. Pass 1's declaration-header
+        // inventory and Pass 2's body checking use the same scope rules; a prebound SymbolTable
+        // occurrence must not become a second origin-specific resolution path.
+        let reference = TypeRef {
+            name: annotation.name.clone(),
+            flags: TrFlags::default(),
+            arg: None,
+            targs: Vec::new(),
+            span: annotation.span,
+            fun_params: Vec::new(),
+            fun_context_count: 0,
+        };
+        let ty = self.type_ref_ty_reported(scope, &reference);
+        let Some(internal) = ty.kotlin_class_internal() else {
+            return;
         };
         if !self.file.is_common
             && self.is_optional_expectation_classifier(internal)
