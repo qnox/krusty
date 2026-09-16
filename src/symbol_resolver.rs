@@ -2183,10 +2183,10 @@ impl<'a> SymbolResolver<'a> {
                 return true;
             }
         }
-        let rendered = internal.render();
-        let Some(simple) = rendered.rsplit_once('$').map(|(_, simple)| simple) else {
+        if internal.nested_owner().is_none() {
             return false;
-        };
+        }
+        let simple = internal.nested_segment_ref();
         self.lexical_classes.iter().copied().any(|owner| {
             inherited_nested_classifier_name(
                 simple,
