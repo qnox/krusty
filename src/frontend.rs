@@ -11,11 +11,13 @@ use crate::libraries::{EmptySymbolSource, SemanticPlatform};
 
 mod header_validation;
 mod inline_preparation;
+mod legacy_checker_bridge;
 mod retained_syntax;
 pub use crate::resolve::ClassFlags as FrontendClassFlags;
 pub(crate) use crate::resolve::ClassSig as FrontendClassSig;
 pub(crate) use crate::resolve::DeclaredPropertySig as FrontendDeclaredPropertySig;
 pub use crate::resolve::ExtPropSig as FrontendExtPropSig;
+pub(crate) use crate::resolve::Signature;
 pub use crate::resolve::SymbolTable as FrontendSymbols;
 pub use crate::resolve::TypeInfo as FrontendTypeInfo;
 pub use crate::resolve::{
@@ -23,7 +25,6 @@ pub use crate::resolve::{
     collect_signatures_with_cp, AnonymousObjectCapture, AnonymousObjectCaptureSource,
     CompoundAssignmentTarget, SourceConstructorMatcher,
 };
-pub(crate) use crate::resolve::{check_preinferred_file_in_source_set, Signature};
 /// Types carried by the public source-set analysis signatures, re-exported here so process
 /// adapters do not have to reach through the frontend boundary into source classification.
 pub use crate::source::{SourceInput, SourceKind};
@@ -756,7 +757,7 @@ fn analyze_source_set_impl<F>(
     prepare_symbols: F,
     diags: &mut DiagSink,
     trim_support_bodies: bool,
-    retain_legacy_analysis: bool,
+    retain_inspection_analysis: bool,
 ) -> SourceSetAnalysis
 where
     F: FnOnce(&[File], &mut FrontendSymbols),
@@ -823,8 +824,8 @@ where
             // Compact signature extraction has consumed every ordinary expression dependency for
             // this source. Production keeps the parser body arenas only for bounded Pass-1 work
             // that has not moved to its own store yet: inline checking, const evaluation, and MPP
-            // actualization matching. Dependency-prefix and inspection entry points retain their
-            // legacy view until their separate migration boundary.
+            // actualization matching. Inspection entry points retain their parser-keyed view for
+            // editor queries while consuming declaration identities from the finalized index.
             let needs_bounded_pass_one_syntax = multiplatform
                 || has_signature_defaults(&file)
                 || stubs.iter().any(|stub| {
@@ -832,7 +833,7 @@ where
                         || stub.flags.has(crate::fir::DeclarationFlags::CONST)
                 });
             local_class_contexts.push(crate::resolve::pass_one_local_class_context(&file, &stubs));
-            if !retain_legacy_analysis && index < inferred_count && !multiplatform {
+            if !retain_inspection_analysis && index < inferred_count && !multiplatform {
                 if needs_bounded_pass_one_syntax {
                     retained_syntax::compact(&mut file);
                 } else {
@@ -884,7 +885,7 @@ where
         let signature_default_work_items = signature_default_work(&pass1_headers, &defaults);
         // Actualization publishes stable expect-default providers before syntax is compacted. Once
         // that source-set operation is complete, retain only Pass-1 signature/inline fragments.
-        if !retain_legacy_analysis {
+        if !retain_inspection_analysis {
             for (file, _source) in files
                 .iter_mut()
                 .zip(&mut reparse_sources)
@@ -950,8 +951,11 @@ where
         .iter()
         .take(inferred_end)
         .any(|roots| !roots.is_empty());
-    if retain_legacy_analysis {
-        crate::resolve::discover_anonymous_object_captures(&files[..inferred_end], &mut symbols);
+    let retained_anonymous_captures = if retain_inspection_analysis {
+        Some(crate::resolve::discover_anonymous_object_captures(
+            &files[..inferred_end],
+            &mut symbols,
+        ))
     } else if has_inline_capture_roots {
         crate::resolve::discover_inline_anonymous_object_captures(
             &files[..inferred_end],
@@ -959,15 +963,18 @@ where
             &inline_capture_selection.bodies[..inferred_end],
             &mut symbols,
         );
-    }
-    if retain_legacy_analysis || has_inline_capture_roots {
+        None
+    } else {
+        None
+    };
+    if retain_inspection_analysis || has_inline_capture_roots {
         crate::resolve::install_streamed_anonymous_capture_declarations(
             &files[..inferred_end],
             &mut pass1_headers,
             &mut symbols,
         );
     }
-    if !retain_legacy_analysis {
+    if !retain_inspection_analysis {
         // Signature collection, target preparation, and inline-capture projection are the last
         // consumers of declaration-only legacy `File` views. From here on, retain a parser fragment
         // only when it still owns executable syntax that Pass 1 must turn into checked FIR
@@ -1066,9 +1073,27 @@ where
             file.release_body_arenas();
         }
     }
-    let (types, streamed) = if retain_legacy_analysis {
-        let types =
-            check_source_set_skipping(&files, &mut symbols, &parse_errors, checked_count, diags);
+    let (types, streamed) = if retain_inspection_analysis {
+        let types = match pending_streamed.as_ref() {
+            Some((module, _, _)) => check_source_set_skipping_with_index(
+                &files,
+                &mut symbols,
+                module.index(),
+                retained_anonymous_captures
+                    .as_deref()
+                    .expect("retained analysis must preserve capture discovery"),
+                &parse_errors,
+                checked_count,
+                diags,
+            ),
+            None => legacy_checker_bridge::check_source_set_skipping(
+                &files,
+                &mut symbols,
+                &parse_errors,
+                checked_count,
+                diags,
+            ),
+        };
         let streamed = pending_streamed.and_then(|(module, bodies, default_arguments)| {
             inline_preparation::from_checked_analysis(
                 module,
@@ -1101,7 +1126,7 @@ where
     let streamed = streamed.or(recovery_streamed);
     diags.collapse_duplicates_from(diagnostics_start);
     let analysis = SourceSetAnalysis {
-        files: if retain_legacy_analysis {
+        files: if retain_inspection_analysis {
             files
         } else {
             Vec::new()
@@ -1124,31 +1149,42 @@ where
     analysis
 }
 
-fn check_source_set_skipping(
+fn check_source_set_skipping_with_index(
     files: &[File],
     symbols: &mut FrontendSymbols,
+    index: &crate::fir::ResolvedModuleIndex,
+    anonymous_captures: &[std::collections::HashMap<
+        crate::ast::DeclId,
+        Vec<crate::resolve::AnonymousObjectCapture>,
+    >],
     skip: &[bool],
     checked_count: usize,
     diags: &mut DiagSink,
 ) -> Vec<Option<FrontendTypeInfo>> {
-    let types = files
+    let source_declarations = std::sync::Arc::new(
+        crate::resolve::inspection_source_declaration_keys(files, index),
+    );
+    files
         .iter()
         .enumerate()
-        .map(|(index, _)| {
-            if index >= checked_count || skip.get(index).copied().unwrap_or(false) {
-                None
-            } else {
-                diags.set_file(index as u32);
-                Some(check_preinferred_file_in_source_set(
-                    files,
-                    index as u32,
-                    symbols,
-                    diags,
-                ))
+        .map(|(source, _)| {
+            if source >= checked_count || skip.get(source).copied().unwrap_or(false) {
+                return None;
             }
+            diags.set_file(source as u32);
+            Some(
+                crate::resolve::check_preinferred_file_in_source_set_with_index(
+                    files,
+                    source as u32,
+                    symbols,
+                    index,
+                    source_declarations.clone(),
+                    anonymous_captures.get(source),
+                    diags,
+                ),
+            )
         })
-        .collect();
-    types
+        .collect()
 }
 
 /// Check a parsed source set whose signatures have already been collected.
@@ -1160,8 +1196,9 @@ pub fn check_source_set(
     let diagnostics_start = diags.diags.len();
     // Capture discovery, for the same reason as the other entry point: an anonymous object's capture
     // fields and constructor parameters are facts the backend needs before it can lower one at all.
-    crate::resolve::discover_anonymous_object_captures(files, symbols);
-    let types = check_source_set_skipping(files, symbols, &[], files.len(), diags);
+    let _ = crate::resolve::discover_anonymous_object_captures(files, symbols);
+    let types =
+        legacy_checker_bridge::check_source_set_skipping(files, symbols, &[], files.len(), diags);
     diags.collapse_duplicates_from(diagnostics_start);
     types
 }
