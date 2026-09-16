@@ -24,6 +24,7 @@ mod qualified_calls;
 mod semantics;
 mod source_contracts;
 mod stable_function_index;
+mod type_parameter_publication;
 
 pub(super) use declaration_aliases::publish_compact_nested_aliases;
 pub(crate) use declaration_conflicts::finalize_streamed_top_level_conflicts;
@@ -5717,6 +5718,18 @@ pub(crate) fn finalized_streamed_signature_index(
             );
             stop_with_failure!(stub.id);
         };
+        // Callable collection has already resolved the declaration in its complete lexical scope,
+        // including enclosing classifier formals. Reuse that semantic generic contract when it is
+        // available: rebuilding `fun <T : S>` from an isolated own-parameter scope erases `S`,
+        // while resolving `fun <T : Bound<T>>` through an already bounded `T` recursively expands
+        // the bound an extra level.
+        let stable_generic = matches!(
+            declaration.kind,
+            crate::fir::HeaderDeclarationKind::Callable { .. }
+        )
+        .then(|| stable_function(table, headers, &classifier_types, stub.id))
+        .flatten()
+        .and_then(|(signature, _)| signature.generic_sig.as_ref());
         let symbolic =
             super::TParams::symbolic_from_decl_with(&declared_names, &declared_bounds, &|name| {
                 table.class_names.get(name)
@@ -5729,11 +5742,15 @@ pub(crate) fn finalized_streamed_signature_index(
             );
         for (ordinal, (source_name, parameter)) in declared_names.iter().zip(packed).enumerate() {
             let semantic = symbolic.bound(source_name);
-            let semantic_name = semantic.ty_param_name().unwrap_or(source_name);
+            let semantic_name = type_parameter_publication::semantic_name(
+                stable_generic,
+                ordinal,
+                semantic.ty_param_name().unwrap_or(source_name),
+            );
             let has_explicit_bound = declared_bounds
                 .iter()
                 .any(|(owner, _)| owner == source_name);
-            let resolved_bounds = has_explicit_bound
+            let local_bounds = has_explicit_bound
                 .then(|| {
                     let mut bounds = vec![semantic
                         .ty_param_bound()
@@ -5741,40 +5758,16 @@ pub(crate) fn finalized_streamed_signature_index(
                     bounds.extend(symbolic.extra_bounds_of(source_name));
                     bounds
                 })
-                .unwrap_or_default()
-                .into_iter()
-                .map(|bound| {
-                    let is_interface = bound.non_null().obj_internal().is_some_and(|owner| {
-                        table
-                            .classes
-                            .get(&owner)
-                            .is_some_and(|classifier| classifier.is_interface())
-                            || table
-                                .libraries
-                                .classifier(owner)
-                                .is_some_and(|classifier| classifier.is_interface())
-                    });
-                    (bound, is_interface)
-                })
-                .collect::<Vec<_>>();
-            let variance = if parameter.flags.is_in() {
-                crate::types::TypeVariance::In
-            } else if parameter.flags.is_out() {
-                crate::types::TypeVariance::Out
-            } else {
-                crate::types::TypeVariance::Invariant
-            };
+                .unwrap_or_default();
+            let resolved_bounds =
+                type_parameter_publication::bounds(stable_generic, ordinal, local_bounds, table);
             if index
                 .publish_type_parameter(
                     stub.id,
                     u32::try_from(ordinal).expect("too many declaration type parameters"),
                     source_name,
                     semantic_name,
-                    crate::fir::ResolvedTypeParameterFlags::new(
-                        variance,
-                        parameter.flags.is_non_null(),
-                        parameter.flags.is_reified(),
-                    ),
+                    type_parameter_publication::flags(parameter.flags),
                     resolved_bounds,
                 )
                 .is_err()
