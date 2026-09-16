@@ -1133,6 +1133,8 @@ mod one_armed_when_fallthrough_e2e;
 mod extension_receiver_specificity_e2e;
 #[path = "int_when_switch_e2e.rs"]
 mod int_when_switch_e2e;
+#[path = "loop_backedge_narrowing_e2e.rs"]
+mod loop_backedge_narrowing_e2e;
 #[path = "operator_expected_result_seeding_e2e.rs"]
 mod operator_expected_result_seeding_e2e;
 #[path = "operator_inc_dec_e2e.rs"]

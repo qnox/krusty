@@ -6115,6 +6115,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   at class load rather than a wrong answer.
   Tests: `tests/context_parameter_signature_order_e2e.rs`.
 
+- **A flow narrowing does not survive a loop that writes its subject.** A straight-line proof is a
+  proof about ONE edge, and a loop has a back edge: a body that reassigns `x` reaches its own start
+  with whatever that assignment left. So the writes a loop performs anywhere inside it — including
+  in nested lambdas and local functions, which run on that same edge — clear the narrowing before
+  the loop is checked at all. Four of kotlinc's answers follow from doing it there rather than on
+  the body scope: the CONDITION sees it (`while (x.length > 0) { x = 42 }` is rejected), the body
+  sees it, the code after the loop sees it, and a `do…while` sees it even though its first
+  iteration precedes any back edge. What must NOT be cleared is the narrowing the loop's own
+  condition proves — that one is re-evaluated on every iteration, so `while (x != null) { x.length;
+  x = null }` stays legal — and it survives because condition narrowings are computed after this
+  clearing and applied to the body scope. Narrowing within one iteration is unaffected: the
+  loop's own assignment proves the new type from that point on.
+  krusty used to keep the stale proof and emit a cast from it, which failed at run time on both
+  backends (`codegen/box/casts/kt83324.kt`, `codegen/box/objectExpression/expr3.kt`).
+  Tests: `tests/loop_backedge_narrowing_e2e.rs` (all eight, each answer taken from kotlinc 2.4.10
+  first).
+
 ### Native target (`src/native/`)
 
 The native backend has no `kotlinc` to be differential against — Kotlin/Native's output is LLVM
