@@ -887,10 +887,59 @@ fn conformance_report(scanned: usize, passed: usize) -> String {
     format!("{pct:.1} {passed} {scanned}\n")
 }
 
+fn conformance_shard() -> Option<(usize, usize)> {
+    match (
+        env("KRUSTY_CONFORMANCE_SHARD_INDEX"),
+        env("KRUSTY_CONFORMANCE_SHARD_COUNT"),
+    ) {
+        (None, None) => None,
+        (Some(index), Some(count)) => {
+            let index = index
+                .parse::<usize>()
+                .expect("KRUSTY_CONFORMANCE_SHARD_INDEX must be an integer");
+            let count = count
+                .parse::<usize>()
+                .expect("KRUSTY_CONFORMANCE_SHARD_COUNT must be an integer");
+            assert!(count > 0, "KRUSTY_CONFORMANCE_SHARD_COUNT must be positive");
+            assert!(
+                index < count,
+                "KRUSTY_CONFORMANCE_SHARD_INDEX {index} is outside 0..{count}"
+            );
+            Some((index, count))
+        }
+        _ => panic!(
+            "KRUSTY_CONFORMANCE_SHARD_INDEX and KRUSTY_CONFORMANCE_SHARD_COUNT must be set together"
+        ),
+    }
+}
+
+fn retain_conformance_shard<T>(items: Vec<T>, index: usize, count: usize) -> Vec<T> {
+    items
+        .into_iter()
+        .enumerate()
+        .filter_map(|(position, item)| (position % count == index).then_some(item))
+        .collect()
+}
+
 #[test]
 fn conformance_report_has_stable_machine_format() {
     assert_eq!(conformance_report(7352, 3064), "41.7 3064 7352\n");
     assert_eq!(conformance_report(0, 0), "0.0 0 0\n");
+}
+
+#[test]
+fn conformance_shards_are_stable_disjoint_and_complete() {
+    let input = (0..17).collect::<Vec<_>>();
+    let shards = (0..4)
+        .map(|index| retain_conformance_shard(input.clone(), index, 4))
+        .collect::<Vec<_>>();
+    assert_eq!(shards[0], [0, 4, 8, 12, 16]);
+    assert_eq!(shards[1], [1, 5, 9, 13]);
+    assert_eq!(shards[2], [2, 6, 10, 14]);
+    assert_eq!(shards[3], [3, 7, 11, 15]);
+    let mut union = shards.into_iter().flatten().collect::<Vec<_>>();
+    union.sort_unstable();
+    assert_eq!(union, input);
 }
 
 /// Base frame of a folded stack: the sampled thread's name, or its id when it has none.
@@ -1129,6 +1178,10 @@ fn kotlin_codegen_box_conformance() {
     // (a stride) rather than truncating to the first N — the first N are all `annotations/…`, which
     // would hide coverage in every other package. A full (unset) run keeps the whole corpus.
     files = krusty::conformance::evenly_sample(files, limit);
+    if let Some((index, count)) = conformance_shard() {
+        files = retain_conformance_shard(files, index, count);
+        eprintln!("box setup: conformance shard {}/{count}", index + 1);
+    }
     eprintln!("box setup: scheduled {} cases", files.len());
 
     let work = std::env::temp_dir().join(format!("krusty_box_{}", std::process::id()));
