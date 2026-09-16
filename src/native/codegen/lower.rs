@@ -2029,11 +2029,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 };
                 let owner = realization.callable.owner.render();
                 // The Kotlin name the declaration PUBLISHES, not the spelling it is realized under.
-                // A physical name is an emit handle: a JVM realization may rename it
-                // (`MutableList.removeAt` is realized as `java/util/List.remove`) and, where the
-                // signature mentions a value class, kotlinc appends a hash of the erasure
-                // (`UInt.compareTo` is `compareTo-WZ4Q5Ns`). Neither is recoverable from the
-                // spelling, and neither has to be: the contract carries the Kotlin name beside it.
+                // A physical name is an emit handle: a JVM realization may RENAME a member, and
+                // where the signature mentions a value class kotlinc appends a hash of the erasure
+                // (`UInt.compareTo` is realized as `compareTo-WZ4Q5Ns`). Neither is recoverable
+                // from the spelling, and neither has to be: the contract carries the Kotlin name
+                // beside it. Where it does not, the member declines rather than being guessed at.
                 let name = realization
                     .callable
                     .reflection_name

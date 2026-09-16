@@ -7,7 +7,7 @@
 //! each would pass by accident if the value were simply carried as the signed number — and each was
 //! why the whole family was declined until it could be answered.
 
-use super::common::expect_native_box;
+use super::common::{expect_native_box, expect_native_decline};
 
 #[test]
 fn an_unsigned_value_renders_as_the_value_and_not_as_its_bits() {
@@ -255,36 +255,32 @@ fn an_unsigned_array_is_not_the_signed_array_it_is_laid_out_as() {
     );
 }
 
-/// Walking an unsigned array through the ITERATOR protocol, which is where its descriptor stops
-/// being the receiver of an indexed load and becomes the only record of how wide an element is.
+/// Walking an unsigned array through the ITERATOR protocol, paired with a count.
 ///
-/// `withIndex()` is lazy and general: it wraps the array in an iterable and asks that for elements
-/// one at a time, so each element is read by the runtime from the array's descriptor alone rather
-/// than by generated code that still knows the static type. A descriptor the reader does not
-/// recognise falls through to whatever the last arm of the chain happens to be — which reads a
-/// four-byte element eight bytes wide, and answers the next element, or garbage past the end, for
-/// values the indexed path gets right. Every element here is distinct and in range, so a wrong
-/// stride shows up as a shifted or invented value rather than as a crash.
+/// `withIndex()` on an unsigned array DECLINES, and this pins that rather than the walk, because
+/// the reason is not this backend's to fix. The extension is realized as
+/// `UArraysKt.withIndex-GBYM_sE` — value-class-mangled, because the JVM needs two signatures that
+/// erase alike to stay distinct — and the declaration contract publishes no Kotlin name beside it
+/// for an extension, as it does for a classifier member. So the member arrives spelled in a way no
+/// table is written in.
+///
+/// Reading the Kotlin name back out of that spelling is what this backend used to do, and it was
+/// unsound: nothing in a name says the `-` is kotlinc's rather than part of a Java method's, so a
+/// spelling pattern cannot establish declaration origin. Declining is the honest answer until the
+/// contract publishes the name.
+///
+/// When it does, this test fails — which is the point. Restore it to the walk it was: every width
+/// indexed and paired, `"0:1;1:2;2:255;"` and its three siblings.
 #[test]
-fn an_unsigned_array_walks_at_its_own_width() {
-    expect_native_box(
+fn a_counted_walk_of_an_unsigned_array_declines_until_the_contract_names_it() {
+    expect_native_decline(
         "fun box(): String {\n\
          \x20   var s = \"\"\n\
          \x20   for ((i, u) in ubyteArrayOf(1u, 2u, 255u).withIndex()) s += \"$i:$u;\"\n\
-         \x20   if (s != \"0:1;1:2;2:255;\") return \"fail ubyte: $s\"\n\
-         \x20   s = \"\"\n\
-         \x20   for ((i, u) in ushortArrayOf(1u, 2u, 65535u).withIndex()) s += \"$i:$u;\"\n\
-         \x20   if (s != \"0:1;1:2;2:65535;\") return \"fail ushort: $s\"\n\
-         \x20   s = \"\"\n\
-         \x20   for ((i, u) in uintArrayOf(1u, 2u, 4294967295u).withIndex()) s += \"$i:$u;\"\n\
-         \x20   if (s != \"0:1;1:2;2:4294967295;\") return \"fail uint: $s\"\n\
-         \x20   s = \"\"\n\
-         \x20   for ((i, u) in ulongArrayOf(1u, 2u, 18446744073709551615uL).withIndex()) s += \"$i:$u;\"\n\
-         \x20   if (s != \"0:1;1:2;2:18446744073709551615;\") return \"fail ulong: $s\"\n\
-         \x20   return \"OK\"\n\
+         \x20   return if (s == \"0:1;1:2;2:255;\") \"OK\" else \"fail: $s\"\n\
          }\n",
-        "UnsignedArrayWalk",
-        "OK",
+        "UnsignedArrayWalkDeclines",
+        "withIndex",
     );
 }
 
