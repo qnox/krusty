@@ -84,3 +84,31 @@ fn lambda_to_void_sam() {
          }\n",
     );
 }
+
+#[test]
+fn data_class_array_fields_render_their_contents() {
+    // A data class renders an array field by CONTENT, not by identity, and does so whether or not
+    // the field is nullable — `A(x=[0, 1], y=null)`. Two things had to hold for that: the checked
+    // lowering has to see through the `?` when it decides a field is an array, and the call it
+    // synthesizes has to name `java.util.Arrays.toString(Object[])` for a reference array, since
+    // there is no `Integer[]` overload to name.
+    const SOURCE: &str =
+        "data class A(val x: Array<Int>?, val y: IntArray?, val z: Array<String>)\n\
+         fun box(): String {\n\
+         val full = A(Array<Int>(2, { it }), IntArray(3), arrayOf(\"a\", \"b\"))\n\
+         if (full.toString() != \"A(x=[0, 1], y=[0, 0, 0], z=[a, b])\") return full.toString()\n\
+         val empty = A(null, null, arrayOf())\n\
+         if (empty.toString() != \"A(x=null, y=null, z=[])\") return empty.toString()\n\
+         return \"OK\"\n\
+         }\n";
+    let reference = common::kotlinc_box_result(SOURCE);
+    assert_eq!(
+        reference, "OK",
+        "kotlinc fixture must exercise the expected path"
+    );
+    assert_eq!(
+        common::expect_box_run_with_stdlib(SOURCE, "DataArrayToString"),
+        reference,
+        "krusty and kotlinc must render the same nullable and reference arrays",
+    );
+}

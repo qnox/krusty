@@ -1000,12 +1000,16 @@ pub trait SignatureSemantics {
     }
 
     /// Type a checked class literal. `unbound` distinguishes a classifier literal
-    /// (`String::class`) from a value literal (`value::class`). The platform supplies the semantic
-    /// `KClass` classifier; compact signature inference never names it.
+    /// (`String::class`) from a value literal (`value::class`). An unbound literal also carries its
+    /// already-selected classifier spelling and scope so provider normalization can preserve a
+    /// typealias application instead of inferring that fact from the target classifier's name.
+    /// The platform supplies the semantic `KClass` classifier; compact signature inference never
+    /// names it.
     fn class_literal_type(
         &self,
         receiver: ResolvedTy,
         unbound: bool,
+        classifier: Option<(SignatureScope, &str)>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
     fn select_member(
