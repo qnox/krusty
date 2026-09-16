@@ -2363,6 +2363,29 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   genuinely version-dependent serializers are probed; the primitives ship in every supported version.
   `tests/instant_builtin_serializer_e2e.rs::an_instant_property_serializes_through_the_builtin`,
   `an_instant_collection_element_serializes_through_the_builtin`, `the_uuid_builtin_still_works`.
+- **A call whose operands disagree with its descriptor is REFUSED, never emitted (fix).** Three
+  operand emitters ASSERTED that a selected call's argument count matches its JVM descriptor, so a
+  mismatch took down the whole compilation instead of one file, with no diagnostic. Making them
+  return early was not enough and was briefly wrong: the operand helper stopped pushing, but every
+  caller went on to emit its `invoke*` with the argument-word count computed from the descriptor, so
+  the method claimed operands that were never pushed.
+  The contract is now a typed refusal. `src/jvm/ir_emit/call_operands.rs` owns it: every entry point
+  checks arity BEFORE pushing anything and returns `DescriptorArityMismatch`, leaving the operand
+  stack untouched. The compiler then forces each of the ten call sites to answer, and the answer
+  depends on the site. A speculative inline splice DECLINES, so the ordinary call path still gets to
+  emit the call correctly. A committed path abandons the whole call — never emitting the `invoke*` —
+  bails the file, and pushes a typed zero so the now-unreachable code still assembles.
+  Emission cannot repair the underlying defect and must not guess: a checked call whose argument
+  vector disagrees with its realized descriptor is a provider-normalization or call-realization
+  defect upstream, and choosing either side would write a method whose operand stack contradicts its
+  own invocation. The bail reason stays a fixed public category because it reaches CLI diagnostics
+  and survey buckets; the owner and counts go to the opt-in `emit` trace.
+  `src/jvm/ir_emit.rs::fail_soft_tests::a_cross_file_call_short_of_its_parameters_is_refused_not_emitted`,
+  `a_classpath_static_call_short_of_its_descriptor_is_refused_not_emitted`,
+  `a_virtual_call_short_of_its_descriptor_is_refused_not_emitted`,
+  `arity_failure_exposes_category_without_owner_or_callable_name`,
+  `tests/descriptor_arity_fails_closed_e2e.rs::ordinary_calls_at_every_arity_still_emit`,
+  `a_suspend_call_with_its_appended_continuation_still_emits`.
 - **A branching inline body may be a vararg element (fix).** Vararg packing evaluates each element
   with `[array, index]` already on the operand stack. A spliced BRANCHY inline body needs an empty
   stack — its relocated frames carry no stack prefix — so the splicer declined, and because a
