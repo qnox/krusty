@@ -1821,8 +1821,22 @@ pub(crate) struct ExternalCallableRealization {
 /// `ExternalPropertyId`; the read/write node determines which optional accessor is requested here.
 /// Each accessor may itself realize as a JVM field or method, but that distinction never crosses
 /// into the semantic provider interface.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ExternalPropertyRealization {
+    /// The property's own Kotlin name, as its declaration's metadata published it.
+    ///
+    /// It is here because an accessor cannot answer for it, and a backend must not try to make one.
+    /// An accessor's name is a physical call target: a JVM realization may RENAME it
+    /// (`MutableList.removeAt` is realized as `java/util/List.remove`) and, where the signature
+    /// mentions a value class, kotlinc MANGLES it with a hash of the erasure (`UIntRange.start` is
+    /// `getStart-pVg5ArA`). Neither is recoverable from the spelling, and recovering is not merely
+    /// lossy but unsound: nothing in a name says the declaration came from Kotlin metadata, so a
+    /// `-` in it may belong to a Java accessor rather than to kotlinc.
+    ///
+    /// Nor is recovery needed. Metadata carries the source name and the provider decoded it before
+    /// interning. A consumer that wants the property reads this; one that wants to CALL an accessor
+    /// reads that accessor. Neither learns the other target's emit conventions.
+    pub name: String,
     pub getter: crate::fir::ExternalCallableId,
     pub setter: Option<crate::fir::ExternalCallableId>,
 }
@@ -2255,6 +2269,7 @@ impl Classpath {
     /// pair remains JVM-owned; callers outside this module receive only the opaque property id.
     pub(crate) fn intern_external_property(
         &self,
+        name: &str,
         getter: crate::fir::ExternalCallableId,
         setter: Option<crate::fir::ExternalCallableId>,
     ) -> crate::fir::ExternalPropertyId {
@@ -2267,7 +2282,11 @@ impl Classpath {
             u32::try_from(properties.len())
                 .expect("too many external property declarations for packed FIR identity"),
         );
-        properties.push(ExternalPropertyRealization { getter, setter });
+        properties.push(ExternalPropertyRealization {
+            name: name.to_string(),
+            getter,
+            setter,
+        });
         self.external_property_ids
             .borrow_mut()
             .insert(key, identity);
@@ -2281,7 +2300,7 @@ impl Classpath {
         self.external_properties
             .borrow()
             .get(identity.raw() as usize)
-            .copied()
+            .cloned()
     }
 
     /// Publish declaration facets discovered after an exact external identity was first interned.

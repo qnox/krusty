@@ -957,7 +957,6 @@ fn external_property_function_reference_is_materialized_without_lookup() {
     let origin = OriginId::from_raw(0);
     let property = crate::fir::ExternalPropertyId::from_raw(17);
     let target = FirPropertyReferenceTarget::External {
-        name: "length".into(),
         reflection_owner: Some(resolved(Ty::String)),
         getter: Box::new(FirPropertyTarget::External {
             property,

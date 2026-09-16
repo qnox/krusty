@@ -650,6 +650,87 @@ fn mapped_interface_override_publishes_external_declaration_identity() {
     assert!(realization.callable.owner.matches("java/util/List"));
 }
 
+/// A dependency property publishes its own Kotlin name, so nothing reads one off an accessor.
+///
+/// An accessor's name is a physical call target and cannot stand in for the property's. A JVM
+/// realization may RENAME it — the test above pins `MutableList.removeAt` arriving as
+/// `java/util/List.remove` — and where the signature mentions a value class, kotlinc MANGLES it
+/// with a hash of the erasure, so `UIntRange.start` is realized as `getStart-pVg5ArA`.
+///
+/// Recovering the Kotlin name from either is unsound, not merely lossy: nothing in a spelling says
+/// the declaration came from Kotlin metadata, so a `-` may belong to a Java accessor rather than to
+/// kotlinc. And it is unnecessary — metadata carries the source name and the provider decoded it.
+#[test]
+fn a_dependency_property_publishes_its_kotlin_name() {
+    let (Some(stdlib), Some(jdk)) = (
+        crate::toolchain::stdlib_jar(),
+        crate::toolchain::jdk_modules(),
+    ) else {
+        return;
+    };
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(vec![stdlib, jdk]));
+    let mut diagnostics = DiagSink::new();
+    let _ = crate::frontend::analyze_source_set_with_features(
+        &[SourceInput::kotlin(
+            "fun f(r: UIntRange): UInt = r.start\n\
+             fun e(r: UIntRange): UInt = r.endInclusive\n\
+             fun h(s: String): IntRange = s.indices\n",
+        )
+        .with_file_stem("DependencyPropertyName")],
+        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
+            classpath.clone(),
+        )),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+
+    // The contract stated as exact pairs: what each property is CALLED, and the accessor spelling
+    // it is realized through. Stated rather than tested by predicate — a rule like "the name holds
+    // no dash" passes on the wrong base name, and a derivation like `property_getter_name(name)`
+    // would only re-assert the guess this removes. `indices` earns its place by having no dash at
+    // all, so a fix reaching only the mangled case would not cover it.
+    let mut published: Vec<(String, String)> = Vec::new();
+    for raw in 0.. {
+        let Some(property) =
+            classpath.external_property(crate::fir::ExternalPropertyId::from_raw(raw))
+        else {
+            break;
+        };
+        let Some(getter) = classpath.external_callable(property.getter) else {
+            continue;
+        };
+        if matches!(property.name.as_str(), "start" | "endInclusive" | "indices") {
+            published.push((property.name.clone(), getter.callable.name.clone()));
+        }
+    }
+    published.sort();
+    published.dedup();
+    let published: Vec<(&str, &str)> = published
+        .iter()
+        .map(|(property, accessor)| (property.as_str(), accessor.as_str()))
+        .collect();
+    assert_eq!(
+        published,
+        vec![
+            // The same Kotlin name against several distinct physical accessors — which is the whole
+            // point. `indices` is realized five ways: once unmangled for `CharSequence`, and once
+            // per unsigned array width, each with its own hash of the erasure. No rule over
+            // spellings maps these back, and none has to: each property publishes its own name.
+            ("endInclusive", "getEndInclusive"),
+            ("endInclusive", "getEndInclusive-pVg5ArA"),
+            ("indices", "getIndices"),
+            ("indices", "getIndices--ajY-9A"),
+            ("indices", "getIndices-GBYM_sE"),
+            ("indices", "getIndices-QwZRm1k"),
+            ("indices", "getIndices-rL5Bavg"),
+            ("start", "getStart"),
+            ("start", "getStart-pVg5ArA"),
+        ],
+        "the property/accessor contract changed"
+    );
+}
+
 #[test]
 fn value_class_override_publishes_the_generic_interface_edge() {
     let (Some(stdlib), Some(jdk)) = (

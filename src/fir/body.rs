@@ -586,8 +586,14 @@ pub enum FirPropertyReferenceTarget {
         property: FirClassifierProperty,
         property_type: ResolvedTy,
     },
+    /// A dependency property after callable-reference selection.
+    ///
+    /// It carries no name of its own. The property's is the provider's, decoded from the
+    /// declaration's metadata and reachable through `getter`'s [`ExternalPropertyId`]. A copy here
+    /// was the REFERENCE SITE's spelling, which is a different fact — a lookup may reach a
+    /// declaration under an import alias — and the accessor cannot stand in for it either, its name
+    /// being a physical call target a JVM realization may rename or value-class-mangle.
     External {
-        name: Box<str>,
         reflection_owner: Option<ResolvedTy>,
         getter: Box<FirPropertyTarget>,
         setter: Option<Box<FirPropertyTarget>>,
@@ -619,14 +625,8 @@ impl FirPropertyReferenceTarget {
     fn storage_payload_bytes(&self) -> usize {
         match self {
             Self::Module(_) | Self::SpecializedModule { .. } | Self::Classifier { .. } => 0,
-            Self::External {
-                name,
-                getter,
-                setter,
-                ..
-            } => {
-                name.len()
-                    + getter.storage_payload_bytes()
+            Self::External { getter, setter, .. } => {
+                getter.storage_payload_bytes()
                     + setter
                         .as_deref()
                         .map_or(0, FirPropertyTarget::storage_payload_bytes)

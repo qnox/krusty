@@ -81,7 +81,6 @@ pub(super) fn realize(
                 property_type,
             } => classifier_property(owner, property, property_type.get()),
             FirPropertyReferenceTarget::External {
-                name,
                 reflection_owner,
                 getter,
                 setter,
@@ -89,7 +88,6 @@ pub(super) fn realize(
                 property_type,
             } => external_property(
                 classpath,
-                &name,
                 reflection_owner.map(crate::fir::ResolvedTy::get),
                 getter.as_ref(),
                 setter.as_deref(),
@@ -258,13 +256,16 @@ fn classifier_property(
 
 fn external_property(
     classpath: &Classpath,
-    name: &str,
     reflection_owner: Option<Ty>,
     getter: &FirPropertyTarget,
     setter: Option<&FirPropertyTarget>,
     extension_receiver: bool,
     property_type: Ty,
 ) -> Result<PropRef, PropertyReferenceRealizationTarget> {
+    // The name a `KProperty` answers with is the PROPERTY's, and only the provider has it: it
+    // decoded it from the declaration's metadata, where an accessor's own name is a physical call
+    // target that may be renamed or value-class-mangled.
+    let name = declared_property_name(classpath, getter)?;
     let getter = external_accessor(classpath, getter, false)?;
     let setter = setter
         .map(|setter| external_accessor(classpath, setter, true))
@@ -339,6 +340,20 @@ fn external_property(
         mutable: setter.is_some(),
         ext_facade,
     })
+}
+
+/// The Kotlin name of the property an accessor target belongs to, as its declaration published it.
+fn declared_property_name(
+    classpath: &Classpath,
+    target: &FirPropertyTarget,
+) -> Result<String, PropertyReferenceRealizationTarget> {
+    let FirPropertyTarget::External { property, .. } = target else {
+        return Err(PropertyReferenceRealizationTarget::Invalid);
+    };
+    classpath
+        .external_property(*property)
+        .map(|realization| realization.name)
+        .ok_or(PropertyReferenceRealizationTarget::Invalid)
 }
 
 fn external_accessor(
