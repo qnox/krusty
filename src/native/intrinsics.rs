@@ -763,27 +763,6 @@ pub(super) fn class_name_accessor(
     }
 }
 
-/// The Kotlin name of an external callable, with kotlinc's value-class mangling removed.
-///
-/// Mangling is a JVM EMIT detail and has no meaning on this target. A member whose signature
-/// mentions a value class is emitted as `name-<suffix>`: `-impl` for the static carrying the
-/// wrapped value, and a hash of the signature where an overload would otherwise clash
-/// (`compareTo-WZ4Q5Ns`, `getFirst-pVg5ArA`). The suffix encodes the JVM erasure, which says
-/// nothing a backend wants; the member behind it is the same `compareTo`, the same `first`.
-///
-/// Part of the same temporary bridge as [`kotlin_owner`] and [`facade_package`]: it exists because
-/// krusty's only symbol provider reads a JVM jar, and it goes when the provider becomes
-/// klib-based.
-///
-/// EVERY read of an external callable's name goes through here, and an architecture test holds
-/// that. A Kotlin identifier cannot contain `-`, so this is a no-op on a name that was never
-/// mangled, and there is no site where the mangled spelling is the one wanted — a site that
-/// forgot simply failed to match, which is how `UIntRange.first` arrived as `getFirst-pVg5ArA`
-/// and fell through to a decline.
-pub(super) fn value_class_member(name: &str) -> &str {
-    name.split_once('-').map_or(name, |(kotlin, _)| kotlin)
-}
-
 pub(super) fn runtime_member(owner: &str, name: &str, params: &[Ty]) -> Option<&'static str> {
     // `removeSuffix` is a top-level extension of `kotlin.text`, so it arrives as a member of that
     // package's file facade; everything it takes and answers is a reference, which is this path.
@@ -887,12 +866,6 @@ mod tests {
         assert_eq!(unsigned_owner("kotlin/UInt"), Some(Ty::UInt));
         assert_eq!(unsigned_owner("kotlin/ULong"), Some(Ty::ULong));
         assert_eq!(unsigned_owner("kotlin/Int"), None);
-        // kotlinc mangles a value class's members; the Kotlin name is what a table is written in.
-        // Both spellings occur: `-impl` for the static, and a signature hash where an overload
-        // would otherwise clash.
-        assert_eq!(value_class_member("toString-impl"), "toString");
-        assert_eq!(value_class_member("compareTo-WZ4Q5Ns"), "compareTo");
-        assert_eq!(value_class_member("plus"), "plus");
     }
 
     #[test]

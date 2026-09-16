@@ -26,7 +26,7 @@ impl BodyLowering<'_, '_, '_> {
         };
         super::super::super::intrinsics::is_char_sequence_length(
             getter.callable.owner,
-            super::super::super::intrinsics::value_class_member(&getter.callable.name),
+            &getter.callable.name,
         )
     }
 

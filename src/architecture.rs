@@ -428,36 +428,6 @@ mod tests {
     }
 
     #[test]
-    fn value_class_mangling_is_undone_wherever_an_external_name_is_read() {
-        // Mangling is a JVM EMIT detail: `UIntRange.first` is presented as `getFirst-pVg5ArA`
-        // because the signatures come out of a JVM jar, and the suffix encodes an erasure that
-        // means nothing on a target with no JVM. Every read of an external callable's name goes
-        // through `intrinsics::value_class_member`, which undoes it.
-        //
-        // Per-site demangling is what this replaces, and it had already failed twice: `rangeTo` on
-        // an unsigned receiver demangled while the getter behind `first` did not, so an unsigned
-        // range built correctly and then could not be read.
-        //
-        // A MODULE callable is a different field and stays raw — those are krusty's own
-        // declarations, whose names were never mangled.
-        for path in rust_files_under("src/native") {
-            if path.ends_with("intrinsics.rs") {
-                continue;
-            }
-            let text = fs::read_to_string(&path).expect("read native source");
-            for (number, line) in text.lines().enumerate() {
-                assert!(
-                    !line.contains(".callable.name") || line.contains("value_class_member"),
-                    "{}:{} reads an external callable's name without undoing kotlinc's \
-                     value-class mangling; go through intrinsics::value_class_member",
-                    path.display(),
-                    number + 1
-                );
-            }
-        }
-    }
-
-    #[test]
     fn fir_lower_facade_uses_only_common_lowering_dependencies() {
         assert_allowed_crate_modules("src/fir_lower/mod.rs", &["fir", "ir", "types"]);
     }

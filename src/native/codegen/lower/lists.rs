@@ -320,8 +320,8 @@ impl BodyLowering<'_, '_, '_> {
         }
         let property = self.file.classpath.external_property(target)?;
         let getter = self.file.classpath.external_callable(property.getter)?;
-        lazy_symbol(value_class_member(&getter.callable.name), 0)?;
-        Some(value_class_member(&getter.callable.name).to_string())
+        lazy_symbol(&getter.callable.name, 0)?;
+        Some(getter.callable.name.clone())
     }
 
     /// `a to b`, or `None` when the declaration is something else.
@@ -368,8 +368,8 @@ impl BodyLowering<'_, '_, '_> {
         }
         let property = self.file.classpath.external_property(target)?;
         let getter = self.file.classpath.external_callable(property.getter)?;
-        pair_symbol(value_class_member(&getter.callable.name), 0)?;
-        Some(value_class_member(&getter.callable.name).to_string())
+        pair_symbol(&getter.callable.name, 0)?;
+        Some(getter.callable.name.clone())
     }
 
     fn list_of(&mut self, elements: u32) -> Result<Option<Value>, Unsupported> {
@@ -407,8 +407,8 @@ impl BodyLowering<'_, '_, '_> {
         }
         let property = self.file.classpath.external_property(target)?;
         let getter = self.file.classpath.external_callable(property.getter)?;
-        indexed_value_symbol(value_class_member(&getter.callable.name), 0)?;
-        Some(value_class_member(&getter.callable.name).to_string())
+        indexed_value_symbol(&getter.callable.name, 0)?;
+        Some(getter.callable.name.clone())
     }
 
     pub(super) fn list_getter(
@@ -421,8 +421,8 @@ impl BodyLowering<'_, '_, '_> {
         }
         let property = self.file.classpath.external_property(target)?;
         let getter = self.file.classpath.external_callable(property.getter)?;
-        list_symbol(value_class_member(&getter.callable.name), 0, &[])?;
-        Some(value_class_member(&getter.callable.name).to_string())
+        list_symbol(&getter.callable.name, 0, &[])?;
+        Some(getter.callable.name.clone())
     }
 
     /// A member of a runtime list or of its iterator, or `None` when the receiver is neither.

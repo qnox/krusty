@@ -33,7 +33,6 @@ impl BodyLowering<'_, '_, '_> {
         args: &[u32],
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let element = super::super::super::intrinsics::unsigned_owner(owner)?;
-        let name = super::super::super::intrinsics::value_class_member(name);
         Some(self.unsigned_call(element, name, params, ret, receiver, args))
     }
 
