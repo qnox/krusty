@@ -2792,7 +2792,7 @@ fn member_body(disassembly: &str, member: &str) -> Vec<String> {
         .skip_while(|line| !(declaration(line) && line.contains(member)));
     let mut body = vec![lines.next().unwrap_or_default().to_string()];
     for line in lines {
-        if declaration(line) {
+        if declaration(line) || line == "}" {
             break;
         }
         body.push(line.to_string());
@@ -2836,5 +2836,32 @@ fn a_generated_serializer_constructor_carries_its_debug_tables() {
         member_body(&built.krusty, "Retention$$serializer()"),
         want,
         "generated serializer constructor"
+    );
+}
+
+/// Declaring one accessor does not make the other accessor declared. In particular, a `var` with
+/// an explicit getter still has a synthesized default setter, whose own line/local tables must not
+/// be dropped while the generated serializer's declared getter is excluded from synthesis.
+#[test]
+fn an_explicit_getter_keeps_its_default_setter_debug_tables() {
+    let src = "class Holder {\n\
+               \x20 var value: String = \"initial\"\n\
+               \x20     get() = field\n\
+               }\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "MixedPropertyAccessors",
+        src,
+        "Holder",
+        &[common::stdlib_jar()],
+        "25",
+        &[],
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    assert_eq!(
+        member_body(&built.krusty, "setValue(java.lang.String)"),
+        member_body(&built.reference, "setValue(java.lang.String)"),
+        "default setter beside an explicit getter"
     );
 }
