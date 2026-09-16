@@ -80,7 +80,7 @@ impl Checker<'_> {
                 self.declare_narrowing_shadow(scope, &root, ty);
             } else if self
                 .receiver_owning(scope, &root)
-                .is_some_and(|receiver| scope.this_ty() == Some(receiver))
+                .is_some_and(|receiver| receiver.current)
             {
                 // A bare name that is a property of the CURRENT receiver — an extension function
                 // reading its own receiver's property — has no lexical binding to shadow, and the
@@ -125,11 +125,6 @@ impl Checker<'_> {
         }
     }
 
-    /// The active narrowing for a property path, if any. A proof recorded OUTSIDE the rung holding
-    /// the root's innermost binding describes an outer, now-shadowed binding; a `this`-rooted proof
-    /// was made against the receiver of the rung that established it, and crossing out of that rung
-    /// means `this` is a different object (a receiver lambda of the same type is still a different
-    /// object). Both are expressed by where the walk stops.
     /// Nearest implicit receiver that declares `name`, if any.
     ///
     /// Scope-tower order is preserved, so an inner receiver shadows an outer one exactly as member
@@ -137,11 +132,15 @@ impl Checker<'_> {
     /// through this one walk: if they disagreed about which receiver owns the name, a proof about an
     /// outer receiver's property could be found by a read of a nearer receiver's property of the
     /// same name.
-    pub(super) fn receiver_owning(&self, scope: &CheckerScope<'_>, name: &str) -> Option<Ty> {
-        self.implicit_receivers(scope)
-            .into_iter()
-            .map(|candidate| candidate.ty)
-            .find(|receiver| self.lookup_prop_name(receiver.non_null(), name).is_some())
+    pub(super) fn receiver_owning(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+    ) -> Option<ImplicitReceiver> {
+        self.implicit_receivers(scope).into_iter().find(|receiver| {
+            self.lookup_prop_name(receiver.ty.non_null(), name)
+                .is_some()
+        })
     }
 
     pub(super) fn lookup_path_narrowing(

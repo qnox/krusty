@@ -682,6 +682,8 @@ mod generic_inferred_primitive_return_e2e;
 mod generic_inferred_return_e2e;
 #[path = "generic_member_extension_lambda_result_e2e.rs"]
 mod generic_member_extension_lambda_result_e2e;
+#[path = "generic_receiver_extension_lambda_shape_e2e.rs"]
+mod generic_receiver_extension_lambda_shape_e2e;
 #[path = "generic_return_inference_e2e.rs"]
 mod generic_return_inference_e2e;
 #[path = "generic_signature_e2e.rs"]
@@ -740,6 +742,8 @@ mod inline_end_branch_e2e;
 mod inline_lambda_result_boxing_e2e;
 #[path = "inline_lambda_value_return_e2e.rs"]
 mod inline_lambda_value_return_e2e;
+#[path = "inline_preparation_sibling_annotation_e2e.rs"]
+mod inline_preparation_sibling_annotation_e2e;
 #[path = "inline_return_bound_context_e2e.rs"]
 mod inline_return_bound_context_e2e;
 #[path = "inline_splice_e2e.rs"]
@@ -1089,6 +1093,8 @@ mod one_armed_when_fallthrough_e2e;
 mod extension_receiver_specificity_e2e;
 #[path = "int_when_switch_e2e.rs"]
 mod int_when_switch_e2e;
+#[path = "loop_backedge_narrowing_e2e.rs"]
+mod loop_backedge_narrowing_e2e;
 #[path = "operator_expected_result_seeding_e2e.rs"]
 mod operator_expected_result_seeding_e2e;
 #[path = "operator_inc_dec_e2e.rs"]
@@ -1388,6 +1394,8 @@ mod suspend_prologue_cast_e2e;
 mod suspend_receiver_lambda_e2e;
 #[path = "suspend_return_type_recovery_e2e.rs"]
 mod suspend_return_type_recovery_e2e;
+#[path = "suspend_single_operand_hoist_e2e.rs"]
+mod suspend_single_operand_hoist_e2e;
 #[path = "suspend_spill_slot_reuse_e2e.rs"]
 mod suspend_spill_slot_reuse_e2e;
 #[path = "suspend_throw_operand_e2e.rs"]
@@ -1494,6 +1502,8 @@ mod unit_vararg_e2e;
 mod unqualified_enum_entry_e2e;
 #[path = "unreachable_trailing_block_ty_e2e.rs"]
 mod unreachable_trailing_block_ty_e2e;
+#[path = "unresolved_label_diagnostic_e2e.rs"]
+mod unresolved_label_diagnostic_e2e;
 #[path = "unresolved_supertype_diag_e2e.rs"]
 mod unresolved_supertype_diag_e2e;
 #[path = "unsigned_array_e2e.rs"]

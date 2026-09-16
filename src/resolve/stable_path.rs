@@ -28,7 +28,7 @@ impl<'checker, 'source> StablePathRead<'checker, 'source> {
                 // answered `None` and dropped the proof before it was ever recorded.
                 if path.segments.is_empty() {
                     if let Some(receiver) = self.checker.receiver_owning(scope, &path.root) {
-                        return self.member_ty(receiver, &path.root);
+                        return self.member_ty(receiver.ty, &path.root);
                     }
                 }
                 return self.top_level_ty(scope, path);

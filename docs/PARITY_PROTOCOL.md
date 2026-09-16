@@ -2503,4 +2503,77 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `tests/extension_receiver_property_smartcast_e2e.rs::an_extension_receivers_property_smart_casts_under_a_bare_name`,
   `the_proof_survives_a_supertype_result_and_a_sibling_read`,
   `the_member_and_qualified_spellings_still_smart_cast`,
-  `a_mutable_extension_receiver_property_still_declines`.
+  `a_mutable_extension_receiver_property_still_declines`,
+  `a_nearer_receiver_of_the_same_property_name_is_not_proven`,
+  `a_nearer_receiver_of_the_same_type_is_not_proven`.
+- **Every single-operand node hoists its suspension, not a subset (fix).** The suspend hoister
+  recurses through one IR node kind per arm. Source-reachable gaps included an enum lookup's name
+  (`enumValueOf<Level>(pickName())`) and the construction of the `Ref` holder that boxes a captured
+  mutable local (`var total = count()` where a closure captures `total`). Either left the suspension
+  where the state-machine flattener cannot split it, so the backend declined the whole function with
+  `this suspend-function shape is not yet supported by the IR backend` — a per-FILE verdict. The
+  second shape is ordinary Kotlin: a `var` initialized from a suspend call and captured by any lambda.
+  Both operands evaluate unconditionally before the node they feed, so both hoist to a preceding temp
+  exactly as the neighbouring arms do. Assigning the same captured local from a suspension LATER
+  needed nothing: that is a holder write, which already had its arm, and it is the control that
+  isolates the holder's construction as the gap. Found by listing every `IrExpr` variant, diffing it
+  against the arms the hoister handles, and compiling one fixture per variant that can carry a
+  sub-expression. `NewArray(size)` and bound `KClassLiteral(value)` are covered too; the remaining
+  unconditional one-child nodes (`RefGet`, `EnclosingInstance`, `LateinitInitialized`) now recurse
+  directly rather than relying on their current source constructors to supply pure operands. Before
+  hoisting, a suspending body also expands shared common-IR DAG operands into private per-use nodes.
+  That ownership step happens before lexical-scope and debug-line capture, so every cloned suspension
+  keeps authoritative side-table identity and a temp inserted for one parent never leaks into another.
+  `tests/suspend_single_operand_hoist_e2e.rs::an_enum_lookup_hoists_a_suspending_name`,
+  `a_captured_local_hoists_a_suspending_initializer`,
+  `a_captured_local_assigned_from_a_suspension_later_still_works`,
+  `an_enum_lookup_with_no_suspension_still_works`,
+  `src/jvm/suspend/hoisting.rs::tests::a_shared_operand_is_hoisted_independently_at_each_use`,
+  `every_remaining_single_operand_node_recurses`.
+- **An unresolvable `return@label` reports the reference diagnostic, at its span (fix).** krusty wrote
+  its own wording at the `return` keyword; the reference compiler writes `unresolved label.` at the
+  `@` token. Both the message and the column differed, for an unknown name and for a name whose
+  lambda does not enclose the return alike. The label survives on the node only as a bare `String`,
+  so the span cannot be recovered afterwards: the parser now records the `@` span for the statement
+  and expression forms, and both report sites read it. Shared test helpers
+  (`common::expect_identical_rejection`) compares the COMPLETE diagnostic
+  set of both compilers — count, file, line, column, message and order — since a nonzero-exit
+  assertion passes on an unrelated rejection, which is how a "both compilers agree" claim goes stale.
+  `tests/unresolved_label_diagnostic_e2e.rs::an_unknown_return_label_matches_the_reference_diagnostic`,
+  `a_declared_but_non_enclosing_return_label_matches_the_reference_diagnostic`,
+  `an_unresolved_label_in_expression_position_matches_the_reference_diagnostic`,
+  `a_resolvable_return_label_still_works`.
+- **An extension's type-parameter receiver is solved with the arguments, not before or after them
+  (fix).** For `fun <P : Pipe, B : Any> P.install(plugin: Plug<P, B>, configure: B.() -> Unit)`, the
+  pre-lambda applicability probe first unified the receiver in a separate pass. That pinned `P` to
+  the receiver's concrete class, so `App().install(pluginOfPipe) { … }` judged `Plug<Pipe, Cfg>`
+  against `Plug<App, B>`, declined the overload, and left its lambda unshaped. Simply reversing the
+  passes was also wrong: once argument inference occupied a formal, the old unifier discarded the
+  receiver evidence. The receiver now contributes an assignability constraint to the SAME set as
+  the mapped arguments. The ordinary constraint solver therefore applies each parameter position's
+  variance, joins compatible lower bounds, honors explicit arguments and declared bounds, and rejects
+  incompatible invariant evidence without making call-site ordering decide the answer.
+  `tests/generic_receiver_extension_lambda_shape_e2e.rs::a_generic_receiver_extension_still_shapes_its_lambda_receiver`,
+  `a_generic_receiver_extension_still_shapes_a_plain_lambda_parameter`,
+  `a_receiver_and_an_argument_join_into_one_formal`,
+  `a_formal_inside_a_variant_shell_still_admits_the_receiver`,
+  `a_receiver_the_invariant_argument_excludes_is_still_rejected`,
+  `explicit_type_arguments_still_fix_both_formals`,
+  `a_receiver_outside_the_formals_bound_is_still_rejected`,
+  `an_ordinary_parameter_of_the_same_shape_still_shapes_its_lambda`,
+  `a_concrete_receiver_extension_still_shapes_its_lambda`,
+  `a_member_the_shaped_receiver_lacks_is_still_rejected`.
+- **An inline member no longer crashes its siblings' annotation checking (fix).** Preparing a class's
+  inline members re-enters the class and walks the members it did NOT select, purely to rebuild their
+  lexical scopes. Those members' annotation ARGUMENT expressions belong to a source fragment that pass
+  no longer retains, and the checker asserted that only Pass-1 default checking could ever observe
+  released syntax. Any argument-bearing annotation on an ordinary member therefore CRASHED the
+  compiler as soon as the same class also declared an `inline` member — `@Suppress("UNCHECKED_CAST")`
+  beside an `inline fun` is the everyday case, and five lines reproduce it with no classpath. Two
+  passes are restricted this way, not one: Pass-1 default checking and inline preparation, which
+  selects only the inline declarations it must expand. Skipping released syntax is correct in each,
+  and the assertion now says so; an UNRESTRICTED pass, which has every expression, still trips it.
+  `tests/inline_preparation_sibling_annotation_e2e.rs::an_inline_member_does_not_crash_an_annotated_sibling`,
+  `any_argument_bearing_annotation_on_the_sibling_behaves_the_same`,
+  `a_class_with_no_inline_member_still_compiles`,
+  `a_bad_annotation_argument_is_still_rejected_beside_an_inline_member`.

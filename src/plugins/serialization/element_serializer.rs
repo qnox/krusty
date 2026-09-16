@@ -163,7 +163,6 @@ pub(super) fn always_available_builtin_serializer(ty: &Ty) -> Option<TypeName> {
 /// krusty represents a value-class-typed field/value. Recurses through a value-class chain
 /// (`A(val b: B)`, `B(val i: Int)` → `Int`), depth-bounded against a malformed cycle. `None` for any
 /// type that isn't (transitively) a value class.
-
 /// Select one complete serializer plan without mutating IR. Applicability checks and expression
 /// construction consume this same decision, so they cannot drift into parallel overload systems.
 pub(super) fn element_serializer_plan(

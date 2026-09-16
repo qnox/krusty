@@ -178,3 +178,18 @@ fun Outer.probe(inner: Inner): String {\n\
     let result = common::compiler_diagnostics(&[("Main.kt", MAIN)], &[]);
     expect_identical_rejection(&result, "a shadowing nearer receiver");
 }
+
+/// Receiver TYPE equality is not receiver identity: entering another `Outer` still rebinds `this`.
+#[test]
+fn a_nearer_receiver_of_the_same_type_is_not_proven() {
+    const MAIN: &str = "class Outer(val ref: String?)\n\
+fun take(value: String): String = value\n\
+fun Outer.probe(inner: Outer): String {\n\
+\x20   if (ref != null) {\n\
+\x20       return inner.run { take(ref) }\n\
+\x20   }\n\
+\x20   return \"none\"\n\
+}\n";
+    let result = common::compiler_diagnostics(&[("Main.kt", MAIN)], &[]);
+    expect_identical_rejection(&result, "a same-typed shadowing receiver");
+}

@@ -194,10 +194,14 @@ impl SymbolSource for CompositeSource<'_> {
 /// cannot outlive or conceal mutation of any contributing provider.
 #[derive(Default)]
 pub(crate) struct SymbolQueryCache {
+    /// Keyed by NAME, and every miss and hit hashes that string. The default hasher is SipHash,
+    /// which is a cryptographic-strength choice this cache does not need: the keys are internal
+    /// declaration spellings, never attacker-supplied, and the map lives and dies inside one source
+    /// unit. `FxHashMap` is the same hasher the name tree already uses for exactly this reason.
     records: std::cell::RefCell<
-        std::collections::HashMap<
+        crate::name_tree::FxHashMap<
             SymbolNamespace,
-            std::collections::HashMap<String, std::rc::Rc<ResolvedSymbols>>,
+            crate::name_tree::FxHashMap<String, std::rc::Rc<ResolvedSymbols>>,
         >,
     >,
 }
