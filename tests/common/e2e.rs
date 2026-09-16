@@ -40,6 +40,41 @@ pub fn expect_true_e2e(tag: &str, src: &str, extra_cp: &[PathBuf]) {
     }
 }
 
+/// Assert that both compilers REJECT the fixture with the identical diagnostic set: same count, and
+/// the same file, line, column, message and order.
+///
+/// A nonzero-exit assertion is not enough on its own — it passes when krusty rejects the fixture for
+/// an unrelated reason, which is exactly how a "both compilers agree" claim goes stale.
+pub fn expect_identical_rejection(result: &CompilerDiagnosticResult, tag: &str) {
+    let stdout_errors = compiler_errors(&result.krusty_stdout);
+    let krusty = compiler_errors(&result.krusty_stderr);
+    let reference = compiler_errors(&result.reference_stderr);
+    assert_eq!(
+        result.reference_code, 1,
+        "{tag}: kotlinc exited {} rather than rejecting the fixture: {}",
+        result.reference_code, result.reference_stderr
+    );
+    assert_eq!(
+        result.krusty_code, 1,
+        "{tag}: krusty exited {} rather than rejecting the fixture: {}{}",
+        result.krusty_code, result.krusty_stdout, result.krusty_stderr
+    );
+    assert_eq!(
+        stdout_errors,
+        [],
+        "{tag}: krusty emitted errors on stdout instead of stderr"
+    );
+    assert!(
+        !reference.is_empty(),
+        "{tag}: kotlinc rejected without a parseable diagnostic: {}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        krusty, reference,
+        "{tag}: diagnostics differ.\nkrusty:    {krusty:#?}\nkotlinc:   {reference:#?}"
+    );
+}
+
 pub struct CompilerDiagnosticResult {
     pub krusty_code: i32,
     pub krusty_stdout: String,
@@ -323,15 +358,35 @@ pub fn kotlinc_source_result(tag: &str, source: &str) -> (i32, String) {
 
 /// Compile one `Main.kt` fixture with kotlinc and run its `box()` result on the shared JVM.
 pub fn kotlinc_box_result(source: &str) -> String {
+    kotlinc_box_result_with_classpath(source, &[])
+}
+
+/// Compile one `Main.kt` fixture with kotlinc against caller-supplied dependencies and run its
+/// `box()` result on the shared JVM.
+pub fn kotlinc_box_result_with_classpath(source: &str, classpath: &[PathBuf]) -> String {
     let work = common::scratch_dir().expect("cannot allocate reference-runtime fixture");
     let source_paths = write_fixture_sources(&work, &[("Main.kt", source)]);
     let output = work.join("out");
-    let (code, diagnostics) = kotlinc_paths_result(&source_paths, &output, &[]);
+    let extra_args = if classpath.is_empty() {
+        Vec::new()
+    } else {
+        vec![
+            "-cp".to_string(),
+            std::env::join_paths(classpath)
+                .expect("build reference-runtime classpath")
+                .to_string_lossy()
+                .into_owned(),
+        ]
+    };
+    let (code, diagnostics) = kotlinc_paths_result(&source_paths, &output, &extra_args);
     assert_eq!(code, 0, "kotlinc rejected runtime fixture: {diagnostics}");
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    let result = common::run_box(&[], "MainKt", &[output, stdlib, jdk])
-        .expect("run kotlinc-built box fixture");
+    let mut runtime_classpath = vec![output];
+    runtime_classpath.extend_from_slice(classpath);
+    runtime_classpath.extend([stdlib, jdk]);
+    let result =
+        common::run_box(&[], "MainKt", &runtime_classpath).expect("run kotlinc-built box fixture");
     let _ = std::fs::remove_dir_all(work);
     result
 }

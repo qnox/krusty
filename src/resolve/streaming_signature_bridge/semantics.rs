@@ -833,6 +833,7 @@ impl ProductionSignatureSemantics<'_> {
                     projected.arguments(),
                     &resolved_type_arguments,
                     projected.callables(),
+                    None,
                 )
             else {
                 return None;
@@ -915,6 +916,7 @@ impl ProductionSignatureSemantics<'_> {
                 &kinds,
                 &resolved_type_arguments,
                 &callables,
+                None,
             ) {
                 crate::symbol_resolver::CandidateSelection::Selected((selected, _, _)) => {
                     selected
@@ -2252,6 +2254,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     projected.arguments(),
                     &resolved_type_arguments,
                     projected.callables(),
+                    None,
                 );
                 crate::trace_compiler!(
                     "signature",
@@ -4808,6 +4811,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 projected.arguments(),
                 &type_arguments,
                 projected.callables(),
+                None,
             );
             crate::trace_compiler!(
                 "signature",
@@ -5402,6 +5406,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 &argument_kinds,
                 &[],
                 &callables,
+                None,
             )
             else {
                 return None;

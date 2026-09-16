@@ -8,11 +8,42 @@ use crate::types::Ty;
 
 use super::{BodyLowering, FirLoweringFailure, LoweringState};
 
+/// The unoptimized lowering dispatcher reserves frames of the same order as the checker's. Check
+/// before the first frame and then every 64 nested frames: that keeps the largest unchecked run
+/// well below one grown segment without paying `stacker`'s probe for every ordinary node.
+const EXPRESSION_STACK_CHECK_INTERVAL: u32 = 64;
+
 impl BodyLowering<'_> {
+    /// Lower one expression, growing the stack when this recursion is about to outrun the current
+    /// segment.
+    ///
+    /// The checker bounds semantic nesting, but the bound is only survivable if the stack lasts
+    /// long enough to reach it, and lowering recurses over the same nesting with frames of its own.
+    /// The lowerer this pass replaced entered on a grown segment and re-checked per level for
+    /// exactly this reason; without it a deeply nested call chain exhausts a small embedder stack
+    /// and dies on the guard page instead of degrading.
     pub(super) fn expression(
         &mut self,
         expression_id: FirExprId,
     ) -> Result<ExprId, FirLoweringFailure> {
+        self.expression_depth = self
+            .expression_depth
+            .checked_add(1)
+            .expect("expression nesting exceeds u32");
+        let check_stack = self.expression_depth == 1
+            || self
+                .expression_depth
+                .is_multiple_of(EXPRESSION_STACK_CHECK_INTERVAL);
+        let result = if check_stack {
+            crate::wide_stack::on_wide_stack(|| self.expression_inner(expression_id))
+        } else {
+            self.expression_inner(expression_id)
+        };
+        self.expression_depth -= 1;
+        result
+    }
+
+    fn expression_inner(&mut self, expression_id: FirExprId) -> Result<ExprId, FirLoweringFailure> {
         match self.expression_state(expression_id) {
             Some(LoweringState::Lowered(expression)) => return Ok(expression),
             Some(LoweringState::Computing) => {
@@ -1376,7 +1407,7 @@ impl BodyLowering<'_> {
             }
         };
         self.ir.logical_types.insert(lowered, expression.ty.get());
-        let lowered = crate::ir::complete_bottom_value(&mut self.ir, lowered, expression.ty.get());
+        let lowered = crate::ir::complete_bottom_value(self.ir, lowered, expression.ty.get());
         self.ir.logical_types.insert(lowered, expression.ty.get());
         let debug = self.body.expression_debug_lines(expression_id);
         if debug.source != 0 {

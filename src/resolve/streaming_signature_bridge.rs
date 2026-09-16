@@ -2942,6 +2942,7 @@ impl ProductionSignatureSemantics<'_> {
                     &selected_arguments,
                     type_arguments,
                     &callables,
+                    None,
                 )
                 else {
                     return None;

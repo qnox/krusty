@@ -2054,12 +2054,7 @@ fn build_class_metadata(
     } else {
         Vec::new()
     };
-    let sealed_descs: Vec<String> = sealed_sorted
-        .iter()
-        .map(|subclass| format!("L{};", subclass.render()))
-        .collect();
     let nested_refs: Vec<&str> = nested_names.iter().map(String::as_str).collect();
-    let sealed_refs: Vec<&str> = sealed_descs.iter().map(String::as_str).collect();
     let class_type_parameters = ir
         .class_signature(&c.fq_name())
         .map(|signature| signature.type_params.as_slice())
@@ -2172,7 +2167,7 @@ fn build_class_metadata(
         .map(|retained| retained.annotation.clone())
         .collect();
     let (d1_bytes, d2) = build_class(
-        &c.fq_name(),
+        c.fq_name_id(),
         &ctor_params,
         vc_ctor_desc.as_deref().unwrap_or(&ctor_desc),
         &props,
@@ -2233,7 +2228,7 @@ fn build_class_metadata(
             nested: &nested_refs,
             member_order: &member_order,
             type_aliases: &type_aliases,
-            sealed_subclasses: &sealed_refs,
+            sealed_subclasses: &sealed_sorted,
             supertypes: &supertypes,
             annotations: &metadata_annotations,
             primary_ctor_annotations: &primary_ctor_annotations(c),
@@ -16417,7 +16412,8 @@ impl<'a> Emitter<'a> {
                     let ret = jvm_declared_ty(ret);
                     let (facade, name) = (facade.render(), name.clone());
                     let args = args.clone();
-                    if let Err(mismatch) = self.emit_call_descriptor_operands(e, &args, &param_tys, code)
+                    if let Err(mismatch) =
+                        self.emit_call_descriptor_operands(e, &args, &param_tys, code)
                     {
                         self.bail_descriptor_arity(&mismatch, ret, code);
                         return;
@@ -16540,9 +16536,12 @@ impl<'a> Emitter<'a> {
                         _ => args,
                     };
                     let ret = ty_from_descriptor_ret(&descriptor);
-                    if let Err(mismatch) =
-                        self.emit_call_descriptor_operands(e, &physical_args, &physical_params, code)
-                    {
+                    if let Err(mismatch) = self.emit_call_descriptor_operands(
+                        e,
+                        &physical_args,
+                        &physical_params,
+                        code,
+                    ) {
                         self.bail_descriptor_arity(&mismatch, ret, code);
                         return;
                     }
@@ -17603,97 +17602,7 @@ impl<'a> Emitter<'a> {
                 array_type,
                 elements,
                 spreads,
-            } => {
-                let et = array_jvm_element(array_type);
-                let elements = elements.clone();
-                let spreads = spreads.clone();
-                if spreads.len() != elements.len() {
-                    self.run.set_emit_error(
-                        "vararg spread flags do not match the element list".to_string(),
-                    );
-                    return;
-                }
-                if spreads.iter().any(|&spread| spread) {
-                    if et.is_jvm_scalar() {
-                        let Some((builder, add_desc, array_desc)) = primitive_spread_builder(et)
-                        else {
-                            self.run.set_emit_error(
-                                "primitive vararg spread has no platform builder".to_string(),
-                            );
-                            return;
-                        };
-                        let class = self.cw.class_ref(builder);
-                        code.new_obj(class);
-                        code.dup();
-                        code.push_int(elements.len() as i32, self.cw);
-                        let init = self.cw.methodref(builder, "<init>", "(I)V");
-                        code.invokespecial(init, 1, 0);
-                        // `[builder, builder]` stays live across each element (the `dup` is the `add`
-                        // receiver), so a branchy element must frame them — see `emit_value_over`.
-                        let held = self.held_pair(builder);
-                        for (index, &element) in elements.iter().enumerate() {
-                            code.dup();
-                            self.emit_value_over(element, &held, code);
-                            if spreads.get(index).copied().unwrap_or(false) {
-                                let add_spread = self.cw.methodref(
-                                    "kotlin/jvm/internal/PrimitiveSpreadBuilder",
-                                    "addSpread",
-                                    "(Ljava/lang/Object;)V",
-                                );
-                                code.invokevirtual(add_spread, 1, 0);
-                            } else {
-                                let add = self.cw.methodref(builder, "add", add_desc);
-                                code.invokevirtual(add, slot_words(et) as i32, 0);
-                            }
-                        }
-                        let to_array =
-                            self.cw
-                                .methodref(builder, "toArray", &format!("(){array_desc}"));
-                        code.invokevirtual(to_array, 0, 1);
-                    } else {
-                        let builder = "kotlin/jvm/internal/SpreadBuilder";
-                        let class = self.cw.class_ref(builder);
-                        code.new_obj(class);
-                        code.dup();
-                        code.push_int(elements.len() as i32, self.cw);
-                        let init = self.cw.methodref(builder, "<init>", "(I)V");
-                        code.invokespecial(init, 1, 0);
-                        let box_elem = reference_array_scalar_adapter(et);
-                        let held = self.held_pair(builder);
-                        for (index, &element) in elements.iter().enumerate() {
-                            code.dup();
-                            self.emit_value_over(element, &held, code);
-                            let method = if spreads.get(index).copied().unwrap_or(false) {
-                                self.cw
-                                    .methodref(builder, "addSpread", "(Ljava/lang/Object;)V")
-                            } else {
-                                if let Some(primitive) = box_elem {
-                                    box_prim_free(self.cw, code, primitive);
-                                }
-                                self.cw.methodref(builder, "add", "(Ljava/lang/Object;)V")
-                            };
-                            code.invokevirtual(method, 1, 0);
-                        }
-                        code.push_int(0, self.cw);
-                        let element_class = self
-                            .cw
-                            .class_ref(&crate::jvm::names::instanceof_internal_name(et.non_null()));
-                        code.anewarray(element_class);
-                        let to_array = self.cw.methodref(
-                            builder,
-                            "toArray",
-                            "([Ljava/lang/Object;)[Ljava/lang/Object;",
-                        );
-                        code.invokevirtual(to_array, 1, 1);
-                        let array_class = self
-                            .cw
-                            .class_ref(&type_descriptor(ir_ty_to_jvm(array_type)));
-                        code.checkcast(array_class);
-                    }
-                    return;
-                }
-                vararg::emit_packed_array(self, array_type, &elements, code);
-            }
+            } => vararg::emit(self, array_type, elements, spreads, code),
             IrExpr::NewArray { array_type, size } => {
                 let et = array_jvm_element(array_type);
                 self.emit_value(*size, code);
@@ -18468,7 +18377,6 @@ impl<'a> Emitter<'a> {
             .fieldref(owner, &field.name, &type_descriptor(physical));
         code.putstatic(reference, slot_words(physical) as i32);
     }
-
 
     /// Frame-safe operand sequencing with one representation adapter applied immediately after each
     /// value is pushed. Keeping the adapter inside the shared spill/load loop is essential for
@@ -20798,5 +20706,4 @@ mod fail_soft_tests {
         });
         assert!(emit_for_test(&ir, "TestKt", &EmitRun::default()).is_none());
     }
-
 }

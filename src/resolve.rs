@@ -28,6 +28,9 @@ use crate::types::{
 };
 use scope::{ContextReceiver, ContextValue, FlowExclusion, NarrowPath, Ns, ScopeKind};
 
+mod annotation_applications;
+mod annotation_legacy_bridge;
+mod call_result_constraint;
 mod callable_reference_selection;
 mod capture_analysis;
 mod capture_storage;
@@ -40,17 +43,23 @@ mod context_sensitive_resolution;
 mod delegated_properties;
 mod dependency_platform;
 mod finalized_projection;
+mod generic_call_bindings;
 mod interface_delegation;
+mod invoke_selection;
 mod lambda_expectation;
 mod lambda_returns;
 mod local_capture_dependencies;
 mod local_class_scope;
 mod local_method_dependencies;
+mod loop_flow;
+mod operator_calls;
 mod override_plans;
 mod postponed_diagnostics;
 mod qualified_call_shaping;
 mod safe_call_flow;
 mod sam_constructors;
+mod source_fragment;
+use source_fragment::SourceFragmentMode;
 mod scope;
 mod singleton_receivers;
 mod source_constructors;
@@ -64,6 +73,7 @@ mod type_join;
 
 // The capture storage-kind contract and the write analysis behind it. Imported by name so the call
 // sites read as they did when these lived here: what moved is the responsibility, not the spelling.
+use call_result_constraint::CallResultConstraint;
 pub use callable_reference_selection::AdaptedRefArgument;
 use callable_reference_selection::CallableRefSpecialization;
 use capture_analysis::{local_class_declarations, local_fun_body_uses_any, used_names};
@@ -88,6 +98,7 @@ use lambda_returns::{call_implicit_lambda_label, LambdaReturnScopes};
 use local_class_scope::{
     local_class_enclosing_tparams, local_class_sibling_names, EnclosingTypeParameterDeclaration,
 };
+use loop_flow::collect_all_reassigned;
 pub(crate) use override_plans::publish_override_plans;
 use postponed_diagnostics::PostponedDiagnostics;
 use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
@@ -13717,53 +13728,6 @@ fn collect_lambda_outer_writes(
     ce(file, e, outer_names, out);
 }
 
-/// Collect every name reassigned (`=`, `+=`-style, `++`/`--`) anywhere in `e`'s subtree — INCLUDING
-/// inside nested lambdas and local functions (a `var` reassigned in a sibling closure still needs the
-/// box). Used to decide which captured local-function `var`s need a shared mutable cell.
-fn collect_all_reassigned(file: &File, e: ExprId, out: &mut std::collections::HashSet<String>) {
-    // Traverse via `any_child_expr`/`any_child_stmt` (which visit EVERY child, including lambda and
-    // local-function bodies) so no expression form can hide a reassignment from the scan. The closures
-    // only collect (return `false` to keep visiting); a `RefCell` lets both share the accumulator.
-    let cell = std::cell::RefCell::new(std::mem::take(out));
-    fn ce(file: &File, e: ExprId, cell: &std::cell::RefCell<std::collections::HashSet<String>>) {
-        if let Expr::IncDec { target, .. } = file.expr(e) {
-            if let Expr::Name(n) = file.expr(*target) {
-                cell.borrow_mut().insert(n.clone());
-            }
-        }
-        file.any_child_expr(
-            e,
-            &mut |c| {
-                ce(file, c, cell);
-                false
-            },
-            &mut |s| {
-                cs(file, s, cell);
-                false
-            },
-        );
-    }
-    fn cs(file: &File, s: StmtId, cell: &std::cell::RefCell<std::collections::HashSet<String>>) {
-        if let Stmt::Assign { name, .. } | Stmt::IncDec { name, .. } = file.stmt(s) {
-            cell.borrow_mut().insert(name.clone());
-        }
-        if let Stmt::LocalClass(class) = file.stmt(s) {
-            // The parser hoists the declaration and the generic statement child walk stops at its
-            // header. Its member bodies still execute later and can mutate a value captured by
-            // every enclosing local class/local function boundary.
-            for expression in local_class_capture_expressions(class) {
-                ce(file, expression, cell);
-            }
-        }
-        file.any_child_stmt(s, &mut |c| {
-            ce(file, c, cell);
-            false
-        });
-    }
-    ce(file, e, &cell);
-    *out = cell.into_inner();
-}
-
 /// One closure-captured write: the variable's name, the enclosing-lambda stack at the write, and
 /// the assigned value when the write is an assignment (`None` for inc/dec).
 type ClosureWrite = (String, Vec<ExprId>, Option<ExprId>);
@@ -21994,7 +21958,7 @@ fn instantiate_member_extension_with(
     is_spread_arg: &dyn Fn(usize) -> bool,
     unit_coerced_lambda: &dyn Fn(usize, Ty, Ty) -> Option<Ty>,
     score_candidate: &dyn Fn(&[Ty], &CallSig, ArgSlots<'_>) -> Option<CallCandidateScore>,
-    expected_result: Option<Ty>,
+    result_constraint: CallResultConstraint,
     shape: &MemberExtensionFunctionShape,
     call: MemberExtensionCall<'_>,
 ) -> Option<InstantiatedMemberExtension> {
@@ -22102,8 +22066,9 @@ fn instantiate_member_extension_with(
         crate::symbol_resolver::unify_ty(applied, actual, &mut bindings);
         crate::symbol_resolver::unify_ty(declared, actual, &mut bindings);
     }
-    if let Some(expected) = expected_result {
+    if let Some(expected) = result_constraint.expected() {
         let declared_ret = generic.map_or(function.signature.ret, |signature| signature.ret);
+        let declared_ret = result_constraint.declaration_result(declared_ret);
         let applied = apply_inference_bindings(declared_ret, &bindings);
         crate::symbol_resolver::unify_ty(applied, expected, &mut bindings);
         crate::symbol_resolver::unify_ty(declared_ret, expected, &mut bindings);
@@ -22321,8 +22286,8 @@ impl<'a> Checker<'a> {
             },
             extension_receiver,
             name,
-            MemberExtensionSelection::All,
-            None,
+            (MemberExtensionSelection::All, None),
+            CallResultConstraint::direct(None),
         )
     }
 
@@ -22338,9 +22303,12 @@ impl<'a> Checker<'a> {
         call_args: CallArgs<'_>,
         extension_receiver: Ty,
         name: &str,
-        selection: MemberExtensionSelection,
-        receivers: Option<&[ImplicitReceiver]>,
+        // Which candidates this selection may consider: the declaration kinds it admits, and the
+        // implicit-receiver tower to search when one other than the scope's own applies.
+        selection: (MemberExtensionSelection, Option<&[ImplicitReceiver]>),
+        result_constraint: CallResultConstraint,
     ) -> Option<Ty> {
+        let (selection, receivers) = selection;
         let CallArgs {
             call,
             args,
@@ -22358,7 +22326,7 @@ impl<'a> Checker<'a> {
             .collect::<Vec<_>>();
         let request = MemberExtensionFunctionCall {
             extension_receiver,
-            expected_result: None,
+            result_constraint,
             name,
             args,
             arg_tys,
@@ -23667,7 +23635,7 @@ impl<'a> Checker<'a> {
             },
             &type_arguments,
             Some(rt),
-            expected,
+            CallResultConstraint::direct(expected),
             overloads,
         );
         let selected = match selection {
@@ -24411,7 +24379,7 @@ impl<'a> Checker<'a> {
             },
             &type_args,
             None,
-            expected,
+            CallResultConstraint::direct(expected),
             candidates.clone(),
         );
         if let Some(selected) = selection.and_then(CallableCandidateSelection::available) {
@@ -24576,6 +24544,7 @@ impl<'a> Checker<'a> {
                     callee,
                     value_ty,
                     self.span(call),
+                    CallResultConstraint::direct(expected),
                 ) {
                     return ClassifierValueCall::Checked(ret);
                 }
@@ -24627,8 +24596,9 @@ impl<'a> Checker<'a> {
         callee: ExprId,
         classifier: TypeName,
         args: &[ExprId],
-        span: Span,
+        expected: Option<Ty>,
     ) -> Option<InvokeResolution> {
+        let span = self.span(call);
         let receiver = self.classifier_value_ty(callee, classifier)?;
         self.set(callee, receiver);
         let argument_types = self.invoke_operator_arg_tys(scope, call, receiver, args);
@@ -24642,6 +24612,7 @@ impl<'a> Checker<'a> {
             callee,
             receiver,
             span,
+            CallResultConstraint::direct(expected),
         ))
     }
 
@@ -27105,7 +27076,7 @@ impl<'a> Checker<'a> {
                 },
                 &[],
                 classifier.map(Ty::obj_name),
-                expected,
+                CallResultConstraint::direct(expected),
                 companion_candidates,
             )
         });
@@ -27209,7 +27180,7 @@ impl<'a> Checker<'a> {
                 },
                 &[],
                 None,
-                expected,
+                CallResultConstraint::direct(expected),
                 candidates,
             );
             match selection {
@@ -27713,7 +27684,7 @@ impl<'a> Checker<'a> {
                                 },
                                 &targs,
                                 None,
-                                expected,
+                                CallResultConstraint::direct(expected),
                                 candidates,
                             )
                             .and_then(CallableCandidateSelection::candidate)
@@ -28028,7 +27999,7 @@ impl<'a> Checker<'a> {
                         callee,
                         cls.internal_name(),
                         args,
-                        span,
+                        expected,
                     ) {
                         match resolution {
                             InvokeResolution::Selected(result) => return result,
@@ -28094,8 +28065,8 @@ impl<'a> Checker<'a> {
                                 constructor_mapping_error = Some(error);
                             }
                         }
-                        if let Some(resolution) =
-                            self.classifier_value_invoke(scope, call, callee, internal, args, span)
+                        if let Some(resolution) = self
+                            .classifier_value_invoke(scope, call, callee, internal, args, expected)
                         {
                             match resolution {
                                 InvokeResolution::Selected(result) => return result,
@@ -28355,7 +28326,7 @@ impl<'a> Checker<'a> {
                                 },
                                 &explicit_type_args,
                                 Some(classifier_receiver),
-                                expected,
+                                CallResultConstraint::direct(expected),
                                 companion_extensions,
                             )
                             .and_then(CallableCandidateSelection::available)
@@ -28435,7 +28406,7 @@ impl<'a> Checker<'a> {
                             },
                             &explicit_type_args,
                             Some(classifier_receiver),
-                            expected,
+                            CallResultConstraint::direct(expected),
                             candidates,
                         )
                         .and_then(CallableCandidateSelection::available)
@@ -28530,6 +28501,7 @@ impl<'a> Checker<'a> {
                             callee,
                             value_ty,
                             span,
+                            CallResultConstraint::direct(expected),
                         ) {
                             return ret;
                         }
@@ -28985,6 +28957,7 @@ impl<'a> Checker<'a> {
                         receiver,
                         invoke_ty,
                         span,
+                        CallResultConstraint::direct(expected),
                     ) {
                         return ret;
                     }
@@ -29189,6 +29162,7 @@ impl<'a> Checker<'a> {
                             callee,
                             value_ty,
                             span,
+                            CallResultConstraint::direct(expected),
                         ) {
                             return ret;
                         }
@@ -29337,6 +29311,7 @@ impl<'a> Checker<'a> {
                         callee,
                         receiver_ty,
                         span,
+                        CallResultConstraint::direct(expected),
                     ) {
                         return ret;
                     }
@@ -29425,6 +29400,7 @@ impl<'a> Checker<'a> {
                         callee,
                         receiver_ty,
                         span,
+                        CallResultConstraint::direct(expected),
                     ) {
                         return ret;
                     }
@@ -30329,9 +30305,12 @@ impl<'a> Checker<'a> {
                                 scope,
                                 &fname,
                                 (args, partial),
-                                arg_names.as_deref(),
-                                self.file.call_has_trailing_lambda.contains(&call.0),
+                                (
+                                    arg_names.as_deref(),
+                                    self.file.call_has_trailing_lambda.contains(&call.0),
+                                ),
                                 &explicit_type_args,
+                                CallResultConstraint::direct(expected),
                             )
                         })
                     });
@@ -32224,8 +32203,8 @@ impl<'a> Checker<'a> {
                                 },
                                 bt,
                                 &fname,
-                                MemberExtensionSelection::All,
-                                Some(&receivers),
+                                (MemberExtensionSelection::All, Some(&receivers)),
+                                CallResultConstraint::direct(expected),
                             ) {
                                 self.narrowed_this_member.insert(call, bi);
                                 if let Some(receiver) = receivers.into_iter().find(|receiver| {
@@ -32304,7 +32283,7 @@ impl<'a> Checker<'a> {
                             },
                             &explicit_type_args,
                             None,
-                            expected,
+                            CallResultConstraint::direct(expected),
                             top_level_candidates.clone(),
                         )
                     });
@@ -32396,6 +32375,7 @@ impl<'a> Checker<'a> {
                         callee,
                         receiver_ty,
                         span,
+                        CallResultConstraint::direct(expected),
                     ) {
                         return ret;
                     }
@@ -32421,6 +32401,7 @@ impl<'a> Checker<'a> {
                         callee,
                         receiver_ty,
                         span,
+                        CallResultConstraint::direct(expected),
                     ) {
                         return ret;
                     }
@@ -32541,6 +32522,7 @@ impl<'a> Checker<'a> {
                         callee,
                         ct,
                         span,
+                        CallResultConstraint::direct(expected),
                     ) {
                         InvokeResolution::Selected(t) => return t,
                         InvokeResolution::Ambiguous(candidates) => {
@@ -32887,6 +32869,7 @@ impl<'a> Checker<'a> {
                     callee,
                     callee_ty,
                     span,
+                    CallResultConstraint::direct(expected),
                 ) {
                     return ret;
                 }
@@ -32983,6 +32966,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::Return(e, label) => self.stmt_return(scope, s, e, label),
             Stmt::While { cond, body, label } => {
+                self.clear_narrowings_a_loop_invalidates(scope, &[cond, body]);
                 let ct = self.expr(scope, cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "while condition");
                 // `while (x != null) …` — the condition holds on body entry, so narrow stable
@@ -32998,6 +32982,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::DoWhile { body, cond, label } => {
+                self.clear_narrowings_a_loop_invalidates(scope, &[body, cond]);
                 // Unlike a while body, a do-while block and its condition share one lexical scope:
                 // `do { val x = ... } while (x)` is legal Kotlin. Keep that scope alive through
                 // condition checking instead of rebuilding declarations from typed syntax.
@@ -33031,13 +33016,19 @@ impl<'a> Checker<'a> {
                 range,
                 body,
                 label,
-            } => self.stmt_for(scope, s, name, range, body, label),
+            } => {
+                self.clear_narrowings_a_loop_invalidates(scope, &[body]);
+                self.stmt_for(scope, s, name, range, body, label)
+            }
             Stmt::ForEach {
                 name,
                 iterable,
                 body,
                 label,
-            } => self.stmt_for_each(scope, s, name, iterable, body, label),
+            } => {
+                self.clear_narrowings_a_loop_invalidates(scope, &[body]);
+                self.stmt_for_each(scope, s, name, iterable, body, label)
+            }
             Stmt::Expr(e) => {
                 // A `kotlin.contracts.contract { … }` statement is erased metadata: it is never
                 // executed and produces no bytecode (kotlinc drops it). Its lambda body uses the
@@ -34679,7 +34670,7 @@ impl<'a> Checker<'a> {
         // Resolve `set` as a member, same-module extension, or library member. A single-index Map
         // store may resolve to `put`. Record the selected target so lowering does not choose again.
         let set_selected = self
-            .operator_call_ret(scope, array, at, "set", &set_args, &set_exprs, span)
+            .operator_call_ret(scope, array, at, "set", &set_args, &set_exprs, span, None)
             .map(|(_, call)| (SyntheticOperatorCall::Set, call));
         if self.indexed_operator_ambiguous {
             return;
@@ -34687,7 +34678,9 @@ impl<'a> Checker<'a> {
         let selected = set_selected.or_else(|| {
             single_index
                 .then(|| {
-                    self.operator_call_ret(scope, array, at, "put", &set_args, &set_exprs, span)
+                    self.operator_call_ret(
+                        scope, array, at, "put", &set_args, &set_exprs, span, None,
+                    )
                 })
                 .flatten()
                 .map(|(_, call)| (SyntheticOperatorCall::Put, call))
@@ -34762,13 +34755,10 @@ impl<'a> Checker<'a> {
                 label,
                 self.lambda_returns.active_labels()
             );
-            self.diags.error(
-                self.file.stmt_spans[s.0 as usize],
-                format!(
-                    "return label '{}' does not denote an enclosing lambda",
-                    label.as_deref().unwrap_or_default()
-                ),
-            );
+            // The reference compiler reports an unresolvable label at the `@` token and words it
+            // `unresolved label.`, for an unknown name and for a name whose lambda does not enclose
+            // the return alike.
+            self.report_unresolved_statement_label(s);
             return;
         };
         self.stmt_return_targets.insert(s, target);
@@ -34871,6 +34861,7 @@ impl<'a> Checker<'a> {
                 &[et],
                 &[range.end],
                 span,
+                None,
             ) {
                 Some((range_ty, range_call)) if range_ty != Ty::Error => {
                     match self.iterator_protocol_target(
@@ -45503,7 +45494,7 @@ pub(crate) fn member_extension_function_with(
 ) -> Result<Option<MemberExtensionFunctionCandidate>, ()> {
     let MemberExtensionFunctionCall {
         extension_receiver,
-        expected_result,
+        result_constraint,
         name,
         args,
         arg_tys,
@@ -45520,7 +45511,7 @@ pub(crate) fn member_extension_function_with(
             is_spread_arg,
             unit_coerced_lambda,
             score_candidate,
-            expected_result,
+            result_constraint,
             &shape,
             MemberExtensionCall {
                 extension_receiver,
@@ -45807,6 +45798,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         selected_body_declarations: None,
         selected_stable_body_declarations: None,
         signature_defaults_only: false,
+        fragment: SourceFragmentMode::Complete,
         expr_types: vec![Ty::Error; file.expr_arena.len()],
         #[cfg(feature = "trace")]
         expr_visits: vec![0; file.expr_arena.len()],
@@ -47045,7 +47037,7 @@ fn discover_anonymous_object_captures_at<S: CheckerSymbolEnvironment>(
         active_declarations,
         None,
         selected_stable_bodies,
-        false,
+        SourceFragmentMode::Complete,
         None,
         None,
     );
@@ -47286,7 +47278,7 @@ fn check_file_at_impl_mode(
         None,
         None,
         None,
-        false,
+        SourceFragmentMode::Complete,
         None,
         None,
     )
@@ -47305,7 +47297,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     active_declarations: Option<&crate::fir::ActiveSourceDeclarations>,
     selected_stable_roots: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
     selected_stable_bodies: Option<&std::collections::HashSet<crate::fir::DeclarationId>>,
-    signature_defaults_only: bool,
+    fragment: SourceFragmentMode,
     seeded_anonymous_captures: Option<&HashMap<DeclId, Vec<AnonymousObjectCapture>>>,
     streamed_cache: Option<&crate::fir::StreamedModuleProjectionCache>,
 ) -> TypeInfo {
@@ -47325,7 +47317,8 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     if let Some(captures) = seeded_anonymous_captures {
         c.discovered_anonymous_captures = captures.clone();
     }
-    c.signature_defaults_only = signature_defaults_only;
+    c.fragment = fragment;
+    c.signature_defaults_only = fragment.is_signature_defaults();
     if selected_stable_bodies.is_some_and(|declarations| {
         !declarations.is_empty()
             && declarations.iter().all(|declaration| {
@@ -47374,7 +47367,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     // same checked sidecar that will immediately hand this unit's declaration metadata to common
     // IR. Capture discovery and Pass-1 default preparation are scratch traversals whose results are
     // discarded; neither may become a second owner of the application.
-    if !capture_discovery && !signature_defaults_only {
+    if !capture_discovery && !fragment.is_signature_defaults() {
         let applications = file.file_annotations.clone();
         for (annotation, arguments) in applications {
             c.check_annotation_application(scope, &annotation, &arguments);
@@ -47384,7 +47377,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     // The streaming path already published contracts as stable, semantically resolved Pass-1
     // declaration facts. Only the legacy whole-file checker decodes them here; reparsing one Pass-2
     // body must neither rediscover a caller-visible signature fact nor patch the module table.
-    if !signature_defaults_only && resolved_index.is_none() {
+    if !fragment.is_signature_defaults() && resolved_index.is_none() {
         c.collect_source_contracts(scope, selected_body_declarations);
     }
 
@@ -47440,7 +47433,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         // Inline work selects the stable outer declaration root, while capture discovery selects
         // the exact nested classifier that owns the construction. During the scratch capture pass
         // those are the same bounded source region even when their declaration ranges differ.
-        let selected_stable_root = signature_defaults_only.then(|| {
+        let selected_stable_root = fragment.is_signature_defaults().then(|| {
             let stable = active_declarations.and_then(|active| active.file_declaration(file, d));
             crate::trace_compiler!(
                 "fir",
@@ -48240,7 +48233,7 @@ pub(crate) fn check_preinferred_inline_declarations_at_with_index(
             Some(active_declarations),
             None,
             Some(selected_stable_bodies),
-            false,
+            SourceFragmentMode::InlinePreparation,
             None,
             None,
         )
@@ -48274,7 +48267,7 @@ pub(crate) fn check_selected_declarations_in_pass_two(
             Some(active_declarations),
             None,
             Some(selected_stable_bodies),
-            false,
+            SourceFragmentMode::Complete,
             Some(anonymous_captures),
             Some(streamed_cache),
         )
@@ -48308,7 +48301,7 @@ pub(crate) fn check_signature_default_declarations_at_with_index(
             Some(active_declarations),
             Some(selected_stable_roots),
             Some(selected_stable_defaults),
-            true,
+            SourceFragmentMode::SignatureDefaults,
             None,
             None,
         )
@@ -48634,7 +48627,7 @@ struct CtorDelegationSite<'a> {
 /// lambda-planning path works from PARTIAL types, this one runs after they are settled.
 pub(crate) struct MemberExtensionFunctionCall<'a> {
     extension_receiver: Ty,
-    expected_result: Option<Ty>,
+    result_constraint: CallResultConstraint,
     name: &'a str,
     args: &'a [ExprId],
     arg_tys: &'a [Ty],
@@ -48809,7 +48802,13 @@ struct Checker<'a> {
     selected_stable_body_declarations: Option<std::collections::HashSet<crate::fir::DeclarationId>>,
     /// This selected Pass-1 check owns only parameter-default expressions. Finalized signatures
     /// already supply callable result types, so no ordinary body may be reopened for inference.
+    ///
+    /// Derived from [`Checker::fragment`] and never set independently: the MODE is what a pass
+    /// declares about itself, and this is the one restriction many sites ask about directly.
     signature_defaults_only: bool,
+    /// How much of the file this pass actually holds — see [`source_fragment`]. A pass that
+    /// declares nothing is [`SourceFragmentMode::Complete`], which is fail-closed.
+    fragment: SourceFragmentMode,
     /// Resolve a module declaration whose own type is still being determined, ON DEMAND.
     ///
     /// Set only when the checker is typing ONE declaration on behalf of the resolution engine
@@ -52549,9 +52548,10 @@ impl<'a> Checker<'a> {
         call_args: CallArgs<'_>,
         type_args: &[Ty],
         extension_receiver: Option<Ty>,
-        expected: Option<Ty>,
+        result_constraint: CallResultConstraint,
         overloads: Vec<crate::libraries::FunctionInfo>,
     ) -> Option<CallableCandidateSelection> {
+        let expected = result_constraint.expected();
         let CallArgs {
             call,
             args,
@@ -52622,6 +52622,7 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let signature = candidate.semantic_signature().into_owned();
+            let result_signature = result_constraint.signature(&signature);
             let candidate_receiver = extension_receiver.map(|receiver| {
                 if candidate.kind == crate::libraries::FnKind::Member {
                     crate::symbol_resolver::member_scope_receiver(receiver)
@@ -53043,7 +53044,7 @@ impl<'a> Checker<'a> {
             let expected_result_bindings = expected.and_then(|expected| {
                 crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
                     &source,
-                    &signature,
+                    &result_signature,
                     expected,
                     |actual, bound| self.receiver_is_assignable(actual, bound),
                 )
@@ -53053,7 +53054,7 @@ impl<'a> Checker<'a> {
                 if let Some(result_bindings) = expected_result_bindings.as_ref() {
                     let unprojected = crate::symbol_resolver::unprojected_expected_result_formals(
                         &source,
-                        &signature,
+                        &result_signature,
                         expected.expect("bindings require an expected result"),
                         result_bindings,
                     );
@@ -53213,7 +53214,7 @@ impl<'a> Checker<'a> {
                 {
                     crate::symbol_resolver::widen_invariant_expected_bindings(
                         &source,
-                        &signature,
+                        &result_signature,
                         type_args,
                         &mut bindings,
                         &result_bindings,
@@ -53226,7 +53227,7 @@ impl<'a> Checker<'a> {
                     // contextual result, and never over fixed receiver/context evidence.
                     let fixed = crate::symbol_resolver::invariant_expected_result_formals(
                         &source,
-                        &signature,
+                        &result_signature,
                         expected,
                         &result_bindings,
                     );
@@ -53368,7 +53369,7 @@ impl<'a> Checker<'a> {
                 .collect::<Vec<_>>();
             if !crate::symbol_resolver::apply_only_input_type_bindings(
                 &source,
-                &signature,
+                &result_signature,
                 &candidate.call_sig.only_input_type_formals,
                 type_args,
                 candidate_receiver,
@@ -53385,7 +53386,7 @@ impl<'a> Checker<'a> {
                 continue;
             }
             if !crate::symbol_resolver::generic_bindings_admit_expected_return_intersection(
-                &signature,
+                &result_signature,
                 &bindings,
                 expected_return_intersection_bindings.as_ref(),
                 |actual, bound| {
@@ -53544,7 +53545,7 @@ impl<'a> Checker<'a> {
                     inferred_from_sam,
                 );
                 if !crate::symbol_resolver::generic_bindings_admit_expected_return_intersection(
-                    &signature,
+                    &result_signature,
                     &bindings,
                     expected_return_intersection_bindings.as_ref(),
                     |actual, bound| {
@@ -53699,7 +53700,8 @@ impl<'a> Checker<'a> {
             // the expected-result constraint approximates the expression to its consumer type. Keep
             // the bottom binding in `params` for applicability, but expose the contextual result just
             // as Kotlin's constraint system does (`Context<out T>` -> `Context<in Nothing>`, result T).
-            let specialized_ret = expected
+            let specialized_ret = result_constraint
+                .selected_result_approximation(signature.ret)
                 .filter(|expected| {
                     inferred_ret == Ty::Nothing
                         && matches!(signature.ret.non_null(), Ty::TyParam(..))
@@ -54369,83 +54371,6 @@ impl<'a> Checker<'a> {
         )
     }
 
-    fn merge_mapped_generic_argument_bindings(
-        &self,
-        overload: &crate::libraries::FunctionInfo,
-        args_and_partial: (&[ExprId], &[Option<Ty>]),
-        argument_map: &[usize],
-        named_whole_array_varargs: &[bool],
-        explicit_type_arguments: &[Ty],
-        bindings: &mut crate::symbol_resolver::GSigBinds,
-    ) {
-        let (args, arg_tys) = args_and_partial;
-        let semantic = overload.semantic_signature();
-        let source = self.fed_source();
-        let inferred = crate::symbol_resolver::infer_generic_call_bindings_from_symbols(
-            &source,
-            &semantic,
-            argument_map
-                .iter()
-                .copied()
-                .zip(arg_tys)
-                .enumerate()
-                .filter_map(|(argument, (parameter, actual))| {
-                    if self
-                        .unbound_contextual_result_signature(*args.get(argument)?)
-                        .is_some()
-                    {
-                        return None;
-                    }
-                    let actual = (*actual)?;
-                    let whole_array = named_whole_array_varargs
-                        .get(argument)
-                        .copied()
-                        .unwrap_or(false)
-                        || self.file.is_spread_arg(args[argument]);
-                    Some((parameter, actual, whole_array))
-                }),
-            overload.call_sig.vararg_index,
-        );
-        crate::symbol_resolver::merge_generic_bindings(
-            &semantic,
-            explicit_type_arguments,
-            bindings,
-            inferred,
-        );
-    }
-
-    fn mapped_generic_call_bindings(
-        &self,
-        overload: &crate::libraries::FunctionInfo,
-        receiver: Option<Ty>,
-        args_and_partial: (&[ExprId], &[Option<Ty>]),
-        argument_map: &[usize],
-        named_whole_array_varargs: &[bool],
-        type_args: &[Ty],
-    ) -> crate::symbol_resolver::GSigBinds {
-        let (args, arg_tys) = args_and_partial;
-        let semantic = overload.semantic_signature();
-        let mut bindings = crate::symbol_resolver::seeded_gsig_binds(&semantic, type_args);
-        let source = self.fed_source();
-        if let (Some(receiver), Some(receiver_shape)) = (receiver, semantic.receiver) {
-            crate::symbol_resolver::unify_ty_from_symbols(
-                &source,
-                receiver_shape,
-                receiver,
-                &mut bindings,
-            );
-        }
-        self.merge_mapped_generic_argument_bindings(
-            overload,
-            (args, arg_tys),
-            argument_map,
-            named_whole_array_varargs,
-            type_args,
-            &mut bindings,
-        );
-        bindings
-    }
-
     fn lambda_overload_partially_applicable(
         &self,
         overload: &crate::libraries::FunctionInfo,
@@ -54677,12 +54602,13 @@ impl<'a> Checker<'a> {
         args_and_partial: (&[ExprId], &[Option<Ty>]),
         mapped_arguments: (&[usize], &[bool]),
         type_args: &[Ty],
-        expected_result: Option<Ty>,
+        result_constraint: CallResultConstraint,
     ) -> Option<crate::symbol_resolver::LambdaCallShape> {
         let (args, arg_tys) = args_and_partial;
         let (argument_map, whole_array_varargs) = mapped_arguments;
         let mut shape = crate::symbol_resolver::LambdaCallShape::default();
         let semantic = overload.semantic_signature();
+        let result_semantic = result_constraint.signature(&semantic);
         let argument_parameters = argument_map
             .iter()
             .enumerate()
@@ -54787,9 +54713,9 @@ impl<'a> Checker<'a> {
             !semantic.formals.iter().any(|declared| declared == formal)
                 || fixed_expectation_formals.contains(formal)
         });
-        if let Some(expected) = expected_result {
+        if let Some(expected) = result_constraint.expected() {
             for (formal, actual) in self
-                .contextual_lambda_result_bindings(&semantic, expected)
+                .contextual_lambda_result_bindings(&result_semantic, expected)
                 .ok()?
             {
                 if !fixed_expectation_formals.contains(&formal) {
@@ -54802,6 +54728,7 @@ impl<'a> Checker<'a> {
         let fixed_before_argument_merge = expectation_binds.clone();
         self.merge_mapped_generic_argument_bindings(
             overload,
+            receiver,
             (args, arg_tys),
             argument_map,
             whole_array_varargs,
@@ -55267,70 +55194,11 @@ impl<'a> Checker<'a> {
                     &named_whole_array_varargs(&argument_map, arg_names, &o.call_sig),
                 ),
                 type_args,
-                expected_result,
+                CallResultConstraint::direct(expected_result),
             ) else {
                 continue;
             };
             return Some(shape);
-        }
-        None
-    }
-
-    /// Lambda shape for a `Type(args) { … }` factory call answered by a semantic companion's
-    /// `operator fun invoke`. The companion's callable metadata enters the same mapping,
-    /// applicability, binding, and shape operations as every other provider overload.
-    fn companion_invoke_lambda_shape(
-        &self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-        args_and_partial: (&[ExprId], &[Option<Ty>]),
-        arg_names: Option<&[Option<String>]>,
-        trailing_lambda: bool,
-        type_args: &[Ty],
-    ) -> Option<crate::symbol_resolver::LambdaCallShape> {
-        let (args, arg_tys) = args_and_partial;
-        let overloads = self.companion_invoke_overloads(scope, name);
-        for overload in &overloads {
-            if overload.is_extension() {
-                continue;
-            }
-            let Some(argument_map) = call_argument_parameter_indices(
-                arg_tys.len(),
-                overload.semantic_params().len(),
-                arg_names,
-                trailing_lambda,
-                &overload.call_sig,
-            ) else {
-                continue;
-            };
-            if !type_args.is_empty()
-                && overload.semantic_signature().formals.len() != type_args.len()
-            {
-                continue;
-            }
-            if !self.lambda_overload_partially_applicable(
-                overload,
-                None,
-                (args, arg_tys),
-                &argument_map,
-                &named_whole_array_varargs(&argument_map, arg_names, &overload.call_sig),
-                type_args,
-            ) {
-                continue;
-            }
-            if let Some(shape) = self.lambda_shape_for_overload(
-                overload,
-                None,
-                (args, arg_tys),
-                (
-                    &argument_map,
-                    &named_whole_array_varargs(&argument_map, arg_names, &overload.call_sig),
-                ),
-                type_args,
-                None,
-            ) {
-                return Some(shape);
-            }
         }
         None
     }
@@ -55428,7 +55296,7 @@ impl<'a> Checker<'a> {
                     &named_whole_array_varargs(&argument_map, arg_names, &o.call_sig),
                 ),
                 type_args,
-                expected_result,
+                CallResultConstraint::direct(expected_result),
             ) {
                 crate::trace_compiler!(
                     "lambda_shape",
@@ -57052,353 +56920,6 @@ impl<'a> Checker<'a> {
     /// `None` when no such method of matching arity exists (the caller then declines). Used by the
     /// reference-range `in` desugaring (`rangeTo` then `contains`), which records the returned calls only
     /// after the whole desugaring is valid.
-    fn operator_call_ret(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        site: ExprId,
-        receiver: Ty,
-        name: &str,
-        arg_tys: &[Ty],
-        arg_exprs: &[ExprId],
-        span: Span,
-    ) -> Option<(Ty, ResolvedCall)> {
-        // `downTo` and the legacy `until` range spellings are represented by RangeKind in the AST,
-        // but their Kotlin declarations are `infix`, not `operator`. They still go through the same
-        // semantic callable selection and checked-FIR handoff as the operator range conventions.
-        let accepts_range_infix = matches!(name, "downTo" | "until");
-        let has_convention_modifier =
-            |operator: bool, infix: bool| operator || (accepts_range_infix && infix);
-        if name == "set" {
-            self.indexed_operator_ambiguous = false;
-            let arg_kinds = self.call_arg_kinds(scope, arg_exprs);
-            let (mut functions, properties) =
-                self.stable_receiver_callables(receiver, name).into_parts();
-            let resolver = self.resolver();
-            functions.overloads.retain(|candidate| {
-                candidate.flags.operator
-                    && (candidate.kind == crate::libraries::FnKind::Member
-                        || self.source_callable_visible(candidate))
-                    && (candidate.kind != crate::libraries::FnKind::Member
-                        || candidate.context_count == 0)
-            });
-            let callables = crate::libraries::Callables::from_parts(functions, properties);
-            let indexed = resolver.select_receiver_indexed_set_function_with_params(
-                receiver,
-                name,
-                &arg_kinds,
-                &[],
-                &callables,
-            );
-            drop(resolver);
-            let (selected, params, ret) = match indexed {
-                crate::symbol_resolver::CandidateSelection::Selected(selected) => selected,
-                crate::symbol_resolver::CandidateSelection::Ambiguous => {
-                    self.indexed_operator_ambiguous = true;
-                    self.diags.error(
-                        span,
-                        "overload resolution ambiguity for operator 'set'".to_string(),
-                    );
-                    return None;
-                }
-                crate::symbol_resolver::CandidateSelection::None => {
-                    return match self.member_extension_operator_call(
-                        scope, site, receiver, name, arg_exprs, arg_tys, span,
-                    ) {
-                        Ok(selected) => selected,
-                        Err(()) => {
-                            self.indexed_operator_ambiguous = true;
-                            self.diags.error(
-                                span,
-                                "overload resolution ambiguity for operator 'set'".to_string(),
-                            );
-                            None
-                        }
-                    };
-                }
-            };
-            let vararg = selected
-                .call_sig
-                .vararg_index
-                .and_then(|index| index.checked_sub(selected.context_count));
-            if !self
-                .expect_indexed_operator_params(scope, &params, vararg, true, arg_exprs, arg_tys)
-            {
-                return None;
-            }
-            let semantic = selected.semantic_signature();
-            let context_count = selected.context_count.min(semantic.params.len());
-            let context_args = if context_count == 0 {
-                Vec::new()
-            } else if let Some(context) =
-                self.select_context_arguments(scope, &semantic.params[..context_count])
-            {
-                context
-            } else {
-                self.diags.error(
-                    span,
-                    "no implicit value is available for the context parameters".to_string(),
-                );
-                return None;
-            };
-            if selected.kind == crate::libraries::FnKind::Member
-                && !self.member_accessible(selected.visibility, selected.callable.owner)
-            {
-                self.reject_if_inaccessible(
-                    selected.visibility,
-                    name,
-                    selected.callable.owner,
-                    span,
-                );
-                return None;
-            }
-            let target = if selected.kind == crate::libraries::FnKind::Member {
-                let mut member = selected.member_with_return(ret);
-                member.params = params;
-                ResolvedCall::Member(crate::symbol_resolver::ResolvedMember {
-                    receiver,
-                    physical_params: selected.callable.physical_params.clone(),
-                    context_args: context_args.into_iter().map(Some).collect(),
-                    ret,
-                    member,
-                    projected_return_hazard: selected.projected_return_hazard,
-                    suspend: selected.flags.suspend,
-                    origin: selected.callable.origin.clone(),
-                })
-            } else {
-                let mut callable = selected.callable.clone();
-                callable.ret = ret;
-                ResolvedCall::source_extension(
-                    callable,
-                    receiver,
-                    params,
-                    context_args,
-                    ret,
-                    selected.source_key,
-                    selected.stable_declaration,
-                    vararg.is_some(),
-                    vararg,
-                    selected
-                        .default_values
-                        .get(selected.context_count..)
-                        .unwrap_or_default()
-                        .to_vec(),
-                )
-            };
-            return Some((ret, target));
-        }
-        let arg_kinds = self.call_arg_kinds(scope, arg_exprs);
-        crate::trace_compiler!(
-            "resolve",
-            "operator extension inventory name={name} receiver={receiver:?} candidates={:?}",
-            self.stable_receiver_callables(receiver, name)
-                .functions()
-                .iter()
-                .map(|candidate| (
-                    candidate.flags.operator,
-                    candidate.semantic_receiver(),
-                    candidate.semantic_params().to_vec(),
-                    candidate.applied_params().to_vec(),
-                ))
-                .collect::<Vec<_>>()
-        );
-        let (mut functions, properties) =
-            self.stable_receiver_callables(receiver, name).into_parts();
-        functions.overloads.retain(|candidate| {
-            has_convention_modifier(candidate.flags.operator, candidate.flags.infix)
-                && (candidate.kind == crate::libraries::FnKind::Member
-                    || self.source_callable_visible(candidate))
-                && (candidate.kind != crate::libraries::FnKind::Member
-                    || candidate.context_count == 0)
-        });
-        let mut members = functions.clone();
-        members
-            .overloads
-            .retain(|candidate| candidate.kind == crate::libraries::FnKind::Member);
-        let members = crate::libraries::Callables::Functions(members);
-        let callables = crate::libraries::Callables::from_parts(functions, properties);
-        let member_applicable = {
-            !matches!(
-                self.resolver()
-                    .select_receiver_function_with_params_tracking(
-                        receiver,
-                        name,
-                        &arg_kinds,
-                        &[],
-                        &members,
-                    ),
-                crate::symbol_resolver::CandidateSelection::None
-            )
-        };
-        if !member_applicable {
-            match self.select_local_extension_candidate(
-                scope, receiver, name, arg_exprs, arg_tys, None, false,
-            ) {
-                LocalExtensionSelection::Selected(selected)
-                    if has_convention_modifier(
-                        selected.signature.is_operator(),
-                        selected.signature.is_infix(),
-                    ) =>
-                {
-                    let context_count = selected
-                        .signature
-                        .context_count
-                        .min(selected.signature.params.len());
-                    self.expect_call_args(
-                        scope,
-                        &selected.signature.params[context_count..],
-                        selected.signature.vararg(),
-                        arg_exprs,
-                        arg_tys,
-                    );
-                    let ret = selected.signature.ret;
-                    return Some((
-                        ret,
-                        ResolvedCall::LocalFunction(Box::new(ResolvedLocalFunctionCall {
-                            stmt_id: selected.statement,
-                            sig: selected.signature,
-                            provided_arg_count: arg_exprs.len(),
-                            context_args: selected.context_args,
-                            receiver: None,
-                        })),
-                    ));
-                }
-                LocalExtensionSelection::Selected(_)
-                | LocalExtensionSelection::Ambiguous
-                | LocalExtensionSelection::None => {}
-            }
-            match self.member_extension_operator_call(
-                scope, site, receiver, name, arg_exprs, arg_tys, span,
-            ) {
-                Ok(Some(selected)) => return Some(selected),
-                Ok(None) => {}
-                Err(()) => {
-                    self.diags.error(
-                        span,
-                        format!("overload resolution ambiguity for member '{name}'"),
-                    );
-                    return None;
-                }
-            }
-        }
-        let resolver = self.resolver();
-        let (selected, params, ret) = match resolver.select_receiver_function_with_params_tracking(
-            receiver,
-            name,
-            &arg_kinds,
-            &[],
-            &callables,
-        ) {
-            crate::symbol_resolver::CandidateSelection::Selected(selected) => selected,
-            crate::symbol_resolver::CandidateSelection::None
-            | crate::symbol_resolver::CandidateSelection::Ambiguous => return None,
-        };
-        let semantic = selected.semantic_signature();
-        let context_count = selected.context_count.min(semantic.params.len());
-        let context_args = if context_count == 0 {
-            Vec::new()
-        } else if let Some(context) =
-            self.select_context_arguments(scope, &semantic.params[..context_count])
-        {
-            context
-        } else {
-            self.diags.error(
-                span,
-                "no implicit value is available for the context parameters".to_string(),
-            );
-            return None;
-        };
-        if selected.kind == crate::libraries::FnKind::Member
-            && !self.member_accessible(selected.visibility, selected.callable.owner)
-        {
-            self.reject_if_inaccessible(selected.visibility, name, selected.callable.owner, span);
-            return None;
-        }
-        self.expect_call_args(scope, &params, false, arg_exprs, arg_tys);
-        let target = if selected.kind == crate::libraries::FnKind::Member {
-            let mut member = selected.member_with_return(ret);
-            member.params = params;
-            ResolvedCall::Member(crate::symbol_resolver::ResolvedMember {
-                receiver,
-                physical_params: selected.callable.physical_params.clone(),
-                context_args: Vec::new(),
-                ret,
-                member,
-                projected_return_hazard: selected.projected_return_hazard,
-                suspend: selected.flags.suspend,
-                origin: selected.callable.origin.clone(),
-            })
-        } else {
-            let vararg = selected
-                .call_sig
-                .vararg_index
-                .and_then(|index| index.checked_sub(selected.context_count));
-            let mut callable = selected.callable.clone();
-            callable.ret = ret;
-            ResolvedCall::source_extension(
-                callable,
-                receiver,
-                params,
-                context_args,
-                ret,
-                selected.source_key,
-                selected.stable_declaration,
-                vararg.is_some(),
-                vararg,
-                selected
-                    .default_values
-                    .get(selected.context_count..)
-                    .unwrap_or_default()
-                    .to_vec(),
-            )
-        };
-        Some((ret, target))
-    }
-
-    /// Parameter types of the one applicable operator overload, before any postponed argument body is
-    /// checked. Members and in-scope extensions are selected from the same federated callable set.
-    fn selected_operator_params(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        receiver: Ty,
-        name: &str,
-        args: &[ExprId],
-    ) -> Option<Vec<Ty>> {
-        let argument_kinds = self.call_arg_kinds(scope, args);
-        let (mut functions, _) = self.stable_receiver_callables(receiver, name).into_parts();
-        let resolver = self.resolver();
-        functions.overloads.retain(|candidate| {
-            candidate.flags.operator
-                && self.source_callable_visible(candidate)
-                && (candidate.kind != crate::libraries::FnKind::Member
-                    || candidate.context_count == 0)
-        });
-        let callables = crate::libraries::Callables::Functions(functions);
-        if name == "set" {
-            match resolver.select_receiver_indexed_set_function_with_params(
-                receiver,
-                name,
-                &argument_kinds,
-                &[],
-                &callables,
-            ) {
-                crate::symbol_resolver::CandidateSelection::Selected((_, params, _)) => {
-                    Some(params)
-                }
-                crate::symbol_resolver::CandidateSelection::None
-                | crate::symbol_resolver::CandidateSelection::Ambiguous => None,
-            }
-        } else {
-            resolver
-                .select_receiver_function_with_params(
-                    receiver,
-                    name,
-                    &argument_kinds,
-                    &[],
-                    &callables,
-                )
-                .map(|(_, params)| params)
-        }
-    }
     /// Resolve each context-parameter type to one semantic scope value. The implicit-receiver tower is
     /// searched nearest-first, followed by lexical bindings. The returned identities are the complete
     /// checker/lowerer handoff; lowering does not repeat resolution.
@@ -59297,397 +58818,6 @@ impl<'a> Checker<'a> {
             format!("'operator' modifier is required on '{function}' defined in '{owner_name}'."),
         );
         true
-    }
-
-    /// Select the Kotlin invoke-operator convention for `receiver(args)`. One entry point covers both
-    /// a function-value receiver (`Ty::Fun`) and a non-function receiver with a member `operator fun
-    /// invoke`, recording a single [`ExprLowering::Invoke`] and returning the call's result type.
-    /// Candidate discovery and overload selection remain explicit in the result: callers that are
-    /// still walking a callable tower can retain a rejected level without resolving it again.
-    fn record_invoke(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call_args: CallArgs<'_>,
-        receiver: ExprId,
-        receiver_ty: Ty,
-        span: Span,
-    ) -> InvokeResolution {
-        let CallArgs {
-            call,
-            args,
-            arg_tys,
-        } = call_args;
-        let semantic_receiver_ty = self
-            .expression_function_type(scope, receiver, receiver_ty)
-            .unwrap_or(receiver_ty);
-        crate::trace_compiler!(
-            "resolve",
-            "invoke selection call={call:?} receiver={receiver:?} nominal={receiver_ty:?} semantic={semantic_receiver_ty:?} args={arg_tys:?}",
-        );
-        let (params, ret, kind, arguments_already_mapped) = match semantic_receiver_ty {
-            Ty::Fun(sig) => {
-                let context_count = sig.context_count.min(sig.params.len());
-                // Context-function values support both invocation forms: callers may pass the
-                // context slots explicitly (`f(context, value)`), or omit the leading slots and let
-                // ordinary context lookup supply them (`with(context) { f(value) }`).
-                let explicit_context = context_count > 0 && arg_tys.len() == sig.params.len();
-                if context_count > 0 && !explicit_context {
-                    let Some(sources) =
-                        self.select_context_arguments(scope, &sig.params[..context_count])
-                    else {
-                        self.diags.error(
-                            span,
-                            "no implicit value is available for the context parameters".to_string(),
-                        );
-                        return InvokeResolution::Selected(Ty::Error);
-                    };
-                    self.context_args.insert(call, sources);
-                }
-                (
-                    if explicit_context {
-                        sig.params.clone()
-                    } else {
-                        sig.params[context_count..].to_vec()
-                    },
-                    sig.ret,
-                    InvokeKind::Function {
-                        context_params: if explicit_context {
-                            Vec::new()
-                        } else {
-                            sig.params[..context_count].to_vec()
-                        },
-                        ret: sig.ret,
-                        suspend: sig.suspend,
-                    },
-                    false,
-                )
-            }
-            _ => {
-                let explicit_type_args = self.resolved_explicit_type_args(scope, call);
-                let invoke_candidates = self.invoke_operator_candidates(receiver_ty);
-                let overloads = invoke_candidates
-                    .iter()
-                    .filter(|candidate| candidate.kind == crate::libraries::FnKind::Member)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let member_selection = self.select_callable_candidate(
-                    scope,
-                    CallArgs {
-                        call,
-                        args,
-                        arg_tys,
-                    },
-                    &explicit_type_args,
-                    None,
-                    None,
-                    overloads.clone(),
-                );
-                if let Some(CallableCandidateSelection::Ambiguous(candidates)) = &member_selection {
-                    return InvokeResolution::Ambiguous(candidates.clone());
-                }
-                if let Some(selected) =
-                    member_selection.and_then(CallableCandidateSelection::available)
-                {
-                    // Generic invoke selection owns the same substitution handoff as every other
-                    // generic call. Checked FIR needs these bindings both to specialize the stable
-                    // target signature and to prevent a callee-owned `T` from leaking into a
-                    // non-generic caller (`invoke<T>(() -> T)` with a `Nothing` lambda).
-                    if let Some(signature) = selected.generic_sig.as_ref() {
-                        let resolved = signature
-                            .formals
-                            .iter()
-                            .map(|formal| selected.bindings.get(formal).copied())
-                            .collect::<Vec<_>>();
-                        if !resolved.is_empty() && resolved.iter().all(Option::is_some) {
-                            self.resolved_call_type_args.insert(call, resolved);
-                        }
-                    }
-                    let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
-                    let Some(shape) = self.contextual_call_shape(
-                        scope,
-                        &selected.applied_params(),
-                        &selected.call_sig,
-                        selected.context_count,
-                        argument_names,
-                    ) else {
-                        return InvokeResolution::Inapplicable(overloads);
-                    };
-                    if !self.expect_selected_call_args(
-                        scope,
-                        CallArgs {
-                            call,
-                            args,
-                            arg_tys,
-                        },
-                        &shape.params,
-                        &shape.call_sig,
-                        None,
-                    ) {
-                        return InvokeResolution::Selected(Ty::Error);
-                    }
-                    let context_sources = shape
-                        .context_sources
-                        .iter()
-                        .flatten()
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if !context_sources.is_empty() {
-                        self.context_args.insert(call, context_sources.clone());
-                        self.mark_context_extension_receiver_used(scope, call, &context_sources);
-                    }
-                    let ret = selected.callable.ret;
-                    let origin = selected.callable.origin.clone();
-                    let physical_params = selected.callable.physical_params.clone();
-                    let member = selected.member_with_return(ret);
-                    let access_probe = crate::symbol_resolver::ResolvedMember {
-                        receiver: receiver_ty,
-                        member: member.clone(),
-                        physical_params: physical_params.clone(),
-                        context_args: shape.context_sources.clone(),
-                        ret,
-                        projected_return_hazard: selected.projected_return_hazard,
-                        suspend: selected.flags.suspend,
-                        origin: origin.clone(),
-                    };
-                    let owner = member
-                        .owner
-                        .expect("a selected member invoke has a declaring classifier");
-                    if !self.selected_member_accessible(&access_probe, owner) {
-                        self.reject_if_inaccessible(
-                            member.visibility,
-                            &member.name,
-                            owner,
-                            self.call_callee_name_span(call),
-                        );
-                        return InvokeResolution::Selected(Ty::Error);
-                    }
-                    let defaults = selected.default_values.clone();
-                    let target = ResolvedCall::Member(access_probe);
-                    (
-                        shape.params,
-                        ret,
-                        InvokeKind::Operator {
-                            receiver_ty,
-                            target: Box::new(target),
-                            param_default_values: defaults,
-                        },
-                        true,
-                    )
-                } else if let Some(ret) = self.check_member_extension_function_call_mode(
-                    scope,
-                    CallArgs {
-                        call,
-                        args,
-                        arg_tys,
-                    },
-                    receiver_ty,
-                    CALLABLE_INVOKE_OPERATOR,
-                    MemberExtensionSelection::Operators,
-                    None,
-                ) {
-                    // A member EXTENSION `operator fun Recv.invoke(...)` on an implicit receiver
-                    // (`"case" { … }` inside a receiver-DSL lambda). Keep the selected member-
-                    // extension target and publish the same invoke handoff every other invoke
-                    // convention uses; lowering must not rediscover this call from its name shape.
-                    let target = self
-                        .resolved_calls
-                        .get(&call)
-                        .cloned()
-                        .expect("selected member-extension invoke target was recorded");
-                    let params = match &target {
-                        ResolvedCall::MemberExtension {
-                            params,
-                            context_args,
-                            ..
-                        } => params
-                            .get(context_args.len()..)
-                            .unwrap_or_default()
-                            .to_vec(),
-                        _ => unreachable!("member-extension invoke recorded a different target"),
-                    };
-                    (
-                        params,
-                        ret,
-                        InvokeKind::Operator {
-                            receiver_ty,
-                            target: Box::new(target),
-                            param_default_values: Vec::new(),
-                        },
-                        true,
-                    )
-                } else {
-                    let extensions = invoke_candidates
-                        .into_iter()
-                        // The call convention is semantic: a same-named non-operator extension remains
-                        // callable explicitly as `receiver.invoke(...)`, but never as `receiver(...)`.
-                        // `FnFlags::operator` is populated uniformly from source and classpath metadata.
-                        // Keep compatible supertypes too: `operator fun Interface.invoke()` applies
-                        // to a value whose nominal type implements `Interface`. Receiver rank still
-                        // participates in ordinary overload selection and chooses the nearest
-                        // applicable extension; requiring rank zero incorrectly meant exact-type only.
-                        .filter(|o| o.is_extension())
-                        .collect::<Vec<_>>();
-                    let extension_selection = self.select_callable_candidate(
-                        scope,
-                        CallArgs {
-                            call,
-                            args,
-                            arg_tys,
-                        },
-                        &[],
-                        Some(receiver_ty),
-                        None,
-                        extensions.clone(),
-                    );
-                    if let Some(CallableCandidateSelection::Ambiguous(candidates)) =
-                        &extension_selection
-                    {
-                        return InvokeResolution::Ambiguous(candidates.clone());
-                    }
-                    let Some(selected) =
-                        extension_selection.and_then(CallableCandidateSelection::available)
-                    else {
-                        return if overloads.is_empty() {
-                            if extensions.is_empty() {
-                                InvokeResolution::Absent
-                            } else {
-                                InvokeResolution::Inapplicable(extensions)
-                            }
-                        } else {
-                            let mut rejected = overloads;
-                            rejected.extend(extensions);
-                            InvokeResolution::Inapplicable(rejected)
-                        };
-                    };
-                    let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
-                    let Some(shape) = self.contextual_call_shape(
-                        scope,
-                        &selected.applied_params(),
-                        &selected.call_sig,
-                        selected.context_count,
-                        argument_names,
-                    ) else {
-                        return InvokeResolution::Inapplicable(extensions);
-                    };
-                    if !self.expect_selected_call_args(
-                        scope,
-                        CallArgs {
-                            call,
-                            args,
-                            arg_tys,
-                        },
-                        &shape.params,
-                        &shape.call_sig,
-                        None,
-                    ) {
-                        return InvokeResolution::Selected(Ty::Error);
-                    }
-                    let context_args = shape
-                        .context_sources
-                        .iter()
-                        .flatten()
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if !context_args.is_empty() {
-                        self.context_args.insert(call, context_args.clone());
-                        self.mark_context_extension_receiver_used(scope, call, &context_args);
-                    }
-                    let ret = selected.callable.ret;
-                    let target =
-                        if selected.stable_declaration.is_some() || selected.source_key.is_some() {
-                            self.resolved_source_extension_call(
-                                &selected,
-                                receiver_ty,
-                                ret,
-                                context_args,
-                                selected.default_values.clone(),
-                            )
-                        } else {
-                            ResolvedCall::library_extension(selected.callable.clone())
-                        };
-                    (
-                        shape.params,
-                        ret,
-                        InvokeKind::Operator {
-                            receiver_ty,
-                            target: Box::new(target),
-                            param_default_values: selected.default_values.clone(),
-                        },
-                        true,
-                    )
-                }
-            }
-        };
-        // `expect_selected_call_args` has already validated and recorded a selected callable's
-        // named/default/vararg mapping. Function values still use exact positional validation.
-        if !arguments_already_mapped && params.len() != arg_tys.len() {
-            self.diags.error(
-                span,
-                format!(
-                    "invoke operator expects {} args, got {}",
-                    params.len(),
-                    arg_tys.len()
-                ),
-            );
-            return InvokeResolution::Selected(ret);
-        }
-        if !arguments_already_mapped {
-            let positional_signature = CallSig::default();
-            let implicit_lambda_label =
-                call_implicit_lambda_label(self.file, call).map(str::to_string);
-            for (i, (p, a)) in params.iter().zip(arg_tys).enumerate() {
-                let actual = self.selected_argument_type(
-                    scope,
-                    args[i],
-                    *a,
-                    *p,
-                    &positional_signature,
-                    i,
-                    implicit_lambda_label.as_deref(),
-                );
-                self.expect_call_arg(scope, *p, args[i], actual);
-            }
-        }
-        self.expr_lowers.insert(
-            call,
-            ExprLowering::Invoke {
-                receiver,
-                params,
-                kind,
-            },
-        );
-        InvokeResolution::Selected(ret)
-    }
-
-    fn record_invoke_or_report(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call_args: CallArgs<'_>,
-        receiver: ExprId,
-        receiver_ty: Ty,
-        span: Span,
-    ) -> Option<Ty> {
-        match self.record_invoke(scope, call_args, receiver, receiver_ty, span) {
-            InvokeResolution::Selected(ret) => Some(ret),
-            InvokeResolution::Ambiguous(candidates) => {
-                self.diags.error(
-                    span,
-                    self.ambiguous_member_candidates_message(CALLABLE_INVOKE_OPERATOR, &candidates),
-                );
-                Some(Ty::Error)
-            }
-            InvokeResolution::Inapplicable(candidates) => {
-                self.diags.error(
-                    span,
-                    self.inapplicable_member_candidates_message(
-                        CALLABLE_INVOKE_OPERATOR,
-                        &candidates,
-                    ),
-                );
-                Some(Ty::Error)
-            }
-            InvokeResolution::Absent => None,
-        }
     }
 
     fn invoke_operator_candidates(&self, receiver_ty: Ty) -> Vec<crate::libraries::FunctionInfo> {
@@ -66131,87 +65261,6 @@ impl<'a> Checker<'a> {
             })
     }
 
-    fn check_annotation_application(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        annotation: &AnnotationRef,
-        arguments: &[ExprId],
-    ) {
-        if arguments
-            .iter()
-            .any(|argument| self.file.expr_span(*argument).is_none())
-        {
-            assert!(
-                self.signature_defaults_only,
-                "only Pass-1 default checking may observe released annotation syntax"
-            );
-            // Annotation applications were resolved and validated during header collection.
-            // Default checking re-enters this declaration solely to recreate its lexical type and
-            // value scopes; unrelated annotation expressions are outside the retained fragment.
-            return;
-        }
-        let legacy_prebound = self
-            .resolved_index
-            .is_none()
-            .then(|| {
-                self.module
-                    .legacy_symbols()?
-                    .resolved_annotation(self.file_index, annotation)
-            })
-            .flatten();
-        let internal = if let Some(internal) = legacy_prebound {
-            internal
-        } else {
-            // Pass 1 binds declaration-header annotations only. A local declaration first appears
-            // while its active Pass-2 body is checked, where the real lexical type scope is finally
-            // available; resolve it here instead of requiring a whole-body annotation inventory
-            // traversal during signature collection.
-            let reference = TypeRef {
-                name: annotation.name.clone(),
-                flags: TrFlags::default(),
-                arg: None,
-                targs: Vec::new(),
-                span: annotation.span,
-                fun_params: Vec::new(),
-                fun_context_count: 0,
-            };
-            let ty = self.type_ref_ty_reported(scope, &reference);
-            let Some(internal) = ty.kotlin_class_internal() else {
-                return;
-            };
-            internal
-        };
-        if !self.file.is_common
-            && self.is_optional_expectation_classifier(internal)
-            && !self.suppresses_diagnostic("OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE")
-        {
-            self.diags.error(
-                annotation.span,
-                format!("unresolved reference '{}'.", annotation.name),
-            );
-            return;
-        }
-        let Some(shape) = self.annotation_shape(internal) else {
-            self.diags.error(
-                annotation.span,
-                "resolved annotation has no semantic element declaration".to_string(),
-            );
-            return;
-        };
-        if !self.check_annotation_arguments(scope, annotation.span, &shape, arguments, None) {
-            return;
-        }
-        let Some(applied) = self.fold_annotation_application(internal, arguments) else {
-            self.diags.error(
-                annotation.span,
-                "annotation argument is not a supported compile-time constant".to_string(),
-            );
-            return;
-        };
-        self.applied_annotations
-            .insert((annotation.span.lo, annotation.span.hi), applied);
-    }
-
     /// Check annotation arguments for one declaration's type parameters after signature collection
     /// has committed every annotation occurrence to its qualified classifier identity. An absent
     /// identity is already an unresolved-reference diagnostic from that authoritative binding pass.
@@ -67830,7 +66879,7 @@ impl<'a> Checker<'a> {
                 ),
             );
         }
-        tailrec_declarations::check_members(&mut self.diags, cl);
+        tailrec_declarations::check_members(self.diags, cl);
         let current_owner = self.active_classifier_internal(d, cl);
         // A retained default may make an `inner` classifier the bounded Pass-1 checker root. Its
         // enclosing class parser node is then intentionally not reopened, but the enclosing class
@@ -71621,36 +70670,6 @@ impl<'a> Checker<'a> {
             return None;
         }
         self.libraries.property_reference_type(arity, mutable, args)
-    }
-
-    /// Resolve the companion `invoke` overload family once for both lambda shaping and constructor
-    /// arbitration. This prevents those consumers from growing separate origin/name lookup rules.
-    fn companion_invoke_overloads(
-        &self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-    ) -> Vec<crate::libraries::FunctionInfo> {
-        let Ok(ResolvedQualifier::Classifier(internal)) =
-            self.qualifier(scope, QualifierInput::Root(name))
-        else {
-            return Vec::new();
-        };
-        let Some(companion) = self
-            .resolved_type_name(internal)
-            .and_then(|classifier| classifier.companion_object.as_ref().map(|(_, ty)| *ty))
-            .map(Ty::obj_name)
-        else {
-            return Vec::new();
-        };
-        self.resolver()
-            .resolve_symbol(
-                crate::symbol_resolver::SymRecv::Value(companion),
-                CALLABLE_INVOKE_OPERATOR,
-                &[],
-                &[],
-            )
-            .map(crate::symbol_resolver::Symbol::overloads)
-            .unwrap_or_default()
     }
 
     /// Specialized SAM method shape from the same semantic classifier view used by ordinary member
@@ -76387,13 +75406,7 @@ impl<'a> Checker<'a> {
                             label,
                             self.lambda_returns.active_labels()
                         );
-                        self.diags.error(
-                            self.span(e),
-                            format!(
-                                "return label '{}' does not denote an enclosing lambda",
-                                label.as_deref().unwrap_or_default()
-                            ),
-                        );
+                        self.report_unresolved_expression_label(e);
                         return self.set(e, Ty::Error);
                     }
                 };
@@ -76473,7 +75486,7 @@ impl<'a> Checker<'a> {
                     crate::ast::RangeKind::DownTo => "downTo",
                 };
                 if let Some((range_ty, range_call)) =
-                    self.operator_call_ret(scope, e, lt, name, &[rt], &[hi], self.span(e))
+                    self.operator_call_ret(scope, e, lt, name, &[rt], &[hi], self.span(e), None)
                 {
                     if let Some(key) = SyntheticOperatorCall::from_name(name) {
                         self.resolved_operator_calls.insert((e, key), range_call);
@@ -76707,7 +75720,7 @@ impl<'a> Checker<'a> {
                 lhs,
                 rhs,
                 operator_span,
-            } => return self.expr_inner_binary(scope, e, op, lhs, rhs, operator_span),
+            } => return self.expr_inner_binary(scope, e, op, lhs, rhs, operator_span, expected),
             Expr::Member { receiver, name } => {
                 return self.expr_inner_member(scope, e, receiver, name)
             }
@@ -77031,8 +76044,11 @@ impl<'a> Checker<'a> {
                     },
                     at,
                     "get",
-                    MemberExtensionSelection::Operators,
-                    None,
+                    (MemberExtensionSelection::Operators, None),
+                    // A subscript's expectation describes the ELEMENT the `get` yields, which is
+                    // this selection's result; it is threadable, but `get` seeding is its own
+                    // change with its own fixtures.
+                    CallResultConstraint::direct(None),
                 ) {
                     return self.set(e, ret);
                 }
@@ -77647,9 +76663,16 @@ impl<'a> Checker<'a> {
                 // `a.rangeTo(b).contains(x)`. This includes reference operators AND mixed unsigned
                 // membership (`UByte in UIntRange`, `UInt in ULongRange`), whose `contains` overloads
                 // live in stdlib metadata. Scalar storage is irrelevant to source applicability.
-                if let Some((range_ty, range_call)) =
-                    self.operator_call_ret(scope, e, st, "rangeTo", &[et], &[end], self.span(e))
-                {
+                if let Some((range_ty, range_call)) = self.operator_call_ret(
+                    scope,
+                    e,
+                    st,
+                    "rangeTo",
+                    &[et],
+                    &[end],
+                    self.span(e),
+                    None,
+                ) {
                     if let Some((Ty::Boolean, contains_call)) = self.operator_call_ret(
                         scope,
                         e,
@@ -77658,6 +76681,7 @@ impl<'a> Checker<'a> {
                         &[vt],
                         &[value],
                         self.span(e),
+                        None,
                     ) {
                         self.resolved_operator_calls
                             .insert((e, SyntheticOperatorCall::RangeTo), range_call);
@@ -78222,6 +77246,11 @@ impl<'a> Checker<'a> {
                         receiver,
                         recv,
                         self.span(e),
+                        // `a?.invoke(…)` has type `R?` where `R` is the invoke's own return, so an
+                        // expectation of `String?` constrains `R` to `String`. Lift one nullable
+                        // layer rather than dropping the constraint: seeding is a constraint, not a
+                        // commitment, and the receiver and arguments still refine it.
+                        CallResultConstraint::safe_lifted(expected),
                     ) {
                         InvokeResolution::Selected(ty) => ty,
                         InvokeResolution::Ambiguous(_)
@@ -78440,6 +77469,8 @@ impl<'a> Checker<'a> {
                                 e,
                                 property_ty,
                                 self.span(e),
+                                // Nullable-wrapped expectation; see the invoke selection above.
+                                CallResultConstraint::safe_lifted(expected),
                             ) {
                                 let invoke = self.expr_lowers.remove(&e);
                                 if let Some(ExprLowering::Invoke { params, kind, .. }) = invoke {
@@ -79266,6 +78297,7 @@ impl<'a> Checker<'a> {
         lhs: ExprId,
         rhs: ExprId,
         operator_span: Span,
+        expected: Option<Ty>,
     ) -> Ty {
         let t = {
             if matches!(op, BinOp::And | BinOp::Or) {
@@ -79344,9 +78376,16 @@ impl<'a> Checker<'a> {
             // exact callable and may still realize it with primitive operations where appropriate.
             if lt.is_unsigned() {
                 if let Some(name) = op.arith_operator_name() {
-                    if let Some((ret, target)) =
-                        self.operator_call_ret(scope, e, lt, name, &[rt], &[rhs], self.span(e))
-                    {
+                    if let Some((ret, target)) = self.operator_call_ret(
+                        scope,
+                        e,
+                        lt,
+                        name,
+                        &[rt],
+                        &[rhs],
+                        self.span(e),
+                        expected,
+                    ) {
                         self.resolved_operator_calls.insert(
                             (
                                 e,
@@ -79408,9 +78447,16 @@ impl<'a> Checker<'a> {
                         Err(()) => return self.set(e, Ty::Error),
                         Ok(None) => {}
                     }
-                    if let Some((ret, target)) =
-                        self.operator_call_ret(scope, e, lt, fname, &[rt], &[rhs], self.span(e))
-                    {
+                    if let Some((ret, target)) = self.operator_call_ret(
+                        scope,
+                        e,
+                        lt,
+                        fname,
+                        &[rt],
+                        &[rhs],
+                        self.span(e),
+                        expected,
+                    ) {
                         self.resolved_operator_calls.insert(
                             (
                                 e,
@@ -79439,9 +78485,16 @@ impl<'a> Checker<'a> {
             if lt.is_reference() && lt.scalar_value_repr().is_none() {
                 let op_name = op.arith_operator_name();
                 if let Some(fname) = op_name {
-                    if let Some((ret, target)) =
-                        self.operator_call_ret(scope, e, lt, fname, &[rt], &[rhs], self.span(e))
-                    {
+                    if let Some((ret, target)) = self.operator_call_ret(
+                        scope,
+                        e,
+                        lt,
+                        fname,
+                        &[rt],
+                        &[rhs],
+                        self.span(e),
+                        expected,
+                    ) {
                         self.resolved_operator_calls.insert(
                             (
                                 e,
@@ -79524,9 +78577,16 @@ impl<'a> Checker<'a> {
                 && lt != Ty::Error
                 && rt != Ty::Error
             {
-                if let Some((ret, target)) =
-                    self.operator_call_ret(scope, e, lt, "compareTo", &[rt], &[rhs], self.span(e))
-                {
+                if let Some((ret, target)) = self.operator_call_ret(
+                    scope,
+                    e,
+                    lt,
+                    "compareTo",
+                    &[rt],
+                    &[rhs],
+                    self.span(e),
+                    None,
+                ) {
                     if ret == Ty::Int {
                         self.resolved_operator_calls
                             .insert((e, SyntheticOperatorCall::CompareTo), target);
@@ -82485,7 +81545,7 @@ impl<'a> Checker<'a> {
     ) -> Result<Option<(Ty, ResolvedCall)>, ()> {
         let request = MemberExtensionFunctionCall {
             extension_receiver,
-            expected_result: None,
+            result_constraint: CallResultConstraint::direct(None),
             name,
             args,
             arg_tys,
@@ -82672,7 +81732,7 @@ impl<'a> Checker<'a> {
             },
             type_args,
             Some(rt),
-            expected,
+            CallResultConstraint::direct(expected),
             overloads.clone(),
         );
         ExtensionRungSelection {
@@ -83986,7 +83046,14 @@ impl<'a> Checker<'a> {
                         || self.source_callable_visible(candidate))
             });
             let callables = crate::libraries::Callables::Functions(functions);
-            resolver.select_receiver_function_with_params_tracking(recv, name, &[], &[], &callables)
+            resolver.select_receiver_function_with_params_tracking(
+                recv,
+                name,
+                &[],
+                &[],
+                &callables,
+                None,
+            )
         };
         let (selected, params, ret) = match selected {
             crate::symbol_resolver::CandidateSelection::Selected(selected) => selected,
@@ -84341,7 +83408,7 @@ impl<'a> Checker<'a> {
             scope,
             MemberExtensionFunctionCall {
                 extension_receiver: recv,
-                expected_result: None,
+                result_constraint: CallResultConstraint::direct(None),
                 name,
                 args: &[],
                 arg_tys: &[],
@@ -87692,7 +86759,7 @@ impl<'a> Checker<'a> {
                 self.unit_coerced_lambda_type(args[source], expected, actual)
             },
             &|params, call_sig, slots| self.call_candidate_score(scope, params, call_sig, slots),
-            None,
+            CallResultConstraint::direct(None),
             shape,
             call,
         )
