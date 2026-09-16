@@ -21,6 +21,16 @@ impl<'checker, 'source> StablePathRead<'checker, 'source> {
             scope.this_ty()?
         } else {
             let Some(local) = self.checker.lookup(scope, &path.root) else {
+                // A bare name with no lexical binding can still be a property of an implicit
+                // receiver — an extension function reading its own receiver's property. That read
+                // goes THROUGH the receiver, so its stability is decided there, exactly as a bound
+                // dispatch property's is below. Falling straight through to the top-level rule
+                // answered `None` and dropped the proof before it was ever recorded.
+                if path.segments.is_empty() {
+                    if let Some(receiver) = self.checker.receiver_owning(scope, &path.root) {
+                        return self.member_ty(receiver.ty, &path.root);
+                    }
+                }
                 return self.top_level_ty(scope, path);
             };
             if local.is_var
