@@ -466,6 +466,8 @@ mod delegated_member_prop_e2e;
 mod delegated_prop_e2e;
 #[path = "dep_resolution.rs"]
 mod dep_resolution;
+#[path = "descriptor_arity_fails_closed_e2e.rs"]
+mod descriptor_arity_fails_closed_e2e;
 #[path = "destructure_component_extension_e2e.rs"]
 mod destructure_component_extension_e2e;
 #[path = "destructure_e2e.rs"]
