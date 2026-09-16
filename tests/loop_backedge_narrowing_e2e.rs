@@ -23,20 +23,16 @@ use super::common;
 
 fn rejects(src: &str, context: &str) {
     let diagnostics = common::front_end_diagnostics(src, &[], None);
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("unresolved reference 'length'")),
-        "{context}; expected kotlinc's `unresolved reference 'length'`, got {diagnostics:?}"
+    assert_eq!(
+        diagnostics,
+        ["unresolved reference 'length'."],
+        "{context}: exact diagnostics"
     );
 }
 
 fn accepts(src: &str, context: &str) {
     let diagnostics = common::front_end_diagnostics(src, &[], None);
-    assert!(
-        diagnostics.is_empty(),
-        "{context}; expected no diagnostic, got {diagnostics:?}"
-    );
+    assert_eq!(diagnostics, Vec::<String>::new(), "{context}");
 }
 
 #[test]
@@ -103,12 +99,13 @@ fn a_proof_does_not_survive_a_loop_that_overwrites_it() {
 fn a_write_only_a_closure_performs_still_invalidates() {
     // The scan descends into lambdas: the write reaches the next iteration however it is spelled.
     rejects(
-        "fun f() {\n\
+        "fun execute(block: () -> Unit) { block() }\n\
+         fun f() {\n\
          \x20   var x: Any\n\
          \x20   x = \"\"\n\
          \x20   for (i in 0..1) {\n\
          \x20       println(x.length)\n\
-         \x20       run { x = 42 }\n\
+         \x20       execute { x = 42 }\n\
          \x20   }\n\
          }\n",
         "a write performed inside a lambda in the body",

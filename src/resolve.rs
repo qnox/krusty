@@ -51,6 +51,7 @@ mod lambda_returns;
 mod local_capture_dependencies;
 mod local_class_scope;
 mod local_method_dependencies;
+mod loop_flow;
 mod operator_calls;
 mod override_plans;
 mod postponed_diagnostics;
@@ -97,6 +98,7 @@ use lambda_returns::{call_implicit_lambda_label, LambdaReturnScopes};
 use local_class_scope::{
     local_class_enclosing_tparams, local_class_sibling_names, EnclosingTypeParameterDeclaration,
 };
+use loop_flow::collect_all_reassigned;
 pub(crate) use override_plans::publish_override_plans;
 use postponed_diagnostics::PostponedDiagnostics;
 use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
@@ -13724,53 +13726,6 @@ fn collect_lambda_outer_writes(
         }
     }
     ce(file, e, outer_names, out);
-}
-
-/// Collect every name reassigned (`=`, `+=`-style, `++`/`--`) anywhere in `e`'s subtree — INCLUDING
-/// inside nested lambdas and local functions (a `var` reassigned in a sibling closure still needs the
-/// box). Used to decide which captured local-function `var`s need a shared mutable cell.
-fn collect_all_reassigned(file: &File, e: ExprId, out: &mut std::collections::HashSet<String>) {
-    // Traverse via `any_child_expr`/`any_child_stmt` (which visit EVERY child, including lambda and
-    // local-function bodies) so no expression form can hide a reassignment from the scan. The closures
-    // only collect (return `false` to keep visiting); a `RefCell` lets both share the accumulator.
-    let cell = std::cell::RefCell::new(std::mem::take(out));
-    fn ce(file: &File, e: ExprId, cell: &std::cell::RefCell<std::collections::HashSet<String>>) {
-        if let Expr::IncDec { target, .. } = file.expr(e) {
-            if let Expr::Name(n) = file.expr(*target) {
-                cell.borrow_mut().insert(n.clone());
-            }
-        }
-        file.any_child_expr(
-            e,
-            &mut |c| {
-                ce(file, c, cell);
-                false
-            },
-            &mut |s| {
-                cs(file, s, cell);
-                false
-            },
-        );
-    }
-    fn cs(file: &File, s: StmtId, cell: &std::cell::RefCell<std::collections::HashSet<String>>) {
-        if let Stmt::Assign { name, .. } | Stmt::IncDec { name, .. } = file.stmt(s) {
-            cell.borrow_mut().insert(name.clone());
-        }
-        if let Stmt::LocalClass(class) = file.stmt(s) {
-            // The parser hoists the declaration and the generic statement child walk stops at its
-            // header. Its member bodies still execute later and can mutate a value captured by
-            // every enclosing local class/local function boundary.
-            for expression in local_class_capture_expressions(class) {
-                ce(file, expression, cell);
-            }
-        }
-        file.any_child_stmt(s, &mut |c| {
-            ce(file, c, cell);
-            false
-        });
-    }
-    ce(file, e, &cell);
-    *out = cell.into_inner();
 }
 
 /// One closure-captured write: the variable's name, the enclosing-lambda stack at the write, and
@@ -50316,42 +50271,6 @@ impl<'a> Checker<'a> {
         self.ret_ty = prev;
         self.return_allowed = previous_return_allowed;
         r
-    }
-
-    /// Drop every flow narrowing a loop's own writes invalidate, before the loop is checked.
-    ///
-    /// A straight-line proof is a proof about ONE edge. A loop has a back edge, so a body that
-    /// reassigns `x` reaches its own start — and its condition — with whatever that assignment
-    /// left, not with what the code before the loop proved:
-    ///
-    /// ```kotlin
-    /// var x: Any = ""     // proves `String`
-    /// while (true) {
-    ///     x.length        // kotlinc: unresolved reference 'length'
-    ///     x = 42
-    /// }
-    /// ```
-    ///
-    /// The clearing happens on the ENCLOSING scope and before the condition is checked, which is
-    /// what makes all four of kotlinc's answers here come out right at once: the condition sees it
-    /// (`while (x.length > 0) { x = 42 }` is rejected), the body sees it, the code after the loop
-    /// sees it, and a `do…while` sees it even though its first iteration precedes any back edge.
-    ///
-    /// What it deliberately does NOT touch is the narrowing the loop's own CONDITION proves, which
-    /// [`Self::condition_narrowings`] computes afterwards and applies to the body scope. That one
-    /// survives the back edge because the condition is re-evaluated on every iteration, so
-    /// `while (x != null) { x.length; x = null }` stays legal — as it is in Kotlin.
-    ///
-    /// The scan is [`collect_all_reassigned`], which descends into nested lambdas and local
-    /// functions: a write that only a closure performs still reaches this loop's next iteration.
-    fn clear_narrowings_a_loop_invalidates(&mut self, scope: &CheckerScope<'_>, parts: &[ExprId]) {
-        let mut written = std::collections::HashSet::new();
-        for &part in parts {
-            collect_all_reassigned(self.file, part, &mut written);
-        }
-        for name in &written {
-            self.set_local_narrow(scope, name, None);
-        }
     }
 
     fn check_loop_body(&mut self, scope: &CheckerScope<'_>, body: ExprId, label: &Option<String>) {
