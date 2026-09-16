@@ -400,6 +400,40 @@ fn standalone_analysis_reports_checker_errors() {
 }
 
 #[test]
+fn standalone_analysis_preserves_parse_and_signature_failure_results() {
+    let mut parse_diagnostics = DiagSink::new();
+    let (_file, symbols, info) = analyze_source_standalone("fun", &mut parse_diagnostics);
+    assert_eq!(
+        parse_diagnostics
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "expected extension function name",
+            "expected '('",
+            "expected ')'",
+        ]
+    );
+    assert!(symbols.is_none());
+    assert!(info.is_none());
+
+    let mut signature_diagnostics = DiagSink::new();
+    let (_file, symbols, info) =
+        analyze_source_standalone("fun broken(): Missing = 1", &mut signature_diagnostics);
+    assert_eq!(
+        signature_diagnostics
+            .diags
+            .iter()
+            .map(|diagnostic| diagnostic.msg.as_str())
+            .collect::<Vec<_>>(),
+        ["unresolved reference 'Missing'."]
+    );
+    assert!(symbols.is_some());
+    assert!(info.is_none());
+}
+
+#[test]
 fn checked_prefix_reports_cross_file_conflicting_overloads_and_candidates() {
     let target = "fun namedPair(left: Int, right: String): Int = left\n\
                       fun missingNamedArgument(): Int = namedPair(left = 1)";

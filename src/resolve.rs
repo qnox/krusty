@@ -48136,21 +48136,6 @@ pub fn check_file_in_source_set(
     check_file_on_checker_stack(file, file_index, Some(files), syms, diags)
 }
 
-/// Check one file after [`preinfer_module_returns`] has already established the source set's
-/// expression-body signatures. Production source-set analysis uses this entry point so it does not
-/// reopen the same bodies in a redundant per-file fixpoint before their authoritative check.
-pub(crate) fn check_preinferred_file_in_source_set(
-    files: &[File],
-    file_index: u32,
-    syms: &mut SymbolTable,
-    diags: &mut DiagSink,
-) -> TypeInfo {
-    let file = &files[file_index as usize];
-    crate::wide_stack::on_wide_stack(move || {
-        check_file_at_impl(file, file_index, Some(files), syms, diags)
-    })
-}
-
 /// Check only the active declaration fragment that owns inline body work. Every non-active source
 /// declaration is resolved from `resolved_index`/`syms`; no sibling parser `File` is available at
 /// this boundary. This lets Pass 1 release each legacy declaration arena as soon as its retained

@@ -11,7 +11,6 @@ use crate::libraries::{EmptySymbolSource, SemanticPlatform};
 
 mod header_validation;
 mod inline_preparation;
-mod legacy_checker_bridge;
 mod retained_syntax;
 pub use crate::resolve::ClassFlags as FrontendClassFlags;
 pub(crate) use crate::resolve::ClassSig as FrontendClassSig;
@@ -38,6 +37,7 @@ pub struct SourceSetAnalysis {
     pub files: Vec<File>,
     pub symbols: FrontendSymbols,
     pub types: Vec<Option<FrontendTypeInfo>>,
+    parse_errors: Vec<bool>,
     pub(crate) reparse_sources: Vec<ReparseSource>,
     pub(crate) streamed: Option<StreamedPassState>,
 }
@@ -59,11 +59,13 @@ impl From<SourceSetAnalysis> for StreamingSourceSetAnalysis {
             files,
             symbols,
             types,
+            parse_errors,
             reparse_sources,
             streamed,
         } = analysis;
         drop(files);
         drop(types);
+        drop(parse_errors);
         let symbols = symbols.into_pass_two_symbols();
         Self {
             symbols,
@@ -1058,11 +1060,10 @@ where
         // graph/header syntax is consumed here before the second source pass begins.
         let mut index = streamed_index.index;
         pass1_headers.publish_declaration_inventory(&mut index);
-        // The declarations that DID finalize are still the module's facts. The legacy Pass-2
-        // checker reads them only through this projection, so skipping it here left every
-        // inferred property and return type unresolved beside one genuine signature error — an
-        // editor's steady state — and reported each use of them as a further unresolved reference.
-        // Projection skips declarations without a finalized signature, so nothing failed leaks in.
+        // The declarations that DID finalize are still the module's facts. Project them into the
+        // source symbol environment consumed beside the partial stable index; otherwise one
+        // genuine signature error would make every use of an unrelated inferred declaration look
+        // unresolved in an editor's steady state. Failed declarations remain absent.
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
         let (index, sources, _) = pass1_headers.finish(index);
         recovery_streamed = Some(diagnostic_streamed_state(index, sources));
@@ -1074,26 +1075,29 @@ where
         }
     }
     let (types, streamed) = if retain_inspection_analysis {
-        let types = match pending_streamed.as_ref() {
-            Some((module, _, _)) => check_source_set_skipping_with_index(
-                &files,
-                &mut symbols,
-                module.index(),
-                retained_anonymous_captures
-                    .as_deref()
-                    .expect("retained analysis must preserve capture discovery"),
-                &parse_errors,
-                checked_count,
-                diags,
-            ),
-            None => legacy_checker_bridge::check_source_set_skipping(
-                &files,
-                &mut symbols,
-                &parse_errors,
-                checked_count,
-                diags,
-            ),
-        };
+        // Successful finalization and diagnostic recovery both publish the same stable declaration
+        // inventory. Recovery merely lacks signatures for declarations that failed to finalize;
+        // it must not reopen the parser-keyed checker and silently switch identity models.
+        let index = pending_streamed
+            .as_ref()
+            .map(|(module, _, _)| module.index())
+            .or_else(|| {
+                recovery_streamed
+                    .as_ref()
+                    .map(|streamed| streamed.module.index())
+            })
+            .expect("retained analysis must publish a stable declaration index");
+        let types = check_source_set_skipping_with_index(
+            &files,
+            &mut symbols,
+            index,
+            retained_anonymous_captures
+                .as_deref()
+                .expect("retained analysis must preserve capture discovery"),
+            &parse_errors,
+            checked_count,
+            diags,
+        );
         let streamed = pending_streamed.and_then(|(module, bodies, default_arguments)| {
             inline_preparation::from_checked_analysis(
                 module,
@@ -1133,6 +1137,7 @@ where
         },
         symbols,
         types,
+        parse_errors,
         reparse_sources,
         streamed,
     };
@@ -1187,22 +1192,6 @@ fn check_source_set_skipping_with_index(
         .collect()
 }
 
-/// Check a parsed source set whose signatures have already been collected.
-pub fn check_source_set(
-    files: &[File],
-    symbols: &mut FrontendSymbols,
-    diags: &mut DiagSink,
-) -> Vec<Option<FrontendTypeInfo>> {
-    let diagnostics_start = diags.diags.len();
-    // Capture discovery, for the same reason as the other entry point: an anonymous object's capture
-    // fields and constructor parameters are facts the backend needs before it can lower one at all.
-    let _ = crate::resolve::discover_anonymous_object_captures(files, symbols);
-    let types =
-        legacy_checker_bridge::check_source_set_skipping(files, symbols, &[], files.len(), diags);
-    diags.collapse_duplicates_from(diagnostics_start);
-    types
-}
-
 /// Analyze a source set using only per-source feature directives.
 pub fn analyze_source_set(
     sources: &[&str],
@@ -1222,18 +1211,17 @@ pub fn analyze_source(
     platform: Box<dyn SemanticPlatform>,
     diags: &mut DiagSink,
 ) -> (File, Option<FrontendSymbols>, Option<FrontendTypeInfo>) {
-    let mut files = vec![parse_source_with_detected_features(src, diags)];
-    if diags.has_errors() {
-        return (files.pop().unwrap_or_default(), None, None);
-    }
-
-    let mut syms = collect_signatures_with_cp(&files, platform, diags);
-    if diags.has_errors() {
-        return (files.pop().unwrap_or_default(), Some(syms), None);
-    }
-
-    let info = check_file(&files[0], &mut syms, diags);
-    (files.pop().unwrap_or_default(), Some(syms), Some(info))
+    let mut analysis = analyze_source_set(&[src], platform, diags);
+    let file = analysis.files.pop().unwrap_or_default();
+    let parsed = !analysis.parse_errors.pop().unwrap_or(true);
+    let signatures_finalized = analysis
+        .streamed
+        .as_ref()
+        .is_some_and(|streamed| !streamed.diagnostic_recovery);
+    let info = (parsed && signatures_finalized)
+        .then(|| analysis.types.pop().flatten())
+        .flatten();
+    (file, parsed.then_some(analysis.symbols), info)
 }
 
 /// Parse and check a source with no external libraries.

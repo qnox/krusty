@@ -5426,10 +5426,8 @@ pub(crate) fn finalized_streamed_signature_index(
     for declaration in suppressed_generated_callables.iter().copied() {
         index.suppress_generated_callable(declaration);
     }
-    // Retained inline/default anonymous bodies need their captured values during the same Pass-1
-    // checked-FIR construction. Capture discovery synthesized these declarations after signature
-    // extraction, so publish their already-resolved semantic property types directly; they are not
-    // lazy graph nodes and contain no source syntax or target storage decision.
+    // Capture discovery synthesized retained inline/default capture properties after extraction;
+    // publish their resolved types directly for same-Pass-1 checked-FIR construction.
     for stub in headers.stubs.iter().filter(|stub| {
         stub.kind == DeclarationKind::Property
             && stub
@@ -5481,9 +5479,14 @@ pub(crate) fn finalized_streamed_signature_index(
             mutable,
         );
     }
-    // Classifier publication consumes exact own-member override facts while it closes interface
-    // delegation. Publish every declaration header first so source order cannot affect that query.
-    for stub in &headers.stubs {
+    // Publish classifier headers after the full declaration inventory so source order is irrelevant.
+    'classifier_publication: for stub in &headers.stubs {
+        macro_rules! skip_classifier {
+            ($declaration:expr) => {{
+                failed.push($declaration);
+                continue 'classifier_publication;
+            }};
+        }
         if stub.kind != DeclarationKind::Classifier {
             continue;
         }
@@ -5496,7 +5499,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 "signature finalization declined {:?}: classifier stub has no collected classifier signature",
                 stub.id,
             );
-            stop_with_failure!(stub.id);
+            skip_classifier!(stub.id);
         };
         if stub
             .flags
@@ -5515,7 +5518,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 )
                 .is_err()
             {
-                stop_with_failure!(stub.id);
+                skip_classifier!(stub.id);
             }
             continue;
         }
@@ -5540,13 +5543,8 @@ pub(crate) fn finalized_streamed_signature_index(
             resolved_classifier_parents.get(&stub.id),
             &compact_cycle_edges,
         ) else {
-            // An ordinary body-local classifier is not a Pass-1 semantic root. Its header can use
-            // statement-local aliases and other lexical declarations that intentionally exist
-            // only while the containing body is checked in Pass 2. Preserve its stable declaration
-            // inventory, but do not turn the absence of an undemanded semantic header into module
-            // finalization failure. A local classifier reached from an inferred non-local
-            // signature has compact parents in `resolved_classifier_parents` and must still
-            // finalize here.
+            // Preserve an undemanded body-local classifier for Pass 2; one demanded by a non-local
+            // inferred signature has compact parents and must finalize here.
             if stub.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
                 && !resolved_classifier_parents.contains_key(&stub.id)
             {
@@ -5565,7 +5563,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 stub.id,
                 classifier.internal,
             );
-            stop_with_failure!(stub.id);
+            skip_classifier!(stub.id);
         };
         let interface_delegations = headers
             .syntax
@@ -5590,7 +5588,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 "signature finalization declined {:?}: interface-delegation closure did not resolve",
                 stub.id,
             );
-            stop_with_failure!(stub.id);
+            skip_classifier!(stub.id);
         };
         deferred_interface_delegations.push((
             stub.id,
@@ -5627,7 +5625,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 "signature finalization declined {:?}: classifier context parameter did not resolve",
                 stub.id,
             );
-            stop_with_failure!(stub.id);
+            skip_classifier!(stub.id);
         };
         crate::trace_compiler!(
             "signature",
@@ -5652,7 +5650,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 "signature finalization declined {:?}: classifier header publication was rejected",
                 stub.id,
             );
-            stop_with_failure!(stub.id);
+            skip_classifier!(stub.id);
         }
     }
     for stub in &headers.stubs {
@@ -6762,6 +6760,8 @@ pub(crate) fn finalized_streamed_signature_index(
             );
         }
     }
+    failed.sort_by_key(|declaration| declaration.raw());
+    failed.dedup();
     StreamedSignatureIndex {
         index,
         failures: failed,
