@@ -2514,6 +2514,21 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   `a_simple_name_may_begin_with_a_dollar`, `the_shortcut_is_taken_only_when_it_round_trips`,
   `tests/serializer_metadata_class_id_e2e.rs::a_generated_serializer_records_kotlincs_class_id`,
   `the_serializable_class_itself_still_records_its_own_class_id`.
+- **A bare property of an EXTENSION receiver smart-casts (fix).** `fun Yaml.expand() = if (ref != null)
+  take(ref) else …` reads `ref` through the extension receiver, so the proof is a fact about
+  `this.ref`. Two halves were missing. Stability resolution treated a bare name with no LEXICAL
+  binding as a top-level property and answered `None` — an extension receiver's property has no such
+  binding — so the proof was discarded before it was ever recorded; it now reads the property through
+  the implicit receiver that declares it, the same rule a bound dispatch property already used. And
+  the proof was FILED under the bare spelling while the read asks for the receiver-qualified path, so
+  the receiver-qualified key is recorded too. A MEMBER function was unaffected: its properties ARE
+  lexically bound, so they take the shadowing path and never consult this key.
+  `tests/extension_receiver_property_smartcast_e2e.rs::an_extension_receivers_property_smart_casts_under_a_bare_name`,
+  `the_proof_survives_a_supertype_result_and_a_sibling_read`,
+  `the_member_and_qualified_spellings_still_smart_cast`,
+  `a_mutable_extension_receiver_property_still_declines`,
+  `a_nearer_receiver_of_the_same_property_name_is_not_proven`,
+  `a_nearer_receiver_of_the_same_type_is_not_proven`.
 - **Every single-operand node hoists its suspension, not a subset (fix).** The suspend hoister
   recurses through one IR node kind per arm. Source-reachable gaps included an enum lookup's name
   (`enumValueOf<Level>(pickName())`) and the construction of the `Ref` holder that boxes a captured
