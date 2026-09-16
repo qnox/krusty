@@ -23,6 +23,7 @@ mod postponed_calls;
 mod qualified_calls;
 mod semantics;
 mod source_contracts;
+mod stable_function_index;
 
 pub(super) use declaration_aliases::publish_compact_nested_aliases;
 pub(crate) use declaration_conflicts::finalize_streamed_top_level_conflicts;
@@ -59,22 +60,6 @@ enum SelectedTopLevelCall {
     SamConstructor(crate::types::TypeName),
 }
 
-/// Where in the symbol table a stable declaration's signature lives.
-///
-/// Positions rather than references, so the index can be built once and consulted while the table
-/// is borrowed again for the lookup itself.
-#[derive(Clone)]
-enum StableFunctionSite {
-    /// `table.funs[name][index]`
-    Fun(String, usize),
-    /// `table.ext_funs[name][receiver][index]`
-    ExtFun(String, Ty, usize),
-    /// `table.classes[class].methods[name][index]`
-    Method(TypeName, String, usize),
-    /// `table.classes[class].member_ext_funs[name][index]`
-    MemberExt(TypeName, String, usize),
-}
-
 struct ProductionSignatureSemantics<'a> {
     headers: &'a crate::fir::StreamedHeaderModule,
     table: &'a SymbolTable,
@@ -89,16 +74,7 @@ struct ProductionSignatureSemantics<'a> {
         RefCell<HashMap<crate::fir::DeclarationId, Vec<crate::symbol_resolver::GSigBinds>>>,
     completed_scoped_constraints:
         RefCell<HashMap<crate::fir::DeclarationId, crate::symbol_resolver::GSigBinds>>,
-    /// Reverse index from a stable declaration to the signature that carries it.
-    ///
-    /// Without it, `stable_function_signature` falls through its name-narrowed fast paths into a
-    /// LINEAR scan of every function, extension function, method and member extension in the symbol
-    /// table, and it is asked once per declaration — quadratic in the module's size. A generated
-    /// module of several thousand declarations spends most of its compile there.
-    ///
-    /// Built on first use, in exactly the order the scan visited, so the entry recorded for a
-    /// declaration is the one the scan would have found first.
-    stable_functions: RefCell<Option<HashMap<crate::fir::DeclarationId, StableFunctionSite>>>,
+    stable_functions: stable_function_index::StableFunctionIndex,
     diagnostics: RefCell<Vec<ProductionSignatureDiagnostic>>,
     /// The contract of the callable selected for each top-level call, by call origin, so a
     /// [`crate::fir::SigExpr::ContractNarrowed`] read can ask what the statement proved.
@@ -380,123 +356,6 @@ impl ProductionSignatureSemantics<'_> {
         ))
         .map(Some)
         .map_err(|_| Self::failure())
-    }
-
-    /// Build, once, the reverse index the linear scan would otherwise recompute per declaration.
-    ///
-    /// The insertion order mirrors the scan's chain exactly — top-level functions, then extension
-    /// functions, then class methods, then member extensions — and `or_insert_with` keeps the FIRST
-    /// entry for a declaration, so a lookup answers with the signature the scan would have found.
-    fn stable_function_sites(
-        &self,
-    ) -> std::cell::Ref<'_, HashMap<crate::fir::DeclarationId, StableFunctionSite>> {
-        if self.stable_functions.borrow().is_none() {
-            let mut sites: HashMap<crate::fir::DeclarationId, StableFunctionSite> = HashMap::new();
-            let mut record = |declaration, site| {
-                sites.entry(declaration).or_insert(site);
-            };
-            for (name, signatures) in &self.table.funs {
-                for (index, signature) in signatures.iter().enumerate() {
-                    if let Some(declaration) = signature.stable_declaration {
-                        record(declaration, StableFunctionSite::Fun(name.clone(), index));
-                    }
-                }
-            }
-            for (name, by_receiver) in &self.table.ext_funs {
-                for (receiver, signatures) in by_receiver {
-                    for (index, signature) in signatures.iter().enumerate() {
-                        if let Some(declaration) = signature.stable_declaration {
-                            record(
-                                declaration,
-                                StableFunctionSite::ExtFun(name.clone(), *receiver, index),
-                            );
-                        }
-                    }
-                }
-            }
-            for (class_name, class) in &self.table.classes {
-                for (name, signatures) in &class.methods {
-                    for (index, signature) in signatures.iter().enumerate() {
-                        if let Some(declaration) = signature.stable_declaration {
-                            record(
-                                declaration,
-                                StableFunctionSite::Method(*class_name, name.clone(), index),
-                            );
-                        }
-                    }
-                }
-            }
-            for (class_name, class) in &self.table.classes {
-                for (name, functions) in &class.member_ext_funs {
-                    for (index, function) in functions.iter().enumerate() {
-                        if let Some(declaration) = function.signature().stable_declaration {
-                            record(
-                                declaration,
-                                StableFunctionSite::MemberExt(*class_name, name.clone(), index),
-                            );
-                        }
-                    }
-                }
-            }
-            *self.stable_functions.borrow_mut() = Some(sites);
-        }
-        std::cell::Ref::map(self.stable_functions.borrow(), |sites| {
-            sites.as_ref().expect("the index was just built")
-        })
-    }
-
-    /// The signature a stable declaration owns, via the reverse index rather than a table scan.
-    fn indexed_stable_function(
-        &self,
-        declaration: crate::fir::DeclarationId,
-    ) -> Option<(&Signature, Option<Ty>)> {
-        let site = self.stable_function_sites().get(&declaration).cloned()?;
-        match site {
-            StableFunctionSite::Fun(name, index) => {
-                let signature = self.table.funs.get(&name)?.get(index)?;
-                Some((signature, signature.source_receiver))
-            }
-            StableFunctionSite::ExtFun(name, receiver, index) => {
-                let signature = self.table.ext_funs.get(&name)?.get(&receiver)?.get(index)?;
-                Some((signature, signature.source_receiver))
-            }
-            StableFunctionSite::Method(class, name, index) => {
-                let signature = self
-                    .table
-                    .classes
-                    .get(&class)?
-                    .methods
-                    .get(&name)?
-                    .get(index)?;
-                Some((signature, signature.source_receiver))
-            }
-            StableFunctionSite::MemberExt(class, name, index) => {
-                let function = self
-                    .table
-                    .classes
-                    .get(&class)?
-                    .member_ext_funs
-                    .get(&name)?
-                    .get(index)?;
-                Some((
-                    function.signature(),
-                    Some(member_extension_receiver(function)),
-                ))
-            }
-        }
-    }
-
-    fn callable_signature(&self, declaration: crate::fir::DeclarationId) -> Option<&Signature> {
-        // The index is built from EXACTLY the four tables `stable_function_signature` searches —
-        // top-level functions, extension functions, class methods, member extensions — and keyed by
-        // the same `stable_declaration` it matches on. So it answers both ways: a hit is the
-        // signature the scan would have found first, and a MISS means the scan would have walked
-        // every one of those tables and found nothing.
-        //
-        // The miss is the case that mattered. Most declarations asked about here are not in those
-        // tables at all, and each one was paying a full-table scan to learn that.
-        self.indexed_stable_function(declaration)
-            .map(|(signature, _)| signature)
     }
 
     fn declaration_extension_receiver(&self, declaration: crate::fir::DeclarationId) -> Option<Ty> {
@@ -4756,7 +4615,7 @@ pub(crate) fn finalized_streamed_signature_index(
         scoped_constraint_inputs: RefCell::new(HashMap::new()),
         scoped_constraints: RefCell::new(HashMap::new()),
         completed_scoped_constraints: RefCell::new(HashMap::new()),
-        stable_functions: RefCell::new(None),
+        stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_call_contracts: RefCell::new(HashMap::new()),
         source_contracts: RefCell::new(HashMap::new()),
@@ -5428,7 +5287,7 @@ pub(crate) fn finalized_streamed_signature_index(
         scoped_constraint_inputs: RefCell::new(HashMap::new()),
         scoped_constraints: RefCell::new(HashMap::new()),
         completed_scoped_constraints: RefCell::new(HashMap::new()),
-        stable_functions: RefCell::new(None),
+        stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
         selected_call_contracts: RefCell::new(HashMap::new()),
         source_contracts: RefCell::new(HashMap::new()),

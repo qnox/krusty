@@ -175,7 +175,7 @@ pub(in crate::resolve) fn collect_compact_declared_spellings(
         extension_receivers: &empty_receivers,
         source_orders: std::collections::HashMap::new(),
         signature_origins: std::collections::HashMap::new(),
-        stable_functions: std::cell::RefCell::new(None),
+        stable_functions: super::stable_function_index::StableFunctionIndex::default(),
         scoped_receivers: std::cell::RefCell::new(std::collections::HashMap::new()),
         scoped_constraint_inputs: std::cell::RefCell::new(std::collections::HashMap::new()),
         scoped_constraints: std::cell::RefCell::new(std::collections::HashMap::new()),
