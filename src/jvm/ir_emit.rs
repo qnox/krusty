@@ -6918,6 +6918,7 @@ fn emit_class(
         // (the common shape) needs no local at all, matching kotlinc's `ldc; putstatic` sequence.
         let mut clinit_line_entries: Vec<(u16, u32)> = Vec::new();
         if let Some(init_body) = init_body {
+            let body_start = clinit.bytes.len() as u16;
             if init_body_reads_this(ir, init_body) {
                 let iref = e.cw.fieldref(&fq_name, instance_name, &self_desc);
                 clinit.getstatic(iref, 1);
@@ -6956,12 +6957,32 @@ fn emit_class(
             }
             clinit_lines.dedup_by_key(|(_, l)| *l);
             clinit_line_entries = clinit_lines;
+            // A GENERATED class has no per-statement source to map: its whole initializer belongs to
+            // the declaration it was generated for. kotlinc gives such a `<clinit>` two entries — the
+            // body at the declaration line, the trailing `return` at the declaration's closing line.
+            // A source-declared object keeps the per-property mapping above, which is what kotlinc
+            // emits there (measured: a plain `object` gets no closing-line entry at all).
+            if !c.is_source_declared && c.decl_line != 0 && c.decl_end_line != 0 {
+                // The body maps to where the DECLARATION starts — annotations included — exactly as
+                // the primary constructor's `super()` does; the closing line is pushed after the
+                // trailing `return` below.
+                let start = if c.decl_start_line == 0 {
+                    c.decl_line
+                } else {
+                    c.decl_start_line
+                };
+                clinit_line_entries = vec![(body_start, start)];
+            }
         }
         let clinit_max = e.next_slot;
+        let clinit_return = clinit.bytes.len() as u16;
         clinit.ret_void();
         clinit.ensure_locals(clinit_max);
         clinit.link();
         cw.add_method(0x0008, "<clinit>", "()V", &clinit);
+        if !c.is_source_declared && c.decl_end_line != 0 && !clinit_line_entries.is_empty() {
+            clinit_line_entries.push((clinit_return, c.decl_end_line));
+        }
         if !clinit_line_entries.is_empty() {
             cw.set_method_lines("<clinit>", "()V", &clinit_line_entries);
         }
