@@ -21,6 +21,17 @@
 
 use super::*;
 
+/// The runtime range an unsigned receiver ranges over, as (runtime suffix, the width its bounds are
+/// carried at). Kotlin declares exactly two — `UIntRange` and `ULongRange` — and `UByte.rangeTo`
+/// and `UShort.rangeTo` both answer the former, so the narrow two carry their bounds as `UInt`.
+fn unsigned_range(element: Ty) -> Option<(&'static str, Ty)> {
+    match element {
+        Ty::UByte | Ty::UShort | Ty::UInt => Some(("uint", Ty::UInt)),
+        Ty::ULong => Some(("ulong", Ty::ULong)),
+        _ => None,
+    }
+}
+
 impl BodyLowering<'_, '_, '_> {
     /// A member of one of the unsigned types, or `None` when `owner` names none of them.
     pub(super) fn unsigned_member(
@@ -45,6 +56,37 @@ impl BodyLowering<'_, '_, '_> {
         receiver: u32,
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
+        // `a..b` and `a..<b` answer a RANGE OBJECT, so neither operand is carried at the width the
+        // arithmetic below would use: Kotlin declares `UByte.rangeTo(UByte)` as answering a
+        // `UIntRange`, so the narrow two widen to `UInt` and only `ULong` ranges over itself. The
+        // widening is zero-extension, which is what lets the runtime read the bounds unsigned.
+        if let Some((kind, carried)) = unsigned_range(element) {
+            let suffix = match name {
+                "rangeTo" => "",
+                "rangeUntil" => "_until",
+                _ => "",
+            };
+            if matches!(name, "rangeTo" | "rangeUntil") {
+                let Some(first) = self.coerce(receiver, carried)? else {
+                    return Err(format!("a `Unit` receiver of `{name}`"));
+                };
+                let Some(&end) = args.first() else {
+                    return Err(format!("`{name}` without a bound"));
+                };
+                let Some(last) = self.coerce(end, carried)? else {
+                    return Err(format!("a `Unit` bound of `{name}`"));
+                };
+                if self.terminated {
+                    return Ok(None);
+                }
+                return self.runtime_call(
+                    &format!("kt_{kind}_range{suffix}"),
+                    &[carried, carried],
+                    ret,
+                    &[first, last],
+                );
+            }
+        }
         // A unary member reads its receiver at the width the RESULT is computed at: Kotlin's
         // `UByte.plus(UByte)` answers a `UInt`, so both operands widen before the operation and the
         // widening is where the zero-extension happens.

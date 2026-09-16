@@ -53,6 +53,12 @@ fn range_element(owner: TypeName) -> Option<Ty> {
         ("kotlin/ranges/LongProgression", Ty::Long),
         ("kotlin/ranges/CharRange", Ty::Char),
         ("kotlin/ranges/CharProgression", Ty::Char),
+        // The unsigned pair. Their members answer at the element's own width, and the runtime reads
+        // the bounds unsigned, so a `UIntRange`'s `last` of `4294967295u` answers as itself.
+        ("kotlin/ranges/UIntRange", Ty::UInt),
+        ("kotlin/ranges/UIntProgression", Ty::UInt),
+        ("kotlin/ranges/ULongRange", Ty::ULong),
+        ("kotlin/ranges/ULongProgression", Ty::ULong),
     ]
     .into_iter()
     .find_map(|(candidate, element)| owner.matches(candidate).then_some(element))
@@ -72,6 +78,10 @@ fn range_type(ty: Ty) -> Option<(&'static str, Ty)> {
         ("kotlin/ranges/IntProgression", "int", Ty::Int),
         ("kotlin/ranges/LongProgression", "long", Ty::Long),
         ("kotlin/ranges/CharProgression", "char", Ty::Char),
+        ("kotlin/ranges/UIntRange", "uint", Ty::UInt),
+        ("kotlin/ranges/UIntProgression", "uint", Ty::UInt),
+        ("kotlin/ranges/ULongRange", "ulong", Ty::ULong),
+        ("kotlin/ranges/ULongProgression", "ulong", Ty::ULong),
     ]
     .into_iter()
     .find_map(|(candidate, kind, element)| internal.matches(candidate).then_some((kind, element)))
@@ -106,6 +116,8 @@ fn is_range_iterator(ty: Ty) -> bool {
         "kotlin/collections/IntIterator",
         "kotlin/collections/LongIterator",
         "kotlin/collections/CharIterator",
+        "kotlin/collections/UIntIterator",
+        "kotlin/collections/ULongIterator",
     ]
     .iter()
     .any(|candidate| internal.matches(candidate))
@@ -115,7 +127,9 @@ fn is_range_iterator(ty: Ty) -> bool {
 fn range_iterator_symbol(name: &str, arity: usize) -> Option<(&'static str, Ty)> {
     Some(match (name, arity) {
         ("hasNext", 0) => ("kt_range_iterator_has_next", Ty::Boolean),
-        ("next" | "nextInt" | "nextLong" | "nextChar", 0) => ("kt_range_iterator_next", Ty::Long),
+        ("next" | "nextInt" | "nextLong" | "nextChar" | "nextUInt" | "nextULong", 0) => {
+            ("kt_range_iterator_next", Ty::Long)
+        }
         _ => return None,
     })
 }
@@ -399,15 +413,18 @@ impl BodyLowering<'_, '_, '_> {
         let mut params = vec![any()];
         let mut arguments = vec![object];
         for argument in args {
-            // `Char` is unsigned and the other two are signed; `coerce` to the element type and the
-            // widening to the runtime's 64 bits carries that signedness with it.
+            // `coerce` to the element type, then widen to the runtime's 64 bits with the
+            // element's OWN signedness — which is what the runtime reads the bounds back with.
+            // `Char` and the unsigned types zero-extend; getting that wrong makes `4294967295u`
+            // arrive as `-1` and sit outside every range it belongs to.
             let Some(value) = self.coerce(*argument, element)? else {
                 return Ok(None);
             };
+            let signed = element != Ty::Char && !element.is_unsigned();
             let widened = self.resize(
                 value,
                 self.builder.func.dfg.value_type(value),
-                element != Ty::Char,
+                signed,
                 types::I64,
             );
             params.push(Ty::Long);

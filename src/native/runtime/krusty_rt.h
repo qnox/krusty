@@ -314,6 +314,11 @@ typedef struct KRange {
 extern const KType kt_type_int_range;
 extern const KType kt_type_long_range;
 extern const KType kt_type_char_range;
+/* Kotlin declares only these two unsigned ranges: `UByte.rangeTo` and `UShort.rangeTo` both answer
+   a `UIntRange`, so the four unsigned scalars need no more than the pair. Their bounds are read
+   UNSIGNED, which for `ULongRange` is the difference between `18446744073709551615uL` and `-1`. */
+extern const KType kt_type_uint_range;
+extern const KType kt_type_ulong_range;
 
 /* `first..last`. An empty range is one whose `first` exceeds its `last`, which is a value, not an
    error: `3..1` is the empty range and Kotlin says so. */
@@ -326,6 +331,13 @@ KRef kt_char_range(kt_char first, kt_char last);
 KRef kt_int_range_until(kt_int first, kt_int last);
 KRef kt_long_range_until(kt_long first, kt_long last);
 KRef kt_char_range_until(kt_char first, kt_char last);
+
+/* The unsigned pair, bounds already zero-extended by the caller. `until` answers the empty range
+   at a last bound of ZERO — an unsigned type's minimum — rather than at the signed minimum. */
+KRef kt_uint_range(kt_int first, kt_int last);
+KRef kt_ulong_range(kt_long first, kt_long last);
+KRef kt_uint_range_until(kt_int first, kt_int last);
+KRef kt_ulong_range_until(kt_long first, kt_long last);
 
 /* `value in range`. The caller widens its own element to 64 bits — signed for `Int` and `Long`,
    unsigned for `Char` — which is the same widening the bounds were stored with. */

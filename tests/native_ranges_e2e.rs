@@ -399,3 +399,86 @@ fn a_progression_spanning_the_whole_range_reaches_every_step() {
         "OK",
     );
 }
+
+/// The two UNSIGNED ranges, at the bounds where reading them signed would show.
+///
+/// A `UIntRange`'s bounds are stored zero-extended, so a signed 64-bit comparison of them happens
+/// to answer correctly — but a `ULongRange`'s occupy all 64 bits, where `18446744073709551615uL`
+/// reads as `-1` and every comparison would be wrong. Both ends of both types are here so neither
+/// rests on that coincidence: the top of each range is the value a signed read calls `-1`, and an
+/// empty range is the one whose `first` exceeds its `last` UNSIGNED.
+///
+/// `first`/`last` are NOT read here: they are property reads, and an unsigned range's accessors
+/// arrive as `getFirst-pVg5ArA`, a spelling no table is written in. Recovering the Kotlin name from
+/// it is the unsound thing this backend no longer does, so those decline until the declaration
+/// contract publishes the name. `contains`, `isEmpty`, `toString` and the walk are members and
+/// resolve today.
+///
+/// Every expectation is kotlinc's, taken by compiling and running this same `box()` under it.
+#[test]
+fn an_unsigned_range_is_built_read_and_walked_unsigned() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val r = 1u..5u\n\
+         \x20   if (r.toString() != \"1..5\") return \"fail toString: $r\"\n\
+         \x20   if (!r.contains(3u)) return \"fail contains\"\n\
+         \x20   if (r.contains(6u)) return \"fail contains high\"\n\
+         \x20   if (r.isEmpty()) return \"fail isEmpty\"\n\
+         \x20   var s = \"\"\n\
+         \x20   for (u in r) s += \"$u,\"\n\
+         \x20   if (s != \"1,2,3,4,5,\") return \"fail walk: $s\"\n\
+         \x20   val top = 4294967290u..4294967295u\n\
+         \x20   if (top.toString() != \"4294967290..4294967295\") return \"fail top: $top\"\n\
+         \x20   if (!top.contains(4294967295u)) return \"fail top contains\"\n\
+         \x20   var n = 0\n\
+         \x20   for (u in top) n++\n\
+         \x20   if (n != 6) return \"fail top walk: $n\"\n\
+         \x20   val half = 1u..<4u\n\
+         \x20   if (half.toString() != \"1..3\") return \"fail until: $half\"\n\
+         \x20   val empty = 5u..1u\n\
+         \x20   if (!empty.isEmpty()) return \"fail empty\"\n\
+         \x20   if (empty.toString() != \"5..1\") return \"fail empty toString: $empty\"\n\
+         \x20   val big = 18446744073709551610uL..18446744073709551615uL\n\
+         \x20   if (big.toString() != \"18446744073709551610..18446744073709551615\") return \"fail ulong: $big\"\n\
+         \x20   if (!big.contains(18446744073709551615uL)) return \"fail ulong contains\"\n\
+         \x20   var m = 0\n\
+         \x20   for (u in big) m++\n\
+         \x20   if (m != 6) return \"fail ulong walk: $m\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "UnsignedRanges",
+        "OK",
+    );
+}
+
+/// A STEPPED unsigned range, at the step and bounds where the signed ring arithmetic breaks.
+///
+/// The last element of a progression is the bound pulled back onto the step, and computing it
+/// works modulo the step so the widest ranges never form a distance that does not fit. That
+/// modulo has to be taken on the UNSIGNED ring: above 2^63 a `ULong` bound reads as a negative
+/// `kt_long`, and `%` then answers the wrong half — which does not produce a wrong element but a
+/// walk that never reaches its end and hangs. `0uL..ULong.MAX_VALUE step Long.MAX_VALUE` is that
+/// case, and it terminates after exactly three.
+///
+/// Every expectation is kotlinc's, taken by compiling and running this same `box()` under it.
+#[test]
+fn a_stepped_unsigned_range_walks_on_the_unsigned_ring() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   var n = 0\n\
+         \x20   var s = \"\"\n\
+         \x20   for (i in 0u..UInt.MAX_VALUE step Int.MAX_VALUE) { s += \"$i,\"; n++; if (n > 9) break }\n\
+         \x20   if (s != \"0,2147483647,4294967294,\") return \"uint: $s\"\n\
+         \x20   var m = 0\n\
+         \x20   var t = \"\"\n\
+         \x20   for (i in 0uL..ULong.MAX_VALUE step Long.MAX_VALUE) { t += \"$i,\"; m++; if (m > 9) break }\n\
+         \x20   if (t != \"0,9223372036854775807,18446744073709551614,\") return \"ulong: $t\"\n\
+         \x20   var d = \"\"\n\
+         \x20   for (i in (1uL..9uL step 2L).reversed()) d += \"$i,\"\n\
+         \x20   if (d != \"9,7,5,3,1,\") return \"rev: $d\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "SteppedUnsignedRanges",
+        "OK",
+    );
+}
