@@ -1645,6 +1645,11 @@ pub struct IrClass {
     /// `Some(companion_fq)` on a class with a `companion object`: emit a `public static final
     /// <companion> Companion` field, initialized in this class's `<clinit>`.
     pub companion_class: Option<TypeName>,
+    /// Kotlin names of compiler-generated classifiers this class publishes as direct nested
+    /// declarations, in declaration order. Source-declared nested classifiers are represented by
+    /// their own [`IrClass`] ownership; this list is only for generated declarations whose producer
+    /// explicitly owns the language-level publication contract (for example `$serializer`).
+    pub published_nested_classifiers: Vec<String>,
     /// Secondary constructors — each an extra `<init>(params)` that delegates to the primary
     /// constructor (`constructor(…) : this(args)`) then runs its body. Empty for most classes.
     pub secondary_ctors: Vec<IrSecondaryCtor>,
@@ -2016,6 +2021,7 @@ impl IrClass {
             is_object: false,
             is_companion: false,
             companion_class: None,
+            published_nested_classifiers: Vec::new(),
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             applied_annotations: DeclarationAnnotations::default(),
@@ -2125,6 +2131,7 @@ impl IrClass {
             is_object: flags.has(crate::fir::DeclarationFlags::SINGLETON),
             is_companion: flags.has(crate::fir::DeclarationFlags::COMPANION),
             companion_class: None,
+            published_nested_classifiers: Vec::new(),
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             applied_annotations: DeclarationAnnotations::default(),
@@ -2679,13 +2686,6 @@ pub struct IrFile {
     /// Methods kotlinc marks `ACC_SYNTHETIC` — currently a value class's `box-impl`/`unbox-impl` (the
     /// compiler-manufactured box adapters). The JVM backend ORs `0x1000` for a `FunId` in this set.
     pub synthetic_methods: std::collections::HashSet<u32>,
-    /// Nested classifiers a compiler plugin generates AND publishes in the owner's Kotlin metadata,
-    /// as `(owner, Kotlin nested name)` in the order kotlinc records them. `is_source_declared`
-    /// deliberately keeps synthesized classes out of `Class.nestedClassName`; a plugin-generated
-    /// classifier that Kotlin code can name (`Foo.$serializer`) is the exception. The plugin states
-    /// the published NAME because it is the Kotlin-level one — `$serializer` keeps a leading `$`
-    /// that no backend segment split can recover from the JVM spelling `Foo$$serializer`.
-    pub plugin_nested_classifiers: Vec<(TypeName, String)>,
     /// Methods kotlinc marks `ACC_BRIDGE` (0x40) — e.g. a `@Serializable` serializer's
     /// `typeParametersSerializers`. The JVM backend ORs `0x40` for a `FunId` in this set.
     pub bridge_methods: std::collections::HashSet<u32>,

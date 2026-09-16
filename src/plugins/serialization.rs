@@ -1725,10 +1725,9 @@ impl IrPlugin for SerializationPlugin {
             // class's `Class.nestedClassName` — ahead of the `Companion`, which the metadata writer
             // appends last. Without the record a reader of `Foo`'s metadata cannot reach the
             // serializer as a member of the type it serializes.
-            ir.plugin_nested_classifiers.push((
-                ir.classes[class_id as usize].fq_name_id(),
-                SERIALIZER_OBJECT_NAME.to_string(),
-            ));
+            ir.classes[class_id as usize]
+                .published_nested_classifiers
+                .push(SERIALIZER_OBJECT_NAME.to_string());
             ir.insert_class_signature_name(
                 serializer_identity,
                 generated_serializer_signature(serializer_type_parameters, serialized_ty),
