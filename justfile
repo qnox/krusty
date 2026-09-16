@@ -124,7 +124,7 @@ test-fast:
 # "conformance without coverage" half of the pre-push gate. Provisions kotlinc + corpus via the
 # harness. The suite is internally rayon-parallel, so it uses all cores on its own.
 conformance-plain:
-    ./run-tests.sh --test conformance kotlin_codegen_box_conformance
+    just conformance
 
 # Sample compiler CPU time for the box corpus and write an interactive flamegraph. An optional path
 # substring focuses one case, for example: `just profile-box ranges/contains/generated/arrayIndices.kt`.
@@ -141,7 +141,7 @@ profile-box FILTER="":
 # Pass 2's tests are independent JVM-backed suites; thread them (capped at 4 — each thread can hold
 # a compiler-server/runner JVM) instead of serializing ~40 tests on one core.
 conformance-all-plain:
-    ./run-tests.sh --test conformance kotlin_codegen_box_conformance
+    just conformance
     ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --test-threads=$(n=$(nproc 2>/dev/null || sysctl -n hw.ncpu); [ "$n" -gt 4 ] && n=4; echo $n)
 
 # Run all conformance tests for one runtime-selected Kotlin version. The shared Cargo target avoids
@@ -159,7 +159,8 @@ conformance-one VERSION:
     export KRUSTY_LANGUAGE_VERSION="$v"
     export KRUSTY_KOTLINC="$kc"
     export KRUSTY_KOTLIN_BOX_DIR="${KRUSTY_KOTLIN_BOX_DIR:-$PWD/target/cache/box-corpus/$v/compiler/testData/codegen/box}"
-    ./run-tests.sh --test conformance kotlin_codegen_box_conformance
+    bin="$(just conformance-bin)"
+    just conformance-run "$bin" "$v"
     conf_threads="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"; [ "$conf_threads" -gt 4 ] && conf_threads=4
     ./run-tests.sh --test conformance -- --skip kotlin_codegen_box_conformance --test-threads="$conf_threads"
 

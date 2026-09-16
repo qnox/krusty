@@ -148,7 +148,7 @@ fn canonical_gate_defaults_bound_processes_and_partition_e2e() {
     let output = Command::new("bash")
         .args([
             "-c",
-            "unset KRUSTY_TEST_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_TIMEOUT_SECONDS KRUSTY_E2E_SHARDS; source \"$1\"; printf '%s\\n' \"$KRUSTY_TEST_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_SHARDS\"",
+            "unset KRUSTY_TEST_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_TIMEOUT_SECONDS KRUSTY_E2E_TIMEOUT_SECONDS KRUSTY_CONFORMANCE_SHARDS KRUSTY_E2E_SHARDS; source \"$1\"; printf '%s\\n' \"$KRUSTY_TEST_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS\" \"$KRUSTY_E2E_TIMEOUT_SECONDS\" \"$KRUSTY_CONFORMANCE_SHARDS\" \"$KRUSTY_E2E_SHARDS\"",
             "gate-default-test",
         ])
         .arg(defaults)
@@ -164,8 +164,7 @@ fn canonical_gate_defaults_bound_processes_and_partition_e2e() {
         .lines()
         .map(|value| value.parse::<u64>().expect("numeric gate default"))
         .collect::<Vec<_>>();
-    assert_eq!(values, [120, 295, 295, 22]);
-    assert!(values[..3].iter().all(|seconds| *seconds < 300));
+    assert_eq!(values, [120, 120, 120, 4, 22]);
 }
 
 #[cfg(unix)]
@@ -200,7 +199,7 @@ fn prebuilt_conformance_runner_enforces_its_configured_deadline() {
     assert_eq!(output.stdout, b"");
     assert_eq!(
         String::from_utf8(output.stderr).expect("deadline stderr is UTF-8"),
-        "conformance-run: timed out after 1s: Kotlin 2.4.10\n"
+        "conformance-run: timed out after 1s: Kotlin 2.4.10, shard 1/4\n"
     );
     assert!(elapsed.as_secs() < 5, "deadline took {elapsed:?}");
     fs::remove_dir_all(temp).expect("remove conformance deadline test directory");
@@ -219,7 +218,7 @@ fn prebuilt_conformance_runner_preserves_the_report_contract() {
     let binary = temp.join("conformance-bin");
     fs::write(
         &binary,
-        "#!/usr/bin/env bash\nprintf '%s|%s|%s|%s|%s\\n' \"$KRUSTY_LANGUAGE_VERSION\" \"$KRUSTY_KOTLINC\" \"$KRUSTY_KOTLIN_BOX_DIR\" \"$1\" \"$2\" >&2\nprintf '62.50 5 8\\n' >\"$KRUSTY_CONFORMANCE_REPORT\"\n",
+        "#!/usr/bin/env bash\nprintf '%s|%s|%s|%s|%s|%s/%s\\n' \"$KRUSTY_LANGUAGE_VERSION\" \"$KRUSTY_KOTLINC\" \"$KRUSTY_KOTLIN_BOX_DIR\" \"$1\" \"$2\" \"$KRUSTY_CONFORMANCE_SHARD_INDEX\" \"$KRUSTY_CONFORMANCE_SHARD_COUNT\" >&2\nprintf '62.5 5 8\\n' >\"$KRUSTY_CONFORMANCE_REPORT\"\n",
     )
     .expect("write reporting conformance fixture");
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))
@@ -236,12 +235,15 @@ fn prebuilt_conformance_runner_preserves_the_report_contract() {
         .expect("run reporting conformance fixture");
 
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(output.stdout, b"62.50 5 8\n");
+    assert_eq!(output.stdout, b"62.5 20 32\n");
     assert_eq!(
         String::from_utf8(output.stderr).expect("report stderr is UTF-8"),
         format!(
-            "2.4.10|/bin/reference-kotlinc|{}|kotlin_codegen_box_conformance|--nocapture\n",
-            temp.display()
+            "2.4.10|/bin/reference-kotlinc|{0}|kotlin_codegen_box_conformance|--nocapture|0/4\n\
+             2.4.10|/bin/reference-kotlinc|{0}|kotlin_codegen_box_conformance|--nocapture|1/4\n\
+             2.4.10|/bin/reference-kotlinc|{0}|kotlin_codegen_box_conformance|--nocapture|2/4\n\
+             2.4.10|/bin/reference-kotlinc|{0}|kotlin_codegen_box_conformance|--nocapture|3/4\n",
+            temp.display(),
         )
     );
     fs::remove_dir_all(temp).expect("remove conformance report test directory");
