@@ -52,10 +52,9 @@ pub(super) fn add_serializer_members(
         serialized_type,
         None,
     );
-    // `Array<KSerializer<*>>`: the elements serialize the FIELD types, which are unrelated to each
-    // other, so the element serializer's argument is a star projection. `KSerializer<Any>` is a
-    // different Kotlin type — it claims every element serializes `Any` — and the two erase alike, so
-    // only the generic `Signature` attribute and the metadata record show the difference.
+    // Both GeneratedSerializer array methods publish `Array<KSerializer<*>>`: the serializers'
+    // element types are unrelated. `KSerializer<Any>` is a different Kotlin contract despite the
+    // same erasure. The stored star bound is a semantic read fact; metadata omits its nested type.
     let serializer_array = Ty::obj_args(
         "kotlin/Array",
         &[kserializer_of(Ty::star_projection(Ty::nullable(class_ty(

@@ -20,6 +20,8 @@
 //! erased because their numbering is an emission-order artifact rather than class structure.
 use std::path::PathBuf;
 
+use krusty::types::Ty;
+
 use super::common;
 use super::common_core;
 
@@ -2540,11 +2542,33 @@ fn member_signature(disassembly: &str, member: &str) -> String {
     panic!("no Signature attribute for {member}");
 }
 
-/// `childSerializers()` hands back the serializers of the fields, whose element types are unrelated
-/// to each other — so kotlinc gives it `Array<KSerializer<*>>`, a STAR projection. krusty declared
+/// Decode one generated member's Kotlin-metadata return type. The JVM Signature and metadata are
+/// separate attributes built by separate emitters, so bytecode parity alone does not cover this.
+fn metadata_member_return(bytes: &[u8], owner: &str, member: &str) -> Ty {
+    let (d1, d2) = common_core::raw_kotlin_metadata(bytes).expect("read Kotlin metadata");
+    let d1 = vec![d1.into_iter().map(char::from).collect::<String>()];
+    let metadata = krusty::jvm::metadata::decode_metadata(&d1, &d2, Some(1), owner, None, &[]);
+    let matches = metadata
+        .class_functions
+        .iter()
+        .filter(|function| function.kotlin_name == member)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matches.len(),
+        1,
+        "exactly one metadata member named {member}"
+    );
+    matches[0]
+        .generic_sig
+        .as_ref()
+        .unwrap_or_else(|| panic!("metadata member {member} must have a return type"))
+        .ret
+}
+
+/// A generated serializer's array methods hand back serializers whose element types are unrelated
+/// to each other — so kotlinc gives them `Array<KSerializer<*>>`, a STAR projection. krusty declared
 /// the element type as `KSerializer<Any>`, which is a different Kotlin type: it claims every element
-/// serializes `Any`, and it lands in the `Signature` attribute of a method every `@Serializable`
-/// class generates.
+/// serializes `Any`. The distinction exists independently in Kotlin metadata and the JVM `Signature`.
 #[test]
 fn generated_serializer_arrays_are_star_projected() {
     let Some((plugin, cp)) = plugin_and_runtime() else {
@@ -2566,14 +2590,46 @@ fn generated_serializer_arrays_are_star_projected() {
         eprintln!("skipping: reference kotlinc or javap unavailable");
         return;
     };
-    let want = member_signature(&built.reference, "childSerializers()");
-    assert_eq!(
-        want, "()[Lkotlinx/serialization/KSerializer<*>;",
-        "kotlinc star-projects the element serializer type"
+    let expected_type = Ty::obj_args(
+        "kotlin/Array",
+        &[Ty::obj_args(
+            "kotlinx/serialization/KSerializer",
+            &[Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))],
+        )],
+    );
+    for member in ["childSerializers", "typeParametersSerializers"] {
+        let declaration = format!("{member}()");
+        let want_signature = member_signature(&built.reference, &declaration);
+        assert_eq!(
+            want_signature, "()[Lkotlinx/serialization/KSerializer<*>;",
+            "kotlinc star-projects {member}'s element serializer type"
+        );
+        assert_eq!(
+            member_signature(&built.krusty, &declaration),
+            want_signature,
+            "{member} JVM generic signature"
+        );
+    }
+
+    // kotlinc records the generated override of childSerializers in class metadata. Its
+    // typeParametersSerializers realization is synthetic support for the inherited default and is
+    // deliberately absent there, though its JVM Signature above still carries the star projection.
+    let want_metadata = metadata_member_return(
+        &built.reference_bytes,
+        "Retention$$serializer",
+        "childSerializers",
     );
     assert_eq!(
-        member_signature(&built.krusty, "childSerializers()"),
-        want,
-        "childSerializers generic signature"
+        want_metadata, expected_type,
+        "kotlinc childSerializers metadata type"
+    );
+    assert_eq!(
+        metadata_member_return(
+            &built.krusty_bytes,
+            "Retention$$serializer",
+            "childSerializers",
+        ),
+        want_metadata,
+        "childSerializers Kotlin metadata return type"
     );
 }
