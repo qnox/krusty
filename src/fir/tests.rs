@@ -2282,6 +2282,7 @@ impl SignatureSemantics for TestSignatureSemantics {
         &self,
         receiver: ResolvedTy,
         unbound: bool,
+        _classifier: Option<(SignatureScope, &str)>,
     ) -> Result<ResolvedTy, DiagnosticId> {
         self.operations.borrow_mut().push(
             if unbound {

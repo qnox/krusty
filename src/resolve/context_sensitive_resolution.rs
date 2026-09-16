@@ -28,3 +28,11 @@ pub(super) fn expected_nested_classifier(
         |candidate: TypeName| source.classifier(candidate).is_some(),
     )
 }
+
+/// Attach the represented classifier to the reflection-class base selected by normal resolution.
+pub(super) fn parameterized_class_literal_type(base: Ty, represented: Ty) -> Ty {
+    match base {
+        Ty::Obj(internal, []) => Ty::obj_args_name(internal, &[represented]),
+        _ => base,
+    }
+}

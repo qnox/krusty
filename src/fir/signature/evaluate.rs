@@ -772,6 +772,19 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             }
         }
 
+        fn class_literal_classifier_spelling(
+            graph: &SignatureGraph,
+            expression: SigExprId,
+        ) -> Option<String> {
+            match graph.expr(expression)? {
+                SigExpr::Type { syntax, .. } => Some(graph.transient_type_ref(syntax)?.name),
+                SigExpr::Nullable(inner) | SigExpr::NonNullable(inner) => {
+                    class_literal_classifier_spelling(graph, inner)
+                }
+                _ => None,
+            }
+        }
+
         fn evaluate_expression<S: SignatureSemantics>(
             semantics: &S,
             expression: SigExprId,
@@ -894,15 +907,18 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         scope,
                         root,
                     } => {
+                        let semantic_scope = graph
+                            .scope(scope)
+                            .expect("a class literal scope must belong to its graph");
+                        let classifier_spelling = classifier.and_then(|classifier| {
+                            class_literal_classifier_spelling(graph, classifier)
+                        });
                         let use_value = match (classifier, root) {
                             (Some(_), Some(root)) => {
-                                let scope = graph
-                                    .scope(scope)
-                                    .expect("a class literal scope must belong to its graph");
                                 let root = graph
                                     .name(root)
                                     .expect("a class literal root must belong to its graph");
-                                semantics.class_literal_receiver_is_value(scope, root)?
+                                semantics.class_literal_receiver_is_value(semantic_scope, root)?
                             }
                             (None, None) => true,
                             (Some(_), None) | (None, Some(_)) => {
@@ -919,7 +935,19 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         let selected = evaluate_expression(
                             semantics, selected, graph, demand, memo, computing,
                         )?;
-                        semantics.class_literal_type(selected, !use_value)
+                        let classifier = if use_value {
+                            None
+                        } else {
+                            let spelling = classifier_spelling.as_deref().unwrap_or_else(|| {
+                                graph
+                                    .name(root.expect(
+                                        "an unbound class literal must retain its root spelling",
+                                    ))
+                                    .expect("a class literal root must belong to its graph")
+                            });
+                            Some((semantic_scope, spelling))
+                        };
+                        semantics.class_literal_type(selected, !use_value, classifier)
                     }
                     SigExpr::Member {
                         receiver,

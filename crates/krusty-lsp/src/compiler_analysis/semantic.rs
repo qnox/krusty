@@ -2078,7 +2078,7 @@ impl<'a> SemanticClassifier<'a> {
                         };
                         let selected = self
                             .type_info
-                            .and_then(|types| types.resolved_source_call(id))
+                            .and_then(|types| types.callable_reference_source_key(id))
                             .and_then(|(file, declaration)| {
                                 self.definition_symbols
                                     .declaration_target(file, declaration)

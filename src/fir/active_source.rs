@@ -223,10 +223,9 @@ impl ActiveSourceDeclarations {
 
     /// Bind a whole-file syntax arena retained by a same-parse caller to the complete stable
     /// declaration stream. Production Pass 2 binds one bounded parser unit at a time through
-    /// [`ActiveSourceCursor`]; this adapter exists for Pass-1 inline checking and focused tests
-    /// whose syntax arena is already live. The returned table is still transient and contains
-    /// parser indices rather than source coordinates.
-    #[cfg(test)]
+    /// [`ActiveSourceCursor`]; inspection analysis and focused tests instead retain the complete
+    /// syntax arena while consuming the same finalized declaration index. The returned table is
+    /// still transient and contains parser indices rather than source coordinates.
     pub(crate) fn bind_complete_source(
         file: &File,
         source: SourceFileId,

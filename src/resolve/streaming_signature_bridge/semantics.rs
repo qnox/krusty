@@ -4381,8 +4381,23 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         &self,
         receiver: crate::fir::ResolvedTy,
         unbound: bool,
+        classifier: Option<(crate::fir::SignatureScope, &str)>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         let receiver = receiver.get();
+        let receiver = match (receiver, classifier) {
+            (Ty::Obj(internal, []), Some((scope, spelling)))
+                if receiver.is_reference_array()
+                    && self
+                        .signature_source_alias_expansion(scope, spelling)
+                        .is_none() =>
+            {
+                Ty::obj_args_name(
+                    internal,
+                    &[Ty::out_projection(Ty::nullable(Ty::obj("kotlin/Any")))],
+                )
+            }
+            (receiver, _) => receiver,
+        };
         if !unbound && !receiver.is_reference() && receiver.jvm_boxed_ref().is_none() {
             return Err(Self::failure());
         }
