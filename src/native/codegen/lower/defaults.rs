@@ -218,7 +218,7 @@ impl<'a> FileLowering<'a> {
                     }
                     None => {
                         let func_ref = body.func_ref(target);
-                        let call = body.builder.ins().call(func_ref, &arguments);
+                        let call = body.emit_call(func_ref, &arguments)?;
                         body.builder.inst_results(call).first().copied()
                     }
                 };
@@ -279,7 +279,7 @@ impl BodyLowering<'_, '_, '_> {
             return Ok(None);
         }
         let func_ref = self.func_ref(id);
-        let call = self.builder.ins().call(func_ref, &arguments);
+        let call = self.emit_call(func_ref, &arguments)?;
         Ok(self.builder.inst_results(call).first().copied())
     }
 }
@@ -489,7 +489,7 @@ impl<'a> FileLowering<'a> {
                 .map(|variable| body.builder.use_var(*variable))
                 .collect();
             let func_ref = body.func_ref(target);
-            body.builder.ins().call(func_ref, &arguments);
+            body.emit_call(func_ref, &arguments)?;
             body.builder.ins().return_(&[]);
             body.terminate();
             Ok(())
@@ -558,7 +558,7 @@ impl BodyLowering<'_, '_, '_> {
         let object = self.allocate(descriptor, size)?;
         arguments.insert(0, object);
         let func_ref = self.func_ref(id);
-        self.builder.ins().call(func_ref, &arguments);
+        self.emit_call(func_ref, &arguments)?;
         Ok(Some(object))
     }
 }

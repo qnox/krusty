@@ -200,12 +200,12 @@ impl<'a> FileLowering<'a> {
                         operands.push(value);
                     }
                     let func_ref = body.func_ref(constructor);
-                    body.builder.ins().call(func_ref, &operands);
+                    body.emit_call(func_ref, &operands)?;
                 }
                 // The companion comes after every constant, which is the order a program sees.
                 if let Some(getter) = companion {
                     let func_ref = body.func_ref(getter);
-                    body.builder.ins().call(func_ref, &[]);
+                    body.emit_call(func_ref, &[])?;
                 }
                 body.builder.ins().jump(done, &[]);
 
@@ -338,7 +338,7 @@ impl BodyLowering<'_, '_, '_> {
     fn build_enum(&mut self, class: ClassId) -> Result<(), Unsupported> {
         let initializer = self.file.enum_entries[&class].initializer;
         let func_ref = self.func_ref(initializer);
-        self.builder.ins().call(func_ref, &[]);
+        self.emit_call(func_ref, &[])?;
         Ok(())
     }
 

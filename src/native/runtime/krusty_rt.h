@@ -140,6 +140,8 @@ extern const KType kt_type_unit;
    as its own type, and an `is` against either is answered by the interface list of the box. */
 extern const KType kt_type_number;
 extern const KType kt_type_comparable;
+/* `kotlin.CharSequence`, which a `String` and a `StringBuilder` both point at. */
+extern const KType kt_type_char_sequence;
 extern const KType kt_type_ubyte;
 extern const KType kt_type_ushort;
 extern const KType kt_type_uint;
@@ -492,6 +494,7 @@ extern const KType kt_type_unsupported_operation_exception;
 extern const KType kt_type_number_format_exception;
 extern const KType kt_type_no_such_element_exception;
 extern const KType kt_type_concurrent_modification_exception;
+extern const KType kt_type_uninitialized_property_access_exception;
 
 /* Allocate one. `message` may be NULL, which is Kotlin's `null` message. */
 KRef kt_throwable_new(const KType *type, KRef message);
@@ -499,9 +502,30 @@ KRef kt_throwable_new(const KType *type, KRef message);
 /* Its `message`, or NULL. */
 KRef kt_throwable_message(KRef self);
 
-/* Report an uncaught throw and end the program. See the note on the definition for why every throw
-   is uncaught today. */
+/* Reading a `lateinit` property before anything assigned it, named for the message Kotlin gives. */
+void kt_uninitialized_property(KRef name);
+
+/* `throw e`: record the exception in the one pending slot and RETURN. The caller's next act is
+   `kt_pending_exception`, and that check is what turns the return into propagation. The slot is a
+   GC root, because between the throw and the `catch` that names it the exception is reachable from
+   no frame. See "How an exception propagates" in `docs/BUILD_AND_NATIVE_PLAN.md`. */
 void kt_throw(KRef thrown);
+
+/* The exception in flight, or NULL. Generated code LOADS this slot after every call rather than
+   calling the accessor below: a call would clobber the caller-saved registers, and one after every
+   call doubles what a frame keeps alive across a call boundary — which a deep enough recursion
+   pays for in stack. */
+extern KRef kt_pending;
+
+/* The same slot through a call, for the runtime's own use. */
+KRef kt_pending_exception(void);
+
+/* A clause took it; nothing is in flight any more. */
+void kt_clear_pending(void);
+
+/* Nothing handled it: report it on stderr and end the program with 134, as Kotlin does. The
+   generated entry calls this where it is about to treat `main`'s answer as an answer. */
+void kt_check_uncaught(void);
 
 /* ---- kotlin.test ------------------------------------------------------------------------------
 

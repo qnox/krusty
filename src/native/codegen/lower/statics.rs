@@ -205,7 +205,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let id = self.file.functions[function as usize]
             .ok_or_else(|| "an accessor with no body".to_string())?;
         let func_ref = self.func_ref(id);
-        let call = self.builder.ins().call(func_ref, arguments);
+        let call = self.emit_call(func_ref, arguments)?;
         Ok(self.builder.inst_results(call).first().copied())
     }
 
@@ -381,7 +381,7 @@ impl BodyLowering<'_, '_, '_> {
             let id = self.file.functions[function as usize]
                 .ok_or_else(|| "a property accessor with no body".to_string())?;
             let func_ref = self.func_ref(id);
-            let call = self.builder.ins().call(func_ref, &arguments);
+            let call = self.emit_call(func_ref, &arguments)?;
             return Ok(self.builder.inst_results(call).first().copied());
         };
         let class = self.file.class_of(owner, "a property accessor of")?;

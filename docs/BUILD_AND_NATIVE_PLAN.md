@@ -1618,6 +1618,68 @@ before:**
    `x = 42` inside a loop, where krusty resolves `x.length` and kotlinc reports `unresolved
    reference 'length'`. Each wants its own fix against core.
 
+   **`try`/`catch`, for 3756 — and what it cost to find out the runtime was lying.** The top
+   decline at 173, built exactly as the design below says: a `throw` records the exception in one
+   GC-rooted slot and RETURNS, and every call site loads that slot and branches. The `try` pushes a
+   dispatch block, so the check inside its body goes there instead of out of the frame; dispatch
+   tests each clause in source order and CLEARS the slot before running the one that matches.
+   Three things had to be right and only one was obvious.
+   The check must be a LOAD, not a call to an accessor. A call clobbers the caller-saved registers,
+   so one after every call doubles what a frame keeps alive across a call boundary — and the frames
+   grow. A 100,000-deep recursion in the corpus overflowed its stack on exactly that, and stopped
+   when the check became a load. It is also what the design below was costed at.
+   Every call needs it, including the DISPATCHED one. That is the single call this backend emits
+   outside the shared helper, and `expectFail { … }` — a `try` whose body invokes a lambda — is the
+   corpus's own shape, so the exception walked straight out of the `try` until it checked too.
+   And the handler machinery must NOT check. Deciding which clause takes the exception happens
+   while one is pending by construction, so a check there reads the very slot being examined, finds
+   it set, and leaves. Every `catch` swallowed nothing until that path was exempted.
+
+   **Then the runtime turned out to be the thing that could not be caught, for the same 3756.**
+   Landing `try` took the lane from 2 failures to 38, and 36 of them were one finding: programs
+   that now COMPILED and expected the runtime's own failures to be catchable. A failed cast, `!!`
+   on a null, `/ 0`, an index past the end, `valueOf` of an unknown constant, a non-positive
+   `step`, writing through a list while walking it — every one was a `kt_sys_exit` with a `krusty:`
+   line, which was the honest realization while no handler could exist and is a wrong answer now
+   that one can. Each raises Kotlin's own exception through the same slot, so a clause cannot tell
+   a runtime failure from a written `throw`.
+   The trap in converting them is that these functions RETURN now. `kt_divide_by_zero` recorded an
+   `ArithmeticException` and fell through to the machine divide it was there to avoid — a SIGFPE
+   where Kotlin has an exception a program may catch. Every site needed an explicit return, and the
+   ones that answer a value needed a value to answer with; no caller reads it, because every caller
+   checks the slot first.
+   Two messages were worth asking kotlinc about rather than reasoning out: `x!!` raises a
+   `NullPointerException` with NO message, and `null as String` raises one whose message names the
+   target type. Conflating them is the easy mistake — a null is not an instance of anything, so a
+   cast of one has no class to report as its source, and krusty was reporting `class null cannot be
+   cast to …` for both.
+
+   **The casts underneath, for the same run.** A `try` made four more cast defects visible that had
+   been invisible while nothing could catch. `(1 as Any) as Byte` unboxed and converted, answering
+   `1` where Kotlin raises: the widths are convertible and the TYPES are not. `it as Byte` where
+   `it` is a type parameter substituted to `Int` arrives with BOTH sides already unboxed, and is
+   still an object question — Kotlin has no cast between two primitive types, so a
+   scalar-to-other-scalar cast can only have come from erasure. And a cast whose target has no
+   descriptor at all still has a NON-NULL-ness to check.
+   That last one is where reading the target instead of the node cost a measurement: an unbounded
+   `T` is not nullable as a `Ty`, and `null as T` is legal because `T` may be instantiated with a
+   nullable type. Checking on the target's spelling made eight programs throw that Kotlin accepts
+   and took the lane from 11 failures to 16; the node's own `CastNonNull` is the only thing that
+   decides it.
+
+   **And the gate found two more that the corpus had not.** The full harness is the second
+   measurement and it earned its place twice here. `typeparam_cast_e2e` had been DECLINING on the
+   native side — it contains a `try` — so landing `try` made it a cross-check again, and it
+   answered `fail cce` where the JVM answered `OK`: a cast to a bounded type parameter checked
+   nothing. The bound is all that is left of a parameter at run time and is exactly what kotlinc
+   checks, so `checked_cast_target` resolves a `TyParam` to it. That needed a descriptor for
+   `CharSequence`, which is the same arrangement `Number` and `Comparable` already have — with the
+   difference that TWO types point at it now, a `String` and a `StringBuilder`. Answering with the
+   string's own descriptor would have been sound until the builder landed an hour earlier.
+   The architecture test caught the other: recognizing a file facade by its `Kt` suffix is a JVM
+   provider detail, and every one of those lives in `native/intrinsics` or nowhere. That rule has
+   now fired three times on this branch, each time on something that looked local.
+
    **How an exception propagates: a pending slot, not an unwinder.** This is the second of the
    three low-IR decisions the risks section says must be answered by design rather than inherited.
 

@@ -844,8 +844,11 @@ fn a_not_null_assertion_passes_a_value_through_and_fails_on_null() {
         .expect("run");
     assert!(!output.status.success(), "a `!!` on null must not continue");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "before\n");
+    // `!!` raises Kotlin's `NullPointerException`, which a program may CATCH; uncaught, it reaches
+    // the entry and is reported there. kotlinc gives that exception no message, and neither does
+    // this — `null as T` is the one that names a type, and the two are observably different.
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("null cannot be cast to a non-null type"),
+        String::from_utf8_lossy(&output.stderr).contains("kotlin.NullPointerException"),
         "stderr: {:?}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -1174,8 +1177,10 @@ fn an_array_index_outside_its_bounds_fails_loudly() {
                 .expect("run");
         assert!(!output.status.success(), "index {index} must not continue");
         assert_eq!(String::from_utf8_lossy(&output.stdout), "before\n");
+        // Kotlin's `IndexOutOfBoundsException`, which a program may catch; uncaught, it is
+        // reported at the entry like any other.
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("array index out of bounds"),
+            String::from_utf8_lossy(&output.stderr).contains("kotlin.IndexOutOfBoundsException"),
             "index {index}: {:?}",
             String::from_utf8_lossy(&output.stderr)
         );

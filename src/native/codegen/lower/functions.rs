@@ -536,7 +536,7 @@ impl<'a> FileLowering<'a> {
                     arguments.push(value);
                 }
                 let func_ref = body.func_ref(target);
-                let call = body.builder.ins().call(func_ref, &arguments);
+                let call = body.emit_call(func_ref, &arguments)?;
                 let returned = body.builder.inst_results(call).first().copied();
                 match (returned, carrier(result)) {
                     (_, Carrier::Void) => {}
@@ -605,7 +605,7 @@ impl<'a> FileLowering<'a> {
                     arguments.push(value);
                 }
                 let func_ref = body.func_ref(target);
-                let call = body.builder.ins().call(func_ref, &arguments);
+                let call = body.emit_call(func_ref, &arguments)?;
                 let result = body.builder.inst_results(call).first().copied();
                 // A `Unit`-returning lambda still answers with a reference: the runtime's `Unit`.
                 let result = match result {

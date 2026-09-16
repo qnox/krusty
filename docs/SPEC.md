@@ -6602,6 +6602,106 @@ and behavior is checked by RUNNING the emitted program.
   observable depends on; `StringBuilder(text)` copies the text.
   Tests: `tests/native_string_builders_e2e.rs` (all).
 
+- **An exception propagates through a PENDING SLOT, and every call checks it.** `throw` records the
+  exception in one runtime slot and RETURNS the frame's zero value; every call site loads the slot
+  and branches — to the innermost enclosing `try`'s dispatch block, or out of the frame with the
+  slot still set, which IS the propagation. A caller never reads the value a throwing call
+  returned, because it checks first. The slot is a GC root: between the throw and the `catch` that
+  names it the exception is reachable from no frame.
+  The slot is READ, not fetched through an accessor. A call clobbers the caller-saved registers, so
+  one after every call doubles what a frame keeps alive across a call boundary — and the frames
+  grow. The corpus priced that exactly: a 100,000-deep recursion overflowed its stack when the
+  check was a call and does not when it is a load. One load and one predicted branch is also what
+  the design was costed at.
+  EVERY call in a function body carries the check, including the DISPATCHED one, which is the only
+  call this backend emits outside the shared helper — a `try` whose body invokes a lambda is the
+  common shape, and the exception walked straight out of the `try` until that call checked too.
+  The handler machinery itself must NOT check: deciding which clause takes the exception happens
+  while one is pending by construction, so a check there reads the very slot being examined, finds
+  it set, and leaves — every `catch` then swallows nothing.
+  Clauses are tried in source order, which is Kotlin's and the JVM's, by `kt_is_instance` against
+  each clause's type; a clause that matches CLEARS the slot before running, because from there the
+  exception is handled and the handler's own calls check that slot like any others. No clause
+  matching falls through to where the exception was already going.
+  `finally` DECLINES. It runs on every way out — normal completion, each handler, propagation, and
+  a `return` written inside the body — so it is a separate piece of work, and half-answering it
+  would be the silent wrong answer this backend declines instead of giving.
+  Tests: `tests/native_try_catch_e2e.rs` (all).
+
+- **The runtime's own failures are Kotlin exceptions a program can catch.** Each was a diagnosable
+  exit while no handler could exist to see the difference; each is now the exception Kotlin
+  specifies, raised through the same slot a written `throw` uses, so a clause cannot tell the two
+  apart. A failed cast is `ClassCastException` reading `class A cannot be cast to class B`, which
+  is Kotlin/Native's wording; `x!!` is `NullPointerException` with NO message and `null as T` is
+  one whose message names the target type — kotlinc 2.4.10 confirms both, and conflating them is
+  the easy mistake, since a null is not an instance of anything and there is no class to report as
+  a cast's source. Division by zero is `ArithmeticException("/ by zero")`, an index outside an
+  array is `IndexOutOfBoundsException`, `valueOf` of an unknown constant is
+  `IllegalArgumentException`, a non-positive `step` is `IllegalArgumentException`, and writing
+  through a list while walking it is `ConcurrentModificationException` — decided by a MODIFICATION
+  COUNT rather than the size, because `remove` during a walk can leave the cursor inside the
+  shortened list where the bound says nothing is wrong.
+  Every one of these RETURNS after raising, and every caller must act on that: the exception is
+  recorded, not raised, so falling through reaches the machine divide or the out-of-range read the
+  check was there to avoid. Division by zero took a SIGFPE until each site returned.
+  Tests: `tests/native_try_catch_e2e.rs`
+  (`the_runtimes_own_failures_are_catchable_kotlin_exceptions`,
+  `a_failed_cast_names_both_classes_the_way_kotlin_native_does`,
+  `a_null_cast_is_a_null_pointer_exception_naming_the_target_type`, `valueof_of_an_unknown_constant_throws`),
+  `tests/native_lists_e2e.rs` (`writing_through_a_list_while_walking_it_is_a_concurrent_modification`).
+
+- **A cast whose target is a primitive is still a question about the object, unless the source is
+  already that same primitive.** `(1 as Any) as Byte` is a `ClassCastException` in Kotlin: the
+  widths are convertible and the TYPES are not. So is `it as Byte` where `it` is a type parameter
+  the call substituted to `Int` — and that one arrives with both sides already unboxed, because
+  Kotlin has no cast between two primitive types (`val x: Int = 1; x as Byte` does not compile), so
+  a scalar-to-other-scalar cast can only have come from erasure. Both ask the descriptor before
+  reading anything out; unboxing and converting first answers `1` to a program Kotlin refuses.
+  Where there is no descriptor to test against — an erased type parameter — the NON-NULL-ness of
+  the cast is still checked, and the node's own operation is what decides it, never the spelling of
+  the target: an unbounded `T` is not nullable as a type and `null as T` is still legal, because
+  `T` may be instantiated with a nullable one. Reading the target instead made eight programs throw
+  that Kotlin accepts.
+  Tests: `tests/native_try_catch_e2e.rs`
+  (`a_cast_between_two_primitives_can_only_be_an_erased_object_cast`); the corpus cases are
+  `codegen/box/casts/{asForConstants,asWithGeneric,castToDefinitelyNotNullType,kt59022}.kt`.
+
+- **A `lateinit` read is guarded wherever a field is LOADED, not wherever one is written in the
+  source.** There are four paths that load a field — the `GetField` node, a property read that
+  finds storage rather than a getter, the `super` read that does, and the synthesized accessor a
+  property reached through a vtable slot arrives at — and a property that OVERRIDES another takes
+  the last of them. Putting the guard on the load is what makes one rule serve all four. Kotlin
+  puts it at the read rather than tracking initialization because the field being null IS the
+  evidence, which is also why `lateinit` is confined to types that have a null.
+  A TOP-LEVEL `lateinit var` is NOT guarded, and that is common lowering's gap rather than this
+  backend's: its getter carries no check and krusty's JVM backend answers null there too
+  (`codegen/box/properties/lateinit/topLevel/`, both ledgered).
+  Tests: `tests/native_try_catch_e2e.rs` (`reading_a_lateinit_property_before_it_is_set_throws`,
+  `a_lateinit_property_that_overrides_one_is_guarded_too`).
+
+- **`CharSequence` is a descriptor the text types point at, and a cast to a type PARAMETER is a
+  cast to its bound.** `CharSequence` has no instances of its own, so it takes the arrangement
+  `Number` and `Comparable` already use — except that TWO types point at it, a `String` and a
+  `StringBuilder`. Answering the question with the string's own descriptor would have been sound
+  while a string was the only text this runtime made, and stopped being sound the moment there was
+  a builder.
+  A bound is all that is left of a type parameter at run time, and it is exactly what kotlinc
+  checks: `fun <T : CharSequence> f(x: Any?) = x as T` rejects a non-`CharSequence` inside `f`,
+  before the call site's own cast to the argument it was given. An unbounded parameter bounds at
+  `Any?`, where there is nothing to check.
+  Tests: `tests/native_string_builders_e2e.rs` (`both_text_types_answer_to_char_sequence`),
+  `tests/typeparam_cast_e2e.rs` (`class_bounded_type_param_cast_checkcasts`, which cross-checks the
+  two backends).
+
+- **A class nested in the FILE FACADE is not qualified by it on this target.**
+  `castAnonymousClassKt$box$1` is the JVM's binary name for an anonymous object inside a top-level
+  `box`, and it is right there — but there is no facade class here at all: a top-level property is
+  a global and a top-level function is a symbol, neither owned by anything. Kotlin/Native names
+  that object `box$1`, and that is what a failed cast reports. Only the PACKAGE separator becomes a
+  dot: a `$` is Kotlin's own nesting separator and stays one, so a class local to `box` reads
+  `box$MyLocalObject` rather than as a package that does not exist.
+  Tests: the corpus cases are `codegen/box/casts/nativeCCEMessage/` (all four).
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

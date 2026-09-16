@@ -664,7 +664,7 @@ impl BodyLowering<'_, '_, '_> {
         let id = self.file.functions[accessor as usize]
             .ok_or_else(|| "an extension accessor with no body".to_string())?;
         let func_ref = self.func_ref(id);
-        let call = self.builder.ins().call(func_ref, &arguments);
+        let call = self.emit_call(func_ref, &arguments)?;
         Ok(self.builder.inst_results(call).first().copied())
     }
 

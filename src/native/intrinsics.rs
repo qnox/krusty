@@ -96,6 +96,9 @@ pub(super) fn throwable_descriptor(owner: crate::types::TypeName) -> Option<&'st
         "kotlin/NumberFormatException" => "kt_type_number_format_exception",
         "kotlin/NoSuchElementException" => "kt_type_no_such_element_exception",
         "kotlin/ConcurrentModificationException" => "kt_type_concurrent_modification_exception",
+        "kotlin/UninitializedPropertyAccessException" => {
+            "kt_type_uninitialized_property_access_exception"
+        }
         _ => return None,
     })
 }
@@ -519,6 +522,36 @@ pub(super) fn is_list_type(internal: crate::types::TypeName) -> bool {
 /// the path `Any()` and the throwables already take: the runtime allocates it.
 pub(super) fn is_array_list(internal: crate::types::TypeName) -> bool {
     kotlin_owner(&internal.render()) == "kotlin/collections/ArrayList"
+}
+
+/// A qualified name with the FILE FACADE a nested class is qualified by removed, or `None` when it
+/// names no facade.
+///
+/// `castAnonymousClassKt$box$1` is the JVM's binary name for an anonymous object inside a top-level
+/// `box`, and it is right there — but there is no facade class on the native target at all: a
+/// top-level property is a global and a top-level function is a symbol, neither owned by anything.
+/// Kotlin/Native names that object `box$1`.
+///
+/// A facade is recognized by its `Kt` suffix, which is the same test [`facade_package`] makes for
+/// the same reason. That spelling is a JVM provider detail, which is why the test lives here.
+pub(super) fn without_file_facade(qualified: &str) -> Option<String> {
+    let (package, tail) = match qualified.rfind('.') {
+        Some(at) => (&qualified[..=at], &qualified[at + 1..]),
+        None => ("", qualified),
+    };
+    let (facade, nested) = tail.split_once('$')?;
+    (facade.ends_with("Kt") && !nested.is_empty()).then(|| format!("{package}{nested}"))
+}
+
+/// Whether this names `kotlin.CharSequence`, under either spelling a provider may hand over.
+///
+/// It wears a runtime descriptor for the reason `Number` and `Comparable` do: no instances of its
+/// own, and both the string and the builder point at it, so a cast or an `is` against it has
+/// something to compare.
+pub(super) fn is_char_sequence(internal: crate::types::TypeName) -> bool {
+    ["kotlin/CharSequence", "java/lang/CharSequence"]
+        .iter()
+        .any(|candidate| internal.matches(candidate))
 }
 
 /// The string builder the runtime provides, if this names one.

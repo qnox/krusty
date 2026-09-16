@@ -150,3 +150,33 @@ fn a_capacity_is_a_hint_and_nothing_a_program_can_see() {
         "OK",
     );
 }
+
+#[test]
+fn both_text_types_answer_to_char_sequence() {
+    // `CharSequence` has no instances of its own, so it is a descriptor the two text types POINT
+    // AT — the arrangement `Number` and `Comparable` already use. Answering the question with the
+    // string's own descriptor was sound while a string was the only text this runtime made, and
+    // stopped being sound the moment there was a builder.
+    expect_native_box(
+        "fun <T : CharSequence> lengthOf(x: Any?): Int = (x as T).length\n\
+         fun box(): String {\n\
+         \x20   val text: Any = \"abc\"\n\
+         \x20   val builder: Any = StringBuilder(\"abcd\")\n\
+         \x20   if (text !is CharSequence) return \"fail string is\"\n\
+         \x20   if (builder !is CharSequence) return \"fail builder is\"\n\
+         \x20   if (42 as Any is CharSequence) return \"fail int is\"\n\
+         \x20   if (lengthOf<CharSequence>(text) != 3) return \"fail string length\"\n\
+         \x20   if (lengthOf<CharSequence>(builder) != 4) return \"fail builder length\"\n\
+         \x20   // A cast to a bounded type parameter checks the BOUND, which is all that is left\n\
+         \x20   // of it at run time.\n\
+         \x20   return try {\n\
+         \x20       lengthOf<CharSequence>(42)\n\
+         \x20       \"fail: no throw\"\n\
+         \x20   } catch (e: ClassCastException) {\n\
+         \x20       \"OK\"\n\
+         \x20   }\n\
+         }\n",
+        "CharSequenceDescriptor",
+        "OK",
+    );
+}

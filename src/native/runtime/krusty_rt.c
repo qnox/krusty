@@ -61,10 +61,19 @@ const KType kt_type_number = {"kotlin.Number", 13,  sizeof(KObjectHeader), 0, 0,
 const KType kt_type_comparable = {"kotlin.Comparable", 17, sizeof(KObjectHeader), 0, 0, NULL,
                                   &kt_type_any,        kt_any_vtable, 3, 0};
 
+/* `kotlin.CharSequence` is the same kind of thing: no instances of its own, and TWO types point at
+   it — a `String` and a `StringBuilder`. Both are needed. Answering this question with
+   `kt_type_string` would have been sound while a string was the only text this runtime made, and
+   stopped being sound the moment there was a builder. */
+const KType kt_type_char_sequence = {"kotlin.CharSequence", 19, sizeof(KObjectHeader), 0, 0, NULL,
+                                     &kt_type_any,         kt_any_vtable, 3, 0};
+
 /* Flattened and transitive, as `KType.interfaces` requires: a `Number` is also `Comparable`, so a
    numeric box names both rather than relying on a walk that does not exist. */
 static const KType *const kt_number_interfaces[] = {&kt_type_number, &kt_type_comparable};
 static const KType *const kt_comparable_interfaces[] = {&kt_type_comparable};
+static const KType *const kt_text_interfaces[] = {&kt_type_comparable, &kt_type_char_sequence};
+static const KType *const kt_char_sequence_interfaces[] = {&kt_type_char_sequence};
 
 #define KT_TYPE_WITH(identifier, kotlin_name, size, count, offsets, ifaces)                        \
     const KType identifier = {kotlin_name,       sizeof(kotlin_name) - 1,                          \
@@ -116,15 +125,15 @@ KRef kt_array_new(const KType *type, kt_int length) {
     return (KRef)array;
 }
 
+/* An index outside `0 until size`: Kotlin's `IndexOutOfBoundsException`, which a program may
+   catch. The wording is the JVM's, which is what the corpus reads where it reads one at all. */
 void kt_index_out_of_bounds(kt_int index, kt_int size) {
-    (void)index;
-    (void)size;
-    KT_FAIL("krusty: array index out of bounds\n");
+    KRef message = kt_string_plus(kt_string_utf8("Index ", 6), kt_to_string(kt_box_int(index)));
+    message = kt_string_plus(message, kt_string_utf8(" out of bounds for length ", 26));
+    message = kt_string_plus(message, kt_to_string(kt_box_int(size)));
+    kt_throw(kt_throwable_new(&kt_type_index_out_of_bounds_exception, message));
 }
 
-/* `Color.valueOf("NOPE")` throws in Kotlin; a program without exceptions stops here instead. The
-   name is taken so the failure can say which one was asked for once strings can be rendered from
-   the runtime's own failure path. */
 /* `kotlin.Enum`'s own storage, which every enum class carries ahead of its own fields. The
    generator writes both when it builds a constant; the layout is here because the base class is
    the language's, not any file's. */
@@ -145,9 +154,10 @@ void kt_no_when_branch_matched(void) {
     KT_FAIL("krusty: no branch of an exhaustive `when` matched\n");
 }
 
+/* `Color.valueOf("NOPE")` — Kotlin's `IllegalArgumentException`, naming the constant asked for. */
 void kt_no_such_enum_constant(KRef name) {
-    (void)name;
-    KT_FAIL("krusty: no enum constant of that name\n");
+    KRef message = kt_string_plus(kt_string_utf8("No enum constant ", 17), name);
+    kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception, message));
 }
 
 typedef KArray KByteArray;
@@ -185,7 +195,7 @@ struct KObject {
 
 static const uint32_t kt_string_references[] = {offsetof(KObject, as.string.storage)};
 
-KT_TYPE_WITH(kt_type_string, "kotlin.String", sizeof(KObject), 1, kt_string_references, kt_comparable_interfaces)
+KT_TYPE_WITH(kt_type_string, "kotlin.String", sizeof(KObject), 1, kt_string_references, kt_text_interfaces)
 KT_TYPE_WITH(kt_type_byte, "kotlin.Byte", sizeof(KObject), 0, NULL, kt_number_interfaces)
 KT_TYPE_WITH(kt_type_short, "kotlin.Short", sizeof(KObject), 0, NULL, kt_number_interfaces)
 KT_TYPE_WITH(kt_type_int, "kotlin.Int", sizeof(KObject), 0, NULL, kt_number_interfaces)
@@ -616,7 +626,9 @@ const KType kt_type_string_builder = {"kotlin.text.StringBuilder",
                                       &kt_type_any,
                                       kt_string_builder_vtable,
                                       3,
-                                      0};
+                                      0,
+                                      kt_char_sequence_interfaces,
+                                      1};
 
 static const char *kt_text_of(KRef self, kt_int *byte_length) {
     if (self->header.type == &kt_type_string_builder) {
@@ -783,12 +795,12 @@ KRef kt_box_double(kt_double value) {
     return object;
 }
 
-/* Unboxing a `null` is Kotlin's `NullPointerException`. With no exception machinery yet, the
-   honest realization is a diagnosable exit rather than a silent zero. */
+/* Unboxing a `null` is Kotlin's `NullPointerException` — the one `!!` raises, so with no message.
+   The zero returned afterwards is never read: the caller checks the pending slot first. */
 #define KT_UNBOX(suffix, field, type)                                                              \
     type kt_unbox_##suffix(KRef value) {                                                           \
         if (value == NULL) {                                                                       \
-            KT_FAIL("krusty: null cannot be cast to a non-null type\n");                           \
+            kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL));                     \
         }                                                                                          \
         return value->as.field;                                                                    \
     }
@@ -815,7 +827,7 @@ typedef struct KNumber {
 
 static KNumber kt_number_of(KRef value) {
     if (value == NULL) {
-        KT_FAIL("krusty: null cannot be cast to a non-null type\n");
+        kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL));
     }
     const KType *type = value->header.type;
     KNumber number = {0, 0, 0.0};
@@ -1324,8 +1336,15 @@ KRef kt_range_iterator(KRef range) {
 KRef kt_range_step(KRef range, kt_long step) {
     const KRange *bounds = (const KRange *)range;
     if (step <= 0) {
-        kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception,
-                                  kt_string_utf8("Step must be positive, was: ", 27)));
+        /* Kotlin's own message, which names the step that was given. The RETURN matters: the
+           exception is recorded, not raised, so falling through would build a progression whose
+           step is zero and whose last element is computed modulo it — a SIGFPE, and a machine
+           trap where Kotlin has an exception a program is entitled to catch. */
+        KRef message = kt_string_plus(kt_string_utf8("Step must be positive, was: ", 28),
+                                      kt_to_string(kt_box_long(step)));
+        message = kt_string_plus(message, kt_string_utf8(".", 1));
+        kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception, message));
+        return range;
     }
     return kt_range_new_stepped(range->header.type, bounds->first, bounds->last,
                                 bounds->step > 0 ? step : -step);
@@ -1473,6 +1492,11 @@ typedef struct KMutableList {
     KObjectHeader header;
     KRef elements;
     kt_int size;
+    /* Structural changes so far. An iterator records this when it is made and compares on every
+       `next`, which is how a list notices being written through while it is being walked — Kotlin
+       raises `ConcurrentModificationException` there, and the count is the only evidence: after
+       `remove` the cursor and the size can agree again and nothing else would look wrong. */
+    kt_int modifications;
 } KMutableList;
 
 static const uint32_t kt_mutable_list_offsets[] = {offsetof(KMutableList, elements)};
@@ -1507,6 +1531,9 @@ typedef struct KListIterator {
     KObjectHeader header;
     KRef list;
     kt_int at;
+    /* The list's modification count when this iterator was made; see `KMutableList`. An immutable
+       list never changes, so this stays zero and the comparison always holds. */
+    kt_int modifications;
 } KListIterator;
 
 static const uint32_t kt_list_iterator_offsets[] = {offsetof(KListIterator, list)};
@@ -1592,6 +1619,7 @@ KRef kt_mutable_list_new(void) {
     KMutableList *list = (KMutableList *)kt_gc_allocate(&kt_type_mutable_list, sizeof(KMutableList));
     list->elements = kt_array_new(&kt_type_array, 0);
     list->size = 0;
+    list->modifications = 0;
     return (KRef)list;
 }
 
@@ -1636,6 +1664,7 @@ kt_boolean kt_mutable_list_add(KRef self, KRef value) {
     kt_mutable_list_reserve(self);
     KMutableList *list = (KMutableList *)self;
     kt_elements_of(list->elements)[list->size++] = value;
+    list->modifications++;
     /* Kotlin's `MutableList.add` answers whether the list changed, which for a list is always. */
     return true;
 }
@@ -1678,6 +1707,7 @@ void kt_mutable_list_add_at(KRef self, kt_int index, KRef value) {
     }
     elements[index] = value;
     list->size++;
+    list->modifications++;
 }
 
 KRef kt_mutable_list_remove_at(KRef self, kt_int index) {
@@ -1692,6 +1722,7 @@ KRef kt_mutable_list_remove_at(KRef self, kt_int index) {
     }
     /* Clear the vacated slot so the collector stops tracing what the list no longer holds. */
     elements[--list->size] = NULL;
+    list->modifications++;
     return removed;
 }
 
@@ -1711,6 +1742,7 @@ void kt_mutable_list_clear(KRef self) {
         elements[at] = NULL;
     }
     list->size = 0;
+    list->modifications++;
 }
 
 KRef kt_list_iterator(KRef list) {
@@ -1718,6 +1750,8 @@ KRef kt_list_iterator(KRef list) {
         (KListIterator *)kt_gc_allocate(&kt_type_list_iterator, sizeof(KListIterator));
     iterator->list = list;
     iterator->at = 0;
+    iterator->modifications = kt_is_mutable_list(list) ? ((const KMutableList *)list)->modifications
+                                                       : 0;
     return (KRef)iterator;
 }
 
@@ -1728,8 +1762,17 @@ kt_boolean kt_list_iterator_has_next(KRef iterator) {
 
 KRef kt_list_iterator_next(KRef iterator) {
     KListIterator *self = (KListIterator *)iterator;
+    /* Checked BEFORE the bound, because that is the order the difference shows in: a `remove`
+       during the walk can leave the cursor inside the shortened list, where the bound says nothing
+       is wrong and Kotlin still raises. */
+    if (kt_is_mutable_list(self->list) &&
+        ((const KMutableList *)self->list)->modifications != self->modifications) {
+        kt_throw(kt_throwable_new(&kt_type_concurrent_modification_exception, NULL));
+        return NULL;
+    }
     if (self->at >= kt_list_size(self->list)) {
-        KT_FAIL("krusty: no more elements in this list\n");
+        kt_throw(kt_throwable_new(&kt_type_no_such_element_exception, NULL));
+        return NULL;
     }
     return kt_list_get(self->list, self->at++);
 }
@@ -2454,17 +2497,20 @@ kt_boolean kt_is_instance(KRef object, const KType *type) {
     return false;
 }
 
+/* A failed cast is `ClassCastException`, and a program is entitled to catch it. The wording is
+   Kotlin/Native's — `class A cannot be cast to class B`, both sides qualified — which is what the
+   corpus's `nativeCCEMessage` cases read.
+
+   Every intermediate stays in a local across the allocations that follow it, so the collector sees
+   each as a root while the next piece is built. */
 static void kt_fail_cast(KRef object, const KType *type) {
-    kt_write(2, "krusty: class ", 14);
-    if (object == NULL) {
-        kt_write(2, "null", 4);
-    } else {
-        kt_write(2, object->header.type->name, object->header.type->name_length);
-    }
-    kt_write(2, " cannot be cast to ", 19);
-    kt_write(2, type->name, type->name_length);
-    kt_write(2, "\n", 1);
-    kt_sys_exit(134);
+    KRef from = object == NULL
+                    ? kt_string_utf8("null", 4)
+                    : kt_string_utf8(object->header.type->name, object->header.type->name_length);
+    KRef message = kt_string_plus(kt_string_utf8("class ", 6), from);
+    message = kt_string_plus(message, kt_string_utf8(" cannot be cast to class ", 25));
+    message = kt_string_plus(message, kt_string_utf8(type->name, type->name_length));
+    kt_throw(kt_throwable_new(&kt_type_class_cast_exception, message));
 }
 
 KRef kt_cast(KRef object, const KType *type) {
@@ -2475,6 +2521,16 @@ KRef kt_cast(KRef object, const KType *type) {
 }
 
 KRef kt_cast_non_null(KRef object, const KType *type) {
+    if (object == NULL) {
+        // `null as String` is a NullPointerException NAMING the target type, not a
+        // ClassCastException — `null` is not an instance of anything, so there is no class to
+        // report as the source. kotlinc's exact wording, and its exact type.
+        KRef message =
+            kt_string_plus(kt_string_utf8("null cannot be cast to non-null type ", 37),
+                           kt_string_utf8(type->name, type->name_length));
+        kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, message));
+        return object;
+    }
     if (!kt_is_instance(object, type)) {
         kt_fail_cast(object, type);
     }
@@ -2485,9 +2541,11 @@ KRef kt_safe_cast(KRef object, const KType *type) {
     return kt_is_instance(object, type) ? object : NULL;
 }
 
+/* `x!!` on a null: Kotlin's `NullPointerException`, with NO message — which is what kotlinc emits
+   and is observably different from the null CAST below, whose message names the target type. */
 KRef kt_not_null(KRef value) {
     if (value == NULL) {
-        KT_FAIL("krusty: null cannot be cast to a non-null type\n");
+        kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL));
     }
     return value;
 }
@@ -2549,11 +2607,17 @@ void kt_nothing_value_returned(void) {
 
 /* ---- arithmetic ---------------------------------------------------------------------------- */
 
-static void kt_divide_by_zero(void) { KT_FAIL("krusty: / by zero\n"); }
+/* `a / 0`: Kotlin's `ArithmeticException`, with the JVM's wording, which a program may catch.
+   Every caller RETURNS immediately after — the exception is recorded, not raised, so falling
+   through would reach the machine divide this is here to avoid and take a SIGFPE. */
+static void kt_divide_by_zero(void) {
+    kt_throw(kt_throwable_new(&kt_type_arithmetic_exception, kt_string_utf8("/ by zero", 9)));
+}
 
 kt_int kt_div_int(kt_int a, kt_int b) {
     if (b == 0) {
         kt_divide_by_zero();
+        return 0;
     }
     /* INT32_MIN / -1 overflows. Kotlin wraps to INT32_MIN; C leaves it undefined. */
     if (b == -1) {
@@ -2565,6 +2629,7 @@ kt_int kt_div_int(kt_int a, kt_int b) {
 kt_int kt_rem_int(kt_int a, kt_int b) {
     if (b == 0) {
         kt_divide_by_zero();
+        return 0;
     }
     if (b == -1) {
         return 0;
@@ -2575,6 +2640,7 @@ kt_int kt_rem_int(kt_int a, kt_int b) {
 kt_long kt_div_long(kt_long a, kt_long b) {
     if (b == 0) {
         kt_divide_by_zero();
+        return 0;
     }
     if (b == -1) {
         return (kt_long)(0u - (uint64_t)a);
@@ -2585,6 +2651,7 @@ kt_long kt_div_long(kt_long a, kt_long b) {
 kt_long kt_rem_long(kt_long a, kt_long b) {
     if (b == 0) {
         kt_divide_by_zero();
+        return 0;
     }
     if (b == -1) {
         return 0;
@@ -2625,28 +2692,28 @@ KRef kt_box_ulong(kt_long value) {
 
 kt_byte kt_unbox_ubyte(KRef value) {
     if (value == NULL) {
-        KT_FAIL("krusty: null cannot be cast to a non-null type\n");
+        kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL));
     }
     return value->as.byte_value;
 }
 
 kt_short kt_unbox_ushort(KRef value) {
     if (value == NULL) {
-        KT_FAIL("krusty: null cannot be cast to a non-null type\n");
+        kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL));
     }
     return value->as.short_value;
 }
 
 kt_int kt_unbox_uint(KRef value) {
     if (value == NULL) {
-        KT_FAIL("krusty: null cannot be cast to a non-null type\n");
+        kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL));
     }
     return value->as.int_value;
 }
 
 kt_long kt_unbox_ulong(KRef value) {
     if (value == NULL) {
-        KT_FAIL("krusty: null cannot be cast to a non-null type\n");
+        kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL));
     }
     return value->as.long_value;
 }
@@ -2686,6 +2753,7 @@ KRef kt_ulong_to_string(kt_long value) { return kt_unsigned_to_string((uint64_t)
 kt_int kt_div_uint(kt_int a, kt_int b) {
     if (b == 0) {
         kt_divide_by_zero();
+        return 0;
     }
     return (kt_int)((uint32_t)a / (uint32_t)b);
 }
@@ -2693,6 +2761,7 @@ kt_int kt_div_uint(kt_int a, kt_int b) {
 kt_int kt_rem_uint(kt_int a, kt_int b) {
     if (b == 0) {
         kt_divide_by_zero();
+        return 0;
     }
     return (kt_int)((uint32_t)a % (uint32_t)b);
 }
@@ -2700,6 +2769,7 @@ kt_int kt_rem_uint(kt_int a, kt_int b) {
 kt_long kt_div_ulong(kt_long a, kt_long b) {
     if (b == 0) {
         kt_divide_by_zero();
+        return 0;
     }
     return (kt_long)((uint64_t)a / (uint64_t)b);
 }
@@ -2707,6 +2777,7 @@ kt_long kt_div_ulong(kt_long a, kt_long b) {
 kt_long kt_rem_ulong(kt_long a, kt_long b) {
     if (b == 0) {
         kt_divide_by_zero();
+        return 0;
     }
     return (kt_long)((uint64_t)a % (uint64_t)b);
 }
@@ -2860,6 +2931,8 @@ KT_THROWABLE_TYPE(kt_type_no_such_element_exception, "kotlin.NoSuchElementExcept
                   &kt_type_runtime_exception)
 KT_THROWABLE_TYPE(kt_type_concurrent_modification_exception,
                   "kotlin.ConcurrentModificationException", &kt_type_runtime_exception)
+KT_THROWABLE_TYPE(kt_type_uninitialized_property_access_exception,
+                  "kotlin.UninitializedPropertyAccessException", &kt_type_runtime_exception)
 
 KRef kt_throwable_new(const KType *type, KRef message) {
     /* `message` stays in this parameter across the allocation: it is its root. */
@@ -2869,6 +2942,15 @@ KRef kt_throwable_new(const KType *type, KRef message) {
 }
 
 KRef kt_throwable_message(KRef self) { return ((KThrowable *)self)->message; }
+
+/* Reading a `lateinit` property before anything assigned it. Kotlin's exception and Kotlin's
+   wording; the guard is at the READ, which is where kotlinc puts it too, because the field being
+   null is the only evidence there is. */
+void kt_uninitialized_property(KRef name) {
+    KRef message = kt_string_plus(kt_string_utf8("lateinit property ", 18), name);
+    message = kt_string_plus(message, kt_string_utf8(" has not been initialized", 25));
+    kt_throw(kt_throwable_new(&kt_type_uninitialized_property_access_exception, message));
+}
 
 /* An uncaught throw. Until a `try` exists to catch one, every throw is uncaught by construction —
    a file containing a `try` is declined whole — so reporting and exiting here IS the propagation,
@@ -2971,10 +3053,56 @@ kt_int kt_reference_hash_code(KRef self) {
     return hash;
 }
 
+/* The exception in flight, or NULL.
+
+   One slot, because one thread: a throw stores here and every call site that could observe it
+   loads here. It is a GC root — the exception is unreachable from any frame between the throw and
+   the `catch` that names it, and registering the slot is what keeps it alive across the
+   allocations a `finally` or a handler's own code may perform along the way.
+
+   `kt_pending_root` is what makes the registration happen once, from whichever entry point runs
+   first, rather than needing a startup hook the generated program has to remember to call.
+
+   The slot is EXPORTED because generated code reads it directly rather than through a call. That
+   is not a micro-optimization: a call clobbers the caller-saved registers, so putting one after
+   every call doubles what a frame must keep alive across a call boundary, and the frames grow.
+   A 100,000-deep recursion in the corpus overflowed its stack on exactly that. A load and a
+   branch is also what "How an exception propagates" in `docs/BUILD_AND_NATIVE_PLAN.md` costed the
+   design at. */
+KRef kt_pending;
+static kt_boolean kt_pending_root;
+
+static void kt_pending_register(void) {
+    if (!kt_pending_root) {
+        kt_pending_root = 1;
+        kt_gc_add_global_root((void **)&kt_pending);
+    }
+}
+
+/* `throw e`: record it and RETURN. The caller's next act is the check below, which is what turns
+   the return into propagation; see "How an exception propagates" in `docs/BUILD_AND_NATIVE_PLAN.md`
+   for why this rather than unwind tables or `setjmp`. */
 void kt_throw(KRef thrown) {
+    kt_pending_register();
+    kt_pending = thrown;
+}
+
+/* The in-flight exception, for the check a call site makes and for the clause that matches it. */
+KRef kt_pending_exception(void) { return kt_pending; }
+
+/* A `catch` clause took it: nothing is in flight any more. */
+void kt_clear_pending(void) { kt_pending = NULL; }
+
+/* Nothing handled it. Kotlin ends the program, reporting the exception on stderr; 134 is the code
+   this target uses for every abnormal end. Called once, where the generated entry has run the
+   program's `main` and is about to treat its answer as an answer. */
+void kt_check_uncaught(void) {
+    if (kt_pending == NULL) {
+        return;
+    }
     kt_int length = 0;
     KRef storage = NULL;
-    const char *bytes = kt_render(thrown, &length, &storage);
+    const char *bytes = kt_render(kt_pending, &length, &storage);
     kt_write(2, "Exception in thread \"main\" ", 27);
     kt_write(2, bytes, (size_t)length);
     kt_write(2, "\n", 1);

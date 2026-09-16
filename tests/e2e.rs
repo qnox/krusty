@@ -1641,6 +1641,8 @@ mod native_boxed_numbers_e2e;
 
 #[path = "native_throws_e2e.rs"]
 mod native_throws_e2e;
+#[path = "native_try_catch_e2e.rs"]
+mod native_try_catch_e2e;
 
 #[path = "native_type_checks_e2e.rs"]
 mod native_type_checks_e2e;

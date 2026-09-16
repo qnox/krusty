@@ -656,3 +656,33 @@ fn plus_assign_of_an_int_appends_it_rather_than_walking_it() {
         "OK",
     );
 }
+
+#[test]
+fn writing_through_a_list_while_walking_it_is_a_concurrent_modification() {
+    // The evidence is a COUNT, not the size: `remove` during a walk can leave the cursor inside
+    // the shortened list, where the bound says nothing is wrong and Kotlin still raises. That is
+    // also why the check comes before the bound in `next`.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val xs = mutableListOf(\"a\", \"b\", \"c\")\n\
+         \x20   var seen = \"\"\n\
+         \x20   val caught = try {\n\
+         \x20       for (x in xs) {\n\
+         \x20           seen += x\n\
+         \x20           xs.remove(x)\n\
+         \x20       }\n\
+         \x20       false\n\
+         \x20   } catch (e: ConcurrentModificationException) {\n\
+         \x20       true\n\
+         \x20   }\n\
+         \x20   if (!caught) return \"fail: no throw, seen=$seen\"\n\
+         \x20   // A walk that writes nothing is untouched by any of this.\n\
+         \x20   val ys = mutableListOf(1, 2, 3)\n\
+         \x20   var total = 0\n\
+         \x20   for (y in ys) total += y\n\
+         \x20   return if (total == 6) \"OK\" else \"fail total: $total\"\n\
+         }\n",
+        "ListConcurrentModification",
+        "OK",
+    );
+}

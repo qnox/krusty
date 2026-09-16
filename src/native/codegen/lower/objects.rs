@@ -171,6 +171,14 @@ impl<'a> FileLowering<'a> {
             {
                 "kt_type_comparable"
             }
+            // `CharSequence` is a third of the same kind: no instances of its own, and both the
+            // string and the builder point at it.
+            _ if target
+                .obj_internal()
+                .is_some_and(super::super::super::intrinsics::is_char_sequence) =>
+            {
+                "kt_type_char_sequence"
+            }
             // `Unit` reaches a type check spelled as the object it is rather than as the carrier
             // `Ty::Unit` names, and it is one type either way.
             _ if target
@@ -183,6 +191,21 @@ impl<'a> FileLowering<'a> {
                 Ok((symbol, _)) => symbol,
                 Err(_) => return Ok(None),
             },
+            // The `Throwable` hierarchy. Like the built-in supertypes above these are the
+            // RUNTIME's classes, declared in no file, so there is no class id to find one by —
+            // and a `catch` clause is a type check against exactly these, which is what made the
+            // omission visible: everything else that asks a type question here asks it of a class
+            // the program wrote or of a value type.
+            _ if target
+                .obj_internal()
+                .and_then(super::super::super::intrinsics::throwable_descriptor)
+                .is_some() =>
+            {
+                target
+                    .obj_internal()
+                    .and_then(super::super::super::intrinsics::throwable_descriptor)
+                    .expect("just matched")
+            }
             _ => return Ok(None),
         };
         self.import_data(symbol).map(Some)
@@ -373,11 +396,22 @@ impl<'a> FileLowering<'a> {
         Ok(())
     }
 
-    /// The Kotlin-facing qualified name of a class: what its default `toString` prints.
+    /// The Kotlin-facing qualified name of a class: what its default `toString` prints and what a
+    /// failed cast reports.
+    ///
+    /// Only the PACKAGE separator becomes a dot. A `$` is Kotlin's own nesting separator and stays
+    /// one — `box$MyLocalObject` is the name Kotlin/Native gives a class local to `box`, and
+    /// flattening it to `box.MyLocalObject` reads as a package that does not exist.
     fn kotlin_name(&self, class: ClassId) -> String {
-        self.ir.classes[class as usize]
-            .fq_name()
-            .replace(['/', '$'], ".")
+        let rendered = self.ir.classes[class as usize].fq_name().replace('/', ".");
+        // Drop the FILE FACADE a class nested in one is qualified by. `castAnonymousClassKt$box$1`
+        // is the JVM's binary name for an anonymous object inside a top-level `box`, and it is
+        // right there — but there is no facade class on this target at all: a top-level property
+        // is a global and a top-level function is a symbol, neither owned by anything. Kotlin/
+        // Native names that object `box$1`, and that is what a failed cast reports.
+        //
+        // Recognizing the facade is a JVM provider detail, so it lives in `native/intrinsics`.
+        super::super::super::intrinsics::without_file_facade(&rendered).unwrap_or(rendered)
     }
 
     /// Define a `KType` and the two tables it points at, byte for byte as `krusty_rt.h` declares
@@ -657,7 +691,7 @@ impl<'a> FileLowering<'a> {
             let this = params[0];
             if let Some(getter) = companion {
                 let func_ref = body.func_ref(getter);
-                body.builder.ins().call(func_ref, &[]);
+                body.emit_call(func_ref, &[])?;
             }
             for &statement in &prelude {
                 body.statement(statement)?;
@@ -674,7 +708,7 @@ impl<'a> FileLowering<'a> {
             }
             if let Some(target) = target {
                 let func_ref = body.func_ref(target);
-                body.builder.ins().call(func_ref, &operands);
+                body.emit_call(func_ref, &operands)?;
             }
             if let Some(own) = body_expression {
                 body.statement(own)?;
@@ -707,7 +741,6 @@ impl<'a> FileLowering<'a> {
             *field,
             self.ir.classes[*class as usize].fields[*field as usize].ty,
         );
-        let clif = carrier(ty).clif().expect("fields are never `Unit`");
         let name = format!(
             "{}.{}",
             self.ir.classes[*class as usize].fq_name(),
@@ -715,8 +748,17 @@ impl<'a> FileLowering<'a> {
         );
         if matches!(slot, Slot::FieldGetter { .. }) {
             let signature = self.signature_of(&[any()], ty)?;
+            let class = *class;
+            let field = *field;
             self.emit_function(id, signature, carrier(ty), &name, &mut |body, params| {
-                let value = body.builder.ins().load(clif, trusted(), params[0], offset);
+                // Through `load_field` and not a bare load, because this is the FOURTH path that
+                // reads a field and a `lateinit` one is guarded on all of them. It is the path a
+                // property that OVERRIDES another reaches: the read goes through a vtable slot, so
+                // it arrives at this synthesized getter rather than at the field.
+                let value = body.load_field(params[0], class, field, ty)?;
+                if body.terminated {
+                    return Ok(());
+                }
                 body.builder.ins().return_(&[value]);
                 body.terminate();
                 Ok(())
@@ -1003,7 +1045,7 @@ impl<'a> FileLowering<'a> {
             let this = params[0];
             if let Some(getter) = companion {
                 let func_ref = body.func_ref(getter);
-                body.builder.ins().call(func_ref, &[]);
+                body.emit_call(func_ref, &[])?;
             }
             for &statement in &declaration.super_arg_prelude {
                 body.statement(statement)?;
@@ -1041,7 +1083,7 @@ impl<'a> FileLowering<'a> {
                     }
                 }
                 let func_ref = body.func_ref(*constructor);
-                body.builder.ins().call(func_ref, &arguments);
+                body.emit_call(func_ref, &arguments)?;
             }
             if !declaration.explicit_param_stores {
                 let mut next_field = 0;
@@ -1120,7 +1162,7 @@ impl<'a> FileLowering<'a> {
         self.emit_function(getter, signature, Carrier::Ref, &name, &mut |body, _| {
             if let Some(initializer) = enclosing_enum {
                 let func_ref = body.func_ref(initializer);
-                body.builder.ins().call(func_ref, &[]);
+                body.emit_call(func_ref, &[])?;
             }
             let slot_address = body.data_address(slot);
             let current = body
@@ -1139,7 +1181,7 @@ impl<'a> FileLowering<'a> {
                 .ins()
                 .store(trusted(), instance, slot_address, 0);
             let func_ref = body.func_ref(constructor);
-            body.builder.ins().call(func_ref, &[instance]);
+            body.emit_call(func_ref, &[instance])?;
             body.builder.ins().jump(done, &[]);
 
             body.continue_in(done);
@@ -1243,6 +1285,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             .builder
             .ins()
             .call_indirect(signature, function, &all_arguments);
+        // A dispatched call is as able to throw as a direct one, and MORE able to be forgotten:
+        // it is the one call this backend emits that does not go through `emit_call`. A `try`
+        // whose body invokes a lambda is the common shape, and the exception walked straight out
+        // of the `try` until this check existed.
+        self.check_pending()?;
         Ok(self.builder.inst_results(call).first().copied())
     }
 
@@ -1267,14 +1314,60 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             index,
             self.file.ir.classes[class as usize].fields[index as usize].ty,
         );
+        self.load_field(object, class, index, ty).map(Some)
+    }
+
+    /// Load a field, with the throw-if-null a `lateinit` one carries.
+    ///
+    /// Every path that reads a field goes through here, and there are three: the `GetField` node,
+    /// the property read that finds storage rather than a getter, and the `super` read that does.
+    /// The guard being on the LOAD rather than on the node is what makes that true — a `lateinit`
+    /// property read from outside its class reaches the second of those, and reading it before
+    /// anything assigned it answered null quietly until it did.
+    pub(super) fn load_field(
+        &mut self,
+        object: Value,
+        class: ClassId,
+        index: u32,
+        ty: Ty,
+    ) -> Result<Value, Unsupported> {
         let offset = self.file.model.layout(class).fields[index as usize].offset as i32;
         let clif = carrier(ty).clif().expect("fields are never `Unit`");
-        Ok(Some(self.builder.ins().load(
-            clif,
-            trusted(),
-            object,
-            offset,
-        )))
+        let value = self.builder.ins().load(clif, trusted(), object, offset);
+        let field = &self.file.ir.classes[class as usize].fields[index as usize];
+        if field.is_lateinit() {
+            let name = field.name.clone();
+            self.lateinit_guard(value, &name)?;
+        }
+        Ok(value)
+    }
+
+    /// The throw-if-null every read of a `lateinit` property carries.
+    ///
+    /// Kotlin puts the guard at the READ rather than tracking initialization, because the field
+    /// being null IS the evidence — and it is why `lateinit` is only allowed on a type that has a
+    /// null to be distinguishable by. `LateinitInitialized` is the one read that must NOT carry
+    /// it: `::prop.isInitialized` asks the question this guard answers by throwing.
+    pub(super) fn lateinit_guard(&mut self, value: Value, name: &str) -> Result<(), Unsupported> {
+        let initialized = self.builder.create_block();
+        let missing = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(value, initialized, &[], missing, &[]);
+
+        self.builder.switch_to_block(missing);
+        self.builder.seal_block(missing);
+        let name = self.string_literal(name.as_bytes())?;
+        self.runtime_call("kt_uninitialized_property", &[any()], Ty::Unit, &[name])?;
+        // The call's own check sees the exception this just raised and leaves; the jump is the
+        // terminator that block still needs, and nothing reaches it.
+        if !self.terminated {
+            self.builder.ins().jump(initialized, &[]);
+        }
+
+        self.continue_in(initialized);
+        self.builder.seal_block(initialized);
+        Ok(())
     }
 
     pub(super) fn field_write(
@@ -1476,7 +1569,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let object = self.allocate(descriptor, size)?;
         arguments.insert(0, object);
         let func_ref = self.func_ref(constructor);
-        self.builder.ins().call(func_ref, &arguments);
+        self.emit_call(func_ref, &arguments)?;
         Ok(Some(object))
     }
 
@@ -1717,20 +1810,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if let Some(getter) = property.getter {
             let id = self.file.functions[getter as usize].expect("a getter has a body");
             let func_ref = self.func_ref(id);
-            let call = self.builder.ins().call(func_ref, &[object]);
+            let call = self.emit_call(func_ref, &[object])?;
             return Ok(self.builder.inst_results(call).first().copied());
         }
         match property.backing_field {
             Some(field) => {
                 let ty = self.file.ir.classes[class as usize].fields[field as usize].ty;
-                let offset = self.file.model.layout(class).fields[field as usize].offset as i32;
-                let clif = carrier(ty).clif().expect("fields are never `Unit`");
-                Ok(Some(self.builder.ins().load(
-                    clif,
-                    trusted(),
-                    object,
-                    offset,
-                )))
+                self.load_field(object, class, field, ty).map(Some)
             }
             None => Err(format!(
                 "a property with neither storage nor a getter (`{}`)",
@@ -1805,7 +1891,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if let Some(setter) = property.setter {
             let id = self.file.functions[setter as usize].expect("a setter has a body");
             let func_ref = self.func_ref(id);
-            self.builder.ins().call(func_ref, &[object, value]);
+            self.emit_call(func_ref, &[object, value])?;
             return Ok(());
         }
         let field = property.backing_field.expect("checked above");
@@ -1824,6 +1910,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// realization is the coercion the caller falls through to, and routing it through `kt_cast`
     /// would hand back the box where the site expects the number.
     fn checked_cast_target(&mut self, ty: Ty) -> Result<Option<DataId>, Unsupported> {
+        // A cast to a type PARAMETER is a cast to its bound, which is the only thing left of it at
+        // run time and exactly what kotlinc checks: `fun <T : CharSequence> f(x: Any?) = x as T`
+        // rejects a non-`CharSequence` inside `f`, before the call site's own cast to the argument
+        // it was given. An unbounded parameter bounds at `Any?`, where there is nothing to check.
+        let ty = match ty.non_null() {
+            Ty::TyParam(_, bound) => *bound,
+            _ => ty,
+        };
         let target = ty.non_null();
         if let Some(class) = target
             .obj_internal()
@@ -1944,8 +2038,81 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             // to anything else is a representation change, and the coercion is its whole
             // realization.
             IrTypeOp::Cast | IrTypeOp::CastNonNull => {
+                // A cast whose TARGET is a primitive but whose SOURCE is a reference is still a
+                // question about the object: `(1 as Any) as Byte` is a `ClassCastException` in
+                // Kotlin, because a boxed `Int` is not a `Byte` — the widths are convertible and
+                // the TYPES are not. Unboxing first and converting would answer `1` to a program
+                // Kotlin refuses, so the descriptor is asked before anything is read out. It is
+                // the same `kt_cast`, against the value type's own descriptor, which is exactly
+                // what those descriptors exist for.
+                let target = type_operand.non_null();
+                // A cast whose TARGET is a primitive is still a question about the object whenever
+                // the source is not already that same primitive. Two sources reach here:
+                //
+                //  - a reference: `(1 as Any) as Byte`, plainly an object question;
+                //  - a DIFFERENT primitive: `it as Byte` where `it` is an erased type parameter
+                //    the call substituted to `Int`. Kotlin has no cast between two primitive types
+                //    — `val x: Int = 1; x as Byte` does not compile — so a scalar-to-other-scalar
+                //    cast can only have come from erasure, and the question it is really asking is
+                //    the one the value's own box would answer.
+                //
+                // Unboxing first and converting would answer `1` to a program Kotlin refuses with
+                // a ClassCastException, so the descriptor is asked before anything is read out.
+                let source_carrier = self.type_of(arg).map(carrier);
+                if carrier(target) != Carrier::Ref
+                    && source_carrier.is_none_or(|source| source != carrier(target))
+                {
+                    let Some(descriptor) = self.file.type_descriptor(target)? else {
+                        return self.coerce(arg, type_operand);
+                    };
+                    let Some(object) = self.receiver(arg)? else {
+                        return Ok(None);
+                    };
+                    let descriptor = self.data_address(descriptor);
+                    let helper = if type_operand.is_nullable() {
+                        "kt_cast"
+                    } else {
+                        "kt_cast_non_null"
+                    };
+                    let checked =
+                        self.runtime_call(helper, &[any(), any()], any(), &[object, descriptor])?;
+                    let Some(checked) = checked else {
+                        return Ok(None);
+                    };
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    return self.convert(checked, Some(Ty::nullable(target)), type_operand);
+                }
                 let Some(descriptor) = self.checked_cast_target(type_operand)? else {
-                    return self.coerce(arg, type_operand);
+                    // No descriptor to test against: an erased type PARAMETER, or a classifier
+                    // this file does not declare. The type is gone — but whether the cast was a
+                    // NON-NULL one is not, and Kotlin still checks that much: `null as T` where
+                    // `T : Any` raises a NullPointerException, and so does `t as (T & Any)`.
+                    // Without it the null travels on to a caller that unboxes it, which is a fault
+                    // rather than an answer.
+                    //
+                    // The node's OWN operation is what decides, never the spelling of the target:
+                    // an unbounded `T` is not nullable as a `Ty` and `null as T` is still legal,
+                    // because `T` may be instantiated with a nullable type. Reading the target
+                    // instead made eight programs throw that Kotlin accepts.
+                    //
+                    // The exception carries no message where a cast to a NAMED type gives one:
+                    // there is no name left to put in it. That is what erasure costs.
+                    let coerced = self.coerce(arg, type_operand)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    let Some(value) = coerced else {
+                        return Ok(None);
+                    };
+                    if op != IrTypeOp::CastNonNull
+                        || type_operand.is_nullable()
+                        || carrier(type_operand) != Carrier::Ref
+                    {
+                        return Ok(Some(value));
+                    }
+                    return self.runtime_call("kt_not_null", &[any()], any(), &[value]);
                 };
                 let helper = if op == IrTypeOp::Cast || type_operand.is_nullable() {
                     "kt_cast"
@@ -1992,7 +2159,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             ));
         };
         let func_ref = self.func_ref(getter);
-        let call = self.builder.ins().call(func_ref, &[]);
+        let call = self.emit_call(func_ref, &[])?;
         Ok(Some(self.builder.inst_results(call)[0]))
     }
 
@@ -2100,7 +2267,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 ));
             };
             let func_ref = self.func_ref(id);
-            let call = self.builder.ins().call(func_ref, &[object]);
+            let call = self.emit_call(func_ref, &[object])?;
             return Ok(self.builder.inst_results(call).first().copied());
         }
         let Some(field) = property.backing_field else {
@@ -2110,14 +2277,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             ));
         };
         let ty = self.file.ir.classes[class as usize].fields[field as usize].ty;
-        let offset = self.file.model.layout(class).fields[field as usize].offset as i32;
-        let clif = carrier(ty).clif().expect("fields are never `Unit`");
-        Ok(Some(self.builder.ins().load(
-            clif,
-            trusted(),
-            object,
-            offset,
-        )))
+        self.load_field(object, class, field, ty).map(Some)
     }
 
     fn direct_property_write(
@@ -2158,7 +2318,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 ));
             };
             let func_ref = self.func_ref(id);
-            self.builder.ins().call(func_ref, &[object, value]);
+            self.emit_call(func_ref, &[object, value])?;
             return Ok(());
         }
         let field = property.backing_field.expect("checked above");
@@ -2232,7 +2392,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return Ok(None);
         }
         let func_ref = self.func_ref(id);
-        let call = self.builder.ins().call(func_ref, &arguments);
+        let call = self.emit_call(func_ref, &arguments)?;
         Ok(self.builder.inst_results(call).first().copied())
     }
 }
