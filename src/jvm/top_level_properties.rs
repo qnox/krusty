@@ -86,5 +86,6 @@ pub(super) fn merge_top_level_const(
         setter_declaration: None,
         source_member: None,
         accessor_derived: false,
+        read_stability: crate::libraries::PropertyReadStability::Unstable,
     });
 }

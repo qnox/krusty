@@ -71,7 +71,6 @@ mod scope;
 mod singleton_receivers;
 mod source_constructors;
 mod stable_path;
-mod stable_path_legacy_bridge;
 mod streaming_signature_bridge;
 #[cfg(test)]
 mod streaming_signature_tests;
@@ -3585,6 +3584,7 @@ pub struct SourcePropertySig {
     pub package: String,
     pub visibility: Visibility,
     pub setter_visibility: Visibility,
+    pub read_stability: crate::libraries::PropertyReadStability,
     /// Resolved declaration annotation identities projected into the finalized declaration header.
     pub annotations: Vec<TypeName>,
     pub stable_declaration: Option<crate::fir::DeclarationId>,
@@ -11782,6 +11782,17 @@ fn collect_signatures_with_cp_impl(
                             package: source_packages[i].replace('.', "/"),
                             visibility: property_visibility,
                             setter_visibility: property_header.setter_visibility,
+                            read_stability: if property_header.mutable
+                                || has_custom_getter
+                                || is_delegated
+                                || is_external
+                                || is_expect
+                                || !context_params.is_empty()
+                            {
+                                crate::libraries::PropertyReadStability::Unstable
+                            } else {
+                                crate::libraries::PropertyReadStability::Stable
+                            },
                             annotations: if compact_headers.is_some() {
                                 resolved_header_annotation_identities(
                                     &property_header.annotations,
@@ -38304,6 +38315,7 @@ fun box(): String {
                             setter_declaration: None,
                             source_member: None,
                             accessor_derived: false,
+                            read_stability: crate::libraries::PropertyReadStability::Unstable,
                         };
                         (
                             crate::types::TypeNameList::new(),
@@ -41144,6 +41156,17 @@ fun box(): String {
             collect_signatures_with_cp(&files, Box::new(FakeMemberPlatform), &mut diagnostics);
         let _ = check_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
+    }
+
+    #[test]
+    fn legacy_checker_consumes_normalized_member_property_stability() {
+        let (errors, _) = check(
+            "fun consume(value: String) {}\n\
+             class Box(val value: Any?) {\n\
+                 fun use() { if (value is String) consume(value) }\n\
+             }",
+        );
+        assert_eq!(errors, Vec::<String>::new());
     }
 
     #[test]

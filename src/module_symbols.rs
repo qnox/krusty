@@ -789,6 +789,7 @@ impl<'a> ModuleSymbols<'a> {
                 setter_declaration: None,
                 source_member: declaration.source_member(),
                 accessor_derived: false,
+                read_stability: crate::libraries::PropertyReadStability::Unstable,
             }
         }));
         crate::libraries::Callables::from_parts(
@@ -1079,6 +1080,12 @@ fn source_property(
         setter_declaration: None,
         source_member: property.source_member,
         accessor_derived: false,
+        read_stability: crate::libraries::PropertyReadStability::from_declaration(
+            property.setter_name.is_some(),
+            property.has_custom_getter,
+            property.is_open,
+            !property.context_params.is_empty(),
+        ),
     }
 }
 
@@ -1304,6 +1311,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                 setter_declaration: None,
                 source_member: None,
                 accessor_derived: false,
+                read_stability: property.read_stability,
             });
         }
         for ((_, property_name), signatures) in &self.syms.ext_props {
@@ -1399,6 +1407,7 @@ impl SymbolSource for ModuleSymbols<'_> {
                     setter_declaration: None,
                     source_member: None,
                     accessor_derived: false,
+                    read_stability: crate::libraries::PropertyReadStability::Unstable,
                 });
             }
         }
