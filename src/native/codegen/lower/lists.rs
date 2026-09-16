@@ -181,7 +181,21 @@ pub(super) fn indexed_value_getter_ty(name: &str) -> Ty {
 /// realizations differ where it counts: the index one takes an `Int` and the element one takes the
 /// erased reference, whatever `E` was substituted to.
 fn list_symbol(name: &str, arity: usize, physical: &[Ty]) -> Option<(&'static str, Vec<Ty>, Ty)> {
-    let by_index = matches!(physical.first().map(|ty| ty.non_null()), Some(Ty::Int));
+    // The OPERAND is the last physical parameter, never the first. An extension carries its
+    // receiver as a physical argument, so `plusAssign` arrives as `(Collection, Any)` — reading
+    // the first told it the RECEIVER was a collection, which is always true and meant `xs += 1`
+    // walked the integer as if it were one. A member has only the operand, where first and last
+    // are the same.
+    let operand = physical.last().map(|ty| ty.non_null());
+    let by_index = matches!(operand, Some(Ty::Int));
+    // Whether the operand is a thing to WALK rather than a single element; see `plusAssign`.
+    let walkable = operand.is_some_and(|ty| {
+        ty.is_array()
+            || ty.obj_internal().is_some_and(|internal| {
+                super::super::super::intrinsics::is_list_type(internal)
+                    || super::super::super::intrinsics::iteration_role(internal).is_some()
+            })
+    });
     Some(match (name, arity) {
         // `List.size` is a Kotlin property over a Java method, so the provider may present the
         // getter under either spelling; both name the same question.
@@ -205,6 +219,14 @@ fn list_symbol(name: &str, arity: usize, physical: &[Ty]) -> Option<(&'static st
         ("remove", 1) if by_index => ("kt_mutable_list_remove_at", vec![any(), Ty::Int], any()),
         ("remove", 1) => ("kt_mutable_list_remove", vec![any(), any()], Ty::Boolean),
         ("clear", 0) => ("kt_mutable_list_clear", vec![any()], Ty::Unit),
+        // `list += x`. Kotlin declares `plusAssign` once per shape of right-hand side: one takes
+        // the ELEMENT, the others take something to walk. The physical parameter is what tells
+        // them apart, as it does for `remove`/`removeAt` above — after substitution an element of
+        // type `List<T>` and a collection of them read alike.
+        ("plusAssign", 1) if walkable => {
+            ("kt_mutable_list_add_all", vec![any(), any()], Ty::Unit)
+        }
+        ("plusAssign", 1) => ("kt_mutable_list_plus_assign", vec![any(), any()], Ty::Unit),
         _ => return None,
     })
 }

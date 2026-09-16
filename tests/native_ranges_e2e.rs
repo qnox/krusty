@@ -363,3 +363,39 @@ fn a_progression_answers_its_own_bounds() {
         "OK",
     );
 }
+
+#[test]
+fn with_index_numbers_every_element_of_a_range() {
+    // `withIndex` keeps the range as a VALUE -- it wraps the `Iterable`, so the loop walks the
+    // wrapper and the range has to answer `iterator` for itself rather than be unrolled into a
+    // counted loop.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   var seen = \"\"\n\
+         \x20   for (iv in (4..7).withIndex()) seen += \"${iv.index}:${iv.value},\"\n\
+         \x20   return if (seen == \"0:4,1:5,2:6,3:7,\") \"OK\" else \"fail: $seen\"\n\
+         }\n",
+        "RangeWithIndex",
+        "OK",
+    );
+}
+
+#[test]
+fn a_progression_spanning_the_whole_range_reaches_every_step() {
+    // The widest walk a `Long` has. Its two bounds are further apart than a `Long` can hold, so a
+    // last element computed as `first + ((last - first) / step) * step` wraps and the walk stops
+    // after one element; working modulo the step never forms that distance.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   var up = \"\"\n\
+         \x20   for (v in Long.MIN_VALUE..Long.MAX_VALUE step Long.MAX_VALUE) up += \"$v,\"\n\
+         \x20   if (up != \"-9223372036854775808,-1,9223372036854775806,\") return \"fail up: $up\"\n\
+         \x20   var down = \"\"\n\
+         \x20   for (v in Long.MAX_VALUE downTo Long.MIN_VALUE step Long.MAX_VALUE) down += \"$v,\"\n\
+         \x20   if (down != \"9223372036854775807,0,-9223372036854775807,\") return \"fail down: $down\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "WidestProgression",
+        "OK",
+    );
+}

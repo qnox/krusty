@@ -6560,6 +6560,29 @@ and behavior is checked by RUNNING the emitted program.
   JVM.
   Tests: `tests/native_classes_e2e.rs` (`a_generic_class_erases_its_parameter_to_a_reference`).
 
+- **`list += x` appends the ELEMENT; `list += xs` appends every element of `xs`. The operand is the
+  LAST physical parameter, never the first.** Kotlin declares `plusAssign` once per shape of
+  right-hand side, and the two spellings are identical at the call site, so only the operand's type
+  separates them. Most of these declarations are EXTENSIONS, which carry their receiver as the first
+  physical parameter — so reading the first asks whether the RECEIVER is a collection, which is
+  always true, and `xs += 1` walks the integer as if it were one. A member has only the operand,
+  where first and last coincide. The same rule tells `removeAt(index)` from `remove(element)`, and
+  there it must read the PHYSICAL parameter rather than the semantic one: `MutableList<Int>` has
+  substituted `E` to `Int`, so both overloads look like `remove(Int)` until the realization is
+  consulted.
+  Tests: `tests/native_lists_e2e.rs` (`plus_assign_appends_an_element_or_every_element`,
+  `plus_assign_of_an_int_appends_it_rather_than_walking_it`),
+  `tests/mapped_collection_scope_e2e.rs` (`remove_of_an_absent_element_is_not_an_index`).
+
+- **A progression's last element is computed modulo the step, never from the distance between its
+  bounds.** `first + ((last - first) / step) * step` is right for every range a program is likely to
+  write and wrong for the widest: `Long.MIN_VALUE..Long.MAX_VALUE` spans more than a `Long` can
+  hold, so the subtraction wraps and the walk stops after one element instead of reaching three.
+  Reducing both bounds modulo the step never forms that distance — every intermediate stays inside
+  `0 until step` — which is why Kotlin's own `getProgressionLastElement` is written this way.
+  Tests: `tests/native_ranges_e2e.rs` (`a_progression_spanning_the_whole_range_reaches_every_step`);
+  the corpus cases are `codegen/box/ranges/stepped/**/…StepMaxValue.kt`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

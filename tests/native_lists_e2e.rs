@@ -616,3 +616,43 @@ fn a_built_growable_list_does_not_share_the_vararg_array() {
         "OK",
     );
 }
+
+#[test]
+fn plus_assign_appends_an_element_or_every_element() {
+    // `list += x` is Kotlin's `plusAssign`, declared once per shape of right-hand side: one takes
+    // the ELEMENT, the others take something to walk. Both must be told apart by the operand, not
+    // by the syntax, which is identical.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val xs = ArrayList<String>()\n\
+         \x20   xs += \"a\"\n\
+         \x20   xs += \"b\"\n\
+         \x20   if (xs.size != 2) return \"fail element: ${xs.size}\"\n\
+         \x20   xs += listOf(\"c\", \"d\")\n\
+         \x20   if (xs.size != 4) return \"fail iterable: ${xs.size}\"\n\
+         \x20   var joined = \"\"\n\
+         \x20   for (x in xs) joined += x\n\
+         \x20   return if (joined == \"abcd\") \"OK\" else \"fail order: $joined\"\n\
+         }\n",
+        "PlusAssign",
+        "OK",
+    );
+}
+
+#[test]
+fn plus_assign_of_an_int_appends_it_rather_than_walking_it() {
+    // An `Int` operand is where the two readings of `+=` collide: it is both the only type that
+    // could name an INDEX and the only primitive that once read as walkable, because the operand
+    // was taken from the first physical parameter -- which for an extension is the RECEIVER, and a
+    // receiver is always a collection. `xs += 1` then walked the integer as one.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val xs = mutableListOf<Int>()\n\
+         \x20   xs += 1\n\
+         \x20   xs += 2\n\
+         \x20   return if (xs.size == 2 && xs[0] == 1 && xs[1] == 2) \"OK\" else \"fail: ${xs.size}\"\n\
+         }\n",
+        "PlusAssignInt",
+        "OK",
+    );
+}

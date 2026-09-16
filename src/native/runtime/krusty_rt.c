@@ -996,13 +996,44 @@ KT_RANGE_TYPE(kt_type_char_range, "kotlin.ranges.CharRange", KRange, kt_range_vt
    the note on `KRange`. Both differences are taken at 64 bits, and the quotient truncates toward
    zero, which is what makes one expression serve an ascending and a descending walk: the numerator
    and the step always share a sign here, so the count is non-negative either way. */
+/* `a` reduced modulo `c` into `0 until c`, for `c > 0`. C's `%` answers the sign of `a`, which is
+   the wrong half of the line for the difference below. */
+static kt_long kt_floor_mod(kt_long a, kt_long c) {
+    kt_long remainder = a % c;
+    return remainder < 0 ? remainder + c : remainder;
+}
+
+/* How far `a` overshoots the last point of the walk `b` begins, stepping by `c > 0`: the distance
+   between the two ends modulo the step, taken on the ring rather than on the line. */
+static kt_long kt_difference_modulo(kt_long a, kt_long b, kt_long c) {
+    kt_long a_mod = kt_floor_mod(a, c);
+    kt_long b_mod = kt_floor_mod(b, c);
+    return a_mod >= b_mod ? a_mod - b_mod : a_mod - b_mod + c;
+}
+
+/* The last value a progression actually reaches: the bound written, pulled back to the nearest
+   point on the step.
+
+   The obvious `first + ((last - first) / step) * step` is right for every range a program is
+   likely to write and wrong for the ones the corpus asks about, because `last - first` is a
+   DISTANCE and the widest ones do not fit: `Long.MIN_VALUE..Long.MAX_VALUE` spans more than a
+   `Long` can hold, so the subtraction wraps and the walk stops after one element. Working modulo
+   the step instead never forms that distance — every intermediate here is inside `0 until step` —
+   which is why Kotlin's own `getProgressionLastElement` is written this way too. */
 static kt_long kt_range_last_element(kt_long first, kt_long last, kt_long step) {
     if (step > 0 ? first > last : first < last) {
         /* Empty. Kotlin keeps the bounds as written and answers `isEmpty`, rather than inventing a
            last element that the walk would then have to avoid. */
         return last;
     }
-    return first + ((last - first) / step) * step;
+    if (step > 0) {
+        return last - kt_difference_modulo(last, first, step);
+    }
+    /* Descending: the same question about the walk running the other way, so the roles of the two
+       bounds swap and the step is taken by magnitude. `-step` cannot overflow — a step of
+       `Long.MIN_VALUE` is not reachable, since every step is either a literal magnitude or the
+       negation of one. */
+    return last + kt_difference_modulo(first, last, -step);
 }
 
 static KRef kt_range_new_stepped(const KType *type, kt_long first, kt_long last, kt_long step) {
@@ -1452,6 +1483,21 @@ kt_boolean kt_mutable_list_add(KRef self, KRef value) {
     kt_elements_of(list->elements)[list->size++] = value;
     /* Kotlin's `MutableList.add` answers whether the list changed, which for a list is always. */
     return true;
+}
+
+/* `list += element`. Kotlin's `plusAssign` on a mutable collection IS `add`, and it answers
+   `Unit` rather than the `Boolean` `add` answers — so it is its own entry point rather than a
+   result the caller has to remember to drop. */
+void kt_mutable_list_plus_assign(KRef self, KRef value) { kt_mutable_list_add(self, value); }
+
+/* `list += elements`, where the right-hand side is something to walk. Kotlin has one `plusAssign`
+   per shape of that — an `Iterable`, an `Array`, a `Sequence` — and each appends every element in
+   order, which is the one walk this runtime already knows how to do. */
+void kt_mutable_list_add_all(KRef self, KRef elements) {
+    KRef iterator = kt_iterable_iterator(elements);
+    while (kt_iterator_has_next(iterator)) {
+        kt_mutable_list_add(self, kt_iterator_next(iterator));
+    }
 }
 
 KRef kt_mutable_list_set(KRef self, kt_int index, KRef value) {

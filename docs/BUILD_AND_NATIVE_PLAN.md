@@ -1571,6 +1571,32 @@ before:**
    the semantics — the callee's array is its own, and one that shared storage with the caller's
    would let a write reach back through it, which is what the third test pins.
 
+   **`list += x`, for 3515 — and a bug that only the corpus could have found.** `plusAssign` was
+   the top decline at 197 cases and looked like two arms: one that appends the element, one that
+   appends every element of what it is handed. The two spellings are identical at the call site, so
+   only the operand's type separates them. Reading the FIRST physical parameter to get that operand
+   is what most of these declarations make wrong: most are EXTENSIONS, which carry their receiver
+   physically first, so the question became "is the receiver a collection" — always true — and
+   `xs += 1` walked an integer as one. Every unit test passed; the corpus answered with 187 SIGSEGVs
+   and timeouts. Reading the LAST parameter is right for both shapes, since a member has only the
+   operand and an extension has it after the receiver.
+   That same reading settles `removeAt(index)` against `remove(element)`, and there it must be the
+   PHYSICAL parameter rather than the semantic one: a `MutableList<Int>` has substituted `E` to
+   `Int`, so both overloads look like `remove(Int)` until the realization is consulted. There is no
+   `remove(int)` in Kotlin — `removeAt` is merely REALIZED as `java.util.List.remove(int)`, the same
+   way `s[i]` is realized as `charAt`.
+
+   **A progression that spans the whole `Long` line, for 3521.** Landing `plusAssign` made a
+   thousand corpus cases compile, and six of them then ran wrong — all six of the form
+   `Long.MIN_VALUE..Long.MAX_VALUE step Long.MAX_VALUE`, answering one element where Kotlin answers
+   three. The last element was computed as `first + ((last - first) / step) * step`, which is right
+   for every range a program is likely to write and wrong for the widest: the two bounds are further
+   apart than a `Long` can hold, so the subtraction wraps. Reducing both bounds modulo the step
+   never forms that distance — every intermediate stays inside `0 until step` — which is why
+   Kotlin's own `getProgressionLastElement` is written that way. This is the kind of defect a
+   conformance corpus exists for: no unit test anyone writes by hand reaches for the widest walk a
+   type has.
+
    **How an exception propagates: a pending slot, not an unwinder.** This is the second of the
    three low-IR decisions the risks section says must be answered by design rather than inherited.
 
