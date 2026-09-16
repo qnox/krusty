@@ -316,16 +316,17 @@ impl ConstPool {
 
     /// Whether a typed constant-pool descriptor mentions `internal`. Arbitrary `Utf8` entries are
     /// deliberately excluded: a source string literal can itself spell `Lowner/Nested;`.
-    fn typed_descriptor_mentions(&self, internal: &str) -> bool {
-        let needle = format!("L{internal};");
-        self.entries.iter().any(|entry| {
+    /// Feed every descriptor the pool carries in a typed position to `record`.
+    fn record_typed_descriptor_names(&self, record: &mut impl FnMut(&str)) {
+        for entry in &self.entries {
             let descriptor = match entry {
                 Const::NameAndType(_, descriptor) | Const::MethodType(descriptor) => *descriptor,
-                _ => return false,
+                _ => continue,
             };
-            self.utf8_value(descriptor)
-                .is_some_and(|value| value.contains(&needle))
-        })
+            if let Some(value) = self.utf8_value(descriptor) {
+                record(value);
+            }
+        }
     }
 
     fn integer(&mut self, v: i32) -> u16 {
@@ -640,6 +641,16 @@ pub(crate) fn split_declaration_annotations(
 
 pub struct ClassWriter {
     cp: ConstPool,
+    /// Every internal class name mentioned in class-type position by a field/method descriptor or a
+    /// pool descriptor, with the (fields, methods, pool) sizes it was computed from.
+    ///
+    /// `InnerClasses` retention asks "does any descriptor mention this class?" once per candidate
+    /// row, inside a FIXPOINT loop, and the old answer re-scanned every descriptor with a freshly
+    /// formatted `L…;` needle each time. On a module of generated clients that search dominated the
+    /// whole compile. The set answers the same question in one lookup, and the recorded sizes make
+    /// a stale answer impossible: anything appended invalidates it.
+    mentioned_names:
+        std::cell::RefCell<Option<(usize, usize, usize, crate::name_tree::FxHashMap<String, ()>)>>,
     /// Emit (and therefore seed the pool for) `Intrinsics.checkNotNullParameter` guards. Cleared by
     /// `-Xno-param-assertions`.
     param_assertions: bool,
@@ -706,18 +717,53 @@ pub type InnerClassResolver = Rc<dyn Fn(&str) -> Option<InnerClassDetails>>;
 
 impl ClassWriter {
     /// Whether a declared member or typed constant-pool descriptor references `internal`.
+    /// Whether any descriptor mentions `internal` in class-type position.
+    ///
+    /// Equivalent to searching every descriptor for the literal `L<internal>;`, which is what this
+    /// did before: [`Self::mentioned_names`] records exactly the slices such a search could match —
+    /// every run from an `L` to the next `;` — so the two agree on well-formed and malformed
+    /// descriptors alike, without re-scanning per candidate.
     fn descriptor_mentions(&self, internal: &str) -> bool {
-        let needle = format!("L{internal};");
-        self.fields
+        self.mentioned_names(|names| names.contains_key(internal))
+    }
+
+    /// Run `read` against the memoized mention set, rebuilding it when anything has been appended.
+    fn mentioned_names<T>(
+        &self,
+        read: impl Fn(&crate::name_tree::FxHashMap<String, ()>) -> T,
+    ) -> T {
+        let sizes = (self.fields.len(), self.methods.len(), self.cp.entries.len());
+        if let Some((fields, methods, entries, names)) = self.mentioned_names.borrow().as_ref() {
+            if (*fields, *methods, *entries) == sizes {
+                return read(names);
+            }
+        }
+        let mut names = crate::name_tree::FxHashMap::default();
+        let mut record = |value: &str| {
+            let bytes = value.as_bytes();
+            for (index, byte) in bytes.iter().enumerate() {
+                if *byte != b'L' {
+                    continue;
+                }
+                if let Some(end) = value[index + 1..].find(';') {
+                    names.insert(value[index + 1..index + 1 + end].to_string(), ());
+                }
+            }
+        };
+        for descriptor in self
+            .fields
             .iter()
             .map(|field| field.desc)
             .chain(self.methods.iter().map(|method| method.desc))
-            .any(|descriptor| {
-                self.cp
-                    .utf8_value(descriptor)
-                    .is_some_and(|value| value.contains(&needle))
-            })
-            || self.cp.typed_descriptor_mentions(internal)
+        {
+            if let Some(value) = self.cp.utf8_value(descriptor) {
+                record(value);
+            }
+        }
+        self.cp.record_typed_descriptor_names(&mut record);
+        let answer = read(&names);
+        *self.mentioned_names.borrow_mut() = Some((sizes.0, sizes.1, sizes.2, names));
+        answer
     }
 
     pub fn new(internal_name: &str, super_internal: &str) -> ClassWriter {
@@ -740,6 +786,7 @@ impl ClassWriter {
         let super_class = cp.class(super_internal);
         ClassWriter {
             cp,
+            mentioned_names: std::cell::RefCell::new(None),
             param_assertions: true,
             access: ACC_PUBLIC | ACC_FINAL | ACC_SUPER,
             this_class,
