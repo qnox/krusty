@@ -639,6 +639,25 @@ pub(crate) fn split_declaration_annotations(
     )
 }
 
+/// Record every name a `contains("L<name>;")` search over `value` could have matched.
+///
+/// This is deliberately NOT a JVM descriptor parser, and must not be replaced by one. It reproduces
+/// a literal substring predicate, so it records every run from an `L` to the next `;` — including
+/// runs that begin at an `L` INSIDE another name, and including text that is not a well-formed
+/// descriptor at all. A conventional parser would visit only the class names a descriptor properly
+/// declares, and would silently change `InnerClasses` retention for exactly those inputs.
+fn record_mentioned_names(value: &str, names: &mut crate::name_tree::FxHashMap<String, ()>) {
+    for (index, byte) in value.as_bytes().iter().enumerate() {
+        if *byte != b'L' {
+            continue;
+        }
+        let rest = &value[index + 1..];
+        if let Some(end) = rest.find(';') {
+            names.insert(rest[..end].to_string(), ());
+        }
+    }
+}
+
 pub struct ClassWriter {
     cp: ConstPool,
     /// Every internal class name mentioned in class-type position by a field/method descriptor or a
@@ -717,7 +736,6 @@ pub type InnerClassResolver = Rc<dyn Fn(&str) -> Option<InnerClassDetails>>;
 
 impl ClassWriter {
     /// Whether a declared member or typed constant-pool descriptor references `internal`.
-    /// Whether any descriptor mentions `internal` in class-type position.
     ///
     /// Equivalent to searching every descriptor for the literal `L<internal>;`, which is what this
     /// did before: [`Self::mentioned_names`] records exactly the slices such a search could match —
@@ -739,17 +757,7 @@ impl ClassWriter {
             }
         }
         let mut names = crate::name_tree::FxHashMap::default();
-        let mut record = |value: &str| {
-            let bytes = value.as_bytes();
-            for (index, byte) in bytes.iter().enumerate() {
-                if *byte != b'L' {
-                    continue;
-                }
-                if let Some(end) = value[index + 1..].find(';') {
-                    names.insert(value[index + 1..index + 1 + end].to_string(), ());
-                }
-            }
-        };
+        let mut record = |value: &str| record_mentioned_names(value, &mut names);
         for descriptor in self
             .fields
             .iter()
@@ -4453,5 +4461,86 @@ mod tests {
 
         cw.add_method(ACC_PUBLIC | ACC_STATIC, "m", "()V", &code);
         assert!(cw.methods[0].lvt.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod mentioned_name_tests {
+    use super::record_mentioned_names;
+
+    fn mentioned(values: &[&str]) -> Vec<String> {
+        let mut names = crate::name_tree::FxHashMap::default();
+        for value in values {
+            record_mentioned_names(value, &mut names);
+        }
+        let mut found = names.into_keys().collect::<Vec<_>>();
+        found.sort();
+        found
+    }
+
+    /// The contract is a literal `contains("L<name>;")` search, NOT descriptor parsing. Anything
+    /// that search would have matched must still be recorded, or `InnerClasses` retention changes.
+    /// A conventional parser is the tempting "cleanup" that these cases exist to block.
+    #[test]
+    fn a_field_descriptor_records_its_class() {
+        assert_eq!(mentioned(&["Ljava/lang/String;"]), ["java/lang/String"]);
+    }
+
+    /// An ARRAY descriptor's element class is mentioned exactly as the old search saw it.
+    #[test]
+    fn an_array_descriptor_records_its_element_class() {
+        assert_eq!(mentioned(&["[[Lpkg/Elem;"]), ["pkg/Elem"]);
+    }
+
+    /// A method descriptor mentions every class in its parameters AND its result.
+    #[test]
+    fn a_method_descriptor_records_every_class_it_names() {
+        assert_eq!(
+            mentioned(&["(Lpkg/A;ILpkg/B;)Lpkg/C;"]),
+            ["pkg/A", "pkg/B", "pkg/C"]
+        );
+    }
+
+    /// Text with no `;` after an `L` matched nothing before and must still match nothing — the
+    /// extractor has to tolerate malformed input rather than assume a well-formed descriptor.
+    #[test]
+    fn unterminated_text_records_nothing() {
+        assert_eq!(mentioned(&["Lpkg/Unterminated"]), Vec::<String>::new());
+        assert_eq!(mentioned(&["no descriptor here"]), Vec::<String>::new());
+    }
+
+    /// The case that rules out a descriptor parser: an internal name CONTAINING `L`.
+    ///
+    /// `contains("L…;")` could match at either `L` in `Lpkg/LOuter;`, so both runs are recorded —
+    /// the properly declared `pkg/LOuter` and the interior `Outer`. A parser would record only the
+    /// first, and a class genuinely named `Outer` would then lose its retention.
+    #[test]
+    fn an_interior_l_records_both_match_points() {
+        assert_eq!(mentioned(&["Lpkg/LOuter;"]), ["Outer", "pkg/LOuter"]);
+    }
+
+    /// Only the first `;` closes a run, exactly as the substring search bound it.
+    #[test]
+    fn a_run_stops_at_the_first_semicolon() {
+        assert_eq!(mentioned(&["Lpkg/A;Lpkg/B;"]), ["pkg/A", "pkg/B"]);
+    }
+
+    /// The constant-pool boundary: only descriptors in a TYPED position are scanned.
+    ///
+    /// A bare `CONSTANT_Utf8` — a string literal, an attribute name, anything — can spell something
+    /// that looks exactly like a descriptor. The old predicate never saw those, because it read
+    /// only field/method descriptors and `NameAndType`/`MethodType` entries, and neither does this
+    /// one. Widening to every Utf8 in the pool would retain `InnerClasses` rows for classes a
+    /// string constant merely mentions.
+    #[test]
+    fn a_bare_pool_string_is_not_a_mention() {
+        let mut writer = super::ClassWriter::new("pkg/Owner", "java/lang/Object");
+        writer.cp.utf8("Lpkg/OnlyInAStringLiteral;");
+        assert!(!writer.descriptor_mentions("pkg/OnlyInAStringLiteral"));
+
+        // The same spelling in a real field descriptor IS a mention, so the exclusion above is the
+        // pool position doing the work rather than the name being unreachable.
+        writer.add_field(super::ACC_PUBLIC, "field", "Lpkg/OnlyInAStringLiteral;");
+        assert!(writer.descriptor_mentions("pkg/OnlyInAStringLiteral"));
     }
 }
