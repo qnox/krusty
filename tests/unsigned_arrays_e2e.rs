@@ -253,9 +253,18 @@ fn an_unsigned_array_crossing_into_any_still_diverges_from_kotlinc() {
         "false true false | false true",
         "the reference compiler boxes the value class at the `Any` boundary"
     );
+    // The NATIVE backend gives each unsigned array its own runtime descriptor, so it answers what
+    // the reference compiler answers. The two krusty backends therefore disagree here on purpose,
+    // and both answers are named: asserting only that they agree could be satisfied only by making
+    // the native one wrong. When the JVM boxing defect is fixed the answers converge, this call
+    // fails, and the test comes back to the ordinary helper.
     assert_eq!(
-        common::expect_box_run_with_stdlib(src, "UnsignedArrayErasureDivergence"),
+        common::expect_box_run_with_stdlib_diverging(
+            src,
+            "UnsignedArrayErasureDivergence",
+            "false true false | false true",
+        ),
         "true true false | true true",
-        "krusty does not box there yet — a known defect, not an accepted answer"
+        "krusty's JVM backend does not box there yet — a known defect, not an accepted answer"
     );
 }

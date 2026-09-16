@@ -1,8 +1,14 @@
 //! Shared test helpers.
 
 mod kotlin_metadata;
+mod native_backend;
 mod source_set_compile;
 
+// Re-exported so a test writes `common::expect_native_box` like every other helper here. The
+// conformance binary compiles this module too and uses none of them, exactly as it uses none of
+// the JVM-only helpers below.
+#[allow(unused_imports)]
+pub use native_backend::{expect_native_box, expect_native_decline, expect_native_exit};
 pub use source_set_compile::compile_in_process_files;
 
 use kotlin_metadata::raw_kotlin_metadata;
@@ -21,6 +27,37 @@ use krusty::jvm::classpath::Classpath;
 /// Locate the batch CLI built from the separate `krusty-cli` workspace package.
 ///
 /// The canonical test runner builds it before starting the suite. A direct `cargo test -p krusty`
+/// Spawn a just-written executable, waiting out the window in which the kernel still sees an open
+/// write handle to it.
+///
+/// A test that writes a program and immediately runs it races every OTHER test in the binary: a
+/// `Command::spawn` on another thread forks, inheriting this file's still-open write descriptor,
+/// and the exec here fails with `ETXTBSY` until that child reaches its own exec and the
+/// close-on-exec flag takes effect. The window is microseconds and nothing about the compiler is
+/// being tested by it, so it is waited out rather than reported as a failure.
+#[allow(dead_code)]
+pub fn spawn_freshly_written(command: &mut Command) -> std::io::Result<Child> {
+    /// `ETXTBSY`. Spelled as its number because `ErrorKind::ExecutableFileBusy` is still unstable.
+    const TEXT_FILE_BUSY: i32 = 26;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match command.spawn() {
+            Err(error)
+                if error.raw_os_error() == Some(TEXT_FILE_BUSY) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Run a just-written executable to completion, with [`spawn_freshly_written`]'s retry.
+#[allow(dead_code)]
+pub fn run_freshly_written(command: &mut Command) -> std::io::Result<std::process::Output> {
+    spawn_freshly_written(command.stdout(Stdio::piped()).stderr(Stdio::piped()))?.wait_with_output()
+}
+
 /// may not, so build it once on demand in the test profile rather than coupling the compiler crate
 /// back to the executable package.
 #[allow(dead_code)]
@@ -1532,7 +1569,10 @@ pub fn compile_and_run_box_files(
 pub fn compile_and_run_with_stdlib(src: &str, stem: &str) -> Option<String> {
     let stdlib = stdlib_jar();
     let jdk = jdk_modules();
-    compile_and_run_box(src, stem, &[stdlib], Some(jdk.as_path()))
+    // A `None` is the JVM path declining, which leaves no answer to cross-check against.
+    let answer = compile_and_run_box(src, stem, &[stdlib], Some(jdk.as_path()))?;
+    cross_check_backends(src, stem, &answer);
+    Some(answer)
 }
 
 /// Multi-file form of [`compile_and_run_with_stdlib`].
@@ -1589,7 +1629,30 @@ pub fn expect_box_run(
 pub fn expect_box_run_with_stdlib(src: &str, stem: &str) -> String {
     let stdlib = stdlib_jar();
     let jdk = jdk_modules();
-    expect_box_run(src, stem, &[stdlib], Some(jdk.as_path()))
+    let answer = expect_box_run(src, stem, &[stdlib], Some(jdk.as_path()));
+    cross_check_backends(src, stem, &answer);
+    answer
+}
+
+/// [`expect_box_run_with_stdlib`] for a program the two backends answer DIFFERENTLY on purpose.
+///
+/// The ordinary helper asserts the backends agree, which is the right default and the reason it is
+/// the default. A handful of programs sit on a defect one backend has and the other does not, and
+/// for those "the backends agree" is the wrong claim: it would be satisfied only by making the
+/// correct backend wrong.
+///
+/// So both answers are named. The JVM's is returned as usual for the caller to assert; the native
+/// one is asserted here. A test reaching for this has to write down what each backend says, which
+/// is what keeps a deliberate divergence from quietly becoming a regression in either direction —
+/// if the JVM defect is fixed and the answers converge, this call fails and the test comes back to
+/// the ordinary helper.
+#[allow(dead_code)]
+pub fn expect_box_run_with_stdlib_diverging(src: &str, stem: &str, native: &str) -> String {
+    let stdlib = stdlib_jar();
+    let jdk = jdk_modules();
+    let answer = expect_box_run(src, stem, &[stdlib], Some(jdk.as_path()));
+    cross_check_backends(src, stem, native);
+    answer
 }
 
 /// [`expect_box_run`] for a compile-only consumer: the emitted classes, or a panic naming why the
@@ -1627,6 +1690,79 @@ pub fn expect_box_ok_with_stdlib(src: &str, stem: &str) {
         "OK",
         "{stem}"
     );
+    cross_check_backends(src, stem, "OK");
+}
+
+/// A target the suite's `box()` programs run on.
+///
+/// The suite is written ONCE. Which targets a run exercises is the runner's choice, not a property
+/// of the helper a test happens to call — so a new target is registered here and picked up by every
+/// existing test, rather than needing a second suite or an edit per call site.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+pub enum TestBackend {
+    /// The reference target. Always runs: it is the one that decides the expected answer.
+    Jvm,
+    /// Cranelift + the prebuilt runtime for the host.
+    Native,
+}
+
+impl TestBackend {
+    fn spelling(self) -> &'static str {
+        match self {
+            Self::Jvm => "jvm",
+            Self::Native => "native",
+        }
+    }
+}
+
+/// Every target this run CROSS-CHECKS against the JVM answer, from `KRUSTY_TEST_BACKENDS`.
+///
+/// A comma-separated list of spellings; `jvm` is implicit and may be listed harmlessly. The default
+/// is every target this build can actually reach, so a contributor gets the wider check without
+/// asking for it, and `KRUSTY_TEST_BACKENDS=jvm` narrows a run to the reference target alone.
+#[allow(dead_code)]
+fn cross_checked_backends() -> Vec<TestBackend> {
+    let available = [TestBackend::Native];
+    let selected = std::env::var("KRUSTY_TEST_BACKENDS").ok();
+    let selected = match selected.as_deref() {
+        // Retained spelling of the first switch this replaced.
+        None => match std::env::var("KRUSTY_NATIVE_E2E").as_deref() {
+            Ok("0") => return Vec::new(),
+            _ => return available.to_vec(),
+        },
+        Some(list) => list,
+    };
+    available
+        .into_iter()
+        .filter(|backend| {
+            selected
+                .split(',')
+                .any(|name| name.trim() == backend.spelling())
+        })
+        .collect()
+}
+
+/// Run `src` on every cross-checked target and require the SAME answer the JVM gave.
+///
+/// The suite's own programs are a better corpus for a young backend than anything written for it:
+/// they were written to pin krusty's semantics, they are small, and their oracle is already the
+/// string `box()` returns. Reusing them costs one switch rather than a second suite.
+///
+/// Comparing against `expected` rather than against the literal `"OK"` is what lets EVERY box
+/// helper route through here, including the ones whose programs deliberately answer something else:
+/// the claim is that a backend agrees with the reference, which is the claim worth making.
+///
+/// A construct the generator DECLINES is a skip. A younger backend says "not lowered yet" that way,
+/// and failing a test for it would turn every JVM-side test into that backend's to-do list.
+#[allow(dead_code)]
+pub fn cross_check_backends(src: &str, stem: &str, expected: &str) {
+    for backend in cross_checked_backends() {
+        match backend {
+            TestBackend::Jvm => {}
+            TestBackend::Native => native_backend::also_run_natively(src, stem, expected),
+        }
+    }
 }
 
 /// Multi-file form of [`expect_box_ok_with_stdlib`].
