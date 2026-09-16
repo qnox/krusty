@@ -292,6 +292,8 @@ mod classpath_reified_named_default_vararg_e2e;
 mod classpath_relocated_facade_typealias_e2e;
 #[path = "classpath_runblocking_e2e.rs"]
 mod classpath_runblocking_e2e;
+#[path = "classpath_serializable_round_trip_e2e.rs"]
+mod classpath_serializable_round_trip_e2e;
 #[path = "classpath_static_call_inference_e2e.rs"]
 mod classpath_static_call_inference_e2e;
 #[path = "classpath_subtype_ctor_arg_e2e.rs"]
