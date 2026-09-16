@@ -11,7 +11,7 @@ use krusty::frontend::{
     FrontendSymbols,
 };
 use krusty::libraries::SourceMember;
-use krusty::types::{Ty, TypeName, Visibility};
+use krusty::types::{existing_type_name, Ty, TypeName, Visibility};
 
 use super::{
     checked_property_type, companion_class,
@@ -179,7 +179,8 @@ impl DefinitionSymbols {
                         definitions
                             .source_classes
                             .insert(owner.clone(), source_class);
-                        let class_symbols = symbols.class_by_internal(&owner);
+                        let class_symbols = existing_type_name(&owner)
+                            .and_then(|owner| symbols.class_by_type_name(owner));
                         if let Some(stable) =
                             class_symbols.and_then(|class| class.stable_declaration)
                         {

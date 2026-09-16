@@ -324,7 +324,7 @@ impl TypeName {
         type_names().jvm_nested_parts(self.name_id())
     }
 
-    /// Lexicographic path ordering for deterministic external serialization.
+    /// Lexicographic path ordering for deterministic internal traversal without boundary rendering.
     pub(crate) fn path_cmp(self, other: TypeName) -> std::cmp::Ordering {
         type_names().path_cmp(self.name_id(), other.name_id())
     }
@@ -349,10 +349,6 @@ impl TypeName {
 
     pub fn unsigned_suffix_after_prefix(self, prefix: &str) -> Option<usize> {
         type_names().unsigned_suffix_after_prefix(self.name_id(), prefix)
-    }
-
-    pub fn replace(self, from: char, to: &str) -> String {
-        self.render().replace(from, to)
     }
 
     pub fn render(self) -> String {

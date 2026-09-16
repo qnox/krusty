@@ -3932,7 +3932,7 @@ pub(crate) fn install_streamed_plugin_declarations(
         })
         .map(|class| class.internal)
         .collect::<Vec<_>>();
-    generated_owners.sort_by_key(|owner| owner.render());
+    generated_owners.sort_by(|left, right| left.path_cmp(*right));
 
     for internal in generated_owners {
         let stable_owner = match table

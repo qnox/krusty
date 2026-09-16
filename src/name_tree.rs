@@ -949,6 +949,28 @@ mod tests {
         let nested = names.insert("kotlin/collections/Map$Entry$Key");
         let sibling = names.insert("kotlin/collections/Mapper");
         let other_package = names.insert("other/Map$Entry");
+        let dotted = names.insert("kotlin/collections/Map.Entry");
+        assert_eq!(
+            names.path_cmp(entry, sibling),
+            std::cmp::Ordering::Less,
+            "the nested separator participates in full-path ordering"
+        );
+        assert_eq!(
+            names.path_cmp(map, other_package),
+            std::cmp::Ordering::Less,
+            "ordering compares the complete qualified path"
+        );
+        assert_eq!(names.path_cmp(nested, nested), std::cmp::Ordering::Equal);
+        let sample = [map, entry, nested, sibling, other_package, dotted];
+        for &left in &sample {
+            for &right in &sample {
+                assert_eq!(
+                    names.path_cmp(left, right),
+                    names.render(left).cmp(&names.render(right)),
+                    "tree-path ordering must preserve the deterministic rendered order"
+                );
+            }
+        }
         assert!(names.same_or_nested_within(map, map));
         assert!(names.same_or_nested_within(entry, map));
         assert!(names.same_or_nested_within(nested, map));
@@ -963,7 +985,6 @@ mod tests {
             "a separator-free immutable segment records a definitive miss"
         );
 
-        let dotted = names.insert("kotlin/collections/Map.Entry");
         assert_eq!(names.nested_owner(dotted), Some(map));
 
         let dollar_name = names.insert("kotlin/collections/Map$Nested$With$Dollars");

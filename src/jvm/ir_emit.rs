@@ -16961,7 +16961,7 @@ impl<'a> Emitter<'a> {
                             }
                             // Null-check (throws on null) then checkcast — matching kotlinc's `as T`.
                             let kotlin_name = match type_operand.non_null() {
-                                Ty::Obj(fq_name, _) => fq_name.replace('/', "."),
+                                Ty::Obj(fq_name, _) => fq_name.render().replace('/', "."),
                                 Ty::TyParam(name, _) => {
                                     crate::types::type_parameter_source_name(name).to_string()
                                 }

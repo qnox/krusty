@@ -1601,18 +1601,16 @@ fn signature_from_resolved_function(function: &crate::libraries::FunctionInfo) -
 }
 
 /// Source extension overloads applicable to one receiver.
-pub struct ExtensionOverloads<'symbols, 'package> {
+pub struct ExtensionOverloads<'symbols, 'scope> {
     exact: Option<&'symbols [Signature]>,
     ranked: Vec<(u32, &'symbols Signature)>,
-    package: Option<&'package str>,
-    packages: Option<&'package [TypeName]>,
-    import_scope: Option<&'package crate::symbol_resolver::FunctionImportScope>,
-    scope_name: Option<&'package str>,
+    packages: Option<&'scope [TypeName]>,
+    import_scope: Option<&'scope crate::symbol_resolver::FunctionImportScope>,
+    scope_name: Option<&'scope str>,
 }
 
-impl<'symbols, 'package> ExtensionOverloads<'symbols, 'package> {
+impl<'symbols, 'scope> ExtensionOverloads<'symbols, 'scope> {
     pub fn iter(&self) -> impl Iterator<Item = &'symbols Signature> + '_ {
-        let package = self.package;
         let packages = self.packages;
         let import_scope = self.import_scope;
         let scope_name = self.scope_name;
@@ -1659,10 +1657,7 @@ impl<'symbols, 'package> ExtensionOverloads<'symbols, 'package> {
                             .iter()
                             .any(|package| package.matches(&signature.package))
                     }))
-                    || (import_scope.is_none()
-                        && packages.is_none()
-                        && package
-                            .is_none_or(|package| package_path_eq(&signature.package, package)))
+                    || (import_scope.is_none() && packages.is_none())
             })
     }
 
@@ -1673,14 +1668,6 @@ impl<'symbols, 'package> ExtensionOverloads<'symbols, 'package> {
     pub fn is_empty(&self) -> bool {
         self.iter().next().is_none()
     }
-}
-
-fn package_path_eq(left: &str, right: &str) -> bool {
-    left.bytes()
-        .map(|byte| if byte == b'.' { b'/' } else { byte })
-        .eq(right
-            .bytes()
-            .map(|byte| if byte == b'.' { b'/' } else { byte }))
 }
 
 /// Compatibility name for source signatures built in this module. The data itself belongs to the
@@ -4317,12 +4304,6 @@ impl SymbolTable {
         })
     }
 
-    pub fn fun_by_params(&self, name: &str, params: &[Ty]) -> Option<&Signature> {
-        let sigs = self.funs.get(name)?;
-        sigs.iter()
-            .find(|sig| sigs.len() == 1 || sig.params == params)
-    }
-
     pub fn source_function_signature(
         &self,
         name: &str,
@@ -4340,11 +4321,6 @@ impl SymbolTable {
             .iter()
             .find(|sig| overloads.len() == 1 || erased_params_semantic_key(sig) == params)
             .map(|sig| sig.ret)
-    }
-
-    /// Resolve a class reference type `Ty::Obj` back to its declaration (by internal name).
-    pub fn class_by_internal(&self, internal: &str) -> Option<&ClassSig> {
-        existing_type_name(internal).and_then(|internal| self.class_by_type_name(internal))
     }
 
     pub fn class_by_type_name(&self, internal: TypeName) -> Option<&ClassSig> {
@@ -4480,29 +4456,6 @@ impl SymbolTable {
             }
         }
         None
-    }
-
-    /// The type of member property `name` as seen AT A USE SITE on a receiver of type `recv`:
-    /// the declaration's type with the receiver's type arguments substituted (`Holder<A>.a` is
-    /// `A`, not the erased `T`; `Leaf : Mid<String>` binds `T = String` for `Mid.v`). The single
-    /// lookup-and-substitution entry point for consumers that do not already have declaration data,
-    /// notably signature-time computed-getter inference. Checker reads, probes, and stable-path
-    /// validation already resolve the declaration for visibility/stability and call the lower-level
-    /// [`Self::applied_declared_member_prop_ty`] operation with that SAME semantic owner.
-    pub fn applied_member_prop_ty(&self, recv: Ty, name: &str) -> Option<Ty> {
-        let recv = recv.non_null();
-        let internal = recv.obj_internal()?;
-        let Some((owner, property)) = self.declared_member_prop(internal, name) else {
-            // Preserve the structural fallback the pre-substitution inference used. Synthetic and
-            // module-populated class signatures can intentionally expose a property shape without a
-            // source `DeclaredPropertySig`; there is then no declaring generic metadata to apply, but
-            // the flattened type is still better than turning a previously inferable read into Error.
-            return self.prop_of_name(internal, name).map(|(ty, _)| ty);
-        };
-        if !property.context_params.is_empty() {
-            return None;
-        }
-        Some(self.applied_declared_member_prop_ty(recv, owner, name, property.ty))
     }
 
     /// Apply a source property declaration to one concrete receiver while retaining its semantic
@@ -5060,16 +5013,7 @@ impl SymbolTable {
 
     /// Source extension overloads applicable to `recv`, most-specific first.
     pub fn ext_fun_overloads(&self, recv: Ty, name: &str) -> ExtensionOverloads<'_, 'static> {
-        self.ext_fun_overloads_filtered(recv, name, None, None, None, None)
-    }
-
-    pub fn ext_fun_overloads_in_package<'symbols, 'package>(
-        &'symbols self,
-        recv: Ty,
-        name: &str,
-        package: &'package str,
-    ) -> ExtensionOverloads<'symbols, 'package> {
-        self.ext_fun_overloads_filtered(recv, name, Some(package), None, None, None)
+        self.ext_fun_overloads_filtered(recv, name, None, None, None)
     }
 
     pub fn ext_fun_overloads_in_scope<'symbols, 'scope>(
@@ -5078,7 +5022,7 @@ impl SymbolTable {
         name: &str,
         packages: &'scope [TypeName],
     ) -> ExtensionOverloads<'symbols, 'scope> {
-        self.ext_fun_overloads_filtered(recv, name, None, Some(packages), None, None)
+        self.ext_fun_overloads_filtered(recv, name, Some(packages), None, None)
     }
 
     pub(crate) fn ext_fun_overloads_in_import_scope<'symbols, 'scope>(
@@ -5087,23 +5031,21 @@ impl SymbolTable {
         name: &'scope str,
         scope: &'scope crate::symbol_resolver::FunctionImportScope,
     ) -> ExtensionOverloads<'symbols, 'scope> {
-        self.ext_fun_overloads_filtered(recv, name, None, None, Some(scope), Some(name))
+        self.ext_fun_overloads_filtered(recv, name, None, Some(scope), Some(name))
     }
 
-    fn ext_fun_overloads_filtered<'symbols, 'package>(
+    fn ext_fun_overloads_filtered<'symbols, 'scope>(
         &'symbols self,
         recv: Ty,
         name: &str,
-        package: Option<&'package str>,
-        packages: Option<&'package [TypeName]>,
-        import_scope: Option<&'package crate::symbol_resolver::FunctionImportScope>,
-        scope_name: Option<&'package str>,
-    ) -> ExtensionOverloads<'symbols, 'package> {
+        packages: Option<&'scope [TypeName]>,
+        import_scope: Option<&'scope crate::symbol_resolver::FunctionImportScope>,
+        scope_name: Option<&'scope str>,
+    ) -> ExtensionOverloads<'symbols, 'scope> {
         let Some(families) = self.ext_funs.get(name) else {
             return ExtensionOverloads {
                 exact: None,
                 ranked: Vec::new(),
-                package,
                 packages,
                 import_scope,
                 scope_name,
@@ -5115,7 +5057,6 @@ impl SymbolTable {
             return ExtensionOverloads {
                 exact,
                 ranked: Vec::new(),
-                package,
                 packages,
                 import_scope,
                 scope_name,
@@ -5151,19 +5092,10 @@ impl SymbolTable {
         ExtensionOverloads {
             exact,
             ranked,
-            package,
             packages,
             import_scope,
             scope_name,
         }
-    }
-
-    /// The first extension overload for `(recv, name)`, or `None`. Most direct-read sites resolve a
-    /// single extension (or only need a representative overload — the arity/argument disambiguation for
-    /// a genuine call runs through the `SymbolResolver`'s `receiver_extensions`), so they read the
-    /// first. A site that must pick by argument arity iterates [`Self::ext_fun_overloads`].
-    pub fn ext_fun(&self, recv: Ty, name: &str) -> Option<&Signature> {
-        self.ext_fun_overloads(recv, name).first()
     }
 
     /// Find an extension signature by source declaration identity.
@@ -5177,21 +5109,6 @@ impl SymbolTable {
         signature
             .source_receiver
             .map(|declared_receiver| (declared_receiver, signature))
-    }
-
-    pub fn ext_fun_in_package(&self, recv: Ty, name: &str, package: &str) -> Option<&Signature> {
-        self.ext_fun_overloads_in_package(recv, name, package)
-            .first()
-    }
-
-    pub fn ext_fun_in_scope(
-        &self,
-        recv: Ty,
-        name: &str,
-        packages: &[TypeName],
-    ) -> Option<&Signature> {
-        self.ext_fun_overloads_in_scope(recv, name, packages)
-            .first()
     }
 
     pub fn source_extension_signature(
@@ -5212,276 +5129,8 @@ impl SymbolTable {
             .flatten()
     }
 
-    pub fn class_by_internal_mut(&mut self, internal: &str) -> Option<&mut ClassSig> {
-        let internal = existing_type_name(internal)?;
-        self.class_by_type_name_mut(internal)
-    }
-
     pub fn class_by_type_name_mut(&mut self, internal: TypeName) -> Option<&mut ClassSig> {
-        self.classes
-            .values_mut()
-            .find(|sig| sig.internal == internal)
-    }
-
-    /// A method (own or inherited up the base-class chain) on a class internal name.
-    pub fn method_of(&self, internal: &str, name: &str) -> Option<Signature> {
-        self.method_of_with_owner(internal, name)
-            .map(|(_, sig)| sig)
-    }
-
-    pub fn method_of_name(&self, internal: TypeName, name: &str) -> Option<Signature> {
-        self.method_of_with_owner_name(internal, name)
-            .map(|(_, sig)| sig)
-    }
-
-    /// Whether every supertype of `internal` (transitively) is a MODULE class — i.e. the
-    /// supertype member set visible to [`Self::supertype_methods_name`] is COMPLETE. A hierarchy
-    /// touching a classpath type has members that walk cannot see, so completeness-based checks
-    /// (an `override` must override something) must not fire.
-    pub fn hierarchy_is_module_closed(&self, internal: TypeName) -> bool {
-        self.hierarchy_is_module_closed_inner(internal, &mut std::collections::HashSet::new())
-    }
-
-    fn hierarchy_is_module_closed_inner(
-        &self,
-        internal: TypeName,
-        seen: &mut std::collections::HashSet<TypeName>,
-    ) -> bool {
-        if !seen.insert(internal) {
-            return true; // a supertype cycle is ill-formed source; don't recurse forever on it
-        }
-        let Some(c) = self.class_by_type_name(internal) else {
-            // `kotlin/Any` / `java/lang/Object` roots aren't module classes but add no members a
-            // source `override` could target beyond the universal ones.
-            return internal.matches("kotlin/Any") || internal.matches("java/lang/Object");
-        };
-        c.super_internal
-            .into_iter()
-            .chain(c.interfaces.iter_ids())
-            .all(|p| self.hierarchy_is_module_closed_inner(p, seen))
-    }
-
-    /// The overload of `name` on `internal` (or up its base chain) that could OVERRIDE a supertype
-    /// method with parameters `want_params` — same arity, each param equal or erasable to the
-    /// super's `Object`. A same-name overload with an unrelated shape is a SIBLING, not an
-    /// override, and must not be paired (`None` = the super method is inherited untouched).
-    pub fn override_impl_of_name(
-        &self,
-        internal: TypeName,
-        name: &str,
-        want_params: &[Ty],
-    ) -> Option<Signature> {
-        let obj = Ty::obj("kotlin/Any");
-        let mut seen = std::collections::HashSet::new();
-        let mut cur = Some(internal);
-        while let Some(ci_name) = cur {
-            if !seen.insert(ci_name) {
-                return None; // supertype cycle (ill-formed source) — stop
-            }
-            let c = self.class_by_type_name(ci_name)?;
-            if let Some(found) = c.methods_named(name).iter().find(|sig| {
-                sig.params.len() == want_params.len()
-                    && want_params
-                        .iter()
-                        .zip(&sig.params)
-                        .all(|(e, c)| e == c || *e == obj)
-            }) {
-                return Some(found.clone());
-            }
-            cur = c.super_internal;
-        }
-        None
-    }
-
-    /// A method (own or inherited up the base-class chain) with the internal name of the class that
-    /// declares it. Call resolution records this owner so lowering can dispatch to a cross-file base method
-    /// instead of pretending the receiver class declares it.
-    pub fn method_of_with_owner(&self, internal: &str, name: &str) -> Option<(String, Signature)> {
-        let internal = existing_type_name(internal)?;
-        self.method_of_with_owner_name(internal, name)
-            .map(|(owner, sig)| (owner.render(), sig))
-    }
-
-    pub fn method_of_with_owner_name(
-        &self,
-        internal: TypeName,
-        name: &str,
-    ) -> Option<(TypeName, Signature)> {
-        let c = self.class_by_type_name(internal)?;
-        if let Some(sigs) = c.methods.get(name) {
-            // Overloaded name: there is no single "the method" — the caller must select by
-            // argument types (`method_matching`); returning one arbitrarily would misdispatch.
-            return match sigs.as_slice() {
-                [one] => Some((c.internal_name(), one.clone())),
-                _ => None,
-            };
-        }
-        self.method_of_with_owner_name(c.super_internal?, name)
-    }
-
-    /// Select a source-module overload and return its declaring class.
-    pub fn method_matching_with_owner_name(
-        &self,
-        internal: TypeName,
-        name: &str,
-        args: &[Ty],
-    ) -> Option<(TypeName, Signature)> {
-        self.method_matching_in_hierarchy(internal, name, args, false)
-    }
-
-    /// Select a source operator across class and interface hierarchies.
-    pub fn operator_method_matching_with_owner_name(
-        &self,
-        internal: TypeName,
-        name: &str,
-        args: &[Ty],
-    ) -> Option<(TypeName, Signature)> {
-        self.method_matching_in_hierarchy(internal, name, args, true)
-    }
-
-    fn method_matching_in_hierarchy(
-        &self,
-        internal: TypeName,
-        name: &str,
-        args: &[Ty],
-        include_interfaces: bool,
-    ) -> Option<(TypeName, Signature)> {
-        let mut owners = Vec::<TypeName>::new();
-        let mut signatures = Vec::<Signature>::new();
-        let mut seen_owners = std::collections::HashSet::new();
-        let mut seen_params = HashMap::<Vec<Ty>, usize>::new();
-        let mut pending = vec![internal];
-        while let Some(owner) = pending.pop() {
-            if !seen_owners.insert(owner) {
-                continue;
-            }
-            // A CLASSPATH owner in the chain: its methods aren't source declarations, so it
-            // contributes nothing and its own supertypes aren't walked. Keep whatever the SOURCE
-            // classes below it already contributed rather than discarding the walk — a source class
-            // extending a library class (`class C : ArrayList<Int>() { override fun removeAt(…) }`)
-            // still has its own declaration matched, which is what a `super.` call and the mapped-
-            // interface bridge both need. Bailing out here made such an override invisible.
-            let Some(class) = self.class_by_type_name(owner) else {
-                continue;
-            };
-            for signature in class.methods_named(name) {
-                // An override has the same JVM parameter signature as its parent. Keep the
-                // most-derived declaration while retaining inherited overloads.
-                if let Some(&derived) = seen_params.get(&signature.params) {
-                    if signatures[derived].is_override() && signature.is_operator() {
-                        signatures[derived].set_is_operator(true);
-                    }
-                } else {
-                    let index = signatures.len();
-                    seen_params.insert(signature.params.clone(), index);
-                    owners.push(class.internal_name());
-                    signatures.push(signature.clone());
-                }
-            }
-            if include_interfaces {
-                let interfaces = class.interfaces.iter_ids().collect::<Vec<_>>();
-                pending.extend(interfaces.into_iter().rev());
-            }
-            if let Some(superclass) = class.super_internal {
-                pending.push(superclass);
-            }
-        }
-        let selected = pick_overload(&signatures, args)?;
-        let owner = owners[selected];
-        let signature = signatures
-            .into_iter()
-            .nth(selected)
-            .expect("selected overload index must exist");
-        Some((owner, signature))
-    }
-
-    /// Whether `internal`'s method `name` (or one inherited up the base chain) is `vararg` — a
-    /// clone-free probe for the hot call paths, which only need the flag (`method_of` clones the whole
-    /// `Signature`, an allocation per call when used merely to read one bool).
-    pub fn method_is_vararg(&self, internal: &str, name: &str) -> bool {
-        existing_type_name(internal)
-            .is_some_and(|internal| self.method_is_vararg_name(internal, name))
-    }
-
-    pub fn method_is_vararg_name(&self, internal: TypeName, name: &str) -> bool {
-        let Some(c) = self.class_by_type_name(internal) else {
-            return false;
-        };
-        if let Some(sigs) = c.methods.get(name) {
-            // The flag is only trustworthy when the name has a sole overload.
-            return matches!(sigs.as_slice(), [one] if one.vararg());
-        }
-        c.super_internal
-            .is_some_and(|s| self.method_is_vararg_name(s, name))
-    }
-
-    /// All method signatures inherited from declared supertypes (base-class chain + interfaces,
-    /// recursively) as `(name, signature)`. Used to detect overrides that would need a JVM bridge
-    /// method (covariant/generic return), which krusty does not synthesize.
-    pub fn supertype_methods(&self, internal: &str) -> Vec<(String, Signature)> {
-        let mut out = Vec::new();
-        if let Some(internal) = existing_type_name(internal) {
-            self.collect_super_methods(internal, &mut out);
-        }
-        out
-    }
-
-    pub fn supertype_methods_name(&self, internal: TypeName) -> Vec<(String, Signature)> {
-        let mut out = Vec::new();
-        self.collect_super_methods(internal, &mut out);
-        out
-    }
-
-    fn collect_super_methods(&self, internal: TypeName, out: &mut Vec<(String, Signature)>) {
-        let Some(c) = self.class_by_type_name(internal) else {
-            return;
-        };
-        let mut parents: Vec<TypeName> = Vec::new();
-        if let Some(s) = c.super_internal {
-            parents.push(s);
-        }
-        parents.extend(c.interfaces.iter_ids());
-        for p in parents {
-            if let Some(pc) = self.class_by_type_name(p) {
-                for (n, sigs) in &pc.methods {
-                    for sig in sigs {
-                        out.push((n.clone(), sig.clone()));
-                    }
-                }
-            }
-            self.collect_super_methods(p, out);
-        }
-    }
-
-    pub fn supertype_internal_names(&self, internal: &str) -> Vec<TypeName> {
-        let mut out = Vec::new();
-        if let Some(internal) = existing_type_name(internal) {
-            out = self.supertype_internal_names_from(internal);
-        }
-        out
-    }
-
-    pub fn supertype_internal_names_from(&self, internal: TypeName) -> Vec<TypeName> {
-        let mut out = Vec::new();
-        self.collect_super_internals(internal, &mut out);
-        out
-    }
-
-    fn collect_super_internals(&self, internal: TypeName, out: &mut Vec<TypeName>) {
-        let Some(c) = self.class_by_type_name(internal) else {
-            return;
-        };
-        let mut parents: Vec<TypeName> = Vec::new();
-        if let Some(s) = c.super_internal {
-            parents.push(s);
-        }
-        parents.extend(c.interfaces.iter_ids());
-        for p in parents {
-            if !out.contains(&p) {
-                out.push(p);
-                self.collect_super_internals(p, out);
-            }
-        }
+        self.classes.get_mut(&internal)
     }
 
     pub fn subclass_names_of(&self, internal: TypeName) -> Vec<TypeName> {
@@ -5496,37 +5145,6 @@ impl SymbolTable {
             .map(ClassSig::internal_name)
             .collect()
     }
-
-    /// A property (own or inherited) on a class internal name. Returns `(type, is_var)`.
-    pub fn prop_of(&self, internal: &str, name: &str) -> Option<(Ty, bool)> {
-        let internal = existing_type_name(internal)?;
-        self.prop_of_name(internal, name)
-    }
-
-    pub fn prop_of_name(&self, internal: TypeName, name: &str) -> Option<(Ty, bool)> {
-        let c = self.class_by_type_name(internal)?;
-        if let Some(p) = c.source_prop(name) {
-            return Some(p);
-        }
-        self.prop_of_name(c.super_internal?, name)
-    }
-
-    /// True when `internal`'s full bare-name member scope is visible to this module's own-class
-    /// queries — no superclass, no interfaces (whose default accessor `var`s `prop_of` cannot see),
-    /// no `inner` outer chain, and not itself nested inside another class (an outer member binds
-    /// before a top-level name). Per-NAME shadows the caller must still check itself: instance
-    /// props/accessors via `prop_of`/method lookup, and this class's own companion declarations via
-    /// its companion classifier. Lets a bare `x++` inside a member safely fall through to a
-    /// same-named top-level property when nothing in the enclosing scope can shadow it.
-    pub fn class_scope_fully_visible(&self, internal: &str) -> bool {
-        let Some(c) = self.class_by_internal(internal) else {
-            return false;
-        };
-        c.super_internal.is_none()
-            && c.interfaces.is_empty()
-            && c.inner_of.is_none()
-            && !internal.contains('$')
-    }
 }
 
 pub struct SourceConstructorMatcher<'a> {
@@ -5539,14 +5157,6 @@ const MAX_SOURCE_SUPERTYPE_NODES: usize = 4096;
 impl SourceConstructorMatcher<'_> {
     pub fn argument_matches(&self, expected: Ty, actual: Ty) -> bool {
         constructor_argument_matches(self, expected, actual)
-    }
-
-    pub fn arguments_match(&self, expected: &[Ty], actual: &[Ty]) -> bool {
-        expected.len() == actual.len()
-            && expected
-                .iter()
-                .zip(actual)
-                .all(|(&expected, &actual)| self.argument_matches(expected, actual))
     }
 
     pub fn common_supertypes(&self, types: &[Ty]) -> Vec<crate::libraries::SemanticSupertype> {
@@ -41928,7 +41538,7 @@ fun box(): String {
         ));
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
         let class = symbols
-            .class_by_internal("A")
+            .class_by_type_name(type_name("A"))
             .expect("source class A must be registered");
         assert_eq!(
             class.callable_signature,
@@ -47659,7 +47269,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                 resolved_index,
             );
             for (internal, params) in super_ctor_params {
-                if let Some(cs) = syms.class_by_internal_mut(&internal) {
+                if let Some(cs) = syms.class_by_type_name_mut(internal) {
                     cs.super_ctor_params = params;
                 }
             }
@@ -48910,7 +48520,7 @@ struct Checker<'a> {
     /// A class internal name → the base-constructor parameter types its `super(args)` resolved to
     /// (see [`ClassSig::super_ctor_params`]). Stashed during checking (where the argument types are
     /// known) and applied to the `ClassSig` after, since `syms` is borrowed immutably while checking.
-    super_ctor_params: HashMap<String, Vec<Ty>>,
+    super_ctor_params: HashMap<TypeName, Vec<Ty>>,
     stmt_lowers: HashMap<StmtId, StmtLowering>,
     stmt_return_targets: HashMap<StmtId, ReturnTarget>,
     expr_return_targets: HashMap<ExprId, ReturnTarget>,
@@ -62940,7 +62550,7 @@ impl<'a> Checker<'a> {
         if subclasses.is_empty() {
             return None;
         }
-        subclasses.sort_by_key(|subclass| subclass.render());
+        subclasses.sort_by(|left, right| left.path_cmp(*right));
         // Every sealed descendant, not just the direct ones: an `object` arm may name a subclass of a
         // NESTED sealed class (`sealed class Node { sealed class Leaf : Node() … }`), and that arm still
         // covers part of the hierarchy.
@@ -63033,7 +62643,7 @@ impl<'a> Checker<'a> {
         for subclass in subclasses {
             uncovered_leaves(self, subclass, &covered, 0, &mut uncovered);
         }
-        uncovered.sort_by_key(|subclass| subclass.render());
+        uncovered.sort_by(|left, right| left.path_cmp(*right));
         uncovered.dedup();
         let mut missing = uncovered
             .into_iter()
@@ -68946,7 +68556,7 @@ impl<'a> Checker<'a> {
                         // are essential for named/vararg arguments: zipping the source arguments
                         // with parameter order would contextually type the wrong lambda.
                         if cl.base_class.is_some() {
-                            let internal = class_internal(c.file, &cl.name);
+                            let internal = type_name(&class_internal(c.file, &cl.name));
                             let names = cl
                                 .base_args
                                 .first()
