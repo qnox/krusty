@@ -961,6 +961,7 @@ mod tests {
             is_object: false,
             is_companion: false,
             companion_class: None,
+            published_nested_classifiers: Vec::new(),
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             applied_annotations: crate::ir::DeclarationAnnotations::default(),

@@ -1645,6 +1645,11 @@ pub struct IrClass {
     /// `Some(companion_fq)` on a class with a `companion object`: emit a `public static final
     /// <companion> Companion` field, initialized in this class's `<clinit>`.
     pub companion_class: Option<TypeName>,
+    /// Kotlin names of compiler-generated classifiers this class publishes as direct nested
+    /// declarations, in declaration order. Source-declared nested classifiers are represented by
+    /// their own [`IrClass`] ownership; this list is only for generated declarations whose producer
+    /// explicitly owns the language-level publication contract (for example `$serializer`).
+    pub published_nested_classifiers: Vec<String>,
     /// Secondary constructors — each an extra `<init>(params)` that delegates to the primary
     /// constructor (`constructor(…) : this(args)`) then runs its body. Empty for most classes.
     pub secondary_ctors: Vec<IrSecondaryCtor>,
@@ -2016,6 +2021,7 @@ impl IrClass {
             is_object: false,
             is_companion: false,
             companion_class: None,
+            published_nested_classifiers: Vec::new(),
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             applied_annotations: DeclarationAnnotations::default(),
@@ -2125,6 +2131,7 @@ impl IrClass {
             is_object: flags.has(crate::fir::DeclarationFlags::SINGLETON),
             is_companion: flags.has(crate::fir::DeclarationFlags::COMPANION),
             companion_class: None,
+            published_nested_classifiers: Vec::new(),
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             applied_annotations: DeclarationAnnotations::default(),
