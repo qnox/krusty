@@ -2038,10 +2038,27 @@ fn build_class_metadata(
         })
         .map(|candidate| candidate.fq_name.nested_segment_ref().to_string())
         .collect();
+    // A compiler plugin can generate a classifier that Kotlin code names (`Foo.$serializer`); the
+    // plugin states which ones it publishes, so a synthesized implementation class stays out on its
+    // `is_source_declared` record alone. They precede the COMPANION, which kotlinc lists last of the
+    // generated set (`$serializer` then `Companion` for a `@Serializable` class).
+    let plugin_nested = ir
+        .plugin_nested_classifiers
+        .iter()
+        .filter(|(owner, _)| *owner == c.fq_name)
+        .map(|(_, nested)| nested.clone());
     // kotlinc lists the companion under `nestedClassName` (f7) TOO, alongside its own
     // `companionObjectName` (f4) record — both reference the same interned string.
-    if let Some(companion) = &c.companion_class {
-        let segment = companion.nested_segment_ref().to_string();
+    let companion_segment = c
+        .companion_class
+        .as_ref()
+        .map(|companion| companion.nested_segment_ref().to_string());
+    let at = companion_segment
+        .as_ref()
+        .and_then(|segment| nested_names.iter().position(|name| name == segment))
+        .unwrap_or(nested_names.len());
+    nested_names.splice(at..at, plugin_nested);
+    if let Some(segment) = companion_segment {
         if !nested_names.contains(&segment) {
             nested_names.push(segment);
         }

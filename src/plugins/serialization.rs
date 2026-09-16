@@ -179,8 +179,12 @@ fn serializer_fq(class_fq: &str) -> String {
     serializer_name(type_name(class_fq)).render()
 }
 
+/// The Kotlin name of that object. It begins with `$`, so the JVM spelling `Foo$$serializer` cannot
+/// be split back into it — metadata records this name, not a segment derived from the binary one.
+const SERIALIZER_OBJECT_NAME: &str = "$serializer";
+
 fn serializer_name(classifier: TypeName) -> TypeName {
-    classifier.nested_child("$serializer")
+    classifier.nested_child(SERIALIZER_OBJECT_NAME)
 }
 
 /// The FqName of a `@Serializable` class's `Companion` object (`Foo` → `Foo$Companion`), which holds
@@ -1717,6 +1721,14 @@ impl IrPlugin for SerializationPlugin {
             ir.mark_synthetic_class(serializer_identity);
             ir.mark_deprecated_class(serializer_identity);
             let ser_id = ir.add_class(ser);
+            // `Foo.$serializer` is nameable Kotlin, so kotlinc records it under the serialized
+            // class's `Class.nestedClassName` — ahead of the `Companion`, which the metadata writer
+            // appends last. Without the record a reader of `Foo`'s metadata cannot reach the
+            // serializer as a member of the type it serializes.
+            ir.plugin_nested_classifiers.push((
+                ir.classes[class_id as usize].fq_name_id(),
+                SERIALIZER_OBJECT_NAME.to_string(),
+            ));
             ir.insert_class_signature_name(
                 serializer_identity,
                 generated_serializer_signature(serializer_type_parameters, serialized_ty),

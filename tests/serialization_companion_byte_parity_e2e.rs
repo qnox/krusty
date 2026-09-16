@@ -2399,3 +2399,65 @@ fn a_sibling_files_generated_serializer_accessor_matches_kotlinc() {
         "sibling serializer accessor instructions"
     );
 }
+
+/// The `d2` string array of a `@Metadata` annotation as javap prints it, split into its entries.
+///
+/// `d2` holds every name the `d1` protobuf refers to by index, so it is the readable projection of
+/// what the metadata actually DESCRIBES — a member missing from the record is missing from `d2`.
+fn metadata_d2(disassembly: &str) -> Vec<String> {
+    let row = disassembly
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("d2="))
+        .unwrap_or_else(|| panic!("no d2= row in the disassembly"));
+    row.trim_start_matches("d2=")
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split("\",\"")
+        .map(|entry| entry.trim_matches('"').to_string())
+        .collect()
+}
+
+/// A `@Serializable` class's generated `$serializer` is a nested classifier of the class, and
+/// kotlinc records it under `Class.nestedClassName` beside the `Companion`. krusty listed the
+/// companion alone, so a reader of the metadata could not find the serializer as a member of the
+/// type it serializes — the plugin generates it, but the language record is the class's own.
+#[test]
+fn a_serializable_class_lists_its_generated_serializer_as_nested() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class Retention(val days: Int)\n";
+    let Some(built) =
+        compare_with_kotlinc_plugin("NestedSerializer", src, "Retention", &cp, "25", &extra)
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // The nested names intern LAST of the structural strings, so their ABSOLUTE indices move with
+    // every member the record describes. What this pins is the nested list itself: which names it
+    // holds and in what order.
+    let nested = |entries: &[String]| {
+        entries
+            .iter()
+            .filter(|entry| *entry == "$serializer" || *entry == "Companion")
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let want = nested(&metadata_d2(&built.reference));
+    assert_eq!(
+        want,
+        ["$serializer", "Companion"],
+        "kotlinc records $serializer before Companion"
+    );
+    let got = metadata_d2(&built.krusty);
+    assert_eq!(
+        nested(&got),
+        want,
+        "nested classifier names of a @Serializable class: {got:?}"
+    );
+}
