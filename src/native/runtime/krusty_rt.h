@@ -505,6 +505,10 @@ KRef kt_throwable_message(KRef self);
 /* Reading a `lateinit` property before anything assigned it, named for the message Kotlin gives. */
 void kt_uninitialized_property(KRef name);
 
+/* `assertFailsWith<T> { … }` whose block threw the wrong thing, or nothing. `was` is what it threw,
+   or NULL when it completed; `message` is the caller's prefix, or NULL. */
+void kt_assert_failed_to_throw(KRef message, const KType *expected, KRef was);
+
 /* `throw e`: record the exception in the one pending slot and RETURN. The caller's next act is
    `kt_pending_exception`, and that check is what turns the return into propagation. The slot is a
    GC root, because between the throw and the `catch` that names it the exception is reachable from

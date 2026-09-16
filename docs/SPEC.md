@@ -6710,6 +6710,43 @@ and behavior is checked by RUNNING the emitted program.
   `tests/typeparam_cast_e2e.rs` (`class_bounded_type_param_cast_checkcasts`, which cross-checks the
   two backends).
 
+- **`assertFailsWith<T> { … }` reads its expected class from the call's RETURN type, and a wrong
+  throw FAILS the assertion rather than propagating.** The reified `T` never reaches a backend as a
+  type argument — kotlinc resolves it into the return type — so there is no class operand to find,
+  and the descriptor that type already wears is the test. It is the same `kt_is_instance` a `catch`
+  clause makes, so a SUPERTYPE matches: `assertFailsWith<RuntimeException>` takes an
+  `IllegalStateException`. The block is the LAST argument, never the first: `message` is declared
+  before it and defaulted, so a call that omits it passes one argument and a call that supplies it
+  passes two.
+  A block that throws the WRONG type raises `AssertionError` and the original exception is
+  REPLACED, not allowed past — kotlin-test catches `Throwable` and fails on what it caught.
+  Letting it propagate is the plausible reading and it is wrong; kotlinc 2.4.10 settled it, along
+  with the wording of both failures and the `". "` a supplied message is joined by.
+  Tests: `tests/native_try_catch_e2e.rs` (the five `assert_fails_with*` cases).
+
+- **A boxed floating-point value compares and hashes by CANONICALIZED bits: every NaN is one
+  value.** This is `java.lang.Double.doubleToLongBits`, and the difference from
+  `doubleToRawLongBits` is the whole point — `0.0 / 0.0` produces a NaN with the sign bit SET on
+  x86 (`fff8…`) where the `Double.NaN` constant does not (`7ff8…`), so comparing raw bits answers
+  false for two values Kotlin calls equal. `hashCode` canonicalizes through the same helper,
+  because two values that compare equal must hash equal and two NaNs do compare equal.
+  (`0.0.equals(-0.0)` stays FALSE: those differ in a bit that is not a NaN payload. The scalar
+  comparison emitted for `==` is a third rule again, where `0.0 == -0.0` is true.)
+  Tests: the corpus case is `codegen/box/arithmetic/division.kt` (`assertEquals(Double.NaN, 0.0 / 0.0)`).
+
+- **A branch's type is read from the IR, not from what lowering has emitted so far.** A `when`
+  types itself BEFORE lowering any arm, because its merge block has to know whether it carries a
+  value. A local's type was answered from the slot map, which is a lowering artifact — a slot is
+  in it once its declaring statement has been emitted — so a branch ending in a local that branch
+  DECLARES had no type. The `when` then typed as no-value, every arm was lowered as a statement,
+  and whatever the branch computed went nowhere: the destination read zero.
+  That is the shape every inline function spliced into a branch takes, which is how
+  `if (c) Array(2) { … } else Array(5) { … }` answered an array of size 0 while the same
+  constructor answered 2 outside a branch. The declaring `IrExpr::Variable` carries the type, so
+  the question goes there.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`a_branch_ending_in_a_local_it_declares_still_has_a_value`, which cross-checks the two backends).
+
 - **A class nested in the FILE FACADE is not qualified by it on this target.**
   `castAnonymousClassKt$box$1` is the JVM's binary name for an anonymous object inside a top-level
   `box`, and it is right there — but there is no facade class here at all: a top-level property is

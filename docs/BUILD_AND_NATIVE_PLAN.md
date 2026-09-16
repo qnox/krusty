@@ -1680,6 +1680,33 @@ before:**
    provider detail, and every one of those lives in `native/intrinsics` or nowhere. That rule has
    now fired three times on this branch, each time on something that looked local.
 
+   **`assertFailsWith`, for 3819 — and the miscompile it uncovered was worth more than the 55.**
+   The top decline at 96, and cheap once `try` existed: the reified `T` is resolved into the call's
+   RETURN type before a backend sees it, so there is no class operand to find and the descriptor
+   that type already wears is the test. Two answers came from kotlinc rather than from reading the
+   shape — a SUPERTYPE matches, and a block that throws the WRONG type fails the assertion with
+   what it caught rather than letting it propagate. The second is the plausible reading and it is
+   wrong.
+   Landing it took the lane to 3815 with two failures, and one of them was not about assertions at
+   all. `bce/withGetter.kt` completed a loop that had to throw, and reducing it gave
+   `if (c) Array(2) { 1 } else Array(5) { 1 }` answering an array of size ZERO — where the same
+   constructor answered 2 one line above, outside the branch.
+   The cause is a question asked too early. A `when` types itself before lowering any arm, because
+   its merge block has to know whether it carries a value; a local's type was answered from the
+   slot map, and that map is a LOWERING artifact — a slot is in it once its declaring statement has
+   been emitted. So a branch ending in a local it declares had no type, the `when` typed as
+   no-value, every arm was lowered as a statement, and the value went nowhere. The destination read
+   zero and the program carried on.
+   Nothing about that is specific to arrays. It is the shape EVERY inline function spliced into a
+   branch takes, and `Array(n) { … }` is simply the common one. The IR knew the answer all along —
+   the declaring `IrExpr::Variable` carries the type — so the question goes there now, and the test
+   cross-checks both backends because the JVM one was already right.
+   The other failure was `assertEquals(Double.NaN, 0.0 / 0.0)`. Boxed floating point compared by
+   RAW bits, and `0.0 / 0.0` sets the sign bit on x86 where the `Double.NaN` constant does not, so
+   two NaNs Kotlin calls equal compared false. `equals` is `doubleToLongBits`, which collapses
+   every NaN to one value; `hashCode` needed the same helper, since values that compare equal must
+   hash equal.
+
    **How an exception propagates: a pending slot, not an unwinder.** This is the second of the
    three low-IR decisions the risks section says must be answered by design rather than inherited.
 

@@ -2422,7 +2422,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 pub(super) const TOP_LEVEL: &str = "\u{0}top-level";
 
 /// A type's spelling for a diagnostic: the class name when it has one, else the debug form.
-fn type_name_of(ty: Ty) -> String {
+pub(super) fn type_name_of(ty: Ty) -> String {
     match ty.non_null().obj_internal() {
         Some(internal) => internal.render().replace('/', "."),
         None => format!("{ty:?}"),

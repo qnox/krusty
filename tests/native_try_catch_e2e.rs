@@ -408,3 +408,97 @@ fn a_cast_between_two_primitives_can_only_be_an_erased_object_cast() {
         "OK",
     );
 }
+
+#[test]
+fn assert_fails_with_answers_the_exception_the_block_threw() {
+    // The reified `T` never reaches the backend as a type argument: kotlinc resolves it into the
+    // call's RETURN type, so the class to test against is read from there.
+    expect_native_box(
+        "import kotlin.test.assertFailsWith\n\
+         fun box(): String {\n\
+         \x20   val e = assertFailsWith<IllegalStateException> { error(\"boom\") }\n\
+         \x20   return if (e.message == \"boom\") \"OK\" else \"fail: ${e.message}\"\n\
+         }\n",
+        "AssertFailsWith",
+        "OK",
+    );
+}
+
+#[test]
+fn assert_fails_with_a_supertype_takes_it() {
+    // The test is `is_instance`, the same one a `catch` clause makes, so a supertype matches.
+    // kotlinc 2.4.10 confirms: `assertFailsWith<RuntimeException>` takes an IllegalStateException.
+    expect_native_box(
+        "import kotlin.test.assertFailsWith\n\
+         fun box(): String {\n\
+         \x20   val e = assertFailsWith<RuntimeException> { error(\"sup\") }\n\
+         \x20   return if (e.message == \"sup\") \"OK\" else \"fail: ${e.message}\"\n\
+         }\n",
+        "AssertFailsWithSupertype",
+        "OK",
+    );
+}
+
+#[test]
+fn a_block_that_completes_fails_the_assertion() {
+    expect_native_box(
+        "import kotlin.test.assertFailsWith\n\
+         fun box(): String {\n\
+         \x20   return try {\n\
+         \x20       assertFailsWith<IllegalStateException> { }\n\
+         \x20       \"fail: no throw\"\n\
+         \x20   } catch (e: AssertionError) {\n\
+         \x20       val want = \"Expected an exception of class kotlin.IllegalStateException\" +\n\
+         \x20                  \" to be thrown, but was completed successfully.\"\n\
+         \x20       if (e.message == want) \"OK\" else \"fail: ${e.message}\"\n\
+         \x20   }\n\
+         }\n",
+        "AssertFailsWithNoThrow",
+        "OK",
+    );
+}
+
+#[test]
+fn a_block_that_throws_the_wrong_type_fails_the_assertion_rather_than_propagating() {
+    // The plausible reading is that the unexpected exception travels on. kotlin-test catches
+    // `Throwable` and fails the assertion with what it caught, so the original is REPLACED — and
+    // kotlinc 2.4.10 is what settled it, not the reading.
+    expect_native_box(
+        "import kotlin.test.assertFailsWith\n\
+         fun box(): String {\n\
+         \x20   return try {\n\
+         \x20       assertFailsWith<IllegalStateException> { throw NumberFormatException(\"nfe\") }\n\
+         \x20       \"fail: no throw\"\n\
+         \x20   } catch (e: NumberFormatException) {\n\
+         \x20       \"fail: the wrong exception propagated\"\n\
+         \x20   } catch (e: AssertionError) {\n\
+         \x20       val want = \"Expected an exception of class kotlin.IllegalStateException\" +\n\
+         \x20                  \" to be thrown, but was kotlin.NumberFormatException: nfe\"\n\
+         \x20       if (e.message == want) \"OK\" else \"fail: ${e.message}\"\n\
+         \x20   }\n\
+         }\n",
+        "AssertFailsWithWrongType",
+        "OK",
+    );
+}
+
+#[test]
+fn a_supplied_message_is_a_prefix() {
+    // `message` is declared BEFORE the block and defaulted, so the block is the LAST argument and
+    // never the first — a call that supplies a message passes two.
+    expect_native_box(
+        "import kotlin.test.assertFailsWith\n\
+         fun box(): String {\n\
+         \x20   return try {\n\
+         \x20       assertFailsWith<IllegalStateException>(\"mine\") { }\n\
+         \x20       \"fail: no throw\"\n\
+         \x20   } catch (e: AssertionError) {\n\
+         \x20       val want = \"mine. Expected an exception of class kotlin.IllegalStateException\" +\n\
+         \x20                  \" to be thrown, but was completed successfully.\"\n\
+         \x20       if (e.message == want) \"OK\" else \"fail: ${e.message}\"\n\
+         \x20   }\n\
+         }\n",
+        "AssertFailsWithMessage",
+        "OK",
+    );
+}

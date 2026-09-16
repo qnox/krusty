@@ -246,6 +246,15 @@ pub(super) fn assertion_call(
     Some((symbol, compared))
 }
 
+/// Whether this names `assertFailsWith`, which reaches a backend under the name kotlin-test
+/// gives its non-inline half.
+///
+/// It takes no class operand: the reified type argument is resolved into the call's RETURN type
+/// before a backend sees it, so the caller reads the class to test against from there.
+pub(super) fn is_assert_fails_with(owner: &str, name: &str) -> bool {
+    facade_package(kotlin_owner(owner)) == Some("kotlin/test") && name == "assertFailsWithAny"
+}
+
 /// Is this `kotlin.String`, at either nullability and under either spelling?
 fn is_string_type(ty: &Ty) -> bool {
     match ty {

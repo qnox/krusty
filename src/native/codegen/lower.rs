@@ -1559,6 +1559,32 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
     }
 
+    /// The type of a block's value when that value is a local the block itself DECLARES.
+    ///
+    /// `Self::physical_type_of` answers a `GetValue` from the slot map, and that map is a lowering
+    /// artifact: a slot is in it once its declaring statement has been emitted. Typing is asked
+    /// EARLIER than that — a `when` types itself before lowering any arm, to know whether its
+    /// merge block carries a value — so a branch ending in a local it declares had no type, the
+    /// whole `when` typed as no-value, and every arm was lowered as a statement. The value went
+    /// nowhere and the destination read zero.
+    ///
+    /// Nothing about that is specific to what the block computes; it is any branch spliced from an
+    /// inline function, which is how `Array(n) { … }` arrives. The IR knows the answer — the
+    /// declaring `IrExpr::Variable` carries the type — so this asks the IR rather than the map.
+    fn declared_in(&self, stmts: &[u32], value: u32) -> Option<Ty> {
+        let IrExpr::GetValue(slot) = self.file.ir.expr(value) else {
+            return None;
+        };
+        stmts.iter().rev().find_map(|&statement| {
+            match self.file.ir.expr(statement) {
+                IrExpr::Variable { index, ty, .. } if index == slot => Some(*ty),
+                // A splice may nest another block around the declaration.
+                IrExpr::Block { stmts, .. } => self.declared_in(stmts, value),
+                _ => None,
+            }
+        })
+    }
+
     /// The machine shape an expression lowers to, read from the node itself.
     fn physical_type_of(&self, id: u32) -> Option<Ty> {
         Some(match self.file.ir.expr(id) {
@@ -1584,8 +1610,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 _ => *type_operand,
             },
             IrExpr::Block {
-                value: Some(value), ..
-            } => self.type_of(*value)?,
+                stmts,
+                value: Some(value),
+            } => self
+                .type_of(*value)
+                .or_else(|| self.declared_in(stmts, *value))?,
             IrExpr::Block { value: None, .. } => Ty::Unit,
             IrExpr::When { branches } => {
                 // NOT the first arm's type: `when (s) { "a" -> 1; else -> null }` is `Int?`, and
@@ -2114,6 +2143,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             super::super::intrinsics::assertion_call(&owner, &name, params)
                         {
                             return self.assertion(symbol, compared, args, params);
+                        }
+                        // `assertFailsWith<T> { … }`. Not one of the comparisons above: it runs a
+                        // block and answers what that block threw, so it is the `try` machinery
+                        // rather than a runtime call.
+                        if super::super::intrinsics::is_assert_fails_with(&owner, &name) {
+                            return self.assert_fails_with(args, params, *ret);
                         }
                         let Some(symbol) =
                             super::super::intrinsics::runtime_function(&owner, &name, params)

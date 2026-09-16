@@ -2338,6 +2338,32 @@ kt_int kt_hash_code(KRef value) {
     return ((kt_int(*)(KRef))type->vtable[KT_SLOT_HASH_CODE])(value);
 }
 
+/* The bits `equals` and `hashCode` read from a floating-point value: every NaN collapsed to ONE.
+
+   This is `java.lang.Double.doubleToLongBits`, and the difference from `doubleToRawLongBits` is
+   the whole point. `0.0 / 0.0` produces a NaN with the sign bit SET on x86 (`fff8…`) where the
+   `Double.NaN` constant does not (`7ff8…`), so comparing raw bits answers false for two values
+   Kotlin calls equal — and hashes them differently, which would break the contract between them.
+   Kotlin has ONE NaN as far as `equals` is concerned, and this is where that is decided. */
+static uint64_t kt_double_bits(kt_double value) {
+    uint64_t bits;
+    memcpy(&bits, &value, sizeof bits);
+    if ((bits & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL &&
+        (bits & 0x000FFFFFFFFFFFFFULL) != 0) {
+        return 0x7FF8000000000000ULL;
+    }
+    return bits;
+}
+
+static uint32_t kt_float_bits(kt_float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof bits);
+    if ((bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0) {
+        return 0x7FC00000u;
+    }
+    return bits;
+}
+
 /* Built-in values compare by value, as Kotlin's `==` on boxed values does: two `Int?` holding 3
    are equal, and two strings with the same text are equal. */
 static kt_boolean kt_builtin_equals(KRef self, KRef other) {
@@ -2386,16 +2412,10 @@ static kt_boolean kt_builtin_equals(KRef self, KRef other) {
        true. The scalar comparison the generator emits for `==` is the other rule, and neither is
        this one. */
     if (type == &kt_type_double) {
-        uint64_t left, right;
-        memcpy(&left, &self->as.double_value, sizeof left);
-        memcpy(&right, &other->as.double_value, sizeof right);
-        return left == right;
+        return kt_double_bits(self->as.double_value) == kt_double_bits(other->as.double_value);
     }
     if (type == &kt_type_float) {
-        uint32_t left, right;
-        memcpy(&left, &self->as.float_value, sizeof left);
-        memcpy(&right, &other->as.float_value, sizeof right);
-        return left == right;
+        return kt_float_bits(self->as.float_value) == kt_float_bits(other->as.float_value);
     }
     /* kotlin.Unit: one instance, already handled by identity above. */
     return false;
@@ -2466,14 +2486,13 @@ static kt_int kt_builtin_hash_code(KRef self) {
     /* Kotlin's answers for these are fixed — a program can print a hash — and they are the bits,
        folded for a `Double` the way a `Long`'s are. */
     if (type == &kt_type_double) {
-        uint64_t bits;
-        memcpy(&bits, &self->as.double_value, sizeof bits);
+        /* Through the same canonicalization `equals` uses: two values that compare equal must hash
+           equal, and two NaNs do compare equal. */
+        uint64_t bits = kt_double_bits(self->as.double_value);
         return (kt_int)(uint32_t)(bits ^ (bits >> 32));
     }
     if (type == &kt_type_float) {
-        uint32_t bits;
-        memcpy(&bits, &self->as.float_value, sizeof bits);
-        return (kt_int)bits;
+        return (kt_int)kt_float_bits(self->as.float_value);
     }
     return kt_any_hash_code(self);
 }
@@ -2942,6 +2961,24 @@ KRef kt_throwable_new(const KType *type, KRef message) {
 }
 
 KRef kt_throwable_message(KRef self) { return ((KThrowable *)self)->message; }
+
+/* `assertFailsWith<T> { … }` when the block did not throw what it had to.
+
+   Kotlin's own wording, in two shapes: `message` is a PREFIX followed by ". " when the caller
+   supplied one, and `was` is the exception actually caught or NULL when the block completed. The
+   class is named by its descriptor, so it reads `kotlin.IllegalStateException` where kotlin-test
+   on the JVM reads `class java.lang.IllegalStateException` — the same difference every other
+   report on this target already carries, since these are Kotlin's classes and not the JVM's. */
+void kt_assert_failed_to_throw(KRef message, const KType *expected, KRef was) {
+    KRef text = message == NULL ? kt_string_utf8("", 0)
+                                : kt_string_plus(message, kt_string_utf8(". ", 2));
+    text = kt_string_plus(text, kt_string_utf8("Expected an exception of class ", 31));
+    text = kt_string_plus(text, kt_string_utf8(expected->name, expected->name_length));
+    text = kt_string_plus(text, kt_string_utf8(" to be thrown, but was ", 23));
+    text = kt_string_plus(text, was == NULL ? kt_string_utf8("completed successfully.", 23)
+                                            : kt_to_string(was));
+    kt_throw(kt_throwable_new(&kt_type_assertion_error, text));
+}
 
 /* Reading a `lateinit` property before anything assigned it. Kotlin's exception and Kotlin's
    wording; the guard is at the READ, which is where kotlinc puts it too, because the field being

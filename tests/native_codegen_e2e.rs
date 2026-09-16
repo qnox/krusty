@@ -2471,3 +2471,33 @@ fn a_callable_reference_is_equal_by_what_it_refers_to() {
         "OK",
     );
 }
+
+#[test]
+fn a_branch_ending_in_a_local_it_declares_still_has_a_value() {
+    // A `when` types itself BEFORE lowering any arm, to know whether its merge block carries a
+    // value. A branch spliced from an inline function ends in a local that branch declares, and
+    // the slot map that answers a local's type is a lowering artifact — empty until the declaring
+    // statement is emitted. So the branch had no type, the `when` typed as no-value, every arm was
+    // lowered as a statement, and the destination read zero.
+    //
+    // `Array(n) { … }` is how that shape arrives in practice: it is an inline function, so
+    // `if (c) Array(2) { 1 } else Array(5) { 1 }` answered an array of size 0 while the same
+    // constructor answered 2 outside a branch. Nothing about the defect is specific to arrays.
+    common::expect_box_ok_with_stdlib(
+        "fun box(): String {\n\
+         \x20   val c = true\n\
+         \x20   val direct = Array(2) { 1 }\n\
+         \x20   val inIf = if (c) Array(2) { 1 } else Array(5) { 1 }\n\
+         \x20   val inWhen = when { c -> Array(2) { 1 }; else -> Array(5) { 1 } }\n\
+         \x20   val sized = Array(if (c) 2 else 5) { 1 }\n\
+         \x20   val counted = if (c) (1..3).map { it * 2 } else emptyList()\n\
+         \x20   if (direct.size != 2) return \"fail direct: ${direct.size}\"\n\
+         \x20   if (inIf.size != 2) return \"fail inIf: ${inIf.size}\"\n\
+         \x20   if (inWhen.size != 2) return \"fail inWhen: ${inWhen.size}\"\n\
+         \x20   if (sized.size != 2) return \"fail sized: ${sized.size}\"\n\
+         \x20   if (counted.size != 3) return \"fail counted: ${counted.size}\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "P",
+    );
+}
