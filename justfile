@@ -60,11 +60,12 @@ fmt:
 clippy-findings:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Cached crates do not re-emit diagnostics, so rebuild first-party crates before fingerprinting.
-    # Keep Clippy in its own target: cleaning the shared target here discarded the gate-profile test
-    # binaries immediately before the pre-push test phase and forced an otherwise unnecessary rebuild.
+    # Cached crates do not re-emit diagnostics, so fingerprint from a clean Clippy target. A
+    # package-scoped `cargo clean -p` is not sufficient for a restored CI target: Cargo can report
+    # `Removed 0 files` and then reuse every cached first-party artifact, producing a false-empty
+    # diagnostic set. Keep Clippy in its own target so the clean cannot discard gate-profile tests.
     clippy_target="$PWD/target/clippy-baseline"
-    CARGO_TARGET_DIR="$clippy_target" cargo clean -p krusty -p krusty-cli -p krusty-lsp >/dev/null
+    cargo clean --target-dir "$clippy_target" >/dev/null
     output=$(mktemp)
     trap 'rm -f "$output"' EXIT
     if ! CARGO_TARGET_DIR="$clippy_target" cargo clippy --workspace --all-targets --all-features --message-format=short >"$output" 2>&1; then
