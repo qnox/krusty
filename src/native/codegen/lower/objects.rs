@@ -1672,7 +1672,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         };
         super::super::super::intrinsics::is_throwable_message(
             getter.callable.owner,
-            &getter.callable.name,
+            super::super::super::intrinsics::value_class_member(&getter.callable.name),
         )
     }
 

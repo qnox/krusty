@@ -686,7 +686,7 @@ impl BodyLowering<'_, '_, '_> {
         let getter = self.file.classpath.external_callable(property.getter)?;
         if !super::super::super::intrinsics::is_callable_name(
             getter.callable.owner,
-            &getter.callable.name,
+            value_class_member(&getter.callable.name),
         ) {
             return None;
         }
@@ -733,7 +733,7 @@ impl BodyLowering<'_, '_, '_> {
         }
         let property = self.file.classpath.external_property(target)?;
         let getter = self.file.classpath.external_callable(property.getter)?;
-        let name = getter.callable.name.clone();
+        let name = value_class_member(&getter.callable.name).to_string();
         let ret = getter.callable.ret;
         self.reference_member(&name, receiver, &[], ret)
     }

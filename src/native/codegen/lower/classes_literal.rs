@@ -51,7 +51,7 @@ impl BodyLowering<'_, '_, '_> {
         let getter = self.file.classpath.external_callable(property.getter)?;
         super::super::super::intrinsics::class_name_accessor(
             getter.callable.owner,
-            &getter.callable.name,
+            super::super::super::intrinsics::value_class_member(&getter.callable.name),
         )
     }
 

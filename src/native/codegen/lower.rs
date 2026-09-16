@@ -52,6 +52,9 @@ use crate::types::Ty;
 
 use super::super::classes::{self as model, ClassModel, Slot, Symbols, ValueMember};
 use super::super::target::NativeTarget;
+// Re-exported so every submodule reaches the one accessor through `use super::*`: an
+// architecture test holds that no read of an external callable's name skips it.
+pub(super) use super::super::intrinsics::value_class_member;
 use super::{Entry, PROGRAM_ENTRY};
 
 /// The construct a lowering declined, phrased for a diagnostic.
@@ -2038,7 +2041,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Err("an unresolvable dependency call".to_string());
                 };
                 let owner = realization.callable.owner.render();
-                let name = realization.callable.name.clone();
+                let name = value_class_member(&realization.callable.name).to_string();
                 match dispatch_receiver {
                     // A member: the receiver is the runtime function's first argument, and
                     // everything crosses as a reference.

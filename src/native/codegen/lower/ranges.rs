@@ -308,7 +308,7 @@ impl BodyLowering<'_, '_, '_> {
         };
         super::super::super::intrinsics::is_indices(
             &getter.callable.owner.render(),
-            &getter.callable.name,
+            value_class_member(&getter.callable.name),
         )
     }
 
@@ -357,10 +357,17 @@ impl BodyLowering<'_, '_, '_> {
         let property = self.file.classpath.external_property(target)?;
         let getter = self.file.classpath.external_callable(property.getter)?;
         range_element(getter.callable.owner)?;
-        range_symbol(&getter.callable.name, 0)?;
+        // A getter on an UNSIGNED range arrives MANGLED — `getFirst-pVg5ArA` — because its result
+        // is a value class and the JVM has no other way to keep two such signatures apart. The
+        // suffix is a hash of the erasure, so it says nothing this backend wants; the member behind
+        // it is the same `first`.
+        let name = value_class_member(&getter.callable.name);
+        range_symbol(name, 0)?;
+        // The DEMANGLED name is what the caller answers with: it is the member this resolves to,
+        // and the mangling is a JVM signature detail that says nothing past this point.
         Some((
             getter.callable.owner.render(),
-            getter.callable.name.clone(),
+            name.to_string(),
             getter.callable.ret,
         ))
     }
