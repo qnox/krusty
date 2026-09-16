@@ -812,7 +812,6 @@ impl BodyFirChecker<'_> {
                         binding,
                         dispatch_receiver,
                         extension_receiver,
-                        &property.name,
                         (!property.companion_extension).then_some(property.reflection_owner),
                         property.extension_facade.is_some() && !property.companion_extension,
                         &property.getter,
@@ -842,7 +841,6 @@ impl BodyFirChecker<'_> {
                         FirCallableReferenceBinding::Static,
                         None,
                         None,
-                        &property.name,
                         None,
                         false,
                         &property.getter,
@@ -1159,7 +1157,6 @@ impl BodyFirChecker<'_> {
         binding: FirCallableReferenceBinding,
         dispatch_receiver: Option<FirReceiver>,
         extension_receiver: Option<FirReceiver>,
-        name: &str,
         receiver: Option<Ty>,
         extension_receiver_target: bool,
         getter: &crate::libraries::LibraryCallable,
@@ -1196,7 +1193,6 @@ impl BodyFirChecker<'_> {
         let mutable = setter.is_some();
         Ok(FirExprKind::PropertyReference {
             target: FirPropertyReferenceTarget::External {
-                name: name.into(),
                 reflection_owner,
                 getter: Box::new(getter),
                 setter: setter.map(Box::new),
