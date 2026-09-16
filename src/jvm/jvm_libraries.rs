@@ -4941,6 +4941,17 @@ impl JvmLibraries {
                     // type arguments. Without it the reified body cannot be specialized and the call falls
                     // back to a (throwing) direct invoke of the inline-only method.
                     signature: cand.as_ref().and_then(|c| c.signature.clone()),
+                    // The name this extension is DECLARED under, beside the emit handle it is
+                    // realized as. Everything above selected this declaration by `mf.kotlin_name`
+                    // and then derived a JVM method for it, so the two spellings are already known
+                    // to be different things here: `@JvmName` renames the handle outright, and a
+                    // value-class signature makes kotlinc append a hash of the erasure, which is
+                    // why `UInt.downTo` is compiled as `downTo-J1ME1BU`. Neither is recoverable
+                    // from the spelling, and a consumer that needs the Kotlin name should not have
+                    // to re-align the overload to get it. A classifier member already publishes
+                    // both (`LibraryCallable::classifier_member`); this is the same thing for a
+                    // declaration reached through a facade.
+                    reflection_name: Some(mf.kotlin_name.clone()),
                     ..LibraryCallable::library(facade, jvm_name, params, ret, pret, descriptor)
                 };
                 callable.physical_params = physical_params;
