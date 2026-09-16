@@ -31476,7 +31476,7 @@ impl<'a> Checker<'a> {
                     .into_iter()
                     .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
                     .collect::<Vec<_>>();
-                if !self.invisible_reference_suppressed(self.call_callee_name_span(call))
+                if !self.suppresses_diagnostic("INVISIBLE_REFERENCE")
                     && top_level_candidates.iter().any(|candidate| {
                         candidate.visibility == Visibility::Private
                             && candidate
@@ -31995,7 +31995,7 @@ impl<'a> Checker<'a> {
                 } else if let Some((internal, access)) = self.inaccessible_classifier(scope, &fname)
                 {
                     let reference = self.call_callee_name_span(call);
-                    if self.invisible_reference_suppressed(reference) {
+                    if self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
                         (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None, span)
                     } else {
                         (
@@ -35656,6 +35656,59 @@ val result = object { fun value(): String = captured }
             .iter()
             .map(|diagnostic| diagnostic.msg.clone())
             .collect()
+    }
+
+    #[test]
+    fn legacy_visibility_suppression_uses_the_lexical_annotation_identity() {
+        let (file_errors, _) = check_with_annotation_fixtures(
+            r#"
+@file:KotlinSuppress("INVISIBLE_REFERENCE")
+import kotlin.Suppress as KotlinSuppress
+
+class FileOwner { private fun hidden(): Int = 1 }
+fun fileAllowed(owner: FileOwner): Int = owner.hidden()
+"#,
+            false,
+        );
+        assert_eq!(file_errors, Vec::<String>::new());
+
+        let (errors, _) = check_with_annotation_fixtures(
+            r#"
+import kotlin.Suppress as KotlinSuppress
+
+annotation class Suppress(vararg val names: String)
+class Owner { private fun hidden(): Int = 1 }
+
+@KotlinSuppress("INVISIBLE_REFERENCE")
+fun allowed(owner: Owner) { owner.hidden() }
+
+class MemberProperty {
+    @KotlinSuppress("INVISIBLE_REFERENCE")
+    val value: Int = Owner().hidden()
+}
+
+class Primary @KotlinSuppress("INVISIBLE_REFERENCE") constructor(
+    val value: Int = Owner().hidden(),
+)
+
+class Secondary {
+    @KotlinSuppress("INVISIBLE_REFERENCE")
+    constructor() { Owner().hidden() }
+}
+
+fun outer() {
+    @KotlinSuppress("INVISIBLE_REFERENCE")
+    fun local(): Int = Owner().hidden()
+    local()
+}
+
+@Suppress("INVISIBLE_REFERENCE")
+fun rejected(owner: Owner) { owner.hidden() }
+"#,
+            false,
+        );
+
+        assert_eq!(errors, ["cannot access 'hidden': it is private in 'Owner'"]);
     }
 
     #[test]
@@ -44975,28 +45028,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         },
     );
     let import_levels = function_import_scope.levels().clone();
-    let active_statement_suppressions = if resolved_index.is_some() {
-        // Production seeds file/declaration visibility policy from stable declaration facts after
-        // the active body set is selected below. The occurrence map is a legacy same-parse aid and
-        // is deliberately unavailable in Pass 2.
-        Vec::new()
-    } else {
-        let pass_one = syms
-            .pass_one_symbols()
-            .expect("legacy checking requires Pass-1 symbols");
-        file.file_annotations
-            .iter()
-            .filter(|(annotation, _)| {
-                pass_one
-                    .resolved_annotation(file_index, annotation)
-                    .is_some_and(|identity| identity.matches("kotlin/Suppress"))
-            })
-            .flat_map(|(_, arguments)| arguments)
-            .filter_map(|argument| file.const_string_value(*argument))
-            .map(|value| value.to_lossy())
-            .collect()
-    };
-    Checker {
+    let mut checker = Checker {
         file,
         libraries: syms.libraries(),
         compilation_id: syms.compilation_id(),
@@ -45047,7 +45079,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         reflective_callable_references: std::collections::HashSet::new(),
         resolved_type_tys: HashMap::new(),
         unresolved_type_segments: HashMap::new(),
-        active_statement_suppressions,
+        active_statement_suppressions: Vec::new(),
         resolved_type_bounds: HashMap::new(),
         resolved_declaration_types: HashMap::new(),
         resolved_declaration_type_parameters: HashMap::new(),
@@ -45171,7 +45203,13 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         loop_depth: 0,
         return_allowed: true,
         lambda_returns: LambdaReturnScopes::default(),
+    };
+    if resolved_index.is_none() {
+        let (annotations, arguments): (Vec<_>, Vec<_>) =
+            file.file_annotations.iter().cloned().unzip();
+        checker.push_declaration_suppressions(&CheckerScope::root(), &annotations, &arguments);
     }
+    checker
 }
 
 fn class_declaration_label(name: &str) -> &str {
@@ -61574,7 +61612,7 @@ impl<'a> Checker<'a> {
         if !scope.tparam_contains(&r.name) {
             if let Some(internal) = resolved.non_null().kotlin_class_internal() {
                 if !r.is_import() {
-                    if !self.invisible_reference_suppressed(r.span) {
+                    if !self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
                         if let Some(access) =
                             self.resolver().inaccessible_classifier_access(internal)
                         {
@@ -68081,6 +68119,14 @@ impl<'a> Checker<'a> {
             // for a subclass or a typed `companion object : A()`). Mirrors `check_fun`'s param-default
             // pass so a function-typed parameter's lambda default types concretely.
             if check_primary_constructor {
+                let constructor_suppression_depth = self.active_statement_suppressions.len();
+                if let Some(annotations) = cl.primary_ctor_annotations.as_deref() {
+                    self.push_declaration_suppressions(
+                        scope,
+                        annotations,
+                        &cl.primary_ctor_annotation_args,
+                    );
+                }
                 let defaults_scope = scope.child(ScopeKind::Block);
                 let scope = &defaults_scope;
                 self.with_this_unavailable(|checker| {
@@ -68092,6 +68138,8 @@ impl<'a> Checker<'a> {
                         &source_primary_params,
                     );
                 });
+                self.active_statement_suppressions
+                    .truncate(constructor_suppression_depth);
             }
             // A signature-owned default declared by a local classifier must be checked from the
             // lexical expression that introduces that classifier. A class-header lambda is one
@@ -68445,6 +68493,11 @@ impl<'a> Checker<'a> {
                     if !selected_property {
                         continue;
                     }
+                    let property_suppression_depth = self.push_declaration_suppressions(
+                        scope,
+                        &bp.annotations,
+                        &bp.annotation_args,
+                    );
                     let check_ordinary_property_body = self
                         .selected_body_declarations
                         .as_ref()
@@ -68858,6 +68911,8 @@ impl<'a> Checker<'a> {
                     }
                     self.this_extension_receiver = dispatch_extension_receiver;
                     self.symbolic_signature_inference = outer_symbolic_signature_inference;
+                    self.active_statement_suppressions
+                        .truncate(property_suppression_depth);
                 }
                 for step in &cl.init_order {
                     if let ClassInit::Block(b) = step {
@@ -81680,7 +81735,7 @@ impl<'a> Checker<'a> {
     ) -> Option<Ty> {
         let owner = selected.member.owner?;
         if !self.selected_member_accessible(&selected, owner)
-            && !self.invisible_reference_suppressed(self.call_callee_name_span(call))
+            && !self.suppresses_diagnostic("INVISIBLE_REFERENCE")
         {
             if matches!(
                 selected.member.visibility,
@@ -82208,7 +82263,7 @@ impl<'a> Checker<'a> {
                 .expect("a selected convention member has a declaring classifier");
             if !self.selected_member_accessible(&resolved, owner)
                 && !diagnostic_spans
-                    .is_some_and(|(_, span)| self.invisible_reference_suppressed(span))
+                    .is_some_and(|_| self.suppresses_diagnostic("INVISIBLE_REFERENCE"))
             {
                 if let Some((_, span)) = diagnostic_spans {
                     let visibility = match selected.visibility {
@@ -84232,7 +84287,7 @@ impl<'a> Checker<'a> {
             None
         };
         if !self.member_accessible(member.visibility, internal)
-            && !self.invisible_reference_suppressed(self.call_callee_name_span(call))
+            && !self.suppresses_diagnostic("INVISIBLE_REFERENCE")
         {
             self.diags.error(
                 self.call_callee_name_span(call),
@@ -85181,7 +85236,7 @@ impl<'a> Checker<'a> {
         expression: ExprId,
         internal: TypeName,
     ) -> bool {
-        if self.invisible_reference_suppressed(self.span(expression)) {
+        if self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
             return false;
         }
         let Some(access) = self.resolver().inaccessible_classifier_access(internal) else {
@@ -85221,140 +85276,6 @@ impl<'a> Checker<'a> {
         true
     }
 
-    fn invisible_reference_suppressed(&self, span: Span) -> bool {
-        if self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
-            return true;
-        }
-        self.file
-            .file_annotations
-            .iter()
-            .any(|(annotation, arguments)| {
-                self.annotation_is_kotlin_suppress(annotation)
-                    && arguments.iter().any(|argument| {
-                        self.file
-                            .const_string_value(*argument)
-                            .is_some_and(|value| value.to_lossy() == "INVISIBLE_REFERENCE")
-                    })
-            })
-            || self
-                .file
-                .decls
-                .iter()
-                .any(|&declaration| self.decl_suppresses_invisible_reference(declaration, span))
-            || self.file.stmt_arena.iter().any(|statement| {
-                matches!(statement, Stmt::LocalFun(function)
-                    if self.fun_suppresses_invisible_reference(function, span))
-            })
-    }
-
-    fn annotation_is_kotlin_suppress(&self, annotation: &AnnotationRef) -> bool {
-        self.applied_annotations
-            .get(&(annotation.span.lo, annotation.span.hi))
-            .map(|applied| applied.internal)
-            .or_else(|| {
-                self.module
-                    .legacy_symbols()
-                    .and_then(|symbols| symbols.resolved_annotation(self.file_index, annotation))
-            })
-            .or_else(|| {
-                self.select_classifier(&CheckerScope::root(), &annotation.name)
-                    .found()
-            })
-            .is_some_and(|identity| identity.matches("kotlin/Suppress"))
-    }
-
-    fn annotations_suppress_invisible_reference(
-        &self,
-        annotations: &[AnnotationRef],
-        annotation_args: &[Vec<ExprId>],
-    ) -> bool {
-        annotations
-            .iter()
-            .zip(annotation_args)
-            .any(|(annotation, arguments)| {
-                self.annotation_is_kotlin_suppress(annotation)
-                    && arguments.iter().any(|argument| {
-                        self.file
-                            .const_string_value(*argument)
-                            .is_some_and(|value| value.to_lossy() == "INVISIBLE_REFERENCE")
-                    })
-            })
-    }
-
-    fn span_contains(outer: Span, inner: Span) -> bool {
-        inner.lo >= outer.lo && inner.hi <= outer.hi
-    }
-
-    fn fun_suppresses_invisible_reference(&self, function: &FunDecl, span: Span) -> bool {
-        Self::span_contains(function.span, span)
-            && self.annotations_suppress_invisible_reference(
-                &function.annotations,
-                &function.annotation_args,
-            )
-    }
-
-    fn property_suppresses_invisible_reference(&self, property: &PropDecl, span: Span) -> bool {
-        Self::span_contains(property.span, span)
-            && self.annotations_suppress_invisible_reference(
-                &property.annotations,
-                &property.annotation_args,
-            )
-    }
-
-    fn primary_constructor_suppresses_invisible_reference(
-        &self,
-        class: &ClassDecl,
-        span: Span,
-    ) -> bool {
-        let Some(annotations) = class.primary_ctor_annotations.as_deref() else {
-            return false;
-        };
-        self.annotations_suppress_invisible_reference(
-            annotations,
-            &class.primary_ctor_annotation_args,
-        ) && class.props.iter().any(|parameter| {
-            Self::span_contains(parameter.ty.span, span)
-                || parameter
-                    .default
-                    .is_some_and(|default| Self::span_contains(self.span(default), span))
-        })
-    }
-
-    fn decl_suppresses_invisible_reference(&self, declaration: DeclId, span: Span) -> bool {
-        match self.file.decl(declaration) {
-            Decl::Fun(function) => self.fun_suppresses_invisible_reference(function, span),
-            Decl::Property(property) => {
-                self.property_suppresses_invisible_reference(property, span)
-            }
-            Decl::Class(class) => {
-                if !Self::span_contains(class.span, span) {
-                    return false;
-                }
-                self.annotations_suppress_invisible_reference(
-                    &class.annotations,
-                    &class.annotation_args,
-                ) || class
-                    .methods
-                    .iter()
-                    .any(|method| self.fun_suppresses_invisible_reference(method, span))
-                    || self.primary_constructor_suppresses_invisible_reference(class, span)
-                    || class.body_props.iter().any(|property| {
-                        self.property_suppresses_invisible_reference(property, span)
-                    })
-                    || class.secondary_ctors.iter().any(|constructor| {
-                        Self::span_contains(constructor.span, span)
-                            && self.annotations_suppress_invisible_reference(
-                                &constructor.annotations,
-                                &constructor.annotation_args,
-                            )
-                    })
-                    || class.companion.is_some_and(|companion| {
-                        self.decl_suppresses_invisible_reference(companion, span)
-                    })
-            }
-        }
-    }
-
     /// Emit kotlinc's access diagnostic when a member of `owner` with visibility `vis` is NOT reachable
     /// from the current site. Shared by the property-read and member-call checks.
     fn reject_if_inaccessible(
@@ -85364,7 +85285,8 @@ impl<'a> Checker<'a> {
         owner: TypeName,
         span: Span,
     ) -> bool {
-        if !self.member_accessible(vis, owner) && !self.invisible_reference_suppressed(span) {
+        if !self.member_accessible(vis, owner) && !self.suppresses_diagnostic("INVISIBLE_REFERENCE")
+        {
             let kind = match vis {
                 Visibility::Private => "private",
                 Visibility::Protected => "protected",
@@ -85412,7 +85334,7 @@ impl<'a> Checker<'a> {
         property: Option<crate::fir::ExternalPropertyId>,
         span: Span,
     ) {
-        if self.visibility_access_suppressed() || self.invisible_reference_suppressed(span) {
+        if self.visibility_access_suppressed() {
             return;
         }
         let label = property.and_then(|property| {
