@@ -97,29 +97,48 @@ pub trait SymbolSource {
 #[derive(Default)]
 pub struct CompositeSource<'a> {
     children: Vec<&'a dyn SymbolSource>,
+    /// Per-composite memo of the fan-out below.
+    ///
+    /// A composite is built once and then asked about the same names repeatedly. Override planning
+    /// is the clearest case: it builds one composite and queries it per class, per method, per
+    /// supertype, so a class hierarchy's declaration names are re-merged once for every overriding
+    /// member that looks at them. Each miss walks every child — the module table, the classpath and
+    /// the platform libraries — and merges the records.
+    ///
+    /// The memo is keyed by exactly the query and lives only as long as this composite, whose
+    /// children are borrowed immutably for its lifetime, so it cannot answer for a source that has
+    /// since changed. `push` clears it because the precedence order it captured no longer holds.
+    symbols: std::cell::RefCell<
+        crate::name_tree::FxHashMap<(SymbolNamespace, String), std::rc::Rc<ResolvedSymbols>>,
+    >,
+    packages: std::cell::RefCell<crate::name_tree::FxHashMap<(TypeName, String), bool>>,
 }
 
 impl<'a> CompositeSource<'a> {
     /// Build a composite from sources in PRECEDENCE order (first shadows later).
     pub fn new(children: Vec<&'a dyn SymbolSource>) -> Self {
-        CompositeSource { children }
+        CompositeSource {
+            children,
+            symbols: std::cell::RefCell::new(crate::name_tree::FxHashMap::default()),
+            packages: std::cell::RefCell::new(crate::name_tree::FxHashMap::default()),
+        }
     }
 
     /// Append a source at the lowest precedence (consulted last).
     pub fn push(&mut self, source: &'a dyn SymbolSource) {
         self.children.push(source);
-    }
-}
-
-impl SymbolSource for CompositeSource<'_> {
-    /// A package exists if ANY source declares it — packages are a union across the module and the
-    /// classpath, not a shadowing lookup: the same package name legitimately holds declarations from
-    /// both, and a qualifier walk must be able to continue through either.
-    fn package_exists(&self, parent: TypeName, name: &str) -> bool {
-        self.children.iter().any(|c| c.package_exists(parent, name))
+        // Every memoized answer was decided against the old child list.
+        self.symbols.borrow_mut().clear();
+        self.packages.borrow_mut().clear();
     }
 
-    fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
+    /// Merge every child's record for one query, in precedence order. This is what
+    /// [`SymbolSource::symbols`] memoizes.
+    fn merge_symbols(
+        &self,
+        namespace: SymbolNamespace,
+        name: &str,
+    ) -> std::rc::Rc<ResolvedSymbols> {
         use crate::libraries::Callables;
         // Classifier: first source wins (user shadows library). Callables: concatenate in precedence
         // order (each overload keeps its origin) — functions XOR a property, so take whichever appears.
@@ -176,6 +195,33 @@ impl SymbolSource for CompositeSource<'_> {
                 })
             }
         }
+    }
+}
+
+impl SymbolSource for CompositeSource<'_> {
+    /// A package exists if ANY source declares it — packages are a union across the module and the
+    /// classpath, not a shadowing lookup: the same package name legitimately holds declarations from
+    /// both, and a qualifier walk must be able to continue through either.
+    fn package_exists(&self, parent: TypeName, name: &str) -> bool {
+        if let Some(&known) = self.packages.borrow().get(&(parent, name.to_string())) {
+            return known;
+        }
+        let exists = self.children.iter().any(|c| c.package_exists(parent, name));
+        self.packages
+            .borrow_mut()
+            .insert((parent, name.to_string()), exists);
+        exists
+    }
+
+    fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
+        if let Some(known) = self.symbols.borrow().get(&(namespace, name.to_string())) {
+            return std::rc::Rc::clone(known);
+        }
+        let merged = self.merge_symbols(namespace, name);
+        self.symbols
+            .borrow_mut()
+            .insert((namespace, name.to_string()), std::rc::Rc::clone(&merged));
+        merged
     }
 
     fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
