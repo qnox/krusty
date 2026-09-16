@@ -367,6 +367,47 @@ fn kotlin_codegen_box_native_conformance() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(usize::MAX);
     let files = krusty::conformance::evenly_sample(files, limit);
+    // One PARTITION of the corpus, so a lane that outgrew the two-minute process deadline is
+    // divided rather than exempted — `scripts/test-gate-defaults.sh` states that as the rule, and
+    // the JVM lane is partitioned the same way. Every count this test reports, the expected-failure
+    // ledger included, is over the cases actually scanned, so a shard stays self-consistent: a
+    // ledger entry in another shard is simply not scanned here, and one in THIS shard that passes
+    // still fails the run.
+    //
+    // Striding by position rather than splitting into blocks keeps the shards comparable: the
+    // corpus is ordered by path, so contiguous blocks would hand one shard a whole directory of
+    // near-identical cases and another the long tail.
+    let files = match (
+        std::env::var("KRUSTY_NATIVE_CONFORMANCE_SHARD_INDEX"),
+        std::env::var("KRUSTY_NATIVE_CONFORMANCE_SHARD_COUNT"),
+    ) {
+        (Ok(index), Ok(count)) => {
+            let index: usize = index
+                .parse()
+                .expect("KRUSTY_NATIVE_CONFORMANCE_SHARD_INDEX must be an integer");
+            let count: usize = count
+                .parse()
+                .expect("KRUSTY_NATIVE_CONFORMANCE_SHARD_COUNT must be an integer");
+            assert!(
+                count > 0,
+                "KRUSTY_NATIVE_CONFORMANCE_SHARD_COUNT must be positive"
+            );
+            assert!(
+                index < count,
+                "KRUSTY_NATIVE_CONFORMANCE_SHARD_INDEX {index} is outside 0..{count}"
+            );
+            files
+                .into_iter()
+                .enumerate()
+                .filter_map(|(position, file)| (position % count == index).then_some(file))
+                .collect()
+        }
+        (Err(_), Err(_)) => files,
+        _ => panic!(
+            "KRUSTY_NATIVE_CONFORMANCE_SHARD_INDEX and KRUSTY_NATIVE_CONFORMANCE_SHARD_COUNT \
+             must be set together"
+        ),
+    };
 
     let scratch = Scratch::new();
     // Panics are recorded per case below; the default hook's backtrace spam would bury the

@@ -340,8 +340,20 @@ if [ -n "$gate" ]; then
       run_one \
         "$logdir" "$gate::kotlin_codegen_box_conformance --test-threads=1" "$label"
   done
+  # The NATIVE lane is a second corpus pass and over the ceiling on its own, so it is partitioned
+  # the same way. Its shard variables are its own: the two lanes run as separate processes, and
+  # naming them apart keeps it unambiguous which corpus a partition applies to.
+  for ((shard = 0; shard < conformance_shards; shard++)); do
+    label="native-shard-$((shard + 1))-of-$conformance_shards"
+    echo "run-tests.sh: conformance $label" >&2
+    KRUSTY_NATIVE_CONFORMANCE_SHARD_INDEX="$shard" \
+      KRUSTY_NATIVE_CONFORMANCE_SHARD_COUNT="$conformance_shards" \
+      KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
+      run_one \
+        "$logdir" "$gate::kotlin_codegen_box_native_conformance --test-threads=1" "$label"
+  done
   KRUSTY_TEST_TIMEOUT_SECONDS="$KRUSTY_CONFORMANCE_TIMEOUT_SECONDS" \
-    run_one "$logdir" "$gate::--skip kotlin_codegen_box_conformance --test-threads=$conf_threads"
+    run_one "$logdir" "$gate::--skip kotlin_codegen_box_conformance --skip kotlin_codegen_box_native_conformance --test-threads=$conf_threads"
 fi
 jobs="${KRUSTY_TEST_JOBS:-$ncpu}"
 # Per-binary test threads for the SMALL binaries run in the cross-binary xargs pool: keep 1 so `-P jobs`
