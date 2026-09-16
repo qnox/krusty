@@ -35,6 +35,8 @@ mod callable_reference_selection;
 mod capture_analysis;
 mod capture_storage;
 mod collection_literals;
+#[cfg(test)]
+mod common_supertype_identity_tests;
 mod compound_assignments;
 mod conditional_branch;
 mod constant_evaluation;
@@ -15241,25 +15243,6 @@ type DemandName<'a> = &'a dyn Fn(&str) -> Option<Ty>;
 
 /// The same for a spelling that may be OVERLOADED, chosen by a call's argument types.
 type DemandCall<'a> = &'a dyn Fn(&str, &[Ty]) -> Option<Ty>;
-
-/// `KFunctionN<A, …, R>` as the function type `(A, …) -> R`.
-///
-/// A function reference types as the function type once its target's return is known; only while
-/// that return is undetermined does it stay a reflective `KFunctionN`. Property references
-/// (`KProperty1`) are untouched: they are not function types.
-fn natural_function_reference_ty(ty: Ty) -> Ty {
-    let Ty::Obj(name, args) = ty else {
-        return ty;
-    };
-    let rendered = name.render();
-    if !rendered.starts_with("kotlin/reflect/KFunction") || args.is_empty() {
-        return ty;
-    }
-    let Some((ret, params)) = args.split_last() else {
-        return ty;
-    };
-    Ty::fun(params.to_vec(), *ret)
-}
 
 /// One class member whose return the walk could not determine, addressed by DECLARATION.
 ///
@@ -44684,13 +44667,11 @@ pub(crate) fn semantic_common_supertype_inner(
     // bridge deliberately narrower than "any callable classifier": a fun interface or an arbitrary
     // class with `invoke` is nominal and does not become a Kotlin function type at a join.
     let reflective_function_shape = |ty: Ty| {
-        let internal = ty.non_null().kotlin_class_internal()?;
-        let rendered = internal.render();
-        if !rendered.starts_with("kotlin/reflect/KFunction")
-            && !rendered.starts_with("kotlin/reflect/KSuspendFunction")
-        {
-            return None;
-        }
+        crate::assignable::applied_supertype(
+            oracle,
+            ty.non_null(),
+            Ty::obj(crate::types::KFUNCTION_INTERNAL),
+        )?;
         let shape = crate::symbol_resolver::classifier_callable_signature(source, ty.non_null())?;
         Some(common_result_nullability(ty, ty, shape))
     };
@@ -50037,8 +50018,7 @@ impl<'a> Checker<'a> {
     ) -> Option<std::sync::Arc<crate::libraries::LibraryType>> {
         let source = self.fed_source();
         source.classifier(internal).or_else(|| {
-            let rendered = internal.render();
-            let simple = rendered.rsplit('$').next()?;
+            let simple = internal.nested_segment_ref();
             let (inherited, inheritor) = self.inherited_nested_type_with_owner(simple);
             if inherited.found() == Some(internal) {
                 let inheritor = inheritor?;
@@ -59305,7 +59285,7 @@ impl<'a> Checker<'a> {
             self.declare_scoped_property(property_scope, property, false);
         }
         let outer_internal = type_name(&class_internal(self.file, &outer.name));
-        let entry_owner = type_name(&format!("{}${}", outer_internal.render(), entry.name));
+        let entry_owner = type_name_nested_child(outer_internal, &entry.name);
         let mut properties = Vec::new();
         for (field, property) in entry
             .props
@@ -61495,7 +61475,7 @@ impl<'a> Checker<'a> {
     fn enclosing_nested_type_name(&self, name: &str) -> Option<TypeName> {
         // Probe the current class and its structural lexical owners in nearest-first order.
         for outer in self.lexical_source_class_names() {
-            let candidate = type_name(&format!("{}${name}", outer.render()));
+            let candidate = type_name_nested_child(outer, name);
             if self.resolver().classifier(candidate).is_some() {
                 return Some(candidate);
             }
@@ -63058,8 +63038,7 @@ impl<'a> Checker<'a> {
         let mut missing = uncovered
             .into_iter()
             .map(|subclass| {
-                let rendered = subclass.render();
-                let name = rendered.rsplit(['/', '$', '.']).next().unwrap_or(&rendered);
+                let name = subclass.nested_segment_ref();
                 if self
                     .resolved_type_name(subclass)
                     .is_some_and(|shape| shape.is_object())
@@ -75612,12 +75591,6 @@ impl<'a> Checker<'a> {
                                 .insert(e, crate::types::ty_replace_pending(function, answered));
                         }
                         let answered = crate::types::ty_replace_pending(referenced, answered);
-                        // A FUNCTION reference whose target's return was undetermined is typed
-                        // `KFunctionN<…>`; with the return in hand the reference types as the
-                        // function type itself, which is what every consumer of a function-valued
-                        // declaration reads. Normalize to the shape the determined path produces,
-                        // so that the answer does not also change the reference's KIND.
-                        let answered = natural_function_reference_ty(answered);
                         self.expr_types[e.0 as usize] = answered;
                         return answered;
                     }
