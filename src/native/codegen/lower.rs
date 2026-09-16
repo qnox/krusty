@@ -895,16 +895,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(())
     }
 
-    /// The loop a `break`/`continue` names: the labeled one, or the innermost.
-    fn loop_frame(
-        &mut self,
-        label: Option<&str>,
-        keyword: &str,
-    ) -> Result<&mut LoopFrame, Unsupported> {
-        let index = self.loop_index(label, keyword)?;
-        Ok(&mut self.loops[index])
-    }
-
     /// Which loop a `break`/`continue` names, as an index. The index is what decides how many
     /// `finally` blocks the jump has to run through: those entered INSIDE this loop, and no more.
     fn loop_index(&self, label: Option<&str>, keyword: &str) -> Result<usize, Unsupported> {
