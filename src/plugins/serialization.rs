@@ -1442,7 +1442,7 @@ impl IrPlugin for SerializationPlugin {
                     _ if operation == "encodeToString" => call.params[0].kotlin_class_internal(),
                     _ => None,
                 }?;
-                if !ctx.has_source_annotation(classifier, serializable_annotation) {
+                if !ctx.has_classifier_annotation(classifier, serializable_annotation) {
                     return None;
                 }
                 let format = receiver_ty.kotlin_class_internal()?;
@@ -1507,7 +1507,8 @@ impl IrPlugin for SerializationPlugin {
             let Some(classifier) = classifier else {
                 continue;
             };
-            if !declaration_owned && !ctx.has_source_annotation(classifier, serializable_annotation)
+            if !declaration_owned
+                && !ctx.has_classifier_annotation(classifier, serializable_annotation)
             {
                 continue;
             }
@@ -2483,7 +2484,7 @@ mod tests {
                 type_arguments: vec![Some(inner)],
                 argument_slots: vec![Some(argument)],
             }],
-            source_annotations: std::collections::HashMap::new(),
+            classifier_annotations: std::collections::HashMap::new(),
         };
         let mut plans = Vec::new();
         SerializationPlugin::default().plan_frontend_expressions(&context, &mut plans);

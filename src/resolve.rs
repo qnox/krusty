@@ -56,6 +56,7 @@ mod loop_flow;
 mod operator_calls;
 mod overload_diagnostics;
 mod override_plans;
+mod plugin_expression_annotations;
 mod postponed_diagnostics;
 mod qualified_call_shaping;
 mod receiver_flow;
@@ -48064,65 +48065,22 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                 })
             })
             .collect::<Vec<_>>();
-        let source_at = |index: u32| {
-            (index == file_index)
-                .then_some(file)
-                .or_else(|| source_files?.get(index as usize))
-        };
-        let source_annotations = if let Some(symbols) = syms.pass_one_symbols() {
-            symbols
-                .classes
-                .iter()
-                .filter_map(|(&classifier, class)| {
-                    let source = source_at(class.source_file)?;
-                    let declaration = match active_declarations {
-                        Some(active) if class.source_file == file_index => {
-                            active.class(source, class.stable_declaration?)?.1
-                        }
-                        Some(_) => return None,
-                        None => match source.decl(class.source_decl?) {
-                            Decl::Class(declaration) => declaration,
-                            Decl::Fun(_) | Decl::Property(_) => return None,
-                        },
-                    };
-                    let annotations = resolved_index.map_or_else(
-                        || {
-                            declaration
-                                .annotations
-                                .iter()
-                                .filter_map(|annotation| {
-                                    symbols.resolved_annotation(class.source_file, annotation)
-                                })
-                                .collect::<Vec<_>>()
-                        },
-                        |index| {
-                            class
-                                .stable_declaration
-                                .map(|declaration| {
-                                    index.declaration_annotations(declaration).to_vec()
-                                })
-                                .unwrap_or_default()
-                        },
-                    );
-                    Some((classifier, annotations))
-                })
-                .collect()
-        } else {
-            let index = resolved_index.expect("Pass 2 requires a finalized declaration index");
-            (0..index.declaration_count())
-                .filter_map(|raw| {
-                    let declaration = crate::fir::DeclarationId::from_raw(raw as u32);
-                    let classifier = index.classifier_header(declaration)?.classifier;
-                    Some((
-                        classifier,
-                        index.declaration_annotations(declaration).to_vec(),
-                    ))
-                })
-                .collect()
-        };
+        let classifier_annotations =
+            plugin_expression_annotations::classifier_annotations_for_calls(
+                plugin_expression_annotations::ClassifierAnnotationInputs {
+                    file,
+                    file_index,
+                    source_files,
+                    active_declarations,
+                    resolved_index,
+                    pass_one_symbols: syms.pass_one_symbols(),
+                    libraries: syms.libraries(),
+                },
+                &calls,
+            );
         let context = crate::plugins::FrontendExpressionContext {
             calls,
-            source_annotations,
+            classifier_annotations,
         };
         for (expression, plan) in
             crate::plugins::enabled_plugins("main").plan_frontend_expressions(&context)

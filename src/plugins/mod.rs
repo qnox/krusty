@@ -62,12 +62,13 @@ pub struct FrontendSelectedCall {
 /// Read-only, resolver-independent inputs for post-resolution plugin planning.
 pub struct FrontendExpressionContext {
     pub calls: Vec<FrontendSelectedCall>,
-    pub source_annotations: HashMap<TypeName, Vec<TypeName>>,
+    /// Qualified annotation identities for source and dependency classifiers named by these calls.
+    pub classifier_annotations: HashMap<TypeName, Vec<TypeName>>,
 }
 
 impl FrontendExpressionContext {
-    pub fn has_source_annotation(&self, classifier: TypeName, annotation: TypeName) -> bool {
-        self.source_annotations
+    pub fn has_classifier_annotation(&self, classifier: TypeName, annotation: TypeName) -> bool {
+        self.classifier_annotations
             .get(&classifier)
             .is_some_and(|annotations| annotations.contains(&annotation))
     }
