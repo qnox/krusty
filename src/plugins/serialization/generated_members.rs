@@ -52,7 +52,16 @@ pub(super) fn add_serializer_members(
         serialized_type,
         None,
     );
-    let serializer_array = Ty::obj_args("kotlin/Array", &[kserializer_of(class_ty("kotlin/Any"))]);
+    // `Array<KSerializer<*>>`: the elements serialize the FIELD types, which are unrelated to each
+    // other, so the element serializer's argument is a star projection. `KSerializer<Any>` is a
+    // different Kotlin type — it claims every element serializes `Any` — and the two erase alike, so
+    // only the generic `Signature` attribute and the metadata record show the difference.
+    let serializer_array = Ty::obj_args(
+        "kotlin/Array",
+        &[kserializer_of(Ty::star_projection(Ty::nullable(class_ty(
+            "kotlin/Any",
+        ))))],
+    );
     let child_serializers = add_instance_method(
         ir,
         owner,

@@ -2510,3 +2510,70 @@ fn a_serializable_class_lists_its_generated_serializer_as_nested() {
         "nested classifier names of a @Serializable class"
     );
 }
+
+/// The generic `Signature` of a member of a generated serializer, as javap prints the attribute.
+fn member_signature(disassembly: &str, member: &str) -> String {
+    // The attribute trails the member's `Code`, so the search runs to the NEXT member declaration
+    // rather than a fixed number of lines. A declaration is an indented line ending in `;` that is
+    // not a constant-pool row (those start with `#`).
+    let declaration = |line: &str| {
+        line.ends_with(';') && line.contains('(') && !line.contains(':') && !line.starts_with('#')
+    };
+    let mut lines = disassembly
+        .lines()
+        .map(str::trim)
+        .skip_while(|line| !(declaration(line) && line.contains(member)));
+    lines.next();
+    for line in lines {
+        // `descriptor:` and `Signature:` both end in `;` and hold a parenthesized descriptor; the
+        // `:` is what separates an attribute row from a member declaration.
+        if let Some(signature) = line.strip_prefix("Signature: ") {
+            return signature
+                .split_once("// ")
+                .map_or(signature, |(_, text)| text)
+                .to_string();
+        }
+        if declaration(line) {
+            break;
+        }
+    }
+    panic!("no Signature attribute for {member}");
+}
+
+/// `childSerializers()` hands back the serializers of the fields, whose element types are unrelated
+/// to each other — so kotlinc gives it `Array<KSerializer<*>>`, a STAR projection. krusty declared
+/// the element type as `KSerializer<Any>`, which is a different Kotlin type: it claims every element
+/// serializes `Any`, and it lands in the `Signature` attribute of a method every `@Serializable`
+/// class generates.
+#[test]
+fn generated_serializer_arrays_are_star_projected() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class Retention(val days: Int)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "StarProjectedSerializers",
+        src,
+        "Retention$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = member_signature(&built.reference, "childSerializers()");
+    assert_eq!(
+        want, "()[Lkotlinx/serialization/KSerializer<*>;",
+        "kotlinc star-projects the element serializer type"
+    );
+    assert_eq!(
+        member_signature(&built.krusty, "childSerializers()"),
+        want,
+        "childSerializers generic signature"
+    );
+}
