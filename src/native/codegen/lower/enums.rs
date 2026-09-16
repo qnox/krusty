@@ -355,7 +355,7 @@ impl BodyLowering<'_, '_, '_> {
         let getter = self.file.classpath.external_callable(property.getter)?;
         super::super::super::intrinsics::enum_member(
             &getter.callable.owner.render(),
-            &getter.callable.name,
+            &property.name,
         )
     }
 

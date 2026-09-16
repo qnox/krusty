@@ -53,7 +53,7 @@ fn is_lazy(ty: Ty) -> bool {
 /// delegation's two operands as arguments, neither of which a lazy reads.
 fn lazy_symbol(name: &str, arity: usize) -> Option<(&'static str, Vec<Ty>, Ty)> {
     Some(match (name, arity) {
-        ("getValue", 0) | ("getValue", 2) | ("value", 0) => ("kt_lazy_value", vec![any()], any()),
+        ("value", 0) | ("getValue", 2) => ("kt_lazy_value", vec![any()], any()),
         ("isInitialized", 0) => ("kt_lazy_is_initialized", vec![any()], Ty::Boolean),
         _ => return None,
     })
@@ -72,8 +72,8 @@ fn is_pair(ty: Ty) -> bool {
 /// the names the convention uses.
 fn pair_symbol(name: &str, arity: usize) -> Option<(&'static str, Vec<Ty>, Ty)> {
     Some(match (name, arity) {
-        ("getFirst" | "first" | "component1", 0) => ("kt_pair_first", vec![any()], any()),
-        ("getSecond" | "second" | "component2", 0) => ("kt_pair_second", vec![any()], any()),
+        ("first" | "component1", 0) => ("kt_pair_first", vec![any()], any()),
+        ("second" | "component2", 0) => ("kt_pair_second", vec![any()], any()),
         _ => return None,
     })
 }
@@ -143,10 +143,8 @@ fn is_indexed_value(ty: Ty) -> bool {
 /// which is why each signature is spelled out.
 fn indexed_value_symbol(name: &str, arity: usize) -> Option<(&'static str, Vec<Ty>, Ty)> {
     Some(match (name, arity) {
-        ("getIndex" | "index" | "component1", 0) => {
-            ("kt_indexed_value_index", vec![any()], Ty::Int)
-        }
-        ("getValue" | "value" | "component2", 0) => ("kt_indexed_value_value", vec![any()], any()),
+        ("index" | "component1", 0) => ("kt_indexed_value_index", vec![any()], Ty::Int),
+        ("value" | "component2", 0) => ("kt_indexed_value_value", vec![any()], any()),
         _ => return None,
     })
 }
@@ -319,9 +317,8 @@ impl BodyLowering<'_, '_, '_> {
             return None;
         }
         let property = self.file.classpath.external_property(target)?;
-        let getter = self.file.classpath.external_callable(property.getter)?;
-        lazy_symbol(&getter.callable.name, 0)?;
-        Some(getter.callable.name.clone())
+        lazy_symbol(&property.name, 0)?;
+        Some(property.name.clone())
     }
 
     /// `a to b`, or `None` when the declaration is something else.
@@ -367,9 +364,8 @@ impl BodyLowering<'_, '_, '_> {
             return None;
         }
         let property = self.file.classpath.external_property(target)?;
-        let getter = self.file.classpath.external_callable(property.getter)?;
-        pair_symbol(&getter.callable.name, 0)?;
-        Some(getter.callable.name.clone())
+        pair_symbol(&property.name, 0)?;
+        Some(property.name.clone())
     }
 
     fn list_of(&mut self, elements: u32) -> Result<Option<Value>, Unsupported> {
@@ -406,9 +402,8 @@ impl BodyLowering<'_, '_, '_> {
             return None;
         }
         let property = self.file.classpath.external_property(target)?;
-        let getter = self.file.classpath.external_callable(property.getter)?;
-        indexed_value_symbol(&getter.callable.name, 0)?;
-        Some(getter.callable.name.clone())
+        indexed_value_symbol(&property.name, 0)?;
+        Some(property.name.clone())
     }
 
     pub(super) fn list_getter(
@@ -420,9 +415,8 @@ impl BodyLowering<'_, '_, '_> {
             return None;
         }
         let property = self.file.classpath.external_property(target)?;
-        let getter = self.file.classpath.external_callable(property.getter)?;
-        list_symbol(&getter.callable.name, 0, &[])?;
-        Some(getter.callable.name.clone())
+        list_symbol(&property.name, 0, &[])?;
+        Some(property.name.clone())
     }
 
     /// A member of a runtime list or of its iterator, or `None` when the receiver is neither.

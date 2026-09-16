@@ -446,14 +446,19 @@ fn an_unsupported_construct_is_declined_with_a_diagnostic() {
     // construct is refused but that the backend SAYS so — emitting a partial object that links and
     // misbehaves would be far worse than refusing.
     //
-    // It used to be `try`/`finally`, which now lowers. A decline test has to name something still
-    // declined, so this moves as the backlog does.
+    // It has been `try`/`finally` and then an unsigned RANGE, both of which now lower. A decline
+    // test has to name something still declined, so this moves as the backlog does — and it moving
+    // is the point: each time, the thing it named became supported.
+    //
+    // `downTo` on an unsigned receiver is the current one. It is an EXTENSION of the unsigned
+    // ranges facade, realized as `URangesKt.downTo-J1ME1BU`, and the declaration contract publishes
+    // no Kotlin name for an extension — so the member arrives spelled in a way no table is written
+    // in. The range itself lowers; only this way of building one does not.
     let (artifacts, diagnostics) = compile(
         &[(
             "Main",
             "fun main() {\n\
-             \x20   val r = 1u..3u\n\
-             \x20   println(r.first)\n\
+             \x20   for (i in 3u downTo 1u) println(i)\n\
              }\n",
         )],
         target,

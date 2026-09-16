@@ -1670,10 +1670,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let Some(getter) = self.file.classpath.external_callable(property.getter) else {
             return false;
         };
-        super::super::super::intrinsics::is_throwable_message(
-            getter.callable.owner,
-            &getter.callable.name,
-        )
+        super::super::super::intrinsics::is_throwable_message(getter.callable.owner, &property.name)
     }
 
     /// `e.message` — the one field a `Throwable` carries, read by the runtime rather than by an

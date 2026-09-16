@@ -93,8 +93,11 @@ fn range_symbol(name: &str, arity: usize) -> Option<(&'static str, Ty)> {
     Some(match (name, arity) {
         ("contains", 1) => ("kt_range_contains", Ty::Boolean),
         ("isEmpty", 0) => ("kt_range_is_empty", Ty::Boolean),
-        ("getFirst" | "getStart", 0) => ("kt_range_first", Ty::Long),
-        ("getLast" | "getEndInclusive", 0) => ("kt_range_last", Ty::Long),
+        // The PROPERTY names, not the accessor spellings they are realized under. A property's own
+        // name is what its declaration publishes; the accessor's is a physical call target, which
+        // for an unsigned range is `getStart-pVg5ArA` and names nothing a table can be written in.
+        ("first" | "start", 0) => ("kt_range_first", Ty::Long),
+        ("last" | "endInclusive", 0) => ("kt_range_last", Ty::Long),
         // The iterator answers as a reference, so the narrowing below leaves it alone.
         ("iterator", 0) => ("kt_range_iterator", any()),
         _ => return None,
@@ -320,10 +323,9 @@ impl BodyLowering<'_, '_, '_> {
         let Some(getter) = self.file.classpath.external_callable(property.getter) else {
             return false;
         };
-        super::super::super::intrinsics::is_indices(
-            &getter.callable.owner.render(),
-            &getter.callable.name,
-        )
+        // The OWNER comes from the accessor, which is a type identity and not a spelling; the NAME
+        // comes from the property, which is the only thing that knows what it is called.
+        super::super::super::intrinsics::is_indices(&getter.callable.owner.render(), &property.name)
     }
 
     /// `x.indices` — `0..size - 1` of an indexable receiver.
@@ -371,10 +373,10 @@ impl BodyLowering<'_, '_, '_> {
         let property = self.file.classpath.external_property(target)?;
         let getter = self.file.classpath.external_callable(property.getter)?;
         range_element(getter.callable.owner)?;
-        range_symbol(&getter.callable.name, 0)?;
+        range_symbol(&property.name, 0)?;
         Some((
             getter.callable.owner.render(),
-            getter.callable.name.clone(),
+            property.name.clone(),
             getter.callable.ret,
         ))
     }

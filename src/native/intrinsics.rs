@@ -304,8 +304,8 @@ pub(super) fn enum_member(owner: &str, accessor: &str) -> Option<&'static str> {
         return None;
     }
     match accessor {
-        "getName" | "name" => Some("name"),
-        "getOrdinal" | "ordinal" => Some("ordinal"),
+        "name" => Some("name"),
+        "ordinal" => Some("ordinal"),
         _ => None,
     }
 }
@@ -376,7 +376,7 @@ fn is_ranges_facade(owner: &str, name: &str, arity: usize, wanted: &str) -> bool
 /// program can have without any reflection metadata existing, because the declaration it names is
 /// written in the same file.
 pub(super) fn is_callable_name(owner: crate::types::TypeName, name: &str) -> bool {
-    name == "getName"
+    name == "name"
         && [
             "kotlin/reflect/KCallable",
             "kotlin/reflect/KFunction",
@@ -576,8 +576,12 @@ pub(super) fn is_string_builder(internal: crate::types::TypeName) -> bool {
 ///
 /// Answering it needs the receiver's own `size`, so only the caller can decide whether THIS
 /// receiver has one; this says only that the declaration named is that extension property.
+///
+/// `name` is the PROPERTY's, not its accessor's. `indices` is realized five ways — `getIndices`
+/// for text, and one value-class-mangled spelling per unsigned array width — so a table written in
+/// accessor spellings would have to list all five and would still be guessing at the sixth.
 pub(super) fn is_indices(owner: &str, name: &str) -> bool {
-    name == "getIndices"
+    name == "indices"
         && matches!(
             facade_package(kotlin_owner(owner)),
             Some("kotlin/collections" | "kotlin/text")
@@ -723,7 +727,7 @@ pub(super) fn is_char_sequence_length(owner: crate::types::TypeName, name: &str)
     // The provider presents it under the Kotlin name of the property, not the JVM accessor's:
     // `length`, where `kotlin.Enum`'s two arrive as `getName`/`getOrdinal`. Both spellings are
     // taken because which one a provider uses is the provider's business, not this table's.
-    matches!(name, "length" | "getLength")
+    name == "length"
         && (["kotlin/CharSequence", "java/lang/CharSequence"]
             .iter()
             .any(|candidate| owner.matches(candidate))
@@ -741,8 +745,7 @@ pub(super) fn is_char_sequence_length(owner: crate::types::TypeName, name: &str)
 /// `cause` is deliberately NOT here. This `Throwable` has no cause field, so answering it would be
 /// answering `null` to a program that passed one, and that declines instead.
 pub(super) fn is_throwable_message(owner: crate::types::TypeName, name: &str) -> bool {
-    matches!(name, "message" | "getMessage")
-        && matches!(kotlin_owner(&owner.render()), "kotlin/Throwable")
+    name == "message" && matches!(kotlin_owner(&owner.render()), "kotlin/Throwable")
 }
 
 /// The runtime function answering a `KClass` name accessor, or `None` for anything else.
@@ -757,8 +760,8 @@ pub(super) fn class_name_accessor(
         return None;
     }
     match name {
-        "simpleName" | "getSimpleName" => Some("kt_class_simple_name"),
-        "qualifiedName" | "getQualifiedName" => Some("kt_class_qualified_name"),
+        "simpleName" => Some("kt_class_simple_name"),
+        "qualifiedName" => Some("kt_class_qualified_name"),
         _ => None,
     }
 }
@@ -855,10 +858,14 @@ mod tests {
 
     #[test]
     fn the_indices_extension_is_recognized_on_either_facade() {
-        assert!(is_indices("kotlin/collections/ArraysKt", "getIndices"));
-        assert!(is_indices("kotlin/text/StringsKt", "getIndices"));
-        assert!(!is_indices("kotlin/collections/ArraysKt", "getSize"));
-        assert!(!is_indices("kotlin/collections/AbstractList", "getIndices"));
+        assert!(is_indices("kotlin/collections/ArraysKt", "indices"));
+        assert!(is_indices("kotlin/text/StringsKt", "indices"));
+        assert!(!is_indices("kotlin/collections/ArraysKt", "size"));
+        assert!(!is_indices("kotlin/collections/AbstractList", "indices"));
+        // The accessor spelling is NOT the key: `indices` is realized as `getIndices` for text and
+        // as a value-class-mangled name per unsigned array width, and none of those is what the
+        // declaration is called.
+        assert!(!is_indices("kotlin/collections/ArraysKt", "getIndices"));
     }
 
     #[test]

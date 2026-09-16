@@ -408,12 +408,6 @@ fn a_progression_spanning_the_whole_range_reaches_every_step() {
 /// rests on that coincidence: the top of each range is the value a signed read calls `-1`, and an
 /// empty range is the one whose `first` exceeds its `last` UNSIGNED.
 ///
-/// `first`/`last` are NOT read here: they are property reads, and an unsigned range's accessors
-/// arrive as `getFirst-pVg5ArA`, a spelling no table is written in. Recovering the Kotlin name from
-/// it is the unsound thing this backend no longer does, so those decline until the declaration
-/// contract publishes the name. `contains`, `isEmpty`, `toString` and the walk are members and
-/// resolve today.
-///
 /// Every expectation is kotlinc's, taken by compiling and running this same `box()` under it.
 #[test]
 fn an_unsigned_range_is_built_read_and_walked_unsigned() {
@@ -424,12 +418,14 @@ fn an_unsigned_range_is_built_read_and_walked_unsigned() {
          \x20   if (!r.contains(3u)) return \"fail contains\"\n\
          \x20   if (r.contains(6u)) return \"fail contains high\"\n\
          \x20   if (r.isEmpty()) return \"fail isEmpty\"\n\
+         \x20   if (r.first != 1u || r.last != 5u) return \"fail bounds: ${r.first}..${r.last}\"\n\
          \x20   var s = \"\"\n\
          \x20   for (u in r) s += \"$u,\"\n\
          \x20   if (s != \"1,2,3,4,5,\") return \"fail walk: $s\"\n\
          \x20   val top = 4294967290u..4294967295u\n\
          \x20   if (top.toString() != \"4294967290..4294967295\") return \"fail top: $top\"\n\
          \x20   if (!top.contains(4294967295u)) return \"fail top contains\"\n\
+         \x20   if (top.last != 4294967295u) return \"fail top last: ${top.last}\"\n\
          \x20   var n = 0\n\
          \x20   for (u in top) n++\n\
          \x20   if (n != 6) return \"fail top walk: $n\"\n\

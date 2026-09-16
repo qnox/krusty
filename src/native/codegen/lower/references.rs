@@ -630,7 +630,9 @@ impl BodyLowering<'_, '_, '_> {
         let slot = match (name, args.len()) {
             ("get" | "invoke", 0 | 1) => GET,
             ("set", 1 | 2) => SET,
-            ("getName", 0) => NAME,
+            // The PROPERTY's name. `get`/`set`/`invoke` above are methods and keep theirs; `name`
+            // is a property of `KCallable`, and `getName` was only the accessor it is realized as.
+            ("name", 0) => NAME,
             _ => return None,
         };
         Some(self.reference_call(slot, receiver, args, ret))
@@ -684,10 +686,8 @@ impl BodyLowering<'_, '_, '_> {
         };
         let property = self.file.classpath.external_property(target)?;
         let getter = self.file.classpath.external_callable(property.getter)?;
-        if !super::super::super::intrinsics::is_callable_name(
-            getter.callable.owner,
-            &getter.callable.name,
-        ) {
+        if !super::super::super::intrinsics::is_callable_name(getter.callable.owner, &property.name)
+        {
             return None;
         }
         match &reference.target {
@@ -733,9 +733,8 @@ impl BodyLowering<'_, '_, '_> {
         }
         let property = self.file.classpath.external_property(target)?;
         let getter = self.file.classpath.external_callable(property.getter)?;
-        let name = getter.callable.name.clone();
         let ret = getter.callable.ret;
-        self.reference_member(&name, receiver, &[], ret)
+        self.reference_member(&property.name, receiver, &[], ret)
     }
 
     /// `p.getValue(thisRef, property)` and `p.setValue(thisRef, property, value)`.

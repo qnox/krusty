@@ -49,10 +49,7 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Option<&'static str> {
         let property = self.file.classpath.external_property(target)?;
         let getter = self.file.classpath.external_callable(property.getter)?;
-        super::super::super::intrinsics::class_name_accessor(
-            getter.callable.owner,
-            &getter.callable.name,
-        )
+        super::super::super::intrinsics::class_name_accessor(getter.callable.owner, &property.name)
     }
 
     pub(super) fn class_name(
