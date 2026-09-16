@@ -196,6 +196,55 @@ pub(super) fn runtime_function(owner: &str, name: &str, params: &[Ty]) -> Option
     }
 }
 
+/// One of `kotlin.test`'s assertions, as (runtime symbol, whether a message argument is present).
+///
+/// The corpus checks itself with these — they are most of what `// WITH_STDLIB` buys it — so they
+/// are worth realizing directly rather than waiting for the whole of `kotlin.test` to be
+/// splicable. Each compares and, when the comparison fails, raises the `AssertionError` Kotlin
+/// specifies with Kotlin's own wording.
+///
+/// The operands cross as REFERENCES, which is why this does not go through [`runtime_function`]:
+/// `assertEquals` is generic, so a call with `Int` arguments arrives typed `Int`, and the
+/// comparison Kotlin makes is `==` — structural, on whatever the values are.
+pub(super) fn assertion_call(
+    owner: &str,
+    name: &str,
+    params: &[Ty],
+) -> Option<(&'static str, usize)> {
+    if facade_package(kotlin_owner(owner))? != "kotlin/test" {
+        return None;
+    }
+    let (symbol, compared) = match name {
+        "assertEquals" => ("kt_assert_equals", 2),
+        "assertTrue" => ("kt_assert_true", 1),
+        "assertFalse" => ("kt_assert_false", 1),
+        _ => return None,
+    };
+    // What the DECLARATION takes beyond the compared operands is a `message: String?`, and only
+    // that. `assertEquals` also has a form whose third parameter is a floating-point tolerance;
+    // answering that one as if the tolerance were a message would silently compare exactly, so it
+    // falls through to the decline.
+    //
+    // The count returned is the COMPARED operands, not the declaration's arity: `message` is
+    // defaulted, so a call that leaves it out still names a three-parameter declaration, and
+    // reading the arity here would take the second operand for the message.
+    match params.len() {
+        n if n == compared => {}
+        n if n == compared + 1 && is_string_type(&params[compared]) => {}
+        _ => return None,
+    }
+    Some((symbol, compared))
+}
+
+/// Is this `kotlin.String`, at either nullability and under either spelling?
+fn is_string_type(ty: &Ty) -> bool {
+    match ty {
+        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => is_string_type(inner),
+        Ty::Obj(owner, _) => kotlin_owner(&owner.render()) == "kotlin/String",
+        _ => false,
+    }
+}
+
 /// A question Kotlin lets a program ask of a floating-point value directly.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum FloatPredicate {

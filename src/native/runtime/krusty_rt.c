@@ -2689,6 +2689,51 @@ KRef kt_string_literal(const char *bytes, kt_int length, KRef *slot) {
     return *slot;
 }
 
+/* ---- kotlin.test ---------------------------------------------------------------------------- */
+
+/* Kotlin's own wording, which is what a failing assertion has to report: the caller's message
+   first when there is one, then what was expected and what arrived. */
+static KRef kt_assert_prefix(KRef message) {
+    if (message == NULL) {
+        return kt_string_utf8("", 0);
+    }
+    return kt_string_plus(message, kt_string_utf8(". ", 2));
+}
+
+static void kt_assert_fail(KRef text) {
+    kt_throw(kt_throwable_new(&kt_type_assertion_error, text));
+}
+
+void kt_assert_equals(KRef expected, KRef actual, KRef message) {
+    if (kt_equals(expected, actual)) {
+        return;
+    }
+    /* Built in pieces because rendering either operand may itself allocate, and the text so far
+       has to stay reachable across that — the same reason `kt_list_to_string` is a loop over
+       `kt_string_plus` rather than a render into one buffer. */
+    KRef text = kt_string_plus(kt_assert_prefix(message), kt_string_utf8("Expected <", 10));
+    text = kt_string_plus(text, kt_to_string(expected));
+    text = kt_string_plus(text, kt_string_utf8(">, actual <", 11));
+    text = kt_string_plus(text, kt_to_string(actual));
+    kt_assert_fail(kt_string_plus(text, kt_string_utf8(">.", 2)));
+}
+
+void kt_assert_true(kt_boolean actual, KRef message) {
+    if (actual) {
+        return;
+    }
+    kt_assert_fail(
+        kt_string_plus(kt_assert_prefix(message), kt_string_utf8("Expected value to be true.", 26)));
+}
+
+void kt_assert_false(kt_boolean actual, KRef message) {
+    if (!actual) {
+        return;
+    }
+    kt_assert_fail(kt_string_plus(kt_assert_prefix(message),
+                                  kt_string_utf8("Expected value to be false.", 27)));
+}
+
 /* ---- callable references ----------------------------------------------------------------- */
 
 /* A bound reference keeps its receiver as its first reference field, which is what

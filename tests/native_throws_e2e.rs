@@ -137,3 +137,52 @@ fn a_failed_check_is_an_illegal_state_exception() {
         "kotlin.IllegalStateException: Check failed.",
     );
 }
+
+#[test]
+fn the_test_assertions_pass_quietly_and_report_kotlins_wording() {
+    // The corpus checks itself with these, so the passing path has to cost nothing observable.
+    expect_native_box(
+        "import kotlin.test.assertEquals\n\
+         import kotlin.test.assertTrue\n\
+         fun box(): String {\n\
+         \x20   assertEquals(3, 1 + 2)\n\
+         \x20   assertEquals(\"ab\", \"a\" + \"b\")\n\
+         \x20   assertEquals(3, 1 + 2, \"arithmetic\")\n\
+         \x20   assertTrue(1 < 2)\n\
+         \x20   assertTrue(1 < 2, \"ordering\")\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "AssertionsPass",
+        "OK",
+    );
+}
+
+#[test]
+fn a_failed_assert_equals_reports_both_values() {
+    // Kotlin's wording, which is what a failing assertion has to say for the report to mean the
+    // same thing it means under kotlinc.
+    expect_native_exit(
+        "import kotlin.test.assertEquals\n\
+         fun box(): String {\n\
+         \x20   assertEquals(3, 4)\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "AssertEqualsFails",
+        134,
+        "kotlin.AssertionError: Expected <3>, actual <4>.",
+    );
+}
+
+#[test]
+fn a_failed_assertion_puts_the_callers_message_first() {
+    expect_native_exit(
+        "import kotlin.test.assertTrue\n\
+         fun box(): String {\n\
+         \x20   assertTrue(1 > 2, \"ordering\")\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "AssertTrueFails",
+        134,
+        "kotlin.AssertionError: ordering. Expected value to be true.",
+    );
+}

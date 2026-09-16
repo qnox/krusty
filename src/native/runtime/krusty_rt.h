@@ -472,6 +472,15 @@ KRef kt_throwable_message(KRef self);
    is uncaught today. */
 void kt_throw(KRef thrown);
 
+/* ---- kotlin.test ------------------------------------------------------------------------------
+
+   The assertions the box corpus checks itself with. Each raises the `AssertionError` Kotlin
+   specifies, with Kotlin's wording, so a failing assertion reports what kotlinc would report.
+   `message` may be NULL, which is the form without one. */
+void kt_assert_equals(KRef expected, KRef actual, KRef message);
+void kt_assert_true(kt_boolean actual, KRef message);
+void kt_assert_false(kt_boolean actual, KRef message);
+
 /* ---- callable references --------------------------------------------------------------------
 
    `kotlin.Any`'s identity equality is wrong for a callable reference: Kotlin promises that

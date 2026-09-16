@@ -189,7 +189,16 @@ fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarge
     // without the jimage the exception hierarchy has no declaration to resolve to. Nothing about
     // the EMITTED program changes — it still links only against the runtime — but a cross-check
     // whose native half cannot name what its JVM half named is a skip dressed as agreement.
-    let classpath = std::rc::Rc::new(Classpath::new(vec![jar, jdk_modules()]));
+    // Stdlib, the JDK jimage AND `kotlin-test`: the three the JVM lanes compile against. Each was
+    // missing here at some point and each cost the same way — a program that cannot NAME what it
+    // uses is reported as unresolvable, which reads as the frontend's problem rather than as a
+    // gap in what this helper was given.
+    let classpath = std::rc::Rc::new(Classpath::new(
+        [jar, jdk_modules()]
+            .into_iter()
+            .chain(krusty::toolchain::kotlin_test_jar())
+            .collect::<Vec<_>>(),
+    ));
     let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(
         classpath.clone(),
     ));

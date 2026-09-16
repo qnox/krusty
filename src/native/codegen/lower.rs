@@ -1436,6 +1436,57 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// A string object for a literal's bytes.
+    /// One of `kotlin.test`'s assertions; see `intrinsics::assertion_call`.
+    ///
+    /// The message is a `String?` the caller may leave out, and the runtime takes `null` for the
+    /// form without one — so the shape is fixed and only its last operand varies.
+    fn assertion(
+        &mut self,
+        symbol: &str,
+        compared: usize,
+        args: &[u32],
+        params: &[Ty],
+    ) -> Result<Option<Value>, Unsupported> {
+        // `assertTrue`/`assertFalse` ask about a `Boolean` and take it as one; only the equality
+        // operands are compared structurally and therefore cross boxed.
+        let value = match params.first() {
+            Some(&Ty::Boolean) => Ty::Boolean,
+            _ => Ty::nullable(Ty::obj("kotlin/Any")),
+        };
+        // Whether a message was WRITTEN, which the declaration cannot say: `message` is defaulted,
+        // so a call that leaves it out still names the declaration that has it.
+        let has_message = args.len() > compared;
+        if args.len() < compared {
+            return Err(format!(
+                "a `kotlin.test` assertion missing an operand (`{symbol}`)"
+            ));
+        }
+        let mut operands = Vec::with_capacity(compared + 1);
+        let mut carried = Vec::with_capacity(compared + 1);
+        for argument in &args[..compared] {
+            let Some(operand) = self.coerce(*argument, value)? else {
+                return Ok(None);
+            };
+            operands.push(operand);
+            carried.push(value);
+        }
+        let message = if has_message {
+            match self.coerce(args[compared], Ty::nullable(Ty::String))? {
+                Some(text) => text,
+                None => return Ok(None),
+            }
+        } else {
+            // Kotlin's `null` message: the form written without one.
+            self.builder.ins().iconst(types::I64, 0)
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        operands.push(message);
+        carried.push(any());
+        self.runtime_call(symbol, &carried, Ty::Unit, &operands)
+    }
+
     /// A string literal, INTERNED: equal literals are one object, which is Kotlin's promise and
     /// observable through `===`. Building one where it is written would answer `false` for
     /// `"a" === "a"`, and would answer it for a function returning a literal too — every call
@@ -1933,6 +1984,29 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 // compares the type and the bound receiver.
                 return Err("equality on a function value".to_string());
             }
+            // An IEEE comparison where an operand arrived BOXED. Kotlin's
+            // `ProperIeee754Comparisons` compares two floating-point operands by IEEE rules — so
+            // `NaN == NaN` is false — whenever both static types are the floating-point type
+            // itself, INCLUDING through a type parameter bounded by it (`fun <T : Double> f(d:
+            // Double, v: T) { d == v }`) and through its nullable form. `kt_equals` is the total
+            // order instead, where `NaN` equals `NaN`, and that is the right answer only once an
+            // operand widens to something like `Any`.
+            //
+            // The difference is invisible for two unboxed operands, which take the scalar path
+            // below and already compare by IEEE. It shows exactly here, where one side is a
+            // reference and the rule still applies. Answering with `kt_equals` is wrong rather
+            // than imprecise, so the comparison is declined until it is unboxed and compared
+            // properly; `ieee754/equalsNaN_properIeeeComparisons.kt` is the case.
+            if on_references
+                && [lhs_ty, rhs_ty]
+                    .iter()
+                    .all(|ty| ty.is_some_and(is_ieee_operand))
+            {
+                return Err(
+                    "an IEEE floating-point comparison with an operand that arrived boxed"
+                        .to_string(),
+                );
+            }
             if on_references {
                 // Kotlin's `==` on references is `equals`, dispatched through the receiver's
                 // vtable and null-safe in Kotlin's sense (`null` equals only `null`) — which is
@@ -2403,6 +2477,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         if let Some(realized) = self.lazy_construction(&owner, &name, args) {
                             return realized;
                         }
+                        // `kotlin.test`'s assertions. Their operands cross as REFERENCES rather
+                        // than at their own widths: `assertEquals` is generic, so a call with
+                        // `Int` arguments arrives typed `Int`, and the comparison Kotlin makes is
+                        // `==` on whatever the values are.
+                        if let Some((symbol, compared)) =
+                            super::super::intrinsics::assertion_call(&owner, &name, params)
+                        {
+                            return self.assertion(symbol, compared, args, params);
+                        }
                         let Some(symbol) =
                             super::super::intrinsics::runtime_function(&owner, &name, params)
                         else {
@@ -2783,6 +2866,20 @@ fn scalar_bound(ty: Ty) -> Option<Ty> {
 }
 
 /// `Any?`: the type every runtime reference parameter is declared as.
+/// Whether a type is one Kotlin compares by IEEE rules under `ProperIeee754Comparisons`: the
+/// floating-point type itself, at either nullability and through a type parameter bounded by it.
+///
+/// A supertype is NOT one — `Any` holding a `Double` compares by `equals`, which is the total
+/// order — so the bound is followed only while it stays floating-point.
+fn is_ieee_operand(ty: Ty) -> bool {
+    match ty {
+        Ty::Double | Ty::Float => true,
+        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => is_ieee_operand(*inner),
+        Ty::TyParam(_, bound) => is_ieee_operand(*bound),
+        _ => false,
+    }
+}
+
 fn any() -> Ty {
     Ty::nullable(Ty::obj("kotlin/Any"))
 }
