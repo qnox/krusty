@@ -2038,10 +2038,23 @@ fn build_class_metadata(
         })
         .map(|candidate| candidate.fq_name.nested_segment_ref().to_string())
         .collect();
+    // A producer can generate a classifier that Kotlin code names (`Foo.$serializer`) and publish
+    // that fact on the owning class. Other synthesized implementation classes stay out on their
+    // `is_source_declared` record alone. Generated names precede the COMPANION, which kotlinc lists
+    // last of that set (`$serializer` then `Companion` for a `@Serializable` class).
+    let generated_nested = c.published_nested_classifiers.iter().cloned();
     // kotlinc lists the companion under `nestedClassName` (f7) TOO, alongside its own
     // `companionObjectName` (f4) record — both reference the same interned string.
-    if let Some(companion) = &c.companion_class {
-        let segment = companion.nested_segment_ref().to_string();
+    let companion_segment = c
+        .companion_class
+        .as_ref()
+        .map(|companion| companion.nested_segment_ref().to_string());
+    let at = companion_segment
+        .as_ref()
+        .and_then(|segment| nested_names.iter().position(|name| name == segment))
+        .unwrap_or(nested_names.len());
+    nested_names.splice(at..at, generated_nested);
+    if let Some(segment) = companion_segment {
         if !nested_names.contains(&segment) {
             nested_names.push(segment);
         }

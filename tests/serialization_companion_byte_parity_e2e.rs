@@ -21,6 +21,7 @@
 use std::path::PathBuf;
 
 use super::common;
+use super::common_core;
 
 const SRC: &str = "import kotlinx.serialization.Serializable\n\
                    @Serializable\n\
@@ -2397,5 +2398,115 @@ fn a_sibling_files_generated_serializer_accessor_matches_kotlinc() {
         method_instructions(&built.krusty, "rows()"),
         want,
         "sibling serializer accessor instructions"
+    );
+}
+
+/// Exact `Class.nestedClassName` (protobuf field 7) entries from one class's Kotlin metadata.
+///
+/// This deliberately reads the field rather than searching `d2`: the string table contains names
+/// referenced by every metadata declaration, so presence there does not prove a nested-class edge.
+fn metadata_nested_class_names(bytes: &[u8]) -> Option<Vec<String>> {
+    fn varint(bytes: &[u8], at: &mut usize) -> Option<u64> {
+        let mut value = 0u64;
+        for shift in (0..64).step_by(7) {
+            let byte = *bytes.get(*at)?;
+            *at += 1;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Some(value);
+            }
+        }
+        None
+    }
+
+    fn skip_value(bytes: &[u8], at: &mut usize, wire: u64) -> Option<()> {
+        let length = match wire {
+            0 => {
+                varint(bytes, at)?;
+                return Some(());
+            }
+            1 => 8,
+            2 => usize::try_from(varint(bytes, at)?).ok()?,
+            5 => 4,
+            _ => return None,
+        };
+        *at = at.checked_add(length)?;
+        (*at <= bytes.len()).then_some(())
+    }
+
+    let (d1, d2) = common_core::raw_kotlin_metadata(bytes)?;
+    // Kotlin's raw-byte encoding begins with NUL, followed by one delimited StringTableTypes
+    // message. The remaining bytes are the Class protobuf.
+    if d1.first() != Some(&0) {
+        return None;
+    }
+    let mut at = 1;
+    let string_table_len = usize::try_from(varint(&d1, &mut at)?).ok()?;
+    at = at.checked_add(string_table_len)?;
+    if at > d1.len() {
+        return None;
+    }
+
+    let mut indices = Vec::new();
+    while at < d1.len() {
+        let tag = varint(&d1, &mut at)?;
+        let (field, wire) = (tag >> 3, tag & 7);
+        if field != 7 {
+            skip_value(&d1, &mut at, wire)?;
+            continue;
+        }
+        if wire != 2 {
+            return None;
+        }
+        let length = usize::try_from(varint(&d1, &mut at)?).ok()?;
+        let end = at.checked_add(length)?;
+        if end > d1.len() {
+            return None;
+        }
+        while at < end {
+            indices.push(usize::try_from(varint(&d1, &mut at)?).ok()?);
+        }
+    }
+    indices
+        .into_iter()
+        .map(|index| d2.get(index).cloned())
+        .collect()
+}
+
+/// A `@Serializable` class's generated `$serializer` is a nested classifier of the class, and
+/// kotlinc records it under `Class.nestedClassName` beside the `Companion`. krusty listed the
+/// companion alone, so a reader of the metadata could not find the serializer as a member of the
+/// type it serializes — the plugin generates it, but the language record is the class's own.
+#[test]
+fn a_serializable_class_lists_its_generated_serializer_as_nested() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class Retention(val days: Int)\n";
+    let Some(built) =
+        compare_with_kotlinc_plugin("NestedSerializer", src, "Retention", &cp, "25", &extra)
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // Read Class.nestedClassName (protobuf field 7) itself. Merely searching d2 would be weaker:
+    // d2 is the string table for every declaration and can contain the same spelling without any
+    // nested-class edge referring to it.
+    let want = metadata_nested_class_names(&built.reference_bytes)
+        .expect("read kotlinc Class.nestedClassName");
+    assert_eq!(
+        want,
+        ["$serializer", "Companion"],
+        "kotlinc records $serializer before Companion"
+    );
+    let got = metadata_nested_class_names(&built.krusty_bytes)
+        .expect("read krusty Class.nestedClassName");
+    assert_eq!(
+        got, want,
+        "nested classifier names of a @Serializable class"
     );
 }

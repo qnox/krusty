@@ -5,7 +5,7 @@ mod source_set_compile;
 
 pub use source_set_compile::compile_in_process_files;
 
-use kotlin_metadata::raw_kotlin_metadata;
+pub(crate) use kotlin_metadata::raw_kotlin_metadata;
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read as _, Write as _};
