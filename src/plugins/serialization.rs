@@ -1638,9 +1638,11 @@ impl IrPlugin for SerializationPlugin {
             // constructor's `LineNumberTable` there, and the local-variable table naming `this`
             // rides on the same record. Every other generated member already carried both through
             // `record_debug_tables`; the constructor is emitted from the CLASS, so the generated
-            // class retains both the annotation-inclusive start and the distinct header line.
+            // class retains both the annotation-inclusive start and the distinct header line. Its
+            // CLOSING line comes along too: the class initializer's trailing `return` maps there.
             ser.decl_line = owner_header_line;
             ser.decl_start_line = owner_start_line;
+            ser.decl_end_line = ir.classes[class_id as usize].decl_end_line;
             ser.applied_annotations = generated_serializer_annotations();
             ser.is_object = !is_generic; // non-generic `$serializer` is a singleton object (INSTANCE)
                                          // Implement `GeneratedSerializer` (extends `KSerializer`) — it declares `childSerializers()`
@@ -1833,9 +1835,28 @@ impl IrPlugin for SerializationPlugin {
             } else {
                 let pgsd_name =
                     ir.add_expr(IrExpr::Const(IrConst::String(serial_name(ir, class_id))));
-                // Pass `this` (the `$serializer`, a `GeneratedSerializer`) so the descriptor can derive
-                // element descriptors from `childSerializers()` (`getElementDescriptor`/introspection).
-                let pgsd_self = ir.add_expr(IrExpr::GetValue(0));
+                // Pass the `$serializer` (a `GeneratedSerializer`) so the descriptor can derive element
+                // descriptors from `childSerializers()` (`getElementDescriptor`/introspection).
+                //
+                // A SINGLETON serializer names itself by its own `INSTANCE`, read at the use site and
+                // cast to the parameter's type — kotlinc's shape. Reading `this` instead made the
+                // emitter hoist `INSTANCE` into a local for the class initializer, which is one store,
+                // one load and one extra local that kotlinc does not have. A GENERIC serializer is a
+                // real instance built by its constructor, where `this` IS the value.
+                let pgsd_self = if is_generic {
+                    ir.add_expr(IrExpr::GetValue(0))
+                } else {
+                    let instance = ir.add_expr(IrExpr::ExternalStaticInstance {
+                        owner: serializer_name,
+                        ty: serializer_name,
+                        field: "INSTANCE".to_string(),
+                    });
+                    ir.add_expr(IrExpr::TypeOp {
+                        op: crate::ir::IrTypeOp::Cast,
+                        arg: instance,
+                        type_operand: class_ty(GENERATED_SERIALIZER_FQ),
+                    })
+                };
                 let pgsd_n = ir.add_expr(IrExpr::Const(IrConst::Int(foo_fields.len() as i32)));
                 let pgsd = ir.new_external(
                     pgsd_internal,
@@ -1871,11 +1892,19 @@ impl IrPlugin for SerializationPlugin {
             }
             let this0 = ir.add_expr(IrExpr::GetValue(0));
             let dval = ir.add_expr(IrExpr::GetValue(desc_local));
+            // The local is typed as the concrete descriptor the `addElement` calls need; the FIELD is
+            // the `SerialDescriptor` the interface exposes. kotlinc narrows at the store, so the cast
+            // is part of the store rather than something the local carries.
+            let stored = ir.add_expr(IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::Cast,
+                arg: dval,
+                type_operand: class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+            });
             init_stmts.push(ir.add_expr(IrExpr::SetField {
                 receiver: this0,
                 class: ser_id,
                 index: 0,
-                value: dval,
+                value: stored,
             }));
             // Store each constructor type-param serializer (`GetValue(1..=N)`) to its field (`1..=N`).
             for k in 0..n_tp {
