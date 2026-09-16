@@ -51,6 +51,7 @@ mod lambda_returns;
 mod local_capture_dependencies;
 mod local_class_scope;
 mod local_method_dependencies;
+mod loop_flow;
 mod operator_calls;
 mod override_plans;
 mod postponed_diagnostics;
@@ -97,6 +98,7 @@ use lambda_returns::{call_implicit_lambda_label, LambdaReturnScopes};
 use local_class_scope::{
     local_class_enclosing_tparams, local_class_sibling_names, EnclosingTypeParameterDeclaration,
 };
+use loop_flow::collect_all_reassigned;
 pub(crate) use override_plans::publish_override_plans;
 use postponed_diagnostics::PostponedDiagnostics;
 use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
@@ -13724,53 +13726,6 @@ fn collect_lambda_outer_writes(
         }
     }
     ce(file, e, outer_names, out);
-}
-
-/// Collect every name reassigned (`=`, `+=`-style, `++`/`--`) anywhere in `e`'s subtree — INCLUDING
-/// inside nested lambdas and local functions (a `var` reassigned in a sibling closure still needs the
-/// box). Used to decide which captured local-function `var`s need a shared mutable cell.
-fn collect_all_reassigned(file: &File, e: ExprId, out: &mut std::collections::HashSet<String>) {
-    // Traverse via `any_child_expr`/`any_child_stmt` (which visit EVERY child, including lambda and
-    // local-function bodies) so no expression form can hide a reassignment from the scan. The closures
-    // only collect (return `false` to keep visiting); a `RefCell` lets both share the accumulator.
-    let cell = std::cell::RefCell::new(std::mem::take(out));
-    fn ce(file: &File, e: ExprId, cell: &std::cell::RefCell<std::collections::HashSet<String>>) {
-        if let Expr::IncDec { target, .. } = file.expr(e) {
-            if let Expr::Name(n) = file.expr(*target) {
-                cell.borrow_mut().insert(n.clone());
-            }
-        }
-        file.any_child_expr(
-            e,
-            &mut |c| {
-                ce(file, c, cell);
-                false
-            },
-            &mut |s| {
-                cs(file, s, cell);
-                false
-            },
-        );
-    }
-    fn cs(file: &File, s: StmtId, cell: &std::cell::RefCell<std::collections::HashSet<String>>) {
-        if let Stmt::Assign { name, .. } | Stmt::IncDec { name, .. } = file.stmt(s) {
-            cell.borrow_mut().insert(name.clone());
-        }
-        if let Stmt::LocalClass(class) = file.stmt(s) {
-            // The parser hoists the declaration and the generic statement child walk stops at its
-            // header. Its member bodies still execute later and can mutate a value captured by
-            // every enclosing local class/local function boundary.
-            for expression in local_class_capture_expressions(class) {
-                ce(file, expression, cell);
-            }
-        }
-        file.any_child_stmt(s, &mut |c| {
-            ce(file, c, cell);
-            false
-        });
-    }
-    ce(file, e, &cell);
-    *out = cell.into_inner();
 }
 
 /// One closure-captured write: the variable's name, the enclosing-lambda stack at the write, and
@@ -33011,6 +32966,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::Return(e, label) => self.stmt_return(scope, s, e, label),
             Stmt::While { cond, body, label } => {
+                self.clear_narrowings_a_loop_invalidates(scope, &[cond, body]);
                 let ct = self.expr(scope, cond);
                 self.expect_assignable(Ty::Boolean, ct, self.span(cond), "while condition");
                 // `while (x != null) …` — the condition holds on body entry, so narrow stable
@@ -33026,6 +32982,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::DoWhile { body, cond, label } => {
+                self.clear_narrowings_a_loop_invalidates(scope, &[body, cond]);
                 // Unlike a while body, a do-while block and its condition share one lexical scope:
                 // `do { val x = ... } while (x)` is legal Kotlin. Keep that scope alive through
                 // condition checking instead of rebuilding declarations from typed syntax.
@@ -33059,13 +33016,19 @@ impl<'a> Checker<'a> {
                 range,
                 body,
                 label,
-            } => self.stmt_for(scope, s, name, range, body, label),
+            } => {
+                self.clear_narrowings_a_loop_invalidates(scope, &[body]);
+                self.stmt_for(scope, s, name, range, body, label)
+            }
             Stmt::ForEach {
                 name,
                 iterable,
                 body,
                 label,
-            } => self.stmt_for_each(scope, s, name, iterable, body, label),
+            } => {
+                self.clear_narrowings_a_loop_invalidates(scope, &[body]);
+                self.stmt_for_each(scope, s, name, iterable, body, label)
+            }
             Stmt::Expr(e) => {
                 // A `kotlin.contracts.contract { … }` statement is erased metadata: it is never
                 // executed and produces no bytecode (kotlinc drops it). Its lambda body uses the
