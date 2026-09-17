@@ -31,6 +31,8 @@ mod debug_metadata;
 mod get_or_create;
 mod hoisting;
 use hoisting::hoist_suspensions;
+mod spill_layout;
+use spill_layout::{suspension_points_in_order, SpillLayout};
 mod statement_normalization;
 mod value_liveness;
 
@@ -2624,8 +2626,8 @@ fn build_state_machine(
             .collect::<Vec<_>>()
     );
     let mut layout = SpillLayout::default();
-    for (call, scope) in &susp_scopes {
-        if live_calls.contains(call) {
+    for call in suspension_points_in_order(ir, b, &suspend_set) {
+        if let Some(scope) = susp_scopes.get(&call) {
             layout.add_list(&scope.values);
         }
     }
@@ -2704,10 +2706,10 @@ fn build_state_machine(
             // laid out first. The two orders are independent and only look alike when they agree.
             positions.sort_by_key(|&(_, _, kind, pos)| {
                 (
-                    SPILL_KINDS
+                    DEBUG_SPILL_KIND_ORDER
                         .iter()
                         .position(|&entry| entry == kind)
-                        .unwrap_or(SPILL_KINDS.len()),
+                        .expect("spill_kind returns a debug-metadata kind"),
                     pos,
                 )
             });
@@ -3107,8 +3109,8 @@ fn build_lambda_state_machine(
         return false;
     }
     let mut layout = SpillLayout::default();
-    for (call, scope) in &susp_scopes {
-        if live_calls.contains(call) {
+    for call in suspension_points_in_order(ir, b, &suspend_set) {
+        if let Some(scope) = susp_scopes.get(&call) {
             layout.add_list(&scope.values);
         }
     }
@@ -5853,8 +5855,9 @@ fn spill_kind(ty: &Ty) -> char {
     }
 }
 
-/// Every spill kind, for a deterministic tail after the kinds a method actually uses.
-const SPILL_KINDS: [char; 9] = ['L', 'I', 'J', 'F', 'D', 'Z', 'C', 'B', 'S'];
+/// Fixed kind order used only by `@DebugMetadata`'s `n`/`s` arrays. Field layout follows the
+/// first-spill order recorded by [`SpillLayout`] instead.
+const DEBUG_SPILL_KIND_ORDER: [char; 9] = ['L', 'I', 'J', 'F', 'D', 'Z', 'C', 'B', 'S'];
 
 /// Annotate each scope-list entry with its kind and position WITHIN that kind (kotlinc's
 /// per-suspension positional slot).
@@ -5887,84 +5890,6 @@ fn kind_positions(list: &[(u32, Ty)]) -> Vec<(u32, Ty, char, u32)> {
             (l, ty, k, pos)
         })
         .collect()
-}
-
-/// The positional spill-field layout: per-kind maxima over every suspension's scope list.
-#[derive(Clone, Default)]
-struct SpillLayout {
-    max: std::collections::HashMap<char, u32>,
-    /// The kinds in the order they are first spilled. kotlinc lays the field groups out that way —
-    /// a method whose first spilled local is a `String` opens with `L$0`, one whose first is an
-    /// `Int` opens with `I$0` — so the layout follows the code rather than a fixed table.
-    order: Vec<char>,
-}
-
-impl SpillLayout {
-    fn add_list(&mut self, list: &[(u32, Ty)]) {
-        let mut counts: std::collections::HashMap<char, u32> = std::collections::HashMap::new();
-        for (_, ty) in list {
-            if is_rematerialized_null(ty) {
-                continue;
-            }
-            let kind = spill_kind(ty);
-            if !self.order.contains(&kind) {
-                self.order.push(kind);
-            }
-            *counts.entry(kind).or_insert(0) += 1;
-        }
-        for (k, c) in counts {
-            let e = self.max.entry(k).or_insert(0);
-            if c > *e {
-                *e = c;
-            }
-        }
-    }
-    /// The kinds this layout lays out, first-spilled first, then any remaining kind so the order is
-    /// total whatever a caller asks about.
-    fn kinds(&self) -> Vec<char> {
-        let mut out = self.order.clone();
-        for kind in SPILL_KINDS {
-            if !out.contains(&kind) {
-                out.push(kind);
-            }
-        }
-        out
-    }
-
-    /// Field index of `(kind, pos)` RELATIVE to the first spill field (caller adds `result`/`label`
-    /// offset + `field_base`).
-    fn slot(&self, kind: char, pos: u32) -> u32 {
-        let mut off = 0u32;
-        for k in self.kinds() {
-            if k == kind {
-                return off + pos;
-            }
-            off += self.max.get(&k).copied().unwrap_or(0);
-        }
-        off + pos
-    }
-    /// `(name, field type)` for every spill field, kind-ordered (`L$0.., I$0.., …`).
-    fn fields(&self) -> Vec<(String, Ty)> {
-        let mut out = Vec::new();
-        for k in self.kinds() {
-            let n = self.max.get(&k).copied().unwrap_or(0);
-            let ty = match k {
-                'L' => object_ty(),
-                'J' => Ty::Long,
-                'F' => Ty::Float,
-                'D' => Ty::Double,
-                'Z' => Ty::Boolean,
-                'C' => Ty::Char,
-                'B' => Ty::Byte,
-                'S' => Ty::Short,
-                _ => Ty::Int,
-            };
-            for i in 0..n {
-                out.push((format!("{k}${i}"), ty));
-            }
-        }
-        out
-    }
 }
 
 fn spill_field_ty(ty: Ty) -> Ty {
