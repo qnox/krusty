@@ -472,6 +472,8 @@ mod dep_resolution;
 mod dependency_property_reference_name_e2e;
 #[path = "descriptor_arity_fails_closed_e2e.rs"]
 mod descriptor_arity_fails_closed_e2e;
+#[path = "deserialize_dispatch_shape_e2e.rs"]
+mod deserialize_dispatch_shape_e2e;
 #[path = "destructure_component_extension_e2e.rs"]
 mod destructure_component_extension_e2e;
 #[path = "destructure_e2e.rs"]

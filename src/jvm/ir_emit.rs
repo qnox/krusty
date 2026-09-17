@@ -1,7 +1,7 @@
 //! `krusty-ir` → JVM bytecode. The JVM backend's lowering of backend-agnostic IR maps Kotlin
 //! identities to JVM descriptors here; common IR never carries descriptors.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::backend::BackendClassifierSource;
 use crate::ir::{
@@ -13392,6 +13392,12 @@ struct Emitter<'a> {
     owner: String,
     facade: String,
     slots: HashMap<u32, (u16, Ty)>,
+    /// Semantic locals that are in lexical scope but not definitely assigned on the current edge.
+    /// JVM frames render their physical slots as `top` until every incoming edge has stored them.
+    unassigned_values: HashSet<u32>,
+    /// Incoming definite-assignment state by control-flow label. Union is the verifier lattice:
+    /// unassigned on any incoming edge means `top` at the merge.
+    label_unassigned_values: HashMap<Label, HashSet<u32>>,
     /// Every `Variable` index → its JVM type (file-wide); a `value_ty(GetValue)` fallback for a slot not
     /// yet registered in `slots` (queried before its declaration emits — e.g. an inline result temp).
     var_types: HashMap<u32, Ty>,
@@ -13451,6 +13457,8 @@ impl<'a> Emitter<'a> {
             owner: owner.to_string(),
             facade: facade.to_string(),
             slots: HashMap::new(),
+            unassigned_values: HashSet::new(),
+            label_unassigned_values: HashMap::new(),
             var_types: collect_body_var_types(ir, roots),
             next_slot: 0,
             ret,
@@ -13865,7 +13873,7 @@ impl<'a> Emitter<'a> {
         );
         if bs.join_required {
             let join = code.new_label();
-            code.bind(join);
+            self.bind(join, code);
             let join_stack: Vec<VerifType> = bs.join_stack.iter().map(vtype_to_verif).collect();
             code.add_frame_if_new(join, prefix, join_stack);
         }
@@ -13928,7 +13936,12 @@ impl<'a> Emitter<'a> {
     /// Slot-indexed caller locals for `0..upto` (long/double take two slots; `Top` fills the gaps).
     fn verif_slots_upto(&mut self, upto: u16) -> Vec<VerifType> {
         let mut raw = vec![VerifType::Top; upto as usize];
-        let entries: Vec<(u16, Ty)> = self.slots.values().copied().collect();
+        let entries: Vec<(u16, Ty)> = self
+            .slots
+            .iter()
+            .filter(|(value, _)| !self.unassigned_values.contains(value))
+            .map(|(_, slot)| *slot)
+            .collect();
         for (slot, ty) in entries {
             if (slot as usize) < raw.len() {
                 raw[slot as usize] = self.verif_single(ty);
@@ -14168,7 +14181,7 @@ impl<'a> Emitter<'a> {
         );
         // Join frame: the redirected returns land at the continuation right after the spliced body.
         let join = code.new_label();
-        code.bind(join);
+        self.bind(join, code);
         let join_stack: Vec<VerifType> = bs.join_stack.iter().map(vtype_to_verif).collect();
         code.add_frame_if_new(join, prefix, join_stack);
         true
@@ -14179,7 +14192,12 @@ impl<'a> Emitter<'a> {
     /// (the body's own locals occupy slots `upto..`).
     fn verif_locals_upto(&mut self, upto: u16) -> Vec<VerifType> {
         let mut raw = vec![VerifType::Top; upto as usize];
-        let entries: Vec<(u16, Ty)> = self.slots.values().copied().collect();
+        let entries: Vec<(u16, Ty)> = self
+            .slots
+            .iter()
+            .filter(|(value, _)| !self.unassigned_values.contains(value))
+            .map(|(_, slot)| *slot)
+            .collect();
         for (slot, ty) in entries {
             if (slot as usize) < raw.len() {
                 raw[slot as usize] = self.verif_single(ty);
@@ -14235,7 +14253,7 @@ impl<'a> Emitter<'a> {
                 self.emit_open_block(stmts, value, code);
                 self.close_scope_locals(code);
                 self.block_depth -= 1;
-                self.slots = saved;
+                self.restore_slot_scope(saved);
             }
             IrExpr::Return(value) => self.emit_return_node(value, code),
             IrExpr::Variable {
@@ -14286,6 +14304,7 @@ impl<'a> Emitter<'a> {
                         s
                     });
                     self.slots.insert(index, (slot, jt));
+                    self.unassigned_values.remove(&index);
                     store(jt, slot, code);
                     // A source local becomes visible after its initializing store.
                     if let Some(name) = self
@@ -14310,6 +14329,7 @@ impl<'a> Emitter<'a> {
                         s
                     });
                     self.slots.insert(index, (slot, jt));
+                    self.unassigned_values.insert(index);
                     // An uninitialized source local (`lateinit var`) still has a lexical lifetime.
                     // Its declaration emits no store, so open the debug range at the declaration's
                     // current bytecode position; the later checked assignment only initializes the
@@ -14368,6 +14388,7 @@ impl<'a> Emitter<'a> {
                         store(jt, slot, code);
                     }
                 }
+                self.unassigned_values.remove(&var);
             }
             IrExpr::SetField {
                 receiver,
@@ -14439,7 +14460,7 @@ impl<'a> Emitter<'a> {
                 let cont = code.new_label();
                 let end = code.new_label();
                 self.frame(start, vec![], code);
-                code.bind(start);
+                self.bind(start, code);
                 // A pre-test loop checks the condition before the body; a `do…while` skips this and
                 // tests at the bottom (`cont`), so the body always runs once.
                 if !post_test && self.emit_cond_branch(cond, end, false, code) {
@@ -14447,7 +14468,7 @@ impl<'a> Emitter<'a> {
                     // that would follow are unreachable — emitting them leaves frameless dead code
                     // the verifier rejects. kotlinc emits no body for a never-entered loop either.
                     self.frame(end, vec![], code);
-                    code.bind(end);
+                    self.bind(end, code);
                     return;
                 }
                 // `continue` targets `cont` (run the update / bottom test); `break` targets `end`.
@@ -14489,7 +14510,7 @@ impl<'a> Emitter<'a> {
                 // open here because `continue` and the condition are inside that same Kotlin scope.
                 if bottom == cont {
                     self.frame(cont, vec![], code);
-                    code.bind(cont);
+                    self.bind(cont, code);
                 }
                 // The update is part of the loop, so it keeps the `break`/`continue` scope active — the
                 // non-overflowing counted loop puts its `if (i == end) break` here (before the increment)
@@ -14508,21 +14529,23 @@ impl<'a> Emitter<'a> {
                     if let Some(saved) = retained_body_scope {
                         self.close_scope_locals(code);
                         self.block_depth -= 1;
-                        self.slots = saved;
+                        self.restore_slot_scope(saved);
                     }
                 } else {
                     self.frame(start, vec![], code);
                     code.goto(start);
                 }
                 self.frame(end, vec![], code);
-                code.bind(end);
+                self.bind(end, code);
             }
             IrExpr::Break { label } => {
                 let (_, end) = self.loop_target(&label);
+                self.frame(end, vec![], code);
                 code.goto(end);
             }
             IrExpr::Continue { label } => {
                 let (cont, _) = self.loop_target(&label);
+                self.frame(cont, vec![], code);
                 code.goto(cont);
             }
             other => {
@@ -15483,7 +15506,7 @@ impl<'a> Emitter<'a> {
                     code.invokestatic(m, 1, 0);
                     let st = self.verif_stack(jt);
                     self.frame(lbl, st, code);
-                    code.bind(lbl);
+                    self.bind(lbl, code);
                 }
                 jt
             }
@@ -15832,7 +15855,7 @@ impl<'a> Emitter<'a> {
                     // At the join the field value (non-null on the taken path) is on the stack.
                     let st = self.verif_stack(jt);
                     self.frame(lbl, st, code);
-                    code.bind(lbl);
+                    self.bind(lbl, code);
                 }
             }
             IrExpr::LateinitInitialized {
@@ -17454,7 +17477,7 @@ impl<'a> Emitter<'a> {
                 }
                 self.close_scope_locals(code);
                 self.block_depth -= 1;
-                self.slots = saved;
+                self.restore_slot_scope(saved);
             }
             IrExpr::Lambda {
                 impl_fn,
@@ -17794,7 +17817,7 @@ impl<'a> Emitter<'a> {
                 let jt = self.value_ty(*operand);
                 let st = self.verif_stack(jt);
                 self.frame(lbl, st, code);
-                code.bind(lbl);
+                self.bind(lbl, code);
             }
             IrExpr::Throw { operand } => {
                 self.emit_value(*operand, code);
@@ -18962,10 +18985,10 @@ impl<'a> Emitter<'a> {
         code.push_int(1, self.cw);
         self.frame(end, vec![VerifType::Integer], code);
         code.goto(end);
-        code.bind(f);
+        self.bind(f, code);
         code.set_stack(merged);
         code.push_int(0, self.cw);
-        code.bind(end);
+        self.bind(end, code);
     }
 
     /// Realize the already-selected Kotlin assertion operation. The runtime guard is emitted before
@@ -19027,7 +19050,7 @@ impl<'a> Emitter<'a> {
             code.invokespecial(constructor, i32::from(args.len() == 2), 0);
             code.athrow();
         }
-        code.bind(end);
+        self.bind(end, code);
         code.set_stack(entry_stack);
     }
 
@@ -19535,7 +19558,7 @@ impl<'a> Emitter<'a> {
                         if !body_diverges {
                             end_reachable = true;
                         }
-                        code.bind(next);
+                        self.bind(next, code);
                         code.set_stack(entry_height);
                         continue;
                     }
@@ -19576,7 +19599,7 @@ impl<'a> Emitter<'a> {
                     }
                     // `next` is a branch target at this offset, so the merge shares its frame.
                     end_targeted = true;
-                    code.bind(next);
+                    self.bind(next, code);
                     // `next` is reached only via the conditional jump above, where the stack is back at the
                     // pre-branch baseline — reset the linear counter (the just-emitted branch body left its
                     // value on the counter, but not on this control path).
@@ -19622,7 +19645,7 @@ impl<'a> Emitter<'a> {
         if end_reachable && end_targeted {
             self.frame(end, result_stack, code);
         }
-        code.bind(end);
+        self.bind(end, code);
     }
 
     /// `try { body } catch (v: E) { … } …` (no `finally`). The body value (and each catch value) is
@@ -19655,7 +19678,7 @@ impl<'a> Emitter<'a> {
         let end = code.new_label();
         let after = code.new_label();
 
-        code.bind(start);
+        self.bind(start, code);
         let body_diverges = if is_stmt {
             self.discarding_diverges(body)
         } else {
@@ -19674,7 +19697,7 @@ impl<'a> Emitter<'a> {
         if finally.is_some() {
             self.return_finalizers.pop();
         }
-        code.bind(end);
+        self.bind(end, code);
         let mut after_reachable = false;
         if !body_diverges {
             if let Some(f) = finally {
@@ -19709,7 +19732,7 @@ impl<'a> Emitter<'a> {
             let local_start =
                 (code.bytes.len() <= u16::MAX as usize).then_some(code.bytes.len() as u16);
             let cbody_start = code.new_label();
-            code.bind(cbody_start);
+            self.bind(cbody_start, code);
             let cbody_diverges = if is_stmt {
                 self.discarding_diverges(c.body)
             } else {
@@ -19731,7 +19754,7 @@ impl<'a> Emitter<'a> {
             // The catch body is protected by the finally handler (a throw in a catch runs the finally),
             // but the catch's own inlined finally (below) is not.
             let cbody_end = code.new_label();
-            code.bind(cbody_end);
+            self.bind(cbody_end, code);
             if self.record_locals {
                 if let (Some(name), Some(start_pc)) = (c.name.as_deref(), local_start) {
                     let end_pc = code.bytes.len().min(u16::MAX as usize) as u16;
@@ -19801,7 +19824,7 @@ impl<'a> Emitter<'a> {
                 self.slots.insert(RESULT_KEY, (slot, rt));
             }
             self.frame(after, vec![], code);
-            code.bind(after);
+            self.bind(after, code);
             if let Some(slot) = result_slot {
                 load(rt, slot, code);
                 self.slots.remove(&RESULT_KEY);
@@ -19809,7 +19832,7 @@ impl<'a> Emitter<'a> {
         } else {
             // Every path diverges — `after` is dead; bind it so any stray reference resolves, but emit
             // no frame (nothing reaches it) and leave no value (the `try` is `Nothing`-typed).
-            code.bind(after);
+            self.bind(after, code);
         }
     }
 
@@ -19849,8 +19872,48 @@ impl<'a> Emitter<'a> {
         self.value_ty(e).array_elem().unwrap_or(Ty::Error)
     }
 
+    fn record_label_assignment_state(&mut self, label: Label, code: &CodeBuilder) {
+        // A switch marks the linear stream dead before its case frames are registered. Its targets
+        // are seeded at dispatch time, so later case emission must not merge the preceding case's
+        // state into the next one merely because both are emitted linearly.
+        if code.is_dead() && self.label_unassigned_values.contains_key(&label) {
+            return;
+        }
+        self.label_unassigned_values
+            .entry(label)
+            .and_modify(|unassigned| unassigned.extend(self.unassigned_values.iter().copied()))
+            .or_insert_with(|| self.unassigned_values.clone());
+    }
+
+    fn bind(&mut self, label: Label, code: &mut CodeBuilder) {
+        if !code.is_dead() {
+            self.label_unassigned_values
+                .entry(label)
+                .and_modify(|unassigned| unassigned.extend(self.unassigned_values.iter().copied()))
+                .or_insert_with(|| self.unassigned_values.clone());
+        }
+        if let Some(unassigned) = self.label_unassigned_values.get(&label) {
+            self.unassigned_values.clone_from(unassigned);
+        }
+        code.bind(label);
+    }
+
+    fn restore_slot_scope(&mut self, slots: HashMap<u32, (u16, Ty)>) {
+        self.slots = slots;
+        self.unassigned_values
+            .retain(|value| self.slots.contains_key(value));
+    }
+
     fn frame(&mut self, label: Label, stack: Vec<VerifType>, code: &mut CodeBuilder) {
+        self.record_label_assignment_state(label, code);
+        let current_unassigned = std::mem::take(&mut self.unassigned_values);
+        self.unassigned_values = self
+            .label_unassigned_values
+            .get(&label)
+            .cloned()
+            .unwrap_or_default();
         let locals = self.verif_locals();
+        self.unassigned_values = current_unassigned;
         // Prepend any operand held on the stack below the current expression (an arithmetic LHS across a
         // branchy RHS), so the frame types the full operand stack the verifier sees.
         let stack = if self.pending_stack.is_empty() {
@@ -19870,7 +19933,12 @@ impl<'a> Emitter<'a> {
     fn verif_locals_with(&mut self, extra: &[(u16, Ty)]) -> Vec<VerifType> {
         let max = self.next_slot as usize;
         let mut raw = vec![VerifType::Top; max];
-        let entries: Vec<(u16, Ty)> = self.slots.values().copied().collect();
+        let entries: Vec<(u16, Ty)> = self
+            .slots
+            .iter()
+            .filter(|(value, _)| !self.unassigned_values.contains(value))
+            .map(|(_, slot)| *slot)
+            .collect();
         for (slot, ty) in entries {
             if (slot as usize) < raw.len() {
                 raw[slot as usize] = self.verif_single(ty);

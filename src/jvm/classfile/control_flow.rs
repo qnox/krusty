@@ -3,6 +3,10 @@
 use super::{CodeBuilder, Label};
 
 impl CodeBuilder {
+    pub(crate) fn is_dead(&self) -> bool {
+        self.dead
+    }
+
     pub fn new_label(&mut self) -> Label {
         let id = self.labels.len() as u32;
         self.labels.push(usize::MAX);

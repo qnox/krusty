@@ -3255,7 +3255,7 @@ fn write_annotation_attr(out: &mut Vec<u8>, name_index: Option<u16>, anns: &[Vec
 
 // ---- CodeBuilder: opcode emission with automatic max_stack/max_locals tracking ----------------
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Label {
     builder: u64,
     index: u32,
@@ -3419,8 +3419,9 @@ impl CodeBuilder {
             .collect()
     }
 
-    /// Record the frame at `label` (given locals + stack) if not already recorded.
-    /// First registration wins — early callers capture the "outer" scope before inner vars appear.
+    /// Record or merge the frame at `label` (given locals + stack). A local present on only some
+    /// incoming edges merges to `top`; this matters for initializer-free locals whose first store
+    /// is inside a branch or loop body.
     /// `stack` is the operand-stack verification types at this label (empty in most cases).
     pub fn add_frame_if_new(
         &mut self,
@@ -3429,7 +3430,22 @@ impl CodeBuilder {
         stack: Vec<VerifType>,
     ) {
         let lid = self.label_index(label) as u32;
-        if !self.frames.iter().any(|(id, _, _)| *id == lid) {
+        if let Some((_, recorded_locals, _)) = self.frames.iter_mut().find(|(id, _, _)| *id == lid)
+        {
+            let len = recorded_locals.len().max(locals.len());
+            recorded_locals.resize(len, VerifType::Top);
+            for (index, incoming) in locals.iter().enumerate() {
+                if recorded_locals[index] != *incoming {
+                    recorded_locals[index] = VerifType::Top;
+                }
+            }
+            for local in &mut recorded_locals[locals.len()..] {
+                *local = VerifType::Top;
+            }
+            while recorded_locals.last() == Some(&VerifType::Top) {
+                recorded_locals.pop();
+            }
+        } else {
             self.frames.push((lid, locals, stack));
         }
     }
@@ -4494,6 +4510,32 @@ mod tests {
         code.ret_void();
         assert_eq!(code.bytes.last(), Some(&0xb1));
         assert_eq!(code.bytes.len(), terminator_end + 1);
+    }
+
+    #[test]
+    fn frame_merge_keeps_an_interior_local_top_when_either_edge_skips_its_store() {
+        for top_edge_first in [true, false] {
+            let mut code = CodeBuilder::new(3);
+            let join = code.new_label();
+            let top = vec![VerifType::Integer, VerifType::Top, VerifType::Integer];
+            let assigned = vec![VerifType::Integer, VerifType::Integer, VerifType::Integer];
+            let (first, second) = if top_edge_first {
+                (top, assigned)
+            } else {
+                (assigned, top)
+            };
+            code.add_frame_if_new(join, first, Vec::new());
+            code.add_frame_if_new(join, second, Vec::new());
+            code.bind(join);
+            code.ret_void();
+
+            let frames = code.resolved_frames();
+            let locals = &frames[0].1;
+            assert_eq!(locals.len(), 3);
+            assert!(matches!(locals[0], VerifType::Integer));
+            assert!(matches!(locals[1], VerifType::Top));
+            assert!(matches!(locals[2], VerifType::Integer));
+        }
     }
 
     #[test]
