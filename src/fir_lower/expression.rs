@@ -368,6 +368,21 @@ impl BodyLowering<'_> {
             }
             FirExprKind::ComparisonCall { operation, call } => {
                 let call = self.checked_call(call)?;
+                if let IrExpr::Call {
+                    callee:
+                        Callee::Intrinsic {
+                            operation:
+                                IrIntrinsic::PrimitiveCompare {
+                                    relational_operator,
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } = &mut self.ir.exprs[call as usize]
+                {
+                    *relational_operator = true;
+                }
                 let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
                 self.ir.add_expr(IrExpr::PrimitiveBinOp {
                     op: lower_binary_operation(*operation),

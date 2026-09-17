@@ -59,9 +59,12 @@ pub enum IrIntrinsic {
         classifier: Ty,
     },
     /// Result of an exact builtin scalar `compareTo` declaration. `operand` is the semantic common
-    /// carrier selected by the frontend, not a JVM descriptor type.
+    /// carrier selected by the frontend, not a JVM descriptor type. `relational_operator` records
+    /// that this call came from FIR's `ComparisonCall`; an explicit `.compareTo()` remains false
+    /// even when its integer result is later compared with zero.
     PrimitiveCompare {
         operand: Ty,
+        relational_operator: bool,
     },
     /// Read the context from the current suspend continuation. The JVM coroutine pass replaces
     /// this operation with the continuation parameter's `Continuation.getContext()` call.
