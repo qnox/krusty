@@ -1696,6 +1696,10 @@ pub struct LibBuild {
     sources: Vec<(String, String)>,
     krusty: PathBuf,
     reference: OnceLock<Option<PathBuf>>,
+    /// The same dependency as a KLIB, built lazily by the klib lane and never by a default run.
+    klib: OnceLock<Option<PathBuf>>,
+    /// Stable per-source-set tag, so the klib lands in its own scratch directory.
+    tag: String,
 }
 
 #[allow(dead_code)]
@@ -1719,6 +1723,76 @@ impl LibBuild {
                 kotlinc_lib_out(&sources)
             })
             .as_deref()
+    }
+
+    /// The same dependency as a KLIB, built on first request and never by a default run.
+    ///
+    /// The reference compiler builds it, because krusty cannot yet emit a klib from a compilation —
+    /// its writer produces the container and the fragments from a declaration model, not from a
+    /// source set. Until it can, this side of the lane is kotlinc's artifact and what is under test
+    /// is whether krusty READS the same API out of it that it emits into `@Metadata`.
+    ///
+    /// The JS compiler builds it, not `K2MetadataCompiler`. The metadata compiler resolves against
+    /// `.kotlin_metadata` on its `-classpath` and this distribution ships none, so it cannot see the
+    /// standard LIBRARY at all: builtins resolve and `listOf` does not. A dependency fixture that
+    /// calls one stdlib function would fail to build, which is most of them. `kotlinc-js` resolves
+    /// against `kotlin-stdlib-js.klib` and reaches the whole stdlib.
+    ///
+    /// Its klib carries serialized IR and arrives as a zip rather than a directory, and neither
+    /// matters here: this lane reads `linkdata` only, and the reader takes both container shapes. A
+    /// JS klib's own declarations are the FIXTURE's, whose class kinds and type-parameter names are
+    /// not platform-dependent; the byte-equality ledger, where the metadata-only shape IS the point,
+    /// keeps using the metadata compiler.
+    pub fn klib_out(&self) -> Option<&Path> {
+        self.klib
+            .get_or_init(|| {
+                let sources: Vec<(&str, &str)> = self
+                    .sources
+                    .iter()
+                    .map(|(name, source)| (name.as_str(), source.as_str()))
+                    .collect();
+                crate::common::kotlinc_klib(&format!("dep{}", self.tag), &sources)
+            })
+            .as_deref()
+    }
+
+    /// The klib dependency lane (`KRUSTY_LIB_KLIB=1`): the dependency's API must be the same seen
+    /// through a klib as through the classes krusty emitted for it.
+    ///
+    /// Two carriers of one module's declarations, compared on the facts both state the same way —
+    /// each classifier's kind and type-parameter names, and each top-level function's arity. A
+    /// divergence is a real disagreement about the dependency's API: either krusty's `@Metadata`
+    /// emission or its klib reading is wrong about it.
+    ///
+    /// This is the lane's first stage. It does not yet ROUTE resolution through the klib, because
+    /// krusty installs one `JvmLibraries` provider and has no klib symbol source to federate with
+    /// it; reading the same API consistently is the precondition for that, and this is what checks
+    /// it — across every dependency fixture the suite has, not a handful written by hand.
+    fn cross_check_klib_declarations(&self, tag: &str) {
+        if !crate::common::klib_dep_lane_enabled() {
+            return;
+        }
+        let Some(klib) = self.klib_out() else {
+            return; // no kotlinc provisioned — nothing to compare against
+        };
+        let from_klib = crate::common::surface_from_klib(klib);
+        if from_klib.classifiers.is_empty() && from_klib.functions.is_empty() {
+            return;
+        }
+        let classpath = vec![self.krusty.clone(), stdlib_jar(), jdk_modules()];
+        let from_classpath = crate::common::surface_from_classpath(&classpath, &from_klib);
+        let diff = crate::common::diff_surfaces(&from_klib, &from_classpath);
+        diff.report(tag);
+        assert!(
+            diff.divergent.is_empty(),
+            "{tag}: the klib and the emitted classes disagree about this dependency's API: {:?}",
+            diff.divergent
+        );
+        assert!(
+            diff.missing.is_empty(),
+            "{tag}: declared in the klib and not visible through the emitted classes: {:?}",
+            diff.missing
+        );
     }
 
     /// Default-on differential check (opt out: `KRUSTY_LIB_CROSSCHECK=0`): the same `main`, run
@@ -1849,6 +1923,8 @@ pub fn compile_libs_build(tag: &str, sources: &[(&str, &str)]) -> Option<Arc<Lib
                 .collect(),
             krusty,
             reference: OnceLock::new(),
+            klib: OnceLock::new(),
+            tag: format!("{hash:016x}"),
         }))
     })
     .clone()
@@ -2249,6 +2325,7 @@ fn box_against_build(
     cp.extend_from_slice(extra_cp);
     let result = compile_and_run_box(main, "Main", &cp, Some(jdk))?;
     build.cross_check_box(tag, main, extra_cp, &result);
+    build.cross_check_klib_declarations(tag);
     Some(result)
 }
 

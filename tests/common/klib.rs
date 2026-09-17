@@ -40,28 +40,29 @@ impl KlibEntryDiff {
     /// A single line per entry on stderr, under the same opt-in the JVM lane uses. The prefix is
     /// grep-able so a run's whole ledger can be read off a log.
     pub fn report(&self, tag: &str) {
-        if std::env::var("KRUSTY_KLIB_BYTEDIFF_REPORT").is_err() {
-            return;
-        }
+        let mut lines = Vec::new();
         for entry in &self.identical {
-            eprintln!("KLIBDIFF\tidentical\t{entry}\t{tag}");
+            lines.push(format!("KLIBDIFF\tidentical\t{entry}\t{tag}"));
         }
         for (entry, krusty, reference) in &self.divergent {
-            eprintln!("KLIBDIFF\tdivergent\t{entry}\t{tag}\tkrusty={krusty}\tref={reference}");
+            lines.push(format!(
+                "KLIBDIFF\tdivergent\t{entry}\t{tag}\tkrusty={krusty}\tref={reference}"
+            ));
         }
         for entry in &self.missing {
-            eprintln!("KLIBDIFF\tmissing\t{entry}\t{tag}");
+            lines.push(format!("KLIBDIFF\tmissing\t{entry}\t{tag}"));
         }
         for entry in &self.extra {
-            eprintln!("KLIBDIFF\textra\t{entry}\t{tag}");
+            lines.push(format!("KLIBDIFF\textra\t{entry}\t{tag}"));
         }
-        eprintln!(
+        lines.push(format!(
             "KLIBDIFF\tsummary\t{tag}\tidentical={}\tdivergent={}\tmissing={}\textra={}",
             self.identical.len(),
             self.divergent.len(),
             self.missing.len(),
             self.extra.len()
-        );
+        ));
+        emit_report("KRUSTY_KLIB_BYTEDIFF_REPORT", &lines);
     }
 }
 
@@ -144,4 +145,246 @@ pub fn kotlinc_metadata_klib(tag: &str, sources: &[(&str, &str)]) -> Option<Path
         Some((code, err)) => panic!("kotlinc(metadata-klib) failed ({code}): {err}"),
         None => None,
     }
+}
+
+/// Whether the klib dependency lane is on: `KRUSTY_LIB_KLIB=1`.
+///
+/// Off by default, because it builds a second artifact per dependency fixture. On, every dependency
+/// a box test consumes is ALSO produced as a klib and the two carriers are required to declare the
+/// same API — see [`LibBuild::cross_check_klib_declarations`](super::LibBuild).
+#[allow(dead_code)]
+pub fn klib_dep_lane_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("KRUSTY_LIB_KLIB").as_deref(),
+            Ok("1") | Ok("true") | Ok("on")
+        )
+    })
+}
+
+/// What a classifier declares, in the terms BOTH carriers state the same way.
+///
+/// Deliberately not a whole [`krusty::libraries::LibraryType`]: a JVM classfile's descriptors are
+/// erased and a klib's are not, so comparing rendered member types would report noise rather than
+/// disagreement. The kind and the type-parameter names are Kotlin facts both carriers record, and a
+/// difference in either is a real difference in the declared API.
+///
+/// One fact the two carriers spell differently, reconciled here rather than skipped: an ENUM ENTRY.
+/// Kotlin metadata records it as a `Class` message with `CLASS_KIND = ENUM_ENTRY`, while krusty's
+/// [`krusty::libraries::TypeKind`] has no entry variant and the JVM provider reports the entry as
+/// `importable_declaration` with NO classifier — which is that provider's documented way of saying
+/// "importable, but not a classifier". Both sides are normalized to `EnumEntry` below, so an entry
+/// still has to be present on both rather than being excluded from the comparison.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ClassifierShape {
+    pub kind: String,
+    pub type_params: Vec<String>,
+}
+
+/// `Class.flags` CLASS_KIND (bits 6..9) for an enum entry, straight from the metadata schema. Read
+/// from the raw flag word the reader preserves, rather than inferred from the enclosing declaration.
+const CLASS_KIND_ENUM_ENTRY: u64 = 3;
+
+/// The kind both carriers are compared on.
+fn shape_kind(kind: krusty::libraries::TypeKind, flags: u64) -> String {
+    if (flags >> 6) & 0x7 == CLASS_KIND_ENUM_ENTRY {
+        return "EnumEntry".to_string();
+    }
+    format!("{kind:?}")
+}
+
+/// The declaration surface a dependency presents.
+#[derive(Debug, Default)]
+pub struct DeclarationSurface {
+    /// Internal classifier name → its shape.
+    pub classifiers: BTreeMap<String, ClassifierShape>,
+    /// Top-level functions as (package, name, value arity).
+    pub functions: std::collections::BTreeSet<(String, String, usize)>,
+}
+
+/// Per-declaration verdicts comparing the klib carrier against the JVM one.
+#[derive(Debug, Default)]
+pub struct SurfaceDiff {
+    pub identical: Vec<String>,
+    /// A declaration both carriers have, disagreeing — with each side's rendering.
+    pub divergent: Vec<(String, String, String)>,
+    /// Declared in the klib and not visible through the JVM provider.
+    pub missing: Vec<String>,
+}
+
+impl SurfaceDiff {
+    pub fn report(&self, tag: &str) {
+        let mut lines = Vec::new();
+        for declaration in &self.identical {
+            lines.push(format!("KLIBDEP\tidentical\t{declaration}\t{tag}"));
+        }
+        for (declaration, klib, jvm) in &self.divergent {
+            lines.push(format!(
+                "KLIBDEP\tdivergent\t{declaration}\t{tag}\tklib={klib}\tjvm={jvm}"
+            ));
+        }
+        for declaration in &self.missing {
+            lines.push(format!("KLIBDEP\tmissing\t{declaration}\t{tag}"));
+        }
+        lines.push(format!(
+            "KLIBDEP\tsummary\t{tag}\tidentical={}\tdivergent={}\tmissing={}",
+            self.identical.len(),
+            self.divergent.len(),
+            self.missing.len()
+        ));
+        emit_report("KRUSTY_LIB_KLIB_REPORT", &lines);
+    }
+}
+
+/// Write a ledger under `variable`: to the FILE it names, or to stderr for `1`.
+///
+/// A file is the useful default for a whole-suite run. libtest captures a passing test's stderr and
+/// prints it only for failures, so a report on stderr silently measures the failures alone — which
+/// reads as a plausible ledger and is not one. `--nocapture` would fix that and bury the run in
+/// 5000 lines of test output; a file survives capture and aggregates across parallel tests.
+pub fn emit_report(variable: &str, lines: &[String]) {
+    let Ok(destination) = std::env::var(variable) else {
+        return;
+    };
+    if matches!(destination.as_str(), "1" | "true" | "on") {
+        for line in lines {
+            eprintln!("{line}");
+        }
+        return;
+    }
+    use std::io::Write as _;
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&destination)
+    else {
+        for line in lines {
+            eprintln!("{line}");
+        }
+        return;
+    };
+    let mut body = lines.join("\n");
+    body.push('\n');
+    let _ = file.write_all(body.as_bytes());
+}
+
+/// The surface a klib declares, excluding the standard library it was compiled against.
+pub fn surface_from_klib(klib: &Path) -> DeclarationSurface {
+    let mut surface = DeclarationSurface::default();
+    let Some(archive) = krusty::klib::KlibArchive::open(klib) else {
+        return surface;
+    };
+    for fragment in archive.package_fragments() {
+        let Some(bytes) = archive.read(&fragment.entry) else {
+            continue;
+        };
+        let package = krusty::metadata::reader::parse_package_fragment(&bytes);
+        for (internal, declaration) in package.classes {
+            surface.classifiers.insert(
+                internal,
+                ClassifierShape {
+                    kind: shape_kind(declaration.kind, declaration.flags),
+                    type_params: declaration
+                        .type_params
+                        .iter()
+                        .map(|parameter| parameter.name.clone())
+                        .collect(),
+                },
+            );
+        }
+        for function in package.functions {
+            // A member of a receiver is not a top-level declaration of the package.
+            if function.receiver.is_some() {
+                continue;
+            }
+            surface.functions.insert((
+                fragment.package_fqname.replace('.', "/"),
+                function.name,
+                function.params.len(),
+            ));
+        }
+    }
+    surface
+}
+
+/// The same surface, as krusty's JVM provider reports it from a compiled classpath directory.
+///
+/// Only the declarations the klib named are queried: the point is whether the two carriers agree
+/// about the dependency's API, not to enumerate a classpath that also holds the whole stdlib.
+pub fn surface_from_classpath(
+    classpath: &[PathBuf],
+    wanted: &DeclarationSurface,
+) -> DeclarationSurface {
+    use krusty::symbol_source::{SymbolNamespace, SymbolSource};
+
+    let cp = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(classpath.to_vec()));
+    let libraries = krusty::jvm::jvm_libraries::JvmLibraries::new(cp);
+    let mut surface = DeclarationSurface::default();
+    for internal in wanted.classifiers.keys() {
+        let identity = krusty::types::type_name(internal);
+        let (namespace, leaf) = SymbolNamespace::classifier_key(identity);
+        let record = libraries.symbols(namespace, leaf);
+        let Some(classifier) = record.classifier.as_ref() else {
+            // No classifier but importable: the provider's way of declaring an enum entry.
+            if record.importable_declaration {
+                surface.classifiers.insert(
+                    internal.clone(),
+                    ClassifierShape {
+                        kind: "EnumEntry".to_string(),
+                        type_params: Vec::new(),
+                    },
+                );
+            }
+            continue;
+        };
+        surface.classifiers.insert(
+            internal.clone(),
+            ClassifierShape {
+                kind: format!("{:?}", classifier.kind),
+                type_params: classifier.type_parameters.type_params().clone(),
+            },
+        );
+    }
+    for (package, name, _) in &wanted.functions {
+        let namespace = SymbolNamespace::Package(krusty::types::type_name(package));
+        let record = libraries.symbols(namespace, name);
+        if let krusty::libraries::Callables::Functions(functions)
+        | krusty::libraries::Callables::Both { functions, .. } = &record.callables
+        {
+            for overload in functions.top_level() {
+                surface.functions.insert((
+                    package.clone(),
+                    name.clone(),
+                    overload.callable.params.len(),
+                ));
+            }
+        }
+    }
+    surface
+}
+
+/// Compare the klib's surface against the JVM provider's.
+pub fn diff_surfaces(klib: &DeclarationSurface, jvm: &DeclarationSurface) -> SurfaceDiff {
+    let mut diff = SurfaceDiff::default();
+    for (internal, shape) in &klib.classifiers {
+        match jvm.classifiers.get(internal) {
+            None => diff.missing.push(internal.clone()),
+            Some(other) if other == shape => diff.identical.push(internal.clone()),
+            Some(other) => {
+                diff.divergent
+                    .push((internal.clone(), format!("{shape:?}"), format!("{other:?}")))
+            }
+        }
+    }
+    for entry in &klib.functions {
+        let (package, name, arity) = entry;
+        let rendered = format!("{package}/{name}({arity})");
+        if jvm.functions.contains(entry) {
+            diff.identical.push(rendered);
+        } else {
+            diff.missing.push(rendered);
+        }
+    }
+    diff
 }
