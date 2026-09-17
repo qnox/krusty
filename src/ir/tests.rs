@@ -75,7 +75,7 @@ fn expr_diverges_by_handles_branches_and_custom_leaves() {
 }
 
 #[test]
-fn zero_for_value_type_tracks_primitive_carriers() {
+fn zero_for_value_type_tracks_semantic_identity() {
     assert_eq!(
         IrConst::zero_for_value_type(Ty::Boolean),
         IrConst::Boolean(false)
@@ -85,8 +85,10 @@ fn zero_for_value_type_tracks_primitive_carriers() {
         IrConst::zero_for_value_type(Ty::obj("kotlin/Int")),
         IrConst::Int(0)
     );
-    assert_eq!(IrConst::zero_for_value_type(Ty::UInt), IrConst::Int(0));
-    assert_eq!(IrConst::zero_for_value_type(Ty::ULong), IrConst::Long(0));
+    assert_eq!(IrConst::zero_for_value_type(Ty::UByte), IrConst::UByte(0));
+    assert_eq!(IrConst::zero_for_value_type(Ty::UShort), IrConst::UShort(0));
+    assert_eq!(IrConst::zero_for_value_type(Ty::UInt), IrConst::UInt(0));
+    assert_eq!(IrConst::zero_for_value_type(Ty::ULong), IrConst::ULong(0));
     assert_eq!(IrConst::zero_for_value_type(Ty::String), IrConst::Null);
 }
 
