@@ -2699,12 +2699,15 @@ fn build_state_machine(
         for (state_idx, call) in resume_points.iter().enumerate() {
             let scope = &flat.scopes[call];
             let mut positions = kind_positions(&scope.values);
+            // `@DebugMetadata`'s `n`/`s` lists are ordered by KIND in a fixed sequence, not by the
+            // class's field layout: kotlinc names `ref` before `count` even where the int group is
+            // laid out first. The two orders are independent and only look alike when they agree.
             positions.sort_by_key(|&(_, _, kind, pos)| {
                 (
-                    SPILL_KIND_ORDER
+                    SPILL_KINDS
                         .iter()
                         .position(|&entry| entry == kind)
-                        .unwrap_or(SPILL_KIND_ORDER.len()),
+                        .unwrap_or(SPILL_KINDS.len()),
                     pos,
                 )
             });
@@ -5850,8 +5853,8 @@ fn spill_kind(ty: &Ty) -> char {
     }
 }
 
-/// Fixed kind order for field layout (names within a kind are positional: `L$0..`, `I$0..`).
-const SPILL_KIND_ORDER: [char; 9] = ['L', 'I', 'J', 'F', 'D', 'Z', 'C', 'B', 'S'];
+/// Every spill kind, for a deterministic tail after the kinds a method actually uses.
+const SPILL_KINDS: [char; 9] = ['L', 'I', 'J', 'F', 'D', 'Z', 'C', 'B', 'S'];
 
 /// Annotate each scope-list entry with its kind and position WITHIN that kind (kotlinc's
 /// per-suspension positional slot).
@@ -5890,6 +5893,10 @@ fn kind_positions(list: &[(u32, Ty)]) -> Vec<(u32, Ty, char, u32)> {
 #[derive(Clone, Default)]
 struct SpillLayout {
     max: std::collections::HashMap<char, u32>,
+    /// The kinds in the order they are first spilled. kotlinc lays the field groups out that way —
+    /// a method whose first spilled local is a `String` opens with `L$0`, one whose first is an
+    /// `Int` opens with `I$0` — so the layout follows the code rather than a fixed table.
+    order: Vec<char>,
 }
 
 impl SpillLayout {
@@ -5899,7 +5906,11 @@ impl SpillLayout {
             if is_rematerialized_null(ty) {
                 continue;
             }
-            *counts.entry(spill_kind(ty)).or_insert(0) += 1;
+            let kind = spill_kind(ty);
+            if !self.order.contains(&kind) {
+                self.order.push(kind);
+            }
+            *counts.entry(kind).or_insert(0) += 1;
         }
         for (k, c) in counts {
             let e = self.max.entry(k).or_insert(0);
@@ -5908,11 +5919,23 @@ impl SpillLayout {
             }
         }
     }
+    /// The kinds this layout lays out, first-spilled first, then any remaining kind so the order is
+    /// total whatever a caller asks about.
+    fn kinds(&self) -> Vec<char> {
+        let mut out = self.order.clone();
+        for kind in SPILL_KINDS {
+            if !out.contains(&kind) {
+                out.push(kind);
+            }
+        }
+        out
+    }
+
     /// Field index of `(kind, pos)` RELATIVE to the first spill field (caller adds `result`/`label`
     /// offset + `field_base`).
     fn slot(&self, kind: char, pos: u32) -> u32 {
         let mut off = 0u32;
-        for &k in &SPILL_KIND_ORDER {
+        for k in self.kinds() {
             if k == kind {
                 return off + pos;
             }
@@ -5923,7 +5946,7 @@ impl SpillLayout {
     /// `(name, field type)` for every spill field, kind-ordered (`L$0.., I$0.., …`).
     fn fields(&self) -> Vec<(String, Ty)> {
         let mut out = Vec::new();
-        for &k in &SPILL_KIND_ORDER {
+        for k in self.kinds() {
             let n = self.max.get(&k).copied().unwrap_or(0);
             let ty = match k {
                 'L' => object_ty(),
