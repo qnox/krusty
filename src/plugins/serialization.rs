@@ -1638,9 +1638,11 @@ impl IrPlugin for SerializationPlugin {
             // constructor's `LineNumberTable` there, and the local-variable table naming `this`
             // rides on the same record. Every other generated member already carried both through
             // `record_debug_tables`; the constructor is emitted from the CLASS, so the generated
-            // class retains both the annotation-inclusive start and the distinct header line.
+            // class retains both the annotation-inclusive start and the distinct header line. Its
+            // CLOSING line comes along too: the class initializer's trailing `return` maps there.
             ser.decl_line = owner_header_line;
             ser.decl_start_line = owner_start_line;
+            ser.decl_end_line = ir.classes[class_id as usize].decl_end_line;
             ser.applied_annotations = generated_serializer_annotations();
             ser.is_object = !is_generic; // non-generic `$serializer` is a singleton object (INSTANCE)
                                          // Implement `GeneratedSerializer` (extends `KSerializer`) — it declares `childSerializers()`
@@ -1833,9 +1835,23 @@ impl IrPlugin for SerializationPlugin {
             } else {
                 let pgsd_name =
                     ir.add_expr(IrExpr::Const(IrConst::String(serial_name(ir, class_id))));
-                // Pass `this` (the `$serializer`, a `GeneratedSerializer`) so the descriptor can derive
-                // element descriptors from `childSerializers()` (`getElementDescriptor`/introspection).
-                let pgsd_self = ir.add_expr(IrExpr::GetValue(0));
+                // Pass the `$serializer` (a `GeneratedSerializer`) so the descriptor can derive element
+                // descriptors from `childSerializers()` (`getElementDescriptor`/introspection).
+                //
+                // A SINGLETON serializer names itself by its own `INSTANCE`, read at the use site.
+                // Reading `this` instead made the JVM emitter hoist `INSTANCE` into a local for the
+                // class initializer, which is one store, one load and one extra local that kotlinc
+                // does not have. A GENERIC serializer is a real instance built by its constructor,
+                // where `this` IS the value. Any JVM reference-boundary cast remains an emission fact.
+                let pgsd_self = if is_generic {
+                    ir.add_expr(IrExpr::GetValue(0))
+                } else {
+                    ir.add_expr(IrExpr::ExternalStaticInstance {
+                        owner: serializer_name,
+                        ty: serializer_name,
+                        field: "INSTANCE".to_string(),
+                    })
+                };
                 let pgsd_n = ir.add_expr(IrExpr::Const(IrConst::Int(foo_fields.len() as i32)));
                 let pgsd = ir.new_external(
                     pgsd_internal,
@@ -2786,6 +2802,47 @@ mod tests {
                 "childSerializers",
                 "typeParametersSerializers"
             ]
+        );
+    }
+
+    #[test]
+    fn singleton_descriptor_init_keeps_jvm_casts_out_of_common_ir() {
+        let (mut ir, ctx, _) = serializable_class("demo/Foo", &["kotlin/Int"]);
+        run(&mut ir, &ctx);
+
+        let serializer = find_class(&ir, "demo/Foo$$serializer");
+        let init = serializer
+            .init_body
+            .expect("generated serializer initializer");
+        let IrExpr::Block { stmts, value: None } = ir.expr(init) else {
+            panic!("generated serializer initializer is not a statement block");
+        };
+        let IrExpr::Variable {
+            init: Some(descriptor),
+            ..
+        } = ir.expr(stmts[0])
+        else {
+            panic!("descriptor initializer does not declare its semantic local");
+        };
+        let IrExpr::New { args, .. } = ir.expr(*descriptor) else {
+            panic!("descriptor initializer is not a constructor call");
+        };
+        assert!(
+            matches!(ir.expr(args[1]), IrExpr::ExternalStaticInstance { .. }),
+            "the semantic singleton argument must not be wrapped in a JVM-only cast"
+        );
+        let descriptor_store = stmts
+            .iter()
+            .find_map(|statement| match ir.expr(*statement) {
+                IrExpr::SetField {
+                    index: 0, value, ..
+                } => Some(*value),
+                _ => None,
+            })
+            .expect("descriptor field store");
+        assert!(
+            matches!(ir.expr(descriptor_store), IrExpr::GetValue(_)),
+            "the semantic descriptor value must not be wrapped in a JVM-only cast"
         );
     }
 

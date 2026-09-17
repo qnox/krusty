@@ -59,6 +59,7 @@ impl Emitter<'_> {
             self.emit_value(receiver, code);
             self.emit_value(value, code);
         }
+        self.adapt_generated_initializer_reference(value, self.value_ty(value), field_ty, code);
         let field_ref = self.cw.fieldref(&owner, &name, &type_descriptor(field_ty));
         code.putfield(field_ref, slot_words(field_ty) as i32);
     }
@@ -82,6 +83,7 @@ impl Emitter<'_> {
         if self.diverges(value) {
             return;
         }
+        self.adapt_generated_initializer_reference(value, self.value_ty(value), field_ty, code);
         let field_ref = self.cw.fieldref(owner, name, &type_descriptor(field_ty));
         code.putstatic(field_ref, slot_words(field_ty) as i32);
     }
