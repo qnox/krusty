@@ -346,3 +346,64 @@ fun box(): String {\n\
     assert_eq!(krusty, reference, "krusty and kotlinc disagree");
     assert_eq!(krusty, "OK");
 }
+
+/// A tail call reached through an ELVIS, which is where the rewrite used to stop.
+///
+/// `a ?: b` lowers to `{ tmp = a; when { tmp == null -> b; else -> tmp } }`, and each arm is
+/// coerced to the elvis's own type — so `return a ?: f(x)` leaves the call under a representation
+/// coercion. The sweep walks blocks, `when`s and `return`s to find a tail position and had no arm
+/// for that wrapper, so it never reached the call: the function stayed recursive, and a `tailrec`
+/// written precisely because it recurses a million deep overflowed the stack.
+///
+/// Three shapes, because they fail for three different reasons. The first puts the call directly
+/// under one coercion. The second CHAINS them — `a ?: b ?: c` coerces the inner elvis and coerces
+/// that again, so the call sits under two wrappers with a `when` between, which is what the
+/// coercion has to be distributed through rather than merely stepped over. The third has a
+/// non-recursive call on the left, so the tail call is not the first thing the arm reaches.
+///
+/// Every expectation is kotlinc's, taken by compiling and running this same `box()` under it.
+#[test]
+fn a_tail_call_under_an_elvis_runs_flat() {
+    const SRC: &str = "tailrec fun elvisTail(x: Int): Int? {\n\
+    if (x == 0) return 777\n\
+    return null ?: elvisTail(x - 1)\n\
+}\n\
+tailrec fun chained(x: Int): Int? {\n\
+    if (x < 0) return null\n\
+    if (x == 0) return 777\n\
+    return chained(-1) ?: chained(-2) ?: chained(x - 1)\n\
+}\n\
+fun maybe(x: Int) = x.takeIf { x == 1 }\n\
+tailrec fun elvisOverCall(x: Int): Int {\n\
+    return maybe(x) ?: elvisOverCall(x - 1)\n\
+}\n\
+fun box(): String {\n\
+    if (elvisTail(1000000) != 777) return \"fail elvisTail\"\n\
+    if (chained(1000000) != 777) return \"fail chained\"\n\
+    if (elvisOverCall(1000000) != 1) return \"fail elvisOverCall\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(SRC), "OK");
+}
+
+/// The elvis arm that is NOT the tail call keeps the conversion it needs.
+///
+/// Distributing a coercion into a `when`'s arms is only sound if every arm still gets one; the
+/// tail call's is dropped because what replaces it is a loop step, which ends in `continue` and
+/// yields no value to convert. This pins the other side of that: an elvis whose left-hand value is
+/// the answer returns it, boxed as the function's nullable return type says, rather than losing
+/// the conversion along with the one that was dropped.
+#[test]
+fn the_other_elvis_arm_keeps_its_coercion() {
+    const SRC: &str = "tailrec fun firstNonNull(x: Int): Int? {\n\
+    if (x < 0) return null\n\
+    return (if (x < 3) x else null) ?: firstNonNull(x - 1)\n\
+}\n\
+fun box(): String {\n\
+    if (firstNonNull(1000000) != 2) return \"fail deep: \" + firstNonNull(1000000)\n\
+    if (firstNonNull(2) != 2) return \"fail shallow\"\n\
+    if (firstNonNull(-1) != null) return \"fail null\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(SRC), "OK");
+}
