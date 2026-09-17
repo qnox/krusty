@@ -1042,6 +1042,15 @@ pub struct BuiltinMember {
     pub param_names: Vec<String>,
     /// Which value parameters declare a default, parallel to [`Self::params`].
     pub param_defaults: Vec<bool>,
+    /// Declared receiver of a MEMBER EXTENSION (`class Scope { fun String.f() }`, `val String.p`).
+    /// `None` for an ordinary member. Nothing else records it: the declaring class is the dispatch
+    /// receiver and the extension receiver is a separate declaration fact.
+    pub receiver: Option<BuiltinTy>,
+    /// A property declared `var`. Only the property flag word carries it, and without it a `var`
+    /// reads as a `val` — every write against it would be rejected.
+    pub is_var: bool,
+    /// A property declared `const`. Functions never set it.
+    pub is_const: bool,
 }
 
 /// One top-level function declared by a `.kotlin_builtins` package fragment. Unlike a class member,
@@ -1071,6 +1080,9 @@ pub struct BuiltinFunction {
 pub struct BuiltinPackage {
     pub classes: std::collections::HashMap<String, BuiltinClass>,
     pub functions: Vec<BuiltinFunction>,
+    /// Top-level properties (`Package.property` = 4), including extension properties, which carry
+    /// their declared receiver. `kotlin.math.PI` is one of these and nothing else records it.
+    pub properties: Vec<BuiltinMember>,
 }
 
 /// One constructor declared by a builtin class. Unlike a function it has no return type or name;
@@ -1382,7 +1394,17 @@ pub fn parse_builtin_package_functions(
     strings: &[String],
     qnames: &[QName],
 ) -> Vec<BuiltinFunction> {
+    parse_builtin_package(package, strings, qnames).0
+}
+
+/// A `Package` message's top-level functions and properties, read against its own type table.
+pub fn parse_builtin_package(
+    package: &[u8],
+    strings: &[String],
+    qnames: &[QName],
+) -> (Vec<BuiltinFunction>, Vec<BuiltinMember>) {
     let mut functions = Vec::new();
+    let mut property_bodies: Vec<&[u8]> = Vec::new();
     let mut types = Vec::new();
     let mut package_message = Pb { b: package, i: 0 };
     while !package_message.at_end() {
@@ -1398,6 +1420,16 @@ pub fn parse_builtin_package_functions(
                     break;
                 };
                 functions.push(body);
+            }
+            // `Package.property` = 4 — the same `Property` message a class member carries.
+            (4, 2) => {
+                let Some(len) = package_message.varint() else {
+                    break;
+                };
+                let Some(body) = package_message.bytes(len as usize) else {
+                    break;
+                };
+                property_bodies.push(body);
             }
             (30, 2) => {
                 let Some(len) = package_message.varint() else {
@@ -1438,7 +1470,11 @@ pub fn parse_builtin_package_functions(
         qnames,
         types: &types,
     };
-    functions
+    let properties = property_bodies
+        .into_iter()
+        .filter_map(|body| builtin_property(body, &tables, &TypeParamNames::new()))
+        .collect();
+    let functions = functions
         .into_iter()
         .filter_map(|body| {
             let function = parse_function(body)?;
@@ -1572,7 +1608,8 @@ pub fn parse_builtin_package_functions(
                 context_count,
             })
         })
-        .collect()
+        .collect();
+    (functions, properties)
 }
 
 /// Parse a `.kotlin_builtins` resource → every declared `Class` (qualified name → its supertypes +
@@ -1585,6 +1622,78 @@ pub fn parse_builtins(data: &[u8]) -> BuiltinPackage {
         return BuiltinPackage::default();
     };
     parse_package_fragment(pf)
+}
+
+/// One `Property` declaration, from a class's member list or a package's top-level list.
+///
+/// Both carry the same message, so both read it here. The field numbers were taken off a klib the
+/// reference compiler wrote rather than from memory: `val String.memberExt` records the tags 2
+/// (name), 7 (`getter_flags` — NOT a type id, which is the mistake this comment exists to prevent),
+/// 9 (`return_type_id`), 10 (`receiver_type_id`) and 176 (file), and the flag word is field 11 with
+/// protobuf default [`crate::metadata::property_flags::DEFAULT`] — a `var` writes 1798, a `const
+/// val` 10758, and a `val` with a custom getter omits the field entirely.
+fn builtin_property(
+    body: &[u8],
+    tables: &BuiltinTables,
+    outer: &TypeParamNames,
+) -> Option<BuiltinMember> {
+    use crate::metadata::property_flags;
+    let mut tparams = outer.clone();
+    let formals = tables.type_params(
+        &type_param_bodies(body, MEMBER_TYPE_PARAMETER_FIELD),
+        &mut tparams,
+    );
+    let mut p = Pb { b: body, i: 0 };
+    let mut name_id = None;
+    let mut ret_body = None;
+    let mut ret_id = None;
+    let mut recv_body = None;
+    let mut recv_id = None;
+    let mut legacy_flags = None;
+    let mut modern_flags = None;
+    while !p.at_end() {
+        let Some(tag) = p.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            (1, 0) => legacy_flags = p.varint(),
+            (2, 0) => name_id = p.varint(),
+            (3, 2) => {
+                let len = p.varint()?;
+                ret_body = p.bytes(len as usize);
+            }
+            (5, 2) => {
+                let len = p.varint()?;
+                recv_body = p.bytes(len as usize);
+            }
+            (9, 0) => ret_id = p.varint(),
+            (10, 0) => recv_id = p.varint(),
+            (11, 0) => modern_flags = p.varint(),
+            (_, w) => {
+                p.skip(w)?;
+            }
+        }
+    }
+    let name = tables.strings.get(name_id? as usize).cloned()?;
+    let ret = builtin_type_ref(ret_body, ret_id, tables, &tparams)?;
+    let flags = modern_flags
+        .or(legacy_flags)
+        .unwrap_or(property_flags::DEFAULT);
+    Some(BuiltinMember {
+        name,
+        params: Vec::new(),
+        ret_nullable: ret.nullable(),
+        ret,
+        is_property: true,
+        is_operator: false,
+        is_infix: false,
+        is_abstract: flags & property_flags::MODALITY_MASK == property_flags::MODALITY_ABSTRACT,
+        formals,
+        // A property has no value parameters of its own; its accessors' are the backend's to shape.
+        param_names: Vec::new(),
+        param_defaults: Vec::new(),
+        receiver: builtin_type_ref(recv_body, recv_id, tables, &tparams),
+        is_var: flags & property_flags::IS_VAR != 0,
+        is_const: flags & property_flags::IS_CONST != 0,
+    })
 }
 
 /// Parse one raw Kotlin metadata `PackageFragment`, as stored in a KLIB `.knm` entry. Builtins use
@@ -1706,7 +1815,7 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                     }
                 }
                 (10, 2) => {
-                    // Class.property = 10 (each: name=2, return_type_id=7 — same shape as a function).
+                    // Class.property = 10. Its shape is NOT a function's: see `builtin_property`.
                     if let Some(n) = cp.varint() {
                         if let Some(b) = cp.bytes(n as usize) {
                             props.push(b);
@@ -1861,6 +1970,8 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
             let mut p = Pb { b: fb, i: 0 };
             let mut name_id = None;
             let mut ret_id = None;
+            let mut recv_body = None;
+            let mut recv_id = None;
             // `Function.flags` has protobuf default PUBLIC FINAL (`6`), matching `parse_function`.
             let mut flags = 6u64;
             let mut params = Vec::new();
@@ -1873,6 +1984,14 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                     (9, 0) => flags = p.varint().unwrap_or(6),
                     (2, 0) => name_id = p.varint(), // name
                     (7, 0) => ret_id = p.varint(),  // return_type_id (type-table ref)
+                    // `Function.receiver_type` = 5, `receiver_type_id` = 8 — read off a klib the
+                    // reference compiler wrote for `class Holder { fun Int.memberExtFun() }`, whose
+                    // member carries exactly the tags 2, 7, 8, 172.
+                    (5, 2) => {
+                        let Some(len) = p.varint() else { break };
+                        recv_body = p.bytes(len as usize);
+                    }
+                    (8, 0) => recv_id = p.varint(),
                     (6, 2) => {
                         // value_parameter: ValueParameter.type_id = 4 (type-table ref)
                         if let Some(n) = p.varint() {
@@ -1922,69 +2041,17 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                             ret_nullable,
                             param_names,
                             param_defaults,
+                            receiver: builtin_type_ref(recv_body, recv_id, &tables, &fn_tparams),
+                            is_var: false,
+                            is_const: false,
                         });
                     }
                 }
             }
         }
         for pb_ in &props {
-            let mut prop_tparams = class_tparams.clone();
-            let formals = tables.type_params(
-                &type_param_bodies(pb_, MEMBER_TYPE_PARAMETER_FIELD),
-                &mut prop_tparams,
-            );
-            let mut p = Pb { b: pb_, i: 0 };
-            let mut name_id = None;
-            let mut ret_body = None;
-            let mut ret_id = None;
-            let mut legacy_flags = None;
-            let mut modern_flags = None;
-            while !p.at_end() {
-                let Some(tag) = p.varint() else { break };
-                match (tag >> 3, tag & 7) {
-                    (1, 0) => legacy_flags = p.varint(),
-                    (2, 0) => name_id = p.varint(),
-                    (3, 2) => {
-                        let Some(len) = p.varint() else { break };
-                        ret_body = p.bytes(len as usize);
-                    }
-                    // `Property.return_type_id` is field 9 (field 7 is the receiver_type_id — distinct
-                    // from `Function`, whose return_type_id is field 7). `val length: Int` → field 9 → Int.
-                    (9, 0) => ret_id = p.varint(),
-                    (11, 0) => modern_flags = p.varint(),
-                    (_, w) => {
-                        if p.skip(w).is_none() {
-                            break;
-                        }
-                    }
-                }
-            }
-            if let Some(ni) = name_id {
-                if let (Some(name), Some(ret)) = (
-                    strings.get(ni as usize).cloned(),
-                    builtin_type_ref(ret_body, ret_id, &tables, &prop_tparams),
-                ) {
-                    let ret_nullable = ret.nullable();
-                    let flags = modern_flags
-                        .or(legacy_flags)
-                        .unwrap_or(crate::metadata::property_flags::DEFAULT);
-                    members.push(BuiltinMember {
-                        name,
-                        params: vec![],
-                        ret,
-                        is_property: true,
-                        is_operator: false,
-                        is_infix: false,
-                        is_abstract: flags & crate::metadata::property_flags::MODALITY_MASK
-                            == crate::metadata::property_flags::MODALITY_ABSTRACT,
-                        formals,
-                        ret_nullable,
-                        // A property has no value parameters of its own; its accessors' are the
-                        // backend's to shape.
-                        param_names: Vec::new(),
-                        param_defaults: Vec::new(),
-                    });
-                }
+            if let Some(property) = builtin_property(pb_, &tables, &class_tparams) {
+                members.push(property);
             }
         }
         let is_nested = fqname
@@ -2010,7 +2077,7 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
         );
     }
     if let Some(package) = package {
-        out.functions = parse_builtin_package_functions(package, &strings, &qnames);
+        (out.functions, out.properties) = parse_builtin_package(package, &strings, &qnames);
     }
     out
 }
