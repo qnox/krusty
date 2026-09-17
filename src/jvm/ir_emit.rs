@@ -13335,6 +13335,25 @@ struct PropertyOperation<'a> {
     interface: bool,
 }
 
+/// One `try`'s protected region while it is being emitted.
+///
+/// The region covers everything lexically inside the `try` EXCEPT the inlined copies of that try's
+/// own `finally`. A `return` out of the body inlines such a copy in the middle of the region, so the
+/// open segment is closed ahead of it and a fresh one opened once the whole `return` has been
+/// emitted — which is usually empty, because a `return` ends its enclosing scope.
+///
+/// Nested `try`s are unaffected by each other: an inner finalizer copy is ordinary code as far as an
+/// outer region is concerned, and stays inside it.
+struct FinallyRegion {
+    /// The exact finalizer this region belongs to; regions are matched by IR identity, never by
+    /// nesting depth, so a `return` closes the region of the finalizer it is actually running.
+    finalizer: u32,
+    /// Segments closed so far.
+    segments: Vec<(Label, Label)>,
+    /// Start of the segment currently open, if one is.
+    open: Option<Label>,
+}
+
 struct Emitter<'a> {
     ir: &'a IrFile,
     cw: &'a mut ClassWriter,
@@ -13389,6 +13408,10 @@ struct Emitter<'a> {
     /// Active `finally` bodies, outermost first. A source-level control transfer executes these
     /// before leaving its protected region; the stack carries exact IR identities, not syntax.
     return_finalizers: Vec<u32>,
+    /// Protected-region accumulators for the active `try`s that have a `finally`, outermost first.
+    /// A copy of a try's own finalizer must not lie inside that try's own ranges, or an exception
+    /// raised while the finalizer runs re-enters the same handler and runs it a second time.
+    finally_regions: Vec<FinallyRegion>,
     /// A statement at the lexical tail of a loop body may branch directly to the loop's next
     /// iteration. This is an emitter control-flow target, not a semantic `continue` manufactured in
     /// common IR. Blocks pass it only to their terminal statement.
@@ -13438,6 +13461,7 @@ impl<'a> Emitter<'a> {
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,
             return_finalizers: Vec::new(),
+            finally_regions: Vec::new(),
             terminal_statement_target: None,
             generated_initializer: false,
         }
@@ -19529,6 +19553,65 @@ impl<'a> Emitter<'a> {
     /// `[start, end)` covers the body+store; each catch is an exception-table handler whose frame has
     /// the caught exception on the stack and the pre-`try` locals (the result temp/catch var read as
     /// `top` there, since an exception may occur before they are assigned).
+    /// Start a protected segment for `finalizer` at the current offset.
+    fn open_finally_segment(&mut self, finalizer: u32, code: &mut CodeBuilder) {
+        let Some(index) = self
+            .finally_regions
+            .iter()
+            .rposition(|region| region.finalizer == finalizer && region.open.is_none())
+        else {
+            return;
+        };
+        let label = code.new_label();
+        self.finally_regions[index].open = Some(label);
+        self.bind(label, code);
+    }
+
+    /// End `finalizer`'s open protected segment at the current offset. A segment that turns out to
+    /// be empty is dropped when the table is resolved: an empty range protects nothing, and kotlinc
+    /// emits no entry for one.
+    fn close_finally_segment(&mut self, finalizer: u32, code: &mut CodeBuilder) {
+        let Some(index) = self
+            .finally_regions
+            .iter()
+            .rposition(|region| region.finalizer == finalizer && region.open.is_some())
+        else {
+            return;
+        };
+        let label = code.new_label();
+        let start = self.finally_regions[index]
+            .open
+            .take()
+            .expect("the region was selected for having an open segment");
+        self.finally_regions[index].segments.push((start, label));
+        self.bind(label, code);
+    }
+
+    /// Reopen every active region a control transfer closed. Called once the transfer is fully
+    /// emitted, so the copies of every finalizer it ran are outside their own regions.
+    fn reopen_finally_segments(&mut self, code: &mut CodeBuilder) {
+        for finalizer in self.return_finalizers.clone() {
+            self.open_finally_segment(finalizer, code);
+        }
+    }
+
+    /// The segments of `finalizer`'s region, closed at the current offset.
+    fn take_finally_region(
+        &mut self,
+        finalizer: u32,
+        code: &mut CodeBuilder,
+    ) -> Vec<(Label, Label)> {
+        self.close_finally_segment(finalizer, code);
+        let Some(index) = self
+            .finally_regions
+            .iter()
+            .rposition(|region| region.finalizer == finalizer)
+        else {
+            return Vec::new();
+        };
+        self.finally_regions.remove(index).segments
+    }
+
     fn emit_try(
         &mut self,
         expression: u32,
@@ -19566,6 +19649,11 @@ impl<'a> Emitter<'a> {
             self.diverges(body)
         };
         if let Some(finalizer) = finally {
+            self.finally_regions.push(FinallyRegion {
+                finalizer,
+                segments: Vec::new(),
+                open: Some(start),
+            });
             self.return_finalizers.push(finalizer);
         }
         if is_stmt || body_diverges {
@@ -19575,8 +19663,11 @@ impl<'a> Emitter<'a> {
             self.emit_value(body, code);
             store(rt, result_slot.unwrap(), code);
         }
-        if finally.is_some() {
+        if let Some(finalizer) = finally {
             self.return_finalizers.pop();
+            // The normal-path copy of this finalizer is emitted next and must lie outside its own
+            // region.
+            self.close_finally_segment(finalizer, code);
         }
         self.bind(end, code);
         let mut after_reachable = false;
@@ -19606,7 +19697,6 @@ impl<'a> Emitter<'a> {
         // code (normal-path, per-catch, or its own) — otherwise an exception thrown inside an inlined
         // finally re-enters the handler and the finally runs twice. Collect each catch body's range
         // (`[cbody_start, cbody_end)`, ending before that catch's inlined finally).
-        let mut fin_ranges: Vec<(Label, Label)> = vec![(start, end)];
         for c in catches {
             let handler = code.new_label();
             // A handler is entered over the exception edge, not by a branch — and a diverging `try`
@@ -19626,6 +19716,9 @@ impl<'a> Emitter<'a> {
                 (code.bytes.len() <= u16::MAX as usize).then_some(code.bytes.len() as u16);
             let cbody_start = code.new_label();
             self.bind(cbody_start, code);
+            if let Some(finalizer) = finally {
+                self.open_finally_segment(finalizer, code);
+            }
             let cbody_diverges = if is_stmt {
                 self.discarding_diverges(c.body)
             } else {
@@ -19648,6 +19741,10 @@ impl<'a> Emitter<'a> {
             // but the catch's own inlined finally (below) is not.
             let cbody_end = code.new_label();
             self.bind(cbody_end, code);
+            if let Some(finalizer) = finally {
+                // As on the normal path: this catch's own inlined copy follows and stays outside.
+                self.close_finally_segment(finalizer, code);
+            }
             if self.record_locals {
                 if let (Some(name), Some(start_pc)) = (c.name.as_deref(), local_start) {
                     let end_pc = code.bytes.len().min(u16::MAX as usize) as u16;
@@ -19659,9 +19756,6 @@ impl<'a> Emitter<'a> {
                         &local_variable_desc(exc_ty),
                     );
                 }
-            }
-            if finally.is_some() {
-                fin_ranges.push((cbody_start, cbody_end));
             }
             if !cbody_diverges {
                 if let Some(f) = finally {
@@ -19687,6 +19781,7 @@ impl<'a> Emitter<'a> {
         // `finally` then re-throws. It protects only the body + catch bodies (`fin_ranges`), NOT the
         // inlined finally code — which lies past those ranges, so it doesn't re-catch itself.
         if let Some(f) = finally {
+            let mut fin_ranges = self.take_finally_region(f, code);
             let fin_handler = code.new_label();
             // Exception edge — see the `catch` handler above; this one guards the body and every
             // catch body (`fin_ranges`), which are complete by now.
@@ -19700,6 +19795,11 @@ impl<'a> Emitter<'a> {
             // keyword — mark it before the store so both copies open on the same line.
             debug_lines::mark_block_entry(self.ir, f, code);
             store(thr_ty, tslot, code);
+            // kotlinc protects the handler's own entry — everything ahead of the copy of the
+            // finalizer it introduces — with a range of its own.
+            let handler_protected_end = code.new_label();
+            self.bind(handler_protected_end, code);
+            fin_ranges.push((fin_handler, handler_protected_end));
             // The caught exception is LIVE in `tslot` across the whole inlined `finally` (it is re-raised
             // after it). Register it so any StackMapTable frame recorded WHILE emitting the finally —
             // e.g. a `finally` that itself contains a `try`/`catch` — lists `tslot` as an initialized
