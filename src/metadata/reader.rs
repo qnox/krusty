@@ -1051,6 +1051,10 @@ pub struct BuiltinMember {
     pub is_var: bool,
     /// A property declared `const`. Functions never set it.
     pub is_const: bool,
+    /// Source visibility, from the declaration's own flag word. The Kotlin/Native stdlib's linkdata
+    /// carries 293 private, 67 protected and 84 internal member functions; reporting them all as
+    /// public would let a source call declarations the library does not expose.
+    pub visibility: Visibility,
 }
 
 /// One top-level function declared by a `.kotlin_builtins` package fragment. Unlike a class member,
@@ -1806,6 +1810,7 @@ fn builtin_property(
         receiver: builtin_type_ref(recv_body, recv_id, tables, &tparams),
         is_var: flags & property_flags::IS_VAR != 0,
         is_const: flags & property_flags::IS_CONST != 0,
+        visibility: builtin_declaration_visibility(flags),
     })
 }
 
@@ -2190,6 +2195,7 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                             receiver: builtin_type_ref(recv_body, recv_id, &tables, &fn_tparams),
                             is_var: false,
                             is_const: false,
+                            visibility: builtin_declaration_visibility(flags),
                         });
                     }
                 }
@@ -2238,6 +2244,16 @@ pub fn builtin_class_kind(flags: u64) -> TypeKind {
 }
 
 pub fn builtin_class_visibility(flags: u64) -> Visibility {
+    builtin_declaration_visibility(flags)
+}
+
+/// Source visibility from a metadata flag word, bits 1-3.
+///
+/// One decoder for every declaration kind: a `Class`, a `Function` and a `Property` all carry
+/// visibility in the same three bits, which is why the property flag constants can name a shared
+/// [`crate::metadata::property_flags::VISIBILITY_MASK`]. `PRIVATE_TO_THIS` reads as `Private` —
+/// it is a stricter private, and nothing outside the declaration may reach either.
+pub fn builtin_declaration_visibility(flags: u64) -> Visibility {
     match (flags >> 1) & 0x7 {
         1 | 4 => Visibility::Private,
         2 => Visibility::Protected,
