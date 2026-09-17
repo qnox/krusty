@@ -115,6 +115,20 @@ pub fn library_type(internal: TypeName, declaration: BuiltinClass) -> LibraryTyp
     let has_no_arg_constructor = constructors
         .iter()
         .any(|constructor| constructor.params.is_empty());
+    // A value class's underlying type is the DECLARED type of its sole underlying property, which
+    // the declaration already carries as an ordinary property. Erasing it is a target's business —
+    // the JVM provider fills this field with its own erasure — so the declared type is what a
+    // carrier-independent read can honestly report.
+    let value_underlying = declaration
+        .value_underlying_property
+        .as_ref()
+        .and_then(|name| {
+            declaration
+                .members
+                .iter()
+                .find(|member| member.is_property && &member.name == name)
+        })
+        .map(|member| builtin_ty(&member.ret, &bounds));
     LibraryType {
         access: declaration.visibility.into(),
         is_kotlin: true,
@@ -139,11 +153,12 @@ pub fn library_type(internal: TypeName, declaration: BuiltinClass) -> LibraryTyp
         members: Vec::new(),
         companion: Vec::new(),
         constants: HashMap::new(),
-        sam_eligible: false,
+        // A Kotlin interface is SAM-convertible only when it was declared `fun interface`.
+        sam_eligible: declaration.is_fun_interface,
         callable_signature: None,
         callable_signatures: Vec::new(),
-        value_underlying: None,
-        value_underlying_property: None,
+        value_underlying,
+        value_underlying_property: declaration.value_underlying_property,
         alias_target: None,
         own_type_parameter_count: type_parameters.type_params.len(),
         type_parameters,
