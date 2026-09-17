@@ -407,3 +407,58 @@ fun box(): String {\n\
 }\n";
     assert_eq!(run(SRC), "OK");
 }
+
+/// A LOCAL `tailrec fun` gets the loop transform too.
+///
+/// The rewrite is driven from the declaration lowering in `sink.rs`, and a local function reaches
+/// the IR by another path that never ran it — so `tailrec fun` inside a function kept its self-call
+/// and overflowed the stack at the depth the modifier exists to make safe. kotlinc runs all of
+/// these flat.
+///
+/// A local whose self-call carries CAPTURES is still left recursing, and the arity check is what
+/// says so rather than a rule written here: a local's IR parameters lead with its captures while
+/// `BodySlots::first_parameter` points past them, so the frame counts the DECLARED parameters and
+/// `is_self_call` rejects a call whose argument count includes the captures. That leaves the call
+/// alone instead of stepping it from the wrong slot — the failure mode is a missed optimization,
+/// never a wrong value. `a_local_tailrec_that_captures_is_left_recursing` pins that boundary.
+///
+/// Every expectation is kotlinc's, taken by compiling and running the same `box()` under it.
+#[test]
+fn a_local_tailrec_runs_flat() {
+    const SRC: &str = "fun counted(): Int {\n\
+    tailrec fun go(n: Int, acc: Int): Int = if (n == 0) acc else go(n - 1, acc + 1)\n\
+    return go(1000000, 0)\n\
+}\n\
+fun unitReturning(): Int {\n\
+    val hits = intArrayOf(0)\n\
+    tailrec fun go(n: Int, seen: Int): Int = if (n == 0) seen else go(n - 1, seen + 1)\n\
+    hits[0] = go(1000000, 0)\n\
+    return hits[0]\n\
+}\n\
+fun box(): String {\n\
+    if (counted() != 1000000) return \"fail counted: \" + counted()\n\
+    if (unitReturning() != 1000000) return \"fail unit: \" + unitReturning()\n\
+    return \"OK\"\n\
+}\n";
+    let out = run(SRC);
+    assert_eq!(out, "OK");
+}
+
+/// The boundary: a local `tailrec` that CAPTURES is left recursing rather than stepped wrongly.
+///
+/// This is not an aspiration — it is what the arity check produces, and the test states it so the
+/// next change to the frame layout has to confront it. A million deep would overflow, so the depth
+/// here is one a recursive call survives: the point is that the answer is RIGHT, not that the stack
+/// is flat.
+#[test]
+fn a_local_tailrec_that_captures_is_left_recursing() {
+    const SRC: &str = "fun test(): Int {\n\
+    var seen = 0\n\
+    tailrec fun go(n: Int) { if (n > 0) { seen = seen + 1; go(n - 1) } }\n\
+    go(1000)\n\
+    return seen\n\
+}\n\
+fun box(): String = if (test() == 1000) \"OK\" else \"fail \" + test()\n";
+    let out = run(SRC);
+    assert_eq!(out, "OK");
+}

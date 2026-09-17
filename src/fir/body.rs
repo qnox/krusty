@@ -1856,6 +1856,11 @@ pub enum FirStatementKind {
         declaration: BodyLocalCallableDeclarationId,
         callable: LocalCallableId,
         suspend: bool,
+        /// The source declared this local function `tailrec`. Carried like `suspend` because it is
+        /// a fact about the DECLARATION that lowering needs and cannot recover from the body: a
+        /// self-call in a tail position looks the same whether or not the author asked for the
+        /// loop, and only this says the constant-stack promise was made.
+        tailrec: bool,
         body: Box<FirBody>,
     },
 }

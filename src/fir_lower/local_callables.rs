@@ -7,6 +7,8 @@ use crate::fir::{
 use crate::ir::{Callee, ExprId, IrExpr, IrFunction};
 use crate::types::Ty;
 
+use super::tailrec::{finish_tailrec_body, Frame as TailrecFrame};
+
 use super::checked_arguments::{
     materialize_checked_arguments, CheckedArgumentSlot, CheckedArgumentValue,
 };
@@ -28,6 +30,9 @@ impl BodyLowering<'_> {
                 declaration,
                 callable,
                 suspend,
+                // Read where it is used, once the borrow of `self.body` has ended: lowering the
+                // nested body needs `&mut self`, so the statement is matched a second time below.
+                tailrec: _,
                 body,
             } = &statement.kind
             else {
@@ -90,7 +95,7 @@ impl BodyLowering<'_> {
                         external_capture_arguments: None,
                     },
                 ))?;
-            let FirStatementKind::LocalFunction { body, .. } = &self
+            let FirStatementKind::LocalFunction { body, tailrec, .. } = &self
                 .body
                 .statement(statement)
                 .ok_or(FirLoweringFailure::MissingStatement(statement))?
@@ -98,7 +103,8 @@ impl BodyLowering<'_> {
             else {
                 unreachable!("local function declaration changed during FIR lowering")
             };
-            let lowered = self.lower_nested_function(body, function, false, false)?;
+            let tailrec = *tailrec;
+            let lowered = self.lower_nested_function(body, function, false, false, tailrec)?;
             self.ir.functions[function as usize].body = Some(lowered.callable);
         }
         Ok(())
@@ -357,7 +363,8 @@ impl BodyLowering<'_> {
             .expect("a body always has a local callable scope")
             .insert(callable, realization.clone());
         assert!(previous.is_none(), "a FIR lambda callable is declared once");
-        let lowered = self.lower_nested_function(body, function, unit_as_value, true)?;
+        // A lambda carries no `tailrec`: the modifier is a function declaration's.
+        let lowered = self.lower_nested_function(body, function, unit_as_value, true, false)?;
         if super::inline_returns::reachable_checked_returns(self.ir, lowered.callable)
             .iter()
             .any(|(_, depth)| *depth > 0)
@@ -941,6 +948,7 @@ impl BodyLowering<'_> {
         function: crate::ir::FunId,
         unit_as_value: bool,
         retain_inline_template: bool,
+        tailrec: bool,
     ) -> Result<NestedCallableBodies, FirLoweringFailure> {
         #[cfg(feature = "trace")]
         super::body_trace::trace_checked_body(body, self.index);
@@ -1030,14 +1038,33 @@ impl BodyLowering<'_> {
         } else {
             None
         };
-        let callable = finish_callable_body(
-            nested.ir,
-            roots,
-            result,
-            body.has_implicit_return(),
-            unit_as_value,
-            body_origin(body),
-        )?;
+        // A `tailrec` LOCAL gets the same loop transform a declared one gets in `sink.rs`. It
+        // was never applied here, so `tailrec fun` inside a function kept its self-call and
+        // overflowed the stack at the depth the modifier exists to make safe.
+        //
+        // The frame's parameter COUNT is the declared one, not the IR list's. A local's IR
+        // parameters lead with its captures, and `BodySlots::first_parameter` already points past
+        // them — so counting the whole list would have the loop step write from the wrong slot.
+        // `is_self_call` compares the call's argument count against this, so a mismatch leaves the
+        // call alone rather than stepping it wrongly.
+        let declared_parameters = body
+            .parameters()
+            .len()
+            .saturating_sub(body.context_value_count() as usize);
+        let frame = tailrec
+            .then(|| TailrecFrame::of_body(function, nested.body_slots(), declared_parameters));
+        let callable = if let Some(frame) = frame {
+            finish_tailrec_body(nested.ir, roots, frame, body_origin(body))?
+        } else {
+            finish_callable_body(
+                nested.ir,
+                roots,
+                result,
+                body.has_implicit_return(),
+                unit_as_value,
+                body_origin(body),
+            )?
+        };
         let published_local_callables = std::mem::take(&mut nested.published_local_callables);
         drop(nested);
         self.published_local_callables = published_local_callables;
