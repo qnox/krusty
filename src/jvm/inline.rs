@@ -801,9 +801,18 @@ pub fn relocate_insns(insns: &mut [Insn], src_cp: &[C], cw: &mut ClassWriter) ->
             continue;
         };
         if *op == 0xba {
-            // invokedynamic — unrelocatable without bootstrap-method handling. UNREACHABLE for an inline
-            // body: kotlinc compiles lambdas inside `inline` functions as anonymous-class singletons
-            // (`getstatic …$N.INSTANCE`), never `invokedynamic`, precisely so the inliner can copy them.
+            // invokedynamic — unrelocatable without bootstrap-method handling, so the splice declines
+            // and the caller emits a real call.
+            //
+            // A lambda inside an `inline` function is NOT why: kotlinc compiles those as
+            // anonymous-class singletons (`getstatic …$N.INSTANCE`) precisely so an inliner can copy
+            // them. STRING CONCATENATION is: on JVM target 9 and above it compiles to
+            // `invokedynamic makeConcatWithConstants`, so any classpath inline body that builds a
+            // string reaches here and is not inlined, where kotlinc inlines it.
+            //
+            // Relocating one needs the DEFINING class's `BootstrapMethods` table, which `MethodCode`
+            // does not carry, plus `MethodHandle`/`MethodType` support in `relocate_const`;
+            // `ClassWriter::add_bootstrap` already dedupes the host-side entry.
             return None;
         }
         // `off` is relative to the opcode; in `operands` (opcode stripped) it is `off - 1`.
