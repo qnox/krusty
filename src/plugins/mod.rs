@@ -82,6 +82,8 @@ pub struct FrontendCallable {
     pub owner: FrontendCallableOwner,
     pub name: String,
     pub params: Vec<Ty>,
+    /// Canonical source-visible identities, exactly parallel to `params`.
+    pub param_names: Vec<String>,
     pub ret: Ty,
     pub generic_sig: Option<crate::libraries::GenericSig>,
     pub plugin_expression: Option<crate::libraries::PluginExpressionDeclaration>,

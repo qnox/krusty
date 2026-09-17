@@ -2717,7 +2717,7 @@ fn a_serializable_class_publishes_the_exact_deserialization_constructor() {
             types: vec![
                 Ty::Int,
                 Ty::Int,
-                Ty::String,
+                Ty::nullable(Ty::String),
                 Ty::nullable(Ty::obj(
                     "kotlinx/serialization/internal/SerializationConstructorMarker",
                 )),
@@ -2738,6 +2738,21 @@ fn a_serializable_class_publishes_the_exact_deserialization_constructor() {
         expected,
         "krusty constructor metadata"
     );
+    if built.krusty_bytes != built.reference_bytes {
+        let (want, got) = (structure(&built.reference), structure(&built.krusty));
+        let first = want
+            .iter()
+            .zip(&got)
+            .position(|(expected, actual)| expected != actual)
+            .unwrap_or_else(|| want.len().min(got.len()));
+        panic!(
+            "serialized Point differs from kotlinc ({} B vs {} B); first structural difference at line {first}\n  kotlinc: {:?}\n  krusty:  {:?}",
+            built.krusty_bytes.len(),
+            built.reference_bytes.len(),
+            want.get(first),
+            got.get(first),
+        );
+    }
 }
 
 /// Everything `@Metadata` says about a generated serializer, in kotlinc's order.

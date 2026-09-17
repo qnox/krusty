@@ -14,6 +14,17 @@ const SERIAL_NAME_FQ: &str = "kotlinx/serialization/SerialName";
 const CONTEXTUAL_FQ: &str = "kotlinx/serialization/Contextual";
 const USE_CONTEXTUAL_SERIALIZATION_FQ: &str = "kotlinx/serialization/UseContextualSerialization";
 
+/// `write$Self` is a Kotlin static helper, not merely a static JVM realization.
+pub(super) fn write_self_annotations() -> DeclarationAnnotations {
+    DeclarationAnnotations::new(vec![RetainedAnnotation {
+        retention: AnnotationRetention::Runtime,
+        annotation: AppliedAnnotation {
+            internal: type_name("kotlin/jvm/JvmStatic"),
+            values: Vec::new(),
+        },
+    }])
+}
+
 pub(super) fn custom_serializer_of(
     ctx: &PluginContext,
     ir: &IrFile,
@@ -96,4 +107,19 @@ pub(super) fn generated_serializer_annotations() -> DeclarationAnnotations {
             ],
         },
     }])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_self_annotations;
+    use crate::types::type_name;
+
+    #[test]
+    fn write_self_has_exact_jvm_static_annotation() {
+        let annotations = write_self_annotations();
+        let applications = annotations.applications().collect::<Vec<_>>();
+        assert_eq!(applications.len(), 1);
+        assert_eq!(applications[0].internal, type_name("kotlin/jvm/JvmStatic"));
+        assert!(applications[0].values.is_empty());
+    }
 }

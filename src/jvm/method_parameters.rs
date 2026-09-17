@@ -81,13 +81,22 @@ pub(super) fn function(
     physical_parameters: &[Ty],
     holder_receiver: Option<TypeName>,
 ) -> Vec<MethodParameter> {
-    if ir.synthetic_methods.contains(&function) {
+    let generated = ir.generated_function_publication(function);
+    if ir.synthetic_methods.contains(&function) && generated.is_none() {
         return Vec::new();
     }
-    let Some(info) = ir.fn_params.get(&function) else {
+    let info = ir.fn_params.get(&function);
+    let mut names = if let Some(publication) = generated {
+        assert!(
+            info.is_none(),
+            "a generated publication is the function's sole parameter identity contract"
+        );
+        publication.parameter_names.clone()
+    } else if let Some(info) = info {
+        info.names.clone()
+    } else {
         return Vec::new();
     };
-    let mut names = info.names.clone();
     if names.len() + 1 == physical_parameters.len()
         && physical_parameters.last().is_some_and(|ty| {
             ty.obj_internal()
@@ -111,7 +120,7 @@ pub(super) fn function(
         .map(|(index, name)| {
             parameter(
                 name,
-                u16::from(info.is_compiler_generated(index)) * SYNTHETIC,
+                u16::from(info.is_some_and(|info| info.is_compiler_generated(index))) * SYNTHETIC,
             )
         })
         .collect::<Vec<_>>();

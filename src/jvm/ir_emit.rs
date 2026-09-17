@@ -25,6 +25,7 @@ mod bottom_values;
 mod call_operands;
 mod enum_metadata;
 mod field_write;
+mod function_debug;
 mod inline_body_emission;
 mod interface_compatibility;
 mod member_schedule;
@@ -1118,16 +1119,8 @@ fn build_class_metadata(
             !accessor_shaped && !data_method_names.contains(n) && !value_method_names.contains(n)
         })
         .collect();
-    // A GENERATED class states its own function record on itself: which of its members Kotlin
-    // metadata describes, and in which order. The two differ from what the class emits — a
-    // non-generic `$serializer` emits `typeParametersSerializers` but does not describe it.
-    let published = c.published_generated_functions.as_deref();
-    if let Some(described) = published {
-        declared_fids.retain(|fid| described.contains(fid));
-        declared_fids.sort_by_key(|fid| described.iter().position(|described| described == fid));
-    } else {
-        declared_fids.sort_by_key(|fid| ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX));
-    }
+    declared_fids.sort_by_key(|fid| ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX));
+    let generated_publication = ir.generated_member_publication(c.fq_name_id());
     // A VALUE-CLASS-INVOLVED MEMBER is now DESCRIBED. The writer could always produce kotlinc's exact
     // payload for one (the byte-identity tests proved it); what was missing was the READ half, and the
     // classpath value-class RETURN model supplies it — `MetadataCallFacts::value_class_ret` reports
@@ -1157,19 +1150,29 @@ fn build_class_metadata(
                 && !value_class_is_readable(ir, fq_name)
         })
     };
-    if declared_fids.iter().any(|fid| {
-        ir.vc_declared_sigs
-            .get(fid)
-            .is_some_and(|(_, params, ret)| {
-                params
-                    .iter()
-                    .chain(std::iter::once(ret))
-                    .any(mentions_undescribed_value_class)
-            })
-    }) || c
-        .properties
+    if declared_fids
         .iter()
-        .any(|p| p.getter_jvm_name.is_some() && mentions_undescribed_value_class(&p.ty))
+        .copied()
+        .chain(
+            generated_publication
+                .into_iter()
+                .flat_map(|publication| publication.functions.iter())
+                .filter(|member| member.metadata.is_some())
+                .map(|member| member.function),
+        )
+        .any(|fid| {
+            ir.vc_declared_sigs
+                .get(&fid)
+                .is_some_and(|(_, params, ret)| {
+                    params
+                        .iter()
+                        .chain(std::iter::once(ret))
+                        .any(mentions_undescribed_value_class)
+                })
+        })
+        || c.properties
+            .iter()
+            .any(|p| p.getter_jvm_name.is_some() && mentions_undescribed_value_class(&p.ty))
     {
         return None;
     }
@@ -1806,7 +1809,7 @@ fn build_class_metadata(
             .collect::<Vec<_>>()
     };
     let class_ty = Ty::obj(&c.fq_name());
-    let methods: Vec<FnMeta> = if c.is_data {
+    let inferred_methods: Vec<FnMeta> = if c.is_data {
         let field_tys: Vec<Ty> = data_component_fields.iter().map(|f| f.ty).collect();
         let mut m: Vec<FnMeta> = data_component_fields
             .iter()
@@ -2002,6 +2005,14 @@ fn build_class_metadata(
     } else {
         declared_methods()
     };
+    let mut methods = match generated_publication.map(|publication| publication.metadata_scope) {
+        Some(crate::ir::IrGeneratedFunctionMetadataScope::Exclusive) => Vec::new(),
+        Some(crate::ir::IrGeneratedFunctionMetadataScope::Additive) | None => inferred_methods,
+    };
+    let inferred_method_count = methods.len();
+    if let Some(publication) = generated_publication {
+        methods.extend(super::generated_member_metadata::functions(ir, publication));
+    }
     let type_aliases = ir
         .class_type_aliases
         .get(&c.fq_name_id())
@@ -2027,24 +2038,56 @@ fn build_class_metadata(
                 .enumerate()
                 .map(|(index, order)| (order, ClassMemberOrder::Property(index))),
         );
-        ordered.extend(
-            declared_fids
+        if !matches!(
+            generated_publication.map(|publication| publication.metadata_scope),
+            Some(crate::ir::IrGeneratedFunctionMetadataScope::Exclusive)
+        ) {
+            ordered.extend(
+                declared_fids
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(index, fid)| {
+                        (
+                            ir.fn_source_order.get(&fid).copied().unwrap_or(u32::MAX),
+                            ClassMemberOrder::Function(index),
+                        )
+                    }),
+            );
+        }
+        let generated_order_base = if matches!(
+            generated_publication.map(|publication| publication.metadata_scope),
+            Some(crate::ir::IrGeneratedFunctionMetadataScope::Exclusive)
+        ) {
+            0
+        } else {
+            ordered
                 .iter()
-                .copied()
-                .enumerate()
-                .map(|(index, fid)| {
-                    let order = match published {
-                        // The stated list's own index, in the same numbering a generated property
-                        // uses for `IrProperty::source_order`.
-                        Some(described) => described
-                            .iter()
-                            .position(|described| *described == fid)
-                            .map_or(u32::MAX, |order| order as u32),
-                        None => ir.fn_source_order.get(&fid).copied().unwrap_or(u32::MAX),
-                    };
-                    (order, ClassMemberOrder::Function(index))
-                }),
-        );
+                .map(|(order, _)| *order)
+                .chain(
+                    type_aliases
+                        .iter()
+                        .map(|alias| u32::try_from(alias.decl_order).unwrap_or(u32::MAX)),
+                )
+                .filter(|order| *order != u32::MAX)
+                .max()
+                .map_or(0, |order| order.saturating_add(1))
+        };
+        if let Some(publication) = generated_publication {
+            ordered.extend(
+                publication
+                    .functions
+                    .iter()
+                    .filter(|member| member.metadata.is_some())
+                    .enumerate()
+                    .map(|(index, _)| {
+                        (
+                            generated_order_base.saturating_add(index as u32),
+                            ClassMemberOrder::Function(inferred_method_count + index),
+                        )
+                    }),
+            );
+        }
         ordered.extend(type_aliases.iter().enumerate().map(|(index, alias)| {
             (
                 u32::try_from(alias.decl_order).unwrap_or(u32::MAX),
@@ -2722,68 +2765,13 @@ fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_, '_>, cw: &mut ClassWriter)
     }
 }
 
-/// One synthesized value-class member's debug shape: `(jvm name, jvm descriptor, LocalVariableTable
-/// entries as `(name, descriptor, slot)`)`.
+/// One synthesized value-class member's JVM name, descriptor, and local-variable table entries.
 type VcDebugMethod = (String, String, Vec<(String, String, u16)>);
-
-/// Attach kotlinc's `LineNumberTable` + `LocalVariableTable` to a class's DECLARED methods (as opposed
-/// to the synthesized ctor/accessors handled by [`attach_synth_debug_tables`]). kotlinc maps a method's
-/// table to its own `fun` line — recorded per-FunId by the lowering — and lists `this` plus each
-/// parameter for the whole method.
-fn attach_declared_function_debug(ir: &IrFile, fid: u32, owner: &str, cw: &mut ClassWriter) {
-    let Some(f) = ir.functions.get(fid as usize) else {
-        return;
-    };
-    let Some(&line) = ir.fn_decl_lines.get(&fid) else {
-        return;
-    };
-    if f.body.is_none() {
-        return;
-    }
-    let this_desc = format!("L{owner};");
-    // `aload <slot>` byte length: 1 (aload_0..3), 2 (aload u1), or 4 (wide aload u2).
-    let aload_len = |slot: u16| -> u16 {
-        if slot <= 3 {
-            1
-        } else if slot <= 255 {
-            2
-        } else {
-            4
-        }
-    };
-    let param_tys = jvm_function_params(ir, fid);
-    let ret = jvm_declared_ty(&f.ret);
-    let desc = method_descriptor(&param_tys, ret);
-    let mut locals: Vec<(String, String, u16)> = Vec::new();
-    let mut slot = 0u16;
-    if !f.is_static {
-        locals.push(("this".to_string(), this_desc, 0));
-        slot = 1;
-    }
-    // kotlinc attributes the `fun` line to the first instruction of the BODY, not to the
-    // `checkNotNullParameter` guards it emits ahead of it — so the entry starts past that
-    // prologue, measured the same way the constructor's is.
-    let mut body_pc = 0u16;
-    for (i, t) in param_tys.iter().enumerate() {
-        let name = ir
-            .param_names(fid)
-            .and_then(|ns| ns.get(i).cloned())
-            .or_else(|| f.param_checks.get(i).and_then(|n| n.clone()))
-            .unwrap_or_else(|| format!("p{i}"));
-        if let Some(Some(guarded)) = f.param_checks.get(i) {
-            // guard = aload(slot) + ldc(param-name String) + invokestatic checkNotNullParameter(3)
-            body_pc += aload_len(slot) + cw.string_ldc_len(guarded).unwrap_or(2) + 3;
-        }
-        locals.push((name, crate::jvm::names::type_descriptor(*t), slot));
-        slot += slot_words(*t);
-    }
-    cw.set_method_debug(&f.name, &desc, Some((body_pc, line)), &locals);
-}
 
 fn attach_declared_method_debug(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
     let owner = c.fq_name();
     for &fid in &c.methods {
-        attach_declared_function_debug(ir, fid, &owner, cw);
+        function_debug::attach_declared_function_debug(ir, fid, &owner, cw);
     }
 }
 
@@ -4190,7 +4178,7 @@ fn emit_pass(
             continue;
         }
         emit_method_maybe_rescued(ir, i as u32, facade, facade, &mut cw, false, env, rescued);
-        attach_declared_function_debug(ir, i as u32, facade, &mut cw);
+        function_debug::attach_declared_function_debug(ir, i as u32, facade, &mut cw);
         facade_has_method = true;
         // A PARAMETERLESS `fun main()` is not a JVM entry point on its own: the launcher looks for
         // `main([Ljava/lang/String;)V`, and the no-arg form is only recognized by JEP 445 (Java 21+
@@ -11325,7 +11313,11 @@ fn emit_method_inner_with_holder(
     let ret = jvm_declared_ty(&f.ret);
     let mut e = Emitter::new(ir, cw, env, owner, facade, ret, [body]);
     // Suspend lowering does not preserve source-local expression IDs.
-    e.record_locals = (ir.fn_decl_lines.contains_key(&fid) || ir.fn_debug_locals.contains(&fid))
+    e.record_locals = (ir.fn_decl_lines.contains_key(&fid)
+        || ir.fn_debug_locals.contains(&fid)
+        || ir
+            .generated_function_publication(fid)
+            .is_some_and(|publication| publication.debug.records_locals()))
         && !ir.suspend_funs.contains(&fid);
     if instance {
         e.slots.insert(0, (0, Ty::obj(owner)));
@@ -11567,6 +11559,14 @@ fn emit_method_inner_with_holder(
     // stable and reflection/debug tooling still expects `$completion` (plus the declared receiver and
     // arguments) in the LocalVariableTable.
     if e.record_locals || ir.suspend_funs.contains(&fid) || holder_receiver.is_some() {
+        let generated_parameters = ir.generated_function_publication(fid);
+        if let Some(publication) = generated_parameters {
+            assert_eq!(
+                publication.parameter_names.len(),
+                param_tys.len(),
+                "generated debug parameter identities exactly match physical arity"
+            );
+        }
         if instance {
             let this_desc = format!("L{owner};");
             let receiver_name = if holder_receiver.is_some() {
@@ -11580,9 +11580,9 @@ fn emit_method_inner_with_holder(
         }
         let mut slot = u16::from(instance);
         for (i, t) in param_tys.iter().enumerate() {
-            let pname = ir
-                .param_names(fid)
-                .and_then(|ns| ns.get(i).cloned())
+            let pname = generated_parameters
+                .map(|publication| publication.parameter_names[i].clone())
+                .or_else(|| ir.param_names(fid).and_then(|ns| ns.get(i).cloned()))
                 .or_else(|| f.param_checks.get(i).and_then(|n| n.clone()))
                 .unwrap_or_else(|| format!("p{i}"));
             let pdesc = local_variable_desc(*t);
@@ -20137,7 +20137,7 @@ fn boxed_descriptor(t: Ty) -> String {
 /// semantic SAM and the provider-supplied method spelling. Arrays are references just like objects,
 /// while primitive and `void` spellings are not. Keeping this tiny predicate shared by parameter and
 /// return specialization prevents the two halves of a LambdaMetafactory boundary from drifting.
-fn descriptor_is_reference(descriptor: &str) -> bool {
+pub(super) fn descriptor_is_reference(descriptor: &str) -> bool {
     descriptor.starts_with('L') || descriptor.starts_with('[')
 }
 
