@@ -16350,7 +16350,7 @@ impl<'a> Emitter<'a> {
                             ),
                         }
                     }
-                    crate::ir::IrIntrinsic::PrimitiveCompare { operand } => {
+                    crate::ir::IrIntrinsic::PrimitiveCompare { operand, .. } => {
                         let receiver = dispatch_receiver
                             .expect("checked primitive compare has a dispatch receiver");
                         let [argument] = args.as_slice() else {
@@ -19232,7 +19232,11 @@ impl<'a> Emitter<'a> {
         let IrExpr::Call {
             callee:
                 Callee::Intrinsic {
-                    operation: crate::ir::IrIntrinsic::PrimitiveCompare { .. },
+                    operation:
+                        crate::ir::IrIntrinsic::PrimitiveCompare {
+                            relational_operator: true,
+                            ..
+                        },
                     ..
                 },
             dispatch_receiver: Some(receiver),

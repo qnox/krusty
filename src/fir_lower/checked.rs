@@ -1248,6 +1248,7 @@ pub(super) fn lower_fir_intrinsic(operation: &crate::fir::FirIntrinsic) -> crate
         crate::fir::FirIntrinsic::PrimitiveCompare { operand } => {
             crate::ir::IrIntrinsic::PrimitiveCompare {
                 operand: operand.get(),
+                relational_operator: false,
             }
         }
         crate::fir::FirIntrinsic::CoroutineContext => crate::ir::IrIntrinsic::CoroutineContext,

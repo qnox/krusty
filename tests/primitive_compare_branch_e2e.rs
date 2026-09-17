@@ -32,6 +32,29 @@ fn a_primitive_comparison_is_byte_identical_to_kotlinc() {
     result.expect("PrimitiveCompareKt byte-identical to kotlinc");
 }
 
+/// An explicit floating `compareTo` uses total ordering, unlike the relational operator's IEEE
+/// comparison. The inner call must not be fused merely because its integer result is tested against
+/// zero: signed zero and NaN make the two meanings observably different.
+#[test]
+fn an_explicit_floating_compare_keeps_total_ordering() {
+    let src = "fun box(): String {\n\
+               \x20   if (!((-0.0).compareTo(0.0) < 0)) return \"fail signed zero\"\n\
+               \x20   if (!(Double.NaN.compareTo(0.0) > 0)) return \"fail NaN total order\"\n\
+               \x20   if (Double.NaN < 0.0) return \"fail NaN relation\"\n\
+               \x20   return \"OK\"\n\
+               }\n";
+    let Some(actual) = common::compile_and_run_box(
+        src,
+        "explicit_floating_compare",
+        &[common::stdlib_jar()],
+        None,
+    ) else {
+        eprintln!("skipping: JVM runner unavailable");
+        return;
+    };
+    assert_eq!(actual, "OK");
+}
+
 /// The comparison still has to MEAN the same thing. A three-way result read with the zero on the
 /// left reverses the comparison, and a fusion that dropped that would pass a byte test written only
 /// for the ordinary spelling.
