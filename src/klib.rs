@@ -18,6 +18,7 @@
 //! | `default/manifest`                                  | `java.util.Properties` key/values    |
 //! | `default/linkdata/module`                            | module header protobuf               |
 //! | `default/linkdata/package_<fqname>/<NN>_<seg>.knm`   | per-package declaration fragments    |
+//! | `default/linkdata/root_package/<NN>_.knm`            | the root package's own fragments     |
 //! | `default/ir/*.kn[bdft]`                              | serialized Kotlin IR (bodies)        |
 //!
 //! Declarations live in the `.knm` fragments, which carry the same Kotlin metadata protobuf the JVM
@@ -32,8 +33,11 @@ use std::sync::Mutex;
 
 /// A klib's root directory tree, below which every entry path in this module is relative.
 const ARCHIVE_COMPONENT: &str = "default";
-/// Every per-package fragment path starts with this, followed by the package's fully qualified name.
+/// A named package's fragments live under this, followed by the package's fully qualified name.
 const PACKAGE_PREFIX: &str = "default/linkdata/package_";
+/// The ROOT package's fragments live under their own directory instead — `package_` with an empty
+/// name is not what the serializer writes. Every klib in the reference distribution has one.
+const ROOT_PACKAGE_PREFIX: &str = "default/linkdata/root_package/";
 /// Serialized Kotlin IR — the bodies. Read as opaque bytes here.
 const IR_PREFIX: &str = "default/ir/";
 /// Guard against a symlink cycle in an unpacked klib. A klib's own tree is three levels deep.
@@ -159,7 +163,10 @@ impl KlibArchive {
         let mut fragments: Vec<(String, u32, String)> = self
             .entries
             .iter()
-            .filter(|entry| entry.starts_with(PACKAGE_PREFIX) && entry.ends_with(".knm"))
+            .filter(|entry| {
+                entry.ends_with(".knm")
+                    && (entry.starts_with(PACKAGE_PREFIX) || entry.starts_with(ROOT_PACKAGE_PREFIX))
+            })
             .map(|entry| {
                 let fqname = package_fqname(entry);
                 (fqname, chunk_number(entry), entry.clone())
@@ -188,11 +195,15 @@ impl KlibArchive {
 
 /// The package a fragment declares into, from its entry path.
 ///
-/// Both shapes the serializer writes are accepted: a per-package directory
-/// (`default/linkdata/package_kotlin.collections/03_collections.knm`) and a single flat fragment
-/// (`default/linkdata/package_kotlin.collections.knm`). The root package's directory is named
-/// `package_`, which yields the empty name.
+/// Three spellings the serializer writes are accepted. A named package lives in its own directory
+/// (`default/linkdata/package_kotlin.collections/03_collections.knm`) or, in a library with one
+/// fragment per package, as a single flat entry (`default/linkdata/package_kotlin.collections.knm`).
+/// The ROOT package is `default/linkdata/root_package/0_.knm` — a directory of its own rather than
+/// `package_` with nothing after it — and yields the empty name.
 fn package_fqname(entry: &str) -> String {
+    if entry.starts_with(ROOT_PACKAGE_PREFIX) {
+        return String::new();
+    }
     let rest = &entry[PACKAGE_PREFIX.len()..];
     match rest.split_once('/') {
         Some((fqname, _)) => fqname.to_string(),
@@ -513,7 +524,7 @@ mod tests {
             b"unique_name=stdlib\nbuiltins_platform=NATIVE\n",
         );
         write(&root, "default/linkdata/module", b"module-header");
-        write(&root, "default/linkdata/package_/00_root.knm", b"root");
+        write(&root, "default/linkdata/root_package/00_.knm", b"root");
         write(
             &root,
             "default/linkdata/package_kotlin.collections/03_collections.knm",
@@ -547,7 +558,7 @@ mod tests {
                 .map(|fragment| (fragment.package_fqname.as_str(), fragment.entry.as_str()))
                 .collect::<Vec<_>>(),
             vec![
-                ("", "default/linkdata/package_/00_root.knm"),
+                ("", "default/linkdata/root_package/00_.knm"),
                 (
                     "kotlin.collections",
                     "default/linkdata/package_kotlin.collections/03_collections.knm"
@@ -576,6 +587,15 @@ mod tests {
         let root = temp_dir("klib-not-a-klib");
         write(&root, "META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\n");
         assert!(KlibArchive::open(&root).is_none());
+    }
+
+    /// The root package has its own directory name, which is NOT `package_` with an empty tail: every
+    /// klib the reference distribution ships spells it `root_package`, and a reader that only knew the
+    /// `package_` prefix skipped the root package's declarations entirely.
+    #[test]
+    fn the_root_package_has_its_own_directory() {
+        assert_eq!(package_fqname("default/linkdata/root_package/0_.knm"), "");
+        assert_eq!(chunk_number("default/linkdata/root_package/0_.knm"), 0);
     }
 
     #[test]
