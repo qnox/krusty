@@ -67,6 +67,46 @@ fn multiple_suspensions_keep_the_first_store_order() {
     assert_eq!(fields, ["I$0", "L$0"]);
 }
 
+/// A spliced lambda's own VALUE parameters are locals of the splice and keep their source names, so
+/// a suspension inside the body spills them under those names — `p` for a lambda written at source
+/// level, and one `$iv` per enclosing expansion for one written inside an inline function.
+///
+/// krusty bound them the way it bound inline parameters: the caller's slot when the argument was
+/// already a local read, an unnamed temp otherwise. Either way the parameter had no name, so it was
+/// absent from `@DebugMetadata` while still consuming its field position.
+#[test]
+fn a_spliced_lambdas_value_parameters_keep_their_names() {
+    let src = "suspend fun step(v: String): String = v\n\
+               \n\
+               inline fun <T> tagged(tag: String, block: (String) -> T): T {\n\
+               \x20   val prefix = \"[\" + tag + \"]\"\n\
+               \x20   val suffix = tag + \"!\"\n\
+               \x20   return block(prefix + suffix)\n\
+               }\n\
+               \n\
+               suspend fun run(tag: String): String {\n\
+               \x20   return tagged(tag) { p -> step(p) + p }\n\
+               }\n";
+    let Some((slots, names)) =
+        debug_metadata_names(src, "LambdaSpillNames", "LambdaSpillNamesKt$run$1")
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    assert_eq!(
+        names,
+        ["tag", "tag$iv", "prefix$iv", "suffix$iv", "p"],
+        "both compilers name the same spilled locals"
+    );
+    // As with the inline parameters, the POSITIONS are not yet kotlinc's `L$0..L$4`: one unnamed
+    // temporary of the expansion still takes a field krusty's `L$2`. Stated rather than hidden.
+    assert_eq!(
+        slots,
+        ["L$0", "L$1", "L$3", "L$4", "L$5"],
+        "krusty's positions, still carrying one unnamed extra spill"
+    );
+}
+
 /// An inline function's PARAMETERS and extension RECEIVER are locals of the expansion, so a
 /// suspension inside the inlined body spills them and `@DebugMetadata` names them — `url$iv`,
 /// `$this$send$iv`, with one `$iv` per nesting level.
