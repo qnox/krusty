@@ -169,7 +169,18 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         effective_classpath,
         opts.friend_paths.clone(),
     ));
-    let platform = Box::new(JvmLibraries::new(cp.clone()));
+    // A `-libraries` klib is an extra library on the dependency path, not a different platform:
+    // the JVM libraries stay authoritative for representation and shadow a name a klib also
+    // declares, and the klib's declarations federate underneath them.
+    let jvm = Box::new(JvmLibraries::new(cp.clone()));
+    let platform: Box<dyn krusty::libraries::SemanticPlatform> = if opts.libraries.is_empty() {
+        jvm
+    } else {
+        Box::new(krusty::klib_symbols::PlatformWithKlibs::new(
+            jvm,
+            krusty::klib_symbols::KlibSymbols::open(&opts.libraries),
+        ))
+    };
     let source_inputs = opts
         .sources
         .iter()

@@ -869,8 +869,12 @@ mod klib_byte_equality_e2e;
 mod klib_container_e2e;
 #[path = "klib_declarations_e2e.rs"]
 mod klib_declarations_e2e;
+#[path = "klib_libraries_flag_e2e.rs"]
+mod klib_libraries_flag_e2e;
 #[path = "klib_native_stdlib_e2e.rs"]
 mod klib_native_stdlib_e2e;
+#[path = "klib_platform_e2e.rs"]
+mod klib_platform_e2e;
 #[path = "klib_symbol_source_e2e.rs"]
 mod klib_symbol_source_e2e;
 #[path = "kotlin_fun_java_sam_param_e2e.rs"]
