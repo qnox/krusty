@@ -350,3 +350,63 @@ fn a_test_authored_klib_reports_what_its_source_declared() {
         "and its receiver is the extended type, type argument included"
     );
 }
+
+/// A member's value parameters arrive with their SOURCE NAMES and their defaults.
+///
+/// Two facts a JVM descriptor cannot carry and a call site needs: `describe(prefix: String = "box")`
+/// is callable as `describe(prefix = "x")` and as `describe()`. The decode kept only parameter types
+/// for a long time, because the consumer it was written for — the JVM's `.kotlin_builtins` reader —
+/// needed nothing else.
+#[test]
+fn a_members_parameters_arrive_named_and_with_their_defaults() {
+    let Some(path) = common::kotlinc_klib(
+        "params",
+        &[(
+            "Lib.kt",
+            "package params\n\
+             \n\
+             class Greeter(val who: String) {\n\
+             \x20   fun greet(greeting: String = \"hi\", loudly: Boolean = false): String =\n\
+             \x20       if (loudly) \"$greeting, $who!\" else \"$greeting, $who\"\n\
+             \x20   fun plain(other: String): String = other\n\
+             }\n",
+        )],
+    ) else {
+        return;
+    };
+    let archive = KlibArchive::open(&path).expect("open the klib the test just built");
+    let (classes, _) = declarations_of(&archive);
+    let greeter = classes.get("params/Greeter").expect("the declared class");
+
+    let greet = greeter
+        .members
+        .iter()
+        .find(|member| member.name == "greet")
+        .expect("Greeter.greet");
+    assert_eq!(
+        greet.param_names,
+        vec!["greeting".to_string(), "loudly".to_string()],
+        "the source names, in declaration order"
+    );
+    assert_eq!(
+        greet.param_defaults,
+        vec![true, true],
+        "both parameters declare a default"
+    );
+
+    let plain = greeter
+        .members
+        .iter()
+        .find(|member| member.name == "plain")
+        .expect("Greeter.plain");
+    assert_eq!(plain.param_names, vec!["other".to_string()]);
+    assert_eq!(
+        plain.param_defaults,
+        vec![false],
+        "and a parameter with no default says so"
+    );
+
+    // The names are parallel to the types, so a consumer can pair them without a second lookup.
+    assert_eq!(greet.param_names.len(), greet.params.len());
+    assert_eq!(greet.param_defaults.len(), greet.params.len());
+}

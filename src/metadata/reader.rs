@@ -1033,6 +1033,15 @@ pub struct BuiltinMember {
     /// Whether the declared return type is nullable (`V?`) — the JVM descriptor erases it, only the
     /// `.kotlin_builtins` `Type.nullable` flag carries it (`Map.get(K): V?`, `firstOrNull(): T?`).
     pub ret_nullable: bool,
+    /// Source names of the value parameters, parallel to [`Self::params`]. Empty entries where the
+    /// fragment records no name.
+    ///
+    /// A named argument needs these, and a descriptor cannot supply them.
+    /// [`BuiltinConstructor`] has always carried them; a member did not, because the builtins
+    /// consumer this decode was written for needed only types.
+    pub param_names: Vec<String>,
+    /// Which value parameters declare a default, parallel to [`Self::params`].
+    pub param_defaults: Vec<bool>,
 }
 
 /// One top-level function declared by a `.kotlin_builtins` package fragment. Unlike a class member,
@@ -1137,6 +1146,19 @@ pub struct BuiltinTables<'a> {
 /// used to be dropped.
 pub type TypeParamNames = std::collections::HashMap<u64, String>;
 
+/// `ValueParameter.flags` DECLARES_DEFAULT_VALUE, bit 1 — the `= "box"` of `describe(prefix: String
+/// = "box")`. Only the declaration records it; a JVM descriptor cannot.
+const DECLARES_DEFAULT_VALUE: u64 = 1 << 1;
+
+/// One decoded `ValueParameter`: its type, and the two facts a CALL SITE needs that a descriptor
+/// erases — the parameter's source name, for a named argument, and whether it declares a default.
+pub struct BuiltinValueParameter {
+    pub ty: BuiltinTy,
+    /// The source name, or empty when the fragment records none.
+    pub name: String,
+    pub declares_default: bool,
+}
+
 /// Decode the type of one builtins `ValueParameter`. Functions and constructors use the same
 /// message; keeping one reader prevents their accepted type-table layouts from drifting.
 pub fn builtin_value_parameter_type(
@@ -1144,11 +1166,37 @@ pub fn builtin_value_parameter_type(
     tables: &BuiltinTables<'_>,
     tparams: &TypeParamNames,
 ) -> Option<BuiltinTy> {
+    builtin_value_parameter(body, tables, tparams, &[]).map(|parameter| parameter.ty)
+}
+
+/// [`builtin_value_parameter_type`] with the name and default the same message carries.
+///
+/// `strings` resolves `name` (field 2), which is a string-table index. Pass an empty table to decode
+/// the type alone — a consumer that only needs types should call
+/// [`builtin_value_parameter_type`] instead.
+pub fn builtin_value_parameter(
+    body: &[u8],
+    tables: &BuiltinTables<'_>,
+    tparams: &TypeParamNames,
+    strings: &[String],
+) -> Option<BuiltinValueParameter> {
     let mut value = Pb { b: body, i: 0 };
     let mut ty = None;
+    let mut name = String::new();
+    let mut declares_default = false;
     while !value.at_end() {
         let tag = value.varint()?;
         match (tag >> 3, tag & 7) {
+            (1, 0) => {
+                declares_default = value.varint()? & DECLARES_DEFAULT_VALUE != 0;
+            }
+            (2, 0) => {
+                if let Some(id) = value.varint() {
+                    if let Some(found) = strings.get(id as usize) {
+                        name = found.clone();
+                    }
+                }
+            }
             // `type_id` is field 5 in the current builtins schema and field 4 in older fragments.
             (5, 0) | (4, 0) => {
                 ty = value
@@ -1165,7 +1213,11 @@ pub fn builtin_value_parameter_type(
             (_, wire) => value.skip(wire)?,
         }
     }
-    ty
+    Some(BuiltinValueParameter {
+        ty: ty?,
+        name,
+        declares_default,
+    })
 }
 
 /// Decode either wire representation of a metadata type. Producers may inline the `Type` message or
@@ -1812,6 +1864,8 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
             // `Function.flags` has protobuf default PUBLIC FINAL (`6`), matching `parse_function`.
             let mut flags = 6u64;
             let mut params = Vec::new();
+            let mut param_names = Vec::new();
+            let mut param_defaults = Vec::new();
             let mut complete = true;
             while !p.at_end() {
                 let Some(tag) = p.varint() else { break };
@@ -1823,8 +1877,12 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                         // value_parameter: ValueParameter.type_id = 4 (type-table ref)
                         if let Some(n) = p.varint() {
                             if let Some(vb) = p.bytes(n as usize) {
-                                match builtin_value_parameter_type(vb, &tables, &fn_tparams) {
-                                    Some(parameter) => params.push(parameter),
+                                match builtin_value_parameter(vb, &tables, &fn_tparams, &strings) {
+                                    Some(parameter) => {
+                                        params.push(parameter.ty);
+                                        param_names.push(parameter.name);
+                                        param_defaults.push(parameter.declares_default);
+                                    }
                                     None => complete = false,
                                 }
                             }
@@ -1862,6 +1920,8 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                             is_abstract: (flags >> 4) & 0x3 == 2,
                             formals,
                             ret_nullable,
+                            param_names,
+                            param_defaults,
                         });
                     }
                 }
@@ -1919,6 +1979,10 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                             == crate::metadata::property_flags::MODALITY_ABSTRACT,
                         formals,
                         ret_nullable,
+                        // A property has no value parameters of its own; its accessors' are the
+                        // backend's to shape.
+                        param_names: Vec::new(),
+                        param_defaults: Vec::new(),
                     });
                 }
             }
