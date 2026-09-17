@@ -76,6 +76,7 @@ pub(super) fn merge_top_level_const(
         setter: None,
         setter_visibility: metadata.visibility,
         is_const: true,
+        implicit_integer_coercion: false,
         compile_time_constant: Some(constant),
         visibility: metadata.visibility,
         owner: field.owner,

@@ -451,12 +451,36 @@ fn invisible_reference_suppression_matches_kotlinc_exactly() {
                  }\n",
         ),
         (
+            "LocalBackingFieldSuppressed.kt",
+            "// LANGUAGE: +ExplicitBackingFields\n\
+                 package localbackingfieldcase\n\
+                 fun outer() {\n\
+                 class Local {\n\
+                 @Suppress(\"INVISIBLE_REFERENCE\")\n\
+                 val value: Any\n\
+                 field = lib.Hidden(1)\n\
+                 }\n\
+                 Local().value\n\
+                 }\n",
+        ),
+        (
             "LocalFunctionSuppressed.kt",
             "package localfunctioncase\n\
                  fun outer(): Int {\n\
                  @Suppress(\"INVISIBLE_REFERENCE\")\n\
                  fun local(): Int = lib.Hidden(1).value\n\
                  return local()\n\
+                 }\n",
+        ),
+        (
+            "LocalInferredPropertySuppressed.kt",
+            "package localinferredpropertycase\n\
+                 fun outer() {\n\
+                 class Local {\n\
+                 @Suppress(\"INVISIBLE_REFERENCE\")\n\
+                 val value = lib.Hidden(1).value\n\
+                 }\n\
+                 Local().value\n\
                  }\n",
         ),
     ];
@@ -522,8 +546,20 @@ fn invisible_reference_suppression_matches_kotlinc_exactly() {
                 message: warning.to_string(),
             },
             ObservedDiagnostic {
+                file: "LocalBackingFieldSuppressed.kt".to_string(),
+                line: 5,
+                column: 11,
+                message: warning.to_string(),
+            },
+            ObservedDiagnostic {
                 file: "LocalFunctionSuppressed.kt".to_string(),
                 line: 3,
+                column: 11,
+                message: warning.to_string(),
+            },
+            ObservedDiagnostic {
+                file: "LocalInferredPropertySuppressed.kt".to_string(),
+                line: 4,
                 column: 11,
                 message: warning.to_string(),
             },

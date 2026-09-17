@@ -1740,6 +1740,58 @@ fn streamed_cross_file_companion_const_keeps_checked_payload_on_selected_propert
 }
 
 #[test]
+fn streamed_top_level_const_normalizes_value_and_coercion_on_the_selected_property() {
+    use crate::symbol_source::{SymbolNamespace, SymbolSource};
+
+    let inputs = [
+        SourceInput::kotlin("package kotlin.internal\nannotation class ImplicitIntegerCoercion")
+            .with_file_stem("ImplicitIntegerCoercion"),
+        SourceInput::kotlin(
+            "package values\n\
+             import kotlin.internal.ImplicitIntegerCoercion\n\
+             @ImplicitIntegerCoercion const val VALUE = 255",
+        )
+        .with_file_stem("Values"),
+        SourceInput::kotlin(
+            "// LANGUAGE: +ImplicitSignedToUnsignedIntegerConversion\n\
+             package use\n\
+             import values.VALUE\n\
+             fun read(): Int = VALUE",
+        )
+        .with_file_stem("Use"),
+    ];
+    let mut diagnostics = DiagSink::new();
+    let analysis = analyze_source_set_with_features_and_prepare(
+        &inputs,
+        Box::new(EmptySymbolSource),
+        &LangFeatures::from_source(inputs[2].text),
+        |_, _| {},
+        &mut diagnostics,
+    );
+
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("Pass 1 must finalize")
+        .module
+        .index();
+    let provider = crate::fir::StreamedModuleSymbols::for_file(index, 2);
+    let selected = provider.symbols(
+        SymbolNamespace::Package(crate::types::type_name("values")),
+        "VALUE",
+    );
+    let property = selected
+        .callables
+        .properties()
+        .first()
+        .expect("one selected top-level property");
+    assert!(property.is_const);
+    assert!(property.compile_time_constant.is_some());
+    assert!(property.implicit_integer_coercion);
+}
+
+#[test]
 fn same_file_actual_keeps_expect_default_after_expect_removal_changes_sibling_ordinal() {
     let inputs = [SourceInput::kotlin(
         "// LANGUAGE: +MultiPlatformProjects\n\

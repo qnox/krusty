@@ -24,6 +24,24 @@ fun test() {\n\
 }
 
 #[test]
+fn cross_file_constant_selection_keeps_the_coercion_fact() {
+    const DECLARATION: &str = "package values\n\
+import kotlin.internal.ImplicitIntegerCoercion\n\
+@ImplicitIntegerCoercion const val VALUE = 255\n";
+    const USE_SITE: &str = "// LANGUAGE: +ImplicitSignedToUnsignedIntegerConversion\n\
+package sample\n\
+import kotlin.internal.ImplicitIntegerCoercion\n\
+import values.VALUE\n\
+fun accept(@ImplicitIntegerCoercion value: UByte) {}\n\
+fun test() { accept(VALUE) }\n";
+
+    common::expect_front_end_ok_files_with_stdlib(
+        &[ANNOTATION, DECLARATION, USE_SITE],
+        "cross-file annotated integer constant",
+    );
+}
+
+#[test]
 fn implicit_integer_coercion_requires_the_language_feature() {
     const USE_SITE: &str = "package sample\n\
 import kotlin.internal.ImplicitIntegerCoercion\n\

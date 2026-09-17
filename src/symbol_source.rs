@@ -339,6 +339,7 @@ mod tests {
                                     setter: None,
                                     setter_visibility: Visibility::Public,
                                     is_const: false,
+                                    implicit_integer_coercion: false,
                                     compile_time_constant: None,
                                     visibility: Visibility::Public,
                                     owner: self.owner.as_str().into(),

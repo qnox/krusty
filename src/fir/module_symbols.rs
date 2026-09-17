@@ -568,6 +568,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             setter,
             setter_visibility,
             is_const: header.flags.has(DeclarationFlags::CONST),
+            implicit_integer_coercion: false,
             compile_time_constant: None,
             visibility: header.visibility,
             owner,
@@ -1085,6 +1086,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 setter,
                 setter_visibility,
                 is_const: header.flags.has(DeclarationFlags::CONST),
+                implicit_integer_coercion: false,
                 compile_time_constant: self.index.compile_time_constant(declaration).cloned(),
                 visibility: header.visibility,
                 owner: internal,
@@ -1481,6 +1483,13 @@ impl<'a> StreamedModuleSymbols<'a> {
                 setter,
                 setter_visibility,
                 is_const: header.flags.has(DeclarationFlags::CONST),
+                implicit_integer_coercion: self
+                    .index
+                    .declaration_annotations(declaration)
+                    .iter()
+                    .any(|annotation| {
+                        annotation.matches("kotlin/internal/ImplicitIntegerCoercion")
+                    }),
                 compile_time_constant: self.index.compile_time_constant(declaration).cloned(),
                 visibility: header.visibility,
                 owner: TypeName::ROOT,
