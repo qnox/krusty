@@ -927,6 +927,24 @@ fn data_copy_fn_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
     (COPY_FN_FLAGS & !crate::metadata::property_flags::VISIBILITY_MASK) | (visibility << 1)
 }
 
+/// Whether a type is an ARRAY whose element is star-projected, so its JVM descriptor cannot be
+/// derived from the metadata record.
+///
+/// An array's descriptor is built from its element's ERASURE, and a star projection records no
+/// bound to erase — `Array<List<*>>` is `[Ljava/util/List;` but nothing in the proto says so. A bare
+/// `List<*>` erases to its own classifier and stays derivable, so only the array form needs the
+/// explicit `JvmMethodSignature` (measured on kotlinc 2.4.10).
+fn array_of_star_projection(ty: crate::types::Ty) -> bool {
+    ty.array_elem().is_some_and(|element| {
+        matches!(element.non_null(), crate::types::Ty::StarProjection(_))
+            || element
+                .non_null()
+                .type_args()
+                .iter()
+                .any(|argument| matches!(argument, crate::types::Ty::StarProjection(_)))
+    })
+}
+
 /// Compute a class's `@kotlin.Metadata` from its IR — WIRING [`crate::metadata::class_builder::build_class`]
 /// into emission. Covers a class with a primary constructor of `val`/`var` properties plus real declared
 /// members (emitted with derived [`function_flags`]), and the data/value-class synthesized sets. Returns
@@ -1099,7 +1117,16 @@ fn build_class_metadata(
             !accessor_shaped && !data_method_names.contains(n) && !value_method_names.contains(n)
         })
         .collect();
-    declared_fids.sort_by_key(|fid| ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX));
+    // A GENERATED class states its own function record on itself: which of its members Kotlin
+    // metadata describes, and in which order. The two differ from what the class emits — a
+    // non-generic `$serializer` emits `typeParametersSerializers` but does not describe it.
+    let published = c.published_generated_functions.as_deref();
+    if let Some(described) = published {
+        declared_fids.retain(|fid| described.contains(fid));
+        declared_fids.sort_by_key(|fid| described.iter().position(|described| described == fid));
+    } else {
+        declared_fids.sort_by_key(|fid| ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX));
+    }
     // A VALUE-CLASS-INVOLVED MEMBER is now DESCRIBED. The writer could always produce kotlinc's exact
     // payload for one (the byte-identity tests proved it); what was missing was the READ half, and the
     // classpath value-class RETURN model supplies it — `MetadataCallFacts::value_class_ret` reports
@@ -1729,9 +1756,11 @@ fn build_class_metadata(
                             })))
                         || ir.fn_vararg_index.contains_key(&fid)
                         || matches!(metadata_ret, crate::types::Ty::TyParam(..))
-                        || metadata_params
-                            .iter()
-                            .any(|parameter| matches!(parameter, crate::types::Ty::TyParam(..))))
+                        || array_of_star_projection(metadata_ret)
+                        || metadata_params.iter().any(|parameter| {
+                            matches!(parameter, crate::types::Ty::TyParam(..))
+                                || array_of_star_projection(*parameter)
+                        }))
                     .then(|| crate::jvm::names::method_descriptor(&f.params, f.ret)),
                     jvm_sig_name: (name != f.name).then(|| f.name.clone()),
                     // The declaration's own annotations, mirrored into `@Metadata`. Retention split
@@ -2003,10 +2032,16 @@ fn build_class_metadata(
                 .copied()
                 .enumerate()
                 .map(|(index, fid)| {
-                    (
-                        ir.fn_source_order.get(&fid).copied().unwrap_or(u32::MAX),
-                        ClassMemberOrder::Function(index),
-                    )
+                    let order = match published {
+                        // The stated list's own index, in the same numbering a generated property
+                        // uses for `IrProperty::source_order`.
+                        Some(described) => described
+                            .iter()
+                            .position(|described| *described == fid)
+                            .map_or(u32::MAX, |order| order as u32),
+                        None => ir.fn_source_order.get(&fid).copied().unwrap_or(u32::MAX),
+                    };
+                    (order, ClassMemberOrder::Function(index))
                 }),
         );
         ordered.extend(type_aliases.iter().enumerate().map(|(index, alias)| {
@@ -2038,10 +2073,23 @@ fn build_class_metadata(
         })
         .map(|candidate| candidate.fq_name.nested_segment_ref().to_string())
         .collect();
+    // A producer can generate a classifier that Kotlin code names (`Foo.$serializer`) and publish
+    // that fact on the owning class. Other synthesized implementation classes stay out on their
+    // `is_source_declared` record alone. Generated names precede the COMPANION, which kotlinc lists
+    // last of that set (`$serializer` then `Companion` for a `@Serializable` class).
+    let generated_nested = c.published_nested_classifiers.iter().cloned();
     // kotlinc lists the companion under `nestedClassName` (f7) TOO, alongside its own
     // `companionObjectName` (f4) record — both reference the same interned string.
-    if let Some(companion) = &c.companion_class {
-        let segment = companion.nested_segment_ref().to_string();
+    let companion_segment = c
+        .companion_class
+        .as_ref()
+        .map(|companion| companion.nested_segment_ref().to_string());
+    let at = companion_segment
+        .as_ref()
+        .and_then(|segment| nested_names.iter().position(|name| name == segment))
+        .unwrap_or(nested_names.len());
+    nested_names.splice(at..at, generated_nested);
+    if let Some(segment) = companion_segment {
         if !nested_names.contains(&segment) {
             nested_names.push(segment);
         }
@@ -2922,7 +2970,15 @@ fn attach_synth_debug_tables(
     }
     // Property accessors: getter has only `this`; a `var` setter also has its value parameter (named
     // `<set-?>` by kotlinc), guarded when the property type is a non-null reference.
-    for f in &c.fields {
+    for (field_index, f) in c.fields.iter().enumerate() {
+        // An accessor represented as a real function carries its own debug contract. Decide the
+        // getter and setter independently: a `var` can declare one and retain the synthesized other.
+        // The plugin-generated `descriptor` getter intentionally has NO line table, which this
+        // class-level synthesis would otherwise overwrite with the declaration line.
+        let declared_property = c
+            .properties
+            .iter()
+            .find(|property| property.backing_field == Some(field_index as u32));
         // A CTOR-parameter property's accessors sit on the class-declaration line; a BODY property's
         // sit on its own `val`/`var` line.
         let pline = ir
@@ -2932,13 +2988,15 @@ fn attach_synth_debug_tables(
             .filter(|&l| l != 0)
             .unwrap_or(line);
         let (g, s) = accessor_jvm_names(c, &f.name);
-        cw.set_method_debug(
-            &g,
-            &format!("(){}", desc(f.ty)),
-            Some((0, pline)),
-            &this_only,
-        );
-        if !f.is_final() {
+        if declared_property.is_none_or(|property| property.getter.is_none()) {
+            cw.set_method_debug(
+                &g,
+                &format!("(){}", desc(f.ty)),
+                Some((0, pline)),
+                &this_only,
+            );
+        }
+        if !f.is_final() && declared_property.is_none_or(|property| property.setter.is_none()) {
             let pd = desc(f.ty);
             // The setter's value param is always slot 1 (`this`=0): guard = `aload_1`(1) + the
             // `<set-?>` String's real ldc width + invokestatic(3).
@@ -4835,6 +4893,11 @@ fn const_value_idx(ir: &IrFile, init: crate::ir::ExprId, cw: &mut ClassWriter) -
             IrConst::Byte(v) => cw.const_int(*v as i32),
             IrConst::Short(v) => cw.const_int(*v as i32),
             IrConst::Int(v) => cw.const_int(*v),
+            // `UByte`/`UShort` ride in the `B`/`S` their value class wraps.
+            IrConst::UByte(v) => cw.const_int(i32::from(*v as i8)),
+            IrConst::UShort(v) => cw.const_int(i32::from(*v as i16)),
+            IrConst::UInt(v) => cw.const_int(*v as i32),
+            IrConst::ULong(v) => cw.const_long(*v as i64),
             IrConst::Char(c) => cw.const_int(*c as i32),
             IrConst::Long(v) => cw.const_long(*v),
             IrConst::Float(v) => cw.const_float(*v),
@@ -8449,6 +8512,7 @@ fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
             code.pop();
             throw_assertion_error(cw, &mut code);
             finish_bridge(cw, &b.name, &erased_desc, &mut code, 1 + pw, b.kind);
+            attach_bridge_debug_tables(ir, c, cw, b, &erased_desc);
             continue;
         }
         if b.concrete_ret == Ty::Nothing {
@@ -8462,6 +8526,7 @@ fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
             }
             throw_assertion_error(cw, &mut code);
             finish_bridge(cw, &b.name, &erased_desc, &mut code, 1 + pw, b.kind);
+            attach_bridge_debug_tables(ir, c, cw, b, &erased_desc);
             continue;
         }
         if let Some(owner) = &b.box_ret {
@@ -8514,6 +8579,62 @@ fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
         }
         emit_return(er, &mut code);
         finish_bridge(cw, &b.name, &erased_desc, &mut code, 1 + pw, b.kind);
+        attach_bridge_debug_tables(ir, c, cw, b, &erased_desc);
+    }
+}
+
+/// kotlinc gives every bridge a `LineNumberTable` rooted at the CLASS declaration and a
+/// `LocalVariableTable` naming its receiver and parameters.
+///
+/// The bridge has no source of its own — it exists because a supertype's erased signature differs
+/// from the override's — so the NAMES come from the override it delegates to, while the descriptors
+/// are the ERASED ones the bridge actually receives (`item Ljava/lang/Object;`, not `String`). A
+/// parameter the override does not name keeps the JVM's positional spelling. A property-setter
+/// bridge has no source function identity; its generated parameter uses kotlinc's accessor spelling.
+/// Attached as each bridge is written, not in a pass afterwards: the local-variable table's
+/// strings are interned when they are recorded, and kotlinc interns them with the method they
+/// belong to. Deferring the whole set moved `Ljava/lang/Object;` past the next bridge's descriptor.
+fn attach_bridge_debug_tables(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    cw: &mut ClassWriter,
+    bridge: &crate::ir::Bridge,
+    erased_desc: &str,
+) {
+    if c.decl_line == 0 {
+        return;
+    }
+    // Where the DECLARATION starts, annotations included — the same line the primary constructor's
+    // `super()` maps to. The two coincide unless an annotation sits on its own line above the
+    // header, which is exactly the shape a `@Serializable` class has.
+    let line = if c.decl_start_line == 0 {
+        c.decl_line
+    } else {
+        c.decl_start_line
+    };
+    let this_desc = format!("L{};", c.fq_name());
+    {
+        let target_names = bridge
+            .target_function
+            .and_then(|function| ir.fn_params.get(&function))
+            .map(|parameters| parameters.names.as_slice())
+            .unwrap_or_default();
+        let mut locals = vec![(String::from("this"), this_desc.clone(), 0u16)];
+        let mut slot = 1u16;
+        for (index, parameter) in jvm_tys(&bridge.erased_params).iter().enumerate() {
+            let descriptor = local_variable_desc(*parameter);
+            let spelling = target_names
+                .get(index)
+                .cloned()
+                .or_else(|| {
+                    (bridge.kind == crate::ir::BridgeKind::PropertySetter)
+                        .then(|| "<set-?>".to_string())
+                })
+                .unwrap_or_else(|| format!("p{index}"));
+            locals.push((spelling, descriptor, slot));
+            slot += slot_words(*parameter);
+        }
+        cw.set_method_debug(&bridge.name, erased_desc, Some((0, line)), &locals);
     }
 }
 
@@ -15447,6 +15568,19 @@ impl<'a> Emitter<'a> {
             IrExpr::Const(c) => match c {
                 IrConst::Boolean(b) => code.push_int(if *b { 1 } else { 0 }, self.cw),
                 IrConst::Int(v) => code.push_int(*v, self.cw),
+                // THE representation decision for a narrow unsigned constant, and it is this
+                // backend's to make. `UByte` is a value class over `Byte`, so the JVM carries
+                // it in a `B`: the value 200 is pushed as the byte -56, which is what kotlinc
+                // emits (`bipush -56`) and what a `(B)` parameter and `constructor-impl` both
+                // expect. Pushing the untruncated 200 made two equal `UByte` values compare
+                // unequal, because only one side had been through a narrowing.
+                //
+                // Common IR hands over the VALUE and the unsigned identity; the carrier is
+                // chosen here, and another backend is free to choose differently.
+                IrConst::UByte(v) => code.push_int(i32::from(*v as i8), self.cw),
+                IrConst::UShort(v) => code.push_int(i32::from(*v as i16), self.cw),
+                IrConst::UInt(v) => code.push_int(*v as i32, self.cw),
+                IrConst::ULong(v) => code.push_long(*v as i64, self.cw),
                 IrConst::Short(v) => code.push_int(*v as i32, self.cw),
                 IrConst::Byte(v) => code.push_int(*v as i32, self.cw),
                 IrConst::Char(v) => code.push_int(*v as i32, self.cw),
@@ -16244,7 +16378,7 @@ impl<'a> Emitter<'a> {
                             ),
                         }
                     }
-                    crate::ir::IrIntrinsic::PrimitiveCompare { operand } => {
+                    crate::ir::IrIntrinsic::PrimitiveCompare { operand, .. } => {
                         let receiver = dispatch_receiver
                             .expect("checked primitive compare has a dispatch receiver");
                         let [argument] = args.as_slice() else {
@@ -16948,7 +17082,7 @@ impl<'a> Emitter<'a> {
                             }
                             // Null-check (throws on null) then checkcast — matching kotlinc's `as T`.
                             let kotlin_name = match type_operand.non_null() {
-                                Ty::Obj(fq_name, _) => fq_name.replace('/', "."),
+                                Ty::Obj(fq_name, _) => fq_name.render().replace('/', "."),
                                 Ty::TyParam(name, _) => {
                                     crate::types::type_parameter_source_name(name).to_string()
                                 }
@@ -19092,6 +19226,60 @@ impl<'a> Emitter<'a> {
         code.invokestatic(m, 2, 1);
     }
 
+    /// The two operands of a `compare(a, b) <op> 0`, with the comparison to apply to them directly.
+    ///
+    /// `None` unless one side is the primitive three-way comparison and the other is the integer
+    /// literal `0` — the only shape in which that result is meaningful. With the zero on the LEFT
+    /// the comparison reverses (`0 < compare(a, b)` is `a > b`), so the operator is flipped rather
+    /// than the operands, which keeps evaluation order.
+    fn primitive_compare_operands(
+        &self,
+        op: IrBinOp,
+        lhs: u32,
+        rhs: u32,
+    ) -> Option<(u32, u32, IrBinOp)> {
+        use IrBinOp::*;
+        if !matches!(op, Lt | Le | Gt | Ge | Eq | Ne) {
+            return None;
+        }
+        let zero = |e: u32| matches!(self.ir.expr(e), IrExpr::Const(IrConst::Int(0)));
+        let (compared, direct) = if zero(rhs) {
+            (lhs, op)
+        } else if zero(lhs) {
+            let flipped = match op {
+                Lt => Gt,
+                Le => Ge,
+                Gt => Lt,
+                Ge => Le,
+                same => same,
+            };
+            (rhs, flipped)
+        } else {
+            return None;
+        };
+        let IrExpr::Call {
+            callee:
+                Callee::Intrinsic {
+                    operation:
+                        crate::ir::IrIntrinsic::PrimitiveCompare {
+                            relational_operator: true,
+                            ..
+                        },
+                    ..
+                },
+            dispatch_receiver: Some(receiver),
+            args,
+            ..
+        } = self.ir.expr(compared)
+        else {
+            return None;
+        };
+        let [argument] = args.as_slice() else {
+            return None;
+        };
+        Some((*receiver, *argument, direct))
+    }
+
     /// Emit numeric comparison operands and the final branch for both value and branch consumers.
     /// Centralizing the zero-literal rule here is important: operand syntax must not select a different
     /// optimization merely because the surrounding node consumes a Boolean instead of control flow.
@@ -19105,6 +19293,15 @@ impl<'a> Emitter<'a> {
         code: &mut CodeBuilder,
     ) {
         use IrBinOp::*;
+        // `compare(a, b) <op> 0` IS `a <op> b`. Kotlin's `<`/`<=`/`>`/`>=` are the `compareTo`
+        // operator, so the front end models them as a three-way comparison tested against zero —
+        // but that result exists only to be tested, and kotlinc emits the direct comparison
+        // (`if_icmpge`, or `lcmp` + `ifge`). Unwrapping HERE keeps the operand rules below (the
+        // zero-literal form, the int category) as the single place comparisons are shaped.
+        if let Some((left, right, direct)) = self.primitive_compare_operands(op, lhs, rhs) {
+            self.emit_numeric_compare_branch(direct, left, right, target, jt, code);
+            return;
+        }
         let lt = self.value_ty(lhs);
         let rt = self.value_ty(rhs);
         if !lt.is_jvm_scalar() || !rt.is_jvm_scalar() {
@@ -19627,6 +19824,12 @@ impl<'a> Emitter<'a> {
             IrExpr::KClassLiteral { .. } => Ty::obj("kotlin/reflect/KClass"),
             IrExpr::Const(c) => match c {
                 IrConst::Boolean(_) => Ty::Boolean,
+                // The unsigned identity common IR retained. Answering `Int` here is what hid
+                // the carrier question from every backend.
+                IrConst::UByte(_) => Ty::UByte,
+                IrConst::UShort(_) => Ty::UShort,
+                IrConst::UInt(_) => Ty::UInt,
+                IrConst::ULong(_) => Ty::ULong,
                 IrConst::Int(_) => Ty::Int,
                 IrConst::Long(_) => Ty::Long,
                 IrConst::Double(_) => Ty::Double,

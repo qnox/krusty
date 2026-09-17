@@ -578,6 +578,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             setter_declaration: None,
             source_member: None,
             accessor_derived: false,
+            read_stability: crate::libraries::PropertyReadStability::Unstable,
         }
     }
 
@@ -1094,6 +1095,15 @@ impl<'a> StreamedModuleSymbols<'a> {
                 setter_declaration: None,
                 source_member: None,
                 accessor_derived: false,
+                read_stability: crate::libraries::PropertyReadStability::from_declaration(
+                    header.flags.has(DeclarationFlags::MUTABLE),
+                    header.flags.has(DeclarationFlags::CUSTOM_GETTER)
+                        || header.flags.has(DeclarationFlags::DELEGATED)
+                        || header.flags.has(DeclarationFlags::EXTERNAL)
+                        || header.flags.has(DeclarationFlags::EXPECT),
+                    header.flags.has(DeclarationFlags::OPEN),
+                    context_count != 0,
+                ),
             });
         }
         properties.sort_by_key(|property| {
@@ -1481,6 +1491,15 @@ impl<'a> StreamedModuleSymbols<'a> {
                 setter_declaration: None,
                 source_member: None,
                 accessor_derived: false,
+                read_stability: crate::libraries::PropertyReadStability::from_declaration(
+                    header.flags.has(DeclarationFlags::MUTABLE),
+                    header.flags.has(DeclarationFlags::CUSTOM_GETTER)
+                        || header.flags.has(DeclarationFlags::DELEGATED)
+                        || header.flags.has(DeclarationFlags::EXTERNAL)
+                        || header.flags.has(DeclarationFlags::EXPECT),
+                    header.flags.has(DeclarationFlags::OPEN),
+                    context_count != 0,
+                ),
             });
         }
         properties.sort_by_key(|property| {

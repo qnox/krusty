@@ -349,6 +349,8 @@ mod tests {
                                     setter_declaration: None,
                                     source_member: None,
                                     accessor_derived: false,
+                                    read_stability:
+                                        crate::libraries::PropertyReadStability::Unstable,
                                 }],
                             },
                         ),

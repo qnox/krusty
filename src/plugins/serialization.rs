@@ -179,8 +179,12 @@ fn serializer_fq(class_fq: &str) -> String {
     serializer_name(type_name(class_fq)).render()
 }
 
+/// The Kotlin name of that object. It begins with `$`, so the JVM spelling `Foo$$serializer` cannot
+/// be split back into it — metadata records this name, not a segment derived from the binary one.
+const SERIALIZER_OBJECT_NAME: &str = "$serializer";
+
 fn serializer_name(classifier: TypeName) -> TypeName {
-    classifier.nested_child("$serializer")
+    classifier.nested_child(SERIALIZER_OBJECT_NAME)
 }
 
 /// The FqName of a `@Serializable` class's `Companion` object (`Foo` → `Foo$Companion`), which holds
@@ -1598,14 +1602,17 @@ impl IrPlugin for SerializationPlugin {
                 .collect::<Vec<_>>();
 
             let serializer_name = type_name(&ser_fq);
-            let owner_line = ir.classes[class_id as usize].decl_start_line;
+            let (owner_start_line, owner_header_line) = {
+                let owner = &ir.classes[class_id as usize];
+                (owner.decl_start_line, owner.decl_line)
+            };
             let GeneratedSerializerMembers {
                 descriptor,
                 serialize,
                 deserialize,
                 child_serializers: child,
                 type_parameter_serializers: type_params_ser,
-            } = add_serializer_members(ir, serializer_name, serialized_ty, owner_line);
+            } = add_serializer_members(ir, serializer_name, serialized_ty, owner_start_line);
 
             let foo_fields: Vec<(String, Ty)> = ir.classes[class_id as usize]
                 .fields
@@ -1627,6 +1634,13 @@ impl IrPlugin for SerializationPlugin {
             let n_tp = type_params.len();
             let is_generic = n_tp > 0;
             let mut ser = synthetic_class(&ser_fq);
+            // The generated class stands where the annotated declaration does: kotlinc roots its
+            // constructor's `LineNumberTable` there, and the local-variable table naming `this`
+            // rides on the same record. Every other generated member already carried both through
+            // `record_debug_tables`; the constructor is emitted from the CLASS, so the generated
+            // class retains both the annotation-inclusive start and the distinct header line.
+            ser.decl_line = owner_header_line;
+            ser.decl_start_line = owner_start_line;
             ser.applied_annotations = generated_serializer_annotations();
             ser.is_object = !is_generic; // non-generic `$serializer` is a singleton object (INSTANCE)
                                          // Implement `GeneratedSerializer` (extends `KSerializer`) — it declares `childSerializers()`
@@ -1640,11 +1654,14 @@ impl IrPlugin for SerializationPlugin {
             // serializer adds one `KSerializer` field per type parameter (`typeSerial0..N` at fields 1..=N),
             // set from the constructor parameters.
             // Field 0 `descriptor` + each `typeSerial{k}` are `final` private fields.
-            ser.fields = vec![crate::ir::IrField::new(
-                "descriptor".to_string(),
-                class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
-            )
-            .with_is_final(true)];
+            let descriptor_field = ser.fields.len() as u32;
+            ser.fields.push(
+                crate::ir::IrField::new(
+                    "descriptor".to_string(),
+                    class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+                )
+                .with_is_final(true),
+            );
             for (k, parameter) in type_parameter_tys.iter().copied().enumerate() {
                 ser.fields.push(
                     crate::ir::IrField::new(format!("typeSerial{k}"), kserializer_of(parameter))
@@ -1674,6 +1691,38 @@ impl IrPlugin for SerializationPlugin {
             // `getDescriptor` is DECLARED first — the descriptor field it returns is built in
             // `<init>` — but EMITTED fourth.
             ser.methods = vec![serialize, deserialize, descriptor, child, type_params_ser];
+            // What `@Metadata` says about those members is a different list in a different order.
+            // kotlinc DECLARES `childSerializers`, `deserialize`, `serialize`; it describes
+            // `typeParametersSerializers` only when there are type-parameter serializers to pass
+            // along; and `getDescriptor` is described as the accessor of a `descriptor` PROPERTY,
+            // registered below rather than as a function.
+            let mut described = vec![child, deserialize, serialize];
+            if is_generic {
+                described.push(type_params_ser);
+            }
+            let descriptor_order = described.len() as u32;
+            ser.published_generated_functions = Some(described);
+            ser.properties.push(crate::ir::IrProperty {
+                name: "descriptor".to_string(),
+                context_params: Vec::new(),
+                source_order: descriptor_order,
+                decl_line: 0,
+                ty: class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+                visibility: crate::types::Visibility::Public,
+                annotations: Box::new([]),
+                initializer: None,
+                storage_ty: None,
+                backing_field: Some(descriptor_field),
+                is_var: false,
+                is_open: false,
+                is_private: false,
+                setter_is_private: false,
+                getter: Some(descriptor),
+                setter: None,
+                getter_jvm_name: None,
+                setter_jvm_name: None,
+                needs_access_bridge: false,
+            });
             // Erased generic bridges the `KSerializer<Foo>` interface requires: the JVM sees
             // `serialize(Encoder, Object)` / `deserialize(Decoder): Object`; each adapts args/return
             // and delegates to the concrete `Foo`-typed override.
@@ -1717,6 +1766,13 @@ impl IrPlugin for SerializationPlugin {
             ir.mark_synthetic_class(serializer_identity);
             ir.mark_deprecated_class(serializer_identity);
             let ser_id = ir.add_class(ser);
+            // `Foo.$serializer` is nameable Kotlin, so kotlinc records it under the serialized
+            // class's `Class.nestedClassName` — ahead of the `Companion`, which the metadata writer
+            // appends last. Without the record a reader of `Foo`'s metadata cannot reach the
+            // serializer as a member of the type it serializes.
+            ir.classes[class_id as usize]
+                .published_nested_classifiers
+                .push(SERIALIZER_OBJECT_NAME.to_string());
             ir.insert_class_signature_name(
                 serializer_identity,
                 generated_serializer_signature(serializer_type_parameters, serialized_ty),

@@ -61,7 +61,7 @@ impl BodyLowering<'_> {
         let first_generated = self.ir.exprs.len();
         let lowered = match &expression.kind {
             FirExprKind::Constant(constant) => {
-                let constant = lower_constant(constant, origin)?;
+                let constant = lower_constant(constant, expression.ty.get(), origin)?;
                 self.ir.add_expr(IrExpr::Const(constant))
             }
             FirExprKind::ArrayLiteral {
@@ -368,6 +368,21 @@ impl BodyLowering<'_> {
             }
             FirExprKind::ComparisonCall { operation, call } => {
                 let call = self.checked_call(call)?;
+                if let IrExpr::Call {
+                    callee:
+                        Callee::Intrinsic {
+                            operation:
+                                IrIntrinsic::PrimitiveCompare {
+                                    relational_operator,
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } = &mut self.ir.exprs[call as usize]
+                {
+                    *relational_operator = true;
+                }
                 let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
                 self.ir.add_expr(IrExpr::PrimitiveBinOp {
                     op: lower_binary_operation(*operation),
@@ -1989,8 +2004,13 @@ impl BodyLowering<'_> {
     }
 }
 
+/// An IR constant for a checked FIR one, carrying the value and the checked identity.
+///
+/// The constant's unsigned type is part of what the frontend checked, so common IR records it.
+/// What primitive holds it is not decided here — see [`IrConst::UByte`].
 fn lower_constant(
     constant: &FirConstant,
+    ty: Ty,
     origin: crate::fir::OriginId,
 ) -> Result<IrConst, FirLoweringFailure> {
     Ok(match constant {
@@ -1998,12 +2018,26 @@ fn lower_constant(
             i32::try_from(*value)
                 .map_err(|_| FirLoweringFailure::InvalidIntegerConstant { origin })?,
         ),
-        FirConstant::UInt(value) => IrConst::Int(
-            u32::try_from(*value)
-                .map_err(|_| FirLoweringFailure::InvalidIntegerConstant { origin })?
-                as i32,
-        ),
-        FirConstant::Long(value) | FirConstant::ULong(value) => IrConst::Long(*value),
+        FirConstant::UInt(value) => {
+            let value = u32::try_from(*value)
+                .map_err(|_| FirLoweringFailure::InvalidIntegerConstant { origin })?;
+            // The checked type says WHICH unsigned type this constant is, and that identity is
+            // recorded rather than resolved into a width. `UByte` and `UShort` are value classes,
+            // so which primitive ends up holding the value is a representation decision and
+            // belongs to a backend; folding them into `Int` here took that decision away, because
+            // a backend reading the constant then sees only a number.
+            //
+            // The VALUE is what is carried: 200u is 200. A backend that wants the byte -56 derives
+            // it, and one that wants something else derives that instead.
+            match ty.non_null() {
+                Ty::UByte => IrConst::UByte(value as u8),
+                Ty::UShort => IrConst::UShort(value as u16),
+                Ty::UInt => IrConst::UInt(value),
+                _ => return Err(FirLoweringFailure::InvalidIntegerConstant { origin }),
+            }
+        }
+        FirConstant::Long(value) => IrConst::Long(*value),
+        FirConstant::ULong(value) => IrConst::ULong(*value as u64),
         FirConstant::Double(value) => IrConst::Double(*value),
         FirConstant::Float(value) => IrConst::Float(*value),
         FirConstant::Boolean(value) => IrConst::Boolean(*value),

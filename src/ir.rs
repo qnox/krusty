@@ -59,9 +59,12 @@ pub enum IrIntrinsic {
         classifier: Ty,
     },
     /// Result of an exact builtin scalar `compareTo` declaration. `operand` is the semantic common
-    /// carrier selected by the frontend, not a JVM descriptor type.
+    /// carrier selected by the frontend, not a JVM descriptor type. `relational_operator` records
+    /// that this call came from FIR's `ComparisonCall`; an explicit `.compareTo()` remains false
+    /// even when its integer result is later compared with zero.
     PrimitiveCompare {
         operand: Ty,
+        relational_operator: bool,
     },
     /// Read the context from the current suspend continuation. The JVM coroutine pass replaces
     /// this operation with the continuation parameter's `Continuation.getContext()` call.
@@ -305,6 +308,19 @@ pub enum IrConst {
     /// A Kotlin `String` — a sequence of UTF-16 code units. Same reason as `Char`: `"\uD800"` and
     /// `"😀"` have no Rust `String` spelling one code unit at a time.
     String(crate::kt_string::KtString),
+    /// An unsigned constant, as the VALUE it stands for: `200u` is 200 here, never the byte -56
+    /// that a JVM carries a `UByte` in.
+    ///
+    /// These exist because the unsigned type is the constant's checked IDENTITY and a backend
+    /// cannot choose a representation for what it cannot see. Folding them into `Int` lost that:
+    /// `value_ty` then answers `Int` from the constant's shape, and every backend inherited
+    /// whatever width the number happened to carry. Which primitive holds the value is a
+    /// representation decision, and representation belongs to backends. Matching widths do not
+    /// make `UInt` semantically identical to `Int`, or `ULong` to `Long`.
+    UByte(u8),
+    UShort(u16),
+    UInt(u32),
+    ULong(u64),
     Null,
 }
 
@@ -672,10 +688,14 @@ impl IrConst {
     pub fn zero_for_value_type(ty: Ty) -> IrConst {
         match ty.canonical_semantic() {
             Ty::Boolean => IrConst::Boolean(false),
-            Ty::Byte | Ty::UByte => IrConst::Byte(0),
-            Ty::Short | Ty::UShort => IrConst::Short(0),
-            Ty::Int | Ty::UInt => IrConst::Int(0),
-            Ty::Long | Ty::ULong => IrConst::Long(0),
+            Ty::Byte => IrConst::Byte(0),
+            Ty::UByte => IrConst::UByte(0),
+            Ty::Short => IrConst::Short(0),
+            Ty::UShort => IrConst::UShort(0),
+            Ty::Int => IrConst::Int(0),
+            Ty::UInt => IrConst::UInt(0),
+            Ty::Long => IrConst::Long(0),
+            Ty::ULong => IrConst::ULong(0),
             Ty::Float => IrConst::Float(0.0),
             Ty::Double => IrConst::Double(0.0),
             Ty::Char => IrConst::Char(0),
@@ -1645,6 +1665,23 @@ pub struct IrClass {
     /// `Some(companion_fq)` on a class with a `companion object`: emit a `public static final
     /// <companion> Companion` field, initialized in this class's `<clinit>`.
     pub companion_class: Option<TypeName>,
+    /// Kotlin names of compiler-generated classifiers this class publishes as direct nested
+    /// declarations, in declaration order. Source-declared nested classifiers are represented by
+    /// their own [`IrClass`] ownership; this list is only for generated declarations whose producer
+    /// explicitly owns the language-level publication contract (for example `$serializer`).
+    pub published_nested_classifiers: Vec<String>,
+    /// For a class a producer GENERATED: the functions Kotlin metadata describes, in the order they
+    /// are declared. The producer owns the whole function record of such a class — a generated
+    /// function absent from this list is not described at all, which is how a non-generic
+    /// `$serializer` omits `typeParametersSerializers`. `None` on a source-declared class, whose
+    /// members are described from their own declarations; `Some([])` remains meaningful for a
+    /// generated class whose producer deliberately publishes no functions.
+    ///
+    /// Held apart from `IrFile::fn_source_order` because the two orders genuinely differ: the
+    /// backend EMITS a serializer's members in kotlinc's class-file order while kotlinc DECLARES
+    /// them in another, and `fn_source_order` drives emission. A generated PROPERTY states its own
+    /// position through [`IrProperty::source_order`], in the same numbering as this list's indices.
+    pub published_generated_functions: Option<Vec<FunId>>,
     /// Secondary constructors — each an extra `<init>(params)` that delegates to the primary
     /// constructor (`constructor(…) : this(args)`) then runs its body. Empty for most classes.
     pub secondary_ctors: Vec<IrSecondaryCtor>,
@@ -2016,6 +2053,8 @@ impl IrClass {
             is_object: false,
             is_companion: false,
             companion_class: None,
+            published_nested_classifiers: Vec::new(),
+            published_generated_functions: None,
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             applied_annotations: DeclarationAnnotations::default(),
@@ -2125,6 +2164,8 @@ impl IrClass {
             is_object: flags.has(crate::fir::DeclarationFlags::SINGLETON),
             is_companion: flags.has(crate::fir::DeclarationFlags::COMPANION),
             companion_class: None,
+            published_nested_classifiers: Vec::new(),
+            published_generated_functions: None,
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             applied_annotations: DeclarationAnnotations::default(),

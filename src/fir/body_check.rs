@@ -1903,7 +1903,27 @@ impl BodyFirChecker<'_> {
                     FirExprKind::Constant(constant)
                 }
                 Expr::LongLit(value) => FirExprKind::Constant(FirConstant::Long(*value)),
-                Expr::UIntLit(value) => FirExprKind::Constant(FirConstant::UInt(*value)),
+                // An unsigned literal takes its WIDTH from the checked type, exactly as
+                // `IntLit` above does. Kotlin types an integer literal from its context whether or
+                // not it carries a `u`, so `3u` in a `ULong` position is a `ULong` literal — and
+                // emitting it as a `UInt` put a 32-bit constant where 64 bits were required.
+                //
+                // `f(3u)` for `fun f(v: ULong)` was the whole program needed: the JVM backend
+                // pushed `iconst_3` into a `(J)` call and the class file did not load
+                // (`VerifyError: type integer is not assignable to long_2nd`). An ASSIGNMENT was
+                // already right, which is what hid this — `val x: ULong = 3u` converts at the
+                // initializer — so only a literal reaching a parameter, an argument or a
+                // collection element carried the wrong width.
+                //
+                // `UByte` and `UShort` need no case: `FirConstant` carries neither, because both
+                // are at most 32 bits and a `UInt` constant is the right width for them.
+                Expr::UIntLit(value) => {
+                    let constant = match self.expression_type(expression)?.get() {
+                        Ty::ULong => FirConstant::ULong(*value),
+                        _ => FirConstant::UInt(*value),
+                    };
+                    FirExprKind::Constant(constant)
+                }
                 Expr::ULongLit(value) => FirExprKind::Constant(FirConstant::ULong(*value)),
                 Expr::DoubleLit(value) => FirExprKind::Constant(FirConstant::Double(*value)),
                 Expr::FloatLit(value) => FirExprKind::Constant(FirConstant::Float(*value)),
