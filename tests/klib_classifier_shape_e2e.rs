@@ -25,6 +25,11 @@ class WithCompanion {
         val k: Int = 1
     }
 }
+
+class Outer {
+    inner class Inner
+    class Nested
+}
 "#;
 
 fn symbols() -> Option<KlibSymbols> {
@@ -104,4 +109,32 @@ fn a_companion_object_is_named_relative_to_its_owner() {
         _ => panic!("k is a property"),
     };
     assert_eq!(k.ty, Ty::Int);
+}
+
+/// An `inner` class captures an instance of its enclosing class; a plain nested one does not. The
+/// fragment records only the `isInner` bit, because the enclosing class is the nested identity's
+/// own owner.
+#[test]
+fn an_inner_class_captures_its_outer_instance() {
+    let Some(symbols) = symbols() else {
+        return;
+    };
+    let inner = symbols
+        .classifier(type_name("plib/Outer.Inner"))
+        .expect("plib.Outer.Inner");
+    assert!(inner.is_nested);
+    assert_eq!(
+        inner.outer_instance,
+        Some(type_name("plib/Outer")),
+        "an inner class's outer instance is its owner"
+    );
+
+    let nested = symbols
+        .classifier(type_name("plib/Outer.Nested"))
+        .expect("plib.Outer.Nested");
+    assert!(nested.is_nested);
+    assert!(
+        nested.outer_instance.is_none(),
+        "a plain nested class captures nothing"
+    );
 }

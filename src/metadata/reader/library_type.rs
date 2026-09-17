@@ -135,7 +135,13 @@ pub fn library_type(internal: TypeName, declaration: BuiltinClass) -> LibraryTyp
         source_file: None,
         stable_declaration: None,
         is_nested: declaration.is_nested,
-        outer_instance: None,
+        // An `inner` class captures an instance of its enclosing class, and its enclosing class is
+        // its own identity's owner — the fragment records the `isInner` bit and nothing else,
+        // because nothing else is needed. A plain nested class captures nothing.
+        outer_instance: declaration
+            .is_inner
+            .then(|| internal.nested_owner())
+            .flatten(),
         kind: declaration.kind,
         inheritance: inheritance(declaration.kind, declaration.flags, has_no_arg_constructor),
         supertypes,

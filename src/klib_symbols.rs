@@ -156,6 +156,7 @@ impl KlibSymbols {
                     is_const: false,
                     visibility: function.visibility,
                     annotations: function.annotations.clone(),
+                    setter_visibility: None,
                 };
                 let record = member_record(package_name, TypeKind::Class, &member, &bounds);
                 let receiver = record.generic_sig.as_ref().and_then(|sig| sig.receiver);
@@ -353,10 +354,9 @@ fn property_record(
         setter: member.is_var.then(|| accessor(setter_params, Ty::Unit)),
         is_const: member.is_const,
         visibility: member.visibility,
-        // A klib records one visibility per property. A setter may be declared less visible than
-        // its property, and `Property.setter_flags` carries that; until it is read the property's
-        // own visibility is the only answer this source has, so it is the one given for both.
-        setter_visibility: member.visibility,
+        // A setter declared less visible than its property (`private set`) states its own
+        // visibility; one that is not declared separately is as visible as the property.
+        setter_visibility: member.setter_visibility.unwrap_or(member.visibility),
         ..PropertyInfo::declared(
             member.name.clone(),
             kind,

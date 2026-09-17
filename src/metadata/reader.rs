@@ -1063,8 +1063,16 @@ pub struct BuiltinMember {
     /// the opt-in markers. The Native stdlib annotates 952 of its 2964 member functions, 90 of them
     /// `@Deprecated`.
     pub annotations: Vec<String>,
+    /// A property's SETTER visibility, when the declaration states one of its own
+    /// (`Property.setter_flags` = 8). `None` when the property declares no separate setter, in
+    /// which case the setter is as visible as the property. `var guarded: Int = 1; private set`
+    /// records 66 here — private in bits 1-3 plus the `isNotDefault` bit — while a plain `var`
+    /// omits the field entirely.
+    pub setter_visibility: Option<Visibility>,
 }
 
+/// `Class.flags` bit 9, `IS_INNER`: an `inner class`, which captures its outer instance.
+pub const IS_INNER_CLASS_BIT: u64 = 1 << 9;
 /// `Class.flags` bit 13, `IS_VALUE`: a `value class`.
 pub const IS_VALUE_CLASS_BIT: u64 = 1 << 13;
 /// `Class.flags` bit 14, `IS_FUN`: a `fun interface`, the declaration bit a Kotlin interface needs
@@ -1185,6 +1193,9 @@ pub struct BuiltinClass {
     pub value_underlying_property: Option<String>,
     /// A `fun interface` — the declaration bit that makes a Kotlin interface SAM-convertible.
     pub is_fun_interface: bool,
+    /// An `inner class`, which captures an instance of its enclosing class. A plain nested class
+    /// does not, and the two are otherwise recorded identically.
+    pub is_inner: bool,
     /// The declaration's raw `Class.flags` word, as the fragment records it.
     ///
     /// The Kotlin facts this reader can name — [`Self::kind`], [`Self::visibility`],
@@ -1815,6 +1826,7 @@ fn builtin_property(
     let mut recv_id = None;
     let mut legacy_flags = None;
     let mut modern_flags = None;
+    let mut setter_flags = None;
     let mut annotation_bodies: Vec<&[u8]> = Vec::new();
     while !p.at_end() {
         let Some(tag) = p.varint() else { break };
@@ -1827,6 +1839,9 @@ fn builtin_property(
                     annotation_bodies.push(body);
                 }
             }
+            // `Property.setter_flags` = 8, present only when the declaration states a setter of its
+            // own. A plain `var` omits it and its setter is as visible as the property.
+            (8, 0) => setter_flags = p.varint(),
             (3, 2) => {
                 let len = p.varint()?;
                 ret_body = p.bytes(len as usize);
@@ -1866,6 +1881,7 @@ fn builtin_property(
         is_const: flags & property_flags::IS_CONST != 0,
         visibility: builtin_declaration_visibility(flags),
         annotations: tables.annotation_identities(annotation_bodies.iter().copied()),
+        setter_visibility: setter_flags.map(builtin_declaration_visibility),
     })
 }
 
@@ -2264,6 +2280,7 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                             visibility: builtin_declaration_visibility(flags),
                             annotations: tables
                                 .annotation_identities(annotation_bodies.iter().copied()),
+                            setter_visibility: None,
                         });
                     }
                 }
@@ -2289,6 +2306,7 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                     .then(|| value_property_id.and_then(|id| strings.get(id as usize).cloned()))
                     .flatten(),
                 is_fun_interface: flags & IS_FUN_INTERFACE_BIT != 0,
+                is_inner: flags & IS_INNER_CLASS_BIT != 0,
                 members,
                 constructors,
                 companion_name,

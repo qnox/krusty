@@ -26,6 +26,8 @@ open class Holder {
     private val secret: Int = 5
     internal var shareable: Int = 6
     val visible: Int = 7
+    var guarded: Int = 8
+        private set
 }
 
 private fun topHidden(): Int = 1
@@ -101,7 +103,16 @@ fn a_property_reports_its_own_visibility_and_its_setter_s() {
     assert_eq!(
         shareable.setter_visibility,
         Visibility::Internal,
-        "a klib records one visibility per property, so the setter's is the property's"
+        "a setter not declared separately is as visible as its property"
+    );
+
+    // `var guarded: Int = 1; private set` — the one case where the two differ.
+    let guarded = property("guarded");
+    assert_eq!(guarded.visibility, Visibility::Public);
+    assert_eq!(
+        guarded.setter_visibility,
+        Visibility::Private,
+        "a `private set` states its own visibility in Property.setter_flags"
     );
 }
 
