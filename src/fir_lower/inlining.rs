@@ -402,6 +402,13 @@ impl BodyLowering<'_> {
             .and_then(|origin| origin.receiver_parameter);
         let mut declarations = Vec::new();
         let mut formal_slots = Vec::with_capacity(parameter_types.len());
+        // A lambda's own VALUE parameters are locals of the splice and keep their source names, so a
+        // suspension inside the body spills them under those names. Captures are not: they are the
+        // enclosing locals, already named where they were declared. No provenance is attached here —
+        // a lambda written at source level renders its parameter bare, and cloning the body into an
+        // enclosing expansion is what raises the typed inline depth the JVM boundary formats.
+        let capture_count = captures.len();
+        let lambda_parameter_names = self.ir.param_names(impl_fn).map(<[String]>::to_vec);
         for (parameter, (value, ty)) in captures
             .into_iter()
             .chain(args)
@@ -426,16 +433,28 @@ impl BodyLowering<'_> {
                 declarations.push(declaration);
                 slot
             } else {
-                match self.ir.expr(value) {
-                    IrExpr::GetValue(slot) => *slot,
+                let source_name = (parameter as usize >= capture_count)
+                    .then(|| {
+                        lambda_parameter_names
+                            .as_ref()
+                            .and_then(|names| names.get(parameter as usize))
+                            .cloned()
+                    })
+                    .flatten();
+                match (self.ir.expr(value), &source_name) {
+                    (IrExpr::GetValue(slot), None) => *slot,
                     _ => {
                         let slot = self.allocate_temporary();
-                        declarations.push(self.ir.add_expr(IrExpr::Variable {
+                        let declaration = self.ir.add_expr(IrExpr::Variable {
                             index: slot,
                             ty,
                             init: Some(value),
-                            named: false,
-                        }));
+                            named: source_name.is_some(),
+                        });
+                        if let Some(name) = source_name {
+                            self.ir.value_names.insert(declaration, name);
+                        }
+                        declarations.push(declaration);
                         slot
                     }
                 }
