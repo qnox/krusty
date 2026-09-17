@@ -1186,6 +1186,7 @@ impl JvmLibraries {
                 setter_declaration: None,
                 source_member: None,
                 accessor_derived: false,
+                read_stability: crate::libraries::PropertyReadStability::Unstable,
             });
         }
     }
@@ -3899,6 +3900,7 @@ impl JvmLibraries {
             setter_declaration: None,
             source_member: None,
             accessor_derived: false,
+            read_stability: crate::libraries::PropertyReadStability::Unstable,
         };
         self.register_external_property(&mut property);
         Some(property)
@@ -4169,6 +4171,7 @@ impl JvmLibraries {
                         setter_declaration: None,
                         source_member: None,
                         accessor_derived: false,
+                        read_stability: crate::libraries::PropertyReadStability::Unstable,
                     });
                     continue;
                 }
@@ -4309,6 +4312,7 @@ impl JvmLibraries {
                     setter_declaration: None,
                     source_member: None,
                     accessor_derived: false,
+                    read_stability: crate::libraries::PropertyReadStability::Unstable,
                 });
             }
 
@@ -4404,6 +4408,7 @@ impl JvmLibraries {
                     setter_declaration: None,
                     source_member: None,
                     accessor_derived: false,
+                    read_stability: crate::libraries::PropertyReadStability::Unstable,
                 });
             }
         }
@@ -4456,6 +4461,7 @@ impl JvmLibraries {
                     setter_declaration: None,
                     source_member: None,
                     accessor_derived: false,
+                    read_stability: crate::libraries::PropertyReadStability::Unstable,
                 });
             }
         }
@@ -4532,6 +4538,7 @@ impl JvmLibraries {
                         // Derived from Java bean accessors, not a declared property: a same-named
                         // instance field selected by the hierarchy walk overrides it when accessible.
                         accessor_derived: true,
+                        read_stability: crate::libraries::PropertyReadStability::Unstable,
                     });
                 }
             }
@@ -5158,6 +5165,7 @@ impl JvmLibraries {
                     setter_declaration: None,
                     source_member: None,
                     accessor_derived: false,
+                    read_stability: crate::libraries::PropertyReadStability::Unstable,
                 });
             }
         }
@@ -6354,6 +6362,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                     setter_declaration,
                     source_member: None,
                     accessor_derived: true,
+                    read_stability: crate::libraries::PropertyReadStability::Unstable,
                 });
             }
         }

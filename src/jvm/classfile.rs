@@ -1214,6 +1214,12 @@ impl ClassWriter {
                     IrConst::Byte(v) => self.const_int(*v as i32),
                     IrConst::Short(v) => self.const_int(*v as i32),
                     IrConst::Int(v) => self.const_int(*v),
+                    // The JVM carries `UByte`/`UShort` in `B`/`S`, so the pool entry is the
+                    // value read as that signed primitive: 200u is the byte -56.
+                    IrConst::UByte(v) => self.const_int(i32::from(*v as i8)),
+                    IrConst::UShort(v) => self.const_int(i32::from(*v as i16)),
+                    IrConst::UInt(v) => self.const_int(*v as i32),
+                    IrConst::ULong(v) => self.const_long(*v as i64),
                     IrConst::Char(ch) => self.const_int(*ch as i32),
                     IrConst::Long(v) => self.const_long(*v),
                     IrConst::Float(v) => self.const_float(*v),
@@ -1497,6 +1503,29 @@ impl ClassWriter {
                 IrConst::Boolean(b) => {
                     out.push(b'Z');
                     let i = self.cp.integer(*b as i32);
+                    u2(out, i);
+                }
+                // An unsigned annotation argument is emitted under the signed primitive its
+                // value class wraps, which is the element type the annotation's own descriptor
+                // names.
+                IrConst::UByte(x) => {
+                    out.push(b'B');
+                    let i = self.cp.integer(i32::from(*x as i8));
+                    u2(out, i);
+                }
+                IrConst::UShort(x) => {
+                    out.push(b'S');
+                    let i = self.cp.integer(i32::from(*x as i16));
+                    u2(out, i);
+                }
+                IrConst::UInt(x) => {
+                    out.push(b'I');
+                    let i = self.cp.integer(*x as i32);
+                    u2(out, i);
+                }
+                IrConst::ULong(x) => {
+                    out.push(b'J');
+                    let i = self.cp.long(*x as i64);
                     u2(out, i);
                 }
                 IrConst::Byte(x) => {
@@ -2790,12 +2819,6 @@ impl ClassWriter {
             .iter()
             .any(|method| !method.method_parameters.is_empty())
             .then(|| self.cp.utf8("MethodParameters"));
-        // Intern `Deprecated` only if the class or a method carries it; a method's own use already
-        // interned it in the per-method sequence above.
-        let deprecated_attr_name = method_dep_name.or_else(|| {
-            (self.class_deprecated || !self.deprecated_methods.is_empty())
-                .then(|| self.cp.utf8("Deprecated"))
-        });
         // Source-header annotation stubs carry only the omission policy. The reader deliberately
         // ignores the default payload, but the attribute body remains structurally valid.
         let annotation_default_attr = self
@@ -2866,6 +2889,14 @@ impl ClassWriter {
             let mut body = Vec::new();
             u2(&mut body, file_idx);
             (name, body)
+        });
+        // Intern `Deprecated` only if the class or a method carries it; a method's own use already
+        // interned it in the per-method sequence above. A CLASS-level one interns here — after
+        // `InnerClasses` and `SourceFile`, before `RuntimeVisibleAnnotations` — which is kotlinc's
+        // order; interning it with the method names put it ahead of both.
+        let deprecated_attr_name = method_dep_name.or_else(|| {
+            (self.class_deprecated || !self.deprecated_methods.is_empty())
+                .then(|| self.cp.utf8("Deprecated"))
         });
         // ONE `RuntimeVisibleAnnotations` attribute for all queued annotations (`@Metadata` + user ones);
         // its attribute name is interned LAST, as kotlinc does.

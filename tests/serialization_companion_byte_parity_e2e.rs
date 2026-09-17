@@ -20,7 +20,10 @@
 //! erased because their numbering is an emission-order artifact rather than class structure.
 use std::path::PathBuf;
 
+use krusty::types::Ty;
+
 use super::common;
+use super::common_core;
 
 const SRC: &str = "import kotlinx.serialization.Serializable\n\
                    @Serializable\n\
@@ -2397,5 +2400,531 @@ fn a_sibling_files_generated_serializer_accessor_matches_kotlinc() {
         method_instructions(&built.krusty, "rows()"),
         want,
         "sibling serializer accessor instructions"
+    );
+}
+
+/// Exact `Class.nestedClassName` (protobuf field 7) entries from one class's Kotlin metadata.
+///
+/// This deliberately reads the field rather than searching `d2`: the string table contains names
+/// referenced by every metadata declaration, so presence there does not prove a nested-class edge.
+fn metadata_nested_class_names(bytes: &[u8]) -> Option<Vec<String>> {
+    fn varint(bytes: &[u8], at: &mut usize) -> Option<u64> {
+        let mut value = 0u64;
+        for shift in (0..64).step_by(7) {
+            let byte = *bytes.get(*at)?;
+            *at += 1;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Some(value);
+            }
+        }
+        None
+    }
+
+    fn skip_value(bytes: &[u8], at: &mut usize, wire: u64) -> Option<()> {
+        let length = match wire {
+            0 => {
+                varint(bytes, at)?;
+                return Some(());
+            }
+            1 => 8,
+            2 => usize::try_from(varint(bytes, at)?).ok()?,
+            5 => 4,
+            _ => return None,
+        };
+        *at = at.checked_add(length)?;
+        (*at <= bytes.len()).then_some(())
+    }
+
+    let (d1, d2) = common_core::raw_kotlin_metadata(bytes)?;
+    // Kotlin's raw-byte encoding begins with NUL, followed by one delimited StringTableTypes
+    // message. The remaining bytes are the Class protobuf.
+    if d1.first() != Some(&0) {
+        return None;
+    }
+    let mut at = 1;
+    let string_table_len = usize::try_from(varint(&d1, &mut at)?).ok()?;
+    at = at.checked_add(string_table_len)?;
+    if at > d1.len() {
+        return None;
+    }
+
+    let mut indices = Vec::new();
+    while at < d1.len() {
+        let tag = varint(&d1, &mut at)?;
+        let (field, wire) = (tag >> 3, tag & 7);
+        if field != 7 {
+            skip_value(&d1, &mut at, wire)?;
+            continue;
+        }
+        if wire != 2 {
+            return None;
+        }
+        let length = usize::try_from(varint(&d1, &mut at)?).ok()?;
+        let end = at.checked_add(length)?;
+        if end > d1.len() {
+            return None;
+        }
+        while at < end {
+            indices.push(usize::try_from(varint(&d1, &mut at)?).ok()?);
+        }
+    }
+    indices
+        .into_iter()
+        .map(|index| d2.get(index).cloned())
+        .collect()
+}
+
+/// A `@Serializable` class's generated `$serializer` is a nested classifier of the class, and
+/// kotlinc records it under `Class.nestedClassName` beside the `Companion`. krusty listed the
+/// companion alone, so a reader of the metadata could not find the serializer as a member of the
+/// type it serializes — the plugin generates it, but the language record is the class's own.
+#[test]
+fn a_serializable_class_lists_its_generated_serializer_as_nested() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class Retention(val days: Int)\n";
+    let Some(built) =
+        compare_with_kotlinc_plugin("NestedSerializer", src, "Retention", &cp, "25", &extra)
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // Read Class.nestedClassName (protobuf field 7) itself. Merely searching d2 would be weaker:
+    // d2 is the string table for every declaration and can contain the same spelling without any
+    // nested-class edge referring to it.
+    let want = metadata_nested_class_names(&built.reference_bytes)
+        .expect("read kotlinc Class.nestedClassName");
+    assert_eq!(
+        want,
+        ["$serializer", "Companion"],
+        "kotlinc records $serializer before Companion"
+    );
+    let got = metadata_nested_class_names(&built.krusty_bytes)
+        .expect("read krusty Class.nestedClassName");
+    assert_eq!(
+        got, want,
+        "nested classifier names of a @Serializable class"
+    );
+}
+
+/// The generic `Signature` of a member of a generated serializer, as javap prints the attribute.
+fn member_signature(disassembly: &str, member: &str) -> String {
+    // The attribute trails the member's `Code`, so the search runs to the NEXT member declaration
+    // rather than a fixed number of lines. A declaration is an indented line ending in `;` that is
+    // not a constant-pool row (those start with `#`).
+    let declaration = |line: &str| {
+        line.ends_with(';') && line.contains('(') && !line.contains(':') && !line.starts_with('#')
+    };
+    let mut lines = disassembly
+        .lines()
+        .map(str::trim)
+        .skip_while(|line| !(declaration(line) && line.contains(member)));
+    lines.next();
+    for line in lines {
+        // `descriptor:` and `Signature:` both end in `;` and hold a parenthesized descriptor; the
+        // `:` is what separates an attribute row from a member declaration.
+        if let Some(signature) = line.strip_prefix("Signature: ") {
+            return signature
+                .split_once("// ")
+                .map_or(signature, |(_, text)| text)
+                .to_string();
+        }
+        if declaration(line) {
+            break;
+        }
+    }
+    panic!("no Signature attribute for {member}");
+}
+
+/// Decode one generated member's Kotlin-metadata return type. The JVM Signature and metadata are
+/// separate attributes built by separate emitters, so bytecode parity alone does not cover this.
+fn metadata_member_return(bytes: &[u8], owner: &str, member: &str) -> Ty {
+    let (d1, d2) = common_core::raw_kotlin_metadata(bytes).expect("read Kotlin metadata");
+    let d1 = vec![d1.into_iter().map(char::from).collect::<String>()];
+    let metadata = krusty::jvm::metadata::decode_metadata(&d1, &d2, Some(1), owner, None, &[]);
+    let matches = metadata
+        .class_functions
+        .iter()
+        .filter(|function| function.kotlin_name == member)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matches.len(),
+        1,
+        "exactly one metadata member named {member}"
+    );
+    matches[0]
+        .generic_sig
+        .as_ref()
+        .unwrap_or_else(|| panic!("metadata member {member} must have a return type"))
+        .ret
+}
+
+/// A generated serializer's array methods hand back serializers whose element types are unrelated
+/// to each other — so kotlinc gives them `Array<KSerializer<*>>`, a STAR projection. krusty declared
+/// the element type as `KSerializer<Any>`, which is a different Kotlin type: it claims every element
+/// serializes `Any`. The distinction exists independently in Kotlin metadata and the JVM `Signature`.
+#[test]
+fn generated_serializer_arrays_are_star_projected() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class Retention(val days: Int)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "StarProjectedSerializers",
+        src,
+        "Retention$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let expected_type = Ty::obj_args(
+        "kotlin/Array",
+        &[Ty::obj_args(
+            "kotlinx/serialization/KSerializer",
+            &[Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))],
+        )],
+    );
+    for member in ["childSerializers", "typeParametersSerializers"] {
+        let declaration = format!("{member}()");
+        let want_signature = member_signature(&built.reference, &declaration);
+        assert_eq!(
+            want_signature, "()[Lkotlinx/serialization/KSerializer<*>;",
+            "kotlinc star-projects {member}'s element serializer type"
+        );
+        assert_eq!(
+            member_signature(&built.krusty, &declaration),
+            want_signature,
+            "{member} JVM generic signature"
+        );
+    }
+
+    // kotlinc records the generated override of childSerializers in class metadata. Its
+    // typeParametersSerializers realization is synthetic support for the inherited default and is
+    // deliberately absent there, though its JVM Signature above still carries the star projection.
+    let want_metadata = metadata_member_return(
+        &built.reference_bytes,
+        "Retention$$serializer",
+        "childSerializers",
+    );
+    assert_eq!(
+        want_metadata, expected_type,
+        "kotlinc childSerializers metadata type"
+    );
+    assert_eq!(
+        metadata_member_return(
+            &built.krusty_bytes,
+            "Retention$$serializer",
+            "childSerializers",
+        ),
+        want_metadata,
+        "childSerializers Kotlin metadata return type"
+    );
+}
+
+/// The `d2` string table of a class's Kotlin metadata, read from the class file.
+///
+/// Every name any declaration in the record refers to is interned here, in the order kotlinc
+/// interns them — so comparing the WHOLE table between two compilers pins both which declarations
+/// are described and the order they are described in. (Searching it for one name proves much less,
+/// which is why a nested-class edge is read from its own protobuf field instead.)
+fn metadata_d2(bytes: &[u8]) -> Vec<String> {
+    common_core::raw_kotlin_metadata(bytes)
+        .expect("read the class's Kotlin metadata")
+        .1
+}
+
+/// Everything `@Metadata` says about a generated serializer, in kotlinc's order.
+///
+/// The record is what a Kotlin consumer reads the declaration back from, and three facts diverged:
+/// kotlinc interns the generated functions as `childSerializers`, `deserialize`, `serialize` while
+/// krusty used its own emission order; kotlinc describes `descriptor` as a PROPERTY (with its
+/// `getDescriptor` accessor) where krusty described neither; and krusty described
+/// `typeParametersSerializers`, which kotlinc records only for a GENERIC serializer.
+#[test]
+fn a_generated_serializer_describes_the_members_kotlinc_describes() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class Retention(val days: Int)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "SerializerMemberRecords",
+        src,
+        "Retention$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = metadata_d2(&built.reference_bytes);
+    assert!(
+        !want
+            .iter()
+            .any(|entry| entry == "typeParametersSerializers"),
+        "a non-generic serializer records no typeParametersSerializers: {want:?}"
+    );
+    assert_eq!(
+        metadata_d2(&built.krusty_bytes),
+        want,
+        "generated serializer d2"
+    );
+}
+
+/// The same members for a GENERIC serializer, where kotlinc DOES describe
+/// `typeParametersSerializers` — so the member is not simply dropped, it is described exactly when
+/// the serializer has type parameters to pass along.
+///
+/// Only the member list is compared here, not the whole `d2`: a generic serializer's CONSTRUCTOR
+/// record also diverges (kotlinc describes the single `(KSerializer)V` form where krusty describes
+/// an empty primary plus a `typeSerial0` property), which is a separate change.
+#[test]
+fn a_generic_serializer_describes_its_type_parameter_serializers() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class Boxed<T>(val first: T, val second: String)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "GenericSerializerMemberRecords",
+        src,
+        "Boxed$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let members = |entries: Vec<String>| {
+        entries
+            .into_iter()
+            .filter(|entry| {
+                [
+                    "childSerializers",
+                    "deserialize",
+                    "serialize",
+                    "typeParametersSerializers",
+                    "descriptor",
+                    "getDescriptor",
+                ]
+                .contains(&entry.as_str())
+            })
+            .collect::<Vec<_>>()
+    };
+    let want = members(metadata_d2(&built.reference_bytes));
+    assert!(
+        want.contains(&"typeParametersSerializers".to_string()),
+        "a generic serializer records typeParametersSerializers: {want:?}"
+    );
+    assert_eq!(
+        members(metadata_d2(&built.krusty_bytes)),
+        want,
+        "generic generated serializer members"
+    );
+}
+
+/// The `JvmMethodSignature` rule the generated `childSerializers()` depends on, pinned on ORDINARY
+/// source declarations so it cannot be mistaken for something specific to the serialization plugin.
+///
+/// An array's JVM descriptor is built from its element's erasure, and a star projection records no
+/// bound to erase — so kotlinc writes the descriptor out for `Array<List<*>>` and leaves it derived
+/// for `Array<List<String>>` and for a bare `List<*>`, whose erasure is its own classifier.
+#[test]
+fn only_an_array_of_a_star_projection_records_its_descriptor() {
+    let src = "class Probe {\n\
+               \x20 fun stars(xs: Array<List<*>>): Int = xs.size\n\
+               \x20 fun plain(xs: Array<List<String>>): Int = xs.size\n\
+               \x20 fun one(xs: List<*>): Int = xs.size\n\
+               }\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "StarArraySignature",
+        src,
+        "Probe",
+        &[common::stdlib_jar()],
+        "25",
+        &[],
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = metadata_d2(&built.reference_bytes);
+    assert_eq!(
+        want.iter().filter(|entry| entry.contains('(')).count(),
+        2,
+        "the constructor and exactly one member record a descriptor: {want:?}"
+    );
+    assert!(
+        want.contains(&"([Ljava/util/List;)I".to_string()),
+        "the star-projected array is the one recorded: {want:?}"
+    );
+    assert_eq!(metadata_d2(&built.krusty_bytes), want, "Probe d2");
+}
+
+/// One member's disassembly, from its declaration to the next one, with pool indices erased.
+fn member_body(disassembly: &str, member: &str) -> Vec<String> {
+    let declaration = |line: &str| {
+        line.ends_with(';') && line.contains('(') && !line.contains(':') && !line.starts_with('#')
+    };
+    let mut lines = disassembly
+        .lines()
+        .map(str::trim)
+        .skip_while(|line| !(declaration(line) && line.contains(member)));
+    let mut body = vec![lines.next().unwrap_or_default().to_string()];
+    for line in lines {
+        if declaration(line) || line == "}" {
+            break;
+        }
+        body.push(line.to_string());
+    }
+    structure(&body.join("\n"))
+}
+
+/// A generated serializer's `<init>` carries kotlinc's debug tables: a line table rooted at the
+/// annotated owner's declaration and a local-variable table naming `this`. Every other generated
+/// member already did; the constructor is emitted from the class declaration rather than from a
+/// generated `IrFunction`, and the synthesized class had no declaration line to root them at.
+#[test]
+fn a_generated_serializer_constructor_carries_its_debug_tables() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               \n\
+               @Serializable\n\
+               data class Retention(val days: Int)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "SerializerInitDebug",
+        src,
+        "Retention$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = member_body(&built.reference, "Retention$$serializer()");
+    assert!(
+        want.iter().any(|line| line == "line 3: 0")
+            && want.iter().any(|line| line.contains("this")),
+        "kotlinc roots the constructor at the annotated declaration: {want:?}"
+    );
+    assert_eq!(
+        member_body(&built.krusty, "Retention$$serializer()"),
+        want,
+        "generated serializer constructor"
+    );
+}
+
+/// Declaring one accessor does not make the other accessor declared. In particular, a `var` with
+/// an explicit getter still has a synthesized default setter, whose own line/local tables must not
+/// be dropped while the generated serializer's declared getter is excluded from synthesis.
+#[test]
+fn an_explicit_getter_keeps_its_default_setter_debug_tables() {
+    let src = "class Holder {\n\
+               \x20 var value: String = \"initial\"\n\
+               \x20     get() = field\n\
+               }\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "MixedPropertyAccessors",
+        src,
+        "Holder",
+        &[common::stdlib_jar()],
+        "25",
+        &[],
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    assert_eq!(
+        member_body(&built.krusty, "setValue(java.lang.String)"),
+        member_body(&built.reference, "setValue(java.lang.String)"),
+        "default setter beside an explicit getter"
+    );
+}
+
+/// Where the `Deprecated` attribute name lands in the constant pool of a class that carries the
+/// attribute itself.
+///
+/// It was interned with the per-method attribute names, ahead of `InnerClasses` and `SourceFile`;
+/// kotlinc interns a class-level one after both, immediately before `RuntimeVisibleAnnotations`.
+/// Nothing else about the class changes — a pool in a different order is simply a different class
+/// file, and this was the last byte between the two on a generated serializer.
+///
+/// The generated `$serializer` is the fixture because it is the only class krusty marks deprecated
+/// today: a source `@Deprecated` declaration gets no class-level attribute at all, which is a
+/// separate gap.
+#[test]
+fn a_deprecated_class_attribute_name_interns_after_its_source_file() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class Point(val x: Int, val y: String)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "DeprecatedPool",
+        src,
+        "Point$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // The three attribute names in the order the pool holds them. Their absolute indices differ
+    // while anything else about the class does; their order is the contract.
+    let order = |text: &str| {
+        let pool = text
+            .lines()
+            .map(str::trim)
+            .take_while(|line| !line.starts_with('{'))
+            .filter_map(|line| line.split("= Utf8").nth(1))
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        ["Deprecated", "InnerClasses", "SourceFile"]
+            .into_iter()
+            .filter_map(|name| Some((pool.iter().position(|entry| *entry == name)?, name)))
+            .collect::<Vec<_>>()
+    };
+    let mut want = order(&built.reference);
+    want.sort();
+    assert_eq!(
+        want.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
+        ["InnerClasses", "SourceFile", "Deprecated"],
+        "kotlinc interns a class-level Deprecated after both"
+    );
+    let mut got = order(&built.krusty);
+    got.sort();
+    assert_eq!(
+        got.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
+        want.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
+        "class attribute name interning order"
     );
 }
