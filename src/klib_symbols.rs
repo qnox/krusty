@@ -154,6 +154,7 @@ impl KlibSymbols {
                     receiver: function.receiver.clone(),
                     is_var: false,
                     is_const: false,
+                    visibility: function.visibility,
                 };
                 let record = member_record(package_name, TypeKind::Class, &member, &bounds);
                 let receiver = record.generic_sig.as_ref().and_then(|sig| sig.receiver);
@@ -275,6 +276,7 @@ fn member_record(
     record.set_is_operator(member.is_operator);
     record.set_is_infix(member.is_infix);
     record.set_is_abstract(member.is_abstract);
+    record.visibility = member.visibility;
     // Whether the owner is an interface is a declaration fact the decoded kind already carries; how
     // a call to it dispatches is the backend's reading of that fact.
     record.set_is_interface(matches!(
@@ -344,6 +346,11 @@ fn property_record(
             .collect(),
         setter: member.is_var.then(|| accessor(setter_params, Ty::Unit)),
         is_const: member.is_const,
+        visibility: member.visibility,
+        // A klib records one visibility per property. A setter may be declared less visible than
+        // its property, and `Property.setter_flags` carries that; until it is read the property's
+        // own visibility is the only answer this source has, so it is the one given for both.
+        setter_visibility: member.visibility,
         ..PropertyInfo::declared(
             member.name.clone(),
             kind,
