@@ -1469,7 +1469,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             // backend's to choose, and it carries an unsigned value as the machine integer its
             // value class wraps. So 200u is the 8-bit pattern that reads as -56 signed, which is
             // what every comparison, widening and `toString` in `unsigned.rs` already expects.
-            IrConst::UByte(value) => self.builder.ins().iconst(types::I8, i64::from(*value as i8)),
+            IrConst::UByte(value) => self
+                .builder
+                .ins()
+                .iconst(types::I8, i64::from(*value as i8)),
             IrConst::UShort(value) => self
                 .builder
                 .ins()
