@@ -12145,7 +12145,7 @@ fn collect_stable_visibility_suppressions(
             };
             if !table
                 .resolved_annotation(stub.source.raw(), &annotation)
-                .is_some_and(|identity| identity.matches("kotlin/Suppress"))
+                .is_some_and(|identity| identity == type_name("kotlin/Suppress"))
             {
                 continue;
             }
@@ -35674,6 +35674,7 @@ fun fileAllowed(owner: FileOwner): Int = owner.hidden()
 
         let (errors, _) = check_with_annotation_fixtures(
             r#"
+// LANGUAGE: +ExplicitBackingFields
 import kotlin.Suppress as KotlinSuppress
 
 annotation class Suppress(vararg val names: String)
@@ -35700,12 +35701,25 @@ fun outer() {
     @KotlinSuppress("INVISIBLE_REFERENCE")
     fun local(): Int = Owner().hidden()
     local()
+
+    class LocalInferred {
+        @KotlinSuppress("INVISIBLE_REFERENCE")
+        val value = Owner().hidden()
+    }
+    LocalInferred().value
+
+    class LocalBacking {
+        @KotlinSuppress("INVISIBLE_REFERENCE")
+        val value: Any
+            field = Owner().hidden()
+    }
+    LocalBacking().value
 }
 
 @Suppress("INVISIBLE_REFERENCE")
 fun rejected(owner: Owner) { owner.hidden() }
 "#,
-            false,
+            true,
         );
 
         assert_eq!(errors, ["cannot access 'hidden': it is private in 'Owner'"]);
@@ -66786,6 +66800,11 @@ impl<'a> Checker<'a> {
                     } else {
                         property_scope
                     };
+                    let property_suppression_depth = self.push_declaration_suppressions(
+                        property_scope,
+                        &property.annotations,
+                        &property.annotation_args,
+                    );
                     // A self-recursive inferred property can still have a concrete constraint from
                     // another branch (`val index = left?.index ?: 0`). Publish that constraint only
                     // as a provisional, identity-keyed result, then run the ordinary checker against
@@ -66837,6 +66856,8 @@ impl<'a> Checker<'a> {
                         })
                         .filter(|ty| *ty != Ty::Error)
                         .map(inferred_declaration_ty);
+                    self.active_statement_suppressions
+                        .truncate(property_suppression_depth);
                     crate::trace_compiler!(
                         "signature",
                         "local property inference owner={d:?} name={} initializer={:?} inferred={inferred:?}",
@@ -66936,6 +66957,11 @@ impl<'a> Checker<'a> {
                     if !selected {
                         continue;
                     }
+                    let property_suppression_depth = self.push_declaration_suppressions(
+                        field_scope,
+                        &property.annotations,
+                        &property.annotation_args,
+                    );
                     let initializer_scope = field_scope.child(ScopeKind::Block);
                     if body_local_class {
                         self.declare_property_initializer_class_storage_capture(
@@ -66949,25 +66975,24 @@ impl<'a> Checker<'a> {
                         (None, Some(initializer)) => self.expr(&initializer_scope, initializer),
                         (None, None) => Ty::Error,
                     };
-                    if storage.mentions_error() || storage.mentions_pending() {
-                        continue;
-                    }
-                    self.explicit_backing_field_types
-                        .insert((property.span.lo, property.span.hi), storage);
-                    if let Some(scoped) = props
-                        .iter_mut()
-                        .find(|candidate| candidate.name == property.name)
-                    {
-                        let declared = scoped.ty;
-                        scoped.owner_storage_ty = Some(storage);
-                        self.declare_scoped_property(field_scope, scoped, true);
-                        if field.ty.is_none() {
-                            if !crate::assignable::is_subtype(
-                                &crate::assignable::TyCtx::new(),
-                                self,
-                                storage,
-                                declared,
-                            ) {
+                    if !storage.mentions_error() && !storage.mentions_pending() {
+                        self.explicit_backing_field_types
+                            .insert((property.span.lo, property.span.hi), storage);
+                        if let Some(scoped) = props
+                            .iter_mut()
+                            .find(|candidate| candidate.name == property.name)
+                        {
+                            let declared = scoped.ty;
+                            scoped.owner_storage_ty = Some(storage);
+                            self.declare_scoped_property(field_scope, scoped, true);
+                            if field.ty.is_none()
+                                && !crate::assignable::is_subtype(
+                                    &crate::assignable::TyCtx::new(),
+                                    self,
+                                    storage,
+                                    declared,
+                                )
+                            {
                                 self.diags.error(
                                     property.span,
                                     format!(
@@ -66980,6 +67005,8 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
+                    self.active_statement_suppressions
+                        .truncate(property_suppression_depth);
                 }
             }
             // Push only this declaration's semantic class chain. A local or anonymous declaration is
@@ -85343,7 +85370,7 @@ impl<'a> Checker<'a> {
         for (annotation, arguments) in annotations.iter().zip(arguments) {
             if !self
                 .annotation_identity_in_scope(scope, annotation)
-                .is_some_and(|identity| identity.matches("kotlin/Suppress"))
+                .is_some_and(|identity| identity == type_name("kotlin/Suppress"))
             {
                 continue;
             }
