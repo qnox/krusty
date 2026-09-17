@@ -731,6 +731,87 @@ fn a_dependency_property_publishes_its_kotlin_name() {
     );
 }
 
+/// A dependency EXTENSION or top-level function publishes its own Kotlin name too.
+///
+/// The property test above closes the accessor half; this is the other. A facade static's name in
+/// the class file is an emit handle, and it moves away from the source name whenever the signature
+/// mentions a value class: kotlinc appends a hash of the erasure, so `UInt.downTo` is compiled as
+/// `downTo-J1ME1BU` and each unsigned width gets a hash of its own. `@JvmName` moves it for its own
+/// reasons. A classifier member already publishes both spellings; a facade static is the same kind
+/// of declaration reached another way, and had been publishing only the physical one.
+///
+/// Stated as exact pairs rather than by predicate, for the reason the property test gives: a rule
+/// like "the name holds no dash" passes on the wrong base name.
+#[test]
+fn a_dependency_extension_publishes_its_kotlin_name() {
+    let (Some(stdlib), Some(jdk)) = (
+        crate::toolchain::stdlib_jar(),
+        crate::toolchain::jdk_modules(),
+    ) else {
+        return;
+    };
+    let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(vec![stdlib, jdk]));
+    let mut diagnostics = DiagSink::new();
+    let _ = crate::frontend::analyze_source_set_with_features(
+        &[SourceInput::kotlin(
+            "fun d(a: UInt, b: UInt): UIntProgression = a downTo b\n\
+             fun u(a: UInt, b: UInt): UIntRange = a until b\n\
+             fun l(a: ULong, b: ULong): ULongProgression = a downTo b\n\
+             fun s(x: List<Int>): Int = x.sum()\n",
+        )
+        .with_file_stem("DependencyExtensionName")],
+        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
+            classpath.clone(),
+        )),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+
+    let mut published: Vec<(String, String)> = Vec::new();
+    for raw in 0.. {
+        let Some(realization) =
+            classpath.external_callable(crate::fir::ExternalCallableId::from_raw(raw))
+        else {
+            break;
+        };
+        let Some(kotlin) = realization.callable.reflection_name.clone() else {
+            continue;
+        };
+        if matches!(kotlin.as_str(), "downTo" | "until") {
+            published.push((kotlin, realization.callable.name.clone()));
+        }
+    }
+    published.sort();
+    published.dedup();
+    let published: Vec<(&str, &str)> = published
+        .iter()
+        .map(|(kotlin, physical)| (kotlin.as_str(), physical.as_str()))
+        .collect();
+    assert_eq!(
+        published,
+        vec![
+            // One Kotlin name against every physical spelling it is realized under. The signed
+            // `RangesKt.downTo`/`until` are the case with no hash at all, so a fix reaching only
+            // mangled names would not cover them — and they arrive in the same answer as their four
+            // unsigned siblings, which is what makes the point: `UByte`, `UInt`, `ULong` and
+            // `UShort` each get their own hash of their own erasure, and no rule over spellings
+            // maps any of these back to `downTo`.
+            ("downTo", "downTo"),
+            ("downTo", "downTo-5PvTz6A"),
+            ("downTo", "downTo-J1ME1BU"),
+            ("downTo", "downTo-Kr8caGY"),
+            ("downTo", "downTo-eb3DHEI"),
+            ("until", "until"),
+            ("until", "until-5PvTz6A"),
+            ("until", "until-J1ME1BU"),
+            ("until", "until-Kr8caGY"),
+            ("until", "until-eb3DHEI"),
+        ],
+        "the extension name contract changed"
+    );
+}
+
 #[test]
 fn value_class_override_publishes_the_generic_interface_edge() {
     let (Some(stdlib), Some(jdk)) = (
