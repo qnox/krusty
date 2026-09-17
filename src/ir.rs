@@ -1650,6 +1650,18 @@ pub struct IrClass {
     /// their own [`IrClass`] ownership; this list is only for generated declarations whose producer
     /// explicitly owns the language-level publication contract (for example `$serializer`).
     pub published_nested_classifiers: Vec<String>,
+    /// For a class a producer GENERATED: the functions Kotlin metadata describes, in the order they
+    /// are declared. The producer owns the whole function record of such a class — a generated
+    /// function absent from this list is not described at all, which is how a non-generic
+    /// `$serializer` omits `typeParametersSerializers`. `None` on a source-declared class, whose
+    /// members are described from their own declarations; `Some([])` remains meaningful for a
+    /// generated class whose producer deliberately publishes no functions.
+    ///
+    /// Held apart from `IrFile::fn_source_order` because the two orders genuinely differ: the
+    /// backend EMITS a serializer's members in kotlinc's class-file order while kotlinc DECLARES
+    /// them in another, and `fn_source_order` drives emission. A generated PROPERTY states its own
+    /// position through [`IrProperty::source_order`], in the same numbering as this list's indices.
+    pub published_generated_functions: Option<Vec<FunId>>,
     /// Secondary constructors — each an extra `<init>(params)` that delegates to the primary
     /// constructor (`constructor(…) : this(args)`) then runs its body. Empty for most classes.
     pub secondary_ctors: Vec<IrSecondaryCtor>,
@@ -2022,6 +2034,7 @@ impl IrClass {
             is_companion: false,
             companion_class: None,
             published_nested_classifiers: Vec::new(),
+            published_generated_functions: None,
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             applied_annotations: DeclarationAnnotations::default(),
@@ -2132,6 +2145,7 @@ impl IrClass {
             is_companion: flags.has(crate::fir::DeclarationFlags::COMPANION),
             companion_class: None,
             published_nested_classifiers: Vec::new(),
+            published_generated_functions: None,
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             applied_annotations: DeclarationAnnotations::default(),

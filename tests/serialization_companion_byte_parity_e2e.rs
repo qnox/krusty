@@ -2633,3 +2633,150 @@ fn generated_serializer_arrays_are_star_projected() {
         "childSerializers Kotlin metadata return type"
     );
 }
+
+/// The `d2` string table of a class's Kotlin metadata, read from the class file.
+///
+/// Every name any declaration in the record refers to is interned here, in the order kotlinc
+/// interns them — so comparing the WHOLE table between two compilers pins both which declarations
+/// are described and the order they are described in. (Searching it for one name proves much less,
+/// which is why a nested-class edge is read from its own protobuf field instead.)
+fn metadata_d2(bytes: &[u8]) -> Vec<String> {
+    common_core::raw_kotlin_metadata(bytes)
+        .expect("read the class's Kotlin metadata")
+        .1
+}
+
+/// Everything `@Metadata` says about a generated serializer, in kotlinc's order.
+///
+/// The record is what a Kotlin consumer reads the declaration back from, and three facts diverged:
+/// kotlinc interns the generated functions as `childSerializers`, `deserialize`, `serialize` while
+/// krusty used its own emission order; kotlinc describes `descriptor` as a PROPERTY (with its
+/// `getDescriptor` accessor) where krusty described neither; and krusty described
+/// `typeParametersSerializers`, which kotlinc records only for a GENERIC serializer.
+#[test]
+fn a_generated_serializer_describes_the_members_kotlinc_describes() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class Retention(val days: Int)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "SerializerMemberRecords",
+        src,
+        "Retention$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = metadata_d2(&built.reference_bytes);
+    assert!(
+        !want
+            .iter()
+            .any(|entry| entry == "typeParametersSerializers"),
+        "a non-generic serializer records no typeParametersSerializers: {want:?}"
+    );
+    assert_eq!(
+        metadata_d2(&built.krusty_bytes),
+        want,
+        "generated serializer d2"
+    );
+}
+
+/// The same members for a GENERIC serializer, where kotlinc DOES describe
+/// `typeParametersSerializers` — so the member is not simply dropped, it is described exactly when
+/// the serializer has type parameters to pass along.
+///
+/// Only the member list is compared here, not the whole `d2`: a generic serializer's CONSTRUCTOR
+/// record also diverges (kotlinc describes the single `(KSerializer)V` form where krusty describes
+/// an empty primary plus a `typeSerial0` property), which is a separate change.
+#[test]
+fn a_generic_serializer_describes_its_type_parameter_serializers() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class Boxed<T>(val first: T, val second: String)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "GenericSerializerMemberRecords",
+        src,
+        "Boxed$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let members = |entries: Vec<String>| {
+        entries
+            .into_iter()
+            .filter(|entry| {
+                [
+                    "childSerializers",
+                    "deserialize",
+                    "serialize",
+                    "typeParametersSerializers",
+                    "descriptor",
+                    "getDescriptor",
+                ]
+                .contains(&entry.as_str())
+            })
+            .collect::<Vec<_>>()
+    };
+    let want = members(metadata_d2(&built.reference_bytes));
+    assert!(
+        want.contains(&"typeParametersSerializers".to_string()),
+        "a generic serializer records typeParametersSerializers: {want:?}"
+    );
+    assert_eq!(
+        members(metadata_d2(&built.krusty_bytes)),
+        want,
+        "generic generated serializer members"
+    );
+}
+
+/// The `JvmMethodSignature` rule the generated `childSerializers()` depends on, pinned on ORDINARY
+/// source declarations so it cannot be mistaken for something specific to the serialization plugin.
+///
+/// An array's JVM descriptor is built from its element's erasure, and a star projection records no
+/// bound to erase — so kotlinc writes the descriptor out for `Array<List<*>>` and leaves it derived
+/// for `Array<List<String>>` and for a bare `List<*>`, whose erasure is its own classifier.
+#[test]
+fn only_an_array_of_a_star_projection_records_its_descriptor() {
+    let src = "class Probe {\n\
+               \x20 fun stars(xs: Array<List<*>>): Int = xs.size\n\
+               \x20 fun plain(xs: Array<List<String>>): Int = xs.size\n\
+               \x20 fun one(xs: List<*>): Int = xs.size\n\
+               }\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "StarArraySignature",
+        src,
+        "Probe",
+        &[common::stdlib_jar()],
+        "25",
+        &[],
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = metadata_d2(&built.reference_bytes);
+    assert_eq!(
+        want.iter().filter(|entry| entry.contains('(')).count(),
+        2,
+        "the constructor and exactly one member record a descriptor: {want:?}"
+    );
+    assert!(
+        want.contains(&"([Ljava/util/List;)I".to_string()),
+        "the star-projected array is the one recorded: {want:?}"
+    );
+    assert_eq!(metadata_d2(&built.krusty_bytes), want, "Probe d2");
+}
