@@ -2932,10 +2932,9 @@ fn a_singleton_serializers_class_initializer_matches_kotlinc() {
 ///
 /// The dispatch is one `tableswitch` over `-1..=n-1` with a default, not a chain of comparisons.
 ///
-/// Only the prologue is compared instruction for instruction. The whole method is not yet
-/// byte-identical: kotlinc opens with a `decodeSequentially()` fast path, and leaves the element
-/// index slot UNINITIALIZED where krusty must zero it — its frame locals come from the declarations
-/// in scope rather than from merging edges, so an unstored slot cannot be typed `top`.
+/// Only the prologue is compared instruction for instruction; the rest of the method is pinned by
+/// the dispatch assertion below and by the runtime differentials in
+/// `deserialize_dispatch_shape_e2e`.
 #[test]
 fn deserialize_opens_kotlincs_locals_and_switches_on_the_index() {
     let Some((plugin, cp)) = plugin_and_runtime() else {
@@ -2981,22 +2980,9 @@ fn deserialize_opens_kotlincs_locals_and_switches_on_the_index() {
         ["astore_2", "istore_3", "istore 5", "istore 6", "astore 7"],
         "kotlinc's locals: the descriptor, the loop flag, the seen mask, then the fields"
     );
-    // Slot 4 is the element index, which kotlinc never initializes — it is assigned only by the
-    // loop, and kotlinc's verifier frames carry `top` for it until then.
-    let got = stores(&built.krusty);
-    assert_eq!(
-        got.iter()
-            .filter(|instruction| *instruction != "istore 4")
-            .cloned()
-            .collect::<Vec<_>>(),
-        want,
-        "deserialize local layout"
-    );
-    assert_eq!(
-        got.len(),
-        want.len() + 1,
-        "the element-index zeroing is the ONLY extra store: {got:?}"
-    );
+    // Slot 4 is the element index, which neither compiler initializes — it is assigned only by the
+    // loop, and the verifier frames carry `top` for it until then.
+    assert_eq!(stores(&built.krusty), want, "deserialize local layout");
 
     let dispatch = |text: &str| {
         member_body(text, "deserialize(kotlinx.serialization.encoding.Decoder)")

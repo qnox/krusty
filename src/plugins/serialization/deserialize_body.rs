@@ -399,16 +399,12 @@ impl DeserializeBody<'_> {
                 init: Some(flag_init),
                 named: false,
             }));
-            // The element index exists only inside the loop. kotlinc leaves the slot UNINITIALIZED
-            // and its verifier frames carry `top` there; krusty computes frame locals from the
-            // declarations in scope rather than by merging edges, so an unstored slot cannot be
-            // typed `top` without rejecting every frame that follows. Zeroing it costs the two
-            // bytes kotlinc does not emit and keeps the rest of the layout exact.
-            let index_init = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+            // Declared, never initialized: the element index exists only inside the loop, and the
+            // verifier types its slot `top` until the loop's first store.
             stmts.push(ir.add_expr(IrExpr::Variable {
                 index: INDEX_SLOT,
                 ty: class_ty("kotlin/Int"),
-                init: Some(index_init),
+                init: None,
                 named: false,
             }));
             for &seen_slot in &seen_slots {

@@ -13328,6 +13328,10 @@ struct Emitter<'a> {
     owner: String,
     facade: String,
     slots: HashMap<u32, (u16, Ty)>,
+    /// Slots of locals DECLARED without an initializer and not yet stored to. The verifier types
+    /// such a slot `top`, and a `StackMapTable` frame that claims the declared type instead is
+    /// rejected on any edge reaching it before the first assignment. Cleared per slot by that store.
+    unassigned_slots: std::collections::HashSet<u16>,
     /// Every `Variable` index → its JVM type (file-wide); a `value_ty(GetValue)` fallback for a slot not
     /// yet registered in `slots` (queried before its declaration emits — e.g. an inline result temp).
     var_types: HashMap<u32, Ty>,
@@ -13383,6 +13387,7 @@ impl<'a> Emitter<'a> {
             owner: owner.to_string(),
             facade: facade.to_string(),
             slots: HashMap::new(),
+            unassigned_slots: std::collections::HashSet::new(),
             var_types: collect_body_var_types(ir, roots),
             next_slot: 0,
             ret,
@@ -14188,6 +14193,7 @@ impl<'a> Emitter<'a> {
                         s
                     });
                     self.slots.insert(index, (slot, jt));
+                    self.unassigned_slots.remove(&slot);
                     store(jt, slot, code);
                     // A source local becomes visible after its initializing store.
                     if let Some(name) = self
@@ -14212,6 +14218,7 @@ impl<'a> Emitter<'a> {
                         s
                     });
                     self.slots.insert(index, (slot, jt));
+                    self.unassigned_slots.insert(slot);
                     // An uninitialized source local (`lateinit var`) still has a lexical lifetime.
                     // Its declaration emits no store, so open the debug range at the declaration's
                     // current bytecode position; the later checked assignment only initializes the
@@ -14240,6 +14247,8 @@ impl<'a> Emitter<'a> {
                     );
                     return;
                 };
+                // The slot holds a value from here on, whichever store form is chosen below.
+                self.unassigned_slots.remove(&slot);
                 // `i = i + k` / `i = k + i` / `i = i - k` on an `Int` local with a small constant `k`
                 // compiles to `iinc slot, k` (kotlinc's form), not load/const/add/store.
                 let delta: Option<i32> = if jt == Ty::Int {
@@ -19634,7 +19643,14 @@ impl<'a> Emitter<'a> {
     fn verif_locals_with(&mut self, extra: &[(u16, Ty)]) -> Vec<VerifType> {
         let max = self.next_slot as usize;
         let mut raw = vec![VerifType::Top; max];
-        let entries: Vec<(u16, Ty)> = self.slots.values().copied().collect();
+        // A local DECLARED without an initializer and not yet stored to is `top` to the verifier —
+        // `raw` already holds `top` for it, so it is simply not filled in here.
+        let entries: Vec<(u16, Ty)> = self
+            .slots
+            .values()
+            .copied()
+            .filter(|(slot, _)| !self.unassigned_slots.contains(slot))
+            .collect();
         for (slot, ty) in entries {
             if (slot as usize) < raw.len() {
                 raw[slot as usize] = self.verif_single(ty);
