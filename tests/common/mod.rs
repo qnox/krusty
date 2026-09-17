@@ -24,6 +24,12 @@ use krusty::jvm::classpath::Classpath;
 /// may not, so build it once on demand in the test profile rather than coupling the compiler crate
 /// back to the executable package.
 #[allow(dead_code)]
+/// KLIB helpers. Declared here rather than beside `e2e.rs`'s module list so both test binaries
+/// have them: `conformance.rs` loads this file as a plain `mod common;`, and a helper wired in by
+/// one binary's aggregator does not exist in the other.
+mod klib;
+pub use klib::*;
+
 pub fn krusty_binary() -> PathBuf {
     static BINARY: OnceLock<PathBuf> = OnceLock::new();
     BINARY
