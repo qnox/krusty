@@ -4896,6 +4896,8 @@ fn const_value_idx(ir: &IrFile, init: crate::ir::ExprId, cw: &mut ClassWriter) -
             // `UByte`/`UShort` ride in the `B`/`S` their value class wraps.
             IrConst::UByte(v) => cw.const_int(i32::from(*v as i8)),
             IrConst::UShort(v) => cw.const_int(i32::from(*v as i16)),
+            IrConst::UInt(v) => cw.const_int(*v as i32),
+            IrConst::ULong(v) => cw.const_long(*v as i64),
             IrConst::Char(c) => cw.const_int(*c as i32),
             IrConst::Long(v) => cw.const_long(*v),
             IrConst::Float(v) => cw.const_float(*v),
@@ -15567,6 +15569,8 @@ impl<'a> Emitter<'a> {
                 // chosen here, and another backend is free to choose differently.
                 IrConst::UByte(v) => code.push_int(i32::from(*v as i8), self.cw),
                 IrConst::UShort(v) => code.push_int(i32::from(*v as i16), self.cw),
+                IrConst::UInt(v) => code.push_int(*v as i32, self.cw),
+                IrConst::ULong(v) => code.push_long(*v as i64, self.cw),
                 IrConst::Short(v) => code.push_int(*v as i32, self.cw),
                 IrConst::Byte(v) => code.push_int(*v as i32, self.cw),
                 IrConst::Char(v) => code.push_int(*v as i32, self.cw),
@@ -19751,6 +19755,8 @@ impl<'a> Emitter<'a> {
                 // the carrier question from every backend.
                 IrConst::UByte(_) => Ty::UByte,
                 IrConst::UShort(_) => Ty::UShort,
+                IrConst::UInt(_) => Ty::UInt,
+                IrConst::ULong(_) => Ty::ULong,
                 IrConst::Int(_) => Ty::Int,
                 IrConst::Long(_) => Ty::Long,
                 IrConst::Double(_) => Ty::Double,

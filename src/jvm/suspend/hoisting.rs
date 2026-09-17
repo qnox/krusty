@@ -1244,6 +1244,8 @@ fn hoisted_value_ty(
             IrConst::Boolean(_) => Ty::Boolean,
             IrConst::UByte(_) => Ty::UByte,
             IrConst::UShort(_) => Ty::UShort,
+            IrConst::UInt(_) => Ty::UInt,
+            IrConst::ULong(_) => Ty::ULong,
             IrConst::Int(_) => Ty::Int,
             IrConst::Long(_) => Ty::Long,
             IrConst::Double(_) => Ty::Double,

@@ -304,6 +304,14 @@ fn annotation_value_pb(st: &mut StringTable, value: &crate::ir::AnnoValue) -> Pb
                 out.field_varint(1, 2);
                 out.field_varint(2, zigzag_i64(i64::from(*value as i16)));
             }
+            IrConst::UInt(value) => {
+                out.field_varint(1, 3);
+                out.field_varint(2, zigzag_i64(i64::from(*value as i32)));
+            }
+            IrConst::ULong(value) => {
+                out.field_varint(1, 4);
+                out.field_varint(2, zigzag_i64(*value as i64));
+            }
             IrConst::Byte(value) => {
                 out.field_varint(1, 0);
                 out.field_varint(2, zigzag_i64(i64::from(*value)));

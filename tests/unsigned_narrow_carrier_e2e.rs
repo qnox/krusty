@@ -114,7 +114,8 @@ fn common_ir_keeps_the_unsigned_identity_and_chooses_no_carrier() {
         "fun b(v: UByte): String = v.toString()\n\
          fun s(v: UShort): String = v.toString()\n\
          fun i(v: UInt): String = v.toString()\n\
-         fun box(): String = b(200u) + s(40000u) + i(70000u)\n",
+         fun l(v: ULong): String = v.toString()\n\
+         fun box(): String = b(200u) + s(40000u) + i(70000u) + l(18446744073709551615uL)\n",
         "Carrier",
         platform,
     );
@@ -138,11 +139,13 @@ fn common_ir_keeps_the_unsigned_identity_and_chooses_no_carrier() {
         constants.contains(&&IrConst::UShort(40000)),
         "a `UShort` constant must reach a backend as UShort(40000); got {constants:?}"
     );
-    // `UInt`'s carrier is `Int`, already the full width, so no identity is lost by carrying it
-    // there and no new form is warranted.
     assert!(
-        constants.contains(&&IrConst::Int(70000)),
-        "a `UInt` constant stays an `Int`; got {constants:?}"
+        constants.contains(&&IrConst::UInt(70000)),
+        "a `UInt` constant must retain its identity; got {constants:?}"
+    );
+    assert!(
+        constants.contains(&&IrConst::ULong(u64::MAX)),
+        "a `ULong` constant must retain its identity; got {constants:?}"
     );
     // The carrier the JVM backend will choose must NOT already be present.
     assert!(

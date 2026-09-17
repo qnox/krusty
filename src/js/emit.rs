@@ -366,6 +366,8 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             // The VALUE, which is what a JS number holds; this backend has no narrow carrier.
             IrConst::UByte(v) => v.to_string(),
             IrConst::UShort(v) => v.to_string(),
+            IrConst::UInt(v) => v.to_string(),
+            IrConst::ULong(v) => v.to_string(),
             IrConst::Float(v) => v.to_string(),
             IrConst::Double(v) => v.to_string(),
             // A `Char` is a UTF-16 code unit; `\uXXXX` reproduces it exactly (JS strings admit lone

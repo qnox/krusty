@@ -1218,6 +1218,8 @@ impl ClassWriter {
                     // value read as that signed primitive: 200u is the byte -56.
                     IrConst::UByte(v) => self.const_int(i32::from(*v as i8)),
                     IrConst::UShort(v) => self.const_int(i32::from(*v as i16)),
+                    IrConst::UInt(v) => self.const_int(*v as i32),
+                    IrConst::ULong(v) => self.const_long(*v as i64),
                     IrConst::Char(ch) => self.const_int(*ch as i32),
                     IrConst::Long(v) => self.const_long(*v),
                     IrConst::Float(v) => self.const_float(*v),
@@ -1514,6 +1516,16 @@ impl ClassWriter {
                 IrConst::UShort(x) => {
                     out.push(b'S');
                     let i = self.cp.integer(i32::from(*x as i16));
+                    u2(out, i);
+                }
+                IrConst::UInt(x) => {
+                    out.push(b'I');
+                    let i = self.cp.integer(*x as i32);
+                    u2(out, i);
+                }
+                IrConst::ULong(x) => {
+                    out.push(b'J');
+                    let i = self.cp.long(*x as i64);
                     u2(out, i);
                 }
                 IrConst::Byte(x) => {

@@ -1991,8 +1991,7 @@ impl BodyLowering<'_> {
 
 /// An IR constant for a checked FIR one, carrying the value and the checked identity.
 ///
-/// `ty` is read only to tell `UByte`/`UShort` apart from `UInt`: those two are value classes, and
-/// the constant's unsigned type is part of what the frontend CHECKED, so common IR records it.
+/// The constant's unsigned type is part of what the frontend checked, so common IR records it.
 /// What primitive holds it is not decided here — see [`IrConst::UByte`].
 fn lower_constant(
     constant: &FirConstant,
@@ -2018,10 +2017,12 @@ fn lower_constant(
             match ty.non_null() {
                 Ty::UByte => IrConst::UByte(value as u8),
                 Ty::UShort => IrConst::UShort(value as u16),
-                _ => IrConst::Int(value as i32),
+                Ty::UInt => IrConst::UInt(value),
+                _ => return Err(FirLoweringFailure::InvalidIntegerConstant { origin }),
             }
         }
-        FirConstant::Long(value) | FirConstant::ULong(value) => IrConst::Long(*value),
+        FirConstant::Long(value) => IrConst::Long(*value),
+        FirConstant::ULong(value) => IrConst::ULong(*value as u64),
         FirConstant::Double(value) => IrConst::Double(*value),
         FirConstant::Float(value) => IrConst::Float(*value),
         FirConstant::Boolean(value) => IrConst::Boolean(*value),
