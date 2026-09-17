@@ -877,6 +877,8 @@ mod klib_declarations_e2e;
 mod klib_libraries_flag_e2e;
 #[path = "klib_native_stdlib_e2e.rs"]
 mod klib_native_stdlib_e2e;
+#[path = "klib_optional_expectation_e2e.rs"]
+mod klib_optional_expectation_e2e;
 #[path = "klib_platform_e2e.rs"]
 mod klib_platform_e2e;
 #[path = "klib_property_e2e.rs"]

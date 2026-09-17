@@ -395,8 +395,12 @@ argument = 2 }`.
 Counted over the 486 `.knm` fragments of `klib/common/stdlib`, because it is the library every
 Kotlin/Native compilation resolves against and its shape decides which of these facts matter:
 
-- 940 classes: 17 `value class`, 3 `fun interface`, 10 `data class`, 9 `inner`, 26 `expect`
-  (all of them `kotlin.jvm.*` annotations with no Native actual).
+- 940 classes: 17 `value class`, 3 `fun interface`, 10 `data class`, 9 `inner`, 26 `expect`.
+  Every one of the 26 is an annotation class carrying `kotlin.OptionalExpectation` — the
+  `kotlin.jvm.*` set (`JvmStatic`, `JvmName`, `JvmField`, …) and the `kotlin.js.*` set (`JsExport`,
+  `JsName`, `JsStatic`, …). So "expect annotation" and "optional expectation" coincide in this
+  library, but the annotation is what says so and is what should be read: an ordinary `expect`
+  without an `actual` is an error, not an erasure.
 - 37 top-level type aliases, including `kotlin.collections.LinkedHashMap` → `HashMap` and
   `kotlin.collections.LinkedHashSet` → `HashSet`. On this target they are aliases, not classes.
 - Class visibility: 553 public, 295 internal, 92 private.

@@ -1196,6 +1196,11 @@ pub struct BuiltinClass {
     /// An `inner class`, which captures an instance of its enclosing class. A plain nested class
     /// does not, and the two are otherwise recorded identically.
     pub is_inner: bool,
+    /// Annotation class identities declared on this classifier, by internal name. Identities only,
+    /// like a member's: the arguments are not read. This is what distinguishes an
+    /// `@OptionalExpectation` annotation — an `expect` declaration a target may legitimately leave
+    /// without an `actual` — from an ordinary `expect`, exactly rather than by approximation.
+    pub annotations: Vec<String>,
     /// The declaration's raw `Class.flags` word, as the fragment records it.
     ///
     /// The Kotlin facts this reader can name — [`Self::kind`], [`Self::visibility`],
@@ -1961,6 +1966,7 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
         let mut fq = None;
         let mut companion_name_id = None;
         let mut value_property_id = None;
+        let mut class_annotation_bodies: Vec<&[u8]> = Vec::new();
         // `Class.flags` has the protobuf default PUBLIC FINAL (`6`). Keep wire-format defaulting at
         // the decode boundary, as the ordinary `@Metadata` class reader does, so every consumer sees
         // the semantic flag word. Treating omission as zero conflates it with an explicitly INTERNAL
@@ -1984,6 +1990,15 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                 (4, 0) => companion_name_id = cp.varint(),
                 // `Class.inlineClassUnderlyingPropertyName` = 17, a string-table index.
                 (17, 0) => value_property_id = cp.varint(),
+                // The KLIB annotation extension. A `Class` in this reader's own carrier records its
+                // annotations elsewhere, so only the klib field is read here.
+                (KLIB_ANNOTATION_FIELD, 2) => {
+                    if let Some(n) = cp.varint() {
+                        if let Some(body) = cp.bytes(n as usize) {
+                            class_annotation_bodies.push(body);
+                        }
+                    }
+                }
                 (2, 2) => {
                     // supertype_id (packed) — indexes the class's type_table.
                     if let Some(n) = cp.varint() {
@@ -2307,6 +2322,7 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                     .flatten(),
                 is_fun_interface: flags & IS_FUN_INTERFACE_BIT != 0,
                 is_inner: flags & IS_INNER_CLASS_BIT != 0,
+                annotations: tables.annotation_identities(class_annotation_bodies.iter().copied()),
                 members,
                 constructors,
                 companion_name,

@@ -47,6 +47,10 @@ pub struct KlibSymbols {
     /// Top-level type aliases, by their own identity. A use site resolves the alias's SPELLING to
     /// this identity and then asks for the template, so the identity is the key and not the target.
     aliases: HashMap<TypeName, AliasExpansion>,
+    /// `@OptionalExpectation` annotation classes: an `expect` declaration a target may legitimately
+    /// leave without an `actual`, visible in common sources and erased where none is supplied. The
+    /// Kotlin/Native stdlib ships 26 — every `kotlin.jvm.*` and `kotlin.js.*` annotation.
+    optional_expectations: HashSet<TypeName>,
 }
 
 /// Whether a declaration was read from a classifier's member list or a package's top-level list.
@@ -116,6 +120,14 @@ impl KlibSymbols {
                             record.clone(),
                         ));
                     members.push(record);
+                }
+                if declaration.is_expect
+                    && declaration
+                        .annotations
+                        .iter()
+                        .any(|annotation| annotation == "kotlin/OptionalExpectation")
+                {
+                    self.optional_expectations.insert(owner);
                 }
                 let mut classifier = library_type(owner, declaration);
                 classifier.declared_callables = order
@@ -229,6 +241,13 @@ impl KlibSymbols {
     /// The template a top-level `typealias` this source declares expands to.
     pub fn type_alias_expansion(&self, internal: TypeName) -> Option<AliasExpansion> {
         self.aliases.get(&internal).cloned()
+    }
+
+    /// Whether this classifier is an `expect annotation class` a target may leave without an
+    /// `actual`. Asked exactly, from the `@OptionalExpectation` the declaration carries, rather
+    /// than inferred from "an annotation that is also `expect`".
+    pub fn is_optional_expectation(&self, internal: TypeName) -> bool {
+        self.optional_expectations.contains(&internal)
     }
 }
 
@@ -515,12 +534,18 @@ impl SemanticPlatform for PlatformWithKlibs {
         self.federated_alias_expansion(internal)
     }
 
+    /// Also a declaration lookup, so also federated: whichever side declares the classifier is the
+    /// side that knows whether its `actual` is optional.
+    fn is_optional_expectation(&self, classifier: TypeName) -> bool {
+        self.platform.is_optional_expectation(classifier)
+            || self.klibs.is_optional_expectation(classifier)
+    }
+
     delegated! {
         fn install_source_module_headers(
             sources: &[PlatformSourceHeaderInput<'_>],
             source_classifiers: &[TypeName],
         ) -> Result<(), SourceHeaderError>;
-        fn is_optional_expectation(classifier: TypeName) -> bool;
         fn internal_accessible(owner: TypeName) -> bool;
         fn function_type(arity: usize) -> Option<Ty>;
         fn value_underlying(ty: Ty) -> Option<Ty>;
