@@ -279,6 +279,19 @@ impl PlatformWithKlibs {
         PlatformWithKlibs { platform, klibs }
     }
 
+    /// `platform`, with the klibs at `paths` federated under it — or `platform` itself when there
+    /// are none. Whether a compilation needs the wrapper is a property of its dependency list, so a
+    /// driver states the list and this decides, rather than every driver repeating the test.
+    pub fn over(
+        platform: Box<dyn SemanticPlatform>,
+        paths: &[impl AsRef<Path>],
+    ) -> Box<dyn SemanticPlatform> {
+        if paths.is_empty() {
+            return platform;
+        }
+        Box::new(Self::new(platform, KlibSymbols::open(paths)))
+    }
+
     /// The federation this platform answers declaration queries through, in precedence order.
     fn federated(&self) -> CompositeSource<'_> {
         CompositeSource::new(vec![self.platform.as_ref(), &self.klibs])
