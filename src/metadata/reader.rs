@@ -16,6 +16,7 @@
 //! raw `flags` word rather than a decoded JVM access mask, because what a flag word means for a
 //! target's representation is that backend's answer to give.
 
+pub mod library_type;
 mod type_annotations;
 
 use std::collections::HashMap;

@@ -12,10 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::klib::KlibArchive;
-use crate::libraries::{
-    CallSig, ClassifierInheritance, LibraryMember, LibraryType, ParamList, TypeKind,
-};
-use crate::types::{type_name, Ty, TypeName, TypeNameList, TypeParameters};
+use crate::libraries::{LibraryType, TypeKind};
+use crate::types::{type_name, TypeName};
 
 #[derive(Default)]
 pub(super) struct CommonExpectationIndex {
@@ -73,113 +71,9 @@ impl CommonExpectationIndex {
 }
 
 fn annotation_type(declaration: crate::metadata::reader::BuiltinClass) -> LibraryType {
-    let bounds = crate::metadata::reader::builtin_bounds(&declaration.type_params, &HashMap::new());
-    let type_parameters = TypeParameters::new(
-        declaration
-            .type_params
-            .iter()
-            .map(|parameter| parameter.name.clone())
-            .collect(),
-        declaration
-            .type_params
-            .iter()
-            .map(|parameter| {
-                parameter
-                    .bounds
-                    .iter()
-                    .map(|bound| crate::metadata::reader::builtin_ty(bound, &bounds))
-                    .collect()
-            })
-            .collect(),
-        declaration
-            .type_params
-            .iter()
-            .map(|parameter| parameter.variance)
-            .collect(),
-    );
-    let supertype_templates = declaration
-        .supertype_tys
-        .iter()
-        .map(|supertype| crate::metadata::reader::builtin_ty(supertype, &bounds))
-        .collect::<Vec<_>>();
-    let supertypes = declaration
-        .supertypes
-        .iter()
-        .map(|supertype| type_name(supertype))
-        .collect::<Vec<_>>()
-        .into();
-    let mut constructors = Vec::new();
-    let mut named_parameter_lists = Vec::new();
-    for constructor in declaration.constructors {
-        let params = constructor
-            .params
-            .iter()
-            .map(|parameter| crate::metadata::reader::builtin_ty(parameter, &bounds))
-            .collect::<Vec<_>>();
-        let mut member = LibraryMember::new(
-            "<init>".to_string(),
-            params.clone(),
-            Ty::Unit,
-            String::new(),
-        );
-        member.visibility = constructor.visibility;
-        member.call_sig = CallSig::metadata_member(
-            params.len(),
-            constructor.param_names.clone(),
-            constructor.param_defaults.clone(),
-            constructor.vararg,
-        );
-        constructors.push(member);
-        named_parameter_lists.push(ParamList {
-            visibility: constructor.visibility,
-            names: constructor.param_names,
-            defaults: constructor.param_defaults,
-            types: params,
-            recv_fun: Vec::new(),
-            vararg: constructor.vararg,
-            annotation: None,
-        });
-    }
-    LibraryType {
-        access: declaration.visibility.into(),
-        is_kotlin: true,
-        source_file: None,
-        stable_declaration: None,
-        is_nested: declaration.is_nested,
-        outer_instance: None,
-        kind: TypeKind::Annotation,
-        inheritance: ClassifierInheritance {
-            is_abstract: true,
-            is_extensible: false,
-            has_no_arg_constructor: constructors
-                .iter()
-                .any(|constructor| constructor.params.is_empty()),
-        },
-        supertypes,
-        supertype_templates,
-        constructors,
-        hidden_member_properties: Default::default(),
-        declared_callables: HashMap::new(),
-        declared_callable_order: Vec::new(),
-        members: Vec::new(),
-        companion: Vec::new(),
-        constants: HashMap::new(),
-        sam_eligible: false,
-        callable_signature: None,
-        callable_signatures: Vec::new(),
-        companion_object: None,
-        value_underlying: None,
-        value_underlying_property: None,
-        alias_target: None,
-        own_type_parameter_count: type_parameters.type_params.len(),
-        type_parameters,
-        sealed_subclasses: TypeNameList::new(),
-        enum_entries: Vec::new(),
-        enum_entries_accessor: None,
-        named_parameter_lists,
-        // No JVM actual exists, so this platform erases the optional annotation after checking.
-        annotations: Vec::new(),
-        retention: Some("SOURCE".to_string()),
-        annotation_targets: None,
-    }
+    let mut classifier = crate::metadata::reader::library_type::library_type(declaration);
+    // What is this path's rather than the declaration's: no JVM actual exists for an optional
+    // expectation, so this platform erases the annotation after checking it.
+    classifier.retention = Some("SOURCE".to_string());
+    classifier
 }
