@@ -116,23 +116,13 @@ fn a_spliced_lambdas_value_parameters_keep_their_names() {
                \x20   return tagged(tag) { p -> step(p) + p }\n\
                }\n";
     let Some((slots, names)) =
-        debug_metadata_names(src, "LambdaSpillNames", "LambdaSpillNamesKt$run$1")
+        debug_metadata_spills(src, "LambdaSpillNames", "LambdaSpillNamesKt$run$1")
     else {
         eprintln!("skipping: reference kotlinc or javap unavailable");
         return;
     };
-    assert_eq!(
-        names,
-        ["tag", "tag$iv", "prefix$iv", "suffix$iv", "p"],
-        "both compilers name the same spilled locals"
-    );
-    // As with the inline parameters, the POSITIONS are not yet kotlinc's `L$0..L$4`: one unnamed
-    // temporary of the expansion still takes a field krusty's `L$2`. Stated rather than hidden.
-    assert_eq!(
-        slots,
-        ["L$0", "L$1", "L$3", "L$4", "L$5"],
-        "krusty's positions, still carrying one unnamed extra spill"
-    );
+    assert_eq!(names, ["tag", "tag$iv", "prefix$iv", "suffix$iv", "p"]);
+    assert_eq!(slots, ["L$0", "L$1", "L$2", "L$3", "L$4"]);
 }
 
 /// An inline function's PARAMETERS and extension RECEIVER are locals of the expansion, so a
@@ -166,7 +156,7 @@ fn an_inline_expansions_parameters_and_receiver_are_named_spills() {
                \n\
                suspend fun run(b: Box, u: String): String = b.send(u)\n";
     let Some((slots, names)) =
-        debug_metadata_names(src, "InlineSpillNames", "InlineSpillNamesKt$run$1")
+        debug_metadata_spills(src, "InlineSpillNames", "InlineSpillNamesKt$run$1")
     else {
         eprintln!("skipping: reference kotlinc or javap unavailable");
         return;
@@ -182,17 +172,11 @@ fn an_inline_expansions_parameters_and_receiver_are_named_spills() {
             "$this$call$iv$iv",
             "url$iv$iv",
             "local$iv$iv",
-        ],
-        "both compilers name the same spilled locals"
+        ]
     );
-    // The field POSITIONS are not yet kotlinc's `L$0..L$7`: krusty still spills three unnamed
-    // temporaries of the expansion that kotlinc does not, which pushes the named ones apart. That
-    // is the remaining half of this divergence and it is stated here rather than hidden, so closing
-    // it fails this assertion and updates it.
     assert_eq!(
         slots,
-        ["L$0", "L$1", "L$2", "L$3", "L$5", "L$8", "L$9", "L$10"],
-        "krusty's positions, still carrying three unnamed extra spills"
+        ["L$0", "L$1", "L$2", "L$3", "L$4", "L$5", "L$6", "L$7"]
     );
 }
 
@@ -207,15 +191,13 @@ fn a_spliced_lambda_names_each_of_its_value_parameters() {
                \x20   return pair { text, count -> step(seed + text) + count }\n\
                }\n";
     let Some((slots, names)) =
-        debug_metadata_names(src, "LambdaTwoParameters", "LambdaTwoParametersKt$run$1")
+        debug_metadata_spills(src, "LambdaTwoParameters", "LambdaTwoParametersKt$run$1")
     else {
         eprintln!("skipping: reference kotlinc or javap unavailable");
         return;
     };
     assert_eq!(names, ["seed", "text", "count"]);
-    // As elsewhere in this file, the positions still carry an unnamed temporary of the expansion
-    // that kotlinc does not have. Stated rather than hidden; closing it fails this and updates it.
-    assert_eq!(slots, ["L$0", "L$2", "I$0"]);
+    assert_eq!(slots, ["L$0", "L$1", "I$0"]);
 }
 
 /// A lambda declared INSIDE an inline function is spliced one expansion deeper, so its parameter
@@ -234,13 +216,13 @@ fn a_lambda_declared_inside_an_inline_function_gains_its_frame() {
                \n\
                suspend fun run(seed: String): String = outer(seed)\n";
     let Some((slots, names)) =
-        debug_metadata_names(src, "LambdaInsideInline", "LambdaInsideInlineKt$run$1")
+        debug_metadata_spills(src, "LambdaInsideInline", "LambdaInsideInlineKt$run$1")
     else {
         eprintln!("skipping: reference kotlinc or javap unavailable");
         return;
     };
     assert_eq!(names, ["seed", "prefix$iv", "p$iv"]);
-    assert_eq!(slots, ["L$0", "L$1", "L$4"]);
+    assert_eq!(slots, ["L$0", "L$1", "L$2"]);
 }
 
 /// A member inline EXTENSION binds both receivers at once, and Kotlin keeps them distinct: the
@@ -340,21 +322,6 @@ fn debug_metadata_keeps_the_spill_order_after_the_references() {
         ["L$0", "J$0", "J$1", "I$0", "I$1"],
         "field layout groups by kind"
     );
-}
-
-/// The `n` array of a continuation's `@DebugMetadata`, asserted equal between the compilers, with
-/// KRUSTY's `s` array returned alongside it. Use this where the names agree but the field positions
-/// do not yet, so a test can pin the names and state the positions separately.
-fn debug_metadata_names(src: &str, name: &str, class: &str) -> Option<(Vec<String>, Vec<String>)> {
-    let (reference, krusty) = disassemble_verbose(name, src, class)?;
-    let want = metadata_array(&reference, "n");
-    assert!(!want.is_empty(), "{class}: kotlinc records spilled locals");
-    assert_eq!(
-        metadata_array(&krusty, "n"),
-        want,
-        "{class} @DebugMetadata spilled local names"
-    );
-    Some((metadata_array(&krusty, "s"), want))
 }
 
 /// One `key=[…]` array of a `javap -v` annotation dump.

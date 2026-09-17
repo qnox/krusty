@@ -310,28 +310,23 @@ impl BodyLowering<'_> {
         // the expansion crosses a suspension that local takes a continuation field kotlinc has no
         // counterpart for.
         if let [(tail, value)] = rewritten_returns[..] {
-            if let IrExpr::Block { stmts, value: None } = self.ir.expr(cloned_root).clone() {
-                if stmts.last() == Some(&tail) {
-                    let produced = value.unwrap_or_else(|| self.ir.add_expr(IrExpr::UnitInstance));
-                    self.ir.exprs[tail as usize] = IrExpr::Block {
-                        stmts: Vec::new(),
-                        value: Some(produced),
-                    };
-                    let mut body_statements = stmts;
-                    let tail = body_statements.pop().expect("the tail return was matched");
-                    self.ir.exprs[cloned_root as usize] = IrExpr::Block {
-                        stmts: body_statements,
-                        value: Some(tail),
-                    };
-                    let mut statements = operand_declarations;
-                    statements.push(cloned_root);
-                    let value = statements.pop();
-                    return Some(self.ir.add_expr(IrExpr::Block {
-                        stmts: statements,
-                        value,
-                    }));
-                }
+            let produced = value.unwrap_or_else(|| self.ir.add_expr(IrExpr::UnitInstance));
+            let original = self.ir.expr(tail).clone();
+            self.ir.exprs[tail as usize] = IrExpr::Block {
+                stmts: Vec::new(),
+                value: Some(produced),
+            };
+            if promote_tail_statement_to_value(self.ir, cloned_root, tail) {
+                let mut statements = operand_declarations;
+                statements.push(cloned_root);
+                let value = statements.pop();
+                return Some(self.ir.add_expr(IrExpr::Block {
+                    stmts: statements,
+                    value,
+                }));
             }
+            // The one return is not in tail position after all. Put it back and keep the loop form.
+            self.ir.exprs[tail as usize] = original;
         }
 
         let mut statements = operand_declarations;
@@ -1088,4 +1083,32 @@ fn specialize_checked_operation(
         | IrCheckedOperation::BackingFieldRead { .. }
         | IrCheckedOperation::BackingFieldWrite { .. } => {}
     }
+}
+
+/// Make `block` produce the value of `tail`, which must be its last statement, descending through
+/// nested statement blocks that end in it. Every block along that path becomes value-producing.
+///
+/// Returns false, having changed nothing, unless the path is a chain of statement blocks ending in
+/// `tail` — so a `return` anywhere but the tail keeps the caller's loop form.
+fn promote_tail_statement_to_value(
+    ir: &mut crate::ir::IrFile,
+    block: ExprId,
+    tail: ExprId,
+) -> bool {
+    let IrExpr::Block { stmts, value: None } = ir.expr(block).clone() else {
+        return false;
+    };
+    let Some(&last) = stmts.last() else {
+        return false;
+    };
+    if last != tail && !promote_tail_statement_to_value(ir, last, tail) {
+        return false;
+    }
+    let mut stmts = stmts;
+    let last = stmts.pop().expect("the last statement was just read");
+    ir.exprs[block as usize] = IrExpr::Block {
+        stmts,
+        value: Some(last),
+    };
+    true
 }
