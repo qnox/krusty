@@ -15958,6 +15958,11 @@ impl<'a> Emitter<'a> {
                         .checked_sub(recv_offset)
                         .expect("an extension receiver is a leading physical parameter");
                     let mut masks = vec![0i32; default_mask_count(logical_param_count)];
+                    // Every operand the CALL synthesizes — a placeholder standing in for an omitted
+                    // argument, and the trailing mask/marker group — carries the call's own line, so
+                    // an argument supplied between two of them puts its own line in effect and the
+                    // next group restores the call's. A call that omits nothing synthesizes nothing,
+                    // which is why an ordinary call's dispatch mark sits at its invoke.
                     for (i, arg) in args.iter().enumerate() {
                         match arg {
                             Some(a) => {
@@ -15967,6 +15972,7 @@ impl<'a> Emitter<'a> {
                                 }
                             }
                             None => {
+                                debug_lines::mark_expression_start(self.ir, e, code);
                                 push_zero(stub_param_tys[i], code, self.cw);
                                 let li = i
                                     .checked_sub(recv_offset)
@@ -15975,6 +15981,7 @@ impl<'a> Emitter<'a> {
                             }
                         }
                     }
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     for mask in masks {
                         code.push_int(mask, self.cw);
                     }
