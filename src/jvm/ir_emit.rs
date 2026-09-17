@@ -8369,9 +8369,6 @@ fn emit_bridge_barrier_outcome(
 /// arguments (type barrier / checkcast / unbox / numeric convert), delegates to the concrete override,
 /// and adapts the return value back (box / numeric convert).
 fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
-    // Exact bridge plus erased descriptor per method actually emitted. Retaining the selected IR
-    // bridge avoids re-identifying an overload by an incomplete name/target key after emission.
-    let mut emitted = Vec::new();
     for b in &c.bridges {
         let ep = jvm_tys(&b.erased_params);
         let static_target = b.target_function.and_then(|function| {
@@ -8399,7 +8396,6 @@ fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
         if cw.has_method(&b.name, &erased_desc) {
             continue;
         }
-        emitted.push((b, erased_desc.clone()));
         let pw: u16 = ep.iter().map(|t| slot_words(*t)).sum();
         let mut code = CodeBuilder::new(1 + pw);
         if let Some(barrier) = crate::jvm::backend::bridge_barrier(b) {
@@ -8511,6 +8507,7 @@ fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
             code.pop();
             throw_assertion_error(cw, &mut code);
             finish_bridge(cw, &b.name, &erased_desc, &mut code, 1 + pw, b.kind);
+            attach_bridge_debug_tables(ir, c, cw, b, &erased_desc);
             continue;
         }
         if b.concrete_ret == Ty::Nothing {
@@ -8524,6 +8521,7 @@ fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
             }
             throw_assertion_error(cw, &mut code);
             finish_bridge(cw, &b.name, &erased_desc, &mut code, 1 + pw, b.kind);
+            attach_bridge_debug_tables(ir, c, cw, b, &erased_desc);
             continue;
         }
         if let Some(owner) = &b.box_ret {
@@ -8576,8 +8574,8 @@ fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
         }
         emit_return(er, &mut code);
         finish_bridge(cw, &b.name, &erased_desc, &mut code, 1 + pw, b.kind);
+        attach_bridge_debug_tables(ir, c, cw, b, &erased_desc);
     }
-    attach_bridge_debug_tables(ir, c, cw, &emitted);
 }
 
 /// kotlinc gives every bridge a `LineNumberTable` rooted at the CLASS declaration and a
@@ -8588,17 +8586,29 @@ fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
 /// are the ERASED ones the bridge actually receives (`item Ljava/lang/Object;`, not `String`). A
 /// parameter the override does not name keeps the JVM's positional spelling. A property-setter
 /// bridge has no source function identity; its generated parameter uses kotlinc's accessor spelling.
+/// Attached as each bridge is written, not in a pass afterwards: the local-variable table's
+/// strings are interned when they are recorded, and kotlinc interns them with the method they
+/// belong to. Deferring the whole set moved `Ljava/lang/Object;` past the next bridge's descriptor.
 fn attach_bridge_debug_tables(
     ir: &IrFile,
     c: &crate::ir::IrClass,
     cw: &mut ClassWriter,
-    emitted: &[(&crate::ir::Bridge, String)],
+    bridge: &crate::ir::Bridge,
+    erased_desc: &str,
 ) {
     if c.decl_line == 0 {
         return;
     }
+    // Where the DECLARATION starts, annotations included — the same line the primary constructor's
+    // `super()` maps to. The two coincide unless an annotation sits on its own line above the
+    // header, which is exactly the shape a `@Serializable` class has.
+    let line = if c.decl_start_line == 0 {
+        c.decl_line
+    } else {
+        c.decl_start_line
+    };
     let this_desc = format!("L{};", c.fq_name());
-    for (bridge, erased_desc) in emitted {
+    {
         let target_names = bridge
             .target_function
             .and_then(|function| ir.fn_params.get(&function))
@@ -8619,7 +8629,7 @@ fn attach_bridge_debug_tables(
             locals.push((spelling, descriptor, slot));
             slot += slot_words(*parameter);
         }
-        cw.set_method_debug(&bridge.name, erased_desc, Some((0, c.decl_line)), &locals);
+        cw.set_method_debug(&bridge.name, erased_desc, Some((0, line)), &locals);
     }
 }
 
