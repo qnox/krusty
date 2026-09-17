@@ -113,3 +113,27 @@ fn a_property_setter_bridge_uses_its_generated_parameter_name() {
     // line/local-table projection rather than weakening the bridge assertion to substrings.
     assert_code_and_debug_identical("PropertyBridge", src, "StringBox");
 }
+
+/// An ANNOTATED class: kotlinc roots the bridge at where the DECLARATION starts, annotations
+/// included, not at the class header. The two coincide for an unannotated class, which is why the
+/// fixtures above could not tell them apart — and `@Serializable`, `@Entity` and friends put the
+/// difference on the hot path for real code.
+#[test]
+fn an_annotated_classs_bridge_is_rooted_at_its_declaration() {
+    let src = "annotation class Mark\n\
+               \n\
+               interface Sink<T> {\n\
+               \x20   fun accept(item: T)\n\
+               }\n\
+               \n\
+               @Mark\n\
+               class StringSink : Sink<String> {\n\
+               \x20   override fun accept(item: String) {}\n\
+               }\n";
+    let Some(result) = common::byte_diff_against_kotlinc("AnnotatedBridge", src, "StringSink")
+    else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    result.expect("StringSink byte-identical to kotlinc");
+}
