@@ -2650,6 +2650,96 @@ fn metadata_d2(bytes: &[u8]) -> Vec<String> {
         .1
 }
 
+/// Kotlin-level constructor declarations decoded from one emitted class. This deliberately ignores
+/// classfile method flags: metadata publication and visibility are a separate semantic contract.
+#[derive(Debug, PartialEq)]
+struct ConstructorMetadataShape {
+    visibility: krusty::types::Visibility,
+    names: Vec<String>,
+    defaults: Vec<bool>,
+    types: Vec<Ty>,
+    jvm_name: &'static str,
+    jvm_descriptor: Option<&'static str>,
+}
+
+fn metadata_constructors(bytes: &[u8], owner: &str) -> Vec<ConstructorMetadataShape> {
+    let (d1, d2) = common_core::raw_kotlin_metadata(bytes).expect("read Kotlin metadata");
+    let d1 = vec![d1.into_iter().map(char::from).collect::<String>()];
+    krusty::jvm::metadata::decode_metadata(&d1, &d2, Some(1), owner, None, &[])
+        .constructors
+        .iter()
+        .map(|constructor| ConstructorMetadataShape {
+            visibility: constructor.params.visibility,
+            names: constructor.params.names.clone(),
+            defaults: constructor.params.defaults.clone(),
+            types: constructor.params.types.clone(),
+            jvm_name: constructor.jvm_name,
+            jvm_descriptor: constructor.jvm_desc,
+        })
+        .collect()
+}
+
+#[test]
+fn a_serializable_class_publishes_the_exact_deserialization_constructor() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let built = compare_with_kotlinc_plugin(
+        "DeserializationConstructorMetadata",
+        SRC,
+        "Point",
+        &cp,
+        "25",
+        &extra,
+    )
+    .expect("reference kotlinc and javap are required for byte-parity tests");
+
+    let expected = vec![
+        ConstructorMetadataShape {
+            visibility: krusty::types::Visibility::Public,
+            names: vec!["x".to_string(), "y".to_string()],
+            defaults: vec![false, false],
+            types: vec![Ty::Int, Ty::String],
+            jvm_name: "<init>",
+            jvm_descriptor: Some("(ILjava/lang/String;)V"),
+        },
+        ConstructorMetadataShape {
+            visibility: krusty::types::Visibility::Internal,
+            names: vec![
+                "seen0".to_string(),
+                "x".to_string(),
+                "y".to_string(),
+                "serializationConstructorMarker".to_string(),
+            ],
+            defaults: vec![false, false, false, false],
+            types: vec![
+                Ty::Int,
+                Ty::Int,
+                Ty::String,
+                Ty::nullable(Ty::obj(
+                    "kotlinx/serialization/internal/SerializationConstructorMarker",
+                )),
+            ],
+            jvm_name: "<init>",
+            jvm_descriptor: Some(
+                "(IILjava/lang/String;Lkotlinx/serialization/internal/SerializationConstructorMarker;)V",
+            ),
+        },
+    ];
+    assert_eq!(
+        metadata_constructors(&built.reference_bytes, "Point"),
+        expected,
+        "kotlinc constructor metadata"
+    );
+    assert_eq!(
+        metadata_constructors(&built.krusty_bytes, "Point"),
+        expected,
+        "krusty constructor metadata"
+    );
+}
+
 /// Everything `@Metadata` says about a generated serializer, in kotlinc's order.
 ///
 /// The record is what a Kotlin consumer reads the declaration back from, and three facts diverged:

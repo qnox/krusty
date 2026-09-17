@@ -2045,7 +2045,6 @@ impl IrPlugin for SerializationPlugin {
             }
 
             if plain_data_class {
-                let field_types = foo_fields.iter().map(|(_, ty)| *ty).collect::<Vec<_>>();
                 let cached_descriptor = if is_generic {
                     let elements = foo_fields
                         .iter()
@@ -2073,7 +2072,7 @@ impl IrPlugin for SerializationPlugin {
                     ir,
                     class_id,
                     ser_id,
-                    &field_types,
+                    &foo_fields,
                     cached_descriptor,
                 );
             }
@@ -2884,6 +2883,44 @@ mod tests {
             );
             assert_eq!(ctor.params.len(), expect + n + 1, "n={n} total ctor params");
         }
+    }
+
+    #[test]
+    fn deserialization_constructor_publishes_exact_internal_metadata_shape() {
+        let (mut ir, ctx, class) =
+            serializable_class("demo/Published", &["kotlin/Int", "kotlin/String"]);
+        run(&mut ir, &ctx);
+
+        let ordinal = ir
+            .generated_secondary_constructor(
+                class,
+                crate::ir::IrSecondaryConstructorRole::SerializationDeserialization,
+            )
+            .expect("deserialization constructor identity");
+        let constructor = &ir.classes[class as usize].secondary_ctors[ordinal as usize];
+        assert!(
+            constructor.synthetic,
+            "the classfile constructor stays synthetic"
+        );
+        assert_eq!(
+            constructor.metadata_visibility,
+            Some(crate::types::Visibility::Internal)
+        );
+        assert_eq!(
+            constructor.named_params,
+            [
+                ("seen0".to_string(), Ty::Int),
+                ("f0".to_string(), Ty::Int),
+                ("f1".to_string(), class_ty("kotlin/String")),
+                (
+                    "serializationConstructorMarker".to_string(),
+                    Ty::nullable(class_ty(
+                        "kotlinx/serialization/internal/SerializationConstructorMarker"
+                    )),
+                ),
+            ],
+            "metadata parameters are the mask, declaration-ordered fields, and nullable marker"
+        );
     }
 
     #[test]

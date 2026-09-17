@@ -2154,58 +2154,16 @@ fn build_class_metadata(
         .cloned()
         .unwrap_or_default();
     let supertype_spellings = class_spellings.supertype_spellings(has_declared_superclass);
-    // DECLARED secondary constructors → `Class.constructor` records (flags 22 = public secondary),
-    // described from their recorded source names + SEMANTIC types (fun-type parameters keep their
-    // shape — `Cfg.() -> Unit` — where the erased realization is a bare `Function1`). Synthetic
-    // ctors get no record, matching kotlinc.
-    let mut secondary_ctor_shapes: Vec<SecondaryCtorShape> = c
-        .secondary_ctors
-        .iter()
-        .filter(|sc| !sc.synthetic)
-        .map(|sc| SecondaryCtorShape {
-            params: sc.named_params.clone(),
-            param_defaults: sc.defaults.iter().map(Option::is_some).collect(),
-            desc: format!(
-                "({}{}{})V",
-                sc.prefix_params
-                    .iter()
-                    .map(|&t| desc(t))
-                    .collect::<String>(),
-                sc.params.iter().map(|&t| desc(t)).collect::<String>(),
-                if sc.vc_params {
-                    "Lkotlin/jvm/internal/DefaultConstructorMarker;"
-                } else {
-                    ""
-                }
-            ),
-            sig_name: None,
-            vararg_index: sc.vararg_index,
-            annotations: sc.annotations.applications().cloned().collect(),
-        })
-        .collect();
-    secondary_ctor_shapes.extend(
-        ir.jvm_value_class_secondary_ctors
-            .get(&c.fq_name_id())
-            .into_iter()
-            .flatten()
-            .map(|constructor| SecondaryCtorShape {
-                params: constructor.params.clone(),
-                param_defaults: constructor.param_defaults.clone(),
-                desc: constructor.descriptor.clone(),
-                sig_name: Some("constructor-impl"),
-                vararg_index: constructor.vararg_index,
-                annotations: constructor.annotations.applications().cloned().collect(),
-            }),
-    );
+    let secondary_ctor_shapes = super::constructor_metadata::secondary_constructor_shapes(ir, c);
     let secondary_ctor_metas: Vec<crate::metadata::class_builder::CtorMeta> = secondary_ctor_shapes
         .iter()
         .map(|shape| crate::metadata::class_builder::CtorMeta {
             params: &shape.params,
             param_defaults: &shape.param_defaults,
-            desc: &shape.desc,
-            sig_name: shape.sig_name,
+            desc: &shape.descriptor,
+            sig_name: shape.signature_name,
             vararg_index: shape.vararg_index,
-            flags: crate::metadata::class_builder::SECONDARY_CTOR_FLAGS,
+            flags: shape.flags,
             annotations: &shape.annotations,
         })
         .collect();
@@ -2335,13 +2293,12 @@ fn class_metadata_common_shape_admitted(_ir: &IrFile, c: &crate::ir::IrClass) ->
         || c.enum_entry_of.is_some()
         || c.prop_ref.is_some()
         || c.func_ref.is_some()
-        // A DECLARED secondary constructor is described (`Class.constructor`, flags 22) from its
-        // recorded source names + semantic types; one without that record (an unmodeled synthesis
-        // path) would be published with wrong parameters, so the class declines instead. Synthetic
-        // ctors (`@Serializable` deserialization) get no record, matching kotlinc.
+        // A published secondary constructor is described from its recorded semantic parameter
+        // identities. A malformed publication contract would advertise the wrong parameter list,
+        // so the class declines instead. Unpublished target realizations carry no record.
         || c.secondary_ctors
             .iter()
-            .any(|sc| !sc.synthetic && sc.named_params.len() != sc.params.len())
+            .any(|sc| sc.metadata_visibility.is_some() && sc.named_params.len() != sc.params.len())
         || (!c.has_primary_ctor
             && c.secondary_ctors.is_empty()
             && !c.is_interface
@@ -5665,20 +5622,6 @@ fn anonymous_scope<'a>(
         .map(TypeName::render)
         .unwrap_or_else(|| facade.to_string());
     Some((owner, function))
-}
-
-/// One DECLARED secondary constructor's metadata shape: its source parameter names/types, its JVM
-/// descriptor, and the position of a `vararg` parameter.
-struct SecondaryCtorShape {
-    params: Vec<(String, Ty)>,
-    param_defaults: Vec<bool>,
-    desc: String,
-    sig_name: Option<&'static str>,
-    vararg_index: Option<usize>,
-    /// The constructor's applied annotations, rejoined across the retention split (see
-    /// [`crate::metadata::class_builder::FnMeta::annotations`]) — owned so the borrowed `CtorMeta`
-    /// built from this shape outlives the fold.
-    annotations: Vec<crate::ir::AppliedAnnotation>,
 }
 
 /// The `ACC_PUBLIC` bit a class's own access flags carry. A `private` declaration — of ANY kind, at
