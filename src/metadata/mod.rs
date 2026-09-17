@@ -1,4 +1,7 @@
-//! Kotlin @Metadata emission (protobuf payload + encoding). WIP — Phase 4b.
+//! The Kotlin metadata protobuf: emission (this module's `builder`/`encoding`/`protobuf`) and
+//! decoding ([`reader`]). One schema, both directions, and neither half belongs to a backend: a JVM
+//! classfile's `@Metadata`, the stdlib jar's `.kotlin_builtins` resources and a KLIB's `.knm`
+//! fragments are three carriers of the same declarations.
 
 use protobuf::Pb;
 
@@ -7,6 +10,7 @@ pub mod class_builder;
 pub mod encoding;
 pub mod module;
 pub mod protobuf;
+pub mod reader;
 mod type_encoder;
 
 /// Canonical `ProtoBuf.Property.flags` layout shared by metadata readers and writers. Property flags

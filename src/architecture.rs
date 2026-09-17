@@ -345,6 +345,23 @@ mod tests {
         );
     }
 
+    /// The Kotlin metadata protobuf decoder answers what a library DECLARES. That question has the
+    /// same answer on every target — the schema is one schema, whichever carrier holds it — so the
+    /// decoder depends only on the semantic vocabulary it reports in (`libraries`, `types`) and on
+    /// nothing that could make its answer a target's. Anything that reads a decoded declaration as a
+    /// JVM descriptor, a JVM access mask, or an `@Metadata` `d1`/`d2` carrier belongs to the JVM
+    /// backend, which is where it stayed.
+    #[test]
+    fn kotlin_metadata_reader_depends_on_no_target_module() {
+        for path in rust_files_under("src/metadata/reader") {
+            assert_allowed_crate_modules_in_file(&path, &["libraries", "metadata", "types"]);
+        }
+        assert_allowed_crate_modules(
+            "src/metadata/reader.rs",
+            &["libraries", "metadata", "trace_compiler", "types"],
+        );
+    }
+
     /// A KLIB is the library format every non-JVM target reads, and the JVM backend already reads one
     /// for the common `expect` headers. The container reader is therefore core, and it stays core only
     /// as long as it depends on NOTHING else in the compiler: no target spelling, no symbol tables, no

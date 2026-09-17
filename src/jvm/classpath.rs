@@ -1391,8 +1391,11 @@ fn builtin_descriptor(sig: &GenericSig) -> String {
 /// A decoded `.kotlin_builtins` type as a semantic [`Ty`]. `bounds` supplies each in-scope type
 /// parameter's declared upper bound; an unlisted one is `Any?`, matching the `@Metadata`
 /// generic-signature decoder. JVM erasure is derived separately by [`builtin_erased`].
-pub(super) fn builtin_ty(t: &super::metadata::BuiltinTy, bounds: &HashMap<String, Ty>) -> Ty {
-    use super::metadata::BuiltinTy;
+pub(super) fn builtin_ty(
+    t: &crate::metadata::reader::BuiltinTy,
+    bounds: &HashMap<String, Ty>,
+) -> Ty {
+    use crate::metadata::reader::BuiltinTy;
     let ty = match t {
         BuiltinTy::Class { internal, args, .. } => {
             let args = args
@@ -1421,7 +1424,7 @@ pub(super) fn builtin_ty(t: &super::metadata::BuiltinTy, bounds: &HashMap<String
 /// The declared upper bound of each type parameter, keyed by name. Bounds are decoded with an EMPTY
 /// bound map so a recursive bound (`E : Comparable<E>`) terminates.
 pub(super) fn builtin_bounds(
-    params: &[super::metadata::BuiltinTypeParam],
+    params: &[crate::metadata::reader::BuiltinTypeParam],
     inherited: &HashMap<String, Ty>,
 ) -> HashMap<String, Ty> {
     let mut out = inherited.clone();
@@ -1437,7 +1440,7 @@ pub(super) fn builtin_bounds(
 }
 
 impl BuiltinsFile {
-    fn from_package(package: super::metadata::BuiltinPackage) -> Self {
+    fn from_package(package: crate::metadata::reader::BuiltinPackage) -> Self {
         let mut file = BuiltinsFile::default();
         for function in package.functions {
             let bounds = builtin_bounds(&function.formals, &HashMap::new());
@@ -1560,7 +1563,9 @@ impl BuiltinsFile {
                     kind: class.kind,
                     visibility: class.visibility,
                     is_nested: class.is_nested,
-                    access: class.access,
+                    // The decoded declaration carries Kotlin's own flag word; the JVM access mask
+                    // an `InnerClasses` entry records is this backend's reading of it.
+                    access: super::metadata::builtin_class_access(class.flags),
                     nullable_member_returns: class.nullable_member_returns,
                 },
             );
@@ -2991,7 +2996,7 @@ impl Classpath {
                 match read {
                     EntryReadResult::Data(bytes) => (
                         Some(std::sync::Arc::new(BuiltinsFile::from_package(
-                            super::metadata::parse_builtins(&bytes),
+                            crate::metadata::reader::parse_builtins(&bytes),
                         ))),
                         true,
                     ),
@@ -3024,7 +3029,7 @@ impl Classpath {
         }
         let rc = found.unwrap_or_else(|| {
             std::sync::Arc::new(BuiltinsFile::from_package(
-                super::metadata::BuiltinPackage::default(),
+                crate::metadata::reader::BuiltinPackage::default(),
             ))
         });
         if catalog_complete {
@@ -7652,7 +7657,7 @@ mod fq_tests {
         ));
         let pkg = type_name("kotlin/collections");
         let file = std::sync::Arc::new(BuiltinsFile::from_package(
-            super::super::metadata::BuiltinPackage::default(),
+            crate::metadata::reader::BuiltinPackage::default(),
         ));
         let cache = global_entry_builtins_cache(&a.cache_key[0]);
         let slot = cache

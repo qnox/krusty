@@ -4,7 +4,8 @@
 
 use krusty::jvm::classpath::Classpath;
 use krusty::jvm::jvm_libraries::JvmLibraries;
-use krusty::jvm::metadata::{package_functions, parse_builtins};
+use krusty::jvm::metadata::package_functions;
+use krusty::metadata::reader::parse_builtins;
 use krusty::symbol_resolver::{SymRecv, Symbol, SymbolResolver};
 use krusty::types::{type_name, Ty};
 use std::rc::Rc;
@@ -106,14 +107,23 @@ fn builtins_string_members_from_metadata() {
         .expect("kotlin.kotlin_builtins in stdlib jar");
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
-    let string = krusty::jvm::metadata::parse_builtins(&bytes)
+    let string = krusty::metadata::reader::parse_builtins(&bytes)
         .classes
         .remove("kotlin/String")
         .expect("String builtin class");
     // `kotlin/String` omits `Class.flags` in the shipped fragment. The protobuf default is the
-    // semantic PUBLIC FINAL word (`6`), so the parser must produce the same JVM access as an explicit
-    // public-final class rather than leaking the wire omission downstream as INTERNAL (`0`).
-    assert_eq!(string.access, 0x0019, "public static final");
+    // semantic PUBLIC FINAL word (`6`), so the reader must report that word rather than leaking the
+    // wire omission downstream as INTERNAL (`0`) — and the JVM's reading of it must then be the same
+    // access an explicit public-final class gets.
+    assert_eq!(
+        string.flags, 6,
+        "the omitted flag word is its protobuf default"
+    );
+    assert_eq!(
+        krusty::jvm::metadata::builtin_class_access(string.flags),
+        0x0019,
+        "public static final"
+    );
     let members = string.members;
     let find = |name: &str| members.iter().find(|m| m.name == name);
     // Functions: `get(Int): Char` (the `s[i]` operator), `plus(Any?): String`, `compareTo(String): Int`.

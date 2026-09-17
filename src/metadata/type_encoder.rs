@@ -683,7 +683,10 @@ mod tests {
 
     #[test]
     fn predefined_table_matches_decoder() {
-        assert_eq!(PREDEFINED_STRINGS, crate::jvm::metadata::PREDEFINED_STRINGS);
+        assert_eq!(
+            PREDEFINED_STRINGS,
+            crate::metadata::reader::PREDEFINED_STRINGS
+        );
     }
 
     #[test]

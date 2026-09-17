@@ -56,7 +56,9 @@ impl CommonExpectationIndex {
             let Some(bytes) = archive.read(&fragment.entry) else {
                 continue;
             };
-            for (internal, declaration) in super::metadata::parse_package_fragment(&bytes).classes {
+            for (internal, declaration) in
+                crate::metadata::reader::parse_package_fragment(&bytes).classes
+            {
                 if declaration.kind != TypeKind::Annotation || !declaration.is_expect {
                     continue;
                 }
@@ -70,7 +72,7 @@ impl CommonExpectationIndex {
     }
 }
 
-fn annotation_type(declaration: super::metadata::BuiltinClass) -> LibraryType {
+fn annotation_type(declaration: crate::metadata::reader::BuiltinClass) -> LibraryType {
     let bounds = super::classpath::builtin_bounds(&declaration.type_params, &HashMap::new());
     let type_parameters = TypeParameters::new(
         declaration
