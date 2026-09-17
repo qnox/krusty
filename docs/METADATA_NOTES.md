@@ -319,3 +319,74 @@ non-generic shape with a superclass slot exactly when one was declared.
 that list. The flag cannot be inferred from the spellings themselves: a declared superclass that
 named no alias spells nothing, yet still occupies the slot, so only the emitter knows. Getting it
 wrong shifts every abbreviation onto the neighbouring supertype.
+
+## KLIB declaration surface — field numbers read off artifacts
+
+The `.knm` fragments in a KLIB carry the same `PackageFragment` protobuf as `@Metadata` and
+`.kotlin_builtins`, so these numbers are not klib-specific — but a klib is where they were
+*measured*, by having the reference compiler write a library for a fixture and decoding the bytes.
+Every number below came from such an artifact rather than from memory. Two of them contradicted a
+comment already in the reader, which is the reason this section exists.
+
+`Package`: `f3 = function`, `f4 = property`, `f5 = typeAlias`, `f30 = typeTable`.
+
+`Class`: `f1 = flags`, `f2 = supertype_id` (packed), `f3 = fq_name`, `f4 = companionObjectName`,
+`f5 = typeParameter`, `f7 = nestedClassName` (packed string indices), `f8 = constructor`,
+`f9 = function`, `f10 = property`, `f13 = enumEntry`, `f16 = sealedSubclassFqName` (packed
+qualified-name ids), `f17 = inlineClassUnderlyingPropertyName`, `f30 = typeTable`, `f175 = file`.
+
+`Function`: `f2 = name`, `f4 = typeParameter`, `f5 = receiver_type`, `f6 = value_parameter`,
+`f7 = return_type_id`, `f8 = receiver_type_id`, `f9 = flags`, `f172 = file`. A member extension
+(`class Holder { fun Int.f() }`) is exactly the one that carries `f8`.
+
+`Property`: `f1 = old_flags`, `f2 = name`, `f3 = return_type`, `f5 = receiver_type`,
+`f7 = getter_flags`, `f9 = return_type_id`, `f10 = receiver_type_id`, `f11 = flags`,
+`f173 = compileTimeValue`, `f176 = file`.
+
+**`Property` f7 is `getter_flags`, NOT a receiver type id.** A comment in the reader said otherwise;
+following it would have decoded a flag word as a type. `val String.memberExt: Int get() = 1` records
+`f7 = 70`, which is the declared-accessor flag word (public · final · `isNotDefault`), and its
+receiver in `f10`. Note also that a `Property`'s return type id is `f9` while a `Function`'s is `f7`
+— the two messages disagree, and reading one's number into the other is the mistake to avoid.
+
+`TypeAlias`: `f2 = name`, `f3 = typeParameter`, `f5 = underlyingTypeId`, `f7 = expandedTypeId`. The
+two type ids are distinct facts: `typealias Plain = PBox<Int, String>` records one id in both, while
+`typealias Chain = Boxed<Int>` records the spelled `Boxed<Int>` in `f5` and the expanded
+`PBox<Int, Int>` in `f7`.
+
+`EnumEntry`: `f1 = name` (string index).
+
+Flag words, measured rather than assumed:
+
+| declaration | word | value | meaning |
+| --- | --- | --- | --- |
+| `val topVal: Int = 1` | Property f11 | 8710 | `HAS_CONSTANT` |
+| `var topVar: String` | Property f11 | 1798 | `IS_VAR` + `HAS_SETTER` |
+| `const val topConst: Int = 7` | Property f11 | 10758 | + `IS_CONST` |
+| `val Int.topExt get() = …` | Property f11 | *absent* | protobuf default 518 — a plain `val` |
+| `value class Meters` | Class f1 | 8198 | bit 13 `IS_VALUE` |
+| `fun interface Handler` | Class f1 | 16486 | bit 14 `IS_FUN` |
+| `data class Pair2` | Class f1 | 1030 | bit 10 `IS_DATA` |
+
+Visibility is bits 1-3 in all three flag words (`Class`, `Function`, `Property`), which is why one
+decoder serves them: `1`/`4` → private (`PRIVATE_TO_THIS` is a stricter private), `2` → protected,
+`3` → public, anything else → internal.
+
+A value class records only the underlying property's NAME (`Class.f17`); no shipped klib carries
+`inlineClassUnderlyingTypeId` (f18). The underlying type therefore comes from that property's own
+declaration in `Class.f10`.
+
+### What the Kotlin/Native stdlib actually contains
+
+Counted over the 486 `.knm` fragments of `klib/common/stdlib`, because it is the library every
+Kotlin/Native compilation resolves against and its shape decides which of these facts matter:
+
+- 940 classes: 17 `value class`, 3 `fun interface`, 10 `data class`, 9 `inner`, 26 `expect`
+  (all of them `kotlin.jvm.*` annotations with no Native actual).
+- 37 top-level type aliases, including `kotlin.collections.LinkedHashMap` → `HashMap` and
+  `kotlin.collections.LinkedHashSet` → `HashSet`. On this target they are aliases, not classes.
+- Class visibility: 553 public, 295 internal, 92 private.
+- Member functions: 2520 public, 293 private, 67 protected, 84 internal. A reader that does not
+  decode member visibility reports every one of those 444 non-public members as public.
+- No identity is declared twice, so a reader that keeps the first declaration of a name is not
+  making an order-dependent choice — for this library.

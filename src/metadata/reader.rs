@@ -1057,6 +1057,13 @@ pub struct BuiltinMember {
     pub visibility: Visibility,
 }
 
+/// `Class.flags` bit 13, `IS_VALUE`: a `value class`.
+pub const IS_VALUE_CLASS_BIT: u64 = 1 << 13;
+/// `Class.flags` bit 14, `IS_FUN`: a `fun interface`, the declaration bit a Kotlin interface needs
+/// before it may be SAM-converted. Read off a klib the reference compiler wrote for
+/// `fun interface Handler`, whose flag word is 16486.
+pub const IS_FUN_INTERFACE_BIT: u64 = 1 << 14;
+
 /// One top-level function declared by a `.kotlin_builtins` package fragment. Unlike a class member,
 /// it has no JVM facade method: it is a semantic compiler builtin whose physical realization is a
 /// backend capability. Resolution still needs its complete source signature.
@@ -1160,6 +1167,14 @@ pub struct BuiltinClass {
     /// PACKED list of qualified-name ids). Empty for a non-sealed declaration. An exhaustive `when`
     /// over a dependency's sealed type is proven from these.
     pub sealed_subclasses: Vec<String>,
+    /// Source name of a `value class`'s sole underlying property
+    /// (`Class.inlineClassUnderlyingPropertyName` = 17). `None` for an ordinary class. The Native
+    /// stdlib has 17 value classes and exactly 17 classes carrying this field; none carries
+    /// `inlineClassUnderlyingTypeId` (18), so the underlying TYPE comes from the named property's
+    /// own declaration rather than from a second record.
+    pub value_underlying_property: Option<String>,
+    /// A `fun interface` — the declaration bit that makes a Kotlin interface SAM-convertible.
+    pub is_fun_interface: bool,
     /// The declaration's raw `Class.flags` word, as the fragment records it.
     ///
     /// The Kotlin facts this reader can name — [`Self::kind`], [`Self::visibility`],
@@ -1889,6 +1904,7 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
         let mut cp = Pb { b: cb, i: 0 };
         let mut fq = None;
         let mut companion_name_id = None;
+        let mut value_property_id = None;
         // `Class.flags` has the protobuf default PUBLIC FINAL (`6`). Keep wire-format defaulting at
         // the decode boundary, as the ordinary `@Metadata` class reader does, so every consumer sees
         // the semantic flag word. Treating omission as zero conflates it with an explicitly INTERNAL
@@ -1910,6 +1926,8 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                 (1, 0) => flags = cp.varint().unwrap_or(6),
                 (3, 0) => fq = cp.varint(),
                 (4, 0) => companion_name_id = cp.varint(),
+                // `Class.inlineClassUnderlyingPropertyName` = 17, a string-table index.
+                (17, 0) => value_property_id = cp.varint(),
                 (2, 2) => {
                     // supertype_id (packed) — indexes the class's type_table.
                     if let Some(n) = cp.varint() {
@@ -2217,6 +2235,10 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                 supertype_tys,
                 sealed_subclasses,
                 enum_entries,
+                value_underlying_property: (flags & IS_VALUE_CLASS_BIT != 0)
+                    .then(|| value_property_id.and_then(|id| strings.get(id as usize).cloned()))
+                    .flatten(),
+                is_fun_interface: flags & IS_FUN_INTERFACE_BIT != 0,
                 members,
                 constructors,
                 companion_name,
