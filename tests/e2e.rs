@@ -6,13 +6,9 @@
 mod common_core;
 #[path = "common/e2e.rs"]
 mod e2e_support;
-#[path = "common/klib.rs"]
-mod klib_support;
-
 mod common {
     pub use super::common_core::*;
     pub use super::e2e_support::*;
-    pub use super::klib_support::*;
 }
 
 #[path = "abstract_instantiation_check_e2e.rs"]
