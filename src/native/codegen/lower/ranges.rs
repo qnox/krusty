@@ -286,7 +286,7 @@ impl BodyLowering<'_, '_, '_> {
                 .type_of(receiver)
                 .map(Ty::non_null)
                 .and_then(|ty| ty.obj_internal())
-                .is_some_and(|internal| closed_range_element(internal).is_some())
+                .is_some_and(|internal| range_element(internal).is_some())
         {
             return Some(self.facade_range_contains(receiver, args[0]));
         }
@@ -310,7 +310,7 @@ impl BodyLowering<'_, '_, '_> {
         let Some(internal) = receiver_ty.obj_internal() else {
             return Err(format!("`contains` on a `{receiver_ty:?}`"));
         };
-        if closed_range_element(internal).is_none() {
+        if range_element(internal).is_none() {
             return Err(format!("`contains` on a `{receiver_ty:?}`"));
         }
         let Some(argument_ty) = self.type_of(argument) else {

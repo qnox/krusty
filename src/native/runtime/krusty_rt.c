@@ -1337,11 +1337,36 @@ kt_long kt_range_last(KRef range) { return ((const KRange *)range)->last; }
 
 /* `value in range`. The bounds were stored at 64 bits with the element type's own signedness, so
    the caller widens the same way and one comparison serves all three. */
+/* Membership in a range OR a progression, which Kotlin answers by walking and this answers in
+   constant time with the same result.
+
+   Two conditions, and a plain range satisfies the second for free. The value must lie between the
+   ends IN THE WALK'S OWN DIRECTION -- a descending progression has `first` above `last`, so the
+   ascending test would reject every member of it -- and it must sit ON the step: `5 in
+   (10 downTo 1 step 2)` is false though 5 lies between 10 and 2, because the walk visits only
+   10, 8, 6, 4, 2.
+
+   `last` is already the last element REACHED (see `KRange`), so an EMPTY range fails the bounds
+   test for every value and needs no case of its own. A plain range steps by 1, where the
+   step test is always true. */
 kt_boolean kt_range_contains(KRef range, kt_long value) {
     const KRange *self = (const KRange *)range;
     kt_boolean unsigned_bounds = kt_range_unsigned(range->header.type);
-    return !kt_range_below(unsigned_bounds, value, self->first)
-           && !kt_range_below(unsigned_bounds, self->last, value);
+    kt_long step = self->step;
+    if (step > 0) {
+        if (kt_range_below(unsigned_bounds, value, self->first)
+            || kt_range_below(unsigned_bounds, self->last, value)) {
+            return false;
+        }
+    } else {
+        if (kt_range_below(unsigned_bounds, self->first, value)
+            || kt_range_below(unsigned_bounds, value, self->last)) {
+            return false;
+        }
+    }
+    /* Taken on the ring rather than the line, so an unsigned walk and a descending one are the
+       same expression: the value is reached iff it is congruent to `first` modulo the step. */
+    return kt_difference_modulo(value, self->first, step > 0 ? step : -step) == 0;
 }
 
 /* Two ranges are equal when both are empty, or when both bounds match -- and only within one range
