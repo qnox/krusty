@@ -576,6 +576,8 @@ mod explicit_import_shadows_same_package_e2e;
 mod expr_completeness_e2e;
 #[path = "expression_compound_assignment_e2e.rs"]
 mod expression_compound_assignment_e2e;
+#[path = "expression_line_marks_e2e.rs"]
+mod expression_line_marks_e2e;
 #[path = "ext_on_subtype_receiver_e2e.rs"]
 mod ext_on_subtype_receiver_e2e;
 #[path = "ext_receiver_tparam_binding_e2e.rs"]
