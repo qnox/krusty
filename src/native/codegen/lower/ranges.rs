@@ -88,6 +88,28 @@ fn range_type(ty: Ty) -> Option<(&'static str, Ty)> {
     .find_map(|(candidate, kind, element)| internal.matches(candidate).then_some((kind, element)))
 }
 
+/// The element of a CLOSED range — never a progression.
+///
+/// A progression's membership is not a bounds test. `10 downTo 1` is an `IntProgression`, and
+/// Kotlin answers `x in it` by WALKING it, so `5 in (10 downTo 1 step 2)` is false though 5 lies
+/// between the ends. `kt_range_contains` compares against `first`/`last` and would answer true —
+/// and for a descending progression it compares the wrong way round as well, since `first` is the
+/// larger end.
+///
+/// So the facade `contains` path takes this and not [`range_element`], which accepts both: sending
+/// a progression to a bounds test turned six declining cases into WRONG answers.
+fn closed_range_element(owner: TypeName) -> Option<Ty> {
+    [
+        ("kotlin/ranges/IntRange", Ty::Int),
+        ("kotlin/ranges/LongRange", Ty::Long),
+        ("kotlin/ranges/CharRange", Ty::Char),
+        ("kotlin/ranges/UIntRange", Ty::UInt),
+        ("kotlin/ranges/ULongRange", Ty::ULong),
+    ]
+    .into_iter()
+    .find_map(|(candidate, element)| owner.matches(candidate).then_some(element))
+}
+
 /// The runtime function answering one range member, and the width it answers at. Every bound is
 /// kept at 64 bits, so a member that answers one is a truncation of what the runtime returns.
 fn range_symbol(name: &str, arity: usize) -> Option<(&'static str, Ty)> {
@@ -232,9 +254,87 @@ impl BodyLowering<'_, '_, '_> {
             // The element width the iterator answers at is the one the loop variable has.
             return Some(self.range_call(symbol, carried, ret.non_null(), receiver, args, ret));
         }
+        // `x in range` where `x`'s type is not the range's element. Kotlin declares those as
+        // extensions on the ranges FACADE — `RangesKt.contains(IntRange, Long)` — so the owner
+        // names no range type and `range_element` below answers `None` for it. The range is the
+        // receiver, so that is where the element comes from.
+        //
+        // The argument is carried at ITS OWN width and never coerced to the element, which is the
+        // whole of the correctness. `4294967296L in 0..5` is `false`; truncating that `Long` to an
+        // `Int` makes it 0 and answers `true`. The runtime keeps every bound at 64 bits and reads
+        // them at the range's own signedness, so a value widened by its own signedness is already
+        // the comparison Kotlin specifies.
+        // Claimed only when the RECEIVER is a closed range. The facade declares `contains` over
+        // collections and strings too, and answering `Some` for those took the call away from the
+        // paths that already handle them: a list's `contains` started declining, which the
+        // conformance lane did not see and `native_lists_e2e` did.
+        if name == "contains"
+            && args.len() == 1
+            && range_element(crate::types::type_name(owner)).is_none()
+            && self
+                .type_of(receiver)
+                .map(Ty::non_null)
+                .and_then(|ty| ty.obj_internal())
+                .is_some_and(|internal| closed_range_element(internal).is_some())
+        {
+            return Some(self.facade_range_contains(receiver, args[0]));
+        }
         let element = range_element(crate::types::type_name(owner))?;
         let (symbol, carried) = range_symbol(name, args.len())?;
         Some(self.range_call(symbol, carried, element, receiver, args, ret))
+    }
+
+    /// `x in range` reached through the ranges facade, where `x` is not the range's element type.
+    ///
+    /// Declines a receiver that is not a range: the facade also declares `contains` over
+    /// collections and strings, which this does not answer.
+    fn facade_range_contains(
+        &mut self,
+        receiver: u32,
+        argument: u32,
+    ) -> Result<Option<Value>, Unsupported> {
+        let Some(receiver_ty) = self.type_of(receiver).map(Ty::non_null) else {
+            return Err("`contains` on a receiver with no known type".to_string());
+        };
+        let Some(internal) = receiver_ty.obj_internal() else {
+            return Err(format!("`contains` on a `{receiver_ty:?}`"));
+        };
+        if closed_range_element(internal).is_none() {
+            return Err(format!("`contains` on a `{receiver_ty:?}`"));
+        }
+        let Some(argument_ty) = self.type_of(argument) else {
+            return Err("`contains` of a value with no known type".to_string());
+        };
+        // A NULLABLE value is declined rather than answered. Kotlin's `Int?.contains` is a null
+        // test followed by the comparison — `null in 1..3` is false — and reading the reference as
+        // a scalar without that test dereferences null: the corpus's `nullableInPrimitiveRange.kt`
+        // segfaulted, which is worse than the decline it had before.
+        if matches!(argument_ty, Ty::Nullable(_) | Ty::PlatformNullable(_)) {
+            return Err(format!("`contains` of a `{argument_ty:?}`"));
+        }
+        let argument_ty = argument_ty.non_null();
+        let object = self.reference(receiver)?;
+        let Some(value) = self.coerce(argument, argument_ty)? else {
+            return Ok(None);
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        // `Char` and the unsigned types zero-extend; a signed one extends its sign. Reading this
+        // from the ARGUMENT rather than the range is what keeps an out-of-domain value outside.
+        let signed = argument_ty != Ty::Char && !argument_ty.is_unsigned();
+        let widened = self.resize(
+            value,
+            self.builder.func.dfg.value_type(value),
+            signed,
+            types::I64,
+        );
+        self.runtime_call(
+            "kt_range_contains",
+            &[any(), Ty::Long],
+            Ty::Boolean,
+            &[object, widened],
+        )
     }
 
     /// `for (i in 1u..5u)` — a counted loop the checker left as its BOUNDS rather than as a range.
