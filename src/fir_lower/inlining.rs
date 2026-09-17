@@ -695,7 +695,7 @@ fn specialize_checked_argument(argument: &mut IrCheckedArgument, bindings: &Hash
 
 fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, Ty>) {
     match operation {
-        IrIntrinsic::PrimitiveCompare { operand }
+        IrIntrinsic::PrimitiveCompare { operand, .. }
         | IrIntrinsic::UnsignedToString { source: operand }
         | IrIntrinsic::PrimitiveArrayNew { element: operand }
         | IrIntrinsic::EnumValueOf {
