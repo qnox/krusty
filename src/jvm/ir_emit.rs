@@ -17696,7 +17696,7 @@ impl<'a> Emitter<'a> {
             } => {
                 let catches = catches.clone();
                 let result = result.clone();
-                self.emit_try(*body, &catches, *finally, &result, code);
+                self.emit_try(e, *body, &catches, *finally, &result, code);
             }
             IrExpr::RefNew { elem, init } => {
                 let (cls, fdesc) = ref_class(elem);
@@ -19507,6 +19507,7 @@ impl<'a> Emitter<'a> {
     /// `top` there, since an exception may occur before they are assigned).
     fn emit_try(
         &mut self,
+        expression: u32,
         body: u32,
         catches: &[crate::ir::IrCatch],
         finally: Option<u32>,
@@ -19531,6 +19532,11 @@ impl<'a> Emitter<'a> {
         let after = code.new_label();
 
         self.bind(start, code);
+        // kotlinc opens every protected region with a `nop` carrying the `try` keyword's line, so the
+        // region starts at an instruction of its own rather than sharing the body's first one. The
+        // exception table's `from` is that `nop`.
+        debug_lines::mark_expression_start(self.ir, expression, code);
+        code.nop();
         let body_diverges = if is_stmt {
             self.discarding_diverges(body)
         } else {
@@ -19647,6 +19653,9 @@ impl<'a> Emitter<'a> {
             let thr_ty = Ty::obj("java/lang/Throwable");
             let tslot = self.next_slot;
             self.next_slot += 1;
+            // The handler's entry belongs to the finalizer copy it introduces, not to the `finally`
+            // keyword — mark it before the store so both copies open on the same line.
+            debug_lines::mark_block_entry(self.ir, f, code);
             store(thr_ty, tslot, code);
             // The caught exception is LIVE in `tslot` across the whole inlined `finally` (it is re-raised
             // after it). Register it so any StackMapTable frame recorded WHILE emitting the finally —
