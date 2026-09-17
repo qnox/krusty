@@ -169,10 +169,10 @@ pub(super) fn attach(file: &mut File, src: &str) {
 
 #[cfg(test)]
 mod tests {
-    use crate::ast::Decl;
+    use crate::ast::{ClassDecl, Decl};
     use crate::diag::DiagSink;
 
-    fn class_lines(source: &str, name: &str) -> (u32, u32, u32) {
+    fn parsed_class(source: &str, name: &str) -> ClassDecl {
         let mut diagnostics = DiagSink::new();
         let tokens = crate::lexer::lex(source, &mut diagnostics);
         let file = crate::parser::parse(source, &tokens, &mut diagnostics);
@@ -184,12 +184,15 @@ mod tests {
         file.decl_arena
             .iter()
             .find_map(|declaration| match declaration {
-                Decl::Class(class) if class.name == name => {
-                    Some((class.decl_start_line, class.decl_line, class.decl_end_line))
-                }
+                Decl::Class(class) if class.name == name => Some(class.clone()),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("{name} parsed"))
+    }
+
+    fn class_lines(source: &str, name: &str) -> (u32, u32, u32) {
+        let class = parsed_class(source, name);
+        (class.decl_start_line, class.decl_line, class.decl_end_line)
     }
 
     /// Annotation, header, and closing brace are distinct stable source facts.
@@ -205,5 +208,39 @@ mod tests {
     fn bodyless_class_declaration_lines_match_the_header() {
         let source = "package a\n\ndata class Plain(val x: Int)\n";
         assert_eq!(class_lines(source, "Plain"), (3, 3, 3));
+    }
+
+    /// Optional-body lookahead must not attach following trivia or a sibling to a bodyless
+    /// declaration. The span itself is the ownership fact; line metadata is derived from it.
+    #[test]
+    fn bodyless_declaration_span_stops_before_sibling_trivia() {
+        let source = "data class First(val x: Int)\n\n/* between\n   declarations */\ninterface Second\n\nobject Third\n\nenum class Fourth\n\nclass Fifth\n";
+        for (name, end, line) in [
+            ("First", "data class First(val x: Int)".len(), 1),
+            (
+                "Second",
+                source.find("interface Second").unwrap() + "interface Second".len(),
+                5,
+            ),
+            (
+                "Third",
+                source.find("object Third").unwrap() + "object Third".len(),
+                7,
+            ),
+            (
+                "Fourth",
+                source.find("enum class Fourth").unwrap() + "enum class Fourth".len(),
+                9,
+            ),
+            (
+                "Fifth",
+                source.find("class Fifth").unwrap() + "class Fifth".len(),
+                11,
+            ),
+        ] {
+            let class = parsed_class(source, name);
+            assert_eq!(class.span.hi as usize, end, "{name} exact span");
+            assert_eq!(class.decl_end_line, line, "{name} end line");
+        }
     }
 }
