@@ -2256,8 +2256,13 @@ pub struct IrSecondaryCtor {
     pub params: Vec<Ty>,
     /// SOURCE parameter names paired with SEMANTIC (checker-resolved) types — what the class
     /// `@Metadata` `Constructor` record describes (`params` above are the erased IR realization,
-    /// which loses fun-type shapes and generic arguments). Empty for a synthesized constructor.
+    /// which loses fun-type shapes and generic arguments). This is metadata payload, not a
+    /// publication sentinel: [`Self::metadata_visibility`] alone decides whether a record exists.
     pub named_params: Vec<(String, Ty)>,
+    /// Publish this constructor in Kotlin metadata with the recorded semantic visibility. `None`
+    /// means the constructor is a target/compiler realization with no Kotlin declaration record,
+    /// independently of its parameter names, arity, descriptor, or [`Self::synthetic`] flag.
+    pub metadata_visibility: Option<crate::types::Visibility>,
     /// Index into `named_params` of a `vararg` parameter, for the `Constructor` metadata record.
     pub vararg_index: Option<usize>,
     pub defaults: Vec<Option<ExprId>>,
@@ -2296,6 +2301,7 @@ pub struct IrJvmValueClassSecondaryCtor {
     pub param_defaults: Vec<bool>,
     pub vararg_index: Option<usize>,
     pub annotations: DeclarationAnnotations,
+    pub metadata_visibility: crate::types::Visibility,
     pub descriptor: String,
 }
 
