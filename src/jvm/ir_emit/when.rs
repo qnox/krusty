@@ -149,6 +149,9 @@ impl Emitter<'_> {
         let low = plan.cases.iter().map(|(key, _)| *key).min().expect("keys");
         let high = plan.cases.iter().map(|(key, _)| *key).max().expect("keys");
         let span = i64::from(high) - i64::from(low) + 1;
+        for &label in case_labels.iter().chain(std::iter::once(&default)) {
+            self.record_label_assignment_state(label, code);
+        }
         if span <= 2 * plan.cases.len() as i64 {
             let mut targets = vec![default; span as usize];
             for (index, (key, _)) in plan.cases.iter().enumerate() {
@@ -169,7 +172,7 @@ impl Emitter<'_> {
         let mut end_reachable = false;
         for (index, (_, body)) in plan.cases.iter().enumerate() {
             self.frame(case_labels[index], vec![], code);
-            code.bind(case_labels[index]);
+            self.bind(case_labels[index], code);
             code.set_stack(emission.entry_height);
             if self.emit_switch_body(*body, &emission, code) {
                 self.frame(emission.end, emission.result_stack.to_vec(), code);
@@ -178,7 +181,7 @@ impl Emitter<'_> {
             }
         }
         self.frame(default, vec![], code);
-        code.bind(default);
+        self.bind(default, code);
         code.set_stack(emission.entry_height);
         match plan.default {
             Some(body) => {
@@ -191,7 +194,7 @@ impl Emitter<'_> {
         if end_reachable {
             self.frame(emission.end, emission.result_stack.to_vec(), code);
         }
-        code.bind(emission.end);
+        self.bind(emission.end, code);
     }
 
     /// Emit one case body and report whether it reaches the merge.

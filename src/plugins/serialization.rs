@@ -633,7 +633,7 @@ fn ty_descriptor(ctx: &PluginContext, ty: &Ty) -> Option<String> {
 
 /// The `CompositeDecoder.decode<T>Element` method + descriptor for a property type, or `None` for a
 /// reference/richer type (which needs `decodeSerializableElement`). Covers the full primitive set +
-/// String; Long/Double are 2-slot and their field locals are sized via `slot_width`.
+/// String; backend lowering owns any wider physical carrier/local representation.
 fn decode_element_method(ty: &Ty) -> Option<(&'static str, &'static str)> {
     let fq = ty.kotlin_class_internal()?;
     Some(if fq.matches("kotlin/Int") {
@@ -669,18 +669,6 @@ fn decode_element_method(ty: &Ty) -> Option<(&'static str, &'static str)> {
     } else {
         return None; // reference/richer types: decodeSerializableElement (future work)
     })
-}
-
-/// JVM local-slot width of a field type. Semantic non-null `Long`/`Double` values take two slots;
-/// nullable forms are references and therefore take one. Choosing their physical wrapper class is
-/// a backend concern and does not enter this plugin decision.
-fn slot_width(ty: &Ty) -> u32 {
-    match *ty {
-        // `Ty::Long` and `Ty::Double` are the common semantic classifier identities. Their nullable
-        // wrappers fall through to the one-slot reference case.
-        Ty::Long | Ty::Double => 2,
-        _ => 1,
-    }
 }
 
 /// An `invokeinterface` callee on a runtime interface (`Encoder`/`CompositeEncoder`/…).
@@ -2843,6 +2831,38 @@ mod tests {
         assert!(
             matches!(ir.expr(descriptor_store), IrExpr::GetValue(_)),
             "the semantic descriptor value must not be wrapped in a JVM-only cast"
+        );
+    }
+
+    #[test]
+    fn deserialize_uses_symbolic_local_identities_for_wide_values() {
+        let (mut ir, ctx, _) = serializable_class("demo/Wide", &["kotlin/Long", "kotlin/Double"]);
+        run(&mut ir, &ctx);
+
+        let serializer = find_class(&ir, "demo/Wide$$serializer");
+        let deserialize = serializer
+            .methods
+            .iter()
+            .copied()
+            .find(|function| ir.functions[*function as usize].name == "deserialize")
+            .expect("generated deserialize function");
+        let body = ir.functions[deserialize as usize]
+            .body
+            .expect("generated deserialize body");
+        let IrExpr::Block { stmts, .. } = ir.expr(body) else {
+            panic!("deserialize body is not a block");
+        };
+        let locals = stmts
+            .iter()
+            .filter_map(|statement| match ir.expr(*statement) {
+                IrExpr::Variable { index, .. } => Some(*index),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            locals,
+            [2, 3, 4, 5, 6, 7, 8],
+            "semantic identities stay consecutive; a backend assigns wide physical slots"
         );
     }
 
