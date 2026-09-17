@@ -1697,7 +1697,8 @@ pub struct LibBuild {
     krusty: PathBuf,
     reference: OnceLock<Option<PathBuf>>,
     /// The same dependency as a KLIB, built lazily by the klib lane and never by a default run.
-    klib: OnceLock<Option<PathBuf>>,
+    /// `Err` = valid Kotlin the non-JVM compiler cannot express, with its diagnostics.
+    klib: OnceLock<Option<Result<PathBuf, String>>>,
     /// Stable per-source-set tag, so the klib lands in its own scratch directory.
     tag: String,
 }
@@ -1743,17 +1744,26 @@ impl LibBuild {
     /// JS klib's own declarations are the FIXTURE's, whose class kinds and type-parameter names are
     /// not platform-dependent; the byte-equality ledger, where the metadata-only shape IS the point,
     /// keeps using the metadata compiler.
-    pub fn klib_out(&self) -> Option<&Path> {
-        self.klib
-            .get_or_init(|| {
-                let sources: Vec<(&str, &str)> = self
-                    .sources
-                    .iter()
-                    .map(|(name, source)| (name.as_str(), source.as_str()))
-                    .collect();
-                crate::common::kotlinc_klib(&format!("dep{}", self.tag), &sources)
-            })
-            .as_deref()
+    /// `Ok` = the dependency's klib. `Err` = valid Kotlin that this target cannot express, with the
+    /// diagnostics saying which declaration. `None` = the toolchain is unavailable.
+    ///
+    /// The distinction matters and is well-founded: a `LibBuild` exists only because KRUSTY already
+    /// compiled these sources for the JVM, so they are known-valid Kotlin. A non-JVM compiler
+    /// rejecting them therefore means the fixture is JVM-specific — `@JvmStatic` has no JS
+    /// declaration — and never that the fixture is wrong.
+    pub fn klib_out(&self) -> Option<Result<&Path, &str>> {
+        match self.klib.get_or_init(|| {
+            let sources: Vec<(&str, &str)> = self
+                .sources
+                .iter()
+                .map(|(name, source)| (name.as_str(), source.as_str()))
+                .collect();
+            crate::common::kotlinc_klib_result(&format!("dep{}", self.tag), &sources)
+        }) {
+            Some(Ok(klib)) => Some(Ok(klib.as_path())),
+            Some(Err(diagnostics)) => Some(Err(diagnostics.as_str())),
+            None => None,
+        }
     }
 
     /// The klib dependency lane (`KRUSTY_LIB_KLIB=1`): the dependency's API must be the same seen
@@ -1772,8 +1782,23 @@ impl LibBuild {
         if !crate::common::klib_dep_lane_enabled() {
             return;
         }
-        let Some(klib) = self.klib_out() else {
-            return; // no kotlinc provisioned — nothing to compare against
+        let klib = match self.klib_out() {
+            Some(Ok(klib)) => klib,
+            // Valid Kotlin the non-JVM target cannot express. Recorded rather than passed over, so
+            // the lane's coverage is a number and not an impression.
+            Some(Err(diagnostics)) => {
+                let reason = diagnostics
+                    .lines()
+                    .find(|line| line.contains("error:"))
+                    .map(crate::common::ledger_reason)
+                    .unwrap_or_else(|| "rejected by the non-JVM compiler".to_string());
+                crate::common::emit_report(
+                    "KRUSTY_LIB_KLIB_REPORT",
+                    &[format!("KLIBDEP\tskipped\t{reason}\t{tag}")],
+                );
+                return;
+            }
+            None => return, // no kotlinc provisioned — nothing to compare against
         };
         let from_klib = crate::common::surface_from_klib(klib);
         if from_klib.classifiers.is_empty() && from_klib.functions.is_empty() {
@@ -2638,7 +2663,14 @@ pub fn kotlinc_compile_with(class_name: &str, args: &[String]) -> Option<(i32, S
 /// fixture that is not valid Kotlin must never read as a skip.
 #[allow(dead_code)]
 pub fn kotlinc_klib(unique_name: &str, sources: &[(&str, &str)]) -> Option<PathBuf> {
-    type KlibMemo = Mutex<HashMap<u64, Arc<OnceLock<Option<PathBuf>>>>>;
+    match klib_memo(unique_name, sources)? {
+        Ok(klib) => Some(klib),
+        Err(err) => panic!("kotlinc(klib) failed: {err}"),
+    }
+}
+
+fn klib_memo(unique_name: &str, sources: &[(&str, &str)]) -> Option<Result<PathBuf, String>> {
+    type KlibMemo = Mutex<HashMap<u64, Arc<OnceLock<Option<Result<PathBuf, String>>>>>>;
     static MEMO: OnceLock<KlibMemo> = OnceLock::new();
     let mut hash: u64 = 0xcbf29ce484222325;
     let mut feed = |bytes: &[u8]| {
@@ -2670,7 +2702,7 @@ fn kotlinc_klib_uncached(
     hash: u64,
     unique_name: &str,
     sources: &[(String, String)],
-) -> Option<PathBuf> {
+) -> Option<Result<PathBuf, String>> {
     // The JS stdlib klib is the library a klib compile resolves `kotlin.*` against; without it even
     // `String` is unresolved, and the compile fails with "missing stdlib class" rather than a
     // fixture error.
@@ -2703,11 +2735,24 @@ fn kotlinc_klib_uncached(
                 "kotlinc reported success but wrote no klib at {}",
                 klib.display()
             );
-            Some(klib)
+            Some(Ok(klib))
         }
-        Some((code, err)) => panic!("kotlinc(klib) failed ({code}): {err}"),
+        Some((_, err)) => Some(Err(err)),
         None => None,
     }
+}
+
+/// [`kotlinc_klib`] without the panic: the diagnostics come back instead.
+///
+/// For a caller that already knows the sources are valid Kotlin and is asking whether they are
+/// expressible on a NON-JVM target. A fixture using `@JvmStatic` is perfectly valid and has no JS
+/// klib, and that is a fact about the fixture's platform rather than an error in it.
+#[allow(dead_code)]
+pub fn kotlinc_klib_result(
+    unique_name: &str,
+    sources: &[(&str, &str)],
+) -> Option<Result<PathBuf, String>> {
+    klib_memo(unique_name, sources)
 }
 
 /// The reference compiler's all-in-one jar (`<dist>/lib/kotlin-compiler.jar`), which carries

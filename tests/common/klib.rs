@@ -388,3 +388,56 @@ pub fn diff_surfaces(klib: &DeclarationSurface, jvm: &DeclarationSurface) -> Sur
     }
     diff
 }
+
+/// One compiler diagnostic, reduced to what identifies the declaration.
+///
+/// A diagnostic opens with the absolute path of a file in THIS run's scratch directory, which
+/// carries a pid and a counter — left in, every ledger line is unique to its run and the ledger
+/// cannot be compared against another one. Only the leading path is dropped, structurally: the
+/// text before the first `:` is a path, so its basename is what survives. Nothing keys off a
+/// fixture's file name, because a multi-file dependency has several.
+///
+/// Tabs become spaces: the ledger is read as TSV, and a tab inside a field would split it.
+pub fn ledger_reason(line: &str) -> String {
+    let line = line.trim();
+    let trimmed = match line.find(':') {
+        Some(colon) => match line[..colon].rfind('/') {
+            Some(slash) => &line[slash + 1..],
+            None => line,
+        },
+        None => line,
+    };
+    trimmed.replace('\t', " ")
+}
+
+#[cfg(test)]
+mod ledger_reason_tests {
+    #[test]
+    fn a_diagnostic_keeps_its_file_and_position_and_drops_the_scratch_path() {
+        assert_eq!(
+            super::ledger_reason(
+                "target/scratch/29157/2/klib-13805c744918c5b0/Lib.kt:3:4: \
+                 error: unresolved reference 'JvmStatic'."
+            ),
+            "Lib.kt:3:4: error: unresolved reference 'JvmStatic'."
+        );
+    }
+
+    /// Nothing keys off `Lib`: a multi-file dependency names its files whatever it likes, and a
+    /// scratch directory may contain any letters at all.
+    #[test]
+    fn the_file_name_is_not_assumed() {
+        assert_eq!(
+            super::ledger_reason("/tmp/LibraryBuild/7/Helper.kt:9:1: error: no."),
+            "Helper.kt:9:1: error: no."
+        );
+    }
+
+    #[test]
+    fn a_line_with_no_path_survives_whole_and_loses_its_tabs() {
+        assert_eq!(
+            super::ledger_reason("  error: something\twith a tab  "),
+            "error: something with a tab"
+        );
+    }
+}
