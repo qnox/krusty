@@ -20,6 +20,7 @@ use crate::jvm::names::{
 use crate::kt_string::{KtString, KtStringBuf};
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 
+mod block_scope;
 mod bottom_values;
 mod call_operands;
 mod enum_metadata;
@@ -13370,6 +13371,10 @@ struct Emitter<'a> {
     /// Active `finally` bodies, outermost first. A source-level control transfer executes these
     /// before leaving its protected region; the stack carries exact IR identities, not syntax.
     return_finalizers: Vec<u32>,
+    /// A statement at the lexical tail of a loop body may branch directly to the loop's next
+    /// iteration. This is an emitter control-flow target, not a semantic `continue` manufactured in
+    /// common IR. Blocks pass it only to their terminal statement.
+    terminal_statement_target: Option<Label>,
     /// A generated class initializer has no source expression that owns JVM reference-boundary
     /// casts. Keep that representation choice in emission instead of inserting semantic casts into
     /// common/plugin IR.
@@ -13413,6 +13418,7 @@ impl<'a> Emitter<'a> {
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,
             return_finalizers: Vec::new(),
+            terminal_statement_target: None,
             generated_initializer: false,
         }
     }
@@ -14193,7 +14199,8 @@ impl<'a> Emitter<'a> {
                 // (its slot must read as `Top` once out of scope — else a sibling branch that never
                 // initialized it fails verification).
                 let saved = self.slots.clone();
-                self.emit_open_block(stmts, value, code);
+                let terminal_target = self.terminal_statement_target.take();
+                self.emit_open_block(stmts, value, terminal_target, code);
                 self.close_scope_locals(code);
                 self.block_depth -= 1;
                 self.restore_slot_scope(saved);
@@ -14428,6 +14435,7 @@ impl<'a> Emitter<'a> {
                     start
                 };
                 self.loop_stack.push((bottom, end, label.clone()));
+                let enclosing_terminal_target = self.terminal_statement_target.replace(bottom);
                 let retained_body_scope = if post_test {
                     match self.ir.expr(body).clone() {
                         // Kotlin's `do` body and bottom condition share one lexical scope. Keep the
@@ -14437,7 +14445,7 @@ impl<'a> Emitter<'a> {
                         // authorizes this lifetime, so no source-shape lookup is involved.
                         IrExpr::Block { stmts, value } => {
                             let saved = self.slots.clone();
-                            self.emit_open_block(stmts, value, code);
+                            self.emit_open_block(stmts, value, Some(bottom), code);
                             Some(saved)
                         }
                         _ => {
@@ -14449,6 +14457,7 @@ impl<'a> Emitter<'a> {
                     self.emit(body, code);
                     None
                 };
+                self.terminal_statement_target = enclosing_terminal_target;
                 // A pre-test body's block has restored its slot map. A post-test body's block stays
                 // open here because `continue` and the condition are inside that same Kotlin scope.
                 if bottom == cont {
@@ -14493,62 +14502,6 @@ impl<'a> Emitter<'a> {
             }
             other => {
                 self.emit_discarding_node(e, &other, code);
-            }
-        }
-    }
-
-    /// Emit one IR block while leaving its lexical slot scope open. The ordinary `Block` arm closes
-    /// it immediately; a post-test loop closes it only after emitting the bottom condition, whose
-    /// Kotlin scope includes declarations from the body.
-    fn emit_open_block(&mut self, stmts: Vec<u32>, value: Option<u32>, code: &mut CodeBuilder) {
-        self.block_depth += 1;
-        let mut dead = false;
-        for statement in stmts {
-            // A statement root carrying a source line starts a `LineNumberTable` entry at its first
-            // instruction (kotlinc's per-statement mapping).
-            if let Some(&line) = self.ir.expr_lines.get(&statement) {
-                code.mark_line(line);
-            }
-            // A statement nets zero, so reset the tracked height afterward to undo an approximate
-            // branchy-splice drift.
-            let base = code.stack_height();
-            self.emit(statement, code);
-            if self.discarding_diverges(statement) {
-                dead = true;
-                break;
-            }
-            code.set_stack(base.max(0) as u16);
-        }
-        if !dead {
-            if let Some(value) = value {
-                if let Some(&line) = self.ir.expr_lines.get(&value) {
-                    code.mark_line(line);
-                }
-                self.emit_discarding(value, code);
-            }
-        }
-    }
-
-    /// Close locals declared in the current nested block.
-    fn close_scope_locals(&mut self, code: &mut CodeBuilder) {
-        if self.block_depth <= 1 {
-            return;
-        }
-        let end = code.bytes.len().min(u16::MAX as usize) as u16;
-        let depth = self.block_depth;
-        let mut i = 0;
-        while i < self.open_locals.len() {
-            if self.open_locals[i].0 >= depth {
-                let (_, slot, start, name, desc) = self.open_locals.remove(i);
-                // kotlinc interns a local's debug strings when its lexical scope closes, before
-                // the enclosing method's parameter table. A consuming FIR body commonly has one
-                // additional block wrapper, so deferring these strings until class serialization
-                // would reorder an otherwise identical constant pool.
-                self.cw.seed_utf8(&name);
-                self.cw.seed_utf8(&desc);
-                code.add_local_entry(start, Some(end.saturating_sub(start)), slot, &name, &desc);
-            } else {
-                i += 1;
             }
         }
     }
@@ -19438,6 +19391,8 @@ impl<'a> Emitter<'a> {
             .map(|result| ir_ty_to_jvm(&result))
             .unwrap_or_else(|| self.value_ty_of_when(branches));
         let is_stmt = (!has_else && exhaustive_result.is_none()) || result_ty == Ty::Unit;
+        let enclosing_terminal_target = self.terminal_statement_target.take();
+        let terminal_target = is_stmt.then_some(enclosing_terminal_target).flatten();
         let result_stack = if is_stmt {
             vec![]
         } else {
@@ -19449,7 +19404,14 @@ impl<'a> Emitter<'a> {
         if let Some(plan) = self.int_switch_plan(branches) {
             self.emit_int_switch(
                 &plan,
-                when::Emission::new(is_stmt, result_ty, &result_stack, entry_height, end),
+                when::Emission::new(
+                    is_stmt,
+                    result_ty,
+                    &result_stack,
+                    entry_height,
+                    end,
+                    terminal_target,
+                ),
                 code,
             );
             return;
@@ -19839,12 +19801,6 @@ impl<'a> Emitter<'a> {
             self.unassigned_values.clone_from(unassigned);
         }
         code.bind(label);
-    }
-
-    fn restore_slot_scope(&mut self, slots: HashMap<u32, (u16, Ty)>) {
-        self.slots = slots;
-        self.unassigned_values
-            .retain(|value| self.slots.contains_key(value));
     }
 
     fn frame(&mut self, label: Label, stack: Vec<VerifType>, code: &mut CodeBuilder) {
