@@ -388,7 +388,29 @@ recorded identically minus the bit.
 Annotations travel in `KlibMetadataProtoBuf`'s extension field **170**, on a `Class`, a `Function`
 and a `Property` alike; the carrier this reader writes uses `f12` for the same repeated field, and a
 declaration carries one or the other, never both. `Annotation` is `{ id = 1 (a qualified-name id),
-argument = 2 }`.
+argument = 2 }`, and `Argument` is `{ name_id = 1, value = 2 }`.
+
+`Argument.Value` carries its kind in `f1` and its payload in the field that kind selects. Read off a
+klib written for an annotation with one element of every kind:
+
+| kind | ordinal | payload |
+| --- | --- | --- |
+| `BYTE` `CHAR` `SHORT` `INT` `LONG` `BOOLEAN` | 0 1 2 3 4 7 | `f2`, **zigzag** (`'x'` writes 240 for 120; `-3` writes 5) |
+| `FLOAT` | 5 | `f3`, fixed32 |
+| `DOUBLE` | 6 | `f4`, fixed64 |
+| `STRING` | 8 | `f5`, a string index |
+| `CLASS` | 9 | `f6`, a qualified-name id |
+| `ENUM` | 10 | `f6` (the enum class) + `f7` (the entry name) |
+| `ANNOTATION` | 11 | `f8`, a nested `Annotation` |
+| `ARRAY` | 12 | `f9`, repeated `Value` |
+
+Only `ENUM` and `ARRAY` are read today, for `@Target`: it records ONE argument whose value is an
+`ARRAY` of `ENUM`s, and a single-target application uses the same array with one element. The rest
+of the table is recorded so it need not be measured again — the values a consumer would want next
+are `@Deprecated`'s message (`STRING`) and its level (`ENUM`), which need a carrier for arguments on
+a member record, and `@Retention`, whose `LibraryType` field holds the JVM `RetentionPolicy`
+spelling rather than Kotlin's `AnnotationRetention` and so is not a carrier-independent decode's to
+fill.
 
 ### What the Kotlin/Native stdlib actually contains
 

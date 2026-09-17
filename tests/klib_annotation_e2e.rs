@@ -139,3 +139,80 @@ fn the_native_stdlib_s_members_carry_their_annotations() {
         );
     }
 }
+
+/// An annotation class says where an application of it with no use-site prefix may land.
+///
+/// `None` there means "not an annotation class", so a klib annotation class answering `None` would
+/// be a wrong answer rather than a missing one. An annotation class that declares no `@Target` is
+/// applicable everywhere and answers with the default, because the difference between that and
+/// "nowhere" is whether an application is an error.
+#[test]
+fn an_annotation_class_reports_where_an_application_may_land() {
+    let Some(klib) = common::kotlinc_klib(
+        "klib_annotation_targets",
+        &[(
+            "Lib.kt",
+            r#"
+package plib
+
+@Target(AnnotationTarget.PROPERTY, AnnotationTarget.FIELD)
+annotation class OnStorage
+
+@Target(AnnotationTarget.VALUE_PARAMETER)
+annotation class OnParameter
+
+@Target(AnnotationTarget.CLASS)
+annotation class OnClass
+
+annotation class Anywhere
+
+class NotAnAnnotation
+"#,
+        )],
+    ) else {
+        return;
+    };
+    let symbols = KlibSymbols::open(&[klib]);
+    let targets = |name: &str| {
+        symbols
+            .classifier(type_name(name))
+            .unwrap_or_else(|| panic!("{name}"))
+            .annotation_targets
+    };
+    use krusty::types::AnnotationTargets;
+    assert_eq!(
+        targets("plib/OnStorage"),
+        Some(AnnotationTargets {
+            value_parameter: false,
+            property: true,
+            field: true,
+        })
+    );
+    assert_eq!(
+        targets("plib/OnParameter"),
+        Some(AnnotationTargets {
+            value_parameter: true,
+            property: false,
+            field: false,
+        })
+    );
+    assert_eq!(
+        targets("plib/OnClass"),
+        Some(AnnotationTargets {
+            value_parameter: false,
+            property: false,
+            field: false,
+        }),
+        "a class-only annotation lands on none of the three property sites"
+    );
+    assert_eq!(
+        targets("plib/Anywhere"),
+        Some(AnnotationTargets::DEFAULT),
+        "no @Target means applicable everywhere, not nowhere"
+    );
+    assert_eq!(
+        targets("plib/NotAnAnnotation"),
+        None,
+        "and None keeps meaning `not an annotation class`"
+    );
+}
