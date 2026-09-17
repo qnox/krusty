@@ -18,6 +18,10 @@ pub struct Options {
     pub classpath: Vec<PathBuf>,
     /// Classpath entries whose Kotlin `internal` declarations are visible to this module.
     pub friend_paths: Vec<PathBuf>,
+    /// `-libraries <path>`: Kotlin libraries in KLIB form, ':'-separated — kotlinc's spelling for a
+    /// non-JVM dependency (`kotlinc-js -libraries`). Each entry may be a `.klib` archive or an
+    /// unpacked klib directory, the two shapes a distribution ships.
+    pub libraries: Vec<PathBuf>,
     /// Batch-compilable Kotlin and Java source inputs (directories already expanded). Java files
     /// contribute source headers to Kotlin analysis; their executable bodies remain javac's work.
     pub sources: Vec<String>,
@@ -71,6 +75,7 @@ impl Default for Options {
             dest: PathBuf::from("krusty-out"),
             classpath: Vec::new(),
             friend_paths: Vec::new(),
+            libraries: Vec::new(),
             sources: Vec::new(),
             module_name: "main".to_string(),
             features: LangFeatures::new(),
@@ -197,6 +202,13 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
             "-cp" | "-classpath" | "-class-path" => {
                 if let Some(v) = it.next() {
                     opts.classpath.extend(split_classpath(&v));
+                }
+            }
+            // kotlinc spells a KLIB dependency `-libraries`, on the metadata and JS compilers
+            // alike, and separates entries with the system path separator just like `-classpath`.
+            "-libraries" => {
+                if let Some(v) = it.next() {
+                    opts.libraries.extend(split_classpath(&v));
                 }
             }
             flag if flag.starts_with("-Xfriend-paths=") => {
@@ -451,6 +463,7 @@ supported language subset (kotlinc-equivalent ABI, verified by a differential ha
 Common options (kotlinc-compatible):
   -d <dir|jar>          destination for generated .class files (a directory or a .jar)
   -classpath / -cp <p>  classpath entries (dirs and .jars), ':'-separated
+  -libraries <p>        KLIB dependencies (.klib archives and unpacked klib dirs), ':'-separated
   -module-name <name>   name of the generated <name>.kotlin_module (default: main)
   -include-runtime      accepted (no-op: krusty does not bundle the stdlib)
   -jvm-target <v>        class-file version to emit (1.8→v52, 9→v53, …, 25→v69; default v52)
@@ -665,6 +678,37 @@ mod tests {
         );
         assert_eq!(o.module_name, "lib");
         assert_eq!(o.sources, vec!["x.kt".to_string()]);
+    }
+
+    /// `-libraries` is kotlinc's spelling for a KLIB dependency, and a KLIB is not a classpath
+    /// entry: the two lists stay apart so a jar is never opened as a klib or the reverse.
+    #[test]
+    fn kotlinc_libraries_are_klibs_kept_apart_from_the_classpath() {
+        let o = parse_args(&[
+            "-cp",
+            "ordinary.jar",
+            "-libraries",
+            "stdlib.klib:dist/klib/common/stdlib",
+            "x.kt",
+        ]);
+        assert_eq!(
+            o.libraries,
+            vec![
+                PathBuf::from("stdlib.klib"),
+                PathBuf::from("dist/klib/common/stdlib")
+            ],
+            "an archive and an unpacked klib directory, the two shapes a distribution ships"
+        );
+        assert_eq!(o.classpath, vec![PathBuf::from("ordinary.jar")]);
+        assert_eq!(o.sources, vec!["x.kt".to_string()]);
+        assert!(o.errors.is_empty() && o.ignored.is_empty());
+    }
+
+    #[test]
+    fn a_compilation_with_no_libraries_flag_asks_for_no_klibs() {
+        assert!(parse_args(&["-cp", "ordinary.jar", "x.kt"])
+            .libraries
+            .is_empty());
     }
 
     #[test]

@@ -159,7 +159,18 @@ mod tests {
     fn compiler_cli_uses_only_public_compiler_layers() {
         assert_allowed_external_crate_modules_in_tree(
             "crates/krusty-cli/src",
-            &["compiler", "diag", "features", "frontend", "jvm", "source"],
+            // `klib_symbols` is in budget for the same reason `jvm` is: the driver states which
+            // dependency sources a compilation has. It selects them; it does not reach past the
+            // declaration contract into resolution.
+            &[
+                "compiler",
+                "diag",
+                "features",
+                "frontend",
+                "jvm",
+                "klib_symbols",
+                "source",
+            ],
         );
     }
 

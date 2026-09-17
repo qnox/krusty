@@ -21,14 +21,15 @@ use std::sync::Arc;
 
 use crate::klib::KlibArchive;
 use crate::libraries::{
-    CallSig, Callables, FnKind, FunctionInfo, FunctionSet, GenericSig, LibraryMember, LibraryType,
-    PropertySet, ResolvedSymbols, TypeKind,
+    AliasExpansion, CallSig, Callables, FnKind, FunctionInfo, FunctionSet, GenericSig,
+    LibraryCallable, LibraryMember, LibraryType, PlatformSourceHeaderInput, PropertyInfo,
+    PropertySet, ResolvedSymbols, SemanticPlatform, SemanticSupertype, SourceHeaderError, TypeKind,
 };
 use crate::metadata::reader::{
     builtin_bounds, builtin_ty, library_type::library_type, parse_package_fragment, BuiltinMember,
     BuiltinTypeParam,
 };
-use crate::symbol_source::{SymbolNamespace, SymbolSource};
+use crate::symbol_source::{CompositeSource, SymbolNamespace, SymbolSource};
 use crate::types::{type_name, Ty, TypeName};
 
 /// Declarations read out of one or more klibs.
@@ -258,5 +259,118 @@ impl SymbolSource for KlibSymbols {
             callables: Callables::from_parts(functions, PropertySet::default()),
             importable_declaration: false,
         })
+    }
+}
+
+/// A platform whose dependency path includes klibs.
+///
+/// The klibs are additional libraries, not a replacement platform: representation, builtins and
+/// every other platform semantic stay the wrapped platform's, and only the declaration lookup is
+/// federated. Precedence follows [`CompositeSource`] — the platform's own libraries shadow a
+/// classifier a klib declares under the same name, while callable overloads from both are collected
+/// and selected later, exactly as an extra jar on the classpath behaves.
+pub struct PlatformWithKlibs {
+    platform: Box<dyn SemanticPlatform>,
+    klibs: KlibSymbols,
+}
+
+impl PlatformWithKlibs {
+    pub fn new(platform: Box<dyn SemanticPlatform>, klibs: KlibSymbols) -> Self {
+        PlatformWithKlibs { platform, klibs }
+    }
+
+    /// `platform`, with the klibs at `paths` federated under it — or `platform` itself when there
+    /// are none. Whether a compilation needs the wrapper is a property of its dependency list, so a
+    /// driver states the list and this decides, rather than every driver repeating the test.
+    pub fn over(
+        platform: Box<dyn SemanticPlatform>,
+        paths: &[impl AsRef<Path>],
+    ) -> Box<dyn SemanticPlatform> {
+        if paths.is_empty() {
+            return platform;
+        }
+        Box::new(Self::new(platform, KlibSymbols::open(paths)))
+    }
+
+    /// The federation this platform answers declaration queries through, in precedence order.
+    fn federated(&self) -> CompositeSource<'_> {
+        CompositeSource::new(vec![self.platform.as_ref(), &self.klibs])
+    }
+}
+
+impl SymbolSource for PlatformWithKlibs {
+    fn package_exists(&self, parent: TypeName, name: &str) -> bool {
+        self.federated().package_exists(parent, name)
+    }
+
+    fn symbols(&self, namespace: SymbolNamespace, name: &str) -> Rc<ResolvedSymbols> {
+        self.federated().symbols(namespace, name)
+    }
+
+    /// A klib records no flexible types — the pairing is the JVM's platform-type relation — so the
+    /// wrapped platform answers alone.
+    fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
+        self.platform.platform_flexible_upper_bound(lower)
+    }
+}
+
+/// Pass a platform query straight through to the wrapped platform. Every `SemanticPlatform` method
+/// beyond declaration lookup is the platform's to answer, so each one is delegated verbatim rather
+/// than left to the trait default, which would silently answer "no platform" for a wrapped platform
+/// that does have an answer.
+macro_rules! delegated {
+    ($(fn $name:ident($($arg:ident: $ty:ty),* $(,)?) -> $ret:ty;)*) => {
+        $(
+            fn $name(&self $(, $arg: $ty)*) -> $ret {
+                self.platform.$name($($arg),*)
+            }
+        )*
+    };
+}
+
+impl SemanticPlatform for PlatformWithKlibs {
+    delegated! {
+        fn install_source_module_headers(
+            sources: &[PlatformSourceHeaderInput<'_>],
+            source_classifiers: &[TypeName],
+        ) -> Result<(), SourceHeaderError>;
+        fn is_optional_expectation(classifier: TypeName) -> bool;
+        fn internal_accessible(owner: TypeName) -> bool;
+        fn function_type(arity: usize) -> Option<Ty>;
+        fn value_underlying(ty: Ty) -> Option<Ty>;
+        fn classifier_associated_property(internal: TypeName, name: &str) -> Option<PropertyInfo>;
+        fn inherits_classifier_callables(internal: TypeName) -> bool;
+        fn top_level_associated_property(package: TypeName, name: &str) -> Option<PropertyInfo>;
+        fn external_property_diagnostic_label(
+            property: crate::fir::ExternalPropertyId,
+            name: &str,
+            ty: Ty,
+        ) -> Option<String>;
+        fn library_value_form(ty: Ty) -> Ty;
+        fn library_value_form_name(internal: TypeName) -> TypeName;
+        fn canonical_source_type_name(internal: TypeName) -> TypeName;
+        fn type_alias_expansion(internal: TypeName) -> Option<AliasExpansion>;
+        fn is_default_library_owner(internal: TypeName) -> bool;
+        fn is_erased_contract_callable(callable: &LibraryCallable) -> bool;
+        fn boxed_primitive(ty: Ty) -> Option<Ty>;
+        fn reference_primitive(ty: Ty) -> Option<Ty>;
+        fn extension_receiver_rank(recv: Ty, decl_recv: Ty) -> Option<u32>;
+        fn function_like_arity(ty: Ty) -> Option<usize>;
+        fn property_reference_type(arity: usize, mutable: bool, args: &[Ty]) -> Option<Ty>;
+        fn function_reference_type(function: Ty) -> Option<Ty>;
+        fn class_literal_type() -> Option<Ty>;
+        fn intrinsic_property(receiver: Ty, name: &str) -> Option<LibraryMember>;
+        fn implicit_common_supertypes(types: &[Ty]) -> Vec<SemanticSupertype>;
+        fn platform_default_import_packages() -> &'static [&'static str];
+        fn physical_property_getter_names(property: &str) -> Vec<String>;
+        fn inherited_accessor_properties(
+            source: &dyn SymbolSource,
+            receiver: Ty,
+            property: &str,
+        ) -> PropertySet;
+        fn builtin_type_internal(simple_name: &str) -> Option<String>;
+        fn signature_formal_names(signature: &str) -> Vec<String>;
+        fn iterable_element_type(internal: &str) -> Option<Ty>;
+        fn iterable_element_type_name(internal: TypeName) -> Option<Ty>;
     }
 }
