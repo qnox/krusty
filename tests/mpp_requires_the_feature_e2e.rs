@@ -121,3 +121,64 @@ fn a_file_with_neither_modifier_is_untouched() {
     assert!(ok, "an ordinary compile is unaffected:\n{report}");
     assert!(!report.contains("multiplatform"), "{report}");
 }
+
+/// An `expect` with no `actual`, with the feature on, in the reference compiler's own words and at
+/// its position — the `expect` keyword, not the declaration it precedes.
+///
+/// The message names the module it looked in, so it tracks `-module-name`; the previous wording
+/// ("expected declaration 'helper' has no actual declaration in this module", reported at the
+/// declaration) said neither.
+#[test]
+fn an_unmatched_expect_names_the_module_it_looked_in() {
+    const SOURCE: &str = "package plib\n\
+                          \n\
+                          expect fun helper(): Int\n\
+                          \n\
+                          expect class Holder {\n\
+                          \x20   fun value(): Int\n\
+                          }\n\
+                          \n\
+                          expect val prop: Int\n";
+
+    let (ok, report) = compile(SOURCE, true);
+    assert!(!ok, "the compile must fail:\n{report}");
+    for (line, name) in [(3, "helper"), (5, "Holder"), (9, "prop")] {
+        assert!(
+            report.contains(&format!(
+                "Main.kt:{line}:1: error: expected {name} has no actual declaration in module \
+                 <main> for JVM"
+            )),
+            "{name} at the `expect` keyword:\n{report}"
+        );
+    }
+}
+
+/// And the module it names is the one `-module-name` gave it.
+#[test]
+fn the_module_a_diagnostic_names_is_the_declared_one() {
+    let dir = common::scratch_dir().expect("scratch dir");
+    let src = dir.join("Main.kt");
+    std::fs::write(&src, "package plib\n\nexpect fun helper(): Int\n").unwrap();
+    let out = std::process::Command::new(common::krusty_binary())
+        .args([
+            "-XXLanguage:+MultiPlatformProjects",
+            "-module-name",
+            "mylib",
+            "-no-stdlib",
+            "-no-jdk",
+            "-cp",
+        ])
+        .arg(common::stdlib_jar())
+        .arg("-d")
+        .arg(&dir)
+        .arg(&src)
+        .output()
+        .expect("run krusty");
+    let mut report = String::from_utf8_lossy(&out.stdout).into_owned();
+    report.push_str(&String::from_utf8_lossy(&out.stderr));
+    assert!(
+        report
+            .contains("error: expected helper has no actual declaration in module <mylib> for JVM"),
+        "the declared module name, not the default:\n{report}"
+    );
+}

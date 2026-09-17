@@ -184,10 +184,13 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
             .with_file_stem(stem)
         })
         .collect::<Vec<_>>();
-    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
+    // The module name reaches diagnostics that spell it (an `expect` with no `actual` names the
+    // module it looked in), never resolution.
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_module(
         &source_inputs,
         platform,
         &opts.features,
+        &opts.module_name,
         &mut diags,
     );
 

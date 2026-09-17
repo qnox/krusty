@@ -368,14 +368,32 @@ fn actualize_headers_and_collect_inherited_defaults(
     (crate::fir::matched_expect_declarations(headers), work)
 }
 
+/// The compilation target a diagnostic names. krusty compiles for the JVM; when a second target
+/// ships, this belongs to the platform provider rather than to the frontend.
+const DIAGNOSTIC_PLATFORM: &str = "JVM";
+
+/// The span of the `expect` keyword introducing the declaration at `declaration`: the last one this
+/// file recorded that ends at or before it. Modifiers immediately precede their declaration, so the
+/// nearest preceding keyword is the declaration's own.
+fn expect_keyword_before(file: &File, declaration: crate::diag::Span) -> Option<crate::diag::Span> {
+    file.multiplatform_modifiers
+        .iter()
+        .filter(|(modifier, span)| modifier == "expect" && span.hi <= declaration.lo)
+        .map(|(_, span)| *span)
+        .next_back()
+}
+
 /// Reject every top-level expect subtree for which compact actualization found no platform root.
 /// This is a source-set semantic check, not a consequence of whether a particular expect spelling
 /// happens to have an executable body. Reporting it before exclusion also prevents body checking
 /// or a backend from accidentally treating a body-less expect function as an abstract declaration.
+#[allow(clippy::too_many_arguments)]
 fn report_unmatched_expect_roots(
     headers: &crate::fir::StreamedHeaderModule,
     matched: &std::collections::HashSet<crate::fir::DeclarationId>,
     symbols: &FrontendSymbols,
+    files: &[File],
+    module_name: &str,
     rejected_sources: &mut [bool],
     diags: &mut DiagSink,
 ) {
@@ -397,9 +415,19 @@ fn report_unmatched_expect_roots(
             .lookup_name
             .and_then(|name| headers.lookup_names.get(name))
             .unwrap_or("<anonymous>");
+        // The reference compiler points at the `expect` KEYWORD, not at the declaration it
+        // precedes: the nearest one this file records before the stub. Falling back to the stub's
+        // own range keeps the diagnostic where it used to be rather than dropping it.
+        let range = files
+            .get(stub.source.raw() as usize)
+            .and_then(|file| expect_keyword_before(file, stub.range))
+            .unwrap_or(stub.range);
         diags.error(
-            stub.range,
-            format!("expected declaration '{name}' has no actual declaration in this module"),
+            range,
+            format!(
+                "expected {name} has no actual declaration in module <{module_name}> for \
+                 {DIAGNOSTIC_PLATFORM}"
+            ),
         );
     }
 }
@@ -628,6 +656,7 @@ pub fn analyze_source_set_with_features(
         sources.len(),
         platform,
         project_features,
+        DEFAULT_MODULE_NAME,
         |_, _| {},
         diags,
         false,
@@ -650,6 +679,7 @@ pub fn analyze_source_set_prefix_with_features(
         inferred_count,
         platform,
         project_features,
+        DEFAULT_MODULE_NAME,
         |_, _| {},
         diags,
         false,
@@ -672,6 +702,7 @@ pub fn analyze_source_set_prefix_with_features_trimmed(
         inferred_count,
         platform,
         project_features,
+        DEFAULT_MODULE_NAME,
         |_, _| {},
         diags,
         true,
@@ -704,6 +735,34 @@ where
 /// frontend semantic state. Target layout is realized only after checked common IR exists; file
 /// containers, physical names, and descriptors therefore cannot influence Pass-1 signature
 /// solving or Pass-2 body checking.
+/// kotlinc's default `-module-name`, and what a diagnostic naming the module says when the caller
+/// states none.
+pub const DEFAULT_MODULE_NAME: &str = "main";
+
+/// [`analyze_source_set_streaming_with_features`] for a caller that knows its `-module-name`. The
+/// name reaches only diagnostics that spell it, never resolution.
+pub fn analyze_source_set_streaming_with_module(
+    sources: &[SourceInput<'_>],
+    platform: Box<dyn SemanticPlatform>,
+    project_features: &LangFeatures,
+    module_name: &str,
+    diags: &mut DiagSink,
+) -> StreamingSourceSetAnalysis {
+    analyze_source_set_impl(
+        sources,
+        sources.len(),
+        sources.len(),
+        platform,
+        project_features,
+        module_name,
+        |_, _| {},
+        diags,
+        false,
+        false,
+    )
+    .into()
+}
+
 pub fn analyze_source_set_streaming_with_features(
     sources: &[SourceInput<'_>],
     platform: Box<dyn SemanticPlatform>,
@@ -716,6 +775,7 @@ pub fn analyze_source_set_streaming_with_features(
         sources.len(),
         platform,
         project_features,
+        DEFAULT_MODULE_NAME,
         |_, _| {},
         diags,
         false,
@@ -742,6 +802,7 @@ where
         inferred_count,
         platform,
         project_features,
+        DEFAULT_MODULE_NAME,
         prepare_symbols,
         diags,
         false,
@@ -756,6 +817,7 @@ fn analyze_source_set_impl<F>(
     inferred_count: usize,
     platform: Box<dyn SemanticPlatform>,
     project_features: &LangFeatures,
+    module_name: &str,
     prepare_symbols: F,
     diags: &mut DiagSink,
     trim_support_bodies: bool,
@@ -959,6 +1021,8 @@ where
             &pass1_headers,
             &matched_expect_declarations,
             &symbols,
+            &files,
+            module_name,
             &mut parse_errors,
             diags,
         );
