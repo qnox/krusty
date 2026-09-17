@@ -119,7 +119,7 @@ fn a_property_setter_bridge_uses_its_generated_parameter_name() {
 /// fixtures above could not tell them apart — and `@Serializable`, `@Entity` and friends put the
 /// difference on the hot path for real code.
 #[test]
-fn an_annotated_classs_bridge_is_rooted_at_its_declaration() {
+fn an_annotated_class_bridge_is_rooted_at_its_declaration() {
     let src = "annotation class Mark\n\
                \n\
                interface Sink<T> {\n\

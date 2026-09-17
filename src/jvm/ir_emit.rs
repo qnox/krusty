@@ -8359,9 +8359,6 @@ fn emit_bridge_barrier_outcome(
 /// arguments (type barrier / checkcast / unbox / numeric convert), delegates to the concrete override,
 /// and adapts the return value back (box / numeric convert).
 fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
-    // Exact bridge plus erased descriptor per method actually emitted. Retaining the selected IR
-    // bridge avoids re-identifying an overload by an incomplete name/target key after emission.
-    let mut emitted = Vec::new();
     for b in &c.bridges {
         let ep = jvm_tys(&b.erased_params);
         let static_target = b.target_function.and_then(|function| {
@@ -8389,7 +8386,6 @@ fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
         if cw.has_method(&b.name, &erased_desc) {
             continue;
         }
-        emitted.push((b, erased_desc.clone()));
         let pw: u16 = ep.iter().map(|t| slot_words(*t)).sum();
         let mut code = CodeBuilder::new(1 + pw);
         if let Some(barrier) = crate::jvm::backend::bridge_barrier(b) {
