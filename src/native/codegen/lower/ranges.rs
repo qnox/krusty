@@ -88,6 +88,17 @@ fn range_type(ty: Ty) -> Option<(&'static str, Ty)> {
     .find_map(|(candidate, kind, element)| internal.matches(candidate).then_some((kind, element)))
 }
 
+/// Whether this names text the runtime walks by UTF-16 unit.
+///
+/// Every `CharSequence` this target can produce IS a string — `subSequence` answers one and
+/// nothing in the runtime makes another — which is the position `scalar_member` already takes for
+/// `CharSequence.get`. So a `CharSequence` receiver reads its length the way a `String` does.
+fn is_text(internal: TypeName) -> bool {
+    ["kotlin/String", "kotlin/CharSequence"]
+        .iter()
+        .any(|candidate| internal.matches(candidate))
+}
+
 /// The element of a CLOSED range — never a progression.
 ///
 /// A progression's membership is not a bounds test. `10 downTo 1` is an `IntProgression`, and
@@ -548,14 +559,31 @@ impl BodyLowering<'_, '_, '_> {
         let Some(ty) = self.type_of(receiver).map(Ty::non_null) else {
             return Err("`indices` of a receiver with no known type".to_string());
         };
+        // A type parameter stands for whatever its bound admits, and `indices` is declared for the
+        // bound: `fun <T : Collection<*>> f(c: T) = c.indices` asks the collection's question.
+        let ty = match ty {
+            Ty::TyParam(_, bound) => bound.non_null(),
+            other => other,
+        };
         let size = if ty.is_array() {
             self.array_size(receiver)?
-        } else if ty == Ty::String {
+        } else if ty == Ty::String || ty.obj_internal().is_some_and(is_text) {
             let value = self.reference(receiver)?;
             if self.terminated {
                 return Ok(None);
             }
             self.runtime_call("kt_string_length", &[any()], Ty::Int, &[value])?
+        } else if ty
+            .obj_internal()
+            .is_some_and(super::super::super::intrinsics::is_list_type)
+        {
+            // Every list the runtime hands out answers its size through one entry point, the same
+            // one `size` itself reaches, so `indices` is that size read as a range.
+            let value = self.reference(receiver)?;
+            if self.terminated {
+                return Ok(None);
+            }
+            self.runtime_call("kt_list_size", &[any()], Ty::Int, &[value])?
         } else {
             return Err(format!("`indices` of a `{ty:?}`"));
         };

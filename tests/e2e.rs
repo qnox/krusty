@@ -1022,6 +1022,8 @@ mod native_bottom_value_e2e;
 mod native_classes_e2e;
 #[path = "native_codegen_e2e.rs"]
 mod native_codegen_e2e;
+#[path = "native_collection_indices_e2e.rs"]
+mod native_collection_indices_e2e;
 #[path = "native_concurrency_e2e.rs"]
 mod native_concurrency_e2e;
 #[path = "native_delegation_e2e.rs"]
