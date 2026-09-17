@@ -1121,6 +1121,8 @@ mod omitted_default_generic_overload_e2e;
 #[path = "one_armed_when_fallthrough_e2e.rs"]
 mod one_armed_when_fallthrough_e2e;
 
+#[path = "declaration_debug_lines_e2e.rs"]
+mod declaration_debug_lines_e2e;
 #[path = "extension_receiver_specificity_e2e.rs"]
 mod extension_receiver_specificity_e2e;
 #[path = "int_when_switch_e2e.rs"]
