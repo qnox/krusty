@@ -1602,14 +1602,17 @@ impl IrPlugin for SerializationPlugin {
                 .collect::<Vec<_>>();
 
             let serializer_name = type_name(&ser_fq);
-            let owner_line = ir.classes[class_id as usize].decl_start_line;
+            let (owner_start_line, owner_header_line) = {
+                let owner = &ir.classes[class_id as usize];
+                (owner.decl_start_line, owner.decl_line)
+            };
             let GeneratedSerializerMembers {
                 descriptor,
                 serialize,
                 deserialize,
                 child_serializers: child,
                 type_parameter_serializers: type_params_ser,
-            } = add_serializer_members(ir, serializer_name, serialized_ty, owner_line);
+            } = add_serializer_members(ir, serializer_name, serialized_ty, owner_start_line);
 
             let foo_fields: Vec<(String, Ty)> = ir.classes[class_id as usize]
                 .fields
@@ -1631,6 +1634,13 @@ impl IrPlugin for SerializationPlugin {
             let n_tp = type_params.len();
             let is_generic = n_tp > 0;
             let mut ser = synthetic_class(&ser_fq);
+            // The generated class stands where the annotated declaration does: kotlinc roots its
+            // constructor's `LineNumberTable` there, and the local-variable table naming `this`
+            // rides on the same record. Every other generated member already carried both through
+            // `record_debug_tables`; the constructor is emitted from the CLASS, so the generated
+            // class retains both the annotation-inclusive start and the distinct header line.
+            ser.decl_line = owner_header_line;
+            ser.decl_start_line = owner_start_line;
             ser.applied_annotations = generated_serializer_annotations();
             ser.is_object = !is_generic; // non-generic `$serializer` is a singleton object (INSTANCE)
                                          // Implement `GeneratedSerializer` (extends `KSerializer`) — it declares `childSerializers()`
