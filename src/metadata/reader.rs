@@ -718,8 +718,11 @@ pub fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
                     context_params.push(parameter);
                 }
             }
-            (12, 2) => {
-                // Function.annotation (repeated `Annotation`) — decoded downstream (needs the string table).
+            // Function.annotation (repeated `Annotation`) — decoded downstream (needs the string
+            // table). Field 12 is the shape this reader's own carrier writes; field 170 is the
+            // extension a KLIB uses for the same repeated field, and a declaration carries one or
+            // the other, never both.
+            (12, 2) | (KLIB_ANNOTATION_FIELD, 2) => {
                 let n = pb.varint()? as usize;
                 annotation_bodies.push(pb.bytes(n)?.to_vec());
             }
@@ -1055,6 +1058,11 @@ pub struct BuiltinMember {
     /// carries 293 private, 67 protected and 84 internal member functions; reporting them all as
     /// public would let a source call declarations the library does not expose.
     pub visibility: Visibility,
+    /// Annotation class identities declared on this member, by internal name. Identities only: that
+    /// is what the member layer records, and it is what decides `@Deprecated`, `@PublishedApi` and
+    /// the opt-in markers. The Native stdlib annotates 952 of its 2964 member functions, 90 of them
+    /// `@Deprecated`.
+    pub annotations: Vec<String>,
 }
 
 /// `Class.flags` bit 13, `IS_VALUE`: a `value class`.
@@ -1085,6 +1093,8 @@ pub struct BuiltinFunction {
     /// Old unnamed context receivers followed by named context parameters. Both are leading
     /// implicit parameters in the semantic signature; only the latter have source names.
     pub context_count: usize,
+    /// Annotation class identities declared on this function, by internal name.
+    pub annotations: Vec<String>,
 }
 
 /// One top-level `typealias` (`Package.typeAlias` = 5).
@@ -1299,6 +1309,18 @@ impl BuiltinTables<'_> {
     /// `class_name` (field 6) with `argument`s, `type_parameter` (field 7, by id), or
     /// `type_parameter_name` (field 9, by string). An argument may carry its type inline or by table id;
     /// builtins commonly use the latter, so those edges consume the recursion budget as well.
+    /// The annotation class identities in a repeated `Annotation` field.
+    pub fn annotation_identities<'b>(
+        &self,
+        bodies: impl IntoIterator<Item = &'b [u8]>,
+    ) -> Vec<String> {
+        bodies
+            .into_iter()
+            .filter_map(annotation_class_id)
+            .map(|id| resolve_qname(self.qnames, self.strings, id as i64))
+            .collect()
+    }
+
     pub fn ty(&self, body: &[u8], tparams: &TypeParamNames, depth: u32) -> Option<BuiltinTy> {
         if depth > BUILTIN_TYPE_DEPTH_LIMIT {
             return None;
@@ -1367,27 +1389,10 @@ impl BuiltinTables<'_> {
             .map(|tp| BuiltinTypeParam {
                 name: self.strings[tp.name_id as usize].clone(),
                 variance: tp.variance,
-                only_input: tp.annotation_bodies.iter().any(|body| {
-                    let mut annotation = Pb { b: body, i: 0 };
-                    let mut class_id = None;
-                    while !annotation.at_end() {
-                        let Some(tag) = annotation.varint() else {
-                            break;
-                        };
-                        match (tag >> 3, tag & 7) {
-                            (1, 0) => class_id = annotation.varint(),
-                            (_, wire) => {
-                                if annotation.skip(wire).is_none() {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    class_id.is_some_and(|id| {
-                        resolve_qname(self.qnames, self.strings, id as i64)
-                            == "kotlin/internal/OnlyInputTypes"
-                    })
-                }),
+                only_input: self
+                    .annotation_identities(tp.annotation_bodies.iter().map(Vec::as_slice))
+                    .iter()
+                    .any(|identity| identity == "kotlin/internal/OnlyInputTypes"),
                 bounds: tp
                     .upper_bound_ids
                     .iter()
@@ -1718,6 +1723,8 @@ pub fn parse_builtin_package(
                 is_operator: function.is_operator,
                 is_infix: function.is_infix,
                 context_count,
+                annotations: tables
+                    .annotation_identities(function.annotation_bodies.iter().map(Vec::as_slice)),
             })
         })
         .collect();
@@ -1740,7 +1747,32 @@ pub fn parse_builtins(data: &[u8]) -> BuiltinPackage {
     parse_package_fragment(pf)
 }
 
-/// One `EnumEntry`'s declared name. The message carries the name in field 1 as a string-table
+/// The annotation class's own id, from an `Annotation` message's field 1 (a qualified-name id).
+///
+/// `Annotation` is `{ id = 1, argument = 2 }`. The arguments are deliberately not read here: the
+/// member and callable layers record annotation IDENTITIES only, so an identity is the whole
+/// answer at that boundary. Measured on the Kotlin/Native stdlib: 1449 annotations on member
+/// functions, 607 of which carry arguments.
+fn annotation_class_id(body: &[u8]) -> Option<u64> {
+    let mut p = Pb { b: body, i: 0 };
+    while !p.at_end() {
+        let tag = p.varint()?;
+        match (tag >> 3, tag & 7) {
+            (1, 0) => return p.varint(),
+            (_, w) => {
+                p.skip(w)?;
+            }
+        }
+    }
+    None
+}
+
+/// `KlibMetadataProtoBuf`'s annotation extension, field 170, which a KLIB uses on a `Class`, a
+/// `Function` and a `Property` alike. Read off `klib/common/stdlib`, where exactly the 492 classes
+/// with the `hasAnnotations` flag carry it.
+pub const KLIB_ANNOTATION_FIELD: u64 = 170;
+
+/// One `EnumEntry`'s declared name./// One `EnumEntry`'s declared name. The message carries the name in field 1 as a string-table
 /// index; a malformed entry with no name contributes nothing rather than an empty entry name.
 fn enum_entry_name(body: &[u8], strings: &[String]) -> Option<String> {
     let mut p = Pb { b: body, i: 0 };
@@ -1783,11 +1815,18 @@ fn builtin_property(
     let mut recv_id = None;
     let mut legacy_flags = None;
     let mut modern_flags = None;
+    let mut annotation_bodies: Vec<&[u8]> = Vec::new();
     while !p.at_end() {
         let Some(tag) = p.varint() else { break };
         match (tag >> 3, tag & 7) {
             (1, 0) => legacy_flags = p.varint(),
             (2, 0) => name_id = p.varint(),
+            (KLIB_ANNOTATION_FIELD, 2) => {
+                let Some(len) = p.varint() else { break };
+                if let Some(body) = p.bytes(len as usize) {
+                    annotation_bodies.push(body);
+                }
+            }
             (3, 2) => {
                 let len = p.varint()?;
                 ret_body = p.bytes(len as usize);
@@ -1826,6 +1865,7 @@ fn builtin_property(
         is_var: flags & property_flags::IS_VAR != 0,
         is_const: flags & property_flags::IS_CONST != 0,
         visibility: builtin_declaration_visibility(flags),
+        annotations: tables.annotation_identities(annotation_bodies.iter().copied()),
     })
 }
 
@@ -2141,6 +2181,7 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
             let mut ret_id = None;
             let mut recv_body = None;
             let mut recv_id = None;
+            let mut annotation_bodies: Vec<&[u8]> = Vec::new();
             // `Function.flags` has protobuf default PUBLIC FINAL (`6`), matching `parse_function`.
             let mut flags = 6u64;
             let mut params = Vec::new();
@@ -2161,6 +2202,13 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                         recv_body = p.bytes(len as usize);
                     }
                     (8, 0) => recv_id = p.varint(),
+                    (12, 2) | (KLIB_ANNOTATION_FIELD, 2) => {
+                        if let Some(n) = p.varint() {
+                            if let Some(body) = p.bytes(n as usize) {
+                                annotation_bodies.push(body);
+                            }
+                        }
+                    }
                     (6, 2) => {
                         // value_parameter: ValueParameter.type_id = 4 (type-table ref)
                         if let Some(n) = p.varint() {
@@ -2214,6 +2262,8 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                             is_var: false,
                             is_const: false,
                             visibility: builtin_declaration_visibility(flags),
+                            annotations: tables
+                                .annotation_identities(annotation_bodies.iter().copied()),
                         });
                     }
                 }

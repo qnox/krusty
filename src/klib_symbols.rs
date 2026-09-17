@@ -155,6 +155,7 @@ impl KlibSymbols {
                     is_var: false,
                     is_const: false,
                     visibility: function.visibility,
+                    annotations: function.annotations.clone(),
                 };
                 let record = member_record(package_name, TypeKind::Class, &member, &bounds);
                 let receiver = record.generic_sig.as_ref().and_then(|sig| sig.receiver);
@@ -277,6 +278,11 @@ fn member_record(
     record.set_is_infix(member.is_infix);
     record.set_is_abstract(member.is_abstract);
     record.visibility = member.visibility;
+    record.annotations = member
+        .annotations
+        .iter()
+        .map(|annotation| type_name(annotation))
+        .collect();
     // Whether the owner is an interface is a declaration fact the decoded kind already carries; how
     // a call to it dispatches is the backend's reading of that fact.
     record.set_is_interface(matches!(

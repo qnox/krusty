@@ -863,6 +863,8 @@ mod jvm_name_toplevel_e2e;
 mod jvmfield_companion_e2e;
 #[path = "kclass_type_e2e.rs"]
 mod kclass_type_e2e;
+#[path = "klib_annotation_e2e.rs"]
+mod klib_annotation_e2e;
 #[path = "klib_byte_equality_e2e.rs"]
 mod klib_byte_equality_e2e;
 #[path = "klib_classifier_shape_e2e.rs"]
