@@ -282,7 +282,17 @@ pub(super) enum FloatPredicate {
 /// again and is normalized in the same place. Each is one comparison, so naming them lets the
 /// generator emit that rather than call into the runtime with a boxed operand.
 pub(super) fn float_predicate(owner: &str, name: &str) -> Option<FloatPredicate> {
-    if facade_package(kotlin_owner(owner))? != "kotlin" {
+    // Kotlin declares each of these TWICE: as a member of the primitive (`Double.isNaN()`) and as
+    // an extension on it in the numbers facade. Which spelling reaches a backend is the provider's
+    // choice, not the program's, so both are read here.
+    //
+    // Only the facade one was, and `facade_package` answers `None` for an owner that does not end
+    // in `Kt` — so an owner of `kotlin/Double` fell through and the call declined by name. The
+    // member spelling is the one the corpus actually produces.
+    let owner = kotlin_owner(owner);
+    let declared_here = matches!(owner, "kotlin/Double" | "kotlin/Float")
+        || facade_package(owner) == Some("kotlin");
+    if !declared_here {
         return None;
     }
     match name {
