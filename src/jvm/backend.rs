@@ -23,6 +23,8 @@ pub enum SkipReason {
     Bridges,
     /// JVM default-argument operands could not be realized from a checked semantic call.
     DefaultCalls,
+    /// A plugin-generated checked `super` call could not be given a JVM invocation shape.
+    SuperCalls,
 }
 
 /// THE post-lowering, pre-emit JVM pass pipeline — the single definition every consumer (the real
@@ -100,6 +102,9 @@ fn run_backend_passes_after_plugins(
     continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
     stems: Option<&[String]>,
 ) -> Result<(), SkipReason> {
+    // Plugins produce backend-neutral checked IR. Realize any semantic super dispatch they add at
+    // the same JVM boundary as source super calls, never in the plugin itself or the emitter.
+    crate::jvm::module_calls::realize_super_calls(ir).map_err(|_| SkipReason::SuperCalls)?;
     crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
     // A property's own annotations become a synthetic marker method — a JVM realization of a Kotlin
     // declaration that has no class-file form. Before the value-class pass, which renames a marker
@@ -769,18 +774,28 @@ impl JvmBackend {
 }
 
 fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
-    if reason == SkipReason::DefaultCalls {
-        diags.error(
-            crate::diag::Span::new(0, 0),
-            "internal error: invalid checked default-argument realization".to_string(),
-        );
-        return;
+    match reason {
+        SkipReason::DefaultCalls => {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                "internal error: invalid checked default-argument realization".to_string(),
+            );
+            return;
+        }
+        SkipReason::SuperCalls => {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                "internal error: invalid checked super-call realization".to_string(),
+            );
+            return;
+        }
+        _ => {}
     }
     let what = match reason {
         SkipReason::ValueClasses => "value-class",
         SkipReason::Suspend => "suspend-function",
         SkipReason::Bridges => "bridge-method",
-        SkipReason::DefaultCalls => unreachable!(),
+        SkipReason::DefaultCalls | SkipReason::SuperCalls => unreachable!(),
     };
     diags.error(
         crate::diag::Span::new(0, 0),

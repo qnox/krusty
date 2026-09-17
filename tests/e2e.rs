@@ -1321,6 +1321,8 @@ mod secondary_ctor_this_sibling_e2e;
 mod serialization_companion_byte_parity_e2e;
 #[path = "serialization_coverage_e2e.rs"]
 mod serialization_coverage_e2e;
+#[path = "serialization_default_member_e2e.rs"]
+mod serialization_default_member_e2e;
 #[path = "serialization_krusty_only_e2e.rs"]
 mod serialization_krusty_only_e2e;
 #[path = "serialization_roundtrip_e2e.rs"]

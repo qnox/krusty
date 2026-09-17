@@ -664,7 +664,17 @@ impl BodyLowering<'_> {
                     owner: *owner,
                     dispatch_owner: *dispatch_owner,
                     enclosing_dispatch: *enclosing_dispatch,
-                    kind: *kind,
+                    kind: match kind {
+                        crate::fir::FirSuperCallKind::Function => {
+                            crate::ir::IrSuperCallKind::Function
+                        }
+                        crate::fir::FirSuperCallKind::PropertyGetter => {
+                            crate::ir::IrSuperCallKind::PropertyGetter
+                        }
+                        crate::fir::FirSuperCallKind::PropertySetter => {
+                            crate::ir::IrSuperCallKind::PropertySetter
+                        }
+                    },
                     name: name.clone(),
                     params: parameters.iter().map(|parameter| parameter.get()).collect(),
                     ret: physical_result.get(),

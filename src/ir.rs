@@ -236,7 +236,7 @@ pub enum Callee {
         /// The call appears in a different lexical classifier and therefore needs a target-specific
         /// owner bridge; emitting `invokespecial` directly from the inner class is verifier-invalid.
         enclosing_dispatch: bool,
-        kind: crate::fir::FirSuperCallKind,
+        kind: IrSuperCallKind,
         name: String,
         params: Vec<Ty>,
         ret: Ty,
@@ -270,6 +270,15 @@ pub enum Callee {
         /// coordinate is deliberately absent.
         source: Option<crate::fir::CallableId>,
     },
+}
+
+/// Source-level member operation selected for a semantic `super` dispatch. This common-IR identity
+/// is target-neutral; backends realize the getter/setter spelling and physical invocation shape.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrSuperCallKind {
+    Function,
+    PropertyGetter,
+    PropertySetter,
 }
 
 impl Callee {
