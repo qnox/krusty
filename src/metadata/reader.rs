@@ -1076,6 +1076,21 @@ pub struct BuiltinFunction {
     pub context_count: usize,
 }
 
+/// One top-level `typealias` (`Package.typeAlias` = 5).
+///
+/// The field numbers came off a klib the reference compiler wrote: `name` = 2, `typeParameter` = 3,
+/// `underlyingTypeId` = 5, `expandedTypeId` = 7. `typealias Plain = PBox<Int, String>` records the
+/// same id in 5 and 7; `typealias Chain = Boxed<Int>` records the spelled `Boxed<Int>` in 5 and the
+/// expanded `PBox<Int, Int>` in 7, so the two are genuinely distinct facts.
+pub struct BuiltinTypeAlias {
+    pub name: String,
+    /// The alias's own type parameters, in declaration order — the substitution domain.
+    pub type_params: Vec<BuiltinTypeParam>,
+    /// The right-hand side EXPANDED: the target applied to its arguments, with the alias's own
+    /// parameters still symbolic.
+    pub expanded: BuiltinTy,
+}
+
 #[derive(Default)]
 pub struct BuiltinPackage {
     pub classes: std::collections::HashMap<String, BuiltinClass>,
@@ -1083,6 +1098,9 @@ pub struct BuiltinPackage {
     /// Top-level properties (`Package.property` = 4), including extension properties, which carry
     /// their declared receiver. `kotlin.math.PI` is one of these and nothing else records it.
     pub properties: Vec<BuiltinMember>,
+    /// Top-level type aliases (`Package.typeAlias` = 5). The Kotlin/Native stdlib ships 37 of them;
+    /// each one is a name the library exports that resolves to nothing without this.
+    pub type_aliases: Vec<BuiltinTypeAlias>,
 }
 
 /// One constructor declared by a builtin class. Unlike a function it has no return type or name;
@@ -1374,6 +1392,11 @@ pub const CLASS_TYPE_PARAMETER_FIELD: u64 = 5;
 /// [`class_functions`] and [`class_properties`]); field 5 on those messages is `receiver_type`.
 pub const MEMBER_TYPE_PARAMETER_FIELD: u64 = 4;
 
+/// `TypeAlias.typeParameter` = 3, its own carrier again. Read off a klib the reference compiler
+/// wrote for `typealias Boxed<T> = PBox<T, T>`, whose alias records field 3 holding
+/// `TypeParameter { id: 0, name: "T" }`.
+pub const TYPE_ALIAS_TYPE_PARAMETER_FIELD: u64 = 3;
+
 /// Collect a message's repeated `type_parameter` sub-message bodies. The field number differs by
 /// carrier — see [`CLASS_TYPE_PARAMETER_FIELD`] / [`MEMBER_TYPE_PARAMETER_FIELD`].
 pub fn type_param_bodies(body: &[u8], field: u64) -> Vec<&[u8]> {
@@ -1402,17 +1425,65 @@ pub fn parse_builtin_package_functions(
     strings: &[String],
     qnames: &[QName],
 ) -> Vec<BuiltinFunction> {
-    parse_builtin_package(package, strings, qnames).0
+    parse_builtin_package(package, strings, qnames).functions
 }
 
-/// A `Package` message's top-level functions and properties, read against its own type table.
+/// Everything a `Package` message declares at top level.
+pub struct PackageDeclarations {
+    pub functions: Vec<BuiltinFunction>,
+    pub properties: Vec<BuiltinMember>,
+    pub type_aliases: Vec<BuiltinTypeAlias>,
+}
+
+/// One `TypeAlias` declaration, read against its package's type table.
+///
+/// The alias's own type parameters are registered before the right-hand side is read, so
+/// `typealias Boxed<T> = PBox<T, T>` resolves both `T`s to the alias's parameter rather than
+/// leaving them unbound. The EXPANDED side (field 7) is what a use site substitutes into; the
+/// spelled side (field 5) differs only for an alias whose right-hand side names another alias, and
+/// that abbreviation lives in `Type.abbreviatedTypeId` (field 14), which is not read yet — an
+/// expansion is therefore reported unabbreviated, which is a presentation loss and not a semantic
+/// one.
+fn builtin_type_alias(body: &[u8], tables: &BuiltinTables) -> Option<BuiltinTypeAlias> {
+    let mut tparams = TypeParamNames::new();
+    let type_params = tables.type_params(
+        &type_param_bodies(body, TYPE_ALIAS_TYPE_PARAMETER_FIELD),
+        &mut tparams,
+    );
+    let mut p = Pb { b: body, i: 0 };
+    let mut name_id = None;
+    let mut expanded_body = None;
+    let mut expanded_id = None;
+    while !p.at_end() {
+        let tag = p.varint()?;
+        match (tag >> 3, tag & 7) {
+            (2, 0) => name_id = p.varint(),
+            (6, 2) => {
+                let len = p.varint()?;
+                expanded_body = p.bytes(len as usize);
+            }
+            (7, 0) => expanded_id = p.varint(),
+            (_, w) => {
+                p.skip(w)?;
+            }
+        }
+    }
+    Some(BuiltinTypeAlias {
+        name: tables.strings.get(name_id? as usize).cloned()?,
+        type_params,
+        expanded: builtin_type_ref(expanded_body, expanded_id, tables, &tparams)?,
+    })
+}
+
+/// A `Package` message's top-level declarations, read against its own type table.
 pub fn parse_builtin_package(
     package: &[u8],
     strings: &[String],
     qnames: &[QName],
-) -> (Vec<BuiltinFunction>, Vec<BuiltinMember>) {
+) -> PackageDeclarations {
     let mut functions = Vec::new();
     let mut property_bodies: Vec<&[u8]> = Vec::new();
+    let mut alias_bodies: Vec<&[u8]> = Vec::new();
     let mut types = Vec::new();
     let mut package_message = Pb { b: package, i: 0 };
     while !package_message.at_end() {
@@ -1438,6 +1509,16 @@ pub fn parse_builtin_package(
                     break;
                 };
                 property_bodies.push(body);
+            }
+            // `Package.typeAlias` = 5.
+            (5, 2) => {
+                let Some(len) = package_message.varint() else {
+                    break;
+                };
+                let Some(body) = package_message.bytes(len as usize) else {
+                    break;
+                };
+                alias_bodies.push(body);
             }
             (30, 2) => {
                 let Some(len) = package_message.varint() else {
@@ -1481,6 +1562,10 @@ pub fn parse_builtin_package(
     let properties = property_bodies
         .into_iter()
         .filter_map(|body| builtin_property(body, &tables, &TypeParamNames::new()))
+        .collect();
+    let type_aliases = alias_bodies
+        .into_iter()
+        .filter_map(|body| builtin_type_alias(body, &tables))
         .collect();
     let functions = functions
         .into_iter()
@@ -1617,7 +1702,11 @@ pub fn parse_builtin_package(
             })
         })
         .collect();
-    (functions, properties)
+    PackageDeclarations {
+        functions,
+        properties,
+        type_aliases,
+    }
 }
 
 /// Parse a `.kotlin_builtins` resource → every declared `Class` (qualified name → its supertypes +
@@ -2136,7 +2225,10 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
         );
     }
     if let Some(package) = package {
-        (out.functions, out.properties) = parse_builtin_package(package, &strings, &qnames);
+        let declarations = parse_builtin_package(package, &strings, &qnames);
+        out.functions = declarations.functions;
+        out.properties = declarations.properties;
+        out.type_aliases = declarations.type_aliases;
     }
     out
 }

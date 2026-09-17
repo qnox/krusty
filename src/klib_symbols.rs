@@ -44,6 +44,9 @@ pub struct KlibSymbols {
     top_level: HashMap<(TypeName, String), FunctionSet>,
     /// Top-level properties and extension properties, keyed the same way.
     top_level_properties: HashMap<(TypeName, String), PropertySet>,
+    /// Top-level type aliases, by their own identity. A use site resolves the alias's SPELLING to
+    /// this identity and then asks for the template, so the identity is the key and not the target.
+    aliases: HashMap<TypeName, AliasExpansion>,
 }
 
 /// Whether a declaration was read from a classifier's member list or a package's top-level list.
@@ -166,6 +169,33 @@ impl KlibSymbols {
                     .overloads
                     .push(overload);
             }
+            for alias in &package.type_aliases {
+                let identity = crate::types::type_name_child(package_name, &alias.name);
+                let bounds = builtin_bounds(&alias.type_params, &HashMap::new());
+                let expansion = builtin_ty(&alias.expanded, &bounds);
+                let Some(target) = expansion.non_null().kotlin_class_internal() else {
+                    // An alias whose right-hand side is not a classifier (a function type, a bare
+                    // type parameter) has no target for a use site to check a spelling against.
+                    continue;
+                };
+                self.aliases.insert(
+                    identity,
+                    AliasExpansion {
+                        identity,
+                        target,
+                        formals: alias
+                            .type_params
+                            .iter()
+                            .map(|parameter| parameter.name.clone())
+                            .collect(),
+                        expansion,
+                        // A klib records an abbreviated right-hand side in `Type.abbreviatedTypeId`,
+                        // which the reader does not read yet; the default means "no alias was
+                        // spelled here", so a chained alias expands unabbreviated.
+                        expansion_spelling: crate::spelling::Spelled::default(),
+                    },
+                );
+            }
             for property in &package.properties {
                 self.top_level_properties
                     .entry((package_name, property.name.clone()))
@@ -191,6 +221,11 @@ impl KlibSymbols {
             self.packages.insert((parent, segment.to_string()));
             parent = crate::types::type_name_child(parent, segment);
         }
+    }
+
+    /// The template a top-level `typealias` this source declares expands to.
+    pub fn type_alias_expansion(&self, internal: TypeName) -> Option<AliasExpansion> {
+        self.aliases.get(&internal).cloned()
     }
 }
 
@@ -356,10 +391,26 @@ impl SymbolSource for KlibSymbols {
                 )
             }
         };
-        let classifier = namespace
-            .existing_classifier(name)
-            .and_then(|identity| self.classifiers.get(&identity).cloned());
-        let classifier_name = classifier.as_ref().and(namespace.existing_classifier(name));
+        let identity = namespace.existing_classifier(name);
+        // A `typealias` resolves to its TARGET's record, tagged with the target it came through, and
+        // is importable in its own right — the shape a source alias already federates as. The
+        // target's record may be absent when it is not this source's to declare; the identity is
+        // still the answer, and the federation resolves the record.
+        if let Some(alias) = identity.and_then(|identity| self.aliases.get(&identity)) {
+            let classifier = self.classifiers.get(&alias.target).map(|target| {
+                let mut record = (**target).clone();
+                record.alias_target = Some(alias.target);
+                Arc::new(record)
+            });
+            return Rc::new(ResolvedSymbols {
+                classifier_name: Some(alias.target),
+                classifier,
+                callables: Callables::from_parts(functions, properties),
+                importable_declaration: true,
+            });
+        }
+        let classifier = identity.and_then(|identity| self.classifiers.get(&identity).cloned());
+        let classifier_name = classifier.as_ref().and(identity);
         Rc::new(ResolvedSymbols {
             classifier_name,
             classifier,
@@ -421,6 +472,17 @@ impl SymbolSource for PlatformWithKlibs {
     }
 }
 
+impl PlatformWithKlibs {
+    /// An alias expansion is a declaration lookup, so it federates rather than delegating: the
+    /// platform's own aliases shadow, matching the classifier precedence, and a klib's answer stands
+    /// where the platform has none.
+    fn federated_alias_expansion(&self, internal: TypeName) -> Option<AliasExpansion> {
+        self.platform
+            .type_alias_expansion(internal)
+            .or_else(|| self.klibs.type_alias_expansion(internal))
+    }
+}
+
 /// Pass a platform query straight through to the wrapped platform. Every `SemanticPlatform` method
 /// beyond declaration lookup is the platform's to answer, so each one is delegated verbatim rather
 /// than left to the trait default, which would silently answer "no platform" for a wrapped platform
@@ -436,6 +498,10 @@ macro_rules! delegated {
 }
 
 impl SemanticPlatform for PlatformWithKlibs {
+    fn type_alias_expansion(&self, internal: TypeName) -> Option<AliasExpansion> {
+        self.federated_alias_expansion(internal)
+    }
+
     delegated! {
         fn install_source_module_headers(
             sources: &[PlatformSourceHeaderInput<'_>],
@@ -456,7 +522,6 @@ impl SemanticPlatform for PlatformWithKlibs {
         fn library_value_form(ty: Ty) -> Ty;
         fn library_value_form_name(internal: TypeName) -> TypeName;
         fn canonical_source_type_name(internal: TypeName) -> TypeName;
-        fn type_alias_expansion(internal: TypeName) -> Option<AliasExpansion>;
         fn is_default_library_owner(internal: TypeName) -> bool;
         fn is_erased_contract_callable(callable: &LibraryCallable) -> bool;
         fn boxed_primitive(ty: Ty) -> Option<Ty>;
