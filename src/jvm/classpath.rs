@@ -22,6 +22,10 @@ use std::path::{Path, PathBuf};
 use crate::jvm::classreader::{parse_class, read_method_code, ClassInfo, MethodCode};
 use crate::jvm::names::type_descriptor;
 use crate::libraries::{CallSig, GenericSig, LibraryCallable, ReturnInfo};
+// A decoded metadata type as a semantic `Ty`. The mapping is Kotlin's and lives in the core; what
+// this module adds is the JVM's own reading of one — `builtin_erased`, and the descriptors built
+// from it.
+use crate::metadata::reader::{builtin_bounds, builtin_ty};
 use crate::name_tree::{NameId, NameTree};
 use crate::symbol_source::SymbolNamespace;
 use crate::types::{type_name, type_name_from, Ty, TypeName, TypeNameList};
@@ -1386,57 +1390,6 @@ fn builtin_descriptor(sig: &GenericSig) -> String {
         .map(|p| type_descriptor(builtin_erased(*p)))
         .collect();
     format!("({params}){}", type_descriptor(builtin_erased(sig.ret)))
-}
-
-/// A decoded `.kotlin_builtins` type as a semantic [`Ty`]. `bounds` supplies each in-scope type
-/// parameter's declared upper bound; an unlisted one is `Any?`, matching the `@Metadata`
-/// generic-signature decoder. JVM erasure is derived separately by [`builtin_erased`].
-pub(super) fn builtin_ty(
-    t: &crate::metadata::reader::BuiltinTy,
-    bounds: &HashMap<String, Ty>,
-) -> Ty {
-    use crate::metadata::reader::BuiltinTy;
-    let ty = match t {
-        BuiltinTy::Class { internal, args, .. } => {
-            let args = args
-                .iter()
-                .map(|argument| builtin_ty(argument, bounds))
-                .collect();
-            super::metadata::gsig_from_kotlin_class(internal, args, false, 0)
-        }
-        BuiltinTy::Param { name, .. } => {
-            let bound = bounds
-                .get(name)
-                .copied()
-                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-            Ty::ty_param(name, bound)
-        }
-        BuiltinTy::InProjection(inner) => Ty::in_projection(builtin_ty(inner, bounds)),
-        BuiltinTy::OutProjection(inner) => Ty::out_projection(builtin_ty(inner, bounds)),
-    };
-    if t.nullable() {
-        Ty::nullable(ty)
-    } else {
-        ty
-    }
-}
-
-/// The declared upper bound of each type parameter, keyed by name. Bounds are decoded with an EMPTY
-/// bound map so a recursive bound (`E : Comparable<E>`) terminates.
-pub(super) fn builtin_bounds(
-    params: &[crate::metadata::reader::BuiltinTypeParam],
-    inherited: &HashMap<String, Ty>,
-) -> HashMap<String, Ty> {
-    let mut out = inherited.clone();
-    for p in params {
-        let bound = p
-            .bounds
-            .first()
-            .map(|b| builtin_ty(b, &HashMap::new()))
-            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-        out.insert(p.name.clone(), bound);
-    }
-    out
 }
 
 impl BuiltinsFile {

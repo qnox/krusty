@@ -73,7 +73,7 @@ impl CommonExpectationIndex {
 }
 
 fn annotation_type(declaration: crate::metadata::reader::BuiltinClass) -> LibraryType {
-    let bounds = super::classpath::builtin_bounds(&declaration.type_params, &HashMap::new());
+    let bounds = crate::metadata::reader::builtin_bounds(&declaration.type_params, &HashMap::new());
     let type_parameters = TypeParameters::new(
         declaration
             .type_params
@@ -87,7 +87,7 @@ fn annotation_type(declaration: crate::metadata::reader::BuiltinClass) -> Librar
                 parameter
                     .bounds
                     .iter()
-                    .map(|bound| super::classpath::builtin_ty(bound, &bounds))
+                    .map(|bound| crate::metadata::reader::builtin_ty(bound, &bounds))
                     .collect()
             })
             .collect(),
@@ -100,7 +100,7 @@ fn annotation_type(declaration: crate::metadata::reader::BuiltinClass) -> Librar
     let supertype_templates = declaration
         .supertype_tys
         .iter()
-        .map(|supertype| super::classpath::builtin_ty(supertype, &bounds))
+        .map(|supertype| crate::metadata::reader::builtin_ty(supertype, &bounds))
         .collect::<Vec<_>>();
     let supertypes = declaration
         .supertypes
@@ -114,7 +114,7 @@ fn annotation_type(declaration: crate::metadata::reader::BuiltinClass) -> Librar
         let params = constructor
             .params
             .iter()
-            .map(|parameter| super::classpath::builtin_ty(parameter, &bounds))
+            .map(|parameter| crate::metadata::reader::builtin_ty(parameter, &bounds))
             .collect::<Vec<_>>();
         let mut member = LibraryMember::new(
             "<init>".to_string(),
