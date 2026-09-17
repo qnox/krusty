@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 /// The raw `@kotlin.Metadata` payload of a class file: the `d1` bytes and `d2` strings exactly as
 /// written. The normal class reader decodes metadata and does not retain this packed representation.
-pub(super) fn raw_kotlin_metadata(bytes: &[u8]) -> Option<(Vec<u8>, Vec<String>)> {
+pub(crate) fn raw_kotlin_metadata(bytes: &[u8]) -> Option<(Vec<u8>, Vec<String>)> {
     struct Reader<'a> {
         bytes: &'a [u8],
         at: usize,
