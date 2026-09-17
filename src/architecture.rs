@@ -233,6 +233,7 @@ mod tests {
             "frontend",
             "ir",
             "jvm",
+            "klib",
             "kt_string",
             "libraries",
             "lru",
@@ -342,6 +343,16 @@ mod tests {
                 "source",
             ],
         );
+    }
+
+    /// A KLIB is the library format every non-JVM target reads, and the JVM backend already reads one
+    /// for the common `expect` headers. The container reader is therefore core, and it stays core only
+    /// as long as it depends on NOTHING else in the compiler: no target spelling, no symbol tables, no
+    /// type engine. It hands out bytes and the packages they belong to; deciding what a declaration
+    /// means is the caller's.
+    #[test]
+    fn klib_container_reader_depends_on_no_compiler_module() {
+        assert_allowed_crate_modules("src/klib.rs", &[]);
     }
 
     #[test]
@@ -547,6 +558,7 @@ mod tests {
                 "ir",
                 "js",
                 "jvm",
+                "klib",
                 "lexer",
                 "libraries",
                 "metadata",

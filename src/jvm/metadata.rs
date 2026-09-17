@@ -6107,15 +6107,13 @@ mod module_reader_tests {
         let Some(library_dir) = crate::toolchain::kotlinc_lib_dir() else {
             return;
         };
-        let Ok(file) = std::fs::File::open(library_dir.join("kotlin-stdlib-wasm-js.klib")) else {
+        let klib = library_dir.join("kotlin-stdlib-wasm-js.klib");
+        let Some(archive) = crate::klib::KlibArchive::open(&klib) else {
             return;
         };
-        let mut archive = zip::ZipArchive::new(file).expect("read Kotlin JS stdlib KLIB");
-        let mut entry = archive
-            .by_name("default/linkdata/package_kotlin.js/13_js.knm")
+        let bytes = archive
+            .read("default/linkdata/package_kotlin.js/13_js.knm")
             .expect("Kotlin common JS annotation header metadata fragment");
-        let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut entry, &mut bytes).expect("read KLIB metadata fragment");
 
         let package = parse_package_fragment(&bytes);
         let annotation = package

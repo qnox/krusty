@@ -3,12 +3,15 @@
 //! Kotlin ships the common `expect` headers in the distribution KLIB next to `kotlin-stdlib.jar`.
 //! Only annotation classifiers whose metadata carries `IS_EXPECT_CLASS` are imported here; platform
 //! declarations in the same archive never enter the JVM symbol source.
+//!
+//! The container itself is read through [`crate::klib::KlibArchive`], which is target-independent:
+//! this is the JVM backend's *use* of a klib, not its own klib reader.
 
 use std::collections::HashMap;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::klib::KlibArchive;
 use crate::libraries::{
     CallSig, ClassifierInheritance, LibraryMember, LibraryType, ParamList, TypeKind,
 };
@@ -45,27 +48,14 @@ impl CommonExpectationIndex {
     }
 
     fn read(path: &Path) -> Self {
-        let Ok(file) = std::fs::File::open(path) else {
-            return Self::default();
-        };
-        let Ok(mut archive) = zip::ZipArchive::new(file) else {
+        let Some(archive) = KlibArchive::open(path) else {
             return Self::default();
         };
         let mut classifiers = HashMap::new();
-        for index in 0..archive.len() {
-            let mut bytes = Vec::new();
-            {
-                let Ok(mut entry) = archive.by_index(index) else {
-                    continue;
-                };
-                let name = entry.name();
-                if !name.starts_with("default/linkdata/package_") || !name.ends_with(".knm") {
-                    continue;
-                }
-                if entry.read_to_end(&mut bytes).is_err() {
-                    continue;
-                }
-            }
+        for fragment in archive.package_fragments() {
+            let Some(bytes) = archive.read(&fragment.entry) else {
+                continue;
+            };
             for (internal, declaration) in super::metadata::parse_package_fragment(&bytes).classes {
                 if declaration.kind != TypeKind::Annotation || !declaration.is_expect {
                     continue;
