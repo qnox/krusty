@@ -394,6 +394,8 @@ mod context_local_fun_e2e;
 mod context_parameter_signature_order_e2e;
 #[path = "context_parameters_e2e.rs"]
 mod context_parameters_e2e;
+#[path = "continuation_spill_order_e2e.rs"]
+mod continuation_spill_order_e2e;
 #[path = "contract_calls_in_place_e2e.rs"]
 mod contract_calls_in_place_e2e;
 #[path = "contract_erasure_e2e.rs"]
