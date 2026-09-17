@@ -13,6 +13,9 @@ impl Emitter<'_> {
         let Some(finalizer) = self.return_finalizers.pop() else {
             return true;
         };
+        // This copy of `finalizer` lies in the middle of its own try's protected region. Close the
+        // open segment ahead of it; `emit_return_node` reopens once the whole transfer is emitted.
+        self.close_finally_segment(finalizer, code);
         self.emit(finalizer, code);
         let survives = !self.discarding_diverges(finalizer) && self.emit_return_finalizers(code);
         self.return_finalizers.push(finalizer);
@@ -38,6 +41,7 @@ impl Emitter<'_> {
                 debug_lines::mark_return(self.ir, returned, code);
                 code.ret_void();
             }
+            self.reopen_finally_segments(code);
             return;
         };
         let ret = self.ret;
@@ -52,6 +56,7 @@ impl Emitter<'_> {
                 debug_lines::mark_return(self.ir, returned, code);
                 emit_return(ret, code);
             }
+            self.reopen_finally_segments(code);
             return;
         }
         // Kotlin evaluates the return expression before `finally`. Spill that value so arbitrary
@@ -75,5 +80,6 @@ impl Emitter<'_> {
             debug_lines::mark_return(self.ir, returned, code);
             emit_return(ret, code);
         }
+        self.reopen_finally_segments(code);
     }
 }
