@@ -1201,6 +1201,10 @@ pub struct BuiltinClass {
     /// `@OptionalExpectation` annotation — an `expect` declaration a target may legitimately leave
     /// without an `actual` — from an ordinary `expect`, exactly rather than by approximation.
     pub annotations: Vec<String>,
+    /// For an ANNOTATION class, where an application of it written with no use-site prefix may
+    /// land, from its own `@Target`. `None` for any other declaration kind, which is what that
+    /// field means; an annotation class with no `@Target` answers with the everywhere-default.
+    pub annotation_targets: Option<crate::types::AnnotationTargets>,
     /// The declaration's raw `Class.flags` word, as the fragment records it.
     ///
     /// The Kotlin facts this reader can name — [`Self::kind`], [`Self::visibility`],
@@ -1763,6 +1767,136 @@ pub fn parse_builtins(data: &[u8]) -> BuiltinPackage {
     parse_package_fragment(pf)
 }
 
+/// Where an application of this annotation class written with NO use-site prefix may land.
+///
+/// `None` for a declaration that is not an annotation class, which is what that field means. An
+/// annotation class that declares no `@Target` is applicable everywhere, so it answers with the
+/// default rather than with "nowhere" — the difference is whether an application is an error.
+fn declared_annotation_targets(
+    kind: TypeKind,
+    bodies: &[&[u8]],
+    tables: &BuiltinTables,
+) -> Option<crate::types::AnnotationTargets> {
+    if kind != TypeKind::Annotation {
+        return None;
+    }
+    let declared = bodies.iter().find(|body| {
+        annotation_class_id(body).is_some_and(|id| {
+            resolve_qname(tables.qnames, tables.strings, id as i64) == "kotlin/annotation/Target"
+        })
+    });
+    let Some(declared) = declared else {
+        return Some(crate::types::AnnotationTargets::DEFAULT);
+    };
+    let entries = annotation_target_entries(declared, tables);
+    Some(crate::types::AnnotationTargets {
+        value_parameter: entries.iter().any(|entry| entry == "VALUE_PARAMETER"),
+        property: entries.iter().any(|entry| entry == "PROPERTY"),
+        field: entries.iter().any(|entry| entry == "FIELD"),
+    })
+}
+
+/// `Annotation.Argument.Value.Type`, the tag that says which payload field carries the element./// `Annotation.Argument.Value.Type`, the tag that says which payload field carries the element.
+///
+/// The ordinals and the payload field numbers were read off a klib the reference compiler wrote for
+/// an annotation with one element of every kind:
+///
+/// | kind | ordinal | payload field |
+/// | --- | --- | --- |
+/// | `BYTE` `CHAR` `SHORT` `INT` `LONG` `BOOLEAN` | 0 1 2 3 4 7 | 2, zigzag |
+/// | `FLOAT` | 5 | 3, fixed32 |
+/// | `DOUBLE` | 6 | 4, fixed64 |
+/// | `STRING` | 8 | 5, a string index |
+/// | `CLASS` | 9 | 6, a qualified-name id |
+/// | `ENUM` | 10 | 6 (the enum class) + 7 (the entry name) |
+/// | `ANNOTATION` | 11 | 8, a nested `Annotation` |
+/// | `ARRAY` | 12 | 9, repeated `Value` |
+///
+/// Only `ENUM` and `ARRAY` are read below, because `@Target` is the one argument this layer has a
+/// consumer for. The rest of the table is recorded so the next reader measures nothing twice.
+const VALUE_TYPE_ENUM: u64 = 10;
+const VALUE_TYPE_ARRAY: u64 = 12;
+
+/// The `AnnotationTarget` entry names an `@Target` application lists.
+///
+/// `@Target(AnnotationTarget.FUNCTION, AnnotationTarget.CLASS)` records ONE argument whose value is
+/// an `ARRAY` of `ENUM`s; a single-target application records the same array with one element.
+fn annotation_target_entries(annotation: &[u8], tables: &BuiltinTables) -> Vec<String> {
+    let mut entries = Vec::new();
+    // Two levels down, and they must not be confused: `Annotation.argument` is field 2, and the
+    // `Argument.value` inside it is ALSO field 2. Reading the argument as if it were the value makes
+    // its `name_id` (field 1) look like the value's kind tag (field 1) and silently finds nothing.
+    for argument in repeated_message_bodies(annotation, 2) {
+        for value in repeated_message_bodies(argument, 2) {
+            entries.extend(annotation_enum_entries(value, tables));
+        }
+    }
+    entries
+}
+
+/// Every length-delimited body at `field` in `message`.
+fn repeated_message_bodies(message: &[u8], field: u64) -> Vec<&[u8]> {
+    let mut bodies = Vec::new();
+    let mut p = Pb { b: message, i: 0 };
+    while !p.at_end() {
+        let Some(tag) = p.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            (f, 2) if f == field => {
+                let Some(len) = p.varint() else { break };
+                let Some(body) = p.bytes(len as usize) else {
+                    break;
+                };
+                bodies.push(body);
+            }
+            (_, w) => {
+                if p.skip(w).is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    bodies
+}
+
+/// The enum entry names in one `Value`: itself when it is an `ENUM`, or its elements when it is an
+/// `ARRAY` of them.
+fn annotation_enum_entries(value: &[u8], tables: &BuiltinTables) -> Vec<String> {
+    let mut kind = None;
+    let mut entry_id = None;
+    let mut elements = Vec::new();
+    let mut p = Pb { b: value, i: 0 };
+    while !p.at_end() {
+        let Some(tag) = p.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            (1, 0) => kind = p.varint(),
+            (7, 0) => entry_id = p.varint(),
+            (9, 2) => {
+                let Some(len) = p.varint() else { break };
+                let Some(element) = p.bytes(len as usize) else {
+                    break;
+                };
+                elements.push(element);
+            }
+            (_, w) => {
+                if p.skip(w).is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    match kind {
+        Some(VALUE_TYPE_ENUM) => entry_id
+            .and_then(|id| tables.strings.get(id as usize).cloned())
+            .into_iter()
+            .collect(),
+        Some(VALUE_TYPE_ARRAY) => elements
+            .into_iter()
+            .flat_map(|element| annotation_enum_entries(element, tables))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// The annotation class's own id, from an `Annotation` message's field 1 (a qualified-name id).
 ///
 /// `Annotation` is `{ id = 1, argument = 2 }`. The arguments are deliberately not read here: the
@@ -2323,6 +2457,11 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                 is_fun_interface: flags & IS_FUN_INTERFACE_BIT != 0,
                 is_inner: flags & IS_INNER_CLASS_BIT != 0,
                 annotations: tables.annotation_identities(class_annotation_bodies.iter().copied()),
+                annotation_targets: declared_annotation_targets(
+                    builtin_class_kind(flags),
+                    &class_annotation_bodies,
+                    &tables,
+                ),
                 members,
                 constructors,
                 companion_name,

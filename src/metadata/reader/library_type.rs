@@ -179,6 +179,6 @@ pub fn library_type(internal: TypeName, declaration: BuiltinClass) -> LibraryTyp
         named_parameter_lists,
         annotations: Vec::new(),
         retention: None,
-        annotation_targets: None,
+        annotation_targets: declaration.annotation_targets,
     }
 }
