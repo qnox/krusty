@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use super::{CodeBuilder, Emitter, Label, Ty};
+use super::{debug_lines, CodeBuilder, Emitter, Label, Ty};
 
 impl Emitter<'_> {
     /// Emit one IR block while leaving its lexical slot scope open. The ordinary `Block` arm closes
@@ -19,9 +19,7 @@ impl Emitter<'_> {
         let mut dead = false;
         let last_statement = stmts.len().checked_sub(1);
         for (index, statement) in stmts.into_iter().enumerate() {
-            if let Some(&line) = self.ir.expr_lines.get(&statement) {
-                code.mark_line(line);
-            }
+            debug_lines::mark_statement(self.ir, statement, code);
             let base = code.stack_height();
             self.terminal_statement_target = (value.is_none() && Some(index) == last_statement)
                 .then_some(terminal_target)
@@ -35,9 +33,7 @@ impl Emitter<'_> {
         }
         if !dead {
             if let Some(value) = value {
-                if let Some(&line) = self.ir.expr_lines.get(&value) {
-                    code.mark_line(line);
-                }
+                debug_lines::mark_statement(self.ir, value, code);
                 self.emit_discarding(value, code);
             }
         }

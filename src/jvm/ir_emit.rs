@@ -23,6 +23,7 @@ use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 mod block_scope;
 mod bottom_values;
 mod call_operands;
+mod debug_lines;
 mod enum_metadata;
 mod field_write;
 mod function_debug;
@@ -14539,6 +14540,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_value(&mut self, e: u32, code: &mut CodeBuilder) {
+        debug_lines::mark_expression_start(self.ir, e, code);
         let node = self.ir.expr(e).clone();
         self.emit_value_node(e, &node, code);
     }
@@ -17346,10 +17348,7 @@ impl<'a> Emitter<'a> {
                 self.block_depth += 1;
                 let mut dead = false;
                 for s in stmts {
-                    // A statement root carrying a source line starts a `LineNumberTable` entry.
-                    if let Some(&l) = self.ir.expr_lines.get(s) {
-                        code.mark_line(l);
-                    }
+                    debug_lines::mark_statement(self.ir, *s, code);
                     // A statement nets zero on the operand stack (its value is stored/discarded). Reset
                     // the tracked height to that baseline afterward: a branchy lambda splice (`takeIf`)
                     // tracks its internal branches only approximately and can leave `cur_stack` drifted
@@ -17365,9 +17364,7 @@ impl<'a> Emitter<'a> {
                 }
                 if !dead {
                     if let Some(v) = value {
-                        if let Some(&l) = self.ir.expr_lines.get(v) {
-                            code.mark_line(l);
-                        }
+                        debug_lines::mark_statement(self.ir, *v, code);
                         self.emit_value(*v, code);
                     }
                 }
