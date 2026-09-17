@@ -63,15 +63,18 @@ impl CommonExpectationIndex {
                 let identity = type_name(&internal);
                 classifiers
                     .entry(identity)
-                    .or_insert_with(|| Arc::new(annotation_type(declaration)));
+                    .or_insert_with(|| Arc::new(annotation_type(identity, declaration)));
             }
         }
         Self { classifiers }
     }
 }
 
-fn annotation_type(declaration: crate::metadata::reader::BuiltinClass) -> LibraryType {
-    let mut classifier = crate::metadata::reader::library_type::library_type(declaration);
+fn annotation_type(
+    identity: crate::types::TypeName,
+    declaration: crate::metadata::reader::BuiltinClass,
+) -> LibraryType {
+    let mut classifier = crate::metadata::reader::library_type::library_type(identity, declaration);
     // What is this path's rather than the declaration's: no JVM actual exists for an optional
     // expectation, so this platform erases the annotation after checking it.
     classifier.retention = Some("SOURCE".to_string());

@@ -865,6 +865,8 @@ mod jvmfield_companion_e2e;
 mod kclass_type_e2e;
 #[path = "klib_byte_equality_e2e.rs"]
 mod klib_byte_equality_e2e;
+#[path = "klib_classifier_shape_e2e.rs"]
+mod klib_classifier_shape_e2e;
 #[path = "klib_container_e2e.rs"]
 mod klib_container_e2e;
 #[path = "klib_declarations_e2e.rs"]
