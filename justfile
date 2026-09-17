@@ -228,6 +228,25 @@ kotlinc VERSION=`just max-version`:
     chmod +x "$bin"
     echo "$bin"
 
+# Download the Kotlin/Native distribution's KLIB tree into target/cache/kotlin-native/<ver>/ and print
+# its path. Only `*/klib/*` is extracted, straight out of the download stream: the rest of the
+# prebuilt is a bundled LLVM (~2.5 GB unpacked) that reading a klib does not need, and the klib tree
+# alone is ~600 MB. This is where the NATIVE-target stdlib comes from — `klib/common/stdlib`, which
+# the distribution ships UNPACKED as a directory rather than as a zip. Idempotent.
+kotlin-native VERSION=`just max-version`:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ver="{{VERSION}}"
+    dest="$PWD/target/cache/kotlin-native/$ver"
+    tree="$dest/kotlin-native-prebuilt-linux-x86_64-$ver/klib"
+    if [ -d "$tree/common/stdlib/default" ]; then echo "$tree"; exit 0; fi
+    url="https://github.com/JetBrains/kotlin/releases/download/v${ver}/kotlin-native-prebuilt-linux-x86_64-${ver}.tar.gz"
+    mkdir -p "$dest"
+    echo "downloading kotlin-native klib tree ${ver}…" >&2
+    curl -fsSL "$url" | tar -xz -C "$dest" --wildcards "*/klib/*" \
+      || { echo "failed to download $url" >&2; exit 1; }
+    echo "$tree"
+
 # Provision the Kotlin codegen/box conformance corpus into one cached dir (target/cache/box-corpus/<ver>/) and
 # print the path to compiler/testData/codegen/box. Blobless + sparse clone of just that directory at
 # the matching tag — small and idempotent (no-op once present, cheap to cache). Mirrors `kotlinc`:

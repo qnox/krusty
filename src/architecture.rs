@@ -370,6 +370,11 @@ mod tests {
     #[test]
     fn klib_container_reader_depends_on_no_compiler_module() {
         assert_allowed_crate_modules("src/klib.rs", &[]);
+        // The writer is held to the same line: it writes the container and takes each declaration
+        // fragment as bytes, exactly as the reader hands them out as bytes.
+        for path in rust_files_under("src/klib") {
+            assert_allowed_crate_modules_in_file(&path, &[]);
+        }
     }
 
     #[test]
