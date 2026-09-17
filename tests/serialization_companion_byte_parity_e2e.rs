@@ -2351,18 +2351,12 @@ fn a_nullable_serializable_element_is_actually_decoded() {
         ],
         "reference decoder contract changed"
     );
-    // krusty has no `decodeSequentially` fast path yet, so its call set is kotlinc's minus that one;
-    // what this test pins is that the nullable elements are decoded at all.
+    // krusty now makes the SAME calls, in the same order, so the two are compared directly rather
+    // than against a second written-down list that could drift from the reference.
     assert_eq!(
         decoder_calls(&built.krusty),
-        vec![
-            "decodeElementIndex",
-            "decodeNullableSerializableElement",
-            "decodeNullableSerializableElement",
-            "decodeNullableSerializableElement",
-            "endStructure",
-        ],
-        "krusty must decode all three nullable elements in declaration order"
+        decoder_calls(&built.reference),
+        "krusty must decode all three nullable elements in declaration order, on both paths"
     );
 }
 
