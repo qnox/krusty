@@ -1,6 +1,5 @@
 //! Checked generation of a serializer's `deserialize` body.
 
-use super::element_serializer::always_available_builtin_serializer;
 use super::{
     class_ty, collection_serializer_builder, contextual_serializer_for, decode_element_method,
     element_serializer_expr, element_serializer_plan, inline_prim_methods, is_nullable,
@@ -10,6 +9,150 @@ use crate::ir::{ClassId, ExprId, IrConst, IrExpr, IrFile, IrTypeOp};
 use crate::kt_string::KtString;
 use crate::plugins::PluginContext;
 use crate::types::Ty;
+
+/// One element's decode and the seen-mask bit that records it arrived — the same block on the
+/// sequential fast path and in the index-driven loop, so it is built once and used twice.
+struct ElementDecode<'a> {
+    serialized_class: ClassId,
+    serializer_class: ClassId,
+    fields: &'a [(String, Ty)],
+    type_parameter_serializer_fields: &'a [Option<u32>],
+    descriptor_local: u32,
+    field_locals: &'a [u32],
+    seen_locals: &'a [u32],
+    composite_local: u32,
+}
+
+impl ElementDecode<'_> {
+    fn block(&self, ir: &mut IrFile, ctx: &PluginContext, k: usize) -> ExprId {
+        let ty = self.fields[k].1;
+        let dk = ir.add_expr(IrExpr::GetValue(self.descriptor_local));
+        let idxc = ir.add_expr(IrExpr::Const(IrConst::Int(k as i32)));
+        let cdk = ir.add_expr(IrExpr::GetValue(self.composite_local));
+        let decoded = if let Some(inst) = contextual_serializer_for(
+            ir,
+            property_is_contextual(ctx, ir, self.serialized_class, &self.fields[k].0),
+            &ty,
+        ) {
+            // Contextual element: f_k = (T) c.decode[Nullable]SerializableElement(
+            // desc, k, ContextualSerializer(<type>::class), null).
+            let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
+            let method = if is_nullable(&ty) {
+                "decodeNullableSerializableElement"
+            } else {
+                "decodeSerializableElement"
+            };
+            let raw = ir.add_expr(IrExpr::Call {
+                    callee: virtual_iface(
+                        "kotlinx/serialization/encoding/CompositeDecoder",
+                        method,
+                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/DeserializationStrategy;Ljava/lang/Object;)Ljava/lang/Object;",
+                    ),
+                    dispatch_receiver: Some(cdk),
+                    args: vec![dk, idxc, inst, prev],
+                });
+            ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::Cast,
+                arg: raw,
+                type_operand: ty,
+            })
+        } else if let Some(fidx) = self.type_parameter_serializer_fields[k] {
+            // f_k = (T) c.decode[Nullable]SerializableElement(desc, k,
+            // this.typeSerialK, null) — the ctor-supplied type-param serializer.
+            let this_s = ir.add_expr(IrExpr::GetValue(0));
+            let inst = ir.add_expr(IrExpr::GetField {
+                receiver: this_s,
+                class: self.serializer_class,
+                index: fidx,
+            });
+            let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
+            let method = if is_nullable(&ty) {
+                "decodeNullableSerializableElement"
+            } else {
+                "decodeSerializableElement"
+            };
+            let raw = ir.add_expr(IrExpr::Call {
+                    callee: virtual_iface(
+                        "kotlinx/serialization/encoding/CompositeDecoder",
+                        method,
+                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/DeserializationStrategy;Ljava/lang/Object;)Ljava/lang/Object;",
+                    ),
+                    dispatch_receiver: Some(cdk),
+                    args: vec![dk, idxc, inst, prev],
+                });
+            ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::Cast,
+                arg: raw,
+                type_operand: ty,
+            })
+        } else if is_nullable(&ty) || decode_element_method(&ty).is_none() {
+            // f_k = (T) c.decode[Nullable]SerializableElement(desc, k,
+            // <element serializer>, null) — the nested `$serializer.INSTANCE`
+            // (non-generic) / `Foo.serializer(A_ser)` (generic) / `ListSerializer(…)`
+            // (collection). Same descriptor; the nullable variant yields null for a
+            // JSON-null element.
+            let inst = element_serializer_expr(ir, ctx, &ty)
+                .unwrap_or_else(|| ir.add_expr(IrExpr::Const(IrConst::Null)));
+            let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
+            let method = if is_nullable(&ty) {
+                "decodeNullableSerializableElement"
+            } else {
+                "decodeSerializableElement"
+            };
+            let raw = ir.add_expr(IrExpr::Call {
+                    callee: virtual_iface(
+                        "kotlinx/serialization/encoding/CompositeDecoder",
+                        method,
+                        "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/DeserializationStrategy;Ljava/lang/Object;)Ljava/lang/Object;",
+                    ),
+                    dispatch_receiver: Some(cdk),
+                    args: vec![dk, idxc, inst, prev],
+                });
+            ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::Cast,
+                arg: raw,
+                type_operand: ty,
+            })
+        } else {
+            let (mname, mdesc) = decode_element_method(&ty).unwrap();
+            ir.add_expr(IrExpr::Call {
+                callee: virtual_iface(
+                    "kotlinx/serialization/encoding/CompositeDecoder",
+                    mname,
+                    mdesc,
+                ),
+                dispatch_receiver: Some(cdk),
+                args: vec![dk, idxc],
+            })
+        };
+        let setk = ir.add_expr(IrExpr::SetValue {
+            var: self.field_locals[k],
+            value: decoded,
+        });
+        let mut decoded_stmts = vec![setk];
+        {
+            // `seen[word] = seen[word] or bit` — the element arrived.
+            let seen_local = self.seen_locals[k / 32];
+            let seen = ir.add_expr(IrExpr::GetValue(seen_local));
+            let bit = ir.add_expr(IrExpr::Const(IrConst::Int(
+                1i32.wrapping_shl((k % 32) as u32),
+            )));
+            let marked = ir.add_expr(IrExpr::PrimitiveBinOp {
+                op: crate::ir::IrBinOp::BitOr,
+                lhs: seen,
+                rhs: bit,
+            });
+            decoded_stmts.push(ir.add_expr(IrExpr::SetValue {
+                var: seen_local,
+                value: marked,
+            }));
+        }
+        ir.add_expr(IrExpr::Block {
+            stmts: decoded_stmts,
+            value: None,
+        })
+    }
+}
 
 pub(super) struct DeserializeBody<'a> {
     pub(super) function: u32,
@@ -196,6 +339,16 @@ impl DeserializeBody<'_> {
             |ir: &mut IrFile| -> ExprId { ir.add_expr(IrExpr::GetValue(serial_desc_local)) };
         let composite =
             |ir: &mut IrFile| -> ExprId { ir.add_expr(IrExpr::GetValue(composite_local)) };
+        let elements = ElementDecode {
+            serialized_class: class_id,
+            serializer_class: ser_cid,
+            fields,
+            type_parameter_serializer_fields: tp_field,
+            descriptor_local: serial_desc_local,
+            field_locals: &field_locals,
+            seen_locals: &seen_locals,
+            composite_local,
+        };
         let body = {
             let this0 = ir.add_expr(IrExpr::GetValue(0));
             let descriptor_field = ir.add_expr(IrExpr::GetField {
@@ -300,7 +453,7 @@ impl DeserializeBody<'_> {
                 value: None,
             });
             let mut branches = vec![(Some(is_done), done_blk)];
-            for (k, (_, ty)) in fields.iter().enumerate() {
+            for (k, _) in fields.iter().enumerate() {
                 let iref = ir.add_expr(IrExpr::GetValue(index_local));
                 let kc = ir.add_expr(IrExpr::Const(IrConst::Int(k as i32)));
                 let is_k = ir.add_expr(IrExpr::PrimitiveBinOp {
@@ -308,155 +461,7 @@ impl DeserializeBody<'_> {
                     lhs: iref,
                     rhs: kc,
                 });
-                let dk = this_desc(ir);
-                let idxc = ir.add_expr(IrExpr::Const(IrConst::Int(k as i32)));
-                let cdk = composite(ir);
-                let decoded = if let Some(inst) = contextual_serializer_for(
-                    ir,
-                    property_is_contextual(ctx, ir, class_id, &fields[k].0),
-                    ty,
-                ) {
-                    // Contextual element: f_k = (T) c.decode[Nullable]SerializableElement(
-                    // desc, k, ContextualSerializer(<type>::class), null).
-                    let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
-                    let method = if is_nullable(ty) {
-                        "decodeNullableSerializableElement"
-                    } else {
-                        "decodeSerializableElement"
-                    };
-                    let raw = ir.add_expr(IrExpr::Call {
-                        callee: virtual_iface(
-                            "kotlinx/serialization/encoding/CompositeDecoder",
-                            method,
-                            "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/DeserializationStrategy;Ljava/lang/Object;)Ljava/lang/Object;",
-                        ),
-                        dispatch_receiver: Some(cdk),
-                        args: vec![dk, idxc, inst, prev],
-                    });
-                    ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::Cast,
-                        arg: raw,
-                        type_operand: *ty,
-                    })
-                } else if let Some(fidx) = tp_field[k] {
-                    // f_k = (T) c.decode[Nullable]SerializableElement(desc, k,
-                    // this.typeSerialK, null) — the ctor-supplied type-param serializer.
-                    let this_s = ir.add_expr(IrExpr::GetValue(0));
-                    let inst = ir.add_expr(IrExpr::GetField {
-                        receiver: this_s,
-                        class: ser_cid,
-                        index: fidx,
-                    });
-                    let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
-                    let method = if is_nullable(ty) {
-                        "decodeNullableSerializableElement"
-                    } else {
-                        "decodeSerializableElement"
-                    };
-                    let raw = ir.add_expr(IrExpr::Call {
-                        callee: virtual_iface(
-                            "kotlinx/serialization/encoding/CompositeDecoder",
-                            method,
-                            "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/DeserializationStrategy;Ljava/lang/Object;)Ljava/lang/Object;",
-                        ),
-                        dispatch_receiver: Some(cdk),
-                        args: vec![dk, idxc, inst, prev],
-                    });
-                    ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::Cast,
-                        arg: raw,
-                        type_operand: *ty,
-                    })
-                } else if is_nullable(ty) || decode_element_method(ty).is_none() {
-                    // f_k = (T) c.decode[Nullable]SerializableElement(desc, k,
-                    // <element serializer>, null) — the nested `$serializer.INSTANCE`
-                    // (non-generic) / `Foo.serializer(A_ser)` (generic) / `ListSerializer(…)`
-                    // (collection). Same descriptor; the nullable variant yields null for a
-                    // JSON-null element.
-                    let inst = element_serializer_expr(ir, ctx, ty)
-                        .unwrap_or_else(|| ir.add_expr(IrExpr::Const(IrConst::Null)));
-                    let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
-                    let method = if is_nullable(ty) {
-                        "decodeNullableSerializableElement"
-                    } else {
-                        "decodeSerializableElement"
-                    };
-                    let raw = ir.add_expr(IrExpr::Call {
-                        callee: virtual_iface(
-                            "kotlinx/serialization/encoding/CompositeDecoder",
-                            method,
-                            "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/DeserializationStrategy;Ljava/lang/Object;)Ljava/lang/Object;",
-                        ),
-                        dispatch_receiver: Some(cdk),
-                        args: vec![dk, idxc, inst, prev],
-                    });
-                    ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::Cast,
-                        arg: raw,
-                        type_operand: *ty,
-                    })
-                } else if is_nullable(ty) {
-                    // f_k = (T) c.decodeNullableSerializableElement(desc, k,
-                    // <Elem>Serializer.INSTANCE, null) — yields the element or null.
-                    let serializer = always_available_builtin_serializer(ty).unwrap();
-                    let inst = ir.add_expr(IrExpr::ExternalStaticInstance {
-                        owner: serializer,
-                        ty: serializer,
-                        field: "INSTANCE".to_string(),
-                    });
-                    let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
-                    let raw = ir.add_expr(IrExpr::Call {
-                        callee: virtual_iface(
-                            "kotlinx/serialization/encoding/CompositeDecoder",
-                            "decodeNullableSerializableElement",
-                            "(Lkotlinx/serialization/descriptors/SerialDescriptor;ILkotlinx/serialization/DeserializationStrategy;Ljava/lang/Object;)Ljava/lang/Object;",
-                        ),
-                        dispatch_receiver: Some(cdk),
-                        args: vec![dk, idxc, inst, prev],
-                    });
-                    ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::Cast,
-                        arg: raw,
-                        type_operand: *ty,
-                    })
-                } else {
-                    let (mname, mdesc) = decode_element_method(ty).unwrap();
-                    ir.add_expr(IrExpr::Call {
-                        callee: virtual_iface(
-                            "kotlinx/serialization/encoding/CompositeDecoder",
-                            mname,
-                            mdesc,
-                        ),
-                        dispatch_receiver: Some(cdk),
-                        args: vec![dk, idxc],
-                    })
-                };
-                let setk = ir.add_expr(IrExpr::SetValue {
-                    var: field_locals[k],
-                    value: decoded,
-                });
-                let mut decoded_stmts = vec![setk];
-                {
-                    // `seen[word] = seen[word] or bit` — the element arrived.
-                    let seen_local = seen_locals[k / 32];
-                    let seen = ir.add_expr(IrExpr::GetValue(seen_local));
-                    let bit = ir.add_expr(IrExpr::Const(IrConst::Int(
-                        1i32.wrapping_shl((k % 32) as u32),
-                    )));
-                    let marked = ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: crate::ir::IrBinOp::BitOr,
-                        lhs: seen,
-                        rhs: bit,
-                    });
-                    decoded_stmts.push(ir.add_expr(IrExpr::SetValue {
-                        var: seen_local,
-                        value: marked,
-                    }));
-                }
-                let setk_blk = ir.add_expr(IrExpr::Block {
-                    stmts: decoded_stmts,
-                    value: None,
-                });
+                let setk_blk = elements.block(ir, ctx, k);
                 branches.push((Some(is_k), setk_blk));
             }
             // The `else` of that `when`: an index naming no element of this descriptor.
@@ -485,7 +490,34 @@ impl DeserializeBody<'_> {
                 post_test: false,
                 label: None,
             });
-            stmts.push(whilexpr);
+            // A decoder that reports SEQUENTIAL decoding promises the elements arrive in
+            // declaration order, so their indices need not be asked for at all: decode each in
+            // turn and mark it seen. The blocks are the same ones the loop dispatches to — a
+            // format that cannot promise it still takes the loop.
+            let sequential_composite = ir.add_expr(IrExpr::GetValue(composite_local));
+            let sequential = ir.add_expr(IrExpr::Call {
+                callee: virtual_iface(
+                    "kotlinx/serialization/encoding/CompositeDecoder",
+                    "decodeSequentially",
+                    "()Z",
+                ),
+                dispatch_receiver: Some(sequential_composite),
+                args: vec![],
+            });
+            let in_order = (0..fields.len())
+                .map(|k| elements.block(ir, ctx, k))
+                .collect::<Vec<_>>();
+            let fast = ir.add_expr(IrExpr::Block {
+                stmts: in_order,
+                value: None,
+            });
+            let driven = ir.add_expr(IrExpr::Block {
+                stmts: vec![whilexpr],
+                value: None,
+            });
+            stmts.push(ir.add_expr(IrExpr::When {
+                branches: vec![(Some(sequential), fast), (None, driven)],
+            }));
             // endStructure
             let dend = this_desc(ir);
             let cend = composite(ir);
