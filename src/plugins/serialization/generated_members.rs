@@ -52,7 +52,15 @@ pub(super) fn add_serializer_members(
         serialized_type,
         None,
     );
-    let serializer_array = Ty::obj_args("kotlin/Array", &[kserializer_of(class_ty("kotlin/Any"))]);
+    // Both GeneratedSerializer array methods publish `Array<KSerializer<*>>`: the serializers'
+    // element types are unrelated. `KSerializer<Any>` is a different Kotlin contract despite the
+    // same erasure. The stored star bound is a semantic read fact; metadata omits its nested type.
+    let serializer_array = Ty::obj_args(
+        "kotlin/Array",
+        &[kserializer_of(Ty::star_projection(Ty::nullable(class_ty(
+            "kotlin/Any",
+        ))))],
+    );
     let child_serializers = add_instance_method(
         ir,
         owner,

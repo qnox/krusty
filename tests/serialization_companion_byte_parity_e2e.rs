@@ -20,6 +20,8 @@
 //! erased because their numbering is an emission-order artifact rather than class structure.
 use std::path::PathBuf;
 
+use krusty::types::Ty;
+
 use super::common;
 use super::common_core;
 
@@ -2508,5 +2510,126 @@ fn a_serializable_class_lists_its_generated_serializer_as_nested() {
     assert_eq!(
         got, want,
         "nested classifier names of a @Serializable class"
+    );
+}
+
+/// The generic `Signature` of a member of a generated serializer, as javap prints the attribute.
+fn member_signature(disassembly: &str, member: &str) -> String {
+    // The attribute trails the member's `Code`, so the search runs to the NEXT member declaration
+    // rather than a fixed number of lines. A declaration is an indented line ending in `;` that is
+    // not a constant-pool row (those start with `#`).
+    let declaration = |line: &str| {
+        line.ends_with(';') && line.contains('(') && !line.contains(':') && !line.starts_with('#')
+    };
+    let mut lines = disassembly
+        .lines()
+        .map(str::trim)
+        .skip_while(|line| !(declaration(line) && line.contains(member)));
+    lines.next();
+    for line in lines {
+        // `descriptor:` and `Signature:` both end in `;` and hold a parenthesized descriptor; the
+        // `:` is what separates an attribute row from a member declaration.
+        if let Some(signature) = line.strip_prefix("Signature: ") {
+            return signature
+                .split_once("// ")
+                .map_or(signature, |(_, text)| text)
+                .to_string();
+        }
+        if declaration(line) {
+            break;
+        }
+    }
+    panic!("no Signature attribute for {member}");
+}
+
+/// Decode one generated member's Kotlin-metadata return type. The JVM Signature and metadata are
+/// separate attributes built by separate emitters, so bytecode parity alone does not cover this.
+fn metadata_member_return(bytes: &[u8], owner: &str, member: &str) -> Ty {
+    let (d1, d2) = common_core::raw_kotlin_metadata(bytes).expect("read Kotlin metadata");
+    let d1 = vec![d1.into_iter().map(char::from).collect::<String>()];
+    let metadata = krusty::jvm::metadata::decode_metadata(&d1, &d2, Some(1), owner, None, &[]);
+    let matches = metadata
+        .class_functions
+        .iter()
+        .filter(|function| function.kotlin_name == member)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matches.len(),
+        1,
+        "exactly one metadata member named {member}"
+    );
+    matches[0]
+        .generic_sig
+        .as_ref()
+        .unwrap_or_else(|| panic!("metadata member {member} must have a return type"))
+        .ret
+}
+
+/// A generated serializer's array methods hand back serializers whose element types are unrelated
+/// to each other — so kotlinc gives them `Array<KSerializer<*>>`, a STAR projection. krusty declared
+/// the element type as `KSerializer<Any>`, which is a different Kotlin type: it claims every element
+/// serializes `Any`. The distinction exists independently in Kotlin metadata and the JVM `Signature`.
+#[test]
+fn generated_serializer_arrays_are_star_projected() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class Retention(val days: Int)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "StarProjectedSerializers",
+        src,
+        "Retention$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let expected_type = Ty::obj_args(
+        "kotlin/Array",
+        &[Ty::obj_args(
+            "kotlinx/serialization/KSerializer",
+            &[Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")))],
+        )],
+    );
+    for member in ["childSerializers", "typeParametersSerializers"] {
+        let declaration = format!("{member}()");
+        let want_signature = member_signature(&built.reference, &declaration);
+        assert_eq!(
+            want_signature, "()[Lkotlinx/serialization/KSerializer<*>;",
+            "kotlinc star-projects {member}'s element serializer type"
+        );
+        assert_eq!(
+            member_signature(&built.krusty, &declaration),
+            want_signature,
+            "{member} JVM generic signature"
+        );
+    }
+
+    // kotlinc records the generated override of childSerializers in class metadata. Its
+    // typeParametersSerializers realization is synthetic support for the inherited default and is
+    // deliberately absent there, though its JVM Signature above still carries the star projection.
+    let want_metadata = metadata_member_return(
+        &built.reference_bytes,
+        "Retention$$serializer",
+        "childSerializers",
+    );
+    assert_eq!(
+        want_metadata, expected_type,
+        "kotlinc childSerializers metadata type"
+    );
+    assert_eq!(
+        metadata_member_return(
+            &built.krusty_bytes,
+            "Retention$$serializer",
+            "childSerializers",
+        ),
+        want_metadata,
+        "childSerializers Kotlin metadata return type"
     );
 }
