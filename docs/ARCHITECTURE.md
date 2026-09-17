@@ -40,6 +40,20 @@ boundary.
   fragment into symbols is a *symbol source* concern; turning a symbol into a representation is the
   backend's. The JVM backend consumes the core reader too, for the common `expect` headers Kotlin
   ships in a klib beside `kotlin-stdlib.jar`, which is a use of a klib and not a second reader.
+  `src/klib_symbols.rs` is the symbol-source half: `KlibSymbols` answers declaration queries from
+  klibs, and `PlatformWithKlibs` federates them *under* a platform, so a klib is an extra library on
+  the dependency path rather than a different platform — the platform's own libraries still shadow a
+  name a klib also declares, and every platform semantic beyond declaration lookup stays the wrapped
+  platform's. `krusty-cli` takes them as kotlinc spells it, `-libraries <path>`, kept apart from
+  `-classpath` so a jar is never opened as a klib or the reverse. The callables a klib contributes
+  carry no descriptor: a klib records none, and inventing one would put a target's representation in
+  core.
+- **A classifier's members travel on the classifier record.** A provider publishes them in
+  `LibraryType::declared_callables` (with `declared_callable_order` and `members`), which is what the
+  member-hierarchy walk reads; `SymbolSource::symbols(Classifier(owner), name)` answers the *nested*
+  namespace, not members. The two are easy to confuse, and a provider that filled only the latter
+  looks correct in isolation while every member call against it misses — so a provider's tests assert
+  through the classifier record and, separately, that the namespace probe carries no members.
 - **Process front ends** are separate workspace packages. The root `krusty` package is a compiler
   library and exposes frontend and backend contracts. `crates/krusty-cli` owns kotlinc-compatible
   batch argument parsing, filesystem output, and process exit behavior, while `crates/krusty-lsp`
