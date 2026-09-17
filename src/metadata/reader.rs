@@ -16,7 +16,10 @@
 //! raw `flags` word rather than a decoded JVM access mask, because what a flag word means for a
 //! target's representation is that backend's answer to give.
 
+pub mod library_type;
 mod type_annotations;
+
+use std::collections::HashMap;
 
 use crate::libraries::TypeKind;
 use crate::types::{Ty, Visibility};
@@ -1030,6 +1033,15 @@ pub struct BuiltinMember {
     /// Whether the declared return type is nullable (`V?`) — the JVM descriptor erases it, only the
     /// `.kotlin_builtins` `Type.nullable` flag carries it (`Map.get(K): V?`, `firstOrNull(): T?`).
     pub ret_nullable: bool,
+    /// Source names of the value parameters, parallel to [`Self::params`]. Empty entries where the
+    /// fragment records no name.
+    ///
+    /// A named argument needs these, and a descriptor cannot supply them.
+    /// [`BuiltinConstructor`] has always carried them; a member did not, because the builtins
+    /// consumer this decode was written for needed only types.
+    pub param_names: Vec<String>,
+    /// Which value parameters declare a default, parallel to [`Self::params`].
+    pub param_defaults: Vec<bool>,
 }
 
 /// One top-level function declared by a `.kotlin_builtins` package fragment. Unlike a class member,
@@ -1134,6 +1146,19 @@ pub struct BuiltinTables<'a> {
 /// used to be dropped.
 pub type TypeParamNames = std::collections::HashMap<u64, String>;
 
+/// `ValueParameter.flags` DECLARES_DEFAULT_VALUE, bit 1 — the `= "box"` of `describe(prefix: String
+/// = "box")`. Only the declaration records it; a JVM descriptor cannot.
+const DECLARES_DEFAULT_VALUE: u64 = 1 << 1;
+
+/// One decoded `ValueParameter`: its type, and the two facts a CALL SITE needs that a descriptor
+/// erases — the parameter's source name, for a named argument, and whether it declares a default.
+pub struct BuiltinValueParameter {
+    pub ty: BuiltinTy,
+    /// The source name, or empty when the fragment records none.
+    pub name: String,
+    pub declares_default: bool,
+}
+
 /// Decode the type of one builtins `ValueParameter`. Functions and constructors use the same
 /// message; keeping one reader prevents their accepted type-table layouts from drifting.
 pub fn builtin_value_parameter_type(
@@ -1141,11 +1166,37 @@ pub fn builtin_value_parameter_type(
     tables: &BuiltinTables<'_>,
     tparams: &TypeParamNames,
 ) -> Option<BuiltinTy> {
+    builtin_value_parameter(body, tables, tparams, &[]).map(|parameter| parameter.ty)
+}
+
+/// [`builtin_value_parameter_type`] with the name and default the same message carries.
+///
+/// `strings` resolves `name` (field 2), which is a string-table index. Pass an empty table to decode
+/// the type alone — a consumer that only needs types should call
+/// [`builtin_value_parameter_type`] instead.
+pub fn builtin_value_parameter(
+    body: &[u8],
+    tables: &BuiltinTables<'_>,
+    tparams: &TypeParamNames,
+    strings: &[String],
+) -> Option<BuiltinValueParameter> {
     let mut value = Pb { b: body, i: 0 };
     let mut ty = None;
+    let mut name = String::new();
+    let mut declares_default = false;
     while !value.at_end() {
         let tag = value.varint()?;
         match (tag >> 3, tag & 7) {
+            (1, 0) => {
+                declares_default = value.varint()? & DECLARES_DEFAULT_VALUE != 0;
+            }
+            (2, 0) => {
+                if let Some(id) = value.varint() {
+                    if let Some(found) = strings.get(id as usize) {
+                        name = found.clone();
+                    }
+                }
+            }
             // `type_id` is field 5 in the current builtins schema and field 4 in older fragments.
             (5, 0) | (4, 0) => {
                 ty = value
@@ -1162,7 +1213,11 @@ pub fn builtin_value_parameter_type(
             (_, wire) => value.skip(wire)?,
         }
     }
-    ty
+    Some(BuiltinValueParameter {
+        ty: ty?,
+        name,
+        declares_default,
+    })
 }
 
 /// Decode either wire representation of a metadata type. Producers may inline the `Type` message or
@@ -1809,6 +1864,8 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
             // `Function.flags` has protobuf default PUBLIC FINAL (`6`), matching `parse_function`.
             let mut flags = 6u64;
             let mut params = Vec::new();
+            let mut param_names = Vec::new();
+            let mut param_defaults = Vec::new();
             let mut complete = true;
             while !p.at_end() {
                 let Some(tag) = p.varint() else { break };
@@ -1820,8 +1877,12 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                         // value_parameter: ValueParameter.type_id = 4 (type-table ref)
                         if let Some(n) = p.varint() {
                             if let Some(vb) = p.bytes(n as usize) {
-                                match builtin_value_parameter_type(vb, &tables, &fn_tparams) {
-                                    Some(parameter) => params.push(parameter),
+                                match builtin_value_parameter(vb, &tables, &fn_tparams, &strings) {
+                                    Some(parameter) => {
+                                        params.push(parameter.ty);
+                                        param_names.push(parameter.name);
+                                        param_defaults.push(parameter.declares_default);
+                                    }
                                     None => complete = false,
                                 }
                             }
@@ -1859,6 +1920,8 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                             is_abstract: (flags >> 4) & 0x3 == 2,
                             formals,
                             ret_nullable,
+                            param_names,
+                            param_defaults,
                         });
                     }
                 }
@@ -1916,6 +1979,10 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                             == crate::metadata::property_flags::MODALITY_ABSTRACT,
                         formals,
                         ret_nullable,
+                        // A property has no value parameters of its own; its accessors' are the
+                        // backend's to shape.
+                        param_names: Vec::new(),
+                        param_defaults: Vec::new(),
                     });
                 }
             }
@@ -1959,4 +2026,175 @@ pub fn builtin_class_visibility(flags: u64) -> Visibility {
         3 => Visibility::Public,
         _ => Visibility::Internal,
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// From a decoded metadata NAME to a semantic `Ty`.
+//
+// The decode above answers what a library declares; this answers what those names MEAN as types.
+// Both are carrier-independent: the classifier spellings are Kotlin's (`kotlin/Function1`,
+// `kotlin/IntArray`, `kotlin/Unit`), and collapsing one to its dedicated `Ty` variant is a
+// statement about Kotlin rather than about a target. What a backend then does with a `Ty` — erase
+// it, box it, choose a carrier width — stays with that backend, which is why the JVM's
+// `builtin_erased` is not here.
+// ---------------------------------------------------------------------------------------------
+/// A `@Metadata` class name + decoded type args → a signature [`Ty`]: a `kotlin/FunctionN` becomes a
+/// [`Ty::Fun`] (args are `[P1..Pn, R]`), a Kotlin primitive collapses to its dedicated [`Ty`] variant (so
+/// it matches a JVM-descriptor primitive downstream), everything else stays a [`Ty::Obj`].
+///
+/// `receiver_fun` and `context_count` come from the type's resolved Kotlin type annotations. A
+/// receiver function type carries its receiver after its context parameters; [`Ty::Fun`] keeps all
+/// implicit parameters at the front and records their semantic shape explicitly.
+pub fn gsig_from_kotlin_class(
+    internal: &str,
+    mut args: Vec<Ty>,
+    receiver_fun: bool,
+    context_count: usize,
+) -> Ty {
+    let function_classifier = is_kotlin_function_classifier(internal);
+    if function_classifier && !args.is_empty() {
+        // The metadata arguments are the declaration shape: `[P1, …, R]`. The numeric classifier
+        // suffix identifies the built-in family but is never parsed to recover or validate arity.
+        let ret = args.pop().expect("checked non-empty function arguments");
+        let has_receiver = receiver_fun && !args.is_empty();
+        return Ty::fun_with_shape(args, ret, context_count, has_receiver, false);
+    }
+    // Arrays are `Obj` types. A boxed `Array<T>` carries its element as a type argument — built directly
+    // so a primitive element stays the LOGICAL `Array<Int>` (`Obj("kotlin/Array", [Int])`), NOT the
+    // primitive `IntArray` that `Ty::array(Int)` would mint. A primitive-array class (`IntArray`) carries
+    // the (unboxed) element implicitly (its name minus `Array`) and IS `Ty::array`'s primitive form.
+    if internal == "kotlin/Array" {
+        return Ty::obj_args(
+            "kotlin/Array",
+            &[args.pop().unwrap_or_else(|| Ty::obj("kotlin/Any"))],
+        );
+    }
+    if let Some(elem) = internal.strip_suffix("Array").and_then(kotlin_primitive) {
+        return Ty::array(elem);
+    }
+    // A canonical scalar/reference type (`Int`, `String`, `Unit`, `Nothing`) has ONE dedicated `Ty`
+    // variant; decode it to that here so a gsig-derived return is identical to the one a source annotation
+    // produces — `Obj("kotlin/Unit")` would not drive the expression-body `areturn`'s `Unit.INSTANCE`
+    // materialization the way `Ty::Unit` does.
+    match kotlin_canonical_ty(internal) {
+        Some(t) => t,
+        None => Ty::obj_args(internal, &args),
+    }
+}
+
+pub fn is_kotlin_function_classifier(internal: &str) -> bool {
+    internal
+        .strip_prefix("kotlin/Function")
+        .is_some_and(|segment| {
+            !segment.is_empty() && segment.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
+/// Convert the metadata/JVM carrier for a suspend function type to its Kotlin source shape.
+/// Metadata represents `suspend R.(P) -> T` as a function whose final parameter is
+/// `Continuation<T>` and whose physical return is `Any?`, plus the suspend-type flag. The
+/// continuation is not a source parameter: its argument is the source return type.
+pub fn source_suspend_function_type(ty: Ty) -> Ty {
+    let Ty::Fun(signature) = ty else {
+        return ty;
+    };
+    let mut params = signature.params.clone();
+    let ret = match params.last().copied().map(Ty::non_null) {
+        Some(Ty::Obj(continuation, args))
+            if continuation.matches("kotlin/coroutines/Continuation") =>
+        {
+            let ret = args
+                .first()
+                .copied()
+                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+            params.pop();
+            ret
+        }
+        _ => signature.ret,
+    };
+    Ty::fun_with_shape(
+        params,
+        ret,
+        signature.context_count,
+        signature.has_receiver,
+        true,
+    )
+}
+
+/// The JVM primitive a Kotlin primitive class name denotes (`kotlin/Int` → `Int`), or `None`. Only the
+/// eight primitives — used to recover a primitive-array's (unboxed) element type.
+pub fn kotlin_primitive(internal: &str) -> Option<crate::types::Ty> {
+    use crate::types::Ty;
+    Some(match internal {
+        "kotlin/Int" => Ty::Int,
+        "kotlin/Long" => Ty::Long,
+        "kotlin/Short" => Ty::Short,
+        "kotlin/Byte" => Ty::Byte,
+        "kotlin/Double" => Ty::Double,
+        "kotlin/Float" => Ty::Float,
+        "kotlin/Boolean" => Ty::Boolean,
+        "kotlin/Char" => Ty::Char,
+        _ => return None,
+    })
+}
+
+/// The canonical `Ty` a Kotlin built-in class name denotes — the primitives PLUS the reference types that
+/// carry a dedicated variant (`String`/`Unit`/`Nothing`). `None` for a class with no canonical variant.
+pub fn kotlin_canonical_ty(internal: &str) -> Option<crate::types::Ty> {
+    use crate::types::Ty;
+    kotlin_primitive(internal).or_else(|| {
+        Some(match internal {
+            "kotlin/String" => Ty::String,
+            "kotlin/Unit" => Ty::Unit,
+            "kotlin/Nothing" => Ty::Nothing,
+            _ => return None,
+        })
+    })
+}
+
+/// A decoded `.kotlin_builtins` type as a semantic [`Ty`]. `bounds` supplies each in-scope type
+/// parameter's declared upper bound; an unlisted one is `Any?`, matching the `@Metadata`
+/// generic-signature decoder. JVM erasure is derived separately by [`builtin_erased`].
+pub fn builtin_ty(t: &BuiltinTy, bounds: &HashMap<String, Ty>) -> Ty {
+    let ty = match t {
+        BuiltinTy::Class { internal, args, .. } => {
+            let args = args
+                .iter()
+                .map(|argument| builtin_ty(argument, bounds))
+                .collect();
+            gsig_from_kotlin_class(internal, args, false, 0)
+        }
+        BuiltinTy::Param { name, .. } => {
+            let bound = bounds
+                .get(name)
+                .copied()
+                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+            Ty::ty_param(name, bound)
+        }
+        BuiltinTy::InProjection(inner) => Ty::in_projection(builtin_ty(inner, bounds)),
+        BuiltinTy::OutProjection(inner) => Ty::out_projection(builtin_ty(inner, bounds)),
+    };
+    if t.nullable() {
+        Ty::nullable(ty)
+    } else {
+        ty
+    }
+}
+
+/// The declared upper bound of each type parameter, keyed by name. Bounds are decoded with an EMPTY
+/// bound map so a recursive bound (`E : Comparable<E>`) terminates.
+pub fn builtin_bounds(
+    params: &[BuiltinTypeParam],
+    inherited: &HashMap<String, Ty>,
+) -> HashMap<String, Ty> {
+    let mut out = inherited.clone();
+    for p in params {
+        let bound = p
+            .bounds
+            .first()
+            .map(|b| builtin_ty(b, &HashMap::new()))
+            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+        out.insert(p.name.clone(), bound);
+    }
+    out
 }

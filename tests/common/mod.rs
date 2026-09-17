@@ -28,8 +28,12 @@ use krusty::jvm::classpath::Classpath;
 /// have them: `conformance.rs` loads this file as a plain `mod common;`, and a helper wired in by
 /// one binary's aggregator does not exist in the other.
 mod klib;
+// Not every test binary that loads this module uses them, which is the normal shape for a shared
+// test helper here — the same reason the helpers below carry `#[allow(dead_code)]`.
+#[allow(unused_imports)]
 pub use klib::*;
 
+#[allow(dead_code)]
 pub fn krusty_binary() -> PathBuf {
     static BINARY: OnceLock<PathBuf> = OnceLock::new();
     BINARY

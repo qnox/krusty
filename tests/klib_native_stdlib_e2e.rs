@@ -99,6 +99,25 @@ fn the_native_stdlib_declares_its_whole_api() {
         "isNaN is declared once per receiver type, under its member spelling: {is_nan:?}"
     );
 
+    let list = classes
+        .get("kotlin/collections/List")
+        .expect("kotlin.collections.List");
+    let get = list
+        .members
+        .iter()
+        .find(|member| member.name == "get")
+        .expect("List.get");
+    assert_eq!(
+        get.param_names,
+        vec!["index".to_string()],
+        "a shipped library names its parameters, which a named argument needs"
+    );
+    assert_eq!(
+        get.param_defaults,
+        vec![false],
+        "and says which declare a default"
+    );
+
     let mem_scoped = functions
         .iter()
         .find(|function| function.name == "memScoped")
