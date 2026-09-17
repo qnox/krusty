@@ -6,10 +6,13 @@
 mod common_core;
 #[path = "common/e2e.rs"]
 mod e2e_support;
+#[path = "common/klib.rs"]
+mod klib_support;
 
 mod common {
     pub use super::common_core::*;
     pub use super::e2e_support::*;
+    pub use super::klib_support::*;
 }
 
 #[path = "abstract_instantiation_check_e2e.rs"]
@@ -862,10 +865,14 @@ mod jvm_name_toplevel_e2e;
 mod jvmfield_companion_e2e;
 #[path = "kclass_type_e2e.rs"]
 mod kclass_type_e2e;
+#[path = "klib_byte_equality_e2e.rs"]
+mod klib_byte_equality_e2e;
 #[path = "klib_container_e2e.rs"]
 mod klib_container_e2e;
 #[path = "klib_declarations_e2e.rs"]
 mod klib_declarations_e2e;
+#[path = "klib_native_stdlib_e2e.rs"]
+mod klib_native_stdlib_e2e;
 #[path = "kotlin_fun_java_sam_param_e2e.rs"]
 mod kotlin_fun_java_sam_param_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]

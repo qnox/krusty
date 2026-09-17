@@ -224,6 +224,31 @@ pub fn kotlin_version() -> String {
 
 /// The provisioned Kotlin codegen/box corpus root. `KRUSTY_KOTLIN_BOX_DIR` overrides the
 /// version-selected cache path.
+/// The Kotlin/Native distribution's KLIB tree (`just kotlin-native`), or `None` when unprovisioned.
+///
+/// Only the `klib/` subtree is cached — the rest of the prebuilt is a bundled LLVM that reading a
+/// klib does not need. Under it, `common/stdlib` is the NATIVE-target stdlib and `platform/<target>/`
+/// the per-target platform libraries.
+pub fn kotlin_native_klib_dir() -> Option<PathBuf> {
+    let root = workspace_root()?;
+    let version = reference_version();
+    let tree = root
+        .join("target/cache/kotlin-native")
+        .join(&version)
+        .join(format!("kotlin-native-prebuilt-linux-x86_64-{version}"))
+        .join("klib");
+    tree.is_dir().then_some(tree)
+}
+
+/// The Kotlin/Native stdlib KLIB.
+///
+/// The distribution ships it UNPACKED, as a directory — which is why a klib reader that understood
+/// only zip archives would find no stdlib at all on a Native distribution.
+pub fn kotlin_native_stdlib() -> Option<PathBuf> {
+    let stdlib = kotlin_native_klib_dir()?.join("common/stdlib");
+    stdlib.join("default").is_dir().then_some(stdlib)
+}
+
 pub fn box_corpus_dir() -> Option<PathBuf> {
     let p = toolchain_path(
         std::env::var_os("KRUSTY_KOTLIN_BOX_DIR"),

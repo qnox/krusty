@@ -26,6 +26,9 @@
 //! Bodies live under `default/ir/` in a separate, lower serialization; this module exposes those
 //! entries as bytes and stops there.
 
+pub mod fragment;
+pub mod write;
+
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
