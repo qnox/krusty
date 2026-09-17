@@ -1352,6 +1352,10 @@ pub struct File {
     /// `actual` in the same compiled source set replaces them (see `strip_matched_expects`); an
     /// unmatched `expect` stays and fails checking like any body-less declaration.
     pub expect_decls: Vec<DeclId>,
+    /// Every `expect` or `actual` MODIFIER keyword this file writes, with its own span — members
+    /// included, since the two are legal only in a multiplatform project and the diagnostic points
+    /// at the keyword rather than at the declaration it precedes.
+    pub multiplatform_modifiers: Vec<(String, crate::diag::Span)>,
     pub decl_arena: Vec<Decl>,
     pub expr_arena: Vec<Expr>,
     pub stmt_arena: Vec<Stmt>,
