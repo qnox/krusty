@@ -262,7 +262,6 @@ fn blank_class(fq: &str) -> IrClass {
         is_companion: false,
         companion_class: None,
         published_nested_classifiers: Vec::new(),
-        published_generated_functions: None,
         secondary_ctors: Vec::new(),
         has_primary_ctor: true,
         applied_annotations: DeclarationAnnotations::default(),
@@ -481,4 +480,34 @@ fn default_stub_uses_external_value_class_metadata_without_a_source_class() {
     );
 
     assert!(toplevel_default_stub_safe(&f, fid));
+}
+
+#[test]
+#[should_panic(expected = "generated parameter identities exactly match semantic function arity")]
+fn generated_publication_rejects_parameter_name_arity_drift() {
+    let mut ir = IrFile::default();
+    let function = ir.add_fun(IrFunction {
+        name: "generated".to_string(),
+        params: vec![Ty::Int],
+        ret: Ty::Unit,
+        body: None,
+        is_static: false,
+        dispatch_receiver: None,
+        param_checks: vec![None],
+    });
+    ir.publish_generated_members(
+        crate::types::type_name("sample/Owner"),
+        IrGeneratedMemberPublication {
+            metadata_scope: IrGeneratedFunctionMetadataScope::Exclusive,
+            functions: vec![IrGeneratedFunctionPublication {
+                function,
+                parameter_names: Vec::new(),
+                metadata: Some(IrGeneratedFunctionMetadata {
+                    source_name: "generated".to_string(),
+                    visibility: crate::types::Visibility::Public,
+                }),
+                debug: IrGeneratedDeclarationDebug::declaration_line(1),
+            }],
+        },
+    );
 }

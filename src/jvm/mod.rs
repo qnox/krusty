@@ -16,6 +16,7 @@ mod declaration_collisions;
 mod external_calls;
 mod function_classifiers;
 mod function_references;
+mod generated_member_metadata;
 mod generic_erasure;
 pub mod inline;
 pub mod inline_class;

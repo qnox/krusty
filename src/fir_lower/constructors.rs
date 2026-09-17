@@ -331,6 +331,7 @@ pub(super) fn finalize_constructors(
                             .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?
                             .visibility,
                     ),
+                    generated_debug: crate::ir::IrGeneratedDeclarationDebug::None,
                     vararg_index,
                     defaults,
                     delegate_prelude,

@@ -347,6 +347,7 @@ pub(super) fn add_deserialization_constructor(
         value: None,
     });
     let super_owner = ir.classes[class_id as usize].superclass;
+    let owner_start_line = ir.classes[class_id as usize].decl_start_line;
     let ordinal = u32::try_from(ir.classes[class_id as usize].secondary_ctors.len())
         .expect("too many secondary constructors for an IR identity");
     ir.classes[class_id as usize]
@@ -368,6 +369,9 @@ pub(super) fn add_deserialization_constructor(
                 )))
                 .collect(),
             metadata_visibility: Some(crate::types::Visibility::Internal),
+            generated_debug: crate::ir::IrGeneratedDeclarationDebug::declaration_line(
+                owner_start_line,
+            ),
             defaults: vec![],
             delegate_prelude,
             delegate_args: vec![],
