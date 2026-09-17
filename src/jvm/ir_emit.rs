@@ -14395,7 +14395,19 @@ impl<'a> Emitter<'a> {
                     return;
                 }
                 // `continue` targets `cont` (run the update / bottom test); `break` targets `end`.
-                self.loop_stack.push((cont, end, label.clone()));
+                //
+                // A PRE-TEST loop with no update has nothing at the bottom but the back edge, so
+                // `cont` would be a jump to a jump: `continue` reaches the condition either way, and
+                // kotlinc branches to it directly. Using the condition itself as the continue target
+                // removes the hop, and leaves the back edge below reachable only by falling out of
+                // the body — where a body that always jumps makes it dead, which is what kotlinc
+                // emits for a loop whose every path continues or breaks.
+                let bottom = if post_test || update.is_some() {
+                    cont
+                } else {
+                    start
+                };
+                self.loop_stack.push((bottom, end, label.clone()));
                 let retained_body_scope = if post_test {
                     match self.ir.expr(body).clone() {
                         // Kotlin's `do` body and bottom condition share one lexical scope. Keep the
@@ -14419,8 +14431,10 @@ impl<'a> Emitter<'a> {
                 };
                 // A pre-test body's block has restored its slot map. A post-test body's block stays
                 // open here because `continue` and the condition are inside that same Kotlin scope.
-                self.frame(cont, vec![], code);
-                code.bind(cont);
+                if bottom == cont {
+                    self.frame(cont, vec![], code);
+                    code.bind(cont);
+                }
                 // The update is part of the loop, so it keeps the `break`/`continue` scope active — the
                 // non-overflowing counted loop puts its `if (i == end) break` here (before the increment)
                 // so a `continue` lands on it too, instead of skipping straight to the wrapping `i++`.
@@ -19361,6 +19375,28 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// The loop label a branch body jumps to when it does nothing else.
+    ///
+    /// `None` unless the body IS a `break` or `continue` — one that also computed something would
+    /// have to emit that first, and the jump could then not be fused into the condition.
+    fn loop_jump_target(&self, body: u32) -> Option<Label> {
+        let mut node = self.ir.expr(body);
+        if let IrExpr::Block { stmts, value } = node {
+            let [only] = stmts.as_slice() else {
+                return None;
+            };
+            if value.is_some() {
+                return None;
+            }
+            node = self.ir.expr(*only);
+        }
+        match node {
+            IrExpr::Break { label } => Some(self.loop_target(label).1),
+            IrExpr::Continue { label } => Some(self.loop_target(label).0),
+            _ => None,
+        }
+    }
+
     fn emit_when(
         &mut self,
         expression: u32,
@@ -19398,9 +19434,25 @@ impl<'a> Emitter<'a> {
         // `end` is reachable if any branch falls through to it (i.e. doesn't return/throw). A
         // no-`else` statement always has the implicit no-match fallthrough.
         let mut end_reachable = !has_else && exhaustive_result.is_none();
+        // Whether anything BRANCHES to the merge, as opposed to falling into it. Only a branch
+        // target needs a `StackMapTable` frame; a `when` whose one arm was fused into its condition
+        // is reached by fall-through alone, and a frame there is one kotlinc does not write.
+        let mut end_targeted = false;
         for (index, (cond, body)) in branches.iter().enumerate() {
             match cond {
                 Some(c) => {
+                    // A branch whose body is nothing but `break`/`continue` needs no branch AROUND
+                    // it: the condition can jump straight to the loop label. Otherwise the shape is
+                    // `if !cond -> next; goto target; next:`, a branch over a jump where kotlinc
+                    // writes one inverted branch.
+                    if is_stmt {
+                        if let Some(jump) = self.loop_jump_target(*body) {
+                            self.emit_cond_branch(*c, jump, true, code);
+                            code.set_stack(entry_height);
+                            end_reachable = true;
+                            continue;
+                        }
+                    }
                     // Skip to the next branch when this condition is false (fused comparison branch).
                     let next = code.new_label();
                     // A constant-false condition emits `goto next`; do not lay down its unreachable,
@@ -19456,9 +19508,12 @@ impl<'a> Emitter<'a> {
                         if !falls_into_end {
                             self.frame(end, result_stack.clone(), code);
                             code.goto(end);
+                            end_targeted = true;
                         }
                         end_reachable = true;
                     }
+                    // `next` is a branch target at this offset, so the merge shares its frame.
+                    end_targeted = true;
                     code.bind(next);
                     // `next` is reached only via the conditional jump above, where the stack is back at the
                     // pre-branch baseline — reset the linear counter (the just-emitted branch body left its
@@ -19499,9 +19554,10 @@ impl<'a> Emitter<'a> {
             code.invokespecial(constructor, 0, 0);
             code.athrow();
         }
-        // Frame `end` only when it's actually reachable; if every branch diverges, `end` is dead
-        // (no jump targets it) and a frame there would be "Expecting a stack map frame".
-        if end_reachable {
+        // Frame `end` only when it's actually reachable AND something branches there; if every
+        // branch diverges, `end` is dead (no jump targets it) and a frame there would be
+        // "Expecting a stack map frame", and if control only falls in, no frame is needed at all.
+        if end_reachable && end_targeted {
             self.frame(end, result_stack, code);
         }
         code.bind(end);
