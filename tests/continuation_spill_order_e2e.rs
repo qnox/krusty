@@ -67,6 +67,56 @@ fn multiple_suspensions_keep_the_first_store_order() {
     assert_eq!(fields, ["I$0", "L$0"]);
 }
 
+/// An inline function's parameters and extension receiver are locals of that expansion, so a
+/// suspension inside the inlined body spills and names them independently of the caller's locals.
+/// Nested `suspend inline` extensions make both the receiver role and one `$iv` suffix per
+/// expansion observable.
+#[test]
+fn an_inline_expansions_parameters_and_receiver_are_named_spills() {
+    let src = "class Nacre\n\
+               class Velarium(val seed: Nacre)\n\
+               \n\
+               fun combine(left: Nacre, right: Nacre): Nacre = left\n\
+               suspend fun fetch(value: Nacre): Nacre = value\n\
+               \n\
+               suspend inline fun <T> Velarium.call(token: Nacre, build: (Nacre) -> T): T {\n\
+               \x20   val local = combine(token, seed)\n\
+               \x20   val got = fetch(local)\n\
+               \x20   return build(got)\n\
+               }\n\
+               \n\
+               suspend inline fun Velarium.send(token: Nacre): Nacre {\n\
+               \x20   val prepared = combine(token, seed)\n\
+               \x20   return call(prepared) { combine(it, seed) }\n\
+               }\n\
+               \n\
+               suspend fun run(host: Velarium, input: Nacre): Nacre = host.send(input)\n";
+    let (slots, names) =
+        debug_metadata_names(src, "InlineSpillNames", "InlineSpillNamesKt$run$1");
+    assert_eq!(
+        names,
+        [
+            "host",
+            "input",
+            "$this$send$iv",
+            "token$iv",
+            "prepared$iv",
+            "$this$call$iv$iv",
+            "token$iv$iv",
+            "local$iv$iv",
+        ],
+        "both compilers name the same spilled locals"
+    );
+    // Field positions are not yet kotlinc's `L$0..L$7`: Krusty still spills three unnamed
+    // expansion temporaries, which pushes the named fields apart. State that remaining divergence
+    // explicitly so removing those temporaries changes this assertion rather than passing quietly.
+    assert_eq!(
+        slots,
+        ["L$0", "L$1", "L$2", "L$3", "L$5", "L$8", "L$9", "L$10"],
+        "Krusty's positions, still carrying three unnamed extra spills"
+    );
+}
+
 /// `@DebugMetadata`'s `n`/`s` lists are neither the field layout nor a grouping by kind: kotlinc
 /// hoists the REFERENCE spills and then keeps the order the locals were spilled in. Declaring a
 /// `Long` between two `Int`s puts `J$0` between `I$0` and `I$1`, which no kind grouping produces —
@@ -98,18 +148,7 @@ fn debug_metadata_keeps_the_spill_order_after_the_references() {
 /// equal, and returned so the test can also state what they are.
 fn debug_metadata_spills(src: &str, name: &str, class: &str) -> (Vec<String>, Vec<String>) {
     let (reference, krusty) = disassemble_verbose(name, src, class);
-    let array = |text: &str, key: &str| {
-        text.lines()
-            .map(str::trim)
-            .find_map(|line| line.strip_prefix(key)?.strip_prefix("=["))
-            .map(|list| {
-                list.trim_end_matches(']')
-                    .split(',')
-                    .map(|entry| entry.trim().trim_matches('"').to_string())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
-    };
+    let array = metadata_array;
     let want = (array(&reference, "s"), array(&reference, "n"));
     assert!(
         !want.0.is_empty(),
@@ -121,6 +160,33 @@ fn debug_metadata_spills(src: &str, name: &str, class: &str) -> (Vec<String>, Ve
         "{class} @DebugMetadata spills"
     );
     want
+}
+
+/// The spilled-local names from both compilers, plus Krusty's physical fields. Use this while a
+/// known physical-layout delta remains independently pinned.
+fn debug_metadata_names(src: &str, name: &str, class: &str) -> (Vec<String>, Vec<String>) {
+    let (reference, krusty) = disassemble_verbose(name, src, class);
+    let want = metadata_array(&reference, "n");
+    assert!(!want.is_empty(), "{class}: kotlinc records spilled locals");
+    assert_eq!(
+        metadata_array(&krusty, "n"),
+        want,
+        "{class} @DebugMetadata spilled local names"
+    );
+    (metadata_array(&krusty, "s"), want)
+}
+
+/// One complete `key=[…]` array from a `javap -v` annotation dump.
+fn metadata_array(text: &str, key: &str) -> Vec<String> {
+    let list = text
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix(key)?.strip_prefix("=["))
+        .unwrap_or_else(|| panic!("DebugMetadata has no `{key}` array"));
+    list.trim_end_matches(']')
+        .split(',')
+        .map(|entry| entry.trim().trim_matches('"').to_string())
+        .collect()
 }
 
 /// The spill fields of one continuation class, in layout order, from BOTH compilers — asserted
