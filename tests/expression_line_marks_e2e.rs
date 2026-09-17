@@ -169,10 +169,16 @@ fn an_explicit_multi_line_return_is_byte_identical_to_kotlinc() {
 }
 /// A finalizer changes the active line while the return value is parked in a local. The eventual
 /// return instruction must restore the explicit return's source line, not inherit the finalizer's.
+///
+/// The finalizer calls a declared method rather than `println`: the latter is an `inline` stdlib
+/// function, and krusty's splice of an inline body parks the argument in a local where kotlinc keeps
+/// it on the stack and swaps. Those extra instructions sit ahead of the two entries this test is
+/// about, so keeping `println` here would assert that unrelated contract through their offsets.
 #[test]
 fn an_explicit_return_after_finally_restores_its_line() {
     let src = "class FinallySink {\n\
                \x20   fun take(a: Int, b: String, c: Int): Int = a + c\n\
+               \x20   fun note() {}\n\
                \x20   fun run(x: Int, y: String): Int {\n\
                \x20       try {\n\
                \x20           return take(\n\
@@ -181,7 +187,7 @@ fn an_explicit_return_after_finally_restores_its_line() {
                \x20               c = x + 1,\n\
                \x20           )\n\
                \x20       } finally {\n\
-               \x20           println(\"done\")\n\
+               \x20           note()\n\
                \x20       }\n\
                \x20   }\n\
                }\n";
