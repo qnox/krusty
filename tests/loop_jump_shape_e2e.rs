@@ -87,3 +87,40 @@ fn fused_guards_still_run_correctly() {
         "the guards must keep their original control flow"
     );
 }
+
+/// Constant guards exercise the reachability result returned by the fused conditional emitter.
+/// A true guard must stop emission after its unconditional jump; a false guard must fall through.
+#[test]
+fn constant_fused_guards_preserve_reachability() {
+    let src = "fun box(): String {\n\
+               \x20   var continued = 0\n\
+               \x20   var unreachable = 0\n\
+               \x20   while (continued < 3) {\n\
+               \x20       continued += 1\n\
+               \x20       if (true) continue\n\
+               \x20       unreachable += 1\n\
+               \x20   }\n\
+               \x20   var fellThrough = 0\n\
+               \x20   while (fellThrough < 2) {\n\
+               \x20       fellThrough += 1\n\
+               \x20       if (false) continue\n\
+               \x20       fellThrough += 1\n\
+               \x20   }\n\
+               \x20   var broke = 0\n\
+               \x20   while (broke < 4) {\n\
+               \x20       broke += 1\n\
+               \x20       if (true) break\n\
+               \x20   }\n\
+               \x20   return \"$continued $unreachable $fellThrough $broke\"\n\
+               }\n";
+    let Some(actual) =
+        common::compile_and_run_box(src, "constant_fused_guards", &[common::stdlib_jar()], None)
+    else {
+        eprintln!("skipping: JVM runner unavailable");
+        return;
+    };
+    assert_eq!(
+        actual, "3 0 2 1",
+        "constant guards must retain both unconditional and fall-through control flow"
+    );
+}

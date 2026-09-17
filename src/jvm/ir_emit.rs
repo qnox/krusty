@@ -19447,9 +19447,15 @@ impl<'a> Emitter<'a> {
                     // writes one inverted branch.
                     if is_stmt {
                         if let Some(jump) = self.loop_jump_target(*body) {
-                            self.emit_cond_branch(*c, jump, true, code);
+                            let unconditional = self.emit_cond_branch(*c, jump, true, code);
                             code.set_stack(entry_height);
-                            end_reachable = true;
+                            // A constant-true guard emitted an unconditional jump. Emitting any
+                            // later arm after it would leave dead bytecode without a stack-map
+                            // frame, which the verifier rejects. A constant-false guard emits no
+                            // jump and must keep scanning the remaining arms.
+                            if unconditional {
+                                break;
+                            }
                             continue;
                         }
                     }
@@ -19508,7 +19514,6 @@ impl<'a> Emitter<'a> {
                         if !falls_into_end {
                             self.frame(end, result_stack.clone(), code);
                             code.goto(end);
-                            end_targeted = true;
                         }
                         end_reachable = true;
                     }
