@@ -351,6 +351,151 @@ fn self_call_arguments(ir: &IrFile, call: ExprId) -> Vec<ExprId> {
 /// The receiver is deliberately NOT reassigned. A static frame has none, and a member self-call is
 /// the same frame only when it already dispatches on `this` — so the slot holding it is already
 /// correct, and writing it would be a store with nothing to store.
+/// Whether `expression` is a self call reached through nothing but value-carrying structure.
+///
+/// A representation coercion can stand between a tail position and the call that fills it: an
+/// elvis lowers to `{ tmp = lhs; when { tmp == null -> rhs; else -> tmp } }`, and each arm is
+/// coerced to the elvis's own type, so `return a ?: f(x)` puts the tail call under a
+/// `TypeOp(ImplicitCoercion)`. The rewrite has to see through that wrapper to reach the call, and
+/// then drop it: what replaces the call is a loop STEP, which ends in `continue` and yields no
+/// value for a coercion to convert.
+///
+/// Dropping it is only sound where the whole expression becomes that step, which is what this
+/// establishes — the call is the value of every block on the way down, so rewriting the tail
+/// rewrites the lot. It deliberately does not look inside a `when` or a `try`: there the rewrite
+/// turns SOME arms into steps and leaves others producing a value, and that value still needs its
+/// coercion.
+fn coerced_self_call(ir: &IrFile, expression: ExprId, frame: &Frame) -> bool {
+    match ir.expr(expression) {
+        IrExpr::Call { .. } | IrExpr::MethodCall { .. } => is_self_call(ir, expression, frame),
+        IrExpr::Block {
+            stmts,
+            value: Some(value),
+        } => {
+            let value = *value;
+            let _ = stmts;
+            coerced_self_call(ir, value, frame)
+        }
+        IrExpr::Block { stmts, value: None } => stmts
+            .last()
+            .is_some_and(|tail| coerced_self_call(ir, *tail, frame)),
+        _ => false,
+    }
+}
+
+/// Whether a self call sits anywhere in the tail STRUCTURE of `expression`.
+///
+/// Broader than [`coerced_self_call`]: this looks through a `when`'s arms as well, because a
+/// coercion over a `when` can be distributed into them. It deliberately stops at a `try` for the
+/// reason the sweep does — a `finally` runs after the value is produced — and at a lambda, whose
+/// body is not this function's tail.
+fn reaches_self_call(ir: &IrFile, expression: ExprId, frame: &Frame) -> bool {
+    match ir.expr(expression) {
+        IrExpr::Call { .. } | IrExpr::MethodCall { .. } => is_self_call(ir, expression, frame),
+        IrExpr::Block {
+            stmts,
+            value: Some(value),
+        } => {
+            let value = *value;
+            let _ = stmts;
+            reaches_self_call(ir, value, frame)
+        }
+        IrExpr::Block { stmts, value: None } => stmts
+            .last()
+            .is_some_and(|tail| reaches_self_call(ir, *tail, frame)),
+        IrExpr::When { branches } => branches
+            .clone()
+            .iter()
+            .any(|(_, branch)| reaches_self_call(ir, *branch, frame)),
+        IrExpr::Return(Some(value)) => reaches_self_call(ir, *value, frame),
+        // Only a coercion to the SAME type is looked through, because that is the one
+        // `distribute_coercion` collapses. Looking through one it keeps would let this arm fire on
+        // a node distribution rebuilds unchanged, which does not terminate.
+        IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } if *type_operand == ir.functions[frame.function as usize].ret => {
+            reaches_self_call(ir, *arg, frame)
+        }
+        _ => false,
+    }
+}
+
+/// Push a representation coercion down to the values it actually converts.
+///
+/// `coerce(when { a -> x; else -> y })` and `when { a -> coerce(x); else -> coerce(y) }` answer the
+/// same thing, because the coercion is a pure function of the value and neither arm's effects move.
+/// The same holds for a block: its statements run either way, and only its value is converted.
+///
+/// Doing this is what lets a tail call under a CHAIN of coercions be found — `a ?: b ?: c` coerces
+/// the inner elvis and then coerces that again, so the call filling the tail sits under two
+/// wrappers and a `when` in between. Distributing leaves each wrapper on the leaf it converts,
+/// where a leaf that is the tail call is recognised and the wrapper dropped with it, and every
+/// other leaf keeps the conversion it needs.
+fn distribute_coercion(
+    ir: &mut IrFile,
+    expression: ExprId,
+    target: &Ty,
+    origin: OriginId,
+) -> ExprId {
+    match ir.expr(expression).clone() {
+        IrExpr::Block {
+            stmts,
+            value: Some(value),
+        } => {
+            let value = distribute_coercion(ir, value, target, origin);
+            generated(
+                ir,
+                IrExpr::Block {
+                    stmts,
+                    value: Some(value),
+                },
+                origin,
+            )
+        }
+        IrExpr::Block {
+            mut stmts,
+            value: None,
+        } if !stmts.is_empty() => {
+            let tail = stmts.pop().expect("checked non-empty just above");
+            let tail = distribute_coercion(ir, tail, target, origin);
+            stmts.push(tail);
+            generated(ir, IrExpr::Block { stmts, value: None }, origin)
+        }
+        IrExpr::When { branches } => {
+            let branches = branches
+                .into_iter()
+                .map(|(condition, branch)| {
+                    (condition, distribute_coercion(ir, branch, target, origin))
+                })
+                .collect();
+            generated(ir, IrExpr::When { branches }, origin)
+        }
+        IrExpr::Return(Some(value)) => {
+            let value = distribute_coercion(ir, value, target, origin);
+            generated(ir, IrExpr::Return(Some(value)), origin)
+        }
+        // The same conversion twice is the conversion once, so the outer one is dropped and the
+        // walk continues past the inner. A chained elvis produces exactly this: each link coerces
+        // its own result to the type they all share.
+        IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } if type_operand == *target => distribute_coercion(ir, arg, target, origin),
+        _ => generated(
+            ir,
+            IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::ImplicitCoercion,
+                arg: expression,
+                type_operand: target.clone(),
+            },
+            origin,
+        ),
+    }
+}
+
 fn loop_step(ir: &mut IrFile, call: ExprId, frame: &Frame, origin: OriginId) -> IrExpr {
     let args = self_call_arguments(ir, call);
     let mut updates = Vec::with_capacity(frame.count + 1);
@@ -429,6 +574,31 @@ fn tail_value(
         // `while (true) { … return f(x) }` used to compile to, and the verifier said so.
         IrExpr::While { .. } => Ok(expression),
         IrExpr::Return(None) => Ok(expression),
+        // The coercion a tail position puts on the value that fills it. Its argument is the tail
+        // call itself (see `coerced_self_call`), so what this returns is the loop step, and the
+        // coercion goes with the call it was converting. Restricted to a coercion to THIS
+        // function's return type: that is the one a tail position inserts, and it is the one whose
+        // disappearance cannot change what the function answers.
+        IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg,
+            ref type_operand,
+        } if *type_operand == result && coerced_self_call(ir, arg, frame) => {
+            tail_value(ir, arg, frame, result, origin)
+        }
+        // The same coercion over STRUCTURE rather than directly over the call: `a ?: b ?: c`
+        // wraps the inner elvis, so the tail call sits under two coercions with a `when` between
+        // them. Distributing puts each coercion on the leaf it converts, and the arm above then
+        // recognises the leaf that is the call.
+        IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg,
+            ref type_operand,
+        } if *type_operand == result && reaches_self_call(ir, arg, frame) => {
+            let target = type_operand.clone();
+            let distributed = distribute_coercion(ir, arg, &target, origin);
+            tail_value(ir, distributed, frame, result, origin)
+        }
         IrExpr::When { branches } => {
             let branches = branches
                 .into_iter()
