@@ -9,10 +9,9 @@
 //! What it does not do is decide representation. The callables it reports carry no descriptor and no
 //! erasure: a backend adds those to the record it receives, the same division the reader keeps.
 //!
-//! Classes and functions are reported. Properties and package-level type aliases are not yet: a
-//! property's accessors are shaped by the target that realizes them, and the reader does not decode
-//! a `TypeAlias` declaration at all. Both are missing answers rather than wrong ones — a name that
-//! is not reported simply does not resolve through this source.
+//! Classes, functions and properties are reported. Package-level type aliases are not: the reader
+//! does not decode a `TypeAlias` declaration at all. That is a missing answer rather than a wrong
+//! one — a name that is not reported simply does not resolve through this source.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -22,7 +21,7 @@ use std::sync::Arc;
 use crate::klib::KlibArchive;
 use crate::libraries::{
     AliasExpansion, CallSig, Callables, FnKind, FunctionInfo, FunctionSet, GenericSig,
-    LibraryCallable, LibraryMember, LibraryType, PlatformSourceHeaderInput, PropertyInfo,
+    LibraryCallable, LibraryMember, LibraryType, PlatformSourceHeaderInput, PropKind, PropertyInfo,
     PropertySet, ResolvedSymbols, SemanticPlatform, SemanticSupertype, SourceHeaderError, TypeKind,
 };
 use crate::metadata::reader::{
@@ -43,6 +42,16 @@ pub struct KlibSymbols {
     packages: HashSet<(TypeName, String)>,
     /// Top-level functions and extensions, keyed by their package and source name.
     top_level: HashMap<(TypeName, String), FunctionSet>,
+    /// Top-level properties and extension properties, keyed the same way.
+    top_level_properties: HashMap<(TypeName, String), PropertySet>,
+}
+
+/// Whether a declaration was read from a classifier's member list or a package's top-level list.
+/// A receiver means an extension either way, but the two spell it with different property kinds.
+#[derive(Clone, Copy)]
+enum DeclarationScope {
+    Member,
+    TopLevel,
 }
 
 impl KlibSymbols {
@@ -68,23 +77,35 @@ impl KlibSymbols {
             for (internal, declaration) in package.classes {
                 let owner = type_name(&internal);
                 let class_bounds = builtin_bounds(&declaration.type_params, &HashMap::new());
-                let mut declared: HashMap<String, FunctionSet> = HashMap::new();
+                let mut functions: HashMap<String, FunctionSet> = HashMap::new();
+                let mut properties: HashMap<String, PropertySet> = HashMap::new();
                 let mut order: Vec<String> = Vec::new();
                 let mut members: Vec<LibraryMember> = Vec::new();
                 for member in &declaration.members {
-                    // A property's accessors are shaped by the target that realizes them; only the
-                    // function half is reported here, and `is_property` keeps the split explicit
-                    // rather than incidental.
+                    let mut note = |name: &String| {
+                        if !order.contains(name) {
+                            order.push(name.clone());
+                        }
+                    };
                     if member.is_property {
+                        note(&member.name);
+                        properties
+                            .entry(member.name.clone())
+                            .or_default()
+                            .overloads
+                            .push(property_record(
+                                owner,
+                                member,
+                                &class_bounds,
+                                DeclarationScope::Member,
+                            ));
                         continue;
                     }
                     let record = member_record(owner, declaration.kind, member, &class_bounds);
-                    declared
+                    note(&member.name);
+                    functions
                         .entry(member.name.clone())
-                        .or_insert_with(|| {
-                            order.push(member.name.clone());
-                            FunctionSet::default()
-                        })
+                        .or_default()
                         .overloads
                         .push(FunctionInfo::classifier_member(
                             FnKind::Member,
@@ -94,9 +115,17 @@ impl KlibSymbols {
                     members.push(record);
                 }
                 let mut classifier = library_type(declaration);
-                classifier.declared_callables = declared
-                    .into_iter()
-                    .map(|(name, set)| (name, Callables::from_parts(set, PropertySet::default())))
+                classifier.declared_callables = order
+                    .iter()
+                    .map(|name| {
+                        (
+                            name.clone(),
+                            Callables::from_parts(
+                                functions.remove(name).unwrap_or_default(),
+                                properties.remove(name).unwrap_or_default(),
+                            ),
+                        )
+                    })
                     .collect();
                 classifier.declared_callable_order = order;
                 classifier.members = members;
@@ -107,10 +136,6 @@ impl KlibSymbols {
             let package_name = package_identity(&fragment.package_fqname);
             for function in package.functions {
                 let bounds = builtin_bounds(&function.formals, &HashMap::new());
-                let receiver = function
-                    .receiver
-                    .as_ref()
-                    .map(|receiver| builtin_ty(receiver, &bounds));
                 let member = BuiltinMember {
                     name: function.name.clone(),
                     params: function.params.clone(),
@@ -123,15 +148,16 @@ impl KlibSymbols {
                     ret_nullable: function.ret.nullable(),
                     param_names: function.param_names.clone(),
                     param_defaults: function.param_defaults.clone(),
+                    receiver: function.receiver.clone(),
+                    is_var: false,
+                    is_const: false,
                 };
+                let record = member_record(package_name, TypeKind::Class, &member, &bounds);
+                let receiver = record.generic_sig.as_ref().and_then(|sig| sig.receiver);
                 let kind = match receiver {
                     Some(_) => FnKind::Extension,
                     None => FnKind::TopLevel,
                 };
-                let mut record = member_record(package_name, TypeKind::Class, &member, &bounds);
-                if let (Some(signature), Some(receiver)) = (&mut record.generic_sig, receiver) {
-                    signature.receiver = Some(receiver);
-                }
                 let mut overload = FunctionInfo::classifier_member(kind, package_name, record);
                 overload.receiver = receiver;
                 self.top_level
@@ -139,6 +165,18 @@ impl KlibSymbols {
                     .or_default()
                     .overloads
                     .push(overload);
+            }
+            for property in &package.properties {
+                self.top_level_properties
+                    .entry((package_name, property.name.clone()))
+                    .or_default()
+                    .overloads
+                    .push(property_record(
+                        package_name,
+                        property,
+                        &HashMap::new(),
+                        DeclarationScope::TopLevel,
+                    ));
             }
         }
     }
@@ -170,6 +208,10 @@ fn package_identity(fqname: &str) -> TypeName {
 /// signature is read, so `fun <R> map(transform: (T) -> R): R` resolves `R` to the method's own
 /// parameter and `T` to the class's. The record carries no descriptor: a klib records none, and
 /// inventing one would be this layer deciding a target's representation.
+///
+/// A member EXTENSION (`class Holder { fun Int.f() }`) keeps its declaring class as the dispatch
+/// receiver and carries the extension receiver at the head of its realized parameter list, marked
+/// by the member-extension flag — the shape the module's own declarations already publish.
 fn member_record(
     owner: TypeName,
     owner_kind: TypeKind,
@@ -177,14 +219,23 @@ fn member_record(
     owner_bounds: &HashMap<String, Ty>,
 ) -> LibraryMember {
     let bounds = builtin_bounds(&member.formals, owner_bounds);
-    let params: Vec<Ty> = member
+    let receiver = member
+        .receiver
+        .as_ref()
+        .map(|receiver| builtin_ty(receiver, &bounds));
+    let mut params: Vec<Ty> = member
         .params
         .iter()
         .map(|parameter| builtin_ty(parameter, &bounds))
         .collect();
+    let value_params = params.clone();
+    if let Some(receiver) = receiver {
+        params.insert(0, receiver);
+    }
     let ret = builtin_ty(&member.ret, &bounds);
-    let mut record = LibraryMember::new(member.name.clone(), params.clone(), ret, String::new());
+    let mut record = LibraryMember::new(member.name.clone(), params, ret, String::new());
     record.owner = Some(owner);
+    record.set_is_member_extension(receiver.is_some());
     record.set_ret_nullable(member.ret_nullable);
     record.set_is_operator(member.is_operator);
     record.set_is_infix(member.is_infix);
@@ -195,9 +246,10 @@ fn member_record(
         owner_kind,
         TypeKind::Interface | TypeKind::Annotation
     ));
-    // The parameter names and defaults a named argument needs, which a descriptor erases.
+    // The parameter names and defaults a named argument needs, which a descriptor erases. A
+    // `CallSig` is parallel to the LOGICAL parameter list, which never includes the receiver.
     record.call_sig = CallSig::metadata_member(
-        params.len(),
+        value_params.len(),
         member.param_names.clone(),
         member.param_defaults.clone(),
         None,
@@ -209,12 +261,62 @@ fn member_record(
             .map(|parameter| parameter.name.clone())
             .collect(),
         formal_bounds: formal_bounds(&member.formals, &bounds),
-        receiver: None,
-        params,
+        receiver,
+        params: value_params,
         ret,
         return_policy: Default::default(),
     });
     record
+}
+
+/// The property record one decoded property denotes.
+///
+/// A klib names no accessor: whether a read is a field load, a getter call or something else is the
+/// realizing target's decision, so the accessors here are semantic handles carrying the property's
+/// own name and no descriptor. A `var` gets a setter because the flag word says it has one; a `val`
+/// does not, and a write against it must be rejected.
+fn property_record(
+    owner: TypeName,
+    member: &BuiltinMember,
+    owner_bounds: &HashMap<String, Ty>,
+    scope: DeclarationScope,
+) -> PropertyInfo {
+    let bounds = builtin_bounds(&member.formals, owner_bounds);
+    let ty = builtin_ty(&member.ret, &bounds);
+    let receiver = member
+        .receiver
+        .as_ref()
+        .map(|receiver| builtin_ty(receiver, &bounds));
+    let accessor = |params: Vec<Ty>, ret: Ty| {
+        LibraryCallable::library(owner, member.name.clone(), params, ret, ret, String::new())
+    };
+    let kind = match (receiver, scope) {
+        (Some(_), DeclarationScope::Member) => PropKind::MemberExtension,
+        (Some(_), DeclarationScope::TopLevel) => PropKind::Extension,
+        (None, DeclarationScope::Member) => PropKind::Member,
+        (None, DeclarationScope::TopLevel) => PropKind::TopLevel,
+    };
+    let getter_params = receiver.map(|receiver| vec![receiver]).unwrap_or_default();
+    let setter_params = receiver
+        .map(|receiver| vec![receiver, ty])
+        .unwrap_or_else(|| vec![ty]);
+    PropertyInfo {
+        receiver,
+        formals: member
+            .formals
+            .iter()
+            .map(|parameter| parameter.name.clone())
+            .collect(),
+        setter: member.is_var.then(|| accessor(setter_params, Ty::Unit)),
+        is_const: member.is_const,
+        ..PropertyInfo::declared(
+            member.name.clone(),
+            kind,
+            owner,
+            ty,
+            accessor(getter_params, ty),
+        )
+    }
 }
 
 /// Declared upper bounds, parallel to the formals — read with the formals themselves already in
@@ -241,13 +343,18 @@ impl SymbolSource for KlibSymbols {
         // Member callables are NOT answered here: a member call reads them from the classifier
         // record, the channel every other provider uses. A classifier namespace therefore answers
         // with its nested classifiers only.
-        let functions = match namespace {
-            SymbolNamespace::Classifier(_) => FunctionSet::default(),
-            SymbolNamespace::Package(package) => self
-                .top_level
-                .get(&(package, name.to_string()))
-                .cloned()
-                .unwrap_or_default(),
+        let (functions, properties) = match namespace {
+            SymbolNamespace::Classifier(_) => Default::default(),
+            SymbolNamespace::Package(package) => {
+                let key = (package, name.to_string());
+                (
+                    self.top_level.get(&key).cloned().unwrap_or_default(),
+                    self.top_level_properties
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or_default(),
+                )
+            }
         };
         let classifier = namespace
             .existing_classifier(name)
@@ -256,7 +363,7 @@ impl SymbolSource for KlibSymbols {
         Rc::new(ResolvedSymbols {
             classifier_name,
             classifier,
-            callables: Callables::from_parts(functions, PropertySet::default()),
+            callables: Callables::from_parts(functions, properties),
             importable_declaration: false,
         })
     }

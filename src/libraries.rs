@@ -2404,6 +2404,48 @@ pub struct PropertySet {
 }
 
 impl PropertyInfo {
+    /// A declared property, stating the facts a provider must and defaulting the rest.
+    ///
+    /// The defaults are the conservative reading of "the declaration does not say": no receiver, no
+    /// formals, `val` (no setter), public, not `const`, no compile-time value, no current-module
+    /// identity, and [`PropertyReadStability::Unstable`] — whose own contract already covers "a
+    /// dependency property whose stability is not represented by normalized metadata". A provider
+    /// that knows better overrides the field; one that does not is not silently claiming more than
+    /// its metadata carries.
+    pub fn declared(
+        name: String,
+        kind: PropKind,
+        owner: TypeName,
+        ty: Ty,
+        getter: LibraryCallable,
+    ) -> Self {
+        PropertyInfo {
+            name,
+            kind,
+            receiver: None,
+            formals: Vec::new(),
+            ty,
+            context_count: 0,
+            context_param_names: Vec::new(),
+            getter,
+            setter: None,
+            setter_visibility: Visibility::Public,
+            is_const: false,
+            implicit_integer_coercion: false,
+            compile_time_constant: None,
+            visibility: Visibility::Public,
+            owner,
+            receiver_rank: 0,
+            source_key: None,
+            stable_declaration: None,
+            getter_declaration: None,
+            setter_declaration: None,
+            source_member: None,
+            accessor_derived: false,
+            read_stability: PropertyReadStability::Unstable,
+        }
+    }
+
     /// Whether this extension property uses its classifier receiver only as an associated lookup
     /// coordinate. Providers express that semantic/physical distinction directly in the accessor:
     /// the logical parameters contain the receiver, while the physical parameters do not.
