@@ -7,7 +7,7 @@
 
 use super::Pb;
 
-pub(super) struct TypeAnnotation {
+pub struct TypeAnnotation {
     class_id: Option<u64>,
     arguments: Vec<AnnotationArgument>,
 }
@@ -23,11 +23,11 @@ enum AnnotationValue {
 }
 
 impl TypeAnnotation {
-    pub(super) fn class_id(&self) -> Option<u64> {
+    pub fn class_id(&self) -> Option<u64> {
         self.class_id
     }
 
-    pub(super) fn int_arguments(&self) -> impl Iterator<Item = (u64, i64)> + '_ {
+    pub fn int_arguments(&self) -> impl Iterator<Item = (u64, i64)> + '_ {
         self.arguments.iter().filter_map(|argument| {
             let AnnotationValue::Int(value) = argument.value else {
                 return None;
@@ -37,7 +37,7 @@ impl TypeAnnotation {
     }
 }
 
-pub(super) fn parse(body: &[u8]) -> Option<TypeAnnotation> {
+pub fn parse(body: &[u8]) -> Option<TypeAnnotation> {
     let mut pb = Pb { b: body, i: 0 };
     let mut class_id = None;
     let mut arguments = Vec::new();

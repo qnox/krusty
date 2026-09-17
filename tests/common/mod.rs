@@ -2462,14 +2462,16 @@ public class KotlincServer {
         ArrayList<URL> urls = new ArrayList<>();
         if (files != null) for (File f : files) {
             String n = f.getName();
-            if (n.endsWith(".jar") && !n.endsWith("-sources.jar") && !n.contains("-js") && !n.contains("-wasm"))
+            if (n.endsWith(".jar") && !n.endsWith("-sources.jar"))
                 urls.add(f.toURI().toURL());
         }
         // ONE loader for the whole session: the compiler classes load once (this is the warmth). Parent is
         // the platform loader only, so the compiler's classes stay private to it.
         URLClassLoader cl = new URLClassLoader(urls.toArray(new URL[0]), ClassLoader.getPlatformClassLoader());
-        Class<?> k = cl.loadClass("org.jetbrains.kotlin.cli.jvm.K2JVMCompiler");
-        Method exec = k.getMethod("exec", PrintStream.class, String[].class);
+        // Each CLI compiler class is loaded at most once and then reused, which is the warmth: the JVM
+        // compiler and the JS compiler (the one that writes a klib) are different `CLICompiler`
+        // subclasses reached through the same `exec(PrintStream, String[])`.
+        HashMap<String, Class<?>> compilers = new HashMap<>();
         // The reset the compile daemon uses: dispose the accumulated global application environment after
         // each compile so the next one starts clean — without this the reused compiler leaks and stalls.
         Method disposeAppEnv = cl.loadClass("org.jetbrains.kotlin.cli.jvm.compiler.KotlinCoreEnvironment")
@@ -2484,15 +2486,29 @@ public class KotlincServer {
         while (true) {
             int n;
             try { n = din.readInt(); } catch (EOFException e) { break; }
-            String[] args = new String[n];
+            String[] raw = new String[n];
             for (int i = 0; i < n; i++) {
                 int l = din.readUnsignedShort();
-                args[i] = new String(din.readNBytes(l), "UTF-8");
+                raw[i] = new String(din.readNBytes(l), "UTF-8");
+            }
+            // A request may name the CLI compiler to run; without the marker it is the JVM one, which
+            // is what every existing caller expects.
+            String compilerName = "org.jetbrains.kotlin.cli.jvm.K2JVMCompiler";
+            String[] args = raw;
+            if (n > 0 && raw[0].startsWith("--krusty-compiler=")) {
+                compilerName = raw[0].substring("--krusty-compiler=".length());
+                args = Arrays.copyOfRange(raw, 1, n);
             }
             ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
             PrintStream err = new PrintStream(errBuf, true, "UTF-8");
             int codeNum;
             try {
+                Class<?> k = compilers.get(compilerName);
+                if (k == null) {
+                    k = cl.loadClass(compilerName);
+                    compilers.put(compilerName, k);
+                }
+                Method exec = k.getMethod("exec", PrintStream.class, String[].class);
                 Object comp = k.getDeclaredConstructor().newInstance();
                 Object code = exec.invoke(comp, err, (Object) args);
                 codeNum = (int) code.getClass().getMethod("getCode").invoke(code);
@@ -2512,6 +2528,110 @@ public class KotlincServer {
     }
 }
 "#;
+
+/// Run a reference compile through a CLI compiler OTHER than the JVM one, on the same persistent
+/// server.
+///
+/// `class_name` is a `CLICompiler` subclass in the distribution's compiler jar — today
+/// `org.jetbrains.kotlin.cli.js.K2JSCompiler`, which is the compiler that writes a `.klib`. The
+/// server loads each one once and reuses it, so a klib-producing test pays the same warm cost a JVM
+/// one does rather than starting a compiler JVM of its own.
+#[allow(dead_code)]
+pub fn kotlinc_compile_with(class_name: &str, args: &[String]) -> Option<(i32, String)> {
+    let mut request = Vec::with_capacity(args.len() + 1);
+    request.push(format!("--krusty-compiler={class_name}"));
+    request.extend_from_slice(args);
+    kotlinc_compile(&request)
+}
+
+/// Compile `sources` into a `.klib` with the reference compiler and return the archive's path.
+///
+/// The counterpart of the JVM library helpers for Kotlin's OTHER library format. Where a JVM
+/// dependency is a directory of `.class` files carrying `@Metadata`, a klib is one container holding
+/// `default/manifest`, the `default/linkdata` declaration fragments and the `default/ir` bodies — and
+/// it is what Native, JS and wasm read. A test that needs a library of its OWN to read, rather than
+/// the distribution's stdlib, builds it here.
+///
+/// `unique_name` becomes the library's `unique_name` in its manifest, which is the identity a
+/// dependent records and a linker resolves against — so a test asserting on library identity chooses
+/// it rather than inheriting a path-derived one.
+///
+/// Memoized on the sources, because the reference compile costs seconds and several tests want the
+/// same fixture. `None` = the toolchain is unavailable; kotlinc REJECTING the sources panics, since a
+/// fixture that is not valid Kotlin must never read as a skip.
+#[allow(dead_code)]
+pub fn kotlinc_klib(unique_name: &str, sources: &[(&str, &str)]) -> Option<PathBuf> {
+    type KlibMemo = Mutex<HashMap<u64, Arc<OnceLock<Option<PathBuf>>>>>;
+    static MEMO: OnceLock<KlibMemo> = OnceLock::new();
+    let mut hash: u64 = 0xcbf29ce484222325;
+    let mut feed = |bytes: &[u8]| {
+        for &byte in bytes {
+            hash = (hash ^ byte as u64).wrapping_mul(0x100000001b3);
+        }
+        hash = (hash ^ 0xff).wrapping_mul(0x100000001b3);
+    };
+    feed(unique_name.as_bytes());
+    for (name, source) in sources {
+        feed(name.as_bytes());
+        feed(source.as_bytes());
+    }
+    let cell = {
+        let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut map = memo.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        map.entry(hash).or_default().clone()
+    };
+    let unique_name = unique_name.to_string();
+    let sources: Vec<(String, String)> = sources
+        .iter()
+        .map(|(name, source)| ((*name).to_string(), (*source).to_string()))
+        .collect();
+    cell.get_or_init(|| kotlinc_klib_uncached(hash, &unique_name, &sources))
+        .clone()
+}
+
+fn kotlinc_klib_uncached(
+    hash: u64,
+    unique_name: &str,
+    sources: &[(String, String)],
+) -> Option<PathBuf> {
+    // The JS stdlib klib is the library a klib compile resolves `kotlin.*` against; without it even
+    // `String` is unresolved, and the compile fails with "missing stdlib class" rather than a
+    // fixture error.
+    let stdlib = krusty::toolchain::kotlinc_lib_dir()?.join("kotlin-stdlib-js.klib");
+    if !stdlib.is_file() {
+        return None;
+    }
+    let work = scratch_dir()?.join(format!("klib-{hash:016x}"));
+    let out = work.join("out");
+    std::fs::create_dir_all(&out).ok()?;
+    let mut args = vec![
+        "-Xir-produce-klib-file".to_string(),
+        "-libraries".to_string(),
+        stdlib.to_string_lossy().into_owned(),
+        "-ir-output-dir".to_string(),
+        out.to_string_lossy().into_owned(),
+        "-ir-output-name".to_string(),
+        unique_name.to_string(),
+    ];
+    for (name, source) in sources {
+        let path = work.join(name);
+        std::fs::write(&path, source).ok()?;
+        args.push(path.to_string_lossy().into_owned());
+    }
+    match kotlinc_compile_with("org.jetbrains.kotlin.cli.js.K2JSCompiler", &args) {
+        Some((0, _)) => {
+            let klib = out.join(format!("{unique_name}.klib"));
+            assert!(
+                klib.is_file(),
+                "kotlinc reported success but wrote no klib at {}",
+                klib.display()
+            );
+            Some(klib)
+        }
+        Some((code, err)) => panic!("kotlinc(klib) failed ({code}): {err}"),
+        None => None,
+    }
+}
 
 /// The reference compiler's all-in-one jar (`<dist>/lib/kotlin-compiler.jar`), which carries
 /// `K2JVMCompiler`. `None` when the provisioned dist is unavailable.
