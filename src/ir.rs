@@ -1679,18 +1679,6 @@ pub struct IrClass {
     /// their own [`IrClass`] ownership; this list is only for generated declarations whose producer
     /// explicitly owns the language-level publication contract (for example `$serializer`).
     pub published_nested_classifiers: Vec<String>,
-    /// For a class a producer GENERATED: the functions Kotlin metadata describes, in the order they
-    /// are declared. The producer owns the whole function record of such a class — a generated
-    /// function absent from this list is not described at all, which is how a non-generic
-    /// `$serializer` omits `typeParametersSerializers`. `None` on a source-declared class, whose
-    /// members are described from their own declarations; `Some([])` remains meaningful for a
-    /// generated class whose producer deliberately publishes no functions.
-    ///
-    /// Held apart from `IrFile::fn_source_order` because the two orders genuinely differ: the
-    /// backend EMITS a serializer's members in kotlinc's class-file order while kotlinc DECLARES
-    /// them in another, and `fn_source_order` drives emission. A generated PROPERTY states its own
-    /// position through [`IrProperty::source_order`], in the same numbering as this list's indices.
-    pub published_generated_functions: Option<Vec<FunId>>,
     /// Secondary constructors — each an extra `<init>(params)` that delegates to the primary
     /// constructor (`constructor(…) : this(args)`) then runs its body. Empty for most classes.
     pub secondary_ctors: Vec<IrSecondaryCtor>,
@@ -2063,7 +2051,6 @@ impl IrClass {
             is_companion: false,
             companion_class: None,
             published_nested_classifiers: Vec::new(),
-            published_generated_functions: None,
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             applied_annotations: DeclarationAnnotations::default(),
@@ -2174,7 +2161,6 @@ impl IrClass {
             is_companion: flags.has(crate::fir::DeclarationFlags::COMPANION),
             companion_class: None,
             published_nested_classifiers: Vec::new(),
-            published_generated_functions: None,
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             applied_annotations: DeclarationAnnotations::default(),
@@ -2272,6 +2258,9 @@ pub struct IrSecondaryCtor {
     /// means the constructor is a target/compiler realization with no Kotlin declaration record,
     /// independently of its parameter names, arity, descriptor, or [`Self::synthetic`] flag.
     pub metadata_visibility: Option<crate::types::Visibility>,
+    /// Debug representation for a compiler-generated constructor. Source constructors derive their
+    /// own tables from source declarations and leave this as `None`.
+    pub generated_debug: IrGeneratedDeclarationDebug,
     /// Index into `named_params` of a `vararg` parameter, for the `Constructor` metadata record.
     pub vararg_index: Option<usize>,
     pub defaults: Vec<Option<ExprId>>,
@@ -2431,6 +2420,10 @@ pub struct IrFile {
     /// Guards the active-unit metadata handoff when a source is checked in several body groups.
     pub(crate) file_annotations_attached: bool,
     pub functions: Vec<IrFunction>,
+    /// Exact generated function metadata/debug contracts, keyed by semantic owning classifier.
+    /// Producers publish once; backends consume function identities without name/descriptor scans.
+    generated_member_publications:
+        std::collections::HashMap<TypeName, IrGeneratedMemberPublication>,
     /// Stable checked-FIR callable identity to its realization in this file's function arena.
     /// Common lowering publishes the edge once; checked-operation realization consumes it without
     /// name lookup or overload reconstruction.
@@ -3699,8 +3692,13 @@ impl IrFile {
 }
 
 mod debug_locals;
+mod generated_members;
 pub use debug_locals::IrLambdaOrigin;
 pub(crate) use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
+pub use generated_members::{
+    IrGeneratedDeclarationDebug, IrGeneratedFunctionMetadata, IrGeneratedFunctionMetadataScope,
+    IrGeneratedFunctionPublication, IrGeneratedMemberPublication,
+};
 mod function_parameters;
 pub use function_parameters::FnParamInfo;
 mod traversal;

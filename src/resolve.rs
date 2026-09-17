@@ -10541,6 +10541,11 @@ fn collect_signatures_with_cp_impl(
                     let mut contributed_companion_order = Vec::new();
                     for member in contributed_members {
                         let required = member.params.len();
+                        assert_eq!(
+                            member.param_names.len(),
+                            required,
+                            "a frontend plugin declaration publishes one identity per parameter"
+                        );
                         let signature = Signature {
                             params: member.params,
                             ret: member.ret,
@@ -10556,7 +10561,7 @@ fn collect_signatures_with_cp_impl(
                             no_infer_params: vec![],
                             implicit_integer_coercion: vec![],
                             param_default_values: Vec::new(),
-                            param_names: vec![],
+                            param_names: member.param_names,
                             lambda_param_types: vec![],
                             lambda_recv: vec![],
                             visibility: Visibility::Public,

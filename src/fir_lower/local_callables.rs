@@ -994,10 +994,17 @@ impl BodyLowering<'_> {
             *slot = Some(nested.expression(default.value)?);
         }
         if defaults.iter().any(Option::is_some) {
-            nested.ir.fn_params.insert(
-                function,
-                crate::ir::FnParamInfo::defaults(Vec::new(), defaults),
+            let parameters = nested
+                .ir
+                .fn_params
+                .get_mut(&function)
+                .expect("a lifted local function publishes its parameter identities first");
+            assert_eq!(
+                parameters.names.len(),
+                defaults.len(),
+                "local default arguments exactly match the lifted parameter contract"
             );
+            parameters.defaults = Some(defaults);
         }
         let roots = body
             .roots()

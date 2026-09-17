@@ -32,7 +32,7 @@ use crate::types::{type_name, Ty, TypeName};
 use deserialization_constructor::{add_cached_descriptor, add_deserialization_constructor};
 use deserialize_body::DeserializeBody;
 use element_serializer::{element_serializer_expr, element_serializer_plan};
-use generated_members::{add_serializer_members, GeneratedSerializerMembers};
+use generated_members::{add_serializer_members, publish_write_self, GeneratedSerializerMembers};
 use serialize_body::SerializeBody;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -1360,6 +1360,9 @@ impl IrPlugin for SerializationPlugin {
             .iter()
             .map(|&parameter| Ty::obj_args_name(serializer, &[parameter]))
             .collect::<Vec<_>>();
+        let param_names = (0..params.len())
+            .map(|index| format!("typeSerial{index}"))
+            .collect::<Vec<_>>();
         let ret = Ty::obj_args_name(serializer, &[class]);
         let generic_sig = (!parameters.is_empty()).then(|| crate::libraries::GenericSig {
             formals: ctx.type_parameters.type_params().clone(),
@@ -1384,6 +1387,7 @@ impl IrPlugin for SerializationPlugin {
             },
             name: "serializer".to_string(),
             params,
+            param_names,
             ret,
             generic_sig,
             plugin_expression: Some(crate::libraries::PluginExpressionDeclaration {
@@ -1621,13 +1625,14 @@ impl IrPlugin for SerializationPlugin {
                 .iter()
                 .map(crate::ir::IrField::has_default)
                 .collect();
-            // A generic `$serializer` is a class with one stored `KSerializer` per type parameter;
-            // a non-generic serializer keeps the singleton-object form.
+            // A generic `$serializer` stores one `KSerializer` per type parameter; a non-generic
+            // serializer keeps the singleton-object form.
             let n_tp = type_params.len();
             let is_generic = n_tp > 0;
             let mut ser = synthetic_class(&ser_fq);
-            // The generated class keeps the annotated declaration's start, header, and closing
-            // lines for its constructor and class-initializer debug tables.
+            // The generated class stands where the annotated declaration does. Its member debug
+            // shape is producer-published; its constructor and class initializer retain the class
+            // start/header/end lines used by their separate JVM emission paths.
             ser.decl_line = owner_header_line;
             ser.decl_start_line = owner_start_line;
             ser.decl_end_line = ir.classes[class_id as usize].decl_end_line;
@@ -1682,12 +1687,7 @@ impl IrPlugin for SerializationPlugin {
             // `typeParametersSerializers` only when there are type-parameter serializers to pass
             // along; and `getDescriptor` is described as the accessor of a `descriptor` PROPERTY,
             // registered below rather than as a function.
-            let mut described = vec![child, deserialize, serialize];
-            if is_generic {
-                described.push(type_params_ser);
-            }
-            let descriptor_order = described.len() as u32;
-            ser.published_generated_functions = Some(described);
+            let descriptor_order = 3 + u32::from(is_generic);
             ser.properties.push(crate::ir::IrProperty {
                 name: "descriptor".to_string(),
                 context_params: Vec::new(),
@@ -2007,7 +2007,9 @@ impl IrPlugin for SerializationPlugin {
                 });
                 ir.synthetic_methods.insert(write_self);
                 ir.classes[class_id as usize].methods.push(write_self);
-                self.record_write_self(ir.classes[class_id as usize].fq_name_id(), write_self);
+                let owner = ir.classes[class_id as usize].fq_name_id();
+                publish_write_self(ir, owner, write_self, owner_start_line);
+                self.record_write_self(owner, write_self);
             }
 
             // `<getter>$annotations()` markers for properties kotlinc preserves the serialization
@@ -2486,6 +2488,7 @@ mod tests {
                     KSERIALIZER_FQ,
                     &[Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")))],
                 )],
+                param_names: vec!["typeSerial0".to_string()],
                 ret: Ty::obj_args_name(
                     type_name(KSERIALIZER_FQ),
                     &[Ty::obj_args_name(

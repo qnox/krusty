@@ -268,6 +268,25 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         let sc_desc = method_descriptor(&sc_param_tys, Ty::Unit);
         cw.add_method(sc_access, "<init>", &sc_desc, &sctor);
         cw.set_method_parameters("<init>", &sc_desc, &method_parameters);
+        if sc.generated_debug.records_locals() {
+            assert_eq!(
+                sc.named_params.len(),
+                sc_param_tys.len(),
+                "generated constructor debug identities exactly match physical arity"
+            );
+            let mut locals = vec![("this".to_string(), format!("L{fq_name};"), 0u16)];
+            let mut slot = 1u16;
+            for ((name, _), physical) in sc.named_params.iter().zip(&sc_param_tys) {
+                locals.push((name.clone(), type_descriptor(*physical), slot));
+                slot += slot_words(*physical);
+            }
+            cw.set_method_debug(
+                "<init>",
+                &sc_desc,
+                sc.generated_debug.line().map(|line| (0, line)),
+                &locals,
+            );
+        }
         // Declared constructor annotations, with the same `Deprecated` / `ACC_SYNTHETIC` companions
         // a function's carry (see the method emitter).
         if !sc.annotations.is_empty() {
