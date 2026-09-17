@@ -361,3 +361,30 @@ fn a_multi_line_method_call_is_byte_identical_to_kotlinc() {
     .unwrap_or_else(|| panic!("reference kotlinc unavailable under the test harness"));
     result.expect("MultiLineMethodCallKt byte-identical to kotlinc");
 }
+
+/// An argument supplied BETWEEN two omitted ones splits the call's synthesized operands in two: the
+/// placeholder, then that argument's own line, then the mask and marker. Each synthesized group
+/// carries the call's line, so the table returns to it twice — a single mark at the invoke, or one
+/// at the first placeholder alone, both get this wrong.
+#[test]
+fn an_omitted_argument_before_a_supplied_one_is_byte_identical_to_kotlinc() {
+    let src = "class MiddleSink {
+                   fun take(a: Int, b: Int = 2, c: Int = 3): Int = a + b + c
+               }
+               
+               fun run(s: MiddleSink, x: Int, z: Int): Int = s.take(
+                   a = x,
+                   c = z,
+               )
+";
+    let Some(result) = common::byte_diff_against_kotlinc_cp(
+        "OmittedMiddleArgument",
+        src,
+        "OmittedMiddleArgumentKt",
+        &[common::stdlib_jar()],
+    ) else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    result.expect("omitted middle argument byte-identical to kotlinc");
+}
