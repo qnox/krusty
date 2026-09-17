@@ -2865,3 +2865,66 @@ fn an_explicit_getter_keeps_its_default_setter_debug_tables() {
         "default setter beside an explicit getter"
     );
 }
+
+/// Where the `Deprecated` attribute name lands in the constant pool of a class that carries the
+/// attribute itself.
+///
+/// It was interned with the per-method attribute names, ahead of `InnerClasses` and `SourceFile`;
+/// kotlinc interns a class-level one after both, immediately before `RuntimeVisibleAnnotations`.
+/// Nothing else about the class changes — a pool in a different order is simply a different class
+/// file, and this was the last byte between the two on a generated serializer.
+///
+/// The generated `$serializer` is the fixture because it is the only class krusty marks deprecated
+/// today: a source `@Deprecated` declaration gets no class-level attribute at all, which is a
+/// separate gap.
+#[test]
+fn a_deprecated_class_attribute_name_interns_after_its_source_file() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class Point(val x: Int, val y: String)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "DeprecatedPool",
+        src,
+        "Point$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // The three attribute names in the order the pool holds them. Their absolute indices differ
+    // while anything else about the class does; their order is the contract.
+    let order = |text: &str| {
+        let pool = text
+            .lines()
+            .map(str::trim)
+            .take_while(|line| !line.starts_with('{'))
+            .filter_map(|line| line.split("= Utf8").nth(1))
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        ["Deprecated", "InnerClasses", "SourceFile"]
+            .into_iter()
+            .filter_map(|name| Some((pool.iter().position(|entry| *entry == name)?, name)))
+            .collect::<Vec<_>>()
+    };
+    let mut want = order(&built.reference);
+    want.sort();
+    assert_eq!(
+        want.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
+        ["InnerClasses", "SourceFile", "Deprecated"],
+        "kotlinc interns a class-level Deprecated after both"
+    );
+    let mut got = order(&built.krusty);
+    got.sort();
+    assert_eq!(
+        got.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
+        want.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
+        "class attribute name interning order"
+    );
+}
