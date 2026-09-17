@@ -340,8 +340,12 @@ qualified-name ids), `f17 = inlineClassUnderlyingPropertyName`, `f30 = typeTable
 (`class Holder { fun Int.f() }`) is exactly the one that carries `f8`.
 
 `Property`: `f1 = old_flags`, `f2 = name`, `f3 = return_type`, `f5 = receiver_type`,
-`f7 = getter_flags`, `f9 = return_type_id`, `f10 = receiver_type_id`, `f11 = flags`,
-`f173 = compileTimeValue`, `f176 = file`.
+`f6 = setter_value_parameter`, `f7 = getter_flags`, `f8 = setter_flags`, `f9 = return_type_id`,
+`f10 = receiver_type_id`, `f11 = flags`, `f173 = compileTimeValue`, `f176 = file`.
+
+`f8` is present only when the declaration states a setter of its own: `var guarded: Int = 1;
+private set` writes 66 (private in bits 1-3 plus the `isNotDefault` bit 6) and also writes `f6`,
+while a plain `var` omits both and its setter is as visible as the property.
 
 **`Property` f7 is `getter_flags`, NOT a receiver type id.** A comment in the reader said otherwise;
 following it would have decoded a flag word as a type. `val String.memberExt: Int get() = 1` records
@@ -367,6 +371,7 @@ Flag words, measured rather than assumed:
 | `value class Meters` | Class f1 | 8198 | bit 13 `IS_VALUE` |
 | `fun interface Handler` | Class f1 | 16486 | bit 14 `IS_FUN` |
 | `data class Pair2` | Class f1 | 1030 | bit 10 `IS_DATA` |
+| `inner class Inner` | Class f1 | 518 | bit 9 `IS_INNER` |
 
 Visibility is bits 1-3 in all three flag words (`Class`, `Function`, `Property`), which is why one
 decoder serves them: `1`/`4` → private (`PRIVATE_TO_THIS` is a stricter private), `2` → protected,
@@ -375,6 +380,15 @@ decoder serves them: `1`/`4` → private (`PRIVATE_TO_THIS` is a stricter privat
 A value class records only the underlying property's NAME (`Class.f17`); no shipped klib carries
 `inlineClassUnderlyingTypeId` (f18). The underlying type therefore comes from that property's own
 declaration in `Class.f10`.
+
+An `inner` class records the `IS_INNER` bit and nothing else — no field names its enclosing class,
+because that is the nested identity's own owner (`Outer.Inner` → `Outer`). A plain nested class is
+recorded identically minus the bit.
+
+Annotations travel in `KlibMetadataProtoBuf`'s extension field **170**, on a `Class`, a `Function`
+and a `Property` alike; the carrier this reader writes uses `f12` for the same repeated field, and a
+declaration carries one or the other, never both. `Annotation` is `{ id = 1 (a qualified-name id),
+argument = 2 }`.
 
 ### What the Kotlin/Native stdlib actually contains
 
@@ -388,5 +402,9 @@ Kotlin/Native compilation resolves against and its shape decides which of these 
 - Class visibility: 553 public, 295 internal, 92 private.
 - Member functions: 2520 public, 293 private, 67 protected, 84 internal. A reader that does not
   decode member visibility reports every one of those 444 non-public members as public.
+- 952 of 2964 member functions are annotated (1449 annotations, 607 of them with arguments), and
+  103 of 1603 member properties. The most common are `kotlin.internal.IntrinsicConstEvaluation`
+  (521), `kotlin.internal.InlineOnly` (223), `kotlin.native.internal.TypedIntrinsic` (127),
+  `kotlin.IgnorableReturnValue` (121), `kotlin.Deprecated` (90) and `kotlin.SinceKotlin` (83).
 - No identity is declared twice, so a reader that keeps the first declaration of a name is not
   making an order-dependent choice — for this library.
