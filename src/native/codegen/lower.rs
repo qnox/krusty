@@ -1465,6 +1465,20 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     fn constant(&mut self, constant: &IrConst) -> Result<Value, Unsupported> {
         Ok(match constant {
             IrConst::Boolean(value) => self.builder.ins().iconst(types::I8, i64::from(*value)),
+            // Common IR hands over the unsigned VALUE and its checked type; the carrier is this
+            // backend's to choose, and it carries an unsigned value as the machine integer its
+            // value class wraps. So 200u is the 8-bit pattern that reads as -56 signed, which is
+            // what every comparison, widening and `toString` in `unsigned.rs` already expects.
+            IrConst::UByte(value) => self.builder.ins().iconst(types::I8, i64::from(*value as i8)),
+            IrConst::UShort(value) => self
+                .builder
+                .ins()
+                .iconst(types::I16, i64::from(*value as i16)),
+            IrConst::UInt(value) => self
+                .builder
+                .ins()
+                .iconst(types::I32, i64::from(*value as i32)),
+            IrConst::ULong(value) => self.builder.ins().iconst(types::I64, *value as i64),
             IrConst::Byte(value) => self.builder.ins().iconst(types::I8, i64::from(*value)),
             IrConst::Short(value) => self.builder.ins().iconst(types::I16, i64::from(*value)),
             IrConst::Char(value) => self.builder.ins().iconst(types::I16, i64::from(*value)),
@@ -1637,6 +1651,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Some(match self.file.ir.expr(id) {
             IrExpr::Const(constant) => match constant {
                 IrConst::Boolean(_) => Ty::Boolean,
+                // The unsigned identity common IR retained. Answering the signed type here would
+                // put every such constant back on the signed reading it was separated from.
+                IrConst::UByte(_) => Ty::UByte,
+                IrConst::UShort(_) => Ty::UShort,
+                IrConst::UInt(_) => Ty::UInt,
+                IrConst::ULong(_) => Ty::ULong,
                 IrConst::Byte(_) => Ty::Byte,
                 IrConst::Short(_) => Ty::Short,
                 IrConst::Int(_) => Ty::Int,
@@ -2236,7 +2256,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
         match operation {
-            IrIntrinsic::PrimitiveCompare { operand } => {
+            // `relational_operator` records that the call came from a `ComparisonCall`, which
+            // lets a backend emit a branch instead of materializing the -1/0/1. This one answers
+            // the same VALUE either way and leaves that to Cranelift, so the hint is ignored
+            // rather than acted on.
+            IrIntrinsic::PrimitiveCompare { operand, .. } => {
                 let (Some(receiver), [argument]) = (receiver, args) else {
                     return Err("a malformed `compareTo`".to_string());
                 };
