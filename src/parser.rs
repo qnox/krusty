@@ -11,6 +11,7 @@ use crate::types::Visibility;
 use std::collections::HashMap;
 
 mod debug_lines;
+mod declaration_bodies;
 mod declaration_modifiers;
 mod declaration_stream;
 mod expressions;
@@ -2563,8 +2564,7 @@ impl<'a> Parser<'a> {
         let mut props = Vec::new();
         let mut init_order = Vec::new();
         let mut type_aliases = Vec::new();
-        self.skip_newlines();
-        if self.eat(TokenKind::LBrace) {
+        if self.eat_optional_declaration_body_open() {
             loop {
                 self.skip_newlines();
                 let mods = self.parse_member_decl_prefix();
@@ -2822,8 +2822,7 @@ impl<'a> Parser<'a> {
         let mut companion = None;
         let mut secondary_ctors: Vec<SecondaryCtor> = Vec::new();
         let mut type_aliases = Vec::new();
-        self.skip_newlines();
-        if self.eat(TokenKind::LBrace) {
+        if self.eat_optional_declaration_body_open() {
             // `enum class E {; ... }` has no entries. The lexer represents `;` and a physical line
             // break with the same token kind, but retains the source spelling; consume the separator
             // run once and remember whether it explicitly ended the entry list.
@@ -3972,9 +3971,7 @@ impl<'a> Parser<'a> {
         let mut companion = None;
         let mut secondary_ctors: Vec<SecondaryCtor> = Vec::new();
         let mut type_aliases = Vec::new();
-        self.skip_newlines();
-        if self.at(TokenKind::LBrace) {
-            self.bump();
+        if self.eat_optional_declaration_body_open() {
             loop {
                 self.skip_newlines();
                 let mods = self.parse_member_decl_prefix();
@@ -4418,9 +4415,7 @@ impl<'a> Parser<'a> {
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut companion = None;
         let mut type_aliases = Vec::new();
-        self.skip_newlines();
-        if self.at(TokenKind::LBrace) {
-            self.bump();
+        if self.eat_optional_declaration_body_open() {
             loop {
                 self.skip_newlines();
                 let imods = self.parse_member_decl_prefix();
@@ -4549,9 +4544,7 @@ impl<'a> Parser<'a> {
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut init_order: Vec<ClassInit> = Vec::new();
         let mut type_aliases = Vec::new();
-        self.skip_newlines();
-        if self.at(TokenKind::LBrace) {
-            self.bump();
+        if self.eat_optional_declaration_body_open() {
             loop {
                 self.skip_newlines();
                 let mods = self.parse_member_decl_prefix();
@@ -4693,9 +4686,7 @@ impl<'a> Parser<'a> {
         let mut body_props: Vec<PropDecl> = Vec::new();
         let mut init_order: Vec<ClassInit> = Vec::new();
         let mut type_aliases = Vec::new();
-        self.skip_newlines();
-        if self.at(TokenKind::LBrace) {
-            self.bump();
+        if self.eat_optional_declaration_body_open() {
             loop {
                 self.skip_newlines();
                 let mods = self.parse_member_decl_prefix();

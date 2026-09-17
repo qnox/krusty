@@ -69,15 +69,15 @@ fn kotlinc_plugin_jar(substring: &str) -> Option<PathBuf> {
         })
 }
 
-struct ReferenceComparison {
-    reference: String,
-    krusty: String,
+pub(super) struct ReferenceComparison {
+    pub(super) reference: String,
+    pub(super) krusty: String,
     reference_bytes: Vec<u8>,
     krusty_bytes: Vec<u8>,
 }
 
 /// Build one class with the reference serialization plugin and with krusty.
-fn compare_with_kotlinc_plugin(
+pub(super) fn compare_with_kotlinc_plugin(
     name: &str,
     src: &str,
     class: &str,
@@ -243,7 +243,7 @@ fn compare_files_with_kotlinc_plugin(
 
 /// The serialization runtime the generated code links against, plus the plugin jar kotlinc needs in
 /// order to produce the reference at all. `None` when either is absent from the local caches.
-fn plugin_and_runtime() -> Option<(PathBuf, Vec<PathBuf>)> {
+pub(super) fn plugin_and_runtime() -> Option<(PathBuf, Vec<PathBuf>)> {
     let plugin = kotlinc_plugin_jar("kotlinx-serialization-compiler-plugin")?;
     let core = gradle_module_jar("org.jetbrains.kotlinx", "kotlinx-serialization-core-jvm")?;
     Some((plugin, vec![core, common::stdlib_jar()]))
@@ -2792,7 +2792,7 @@ fn only_an_array_of_a_star_projection_records_its_descriptor() {
 }
 
 /// One member's disassembly, from its declaration to the next one, with pool indices erased.
-fn member_body(disassembly: &str, member: &str) -> Vec<String> {
+pub(super) fn member_body(disassembly: &str, member: &str) -> Vec<String> {
     let declaration = opens_a_member;
     // Raw lines, because INDENTATION is what separates the class body's closing `}` (column 0)
     // from a `}` inside a member — a `tableswitch` block ends with one, and trimming first made
