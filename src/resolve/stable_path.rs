@@ -90,24 +90,19 @@ impl<'checker, 'source> StablePathRead<'checker, 'source> {
         if access.property.context_count != 0 {
             return None;
         }
-        let Some(index) = self.checker.resolved_index else {
-            return super::stable_path_legacy_bridge::top_level_ty(
-                self.checker.file,
-                self.checker.file_index,
-                &access.property,
-            );
-        };
-        let declaration = access.property.stable_declaration?;
-        let anchor = index.declaration_anchor(declaration)?;
-        if anchor.source.raw() != self.checker.file_index {
-            return None;
-        }
-        let flags = index.declaration_header(declaration)?.flags;
-        if flags.has(crate::fir::DeclarationFlags::MUTABLE)
-            || flags.has(crate::fir::DeclarationFlags::CUSTOM_GETTER)
-            || flags.has(crate::fir::DeclarationFlags::DELEGATED)
-            || flags.has(crate::fir::DeclarationFlags::EXTERNAL)
-            || flags.has(crate::fir::DeclarationFlags::EXPECT)
+        let source_file = access
+            .property
+            .source_key
+            .map(|(file, _)| file)
+            .or_else(|| {
+                let declaration = access.property.stable_declaration?;
+                self.checker
+                    .resolved_index?
+                    .declaration_anchor(declaration)
+                    .map(|anchor| anchor.source.raw())
+            });
+        if source_file != Some(self.checker.file_index)
+            || access.property.read_stability != crate::libraries::PropertyReadStability::Stable
         {
             return None;
         }
@@ -120,30 +115,13 @@ impl<'checker, 'source> StablePathRead<'checker, 'source> {
         let receiver = receiver.non_null();
         let owner = receiver.obj_internal()?;
         let class = self.checker.resolver().classifier(owner)?;
-        let Some(index) = self.checker.resolved_index else {
-            return super::stable_path_legacy_bridge::member_ty(
-                &self.checker.module,
-                receiver,
-                owner,
-                name,
-                class.is_final(),
-            );
-        };
         let source = self.checker.fed_source();
         let callables = crate::symbol_resolver::members_in_hierarchy(&source, receiver, name);
         let property = callables
             .properties()
             .iter()
             .find(|property| property.kind == crate::libraries::PropKind::Member)?;
-        let flags = index
-            .declaration_header(property.stable_declaration?)?
-            .flags;
-        if flags.has(crate::fir::DeclarationFlags::MUTABLE)
-            || flags.has(crate::fir::DeclarationFlags::CUSTOM_GETTER)
-            || flags.has(crate::fir::DeclarationFlags::DELEGATED)
-            || (flags.has(crate::fir::DeclarationFlags::OPEN) && !class.is_final())
-            || property.context_count != 0
-        {
+        if !property.read_stability.permits(class.is_final()) {
             return None;
         }
         Some(property.ty.projection_read_ty())

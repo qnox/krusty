@@ -2292,6 +2292,43 @@ pub enum PropKind {
     TopLevel,
 }
 
+/// Whether repeated reads of a selected property are semantically guaranteed to observe the same
+/// value. Providers derive this from declaration facts; the checker combines an overridable read
+/// with the receiver's finality instead of reopening provider-specific declarations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PropertyReadStability {
+    /// A custom/delegated getter, mutable property, context-dependent read, or dependency property
+    /// whose stability is not represented by normalized metadata.
+    #[default]
+    Unstable,
+    /// A final default-getter `val`.
+    Stable,
+    /// An open default-getter `val`, stable only through a statically final receiver classifier.
+    StableOnFinalReceiver,
+}
+
+impl PropertyReadStability {
+    pub(crate) fn from_declaration(
+        mutable: bool,
+        unstable_getter: bool,
+        open: bool,
+        has_context_parameters: bool,
+    ) -> Self {
+        if mutable || unstable_getter || has_context_parameters {
+            Self::Unstable
+        } else if open {
+            Self::StableOnFinalReceiver
+        } else {
+            Self::Stable
+        }
+    }
+
+    pub(crate) fn permits(self, receiver_is_final: bool) -> bool {
+        matches!(self, Self::Stable)
+            || (receiver_is_final && matches!(self, Self::StableOnFinalReceiver))
+    }
+}
+
 /// One property declaration a source exposes, arg-independent — the property analogue of
 /// [`FunctionInfo`], so a resolver can query properties symmetrically with `functions`.
 ///
@@ -2351,6 +2388,8 @@ pub struct PropertyInfo {
     /// Whether this property is derived from Java bean accessors. A same-named accessible field
     /// takes precedence during member selection.
     pub accessor_derived: bool,
+    /// Semantic repeat-read stability, normalized by the declaration provider.
+    pub read_stability: PropertyReadStability,
 }
 
 /// ALL properties of one name applicable to an access — members AND extensions AND top-level, in one
@@ -2959,6 +2998,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             setter_declaration: None,
             source_member: None,
             accessor_derived: false,
+            read_stability: PropertyReadStability::Unstable,
         };
         if let Some(callables) = classifier.declared_callables.get_mut(name) {
             let (functions, mut properties) = std::mem::take(callables).into_parts();
@@ -3229,6 +3269,7 @@ impl EmptySymbolSource {
                     setter_declaration: None,
                     source_member: None,
                     accessor_derived: false,
+                    read_stability: PropertyReadStability::Unstable,
                 });
             }
             _ => {}
@@ -3336,6 +3377,7 @@ impl EmptySymbolSource {
                 setter_declaration: None,
                 source_member: None,
                 accessor_derived: false,
+                read_stability: PropertyReadStability::Unstable,
             }],
         })
     }
