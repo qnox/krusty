@@ -84,6 +84,44 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
     at **~151s**, so lower parallelism is not currently the fix. Any
     binary's non-zero exit fails the run and prints its captured log. A filter arg defers to plain
     `cargo test --profile gate` for focused runs.
+- **`NO_EXPECT_FOR_ACTUAL` — measured, not implemented.** With `MultiPlatformProjects` on, an
+  `actual` with no matching `expect` is an error in kotlinc and is still accepted by krusty, which
+  then emits the declaration. (Without the feature both modifiers are rejected outright — that one IS
+  implemented; see `tests/mpp_requires_the_feature_e2e.rs`.) The message is
+  `'<rendered declaration>' has no corresponding expected declaration`, reported at the declaration's
+  NAME, and the rendering is the obstacle: it is kotlinc's own declaration renderer over the
+  RESOLVED signature, so the check belongs after resolution, not beside the parse-time modifier
+  capture. The grammar, measured over 25 shapes against kotlinc 2.4.10 so it need not be measured
+  again:
+
+  ```
+  <visibility> <modality> actual [suspend] [inline] [data|enum|annotation] <kind> <signature>
+  ```
+
+  | shape | rendering |
+  | --- | --- |
+  | `actual fun simple(): Int` | `public final actual fun simple(): Int` |
+  | `actual fun withParams(a: Int, b: String?): Long` | `… fun withParams(a: Int, b: String?): Long` |
+  | `actual fun <T> generic(t: T): T` | `… fun <T> generic(t: T): T` |
+  | `actual fun Int.receiver(): Int` | `… fun Int.receiver(): Int` |
+  | `actual fun vararged(vararg xs: Int)` | `… fun vararged(vararg xs: Int): Int` |
+  | `actual fun defaulted(a: Int = 1)` | `… fun defaulted(a: Int = ...): Int` — the value is literally `...` |
+  | `actual suspend fun` / `actual inline fun` | the keyword follows `actual` |
+  | `actual val prop: Int` / `actual var mutable: String` | `public final actual val prop: Int` |
+  | `actual val <T> List<T>.ext: Int` | type parameters precede the receiver |
+  | `actual class Cls` | `public final actual class Cls : Any` — the supertype is always rendered |
+  | `actual class Derived : Base()` | `… class Derived : Base` — no constructor parens |
+  | `actual class Generic<T>` | `… class Generic<T> : Any` |
+  | `actual data class Data(val x: Int)` | `… actual data class Data : Any` — no value parameters |
+  | `actual enum class Colors` | `… actual enum class Colors : Enum<Colors>` |
+  | `actual annotation class Anno` | `… actual annotation class Anno : Annotation` |
+  | `actual object Obj` | `… actual object Obj : Any` |
+  | `actual interface Iface` | `public abstract actual interface Iface : Any` |
+  | `actual open class` / `actual abstract class` / `actual sealed class` | `open` / `abstract` / `sealed` fill the modality slot |
+  | `internal actual fun` / `private actual fun` | `internal final actual fun` / `private final actual fun` |
+
+  Rendering from the AST is not sufficient: kotlinc renders the RESOLVED type, so an inferred return
+  (`actual fun f() = 1` → `Int`) and an expanded typealias have no written form to copy.
 - kotlinc 2.4.0 runs on JRE 25 (verified). bytediff is slow (one kotlinc JVM launch per file) — sample.
 
 ## Phase log
