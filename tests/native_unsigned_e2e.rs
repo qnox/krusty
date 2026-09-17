@@ -315,3 +315,60 @@ fn an_unsigned_array_renders_each_element_unsigned_when_it_is_walked() {
         "OK",
     );
 }
+
+/// A SIGNED value converted to an unsigned type — `42.toUInt()`, `(-1).toUByte()`.
+///
+/// These are not members of an unsigned type: the receiver is signed, so they live on the facade
+/// beside the value class and the unsigned member table never saw them. Every one declined, which
+/// on this corpus was 21 cases across `toUInt` and `toUByte` alone.
+///
+/// Kotlin defines each as the ordinary signed conversion to the target's width with those bits
+/// reinterpreted, and the cases below are the ones where that rule is least obvious — so a
+/// backend that guessed the conversion's signedness from the TARGET instead of the source would
+/// fail them rather than pass by accident:
+///
+/// * `(-1).toULong()` WIDENS a negative: the source's sign extends, so every bit is set and the
+///   answer is `ULong`'s maximum. Zero-extending would answer 4294967295.
+/// * `(200.toByte()).toUInt()` widens a `Byte` whose unsigned reading (200) and signed reading
+///   (-56) differ; the signed one is what extends.
+/// * `300.toUByte()` and `(-1L).toUByte()` NARROW, where the target's width truncates.
+///
+/// Every expectation is kotlinc's, taken by running the same expressions under it.
+#[test]
+fn a_signed_value_converts_to_an_unsigned_one_by_its_own_signedness() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   if (42.toUInt() != 42u) return \"fail 42\"\n\
+         \x20   if ((-1).toUInt().toString() != \"4294967295\") return \"fail m1 toUInt\"\n\
+         \x20   if ((-1).toUByte().toString() != \"255\") return \"fail m1 toUByte\"\n\
+         \x20   if ((-1).toUShort().toString() != \"65535\") return \"fail m1 toUShort\"\n\
+         \x20   if ((-1).toULong().toString() != \"18446744073709551615\") return \"fail m1 toULong\"\n\
+         \x20   if (300.toUByte().toString() != \"44\") return \"fail 300 toUByte\"\n\
+         \x20   if ((-1L).toUInt().toString() != \"4294967295\") return \"fail m1L toUInt\"\n\
+         \x20   if ((-1L).toUByte().toString() != \"255\") return \"fail m1L toUByte\"\n\
+         \x20   if ((200.toByte()).toUByte().toString() != \"200\") return \"fail byte toUByte\"\n\
+         \x20   if ((200.toByte()).toUInt().toString() != \"4294967240\") return \"fail byte toUInt\"\n\
+         \x20   if (((-2).toShort()).toUShort().toString() != \"65534\") return \"fail short toUShort\"\n\
+         \x20   if (((-2).toShort()).toUInt().toString() != \"4294967294\") return \"fail short toUInt\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "SignedToUnsigned",
+        "OK",
+    );
+}
+
+/// A FLOAT converted to an unsigned type still declines, and that is the rule rather than an
+/// oversight: `Double.toUInt()` saturates at zero for a negative where the signed conversion
+/// reinterpreted would answer a huge positive. It is a different rule, so it is a different change,
+/// and this pins that the backend refuses it instead of answering it wrongly.
+#[test]
+fn a_float_converted_to_an_unsigned_type_is_declined() {
+    expect_native_decline(
+        "fun box(): String {\n\
+         \x20   val d: Double = -1.5\n\
+         \x20   return if (d.toUInt() == 0u) \"OK\" else \"fail\"\n\
+         }\n",
+        "FloatToUnsigned",
+        "toUInt",
+    );
+}
