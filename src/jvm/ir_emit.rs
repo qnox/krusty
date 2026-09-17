@@ -2970,7 +2970,15 @@ fn attach_synth_debug_tables(
     }
     // Property accessors: getter has only `this`; a `var` setter also has its value parameter (named
     // `<set-?>` by kotlinc), guarded when the property type is a non-null reference.
-    for f in &c.fields {
+    for (field_index, f) in c.fields.iter().enumerate() {
+        // An accessor represented as a real function carries its own debug contract. Decide the
+        // getter and setter independently: a `var` can declare one and retain the synthesized other.
+        // The plugin-generated `descriptor` getter intentionally has NO line table, which this
+        // class-level synthesis would otherwise overwrite with the declaration line.
+        let declared_property = c
+            .properties
+            .iter()
+            .find(|property| property.backing_field == Some(field_index as u32));
         // A CTOR-parameter property's accessors sit on the class-declaration line; a BODY property's
         // sit on its own `val`/`var` line.
         let pline = ir
@@ -2980,13 +2988,15 @@ fn attach_synth_debug_tables(
             .filter(|&l| l != 0)
             .unwrap_or(line);
         let (g, s) = accessor_jvm_names(c, &f.name);
-        cw.set_method_debug(
-            &g,
-            &format!("(){}", desc(f.ty)),
-            Some((0, pline)),
-            &this_only,
-        );
-        if !f.is_final() {
+        if declared_property.is_none_or(|property| property.getter.is_none()) {
+            cw.set_method_debug(
+                &g,
+                &format!("(){}", desc(f.ty)),
+                Some((0, pline)),
+                &this_only,
+            );
+        }
+        if !f.is_final() && declared_property.is_none_or(|property| property.setter.is_none()) {
             let pd = desc(f.ty);
             // The setter's value param is always slot 1 (`this`=0): guard = `aload_1`(1) + the
             // `<set-?>` String's real ldc width + invokestatic(3).
