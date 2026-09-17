@@ -10846,12 +10846,16 @@ fn collect_signatures_with_cp_impl(
                         compact_headers,
                         primary_constructor_declaration,
                     ) {
-                        (Some(headers), Some(declaration)) => resolved_header_annotation_identities(
-                            &streamed_declaration_annotations(headers, declaration).expect(
+                        (Some(headers), Some(declaration)) => {
+                            streamed_resolved_declaration_annotations(
+                                headers,
+                                declaration,
+                                &table.resolved_annotations,
+                            )
+                            .expect(
                                 "a production primary constructor must have compact annotations",
-                            ),
-                            &class_names,
-                        ),
+                            )
+                        }
                         _ => c
                             .primary_ctor_annotations
                             .iter()
@@ -10868,14 +10872,14 @@ fn collect_signatures_with_cp_impl(
                                 let declaration = declaration.expect(
                                     "a production secondary constructor has a stable identity",
                                 );
-                                let annotations = streamed_declaration_annotations(
+                                streamed_resolved_declaration_annotations(
                                     headers,
                                     declaration,
+                                    &table.resolved_annotations,
                                 )
                                 .expect(
                                     "a production secondary constructor has compact annotations",
-                                );
-                                resolved_header_annotation_identities(&annotations, &class_names)
+                                )
                             })
                             .collect(),
                         None => c
