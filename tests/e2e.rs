@@ -871,6 +871,8 @@ mod klib_container_e2e;
 mod klib_declarations_e2e;
 #[path = "klib_native_stdlib_e2e.rs"]
 mod klib_native_stdlib_e2e;
+#[path = "klib_symbol_source_e2e.rs"]
+mod klib_symbol_source_e2e;
 #[path = "kotlin_fun_java_sam_param_e2e.rs"]
 mod kotlin_fun_java_sam_param_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]

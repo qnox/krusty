@@ -581,6 +581,7 @@ mod tests {
                 "js",
                 "jvm",
                 "klib",
+                "klib_symbols",
                 "lexer",
                 "libraries",
                 "metadata",
