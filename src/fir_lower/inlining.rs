@@ -75,13 +75,22 @@ impl BodyLowering<'_> {
                 IrInlineLocalRole::DispatchReceiver,
             ));
         }
+        // An EXTENSION receiver is a leading physical parameter whose recorded name already carries
+        // the receiver spelling. Hand it to debug naming as the function's own name in the receiver
+        // ROLE instead, so the JVM boundary spells `$this$send` rather than escaping the `$`s of a
+        // name that was pre-spelled here.
+        let extension_receiver = self.ir.extension_receiver_fns.contains(&function);
         if let Some(names) = self.ir.param_names(function) {
-            parameter_names.extend(
-                names
-                    .iter()
-                    .cloned()
-                    .map(|name| (name, IrInlineLocalRole::Value)),
-            );
+            parameter_names.extend(names.iter().enumerate().map(|(position, name)| {
+                if extension_receiver && position == 0 {
+                    (
+                        self.ir.functions[function as usize].name.clone(),
+                        IrInlineLocalRole::DispatchReceiver,
+                    )
+                } else {
+                    (name.clone(), IrInlineLocalRole::Value)
+                }
+            }));
         }
         let mut operand_declarations = Vec::new();
         let operand_slots = operands
@@ -91,7 +100,12 @@ impl BodyLowering<'_> {
             .enumerate()
             .map(
                 |(index, ((operand, lambda), ty))| match (self.ir.expr(*operand), lambda) {
-                    (IrExpr::GetValue(slot), None) => Some(*slot),
+                    // An argument that is already a local read still becomes a local OF THE
+                    // EXPANSION: kotlinc copies it so the inline parameter has its own identity,
+                    // name and lifetime. Reusing the caller's slot silently erased the parameter.
+                    (IrExpr::GetValue(slot), None) if parameter_names.get(index).is_none() => {
+                        Some(*slot)
+                    }
                     (IrExpr::Lambda { .. }, Some(_)) => return None,
                     (_, None) => {
                         let slot = self.allocate_temporary();

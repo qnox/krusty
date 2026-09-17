@@ -67,6 +67,62 @@ fn multiple_suspensions_keep_the_first_store_order() {
     assert_eq!(fields, ["I$0", "L$0"]);
 }
 
+/// An inline function's PARAMETERS and extension RECEIVER are locals of the expansion, so a
+/// suspension inside the inlined body spills them and `@DebugMetadata` names them — `url$iv`,
+/// `$this$send$iv`, with one `$iv` per nesting level.
+///
+/// krusty reused the caller's slot whenever the argument was already a local read, which is the
+/// common case, so the parameter had no identity of its own: it was never spilled and never named.
+/// The extension receiver arrives as a leading physical parameter whose recorded name already
+/// carries the receiver spelling, so it has to be handed to debug naming in the receiver ROLE or the
+/// `$`s in it get escaped to `_u24`.
+///
+/// This shape — nested `suspend inline` extensions — is what the corpus is built from, a client
+/// method calling `post`/`request`/`body`.
+#[test]
+fn an_inline_expansions_parameters_and_receiver_are_named_spills() {
+    let src = "class Box(val name: String)\n\
+               \n\
+               suspend fun fetch(v: String): String = v\n\
+               \n\
+               suspend inline fun <T> Box.call(url: String, build: (String) -> T): T {\n\
+               \x20   val local = url + name\n\
+               \x20   val got = fetch(local)\n\
+               \x20   return build(got)\n\
+               }\n\
+               \n\
+               suspend inline fun Box.send(url: String): String {\n\
+               \x20   val prepared = url + \"?\"\n\
+               \x20   return call(prepared) { it + name }\n\
+               }\n\
+               \n\
+               suspend fun run(b: Box, u: String): String = b.send(u)\n";
+    let (slots, names) = debug_metadata_names(src, "InlineSpillNames", "InlineSpillNamesKt$run$1");
+    assert_eq!(
+        names,
+        [
+            "b",
+            "u",
+            "$this$send$iv",
+            "url$iv",
+            "prepared$iv",
+            "$this$call$iv$iv",
+            "url$iv$iv",
+            "local$iv$iv",
+        ],
+        "both compilers name the same spilled locals"
+    );
+    // The field POSITIONS are not yet kotlinc's `L$0..L$7`: krusty still spills three unnamed
+    // temporaries of the expansion that kotlinc does not, which pushes the named ones apart. That
+    // is the remaining half of this divergence and it is stated here rather than hidden, so closing
+    // it fails this assertion and updates it.
+    assert_eq!(
+        slots,
+        ["L$0", "L$1", "L$2", "L$3", "L$5", "L$8", "L$9", "L$10"],
+        "krusty's positions, still carrying three unnamed extra spills"
+    );
+}
+
 /// `@DebugMetadata`'s `n`/`s` lists are neither the field layout nor a grouping by kind: kotlinc
 /// hoists the REFERENCE spills and then keeps the order the locals were spilled in. Declaring a
 /// `Long` between two `Int`s puts `J$0` between `I$0` and `I$1`, which no kind grouping produces —
@@ -156,6 +212,21 @@ fn a_tail_only_inline_expansion_keeps_its_value_on_the_stack() {
         ["L$0", "L$1"],
         "krusty's complete field list, one shorter than this branch's base",
     );
+}
+
+/// The `n` array of a continuation's `@DebugMetadata`, asserted equal between the compilers, with
+/// KRUSTY's `s` array returned alongside it. Use this where the names agree but the field positions
+/// do not yet, so a test can pin the names and state the positions separately.
+fn debug_metadata_names(src: &str, name: &str, class: &str) -> (Vec<String>, Vec<String>) {
+    let (reference, krusty) = disassemble_verbose(name, src, class);
+    let want = metadata_array(&reference, "n");
+    assert!(!want.is_empty(), "{class}: kotlinc records spilled locals");
+    assert_eq!(
+        metadata_array(&krusty, "n"),
+        want,
+        "{class} @DebugMetadata spilled local names"
+    );
+    (metadata_array(&krusty, "s"), want)
 }
 
 /// The `s` and `n` arrays of a continuation's `@DebugMetadata`, from BOTH compilers — asserted
