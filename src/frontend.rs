@@ -804,6 +804,24 @@ where
                 name_anonymous_classes(&mut file, &format!("{stem}Kt"));
             }
             header_validation::validate(&file, diags);
+            // `expect`/`actual` outside a multiplatform project is an ERROR, not a no-op. Accepting
+            // it emitted an artifact that could not link: a call to an unmatched `expect fun` was
+            // written as an `invokestatic` of a method the facade does not declare, so the program
+            // failed at its first call rather than at compile time. Reported once per modifier, at
+            // the modifier, in the reference compiler's own words.
+            if !multiplatform {
+                // The wording does not vary with which modifier was written — an `actual` reports
+                // the same sentence, naming both — and a member `actual` is reported too, at its
+                // own column. Both measured against the reference compiler rather than assumed.
+                for (_, span) in &file.multiplatform_modifiers {
+                    diags.error(
+                        *span,
+                        "'expect' and 'actual' declarations can be used only in multiplatform \
+                         projects. Learn more about Kotlin Multiplatform: \
+                         https://kotl.in/multiplatform-setup",
+                    );
+                }
+            }
         }
         let parse_error = source.kind != SourceKind::Java
             && diags.diags[diagnostics_before..]

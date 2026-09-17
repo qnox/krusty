@@ -1774,7 +1774,24 @@ impl<'a> Parser<'a> {
             {
                 // A modifier soft keyword immediately followed by `:` is a NAME, not a modifier
                 // (`fun f(open: Int)`, `@Anno sealed: T`) — a real modifier is never followed by a colon.
-                mods.push(self.text().to_string());
+                let text = self.text().to_string();
+                // `expect` and `actual` are legal only in a multiplatform project, and kotlinc's
+                // diagnostic points at the MODIFIER, so its span is captured here where the keyword
+                // is in hand. Every call site records, members included, because a member `actual`
+                // is reported too. Deduped by span: the `companion fun` lookahead consumes a prefix
+                // and rewinds, and the ordinary path then re-consumes the same keyword.
+                if text == "expect" || text == "actual" {
+                    let span = self.tok().span;
+                    if !self
+                        .file
+                        .multiplatform_modifiers
+                        .iter()
+                        .any(|(_, seen)| *seen == span)
+                    {
+                        self.file.multiplatform_modifiers.push((text.clone(), span));
+                    }
+                }
+                mods.push(text);
                 self.bump();
             } else {
                 break;
