@@ -25,3 +25,20 @@ pub(super) fn mark_expression_start(ir: &IrFile, expression: ExprId, code: &mut 
         }
     }
 }
+
+/// Mark the actual return instruction after any active `finally` blocks have run.
+///
+/// An implicit expression-body return uses the body's closing line. An explicit return uses its own
+/// source line, which matters when a finalizer changed the line in effect before control comes back
+/// to the pending return.
+pub(super) fn mark_return(ir: &IrFile, returned: ExprId, code: &mut CodeBuilder) {
+    if let Some(&line) = ir
+        .implicit_return_end_lines
+        .get(&returned)
+        .or_else(|| ir.expr_source_lines.get(&returned))
+    {
+        if line != 0 {
+            code.mark_line(line);
+        }
+    }
+}
