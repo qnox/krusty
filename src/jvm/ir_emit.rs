@@ -6905,6 +6905,7 @@ fn emit_class(
                 .map(|property| property.init)
                 .chain(init_body),
         );
+        e.generated_initializer = !c.is_source_declared;
         let mut clinit = CodeBuilder::new(0);
         clinit.new_obj(ci);
         clinit.dup();
@@ -13420,6 +13421,10 @@ struct Emitter<'a> {
     /// Active `finally` bodies, outermost first. A source-level control transfer executes these
     /// before leaving its protected region; the stack carries exact IR identities, not syntax.
     return_finalizers: Vec<u32>,
+    /// A generated class initializer has no source expression that owns JVM reference-boundary
+    /// casts. Keep that representation choice in emission instead of inserting semantic casts into
+    /// common/plugin IR.
+    generated_initializer: bool,
 }
 
 fn parse_descriptor_params(desc: &str) -> Option<Vec<Ty>> {
@@ -13457,6 +13462,36 @@ impl<'a> Emitter<'a> {
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,
             return_finalizers: Vec::new(),
+            generated_initializer: false,
+        }
+    }
+
+    /// Materialize a generated initializer's verifier-visible reference boundary. The common IR
+    /// retains only the semantic value and destination; the JVM backend owns whether an otherwise
+    /// valid upcast is written as `checkcast` for classfile parity.
+    fn adapt_generated_initializer_reference(
+        &mut self,
+        expression: crate::ir::ExprId,
+        source: Ty,
+        physical: Ty,
+        code: &mut CodeBuilder,
+    ) {
+        if !self.generated_initializer
+            || !source.is_reference()
+            || !physical.is_reference()
+            || type_descriptor(source) == type_descriptor(physical)
+            || jvm_is_erased_top(ir_ty_to_jvm(&source))
+            || !matches!(
+                self.ir.expr(expression),
+                IrExpr::GetValue(_) | IrExpr::ExternalStaticInstance { .. }
+            )
+        {
+            return;
+        }
+        let internal = crate::jvm::names::instanceof_internal_name(physical);
+        if internal != "java/lang/Object" {
+            let class = self.cw.class_ref(&internal);
+            code.checkcast(class);
         }
     }
 
@@ -18501,6 +18536,7 @@ impl<'a> Emitter<'a> {
             .copied()
             .unwrap_or(source);
         self.adapt_physical_operand(source, semantic, None, physical, code);
+        self.adapt_generated_initializer_reference(expression, source, physical, code);
     }
 
     fn adapt_physical_call_operand_for(

@@ -1838,23 +1838,18 @@ impl IrPlugin for SerializationPlugin {
                 // Pass the `$serializer` (a `GeneratedSerializer`) so the descriptor can derive element
                 // descriptors from `childSerializers()` (`getElementDescriptor`/introspection).
                 //
-                // A SINGLETON serializer names itself by its own `INSTANCE`, read at the use site and
-                // cast to the parameter's type — kotlinc's shape. Reading `this` instead made the
-                // emitter hoist `INSTANCE` into a local for the class initializer, which is one store,
-                // one load and one extra local that kotlinc does not have. A GENERIC serializer is a
-                // real instance built by its constructor, where `this` IS the value.
+                // A SINGLETON serializer names itself by its own `INSTANCE`, read at the use site.
+                // Reading `this` instead made the JVM emitter hoist `INSTANCE` into a local for the
+                // class initializer, which is one store, one load and one extra local that kotlinc
+                // does not have. A GENERIC serializer is a real instance built by its constructor,
+                // where `this` IS the value. Any JVM reference-boundary cast remains an emission fact.
                 let pgsd_self = if is_generic {
                     ir.add_expr(IrExpr::GetValue(0))
                 } else {
-                    let instance = ir.add_expr(IrExpr::ExternalStaticInstance {
+                    ir.add_expr(IrExpr::ExternalStaticInstance {
                         owner: serializer_name,
                         ty: serializer_name,
                         field: "INSTANCE".to_string(),
-                    });
-                    ir.add_expr(IrExpr::TypeOp {
-                        op: crate::ir::IrTypeOp::Cast,
-                        arg: instance,
-                        type_operand: class_ty(GENERATED_SERIALIZER_FQ),
                     })
                 };
                 let pgsd_n = ir.add_expr(IrExpr::Const(IrConst::Int(foo_fields.len() as i32)));
@@ -1892,19 +1887,11 @@ impl IrPlugin for SerializationPlugin {
             }
             let this0 = ir.add_expr(IrExpr::GetValue(0));
             let dval = ir.add_expr(IrExpr::GetValue(desc_local));
-            // The local is typed as the concrete descriptor the `addElement` calls need; the FIELD is
-            // the `SerialDescriptor` the interface exposes. kotlinc narrows at the store, so the cast
-            // is part of the store rather than something the local carries.
-            let stored = ir.add_expr(IrExpr::TypeOp {
-                op: crate::ir::IrTypeOp::Cast,
-                arg: dval,
-                type_operand: class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
-            });
             init_stmts.push(ir.add_expr(IrExpr::SetField {
                 receiver: this0,
                 class: ser_id,
                 index: 0,
-                value: stored,
+                value: dval,
             }));
             // Store each constructor type-param serializer (`GetValue(1..=N)`) to its field (`1..=N`).
             for k in 0..n_tp {
@@ -2815,6 +2802,47 @@ mod tests {
                 "childSerializers",
                 "typeParametersSerializers"
             ]
+        );
+    }
+
+    #[test]
+    fn singleton_descriptor_init_keeps_jvm_casts_out_of_common_ir() {
+        let (mut ir, ctx, _) = serializable_class("demo/Foo", &["kotlin/Int"]);
+        run(&mut ir, &ctx);
+
+        let serializer = find_class(&ir, "demo/Foo$$serializer");
+        let init = serializer
+            .init_body
+            .expect("generated serializer initializer");
+        let IrExpr::Block { stmts, value: None } = ir.expr(init) else {
+            panic!("generated serializer initializer is not a statement block");
+        };
+        let IrExpr::Variable {
+            init: Some(descriptor),
+            ..
+        } = ir.expr(stmts[0])
+        else {
+            panic!("descriptor initializer does not declare its semantic local");
+        };
+        let IrExpr::New { args, .. } = ir.expr(*descriptor) else {
+            panic!("descriptor initializer is not a constructor call");
+        };
+        assert!(
+            matches!(ir.expr(args[1]), IrExpr::ExternalStaticInstance { .. }),
+            "the semantic singleton argument must not be wrapped in a JVM-only cast"
+        );
+        let descriptor_store = stmts
+            .iter()
+            .find_map(|statement| match ir.expr(*statement) {
+                IrExpr::SetField {
+                    index: 0, value, ..
+                } => Some(*value),
+                _ => None,
+            })
+            .expect("descriptor field store");
+        assert!(
+            matches!(ir.expr(descriptor_store), IrExpr::GetValue(_)),
+            "the semantic descriptor value must not be wrapped in a JVM-only cast"
         );
     }
 
