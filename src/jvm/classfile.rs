@@ -2790,12 +2790,6 @@ impl ClassWriter {
             .iter()
             .any(|method| !method.method_parameters.is_empty())
             .then(|| self.cp.utf8("MethodParameters"));
-        // Intern `Deprecated` only if the class or a method carries it; a method's own use already
-        // interned it in the per-method sequence above.
-        let deprecated_attr_name = method_dep_name.or_else(|| {
-            (self.class_deprecated || !self.deprecated_methods.is_empty())
-                .then(|| self.cp.utf8("Deprecated"))
-        });
         // Source-header annotation stubs carry only the omission policy. The reader deliberately
         // ignores the default payload, but the attribute body remains structurally valid.
         let annotation_default_attr = self
@@ -2866,6 +2860,14 @@ impl ClassWriter {
             let mut body = Vec::new();
             u2(&mut body, file_idx);
             (name, body)
+        });
+        // Intern `Deprecated` only if the class or a method carries it; a method's own use already
+        // interned it in the per-method sequence above. A CLASS-level one interns here — after
+        // `InnerClasses` and `SourceFile`, before `RuntimeVisibleAnnotations` — which is kotlinc's
+        // order; interning it with the method names put it ahead of both.
+        let deprecated_attr_name = method_dep_name.or_else(|| {
+            (self.class_deprecated || !self.deprecated_methods.is_empty())
+                .then(|| self.cp.utf8("Deprecated"))
         });
         // ONE `RuntimeVisibleAnnotations` attribute for all queued annotations (`@Metadata` + user ones);
         // its attribute name is interned LAST, as kotlinc does.
