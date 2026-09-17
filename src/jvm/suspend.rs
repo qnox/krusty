@@ -2701,18 +2701,12 @@ fn build_state_machine(
         for (state_idx, call) in resume_points.iter().enumerate() {
             let scope = &flat.scopes[call];
             let mut positions = kind_positions(&scope.values);
-            // `@DebugMetadata`'s `n`/`s` lists are ordered by KIND in a fixed sequence, not by the
-            // class's field layout: kotlinc names `ref` before `count` even where the int group is
-            // laid out first. The two orders are independent and only look alike when they agree.
-            positions.sort_by_key(|&(_, _, kind, pos)| {
-                (
-                    DEBUG_SPILL_KIND_ORDER
-                        .iter()
-                        .position(|&entry| entry == kind)
-                        .expect("spill_kind returns a debug-metadata kind"),
-                    pos,
-                )
-            });
+            // `@DebugMetadata`'s `n`/`s` lists hoist the REFERENCE spills ahead of the rest and
+            // otherwise keep the order the locals were spilled in. They are not grouped by kind:
+            // kotlinc lists `J$0` between `I$0` and `I$1` when the `long` was declared between the
+            // two `int`s. Nor do they follow the class's field layout, which groups by kind — the
+            // two orders are independent and only look alike when they agree.
+            positions.sort_by_key(|&(_, _, kind, _)| u8::from(kind != REFERENCE_SPILL_KIND));
             for (slot, _ty, kind, pos) in positions {
                 let name = scope
                     .names
@@ -5855,9 +5849,10 @@ fn spill_kind(ty: &Ty) -> char {
     }
 }
 
-/// Fixed kind order used only by `@DebugMetadata`'s `n`/`s` arrays. Field layout follows the
-/// first-spill order recorded by [`SpillLayout`] instead.
-const DEBUG_SPILL_KIND_ORDER: [char; 9] = ['L', 'I', 'J', 'F', 'D', 'Z', 'C', 'B', 'S'];
+/// The spill kind of a reference local. `@DebugMetadata`'s `n`/`s` arrays list these first and keep
+/// every other spill in the order it was spilled; field layout instead groups by kind, in the
+/// first-spill order recorded by [`SpillLayout`].
+const REFERENCE_SPILL_KIND: char = 'L';
 
 /// Annotate each scope-list entry with its kind and position WITHIN that kind (kotlinc's
 /// per-suspension positional slot).
