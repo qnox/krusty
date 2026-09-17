@@ -2513,14 +2513,24 @@ fn a_serializable_class_lists_its_generated_serializer_as_nested() {
     );
 }
 
+/// Whether a javap line opens a MEMBER declaration rather than one of the attribute rows under it.
+///
+/// `descriptor:` and `Signature:` rows also end in `;` around a parenthesized descriptor, so the
+/// `:` is what separates them; constant-pool rows start with `#`. The class initializer prints as
+/// `static {};` and has no parameter list at all.
+fn opens_a_member(line: &str) -> bool {
+    line == "static {};"
+        || (line.ends_with(';')
+            && line.contains('(')
+            && !line.contains(':')
+            && !line.starts_with('#'))
+}
+
 /// The generic `Signature` of a member of a generated serializer, as javap prints the attribute.
 fn member_signature(disassembly: &str, member: &str) -> String {
     // The attribute trails the member's `Code`, so the search runs to the NEXT member declaration
-    // rather than a fixed number of lines. A declaration is an indented line ending in `;` that is
-    // not a constant-pool row (those start with `#`).
-    let declaration = |line: &str| {
-        line.ends_with(';') && line.contains('(') && !line.contains(':') && !line.starts_with('#')
-    };
+    // rather than a fixed number of lines.
+    let declaration = opens_a_member;
     let mut lines = disassembly
         .lines()
         .map(str::trim)
@@ -2783,9 +2793,7 @@ fn only_an_array_of_a_star_projection_records_its_descriptor() {
 
 /// One member's disassembly, from its declaration to the next one, with pool indices erased.
 fn member_body(disassembly: &str, member: &str) -> Vec<String> {
-    let declaration = |line: &str| {
-        line.ends_with(';') && line.contains('(') && !line.contains(':') && !line.starts_with('#')
-    };
+    let declaration = opens_a_member;
     let mut lines = disassembly
         .lines()
         .map(str::trim)
@@ -2926,5 +2934,57 @@ fn a_deprecated_class_attribute_name_interns_after_its_source_file() {
         got.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
         want.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
         "class attribute name interning order"
+    );
+}
+
+/// The class initializer that builds a singleton serializer's `descriptor`.
+///
+/// Three divergences, all invisible to a running program:
+///
+///   * krusty read the serializer through `this`, which made the emitter hoist `INSTANCE` into a
+///     local for the class initializer — one store, one load and one extra local kotlinc does not
+///     have. kotlinc reads `INSTANCE` at the use site.
+///   * neither narrowing cast was emitted: `INSTANCE` to the `GeneratedSerializer` the descriptor's
+///     constructor takes, and the built descriptor to the `SerialDescriptor` the field holds.
+///   * a generated class has no per-statement source to map, so kotlinc gives its `<clinit>` two
+///     line entries — the body at the declaration line, the trailing `return` at the declaration's
+///     closing line. krusty emitted no `LineNumberTable` at all.
+#[test]
+fn a_singleton_serializers_class_initializer_matches_kotlinc() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    // A multi-line declaration, so the closing-brace entry is a DIFFERENT line from the header and
+    // the two cannot be confused.
+    let src = "import kotlinx.serialization.Serializable\n\
+               \n\
+               @Serializable\n\
+               data class Repo(\n\
+               \x20   val id: Long,\n\
+               \x20   val name: String,\n\
+               )\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "SerializerClassInit",
+        src,
+        "Repo$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = member_body(&built.reference, "static {}");
+    assert!(
+        want.iter().any(|line| line == "line 3: 10")
+            && want.iter().any(|line| line.starts_with("line 7:")),
+        "kotlinc maps the body to the declaration and the return to its closing line: {want:?}"
+    );
+    assert_eq!(
+        member_body(&built.krusty, "static {}"),
+        want,
+        "generated serializer class initializer"
     );
 }
