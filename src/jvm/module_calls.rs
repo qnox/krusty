@@ -364,16 +364,11 @@ pub(super) fn realize_default_calls(
     Ok(())
 }
 
-/// Map backend-neutral stable module call targets to JVM file facades. Candidate selection and
-/// argument mapping are already complete; this pass performs only the JVM container/name
-/// realization and therefore never reads imports, scopes, or overload sets.
-pub(super) fn realize(
-    ir: &mut IrFile,
-    stems: &[String],
-    classpath: &crate::jvm::classpath::Classpath,
-    property_realizations: &mut PropertyRealizations,
-) -> Result<(), ModuleRealizationTarget> {
-    realize_declared_function_names(ir)?;
+/// Realize checked semantic `super` dispatch as the JVM's physical non-virtual call. This is a
+/// separate pass because compiler plugins add checked declarations after the streaming frontend
+/// has completed, while the backend must remain the sole owner of descriptors and invocation
+/// opcodes.
+pub(super) fn realize_super_calls(ir: &mut IrFile) -> Result<(), ModuleRealizationTarget> {
     for raw in 0..ir.exprs.len() {
         // `super` dispatch: the checker fixed the supertype declaration, so only the PHYSICAL
         // descriptor is left to choose, and that is a JVM ABI decision derived from the semantic
@@ -406,11 +401,11 @@ pub(super) fn realize(
                 ));
             }
             let name = match kind {
-                crate::fir::FirSuperCallKind::Function => name,
-                crate::fir::FirSuperCallKind::PropertyGetter => {
+                crate::ir::IrSuperCallKind::Function => name,
+                crate::ir::IrSuperCallKind::PropertyGetter => {
                     crate::names::property_getter_name(&name)
                 }
-                crate::fir::FirSuperCallKind::PropertySetter => {
+                crate::ir::IrSuperCallKind::PropertySetter => {
                     crate::names::property_setter_name(&name)
                 }
             };
@@ -555,6 +550,22 @@ pub(super) fn realize(
             }
             continue;
         }
+    }
+    Ok(())
+}
+
+/// Map backend-neutral stable module call targets to JVM file facades. Candidate selection and
+/// argument mapping are already complete; this pass performs only the JVM container/name
+/// realization and therefore never reads imports, scopes, or overload sets.
+pub(super) fn realize(
+    ir: &mut IrFile,
+    stems: &[String],
+    classpath: &crate::jvm::classpath::Classpath,
+    property_realizations: &mut PropertyRealizations,
+) -> Result<(), ModuleRealizationTarget> {
+    realize_declared_function_names(ir)?;
+    realize_super_calls(ir)?;
+    for raw in 0..ir.exprs.len() {
         let replacement = match ir.exprs[raw].clone() {
             IrExpr::Call {
                 callee:

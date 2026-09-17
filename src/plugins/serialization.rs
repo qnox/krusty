@@ -1600,7 +1600,13 @@ impl IrPlugin for SerializationPlugin {
                 deserialize,
                 child_serializers: child,
                 type_parameter_serializers: type_params_ser,
-            } = add_serializer_members(ir, serializer_name, serialized_ty, owner_start_line);
+            } = add_serializer_members(
+                ir,
+                serializer_name,
+                serialized_ty,
+                owner_start_line,
+                !type_params.is_empty(),
+            );
 
             let foo_fields: Vec<(String, Ty)> = ir.classes[class_id as usize]
                 .fields
@@ -1615,35 +1621,25 @@ impl IrPlugin for SerializationPlugin {
                 .iter()
                 .map(crate::ir::IrField::has_default)
                 .collect();
-            // Generic `@Serializable class C<T…>`: the `$serializer` is a CLASS (not a singleton object)
-            // with one `KSerializer` constructor parameter per type parameter (`typeSerialK`, stored at
-            // fields `1..=N`, after the `descriptor` field 0), used as the element serializer for any
-            // type-parameter-typed property. A non-generic class keeps the singleton-object form.
+            // A generic `$serializer` is a class with one stored `KSerializer` per type parameter;
+            // a non-generic serializer keeps the singleton-object form.
             let n_tp = type_params.len();
             let is_generic = n_tp > 0;
             let mut ser = synthetic_class(&ser_fq);
-            // The generated class stands where the annotated declaration does: kotlinc roots its
-            // constructor's `LineNumberTable` there, and the local-variable table naming `this`
-            // rides on the same record. Every other generated member already carried both through
-            // `record_debug_tables`; the constructor is emitted from the CLASS, so the generated
-            // class retains both the annotation-inclusive start and the distinct header line. Its
-            // CLOSING line comes along too: the class initializer's trailing `return` maps there.
+            // The generated class keeps the annotated declaration's start, header, and closing
+            // lines for its constructor and class-initializer debug tables.
             ser.decl_line = owner_header_line;
             ser.decl_start_line = owner_start_line;
             ser.decl_end_line = ir.classes[class_id as usize].decl_end_line;
             ser.applied_annotations = generated_serializer_annotations();
-            ser.is_object = !is_generic; // non-generic `$serializer` is a singleton object (INSTANCE)
-                                         // Implement `GeneratedSerializer` (extends `KSerializer`) — it declares `childSerializers()`
-                                         // (we generate it) and a DEFAULT `typeParametersSerializers()`, and it lets the descriptor
-                                         // (built with `this` below) derive element descriptors for `getElementDescriptor`/introspection.
+            ser.is_object = !is_generic;
+            // `GeneratedSerializer` supplies the default type-parameter serializer member.
             ser.interfaces = vec![crate::types::type_name(GENERATED_SERIALIZER_FQ)].into();
             ser.type_params = type_params.clone();
             ser.type_param_bounds = type_param_bounds;
             ser.supertypes = vec![kserializer_of(serialized_ty)];
-            // Field 0 is the `descriptor` (a `PluginGeneratedSerialDescriptor`), built in <init>. A generic
-            // serializer adds one `KSerializer` field per type parameter (`typeSerial0..N` at fields 1..=N),
-            // set from the constructor parameters.
-            // Field 0 `descriptor` + each `typeSerial{k}` are `final` private fields.
+            // Field 0 is the final descriptor; generic serializer fields 1..=N hold the final
+            // type-parameter serializers supplied to the constructor.
             let descriptor_field = ser.fields.len() as u32;
             ser.fields.push(
                 crate::ir::IrField::new(
@@ -2417,7 +2413,9 @@ impl IrPlugin for SerializationPlugin {
                         });
                         ir.functions[fid as usize].body = Some(body);
                     }
-                    "typeParametersSerializers" => {
+                    // A serializer without type parameters keeps the semantic interface-default
+                    // delegation installed when its member was declared.
+                    "typeParametersSerializers" if !class_type_params.is_empty() => {
                         let elements: Vec<ExprId> = (1..=class_type_params.len() as u32)
                             .map(|fidx| {
                                 let this = ir.add_expr(IrExpr::GetValue(0));
@@ -2862,6 +2860,12 @@ mod tests {
             locals,
             [2, 3, 4, 5, 6, 7, 8],
             "semantic identities stay consecutive; a backend assigns wide physical slots"
+        );
+        assert!(
+            !ir.exprs
+                .iter()
+                .any(|expression| matches!(expression, IrExpr::Continue { .. })),
+            "common IR must not encode the JVM's terminal switch jump as continue"
         );
     }
 

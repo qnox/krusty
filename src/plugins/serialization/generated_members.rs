@@ -1,7 +1,7 @@
 //! Construction of methods owned by serialization-plugin generated classes.
 
 use super::{class_ty, kserializer_of, unit};
-use crate::ir::{ExprId, FnParamInfo, IrExpr, IrFile, IrFunction};
+use crate::ir::{Callee, ExprId, FnParamInfo, IrExpr, IrFile, IrFunction};
 use crate::types::{Ty, TypeName};
 
 pub(super) struct GeneratedSerializerMembers {
@@ -18,6 +18,7 @@ pub(super) fn add_serializer_members(
     owner: TypeName,
     serialized_type: Ty,
     owner_line: u32,
+    has_type_parameters: bool,
 ) -> GeneratedSerializerMembers {
     let descriptor = add_instance_method(
         ir,
@@ -69,12 +70,29 @@ pub(super) fn add_serializer_members(
         serializer_array,
         None,
     );
-    let empty_serializers = ir.add_expr(IrExpr::Vararg {
-        array_type: serializer_array,
-        spreads: vec![],
-        elements: vec![],
+    // `GeneratedSerializer` owns the default implementation. Keep that semantic super-member call
+    // in common IR; a target backend chooses its nonvirtual calling convention and descriptor.
+    let this = ir.add_expr(IrExpr::GetValue(0));
+    let inherited = ir.add_expr(IrExpr::Call {
+        callee: Callee::Super {
+            owner: crate::types::type_name(super::GENERATED_SERIALIZER_FQ),
+            dispatch_owner: owner,
+            enclosing_dispatch: false,
+            kind: crate::ir::IrSuperCallKind::Function,
+            name: "typeParametersSerializers".to_string(),
+            params: Vec::new(),
+            ret: serializer_array,
+            interface: true,
+            realization: crate::libraries::MemberRealization::Dispatch,
+            descriptor: String::new(),
+            source: None,
+            defaults: Vec::new(),
+            source_member: None,
+        },
+        dispatch_receiver: Some(this),
+        args: Vec::new(),
     });
-    let returned = ir.add_expr(IrExpr::Return(Some(empty_serializers)));
+    let returned = ir.add_expr(IrExpr::Return(Some(inherited)));
     let body = ir.add_expr(IrExpr::Block {
         stmts: vec![returned],
         value: None,
@@ -87,9 +105,13 @@ pub(super) fn add_serializer_members(
         serializer_array,
         Some(body),
     );
-    // A plain `GeneratedSerializer` override is open and participates in bridge emission.
-    ir.open_methods.insert(type_parameter_serializers);
-    ir.bridge_methods.insert(type_parameter_serializers);
+    // The non-generic serializer delegates to the interface default and kotlinc publishes that
+    // adapter as open/bridge. A generic serializer supplies its own array and publishes an ordinary
+    // final override. This is a declaration-shape fact from the producer, not a JVM name check.
+    if !has_type_parameters {
+        ir.open_methods.insert(type_parameter_serializers);
+        ir.bridge_methods.insert(type_parameter_serializers);
+    }
     record_debug_tables(
         ir,
         owner_line,
@@ -193,6 +215,79 @@ pub(super) fn record_debug_tables(
             line_and_locals
                 .iter()
                 .map(|function| (*function, owner_line)),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::type_name;
+
+    #[test]
+    fn default_member_dispatch_stays_semantic_until_backend_realization() {
+        let mut ir = IrFile::default();
+        let owner = type_name("demo/Plain$$serializer");
+        let members = add_serializer_members(&mut ir, owner, class_ty("demo/Plain"), 0, false);
+        let body = ir.functions[members.type_parameter_serializers as usize]
+            .body
+            .expect("generated default delegation body");
+        let IrExpr::Block { stmts, value: None } = ir.expr(body) else {
+            panic!("default delegation is not a statement block");
+        };
+        let Some(IrExpr::Return(Some(call))) = stmts.first().map(|statement| ir.expr(*statement))
+        else {
+            panic!("default delegation does not return its call");
+        };
+        let IrExpr::Call {
+            callee:
+                Callee::Super {
+                    owner: super_owner,
+                    dispatch_owner,
+                    params,
+                    ret,
+                    interface,
+                    realization,
+                    descriptor,
+                    ..
+                },
+            dispatch_receiver: Some(_),
+            args,
+        } = ir.expr(*call)
+        else {
+            panic!("default delegation is not a semantic super-member call");
+        };
+        assert_eq!(
+            *super_owner,
+            type_name(super::super::GENERATED_SERIALIZER_FQ)
+        );
+        assert_eq!(*dispatch_owner, owner);
+        assert!(params.is_empty());
+        assert_eq!(
+            *ret,
+            Ty::obj_args(
+                "kotlin/Array",
+                &[kserializer_of(Ty::star_projection(Ty::nullable(class_ty(
+                    "kotlin/Any"
+                ))))]
+            )
+        );
+        assert!(*interface);
+        assert_eq!(*realization, crate::libraries::MemberRealization::Dispatch);
+        assert!(
+            descriptor.is_empty(),
+            "common IR must not carry a JVM descriptor"
+        );
+        assert!(args.is_empty());
+        assert!(
+            !ir.exprs.iter().any(|expression| matches!(
+                expression,
+                IrExpr::Call {
+                    callee: Callee::Special { .. },
+                    ..
+                }
+            )),
+            "plugin IR must not choose the JVM invokespecial representation"
         );
     }
 }
