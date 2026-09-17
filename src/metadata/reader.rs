@@ -1130,6 +1130,14 @@ pub struct BuiltinClass {
     /// to distinguish common declarations from platform-only classifiers in the same archive.
     pub is_expect: bool,
     pub is_nested: bool,
+    /// The entry names an `enum class` declares, in declaration order (`Class.enumEntry` = 13, each
+    /// an `EnumEntry` whose field 1 is a string-table index). Empty for a non-enum. Without them
+    /// `Color.RED` resolves to nothing.
+    pub enum_entries: Vec<String>,
+    /// The direct subclasses a `sealed` declaration names (`Class.sealedSubclassFqName` = 16, a
+    /// PACKED list of qualified-name ids). Empty for a non-sealed declaration. An exhaustive `when`
+    /// over a dependency's sealed type is proven from these.
+    pub sealed_subclasses: Vec<String>,
     /// The declaration's raw `Class.flags` word, as the fragment records it.
     ///
     /// The Kotlin facts this reader can name — [`Self::kind`], [`Self::visibility`],
@@ -1624,6 +1632,22 @@ pub fn parse_builtins(data: &[u8]) -> BuiltinPackage {
     parse_package_fragment(pf)
 }
 
+/// One `EnumEntry`'s declared name. The message carries the name in field 1 as a string-table
+/// index; a malformed entry with no name contributes nothing rather than an empty entry name.
+fn enum_entry_name(body: &[u8], strings: &[String]) -> Option<String> {
+    let mut p = Pb { b: body, i: 0 };
+    while !p.at_end() {
+        let tag = p.varint()?;
+        match (tag >> 3, tag & 7) {
+            (1, 0) => return strings.get(p.varint()? as usize).cloned(),
+            (_, w) => {
+                p.skip(w)?;
+            }
+        }
+    }
+    None
+}
+
 /// One `Property` declaration, from a class's member list or a package's top-level list.
 ///
 /// Both carry the same message, so both read it here. The field numbers were taken off a klib the
@@ -1777,6 +1801,8 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
         // declaration and forces downstream JVM-specific code to guess which input it received.
         let mut flags = 6u64;
         let mut supids: Vec<u64> = Vec::new();
+        let mut sealed_ids: Vec<u64> = Vec::new();
+        let mut enum_entry_bodies: Vec<&[u8]> = Vec::new();
         let mut types: Vec<&[u8]> = Vec::new();
         let mut ctors: Vec<&[u8]> = Vec::new();
         let mut funcs: Vec<&[u8]> = Vec::new();
@@ -1804,6 +1830,29 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                         if let Some(b) = cp.bytes(n as usize) {
                             class_tparam_bodies.push(b);
                         }
+                    }
+                }
+                // `Class.enumEntry` = 13 — one message per entry, its name in field 1. Read off a
+                // klib the reference compiler wrote for `enum class Color { RED, GREEN }`.
+                (13, 2) => {
+                    if let Some(n) = cp.varint() {
+                        if let Some(body) = cp.bytes(n as usize) {
+                            enum_entry_bodies.push(body);
+                        }
+                    }
+                }
+                // `Class.sealedSubclassFqName` = 16 — PACKED qualified-name ids, the same encoding
+                // `supertype_id` uses. `sealed class Shape` with two subclasses writes two bytes.
+                (16, 2) => {
+                    if let Some(n) = cp.varint() {
+                        if let Some(b) = cp.bytes(n as usize) {
+                            sealed_ids.extend(packed_varints(b));
+                        }
+                    }
+                }
+                (16, 0) => {
+                    if let Some(id) = cp.varint() {
+                        sealed_ids.push(id);
                     }
                 }
                 (8, 2) => {
@@ -1895,6 +1944,14 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
         let supertypes: Vec<String> = supertype_tys
             .iter()
             .filter_map(|t| t.internal().map(str::to_string))
+            .collect();
+        let sealed_subclasses: Vec<String> = sealed_ids
+            .iter()
+            .map(|&id| resolve_qname(&qnames, &strings, id as i64))
+            .collect();
+        let enum_entries: Vec<String> = enum_entry_bodies
+            .iter()
+            .filter_map(|body| enum_entry_name(body, &strings))
             .collect();
         let mut members = Vec::new();
         let constructors = ctors
@@ -2063,6 +2120,8 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
             BuiltinClass {
                 supertypes,
                 supertype_tys,
+                sealed_subclasses,
+                enum_entries,
                 members,
                 constructors,
                 companion_name,

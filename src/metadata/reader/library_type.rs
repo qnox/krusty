@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use crate::libraries::{
     CallSig, ClassifierInheritance, LibraryMember, LibraryType, ParamList, TypeKind,
 };
-use crate::types::{type_name, Ty, TypeNameList, TypeParameters};
+use crate::types::{type_name, Ty, TypeName, TypeParameters};
 
 use super::{builtin_bounds, builtin_ty, BuiltinClass};
 
@@ -40,7 +40,11 @@ fn inheritance(kind: TypeKind, flags: u64, has_no_arg_constructor: bool) -> Clas
 }
 
 /// The classifier record a decoded declaration denotes.
-pub fn library_type(declaration: BuiltinClass) -> LibraryType {
+///
+/// `internal` is the declaration's own identity. It is a parameter rather than something recovered
+/// from the record because a companion object's field type is named relative to its owner
+/// (`C` + `Companion` → `C.Companion`), and the decoded declaration carries only the simple name.
+pub fn library_type(internal: TypeName, declaration: BuiltinClass) -> LibraryType {
     let bounds = builtin_bounds(&declaration.type_params, &HashMap::new());
     let type_parameters = TypeParameters::new(
         declaration
@@ -123,6 +127,12 @@ pub fn library_type(declaration: BuiltinClass) -> LibraryType {
         supertypes,
         supertype_templates,
         constructors,
+        companion_object: declaration.companion_name.as_ref().map(|simple| {
+            (
+                simple.clone(),
+                crate::types::type_name_nested_child(internal, simple),
+            )
+        }),
         hidden_member_properties: Default::default(),
         declared_callables: HashMap::new(),
         declared_callable_order: Vec::new(),
@@ -132,14 +142,18 @@ pub fn library_type(declaration: BuiltinClass) -> LibraryType {
         sam_eligible: false,
         callable_signature: None,
         callable_signatures: Vec::new(),
-        companion_object: None,
         value_underlying: None,
         value_underlying_property: None,
         alias_target: None,
         own_type_parameter_count: type_parameters.type_params.len(),
         type_parameters,
-        sealed_subclasses: TypeNameList::new(),
-        enum_entries: Vec::new(),
+        sealed_subclasses: declaration
+            .sealed_subclasses
+            .iter()
+            .map(|subclass| type_name(subclass))
+            .collect::<Vec<_>>()
+            .into(),
+        enum_entries: declaration.enum_entries,
         enum_entries_accessor: None,
         named_parameter_lists,
         annotations: Vec::new(),

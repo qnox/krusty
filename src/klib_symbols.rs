@@ -114,7 +114,7 @@ impl KlibSymbols {
                         ));
                     members.push(record);
                 }
-                let mut classifier = library_type(declaration);
+                let mut classifier = library_type(owner, declaration);
                 classifier.declared_callables = order
                     .iter()
                     .map(|name| {
