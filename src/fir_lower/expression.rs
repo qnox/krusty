@@ -61,7 +61,7 @@ impl BodyLowering<'_> {
         let first_generated = self.ir.exprs.len();
         let lowered = match &expression.kind {
             FirExprKind::Constant(constant) => {
-                let constant = lower_constant(constant, origin)?;
+                let constant = lower_constant(constant, expression.ty.get(), origin)?;
                 self.ir.add_expr(IrExpr::Const(constant))
             }
             FirExprKind::ArrayLiteral {
@@ -1989,8 +1989,23 @@ impl BodyLowering<'_> {
     }
 }
 
+/// An IR constant for a checked FIR one, carried the way the TARGET carries it.
+///
+/// `ty` is the constant's checked type, and it is read for exactly one reason: `UByte` and
+/// `UShort` are value classes over `Byte` and `Short`, so a backend carries one in that signed
+/// primitive. 200 as a `UByte` is the byte -56, and every later stage has only the number — the IR
+/// constant records no unsigned type and a backend derives `Int` from its shape — so a constant
+/// that leaves here unnarrowed can never be narrowed again.
+///
+/// Unnarrowed is not merely a different spelling. `b(200u)` pushed the int 200 into a method whose
+/// parameter descriptor is `B`, and the callee compared it against the -56 that `200.toUByte()`
+/// produces, so two equal `UByte` values answered `false`. kotlinc pushes `bipush -56` at both.
+///
+/// `UInt` and `ULong` need nothing here: their carriers are `Int` and `Long`, already the full
+/// width of the value, and the bits of 4294967295u are the bits of -1 either way.
 fn lower_constant(
     constant: &FirConstant,
+    ty: Ty,
     origin: crate::fir::OriginId,
 ) -> Result<IrConst, FirLoweringFailure> {
     Ok(match constant {
@@ -1998,11 +2013,15 @@ fn lower_constant(
             i32::try_from(*value)
                 .map_err(|_| FirLoweringFailure::InvalidIntegerConstant { origin })?,
         ),
-        FirConstant::UInt(value) => IrConst::Int(
-            u32::try_from(*value)
-                .map_err(|_| FirLoweringFailure::InvalidIntegerConstant { origin })?
-                as i32,
-        ),
+        FirConstant::UInt(value) => {
+            let value = u32::try_from(*value)
+                .map_err(|_| FirLoweringFailure::InvalidIntegerConstant { origin })?;
+            IrConst::Int(match ty.non_null() {
+                Ty::UByte => i32::from(value as u8 as i8),
+                Ty::UShort => i32::from(value as u16 as i16),
+                _ => value as i32,
+            })
+        }
         FirConstant::Long(value) | FirConstant::ULong(value) => IrConst::Long(*value),
         FirConstant::Double(value) => IrConst::Double(*value),
         FirConstant::Float(value) => IrConst::Float(*value),

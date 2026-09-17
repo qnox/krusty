@@ -1,0 +1,90 @@
+//! `UByte` and `UShort` constants are carried in the signed primitive their value class wraps.
+//!
+//! Each is a value class over `Byte`/`Short`, so the JVM carries one in a `B`/`S` slot and 200 as a
+//! `UByte` IS the byte `-56`. krusty lowered the constant to the semantic number and never narrowed
+//! it, and nothing downstream could: the IR constant records no unsigned type, and the backend
+//! derives `Int` from the constant's shape.
+//!
+//! So an int-sized 200 rode into a `B` parameter. The callee then compared it against the `-56`
+//! that `200.toUByte()` produces, and **two equal `UByte` values answered `false`**:
+//!
+//! ```text
+//! krusty   box:  sipush 200     →  b-7apg3OU:(B)     // callee sees 200
+//! kotlinc  box:  bipush -56     →  b-7apg3OU:(B)     // callee sees -56
+//! ```
+//!
+//! `toString` hid it, because reading the untruncated 200 as unsigned renders "200" exactly as the
+//! correctly narrowed `-56` does. Only a comparison against a value that HAD been narrowed showed
+//! the difference, which is why the wrong answer survived the existing unsigned coverage.
+//!
+//! `UInt` and `ULong` need no narrowing: their carriers are `Int` and `Long`, already the full
+//! width of the value.
+//!
+//! Every expectation here is kotlinc's, taken by compiling and running the same `box()` under it.
+
+use super::common;
+
+fn run(src: &str) -> String {
+    common::expect_box_run_with_stdlib(src, "C")
+}
+
+/// The defect: a narrow unsigned literal reaching a parameter, compared against a narrowed value.
+///
+/// `two` pins the case that passed by accident before — two unnarrowed values compare equal to
+/// each other, so only a comparison against a value that went through `toUByte()` exposed it.
+#[test]
+fn a_narrow_unsigned_literal_reaches_a_parameter_in_its_carrier() {
+    const SRC: &str = "fun b(v: UByte): String = (v == 200.toUByte()).toString()\n\
+fun s(v: UShort): String = (v == 40000.toUShort()).toString()\n\
+fun two(x: UByte, y: UByte): String = (x == y).toString()\n\
+fun box(): String {\n\
+    if (b(200u) != \"true\") return \"fail ubyte\"\n\
+    if (s(40000u) != \"true\") return \"fail ushort\"\n\
+    if (two(200u, 200u) != \"true\") return \"fail pair\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(SRC), "OK");
+}
+
+/// The value each width still reads back as, including both ends of each range.
+///
+/// Narrowing changes the BITS a constant is carried in, so this is the half that must not move:
+/// 255 as a `UByte` is the byte `-1` and still renders "255", and 0 is unchanged. If narrowing
+/// were applied to the wrong width — or with the wrong signedness — these are what would break.
+#[test]
+fn a_narrowed_constant_still_reads_back_as_its_value() {
+    const SRC: &str = "fun bv(v: UByte): String = v.toString()\n\
+fun sv(v: UShort): String = v.toString()\n\
+fun iv(v: UInt): String = v.toString()\n\
+fun lv(v: ULong): String = v.toString()\n\
+fun box(): String {\n\
+    if (bv(0u) != \"0\") return \"fail ubyte min\"\n\
+    if (bv(200u) != \"200\") return \"fail ubyte mid: \" + bv(200u)\n\
+    if (bv(255u) != \"255\") return \"fail ubyte max: \" + bv(255u)\n\
+    if (sv(0u) != \"0\") return \"fail ushort min\"\n\
+    if (sv(40000u) != \"40000\") return \"fail ushort mid: \" + sv(40000u)\n\
+    if (sv(65535u) != \"65535\") return \"fail ushort max: \" + sv(65535u)\n\
+    if (iv(4294967295u) != \"4294967295\") return \"fail uint max\"\n\
+    if (lv(18446744073709551615uL) != \"18446744073709551615\") return \"fail ulong max\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(SRC), "OK");
+}
+
+/// The same constants where they are not a bare argument: a collection element and an array.
+///
+/// These already worked — the value reaches its carrier by another route — and they are here so a
+/// later change to the narrowing cannot break them silently.
+#[test]
+fn a_narrow_unsigned_constant_survives_a_collection_and_an_array() {
+    const SRC: &str = "fun box(): String {\n\
+    val l = listOf<UByte>(200u, 255u)\n\
+    if (l[0].toString() != \"200\" || l[1].toString() != \"255\") return \"fail list\"\n\
+    if (l[0] != 200.toUByte()) return \"fail list element\"\n\
+    val a = ubyteArrayOf(200u, 255u)\n\
+    if (a[0].toString() != \"200\" || a[1].toString() != \"255\") return \"fail array\"\n\
+    if (a[0] != 200.toUByte()) return \"fail array element\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(SRC), "OK");
+}
