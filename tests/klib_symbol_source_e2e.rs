@@ -66,19 +66,27 @@ fn a_classifier_resolves_with_its_declared_shape() {
 }
 
 /// A member call's candidates, with the facts a descriptor erases.
+///
+/// A member resolves through the CLASSIFIER RECORD's `declared_callables`, which is the channel
+/// every other provider publishes members on — not through a classifier-namespace probe. Both
+/// halves are asserted, because a provider that filled only the probe would look right in isolation
+/// and contribute nothing to a real member call.
 #[test]
 fn a_member_call_finds_its_overloads() {
     let Some(symbols) = native_stdlib() else {
         return;
     };
-    let record = symbols.symbols(
-        SymbolNamespace::Classifier(type_name("kotlin/collections/List")),
-        "get",
-    );
-    let functions = match &record.callables {
+    let list = symbols
+        .classifier(type_name("kotlin/collections/List"))
+        .expect("kotlin.collections.List, from the Native stdlib klib");
+    let functions = match list
+        .declared_callables
+        .get("get")
+        .expect("List declares get")
+    {
         krusty::libraries::Callables::Functions(functions)
         | krusty::libraries::Callables::Both { functions, .. } => functions,
-        _ => panic!("List.get resolves to functions"),
+        _ => panic!("List.get is a function"),
     };
     let get = functions
         .overloads
@@ -99,6 +107,64 @@ fn a_member_call_finds_its_overloads() {
         get.call_sig.param_names,
         vec!["index".to_string()],
         "the parameter's source name, which a named argument needs"
+    );
+    assert!(
+        list.declared_callable_order.contains(&"get".to_string()),
+        "declaration order carries the name a materialized surface needs"
+    );
+    assert!(
+        list.members.iter().any(|member| member.name == "get"),
+        "and the member surface agrees with the lookup table"
+    );
+
+    assert!(
+        matches!(
+            symbols
+                .symbols(
+                    SymbolNamespace::Classifier(type_name("kotlin/collections/List")),
+                    "get",
+                )
+                .callables,
+            krusty::libraries::Callables::None
+        ),
+        "a classifier-namespace probe carries nested classifiers, not members"
+    );
+}
+
+/// A member that declares its own type parameters composes them over its owner's.
+#[test]
+fn a_generic_member_keeps_its_own_type_parameters() {
+    let Some(symbols) = native_stdlib() else {
+        return;
+    };
+    let iterator = symbols
+        .classifier(type_name("kotlin/collections/Iterator"))
+        .expect("kotlin.collections.Iterator");
+    let next = match iterator
+        .declared_callables
+        .get("next")
+        .expect("Iterator declares next")
+    {
+        krusty::libraries::Callables::Functions(functions)
+        | krusty::libraries::Callables::Both { functions, .. } => functions
+            .overloads
+            .first()
+            .expect("one next overload")
+            .clone(),
+        _ => panic!("Iterator.next is a function"),
+    };
+    let signature = next
+        .generic_sig
+        .as_ref()
+        .expect("every klib member publishes its declared signature");
+    assert!(
+        signature.formals.is_empty(),
+        "next declares no type parameters of its own"
+    );
+    assert!(
+        matches!(signature.ret, krusty::types::Ty::TyParam(..)),
+        "and returns its owner's: {:?}",
+        signature.ret
     );
 }
 
