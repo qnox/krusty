@@ -2360,6 +2360,10 @@ pub struct PropertyInfo {
     pub setter_visibility: Visibility,
     /// `const val` — a compile-time constant whose value use sites inline.
     pub is_const: bool,
+    /// Kotlin's compiler-known integer-coercion marker on this constant declaration. Providers
+    /// normalize the resolved annotation identity here so a selected read never reopens source or
+    /// stable declaration tables.
+    pub implicit_integer_coercion: bool,
     /// Declaration-owned compile-time payload. Providers normalize source/classfile storage into
     /// this common semantic fact; a selected read consumes it without another field/classpath query.
     pub compile_time_constant: Option<LibraryConst>,
@@ -2988,6 +2992,7 @@ pub(crate) fn add_core_builtin_declarations(classifier: &mut LibraryType, owner:
             setter: None,
             setter_visibility: Visibility::Private,
             is_const: false,
+            implicit_integer_coercion: false,
             compile_time_constant: None,
             visibility: Visibility::Public,
             owner,
@@ -3259,6 +3264,7 @@ impl EmptySymbolSource {
                     setter: None,
                     setter_visibility: Visibility::Private,
                     is_const: false,
+                    implicit_integer_coercion: false,
                     compile_time_constant: None,
                     visibility: Visibility::Public,
                     owner,
@@ -3367,6 +3373,7 @@ impl EmptySymbolSource {
                 setter: None,
                 setter_visibility: Visibility::Private,
                 is_const: false,
+                implicit_integer_coercion: false,
                 compile_time_constant: None,
                 visibility: Visibility::Public,
                 owner: crate::types::type_name("kotlin/coroutines/intrinsics/IntrinsicsKt"),
