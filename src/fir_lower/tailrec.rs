@@ -489,7 +489,7 @@ fn distribute_coercion(
             IrExpr::TypeOp {
                 op: crate::ir::IrTypeOp::ImplicitCoercion,
                 arg: expression,
-                type_operand: target.clone(),
+                type_operand: *target,
             },
             origin,
         ),
@@ -595,7 +595,7 @@ fn tail_value(
             arg,
             ref type_operand,
         } if *type_operand == result && reaches_self_call(ir, arg, frame) => {
-            let target = type_operand.clone();
+            let target = *type_operand;
             let distributed = distribute_coercion(ir, arg, &target, origin);
             tail_value(ir, distributed, frame, result, origin)
         }

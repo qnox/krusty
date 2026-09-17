@@ -1644,11 +1644,14 @@ impl IrPlugin for SerializationPlugin {
             // serializer adds one `KSerializer` field per type parameter (`typeSerial0..N` at fields 1..=N),
             // set from the constructor parameters.
             // Field 0 `descriptor` + each `typeSerial{k}` are `final` private fields.
-            ser.fields = vec![crate::ir::IrField::new(
-                "descriptor".to_string(),
-                class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
-            )
-            .with_is_final(true)];
+            let descriptor_field = ser.fields.len() as u32;
+            ser.fields.push(
+                crate::ir::IrField::new(
+                    "descriptor".to_string(),
+                    class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+                )
+                .with_is_final(true),
+            );
             for (k, parameter) in type_parameter_tys.iter().copied().enumerate() {
                 ser.fields.push(
                     crate::ir::IrField::new(format!("typeSerial{k}"), kserializer_of(parameter))
@@ -1678,6 +1681,38 @@ impl IrPlugin for SerializationPlugin {
             // `getDescriptor` is DECLARED first — the descriptor field it returns is built in
             // `<init>` — but EMITTED fourth.
             ser.methods = vec![serialize, deserialize, descriptor, child, type_params_ser];
+            // What `@Metadata` says about those members is a different list in a different order.
+            // kotlinc DECLARES `childSerializers`, `deserialize`, `serialize`; it describes
+            // `typeParametersSerializers` only when there are type-parameter serializers to pass
+            // along; and `getDescriptor` is described as the accessor of a `descriptor` PROPERTY,
+            // registered below rather than as a function.
+            let mut described = vec![child, deserialize, serialize];
+            if is_generic {
+                described.push(type_params_ser);
+            }
+            let descriptor_order = described.len() as u32;
+            ser.published_generated_functions = Some(described);
+            ser.properties.push(crate::ir::IrProperty {
+                name: "descriptor".to_string(),
+                context_params: Vec::new(),
+                source_order: descriptor_order,
+                decl_line: 0,
+                ty: class_ty("kotlinx/serialization/descriptors/SerialDescriptor"),
+                visibility: crate::types::Visibility::Public,
+                annotations: Box::new([]),
+                initializer: None,
+                storage_ty: None,
+                backing_field: Some(descriptor_field),
+                is_var: false,
+                is_open: false,
+                is_private: false,
+                setter_is_private: false,
+                getter: Some(descriptor),
+                setter: None,
+                getter_jvm_name: None,
+                setter_jvm_name: None,
+                needs_access_bridge: false,
+            });
             // Erased generic bridges the `KSerializer<Foo>` interface requires: the JVM sees
             // `serialize(Encoder, Object)` / `deserialize(Decoder): Object`; each adapts args/return
             // and delegates to the concrete `Foo`-typed override.

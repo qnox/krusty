@@ -927,6 +927,24 @@ fn data_copy_fn_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
     (COPY_FN_FLAGS & !crate::metadata::property_flags::VISIBILITY_MASK) | (visibility << 1)
 }
 
+/// Whether a type is an ARRAY whose element is star-projected, so its JVM descriptor cannot be
+/// derived from the metadata record.
+///
+/// An array's descriptor is built from its element's ERASURE, and a star projection records no
+/// bound to erase — `Array<List<*>>` is `[Ljava/util/List;` but nothing in the proto says so. A bare
+/// `List<*>` erases to its own classifier and stays derivable, so only the array form needs the
+/// explicit `JvmMethodSignature` (measured on kotlinc 2.4.10).
+fn array_of_star_projection(ty: crate::types::Ty) -> bool {
+    ty.array_elem().is_some_and(|element| {
+        matches!(element.non_null(), crate::types::Ty::StarProjection(_))
+            || element
+                .non_null()
+                .type_args()
+                .iter()
+                .any(|argument| matches!(argument, crate::types::Ty::StarProjection(_)))
+    })
+}
+
 /// Compute a class's `@kotlin.Metadata` from its IR — WIRING [`crate::metadata::class_builder::build_class`]
 /// into emission. Covers a class with a primary constructor of `val`/`var` properties plus real declared
 /// members (emitted with derived [`function_flags`]), and the data/value-class synthesized sets. Returns
@@ -1099,7 +1117,16 @@ fn build_class_metadata(
             !accessor_shaped && !data_method_names.contains(n) && !value_method_names.contains(n)
         })
         .collect();
-    declared_fids.sort_by_key(|fid| ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX));
+    // A GENERATED class states its own function record on itself: which of its members Kotlin
+    // metadata describes, and in which order. The two differ from what the class emits — a
+    // non-generic `$serializer` emits `typeParametersSerializers` but does not describe it.
+    let published = c.published_generated_functions.as_deref();
+    if let Some(described) = published {
+        declared_fids.retain(|fid| described.contains(fid));
+        declared_fids.sort_by_key(|fid| described.iter().position(|described| described == fid));
+    } else {
+        declared_fids.sort_by_key(|fid| ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX));
+    }
     // A VALUE-CLASS-INVOLVED MEMBER is now DESCRIBED. The writer could always produce kotlinc's exact
     // payload for one (the byte-identity tests proved it); what was missing was the READ half, and the
     // classpath value-class RETURN model supplies it — `MetadataCallFacts::value_class_ret` reports
@@ -1729,9 +1756,11 @@ fn build_class_metadata(
                             })))
                         || ir.fn_vararg_index.contains_key(&fid)
                         || matches!(metadata_ret, crate::types::Ty::TyParam(..))
-                        || metadata_params
-                            .iter()
-                            .any(|parameter| matches!(parameter, crate::types::Ty::TyParam(..))))
+                        || array_of_star_projection(metadata_ret)
+                        || metadata_params.iter().any(|parameter| {
+                            matches!(parameter, crate::types::Ty::TyParam(..))
+                                || array_of_star_projection(*parameter)
+                        }))
                     .then(|| crate::jvm::names::method_descriptor(&f.params, f.ret)),
                     jvm_sig_name: (name != f.name).then(|| f.name.clone()),
                     // The declaration's own annotations, mirrored into `@Metadata`. Retention split
@@ -2003,10 +2032,16 @@ fn build_class_metadata(
                 .copied()
                 .enumerate()
                 .map(|(index, fid)| {
-                    (
-                        ir.fn_source_order.get(&fid).copied().unwrap_or(u32::MAX),
-                        ClassMemberOrder::Function(index),
-                    )
+                    let order = match published {
+                        // The stated list's own index, in the same numbering a generated property
+                        // uses for `IrProperty::source_order`.
+                        Some(described) => described
+                            .iter()
+                            .position(|described| *described == fid)
+                            .map_or(u32::MAX, |order| order as u32),
+                        None => ir.fn_source_order.get(&fid).copied().unwrap_or(u32::MAX),
+                    };
+                    (order, ClassMemberOrder::Function(index))
                 }),
         );
         ordered.extend(type_aliases.iter().enumerate().map(|(index, alias)| {
