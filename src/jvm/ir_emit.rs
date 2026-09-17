@@ -4893,6 +4893,9 @@ fn const_value_idx(ir: &IrFile, init: crate::ir::ExprId, cw: &mut ClassWriter) -
             IrConst::Byte(v) => cw.const_int(*v as i32),
             IrConst::Short(v) => cw.const_int(*v as i32),
             IrConst::Int(v) => cw.const_int(*v),
+            // `UByte`/`UShort` ride in the `B`/`S` their value class wraps.
+            IrConst::UByte(v) => cw.const_int(i32::from(*v as i8)),
+            IrConst::UShort(v) => cw.const_int(i32::from(*v as i16)),
             IrConst::Char(c) => cw.const_int(*c as i32),
             IrConst::Long(v) => cw.const_long(*v),
             IrConst::Float(v) => cw.const_float(*v),
@@ -15553,6 +15556,17 @@ impl<'a> Emitter<'a> {
             IrExpr::Const(c) => match c {
                 IrConst::Boolean(b) => code.push_int(if *b { 1 } else { 0 }, self.cw),
                 IrConst::Int(v) => code.push_int(*v, self.cw),
+                // THE representation decision for a narrow unsigned constant, and it is this
+                // backend's to make. `UByte` is a value class over `Byte`, so the JVM carries
+                // it in a `B`: the value 200 is pushed as the byte -56, which is what kotlinc
+                // emits (`bipush -56`) and what a `(B)` parameter and `constructor-impl` both
+                // expect. Pushing the untruncated 200 made two equal `UByte` values compare
+                // unequal, because only one side had been through a narrowing.
+                //
+                // Common IR hands over the VALUE and the unsigned identity; the carrier is
+                // chosen here, and another backend is free to choose differently.
+                IrConst::UByte(v) => code.push_int(i32::from(*v as i8), self.cw),
+                IrConst::UShort(v) => code.push_int(i32::from(*v as i16), self.cw),
                 IrConst::Short(v) => code.push_int(*v as i32, self.cw),
                 IrConst::Byte(v) => code.push_int(*v as i32, self.cw),
                 IrConst::Char(v) => code.push_int(*v as i32, self.cw),
@@ -19733,6 +19747,10 @@ impl<'a> Emitter<'a> {
             IrExpr::KClassLiteral { .. } => Ty::obj("kotlin/reflect/KClass"),
             IrExpr::Const(c) => match c {
                 IrConst::Boolean(_) => Ty::Boolean,
+                // The unsigned identity common IR retained. Answering `Int` here is what hid
+                // the carrier question from every backend.
+                IrConst::UByte(_) => Ty::UByte,
+                IrConst::UShort(_) => Ty::UShort,
                 IrConst::Int(_) => Ty::Int,
                 IrConst::Long(_) => Ty::Long,
                 IrConst::Double(_) => Ty::Double,

@@ -305,6 +305,20 @@ pub enum IrConst {
     /// A Kotlin `String` — a sequence of UTF-16 code units. Same reason as `Char`: `"\uD800"` and
     /// `"😀"` have no Rust `String` spelling one code unit at a time.
     String(crate::kt_string::KtString),
+    /// A `UByte` constant, as the VALUE it stands for: `200u` is 200 here, never the byte -56 that
+    /// a JVM carries it in. `UShort` is the same at its own width.
+    ///
+    /// These exist because the unsigned type is the constant's checked IDENTITY and a backend
+    /// cannot choose a representation for what it cannot see. Folding them into `Int` lost that:
+    /// `value_ty` then answers `Int` from the constant's shape, and every backend inherited
+    /// whatever width the number happened to carry. Which primitive holds the value — `B`/`S` on
+    /// the JVM, something else elsewhere — is a representation decision, and representation
+    /// belongs to backends.
+    ///
+    /// `UInt` and `ULong` need no form of their own: `Int` and `Long` are already the full width
+    /// of the value, so no identity is lost by carrying them there.
+    UByte(u8),
+    UShort(u16),
     Null,
 }
 

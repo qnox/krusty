@@ -1242,6 +1242,8 @@ fn hoisted_value_ty(
     match &ir.exprs[expression as usize] {
         IrExpr::Const(constant) => Some(match constant {
             IrConst::Boolean(_) => Ty::Boolean,
+            IrConst::UByte(_) => Ty::UByte,
+            IrConst::UShort(_) => Ty::UShort,
             IrConst::Int(_) => Ty::Int,
             IrConst::Long(_) => Ty::Long,
             IrConst::Double(_) => Ty::Double,

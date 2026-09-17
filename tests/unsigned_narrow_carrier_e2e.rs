@@ -88,3 +88,65 @@ fn a_narrow_unsigned_constant_survives_a_collection_and_an_array() {
 }\n";
     assert_eq!(run(SRC), "OK");
 }
+
+/// Common IR retains the constant's unsigned IDENTITY, and records no carrier.
+///
+/// This is the phase assertion, and it is the one the behaviour tests above cannot make. They ask
+/// what the JVM backend ANSWERS, and an implementation that narrowed inside common lowering
+/// answers identically — it was the first version of this change, and every test above passed
+/// against it. What that version got wrong is not visible in a running program at all: it decided
+/// `UByte` is an `i8` in a phase that `AGENTS.md` says does not choose representation, which is
+/// only observable by looking at the IR the backend is handed.
+///
+/// So: the constant arrives as `UByte(200)` — the VALUE, at its own type — never as `Int(-56)`,
+/// which would be the JVM's carrier already chosen, nor as a bare `Int(200)`, which is the
+/// identity erased and the carrier question hidden from every backend.
+#[test]
+fn common_ir_keeps_the_unsigned_identity_and_chooses_no_carrier() {
+    use krusty::ir::{IrConst, IrExpr};
+
+    let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
+        common::stdlib_jar(),
+        common::jdk_modules(),
+    ]));
+    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+    let (files, diagnostics) = common::capture_common_ir(
+        "fun b(v: UByte): String = v.toString()\n\
+         fun s(v: UShort): String = v.toString()\n\
+         fun i(v: UInt): String = v.toString()\n\
+         fun box(): String = b(200u) + s(40000u) + i(70000u)\n",
+        "Carrier",
+        platform,
+    );
+    assert!(diagnostics.is_empty(), "frontend rejected: {diagnostics:?}");
+    let file = files.first().expect("one lowered file");
+
+    let constants: Vec<&IrConst> = file
+        .exprs
+        .iter()
+        .filter_map(|e| match e {
+            IrExpr::Const(c) => Some(c),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        constants.contains(&&IrConst::UByte(200)),
+        "a `UByte` constant must reach a backend as UByte(200), not as a chosen carrier; got {constants:?}"
+    );
+    assert!(
+        constants.contains(&&IrConst::UShort(40000)),
+        "a `UShort` constant must reach a backend as UShort(40000); got {constants:?}"
+    );
+    // `UInt`'s carrier is `Int`, already the full width, so no identity is lost by carrying it
+    // there and no new form is warranted.
+    assert!(
+        constants.contains(&&IrConst::Int(70000)),
+        "a `UInt` constant stays an `Int`; got {constants:?}"
+    );
+    // The carrier the JVM backend will choose must NOT already be present.
+    assert!(
+        !constants.contains(&&IrConst::Int(-56)),
+        "common IR must not carry the JVM's narrowed byte; got {constants:?}"
+    );
+}

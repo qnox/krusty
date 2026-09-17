@@ -11,6 +11,9 @@ pub(super) fn negate(constant: &IrConst) -> Option<IrConst> {
         IrConst::Short(value) => IrConst::Short(value.checked_neg()?),
         IrConst::Int(value) => IrConst::Int(value.checked_neg()?),
         IrConst::Long(value) => IrConst::Long(value.checked_neg()?),
+        // An unsigned constant has no negation to fold: Kotlin has no unary minus on the
+        // unsigned types, so a `-200u` never reaches here.
+        IrConst::UByte(_) | IrConst::UShort(_) => return None,
         IrConst::Float(value) => IrConst::Float(-value),
         IrConst::Double(value) => IrConst::Double(-value),
         IrConst::Boolean(_) | IrConst::Char(_) | IrConst::String(_) | IrConst::Null => return None,

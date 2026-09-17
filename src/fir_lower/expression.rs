@@ -1989,20 +1989,11 @@ impl BodyLowering<'_> {
     }
 }
 
-/// An IR constant for a checked FIR one, carried the way the TARGET carries it.
+/// An IR constant for a checked FIR one, carrying the value and the checked identity.
 ///
-/// `ty` is the constant's checked type, and it is read for exactly one reason: `UByte` and
-/// `UShort` are value classes over `Byte` and `Short`, so a backend carries one in that signed
-/// primitive. 200 as a `UByte` is the byte -56, and every later stage has only the number — the IR
-/// constant records no unsigned type and a backend derives `Int` from its shape — so a constant
-/// that leaves here unnarrowed can never be narrowed again.
-///
-/// Unnarrowed is not merely a different spelling. `b(200u)` pushed the int 200 into a method whose
-/// parameter descriptor is `B`, and the callee compared it against the -56 that `200.toUByte()`
-/// produces, so two equal `UByte` values answered `false`. kotlinc pushes `bipush -56` at both.
-///
-/// `UInt` and `ULong` need nothing here: their carriers are `Int` and `Long`, already the full
-/// width of the value, and the bits of 4294967295u are the bits of -1 either way.
+/// `ty` is read only to tell `UByte`/`UShort` apart from `UInt`: those two are value classes, and
+/// the constant's unsigned type is part of what the frontend CHECKED, so common IR records it.
+/// What primitive holds it is not decided here — see [`IrConst::UByte`].
 fn lower_constant(
     constant: &FirConstant,
     ty: Ty,
@@ -2016,11 +2007,19 @@ fn lower_constant(
         FirConstant::UInt(value) => {
             let value = u32::try_from(*value)
                 .map_err(|_| FirLoweringFailure::InvalidIntegerConstant { origin })?;
-            IrConst::Int(match ty.non_null() {
-                Ty::UByte => i32::from(value as u8 as i8),
-                Ty::UShort => i32::from(value as u16 as i16),
-                _ => value as i32,
-            })
+            // The checked type says WHICH unsigned type this constant is, and that identity is
+            // recorded rather than resolved into a width. `UByte` and `UShort` are value classes,
+            // so which primitive ends up holding the value is a representation decision and
+            // belongs to a backend; folding them into `Int` here took that decision away, because
+            // a backend reading the constant then sees only a number.
+            //
+            // The VALUE is what is carried: 200u is 200. A backend that wants the byte -56 derives
+            // it, and one that wants something else derives that instead.
+            match ty.non_null() {
+                Ty::UByte => IrConst::UByte(value as u8),
+                Ty::UShort => IrConst::UShort(value as u16),
+                _ => IrConst::Int(value as i32),
+            }
         }
         FirConstant::Long(value) | FirConstant::ULong(value) => IrConst::Long(*value),
         FirConstant::Double(value) => IrConst::Double(*value),

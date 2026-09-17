@@ -294,6 +294,16 @@ fn annotation_value_pb(st: &mut StringTable, value: &crate::ir::AnnoValue) -> Pb
     let mut out = Pb::new();
     match value {
         AnnoValue::Const(constant) => match constant {
+            // kotlinc records an unsigned annotation argument under the SIGNED width it is
+            // carried in, which is the same slot its value class wraps.
+            IrConst::UByte(value) => {
+                out.field_varint(1, 0);
+                out.field_varint(2, zigzag_i64(i64::from(*value as i8)));
+            }
+            IrConst::UShort(value) => {
+                out.field_varint(1, 2);
+                out.field_varint(2, zigzag_i64(i64::from(*value as i16)));
+            }
             IrConst::Byte(value) => {
                 out.field_varint(1, 0);
                 out.field_varint(2, zigzag_i64(i64::from(*value)));
