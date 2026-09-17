@@ -90,6 +90,8 @@ mod break_continue_e2e;
 mod break_continue_expr_e2e;
 #[path = "break_continue_in_branch_e2e.rs"]
 mod break_continue_in_branch_e2e;
+#[path = "bridge_debug_tables_e2e.rs"]
+mod bridge_debug_tables_e2e;
 #[path = "build1017_oo1_vcparam_result_takeif_e2e.rs"]
 mod build1017_oo1_vcparam_result_takeif_e2e;
 #[path = "build1018_pp1_suspend_block_firstornull_e2e.rs"]
@@ -1209,6 +1211,8 @@ mod primitive_array_members_e2e;
 mod primitive_bound_generic_e2e;
 #[path = "primitive_box_cast_e2e.rs"]
 mod primitive_box_cast_e2e;
+#[path = "primitive_compare_branch_e2e.rs"]
+mod primitive_compare_branch_e2e;
 #[path = "primitive_operator_extension_e2e.rs"]
 mod primitive_operator_extension_e2e;
 #[path = "primitive_spread_e2e.rs"]
@@ -1588,6 +1592,10 @@ mod unsigned_companion_constant_ty_e2e;
 mod unsigned_ext_e2e;
 #[path = "unsigned_generic_erasure_e2e.rs"]
 mod unsigned_generic_erasure_e2e;
+#[path = "unsigned_literal_width_e2e.rs"]
+mod unsigned_literal_width_e2e;
+#[path = "unsigned_narrow_carrier_e2e.rs"]
+mod unsigned_narrow_carrier_e2e;
 #[path = "unsigned_toplevel_e2e.rs"]
 mod unsigned_toplevel_e2e;
 #[path = "use_inline_finally_e2e.rs"]
