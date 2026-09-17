@@ -7,6 +7,8 @@
 use crate::ir::{ExprId, IrFile};
 use crate::jvm::classfile::CodeBuilder;
 
+use super::Emitter;
+
 /// Mark a source statement or block value at the first instruction it emits.
 pub(super) fn mark_statement(ir: &IrFile, expression: ExprId, code: &mut CodeBuilder) {
     if let Some(&line) = ir.expr_lines.get(&expression) {
@@ -40,5 +42,11 @@ pub(super) fn mark_return(ir: &IrFile, returned: ExprId, code: &mut CodeBuilder)
         if line != 0 {
             code.mark_line(line);
         }
+    }
+}
+
+impl Emitter<'_> {
+    pub(super) fn mark_dispatch_line(&self, expression: ExprId, code: &mut CodeBuilder) {
+        mark_expression_start(self.ir, expression, code);
     }
 }

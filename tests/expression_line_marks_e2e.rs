@@ -198,3 +198,50 @@ fn an_explicit_return_after_finally_restores_its_line() {
         "complete run LineNumberTable"
     );
 }
+
+/// An ordinary METHOD call, not just a constructor: the same rule at every callee kind.
+#[test]
+fn a_multi_line_method_call_is_byte_identical_to_kotlinc() {
+    let src = "class Sink {\n\
+               \x20   fun take(a: Int, b: String, c: Int): Int = a + c\n\
+               }\n\
+               \n\
+               fun run(s: Sink, x: Int, y: String): Int = s.take(\n\
+               \x20   a = x,\n\
+               \x20   b = y,\n\
+               \x20   c = x + 1,\n\
+               )\n";
+    let Some(result) = common::byte_diff_against_kotlinc_cp(
+        "MultiLineMethodCall",
+        src,
+        "MultiLineMethodCallKt",
+        &[common::stdlib_jar()],
+    ) else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    result.expect("MultiLineMethodCallKt byte-identical to kotlinc");
+}
+
+/// A defaulted member dispatch uses its static `$default` entry point but keeps the source call's
+/// line contract.
+#[test]
+fn a_multi_line_defaulted_method_call_is_byte_identical_to_kotlinc() {
+    let src = "class DefaultSink {\n\
+               \x20   fun take(a: Int, b: Int = 2): Int = a + b\n\
+               }\n\
+               \n\
+               fun run(s: DefaultSink, x: Int): Int = s.take(\n\
+               \x20   a = x,\n\
+               )\n";
+    let Some(result) = common::byte_diff_against_kotlinc_cp(
+        "MultiLineDefaultedMethodCall",
+        src,
+        "MultiLineDefaultedMethodCallKt",
+        &[common::stdlib_jar()],
+    ) else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    result.expect("defaulted multi-line method call byte-identical to kotlinc");
+}

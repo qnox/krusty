@@ -42,6 +42,27 @@ impl DescriptorArityMismatch {
 }
 
 impl Emitter<'_> {
+    /// Where a non-virtual call to an interface member must go under `-jvm-default=disable`.
+    ///
+    /// `super.f()` and a call to a private interface member both push the receiver first and then
+    /// `invokespecial` the interface. Under `disable` the interface holds no body, so the call has to
+    /// become `invokestatic <Iface>$DefaultImpls.f(LIface;…)` — the receiver already on the stack is
+    /// exactly the holder static's parameter 0. Returns `None` when the call should stay as it is.
+    pub(super) fn holder_call(
+        &self,
+        owner: &str,
+        descriptor: &str,
+        current_source_body: bool,
+    ) -> Option<(String, String)> {
+        if self.jvm_default != JvmDefaultMode::Disable || !current_source_body {
+            return None;
+        }
+        let holder_descriptor = descriptor
+            .strip_prefix('(')
+            .map(|rest| format!("(L{owner};{rest}"))?;
+        Some((format!("{owner}$DefaultImpls"), holder_descriptor))
+    }
+
     /// Abandon a call whose operands cannot be pushed, leaving the current arm stack-correct.
     ///
     /// The caller must `return` immediately afterwards without emitting its `invoke*`. `ret` is the
