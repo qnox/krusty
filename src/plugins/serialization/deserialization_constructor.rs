@@ -192,14 +192,19 @@ fn multi_mask_check(
     })
 }
 
-/// Add the ABI-only deserialization constructor for a plain serializable data class.
+/// Kotlin's source-level name for the generated constructor's trailing disambiguating parameter.
+const MARKER_PARAMETER: &str = "serializationConstructorMarker";
+
+/// Add the deserialization constructor for a plain serializable data class. It is synthetic in the
+/// class file but published as an internal Kotlin secondary constructor.
 pub(super) fn add_deserialization_constructor(
     ir: &mut IrFile,
     class_id: ClassId,
     serializer_id: ClassId,
-    fields: &[Ty],
+    named_fields: &[(String, Ty)],
     cached_descriptor: Option<u32>,
 ) {
+    let fields = named_fields.iter().map(|(_, ty)| *ty).collect::<Vec<_>>();
     // The deserialization ABI retains a value-class field's BOXED source type. The extra default
     // marker below disambiguates this constructor from the physical primary constructor; the body
     // performs the representation conversion when storing the field.
@@ -352,7 +357,17 @@ pub(super) fn add_deserialization_constructor(
             prefix_params: Vec::new(),
             vararg_index: None,
             params,
-            named_params: Vec::new(),
+            named_params: (0..mask_count)
+                .map(|word| (format!("seen{word}"), Ty::Int))
+                .chain(named_fields.iter().cloned())
+                .chain(std::iter::once((
+                    MARKER_PARAMETER.to_string(),
+                    Ty::nullable(class_ty(
+                        "kotlinx/serialization/internal/SerializationConstructorMarker",
+                    )),
+                )))
+                .collect(),
+            metadata_visibility: Some(crate::types::Visibility::Internal),
             defaults: vec![],
             delegate_prelude,
             delegate_args: vec![],

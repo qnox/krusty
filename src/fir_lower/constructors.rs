@@ -325,6 +325,12 @@ pub(super) fn finalize_constructors(
                     prefix_params,
                     params: named_params.iter().map(|(_, ty)| *ty).collect(),
                     named_params,
+                    metadata_visibility: Some(
+                        index
+                            .declaration_header(declaration)
+                            .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?
+                            .visibility,
+                    ),
                     vararg_index,
                     defaults,
                     delegate_prelude,
