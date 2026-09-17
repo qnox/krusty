@@ -20,10 +20,11 @@ fn an_int_spilled_first_lays_out_its_group_first() {
                \x20   val first = fetch(p)\n\
                \x20   return first + q + r\n\
                }\n";
-    assert_eq!(
-        spill_fields(src, "IntFirst", "IntFirstKt$run$1"),
-        ["I$0", "I$1", "L$0", "L$1", "J$0", "J$1"],
-    );
+    let Some(fields) = spill_fields(src, "IntFirst", "IntFirstKt$run$1") else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    assert_eq!(fields, ["I$0", "I$1", "L$0", "L$1", "J$0", "J$1"]);
 }
 
 /// The same locals in another order lay the groups out in that order — the point being that there
@@ -39,19 +40,39 @@ fn a_reference_spilled_first_lays_out_its_group_first() {
                \x20   val got = fetch(c)\n\
                \x20   return got + a + b\n\
                }\n";
-    assert_eq!(
-        spill_fields(src, "RefFirst", "RefFirstKt$order$1"),
-        ["L$0", "L$1", "J$0", "J$1", "I$0", "I$1"],
-    );
+    let Some(fields) = spill_fields(src, "RefFirst", "RefFirstKt$order$1") else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    assert_eq!(fields, ["L$0", "L$1", "J$0", "J$1", "I$0", "I$1"]);
+}
+
+/// Different suspension points can introduce different first kinds. Their field groups follow the
+/// final body's suspension order, not the randomized iteration order of the scope lookup table.
+#[test]
+fn multiple_suspensions_keep_the_first_store_order() {
+    let src = "suspend fun fetch(a: Int): String = \"\"\n\
+               \n\
+               suspend fun choose(flag: Boolean): String {\n\
+               \x20   return if (flag) {\n\
+               \x20       val n = 1\n\
+               \x20       fetch(n) + n\n\
+               \x20   } else {\n\
+               \x20       val text = \"x\"\n\
+               \x20       fetch(text.length) + text\n\
+               \x20   }\n\
+               }\n";
+    let Some(fields) = spill_fields(src, "MultipleSpills", "MultipleSpillsKt$choose$1") else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    assert_eq!(fields, ["I$0", "L$0"]);
 }
 
 /// The spill fields of one continuation class, in layout order, from BOTH compilers — asserted
 /// equal, and returned so the test can also state what they are.
-fn spill_fields(src: &str, name: &str, class: &str) -> Vec<String> {
-    let Some((reference, krusty)) = disassemble_both(name, src, class) else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return Vec::new();
-    };
+fn spill_fields(src: &str, name: &str, class: &str) -> Option<Vec<String>> {
+    let (reference, krusty) = disassemble_both(name, src, class)?;
     let fields = |text: &str| {
         text.lines()
             .map(str::trim)
@@ -68,7 +89,7 @@ fn spill_fields(src: &str, name: &str, class: &str) -> Vec<String> {
     let want = fields(&reference);
     assert!(!want.is_empty(), "{class}: kotlinc spills something");
     assert_eq!(fields(&krusty), want, "{class} spill field layout");
-    want
+    Some(want)
 }
 
 /// The same source through both compilers, disassembled: `(kotlinc, krusty)`.
