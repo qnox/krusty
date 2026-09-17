@@ -38,6 +38,10 @@ fn js_stdlib_klib_reports_its_identity_and_packages() {
         .map(|fragment| fragment.package_fqname.as_str())
         .collect();
     for expected in [
+        // The root package is spelled `root_package` on disk, not `package_` with an empty tail, so
+        // it is listed here: a reader that only knew the `package_` prefix would report every other
+        // package and silently skip this one.
+        "",
         "kotlin",
         "kotlin.collections",
         "kotlin.ranges",
