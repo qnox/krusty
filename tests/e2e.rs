@@ -881,6 +881,8 @@ mod klib_platform_e2e;
 mod klib_property_e2e;
 #[path = "klib_symbol_source_e2e.rs"]
 mod klib_symbol_source_e2e;
+#[path = "klib_type_alias_e2e.rs"]
+mod klib_type_alias_e2e;
 #[path = "kotlin_fun_java_sam_param_e2e.rs"]
 mod kotlin_fun_java_sam_param_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]

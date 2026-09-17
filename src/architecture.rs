@@ -599,6 +599,7 @@ mod tests {
                 "parser",
                 "plugins",
                 "source",
+                "spelling",
                 "symbol_resolver",
                 "symbol_source",
                 "toolchain",
