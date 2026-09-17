@@ -182,6 +182,8 @@ impl BodyLowering<'_> {
         let local_base = self.next_temporary;
         self.next_temporary = self.next_temporary.checked_add(local_count)?;
 
+        // Every return the expansion rewrites, so the tail-only shape can be recognized below.
+        let mut rewritten_returns: Vec<(ExprId, Option<ExprId>)> = Vec::new();
         let result_slot = (result_ty != Ty::Unit).then(|| {
             let slot = self.next_temporary;
             self.next_temporary += 1;
@@ -259,6 +261,7 @@ impl BodyLowering<'_> {
                 _ => None,
             };
             if let Some(value) = returned {
+                rewritten_returns.push((copy, value));
                 // This return has crossed its checked callable boundary and is now represented by
                 // the expression-local break below.  The sparse depth fact belongs to the old
                 // `Return` node shape; leaving it on the replacement block makes an enclosing
@@ -299,6 +302,36 @@ impl BodyLowering<'_> {
             .collect::<Vec<_>>();
         for invocation in inline_invocations {
             self.splice_inline_lambda_invocation(invocation)?;
+        }
+
+        // An expansion whose ONLY return is its tail needs neither a result local nor the loop that
+        // carries a non-local return out: the value is simply the body's value, which is what kotlinc
+        // emits — it leaves it on the operand stack. The loop form costs an unnamed local, and when
+        // the expansion crosses a suspension that local takes a continuation field kotlinc has no
+        // counterpart for.
+        if let [(tail, value)] = rewritten_returns[..] {
+            if let IrExpr::Block { stmts, value: None } = self.ir.expr(cloned_root).clone() {
+                if stmts.last() == Some(&tail) {
+                    let produced = value.unwrap_or_else(|| self.ir.add_expr(IrExpr::UnitInstance));
+                    self.ir.exprs[tail as usize] = IrExpr::Block {
+                        stmts: Vec::new(),
+                        value: Some(produced),
+                    };
+                    let mut body_statements = stmts;
+                    let tail = body_statements.pop().expect("the tail return was matched");
+                    self.ir.exprs[cloned_root as usize] = IrExpr::Block {
+                        stmts: body_statements,
+                        value: Some(tail),
+                    };
+                    let mut statements = operand_declarations;
+                    statements.push(cloned_root);
+                    let value = statements.pop();
+                    return Some(self.ir.add_expr(IrExpr::Block {
+                        stmts: statements,
+                        value,
+                    }));
+                }
+            }
         }
 
         let mut statements = operand_declarations;

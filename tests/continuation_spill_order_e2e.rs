@@ -69,6 +69,32 @@ fn multiple_suspensions_keep_the_first_store_order() {
     assert_eq!(fields, ["I$0", "L$0"]);
 }
 
+/// An inline expansion whose ONLY return is its tail needs neither a result local nor the loop that
+/// carries a non-local return out of it. kotlinc leaves that value on the operand stack; krusty
+/// always built `var result = zero; while (true) { body; break }; result`, and the unnamed result
+/// local took a continuation field whenever the expansion crossed a suspension.
+///
+/// That extra field was the last difference in the spill lists of these continuation classes — the
+/// names already matched — so both arrays now equal kotlinc's exactly.
+#[test]
+fn a_tail_only_inline_expansion_keeps_its_value_on_the_stack() {
+    let src = "suspend fun step(v: String): String = v\n\
+               \n\
+               inline fun <T> quick(tag: String, block: (String) -> T): T = block(tag + \"!\")\n\
+               \n\
+               suspend fun run(tag: String): String {\n\
+               \x20   return quick(tag) { p -> step(p) + p }\n\
+               }\n";
+    let Some((slots, names)) =
+        debug_metadata_spills(src, "TailInlineExpansion", "TailInlineExpansionKt$run$1")
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    assert_eq!(slots, ["L$0", "L$1", "L$2"]);
+    assert_eq!(names, ["tag", "tag$iv", "p"]);
+}
+
 /// A spliced lambda's own VALUE parameters are locals of the splice and keep their source names, so
 /// a suspension inside the body spills them under those names — `p` for a lambda written at source
 /// level, and one `$iv` per enclosing expansion for one written inside an inline function.
