@@ -2126,6 +2126,38 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         if let Some(realized) = self.boxed_step(&owner, &name, params, receiver) {
                             return realized;
                         }
+                        // `42.toUInt()`: a SIGNED receiver converted to an unsigned type.
+                        // Nothing is called — Kotlin defines the conversion as the ordinary signed
+                        // one to the target's width with those bits reinterpreted, and this
+                        // backend already carries an unsigned value as the machine integer it
+                        // wraps, so the reinterpretation is not an operation at all.
+                        //
+                        // The receiver is read at ITS OWN type, which is what makes the answer
+                        // right: `convert` resizes by the SOURCE's signedness, so a negative
+                        // `Int` widening to `ULong` sign-extends (kotlinc answers
+                        // 18446744073709551615, not 4294967295) while a wide source narrowing
+                        // truncates. Only an integer source is taken; a float one saturates
+                        // instead and `unsigned_conversion` says why it is not here.
+                        if let Some(target) =
+                            super::super::intrinsics::unsigned_conversion(&owner, &name)
+                        {
+                            let source = self.type_of(receiver).map(Ty::non_null);
+                            if let Some(source @ (Ty::Byte | Ty::Short | Ty::Int | Ty::Long)) =
+                                source
+                            {
+                                let Some(value) = self.coerce(receiver, source)? else {
+                                    return Ok(None);
+                                };
+                                if self.terminated {
+                                    return Ok(None);
+                                }
+                                let Some(produced) = self.convert(value, Some(source), target)?
+                                else {
+                                    return Ok(None);
+                                };
+                                return self.convert(produced, Some(target), *ret);
+                            }
+                        }
                         // A member that asks about a NUMBER rather than an object, carried as one:
                         // `s[i]` must not box its index to reach the runtime.
                         if let Some((symbol, carried, answer)) =

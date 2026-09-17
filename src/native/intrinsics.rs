@@ -717,6 +717,40 @@ pub(super) fn unsigned_owner(owner: &str) -> Option<Ty> {
     })
 }
 
+/// The unsigned integer a signed-to-unsigned conversion answers, for the facade extension naming
+/// one: `42.toUInt()`, `(-1).toUByte()`.
+///
+/// These are NOT members of an unsigned type — the receiver is SIGNED, so they live on the facade
+/// beside it rather than on the value class, and [`unsigned_owner`] does not see them.
+///
+/// Kotlin defines each as the ordinary signed conversion to the target's width followed by
+/// reinterpreting those bits: `Int.toUByte()` is `UByte(this.toByte())`. So the answer here is only
+/// the TARGET type, and the caller converts the receiver to it from the receiver's own type, whose
+/// signedness is what decides between extending and truncating. Measured against kotlinc, which is
+/// what establishes that the rule holds where it is least obvious: `(200.toByte()).toUInt()` is
+/// 4294967240 (the source's sign extends) and `300.toUByte()` is 44 (the target's width truncates).
+///
+/// A FLOAT source is deliberately absent. `Double.toUInt()` is not the signed conversion
+/// reinterpreted — it saturates at zero for a negative, where the signed rule would answer a huge
+/// positive — so it belongs to its own change rather than to this rule.
+pub(super) fn unsigned_conversion(owner: &str, name: &str) -> Option<Ty> {
+    let owner = kotlin_owner(owner);
+    let facade = matches!(
+        owner,
+        "kotlin/UByteKt" | "kotlin/UShortKt" | "kotlin/UIntKt" | "kotlin/ULongKt"
+    );
+    if !facade {
+        return None;
+    }
+    Some(match name {
+        "toUByte" => Ty::UByte,
+        "toUShort" => Ty::UShort,
+        "toUInt" => Ty::UInt,
+        "toULong" => Ty::ULong,
+        _ => return None,
+    })
+}
+
 /// Whether an accessor is `CharSequence.length`.
 ///
 /// Every `CharSequence` this target can produce is a string — `subSequence` answers one, and
