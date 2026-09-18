@@ -93,6 +93,13 @@ fn spill_fields(src: &str, name: &str, class: &str) -> Option<Vec<String>> {
 }
 
 /// The same source through both compilers, disassembled: `(kotlinc, krusty)`.
+/// The one JVM target both sides compile for. A target difference forks codegen — indy string
+/// concatenation, for one — so two differently-targeted classes are not an oracle for each other,
+/// and a spill layout read off such a pair says nothing.
+const TARGET: &str = "25";
+/// `TARGET`'s class-file major version, which is how the in-process backend is told the same thing.
+const TARGET_MAJOR: u16 = 69;
+
 fn disassemble_both(name: &str, src: &str, class: &str) -> Option<(String, String)> {
     let dir = common::scratch_dir()?;
     let reference_dir = dir.join("ref");
@@ -105,12 +112,18 @@ fn disassemble_both(name: &str, src: &str, class: &str) -> Option<(String, Strin
         "-d".to_string(),
         reference_dir.to_string_lossy().into_owned(),
         "-jvm-target".to_string(),
-        "25".to_string(),
+        TARGET.to_string(),
         source.to_string_lossy().into_owned(),
     ])?;
     assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
-    let classes = common::compile_in_process(src, name, &[common::stdlib_jar()], None)
-        .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
+    let classes = common::compile_in_process_metadata_cp_module_target(
+        src,
+        name,
+        &[common::stdlib_jar()],
+        "main",
+        Some(TARGET_MAJOR),
+    )
+    .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
     for (internal, bytes) in &classes {
         let path = krusty_dir.join(format!("{internal}.class"));
         if let Some(parent) = path.parent() {
