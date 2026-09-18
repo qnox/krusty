@@ -2725,6 +2725,17 @@ impl ClassWriter {
     /// (`(name, jvm_descriptor, slot)`), each live for the whole method body. Interns the attribute
     /// names and each local's name/descriptor here, so the call ORDER fixes their constant-pool
     /// position (kotlinc adds them per method, ctor before accessors). No-op if the method isn't found.
+    /// Byte length of an emitted method's code, for a caller that needs the offset of its last
+    /// instruction. `None` when the method was never emitted or is abstract.
+    pub fn method_code_len(&self, name: &str, desc: &str) -> Option<u16> {
+        let (n, d) = (self.cp.lookup_utf8(name)?, self.cp.lookup_utf8(desc)?);
+        let method = self
+            .methods
+            .iter()
+            .find(|m| m.name == n && m.desc == d && m.code.is_some())?;
+        u16::try_from(method.code.as_ref()?.len()).ok()
+    }
+
     pub fn set_method_debug(
         &mut self,
         name: &str,

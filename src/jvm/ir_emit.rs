@@ -2753,7 +2753,15 @@ type VcDebugMethod = (String, String, Vec<(String, String, u16)>);
 fn attach_declared_method_debug(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
     let owner = c.fq_name();
     for &fid in &c.methods {
-        function_debug::attach_declared_function_debug(ir, fid, &owner, cw);
+        // Only a GENERATED class closes its members on its declaration's closing line. A generated
+        // member added to a SOURCE class — `write$Self` on the serialized class — keeps the single
+        // entry kotlinc gives it, the same split the generated `<clinit>` rule makes.
+        let class_end_line = if c.is_source_declared {
+            0
+        } else {
+            c.decl_end_line
+        };
+        function_debug::attach_declared_function_debug(ir, fid, &owner, class_end_line, cw);
     }
 }
 
@@ -4184,7 +4192,8 @@ fn emit_pass(
             continue;
         }
         emit_method_maybe_rescued(ir, i as u32, facade, facade, &mut cw, false, env, rescued);
-        function_debug::attach_declared_function_debug(ir, i as u32, facade, &mut cw);
+        // A facade has no class declaration to close on.
+        function_debug::attach_declared_function_debug(ir, i as u32, facade, 0, &mut cw);
         facade_has_method = true;
         // A PARAMETERLESS `fun main()` is not a JVM entry point on its own: the launcher looks for
         // `main([Ljava/lang/String;)V`, and the no-arg form is only recognized by JEP 445 (Java 21+

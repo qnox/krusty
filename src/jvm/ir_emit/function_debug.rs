@@ -3,6 +3,7 @@
 use super::{jvm_declared_ty, jvm_function_params, method_descriptor, slot_words};
 use crate::ir::IrFile;
 use crate::jvm::classfile::ClassWriter;
+use crate::types::Ty;
 
 /// Attach kotlinc's `LineNumberTable` + `LocalVariableTable` to a declared method. Source methods
 /// take their line/name identities from lowering; generated methods use their producer-owned
@@ -11,6 +12,9 @@ pub(super) fn attach_declared_function_debug(
     ir: &IrFile,
     fid: u32,
     owner: &str,
+    // The line the owning class declaration CLOSES on, or 0 when there is none. A generated
+    // member's trailing `return` maps there, the same rule a generated `<clinit>` already follows.
+    class_end_line: u32,
     cw: &mut ClassWriter,
 ) {
     let Some(function) = ir.functions.get(fid as usize) else {
@@ -68,6 +72,28 @@ pub(super) fn attach_declared_function_debug(
         &descriptor,
         line.map(|line| (body_pc, line)),
         &locals,
+    );
+    // A GENERATED member has no per-statement source to map: its body belongs to the declaration it
+    // was generated for, and kotlinc closes it on that declaration's own closing line — the same two
+    // entries it gives a generated `<clinit>`. Only a member that ENDS in a plain `return` has a
+    // final instruction to map there; one that returns a value maps its return to the value.
+    let Some(start) = line else { return };
+    if generated.is_none() || class_end_line == 0 || jvm_declared_ty(&function.ret) != Ty::Unit {
+        return;
+    }
+    let Some(code_len) = cw.method_code_len(&function.name, &descriptor) else {
+        return;
+    };
+    let Some(return_pc) = code_len.checked_sub(1) else {
+        return;
+    };
+    if return_pc <= body_pc {
+        return;
+    }
+    cw.set_method_lines(
+        &function.name,
+        &descriptor,
+        &[(body_pc, start), (return_pc, class_end_line)],
     );
 }
 
