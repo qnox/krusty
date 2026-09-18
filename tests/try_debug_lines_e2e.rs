@@ -276,17 +276,17 @@ fn a_nested_finally_copy_stays_inside_the_outer_region() {
         "kotlinc's own table: the outer region covers the inner finalizer copy at 6..10"
     );
     assert_eq!(
-        numeric_rows(&krusty, "int run(int)", "Exception table:")
-            .into_iter()
-            .map(|row| {
-                // krusty allocates a fresh slot for the outer handler's exception where kotlinc
-                // reuses the dead inner one, so its `astore` is two bytes rather than one and the
-                // last range ends one byte later. That slot gap is a separate divergence.
-                row.replace("23    25    23", "23    24    23")
-            })
-            .collect::<Vec<_>>(),
+        numeric_rows(&krusty, "int run(int)", "Exception table:"),
         want,
         "run exception table"
+    );
+    // The handler temporaries are leased, so the outer handler reuses the dead inner one's slot and
+    // its store keeps kotlinc's one-byte form. Comparing the code as well keeps that honest: a
+    // regression there would move the table's offsets rather than its structure.
+    assert_eq!(
+        numeric_rows(&krusty, "int run(int)", "Code:"),
+        numeric_rows(&reference, "int run(int)", "Code:"),
+        "run code"
     );
 }
 
