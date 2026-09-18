@@ -5158,11 +5158,42 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type is built with the property's own type (`[V]` at arity 0, `[Recv, V]` at arity 1). Two things
   are deliberately NOT asserted, because a wrong type is worse than none: a type still mentioning a
   type parameter (the use site's substitution is not applied here), and an EXTENSION property's value
-  type (written in terms of the property's own parameters). A VALUE-CLASS-typed property reference
-  declines outright — kotlinc emits those accessors under the value-class name mangle, which the
-  reference does not yet carry. Tests: `tests/toplevel_property_ref_e2e.rs::toplevel_property_refs_run`,
-  box `callableReference/property/extensionPropertyWithExtensionType.kt`,
-  `inlineClasses/callableReferences/inlineClassTypeMemberVar.kt`.
+  type (written in terms of the property's own parameters). Tests:
+  `tests/toplevel_property_ref_e2e.rs::toplevel_property_refs_run`,
+  box `callableReference/property/extensionPropertyWithExtensionType.kt`.
+
+- **A property reference names the accessor the declaration actually realizes, value classes
+  included.** krusty emitted a reference class that called an accessor declared nowhere, so the
+  program failed at its first `get` with a `NoSuchMethodError` — an unlinkable artifact emitted
+  without a diagnostic. Four rules, each measured against the reference compiler's own emitted body
+  (box `inlineClasses/callableReferences/*`, 14 cases; box total 6316 → 6333):
+  - A **member** of a value class is realized statically over the erased carrier, so the reference
+    casts its receiver, unboxes it, and calls statically: `checkcast Z; Z.unbox-impl()I;
+    Z.getXx-impl(I)I`. The `-impl` suffix is the structural form the declaration side uses when the
+    signature needs no value-class hash of its own.
+  - An **extension on** a value class is the same shape through its facade, with the hash-mangled
+    name the declaration carries: `ExtKt.getXx-IQRRRT4(I)I`, not `getXx(LZ;)I`.
+  - The value class's own **underlying** property is the exception and takes no rewrite: reading it
+    is the unbox, and its accessor stays an ordinary instance getter on the box (`Z.getX()I` —
+    which is also the signature the reference reports, exactly as kotlinc's does, even though
+    kotlinc's body shortcuts to `unbox-impl`).
+  - A property whose **TYPE** is a value class already carried the mangled accessor name, but a
+    member or top-level property has no written descriptor, so the one synthesized from its
+    semantic type (`()LZ;`) named a method the declaration does not have: it exchanges the carrier
+    (`()I`, `(I)V`). The descriptor is now synthesized from the carrier, which also gives
+    `box-impl`/`unbox-impl` at the `KProperty` boundary their correct signatures.
+
+  A **top-level** property of value-class type deliberately stays on the BOXED convention, because
+  its backing field and accessors still do (kotlinc erases them — a separate declaration-side
+  item). Mangling the reference while the declaration keeps its plain name is precisely what made
+  that shape unlinkable, so the reference follows the declaration it calls. The reference's
+  reflection owner and top-level flag keep reading `ext_facade` alone: a member of a value class is
+  still a MEMBER reference (`ldc Z.class`, flags 0), and only the physical call shape changes. A
+  RECEIVERLESS accessor's descriptor stays the property's own type rather than the `PropRef`'s
+  recorded one, which for a companion-block or access-bridged property names the owner it is
+  called with — a descriptor this reference passes nothing for (it emitted an `invokestatic` on an
+  empty stack). Tests: `tests/value_class_property_reference_e2e.rs`,
+  `companion_e2e::companion_block_mutable_property_reference_is_receiverless`.
 - **A property on a BUILTIN receiver is one table, read by both phases.** `String.length`, `Char.code`
   and an array's `size` have no class file to resolve against. The body checker knew them; the
   SIGNATURE phase did not, so `const val code = a.code` reported "cannot infer the type of property"

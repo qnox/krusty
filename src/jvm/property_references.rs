@@ -245,6 +245,7 @@ fn classifier_property(
         setter_name: None,
         setter_descriptor: None,
         boxed_value_class: None,
+        unboxed_receiver_value_class: None,
         owner_is_interface: false,
         prop_ty: property_type,
         bound: false,
@@ -333,6 +334,7 @@ fn external_property(
             }
         }),
         boxed_value_class: None,
+        unboxed_receiver_value_class: None,
         owner_is_interface: callable.owner_is_interface,
         prop_ty: property_type,
         bound: false,
@@ -466,6 +468,7 @@ fn module_property(
         }),
         setter_descriptor,
         boxed_value_class: None,
+        unboxed_receiver_value_class: None,
         owner_is_interface: super::module_calls::owner_is_jvm_interface(property),
         prop_ty: property.ty,
         bound: false,

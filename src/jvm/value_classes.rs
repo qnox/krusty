@@ -4651,6 +4651,14 @@ pub(crate) fn lower_value_classes(
         let Some(reference) = class.prop_ref.as_mut() else {
             continue;
         };
+        // A TOP-LEVEL property of value-class type is still realized boxed here: its backing field
+        // and accessors keep the declared `LZ;` rather than the carrier (unlike kotlinc, which
+        // erases them — a separate declaration-side work item). Mangling the reference's accessor
+        // name while the declaration keeps its plain one named a method that does not exist, so the
+        // reference must stay on the same boxed convention as the declaration it calls.
+        if reference.static_dispatch {
+            continue;
+        }
         let Some(value_class) = reference
             .prop_ty
             .non_null()
@@ -4687,8 +4695,18 @@ pub(crate) fn lower_value_classes(
             false,
             false,
         );
-        if let Some(descriptor) = reference.getter_descriptor.as_mut() {
-            *descriptor = erase_descriptor(descriptor, &callable_under);
+        // The accessor exchanges the value class's erased CARRIER, never the boxed object. A
+        // member or top-level property has no written descriptor, so the one the emitter would
+        // synthesize from the property's semantic type (`()LZ;`) names a method that does not
+        // exist — the declaration returns `()I`. Synthesize the carrier form here, where the
+        // underlying type is in hand.
+        let carrier = callable_under
+            .get(&value_class)
+            .map(|underlying| desc(&erase(underlying, &callable_under)));
+        match (reference.getter_descriptor.as_mut(), carrier.as_deref()) {
+            (Some(descriptor), _) => *descriptor = erase_descriptor(descriptor, &callable_under),
+            (None, Some(carrier)) => reference.getter_descriptor = Some(format!("(){carrier}")),
+            (None, None) => {}
         }
         if reference.setter_name.is_some() {
             reference.setter_name = Some(vc_mangle(
@@ -4700,9 +4718,111 @@ pub(crate) fn lower_value_classes(
                 false,
             ));
         }
-        if let Some(descriptor) = reference.setter_descriptor.as_mut() {
-            *descriptor = erase_descriptor(descriptor, &callable_under);
+        match (
+            reference.setter_descriptor.as_mut(),
+            reference.setter_name.is_some(),
+            carrier.as_deref(),
+        ) {
+            (Some(descriptor), _, _) => {
+                *descriptor = erase_descriptor(descriptor, &callable_under);
+            }
+            (None, true, Some(carrier)) => {
+                reference.setter_descriptor = Some(format!("({carrier})V"));
+            }
+            (None, _, _) => {}
         }
+    }
+
+    // The RECEIVER side of the same boundary. A property whose reference receiver is a value class
+    // — a member of one (`Z::xx`) or an extension on one (`val Z.xx`) — has its accessor realized
+    // STATICALLY over the erased carrier: `Z.getXx-impl(I)I`, `ExtKt.getXx-IQRRRT4(I)I`. The
+    // reference's `get(Object)` therefore unboxes its argument before the call, exactly as
+    // kotlinc's does. Without this the reference named an instance accessor that is not declared
+    // anywhere, and the program failed at its first `get` with a `NoSuchMethodError`.
+    for class in &mut ir.classes {
+        let Some(reference) = class.prop_ref.as_mut() else {
+            continue;
+        };
+        if reference.static_dispatch {
+            continue;
+        }
+        let Some(receiver) = reference
+            .owner_internal
+            .filter(|owner| callable_under.contains_key(owner))
+        else {
+            continue;
+        };
+        // A value class's own UNDERLYING property is the exception: reading it IS the unbox, and
+        // its accessor stays an ordinary instance getter on the box (`Z.getX()I`, which is also
+        // the signature the reference reports) rather than a static realization over the carrier.
+        // Such a reference needs no rewrite at all.
+        if vc_properties
+            .get(&receiver)
+            .is_some_and(|underlying| *underlying == reference.prop_name)
+        {
+            continue;
+        }
+        let Some(carrier) = callable_under
+            .get(&receiver)
+            .map(|underlying| erase(underlying, &callable_under))
+        else {
+            continue;
+        };
+        // An EXTENSION accessor already names its receiver in its descriptor and is mangled by the
+        // hash; a MEMBER accessor names none and takes the structural `-impl` suffix, with the
+        // carrier prepended after mangling — the same two rules the declaration side applies.
+        let extension = reference.ext_facade.is_some();
+        let boxed_receiver = Ty::obj_name(receiver);
+        let declared_params: &[Ty] = if extension {
+            std::slice::from_ref(&boxed_receiver)
+        } else {
+            &[]
+        };
+        let mut getter = vc_mangle(
+            &property_getter_name(&reference.prop_name),
+            declared_params,
+            &reference.prop_ty,
+            &callable_under,
+            extension,
+            false,
+        );
+        if !extension && getter == property_getter_name(&reference.prop_name) {
+            getter.push_str("-impl");
+        }
+        let physical_ret = reference
+            .getter_descriptor
+            .as_deref()
+            .and_then(|descriptor| descriptor.rsplit_once(')').map(|(_, ret)| ret.to_string()))
+            .unwrap_or_else(|| desc(&erase(&reference.prop_ty, &callable_under)));
+        reference.getter_name = getter;
+        reference.getter_descriptor = Some(format!("({}){physical_ret}", desc(&carrier)));
+        if let Some(setter) = reference.setter_name.as_mut() {
+            let value = reference.prop_ty;
+            let mut params = declared_params.to_vec();
+            params.push(value);
+            let mut mangled = vc_mangle(
+                &crate::names::property_setter_name(&reference.prop_name),
+                &params,
+                &Ty::Unit,
+                &callable_under,
+                extension,
+                false,
+            );
+            if !extension && mangled == crate::names::property_setter_name(&reference.prop_name) {
+                mangled.push_str("-impl");
+            }
+            *setter = mangled;
+            reference.setter_descriptor = Some(format!(
+                "({}{})V",
+                desc(&carrier),
+                desc(&erase(&value, &callable_under))
+            ));
+        }
+        // A member's accessor is static on the value class itself; an extension's already routes
+        // through its facade. Neither changes `ext_facade`, which the reference's reflection owner
+        // and its top-level flag are read from — a member of a value class is still a MEMBER
+        // reference (`ldc Z.class`, flags 0), and only the physical call shape changes.
+        reference.unboxed_receiver_value_class = Some(receiver);
     }
 
     true
