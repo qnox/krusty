@@ -84,15 +84,20 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
     at **~151s**, so lower parallelism is not currently the fix. Any
     binary's non-zero exit fails the run and prints its captured log. A filter arg defers to plain
     `cargo test --profile gate` for focused runs.
-- **`NO_EXPECT_FOR_ACTUAL` — measured, not implemented.** With `MultiPlatformProjects` on, an
-  `actual` with no matching `expect` is an error in kotlinc and is still accepted by krusty, which
-  then emits the declaration. (Without the feature both modifiers are rejected outright — that one IS
+- **`NO_EXPECT_FOR_ACTUAL` — implemented for TOP-LEVEL declarations; members remain.** With `MultiPlatformProjects` on, an
+  `actual` with no matching `expect` is an error in kotlinc. krusty reports it for every top-level
+  declaration — callable, property, classifier and `typealias` — in the reference compiler's exact
+  rendering, verified by comparing the two compilers' reports on the same source rather than
+  against a transcription (`tests/no_expect_for_actual_e2e.rs`). A MEMBER `actual` is still
+  accepted: the reference compiler reports one at its own name, and
+  `a_member_actual_is_not_reported_yet` pins that difference. (Without the feature both modifiers are rejected outright — that one IS
   implemented; see `tests/mpp_requires_the_feature_e2e.rs`.) The message is
   `'<rendered declaration>' has no corresponding expected declaration`, reported at the declaration's
-  NAME, and the rendering is the obstacle: it is kotlinc's own declaration renderer over the
-  RESOLVED signature, so the check belongs after resolution, not beside the parse-time modifier
-  capture. The grammar, measured over 25 shapes against kotlinc 2.4.10 so it need not be measured
-  again:
+  NAME. The rendering is the substance: it is kotlinc's own declaration renderer over the RESOLVED
+  signature, so which `actual` is unmatched is decided while every file's syntax is live, and the
+  message is not built until Pass-1 signature finalization has published the types it names (an
+  inferred return reads `<not determined>` before that point). The grammar, measured against
+  kotlinc 2.4.10 so it need not be measured again:
 
   ```
   <visibility> <modality> actual [suspend] [inline] [data|enum|annotation] <kind> <signature>
@@ -104,8 +109,8 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   | `actual fun withParams(a: Int, b: String?): Long` | `… fun withParams(a: Int, b: String?): Long` |
   | `actual fun <T> generic(t: T): T` | `… fun <T> generic(t: T): T` |
   | `actual fun Int.receiver(): Int` | `… fun Int.receiver(): Int` |
-  | `actual fun vararged(vararg xs: Int)` | `… fun vararged(vararg xs: Int): Int` |
-  | `actual fun defaulted(a: Int = 1)` | `… fun defaulted(a: Int = ...): Int` — the value is literally `...` |
+  | `actual fun vararged(vararg xs: Int)` | `… fun vararged(vararg xs: Int): Unit` |
+  | `actual fun defaulted(a: Int = 1)` | `… fun defaulted(a: Int = ...): Unit` — the value is literally `...` |
   | `actual suspend fun` / `actual inline fun` | the keyword follows `actual` |
   | `actual val prop: Int` / `actual var mutable: String` | `public final actual val prop: Int` |
   | `actual val <T> List<T>.ext: Int` | type parameters precede the receiver |
@@ -119,9 +124,35 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   | `actual interface Iface` | `public abstract actual interface Iface : Any` |
   | `actual open class` / `actual abstract class` / `actual sealed class` | `open` / `abstract` / `sealed` fill the modality slot |
   | `internal actual fun` / `private actual fun` | `internal final actual fun` / `private final actual fun` |
+  | `actual fun inferred() = 1` | `… fun inferred(): Int` — the INFERRED return, which syntax cannot supply |
+  | `actual class OnlyIface : I` / `: I, J` / `: Base(), I` | `… : I` / `: I, J` / `: Base, I` — base first, then interfaces |
+  | `actual class GenericBase : GBase<String>()` | `… : GBase<String>` — supertype type arguments are kept |
+  | `actual class ViaAlias : AliasBase()` | `… : Base` — a supertype named through a typealias is EXPANDED |
+  | `actual class BoundedParams<T : Comparable<T>, U>` | `… class BoundedParams<T : Comparable<T>, U> : Any` — a declared bound is rendered, the implicit `Any?` is not |
+  | `actual sealed interface SealedIface` | `public sealed actual interface SealedIface : Any` — `sealed` beats the interface's `abstract` |
+  | `actual fun interface FunIface` | `public abstract actual fun interface FunIface : Any` |
+  | `actual value class Wrapped(val x: Int)` | `… actual value class Wrapped : Any` |
+  | `actual inner data class InnerData(val x: Int)` | `… actual inner data class InnerData : Any` — `inner` precedes `data` |
+  | `actual object ObjWithSuper : Base(), I` | `… actual object ObjWithSuper : Base, I` |
+  | `actual typealias Alias = String` | `public final actual typealias Alias = String` |
+  | `actual typealias GenericAlias<T> = List<T>` | `… typealias GenericAlias<T> = List<T>` — the alias's own parameters bind to its name |
+  | `actual typealias FunAlias = (Int) -> String` | `… typealias FunAlias = (Int) -> String` |
+  | `actual val <T> List<T>.ext: Int` | `public final actual val <T> List<T>.ext: Int` |
+  | a member `actual` | reported at its OWN name, not the class's — not implemented |
+  | `actual class A { constructor(x: Int) { } }` | nothing: a secondary constructor is not reported |
 
   Rendering from the AST is not sufficient: kotlinc renders the RESOLVED type, so an inferred return
-  (`actual fun f() = 1` → `Int`) and an expanded typealias have no written form to copy.
+  (`actual fun f() = 1` → `Int`) and an expanded typealias have no written form to copy. Nor is the
+  resolved signature sufficient on its own: parameter NAMES, which parameter carries `vararg` or a
+  default, and a classifier's kind and modifier words are what the declaration WROTE. The rendering
+  is therefore a hybrid, and `src/frontend/no_expect_for_actual.rs` states which side owns what.
+  Whether an `actual` is unmatched is answered by ACTUALIZATION's own shape matcher rather than by
+  a name/arity key: the key differs on the receiver spelling for `expect val S.tag: S` against
+  `actual val String.tag: String`, which the matcher pairs by following `actual typealias
+  S = String`.
+  Two resolved facts each need a correction the naive read gets wrong: a generic callable's
+  `Signature::params`/`ret` are ERASED (the declared shape is on its `GenericSig`), and a `vararg`
+  parameter's declared type is the ARRAY it arrives as while the rendering names the element.
 - kotlinc 2.4.0 runs on JRE 25 (verified). bytediff is slow (one kotlinc JVM launch per file) — sample.
 
 ## Phase log

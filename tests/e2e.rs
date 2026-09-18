@@ -1003,6 +1003,7 @@ mod mpp_requires_the_feature_e2e;
 
 #[path = "expect_declaration_body_e2e.rs"]
 mod expect_declaration_body_e2e;
+
 #[path = "multi_index_operator_e2e.rs"]
 mod multi_index_operator_e2e;
 #[path = "multiline_catch_e2e.rs"]
@@ -1061,6 +1062,8 @@ mod nested_value_class_e2e;
 mod newline_method_chain_e2e;
 #[path = "no_assertions_flags_e2e.rs"]
 mod no_assertions_flags_e2e;
+#[path = "no_expect_for_actual_e2e.rs"]
+mod no_expect_for_actual_e2e;
 #[path = "no_jdk_builtin_emit_e2e.rs"]
 mod no_jdk_builtin_emit_e2e;
 #[path = "non_field_ctor_metadata_e2e.rs"]

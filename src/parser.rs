@@ -151,6 +151,7 @@ fn modality_from_modifiers(modifiers: &[String]) -> crate::ast::Modality {
 /// empty body gives the later passes nothing to recurse over.
 fn error_class_decl(span: crate::diag::Span) -> ClassDecl {
     ClassDecl {
+        name_span: span,
         primary_ctor_visibility: Visibility::Public,
         name: "<error>".to_string(),
         visibility: Visibility::Public,
@@ -932,6 +933,11 @@ struct Parser<'a> {
     /// Context parameters parsed at a declaration prefix (`context(a: A)`), consumed by the next
     /// `parse_fun` (mirrors `pending_annotations`). Cleared when taken.
     pending_context_params: Vec<Param>,
+    /// Span of the identifier most recently read as a DECLARATION's name (every declaration head
+    /// takes its name through `ident_or_error`). A declaration head reads this immediately after
+    /// obtaining its name, before parsing anything that could read another one. Kotlin diagnostics
+    /// about a declaration as a whole point at its name rather than at its keyword.
+    declaration_name_span: Span,
     is_script: bool,
     script_stmts: Vec<StmtId>,
     /// Current expression-recursion depth (see [`Parser::parse_bp`]). Bounded by
@@ -1044,6 +1050,7 @@ impl<'a> Parser<'a> {
             pending_annotations: Vec::new(),
             pending_annotation_args: Vec::new(),
             pending_context_params: Vec::new(),
+            declaration_name_span: Span::new(0, 0),
             is_script,
             script_stmts: Vec::new(),
             expr_depth: 0,
@@ -1388,6 +1395,9 @@ impl<'a> Parser<'a> {
             // `expect` (multiplatform header): whatever declaration the arm below pushes is
             // recorded so expect/actual matching can drop it once an `actual` provides the body.
             let is_expect = mods.iter().any(|m| m == "expect");
+            // `actual` is otherwise inert, but an `actual` with no `expect` to actualize is an
+            // error, so the declarations carrying it are recorded exactly as the expects are.
+            let is_actual = mods.iter().any(|m| m == "actual");
             let decls_before = self.file.decls.len();
             match self.kind() {
                 TokenKind::Eof => break,
@@ -1568,6 +1578,11 @@ impl<'a> Parser<'a> {
                             .type_aliases
                             .push((declaration.name.clone(), declaration.target.name.clone()));
                     }
+                    if is_actual {
+                        self.file
+                            .actual_type_aliases
+                            .push(self.file.type_alias_decls.len());
+                    }
                     self.file.type_alias_decls.push(declaration.clone());
                     // The alias's declared visibility survives into `@Metadata`, including aliases
                     // whose target is a function type and therefore has no legacy classifier edge.
@@ -1589,6 +1604,22 @@ impl<'a> Parser<'a> {
                 self.file
                     .expect_decls
                     .extend_from_slice(&self.file.decls[decls_before..after]);
+            }
+            if is_actual {
+                // Only the declaration that WROTE the modifier. A classifier arm also pushes the
+                // nested classifiers it hoists out of the body, and those carry `actual` only if
+                // they wrote it themselves — so take the outermost, which is the one whose span
+                // starts first (a nested declaration always starts inside its owner).
+                let after = self.file.decls.len();
+                let outermost = self.file.decls[decls_before..after]
+                    .iter()
+                    .copied()
+                    .min_by_key(|&declaration| match self.file.decl(declaration) {
+                        Decl::Fun(function) => function.span.lo,
+                        Decl::Class(class) => class.span.lo,
+                        Decl::Property(property) => property.span.lo,
+                    });
+                self.file.actual_decls.extend(outermost);
             }
             if self.file.decls.len() > decls_before {
                 sink(self);
@@ -2106,6 +2137,7 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         self.bump(); // `typealias`
         let name = self.ident_or_error("typealias name");
+        let name_span = self.declaration_name_span;
         let type_params = if self.at(TokenKind::Lt) {
             self.parse_type_params(start.lo).0
         } else {
@@ -2120,6 +2152,7 @@ impl<'a> Parser<'a> {
             type_params,
             target,
             span: Span::new(start.lo, end.hi),
+            name_span,
         }
     }
 
@@ -2172,6 +2205,7 @@ impl<'a> Parser<'a> {
             self.skip_plain_newlines();
         }
         let (receiver, name) = self.parse_receiver_and_declaration_name("property name");
+        let name_span = self.declaration_name_span;
         let ty = if self.eat(TokenKind::Colon) {
             // `… (':' NL* type)?` — the type may start on the next line, which is where a formatter
             // puts a long generic one. An explicit `;` still ends the declaration.
@@ -2390,6 +2424,7 @@ impl<'a> Parser<'a> {
             explicit_backing_field,
             init,
             span: Span::new(start.lo, end.hi),
+            name_span,
         }
     }
 
@@ -2588,6 +2623,12 @@ impl<'a> Parser<'a> {
         if has_object_keyword {
             self.bump(); // 'object'
         }
+        // `companion object Named` names itself; a bare `companion object` has only its keyword.
+        let name_span = if has_object_keyword && self.at(TokenKind::Ident) {
+            self.tok().span
+        } else {
+            start
+        };
         let simple_name = if has_object_keyword && self.at(TokenKind::Ident) {
             self.bump().text(self.src).to_string()
         } else {
@@ -2663,6 +2704,7 @@ impl<'a> Parser<'a> {
         let end = self.t[self.i.saturating_sub(1)].span;
         self.restore_lexical_type_parameter_scope(lexical_scope);
         let declaration = ClassDecl {
+            name_span,
             primary_ctor_visibility: Visibility::Public,
             name,
             visibility: visibility_of(modifiers),
@@ -2791,6 +2833,7 @@ impl<'a> Parser<'a> {
         self.bump(); // 'enum'
         self.bump(); // 'class'
         let name = self.ident_or_error("enum name");
+        let name_span = self.declaration_name_span;
         // Optional explicit `constructor` keyword and primary constructor:
         // `enum class C constructor(val rgb: Int, …)`.
         if self.at(TokenKind::Ident) && self.keyword_text("constructor") {
@@ -3177,6 +3220,7 @@ impl<'a> Parser<'a> {
         ClassDecl {
             primary_ctor_visibility: Visibility::Public,
             name,
+            name_span,
             visibility: Visibility::Public,
             annotations,
             annotation_args,
@@ -3332,6 +3376,7 @@ impl<'a> Parser<'a> {
             self.skip_plain_newlines();
         }
         let (receiver, name) = self.parse_receiver_and_declaration_name("extension function name");
+        let name_span = self.declaration_name_span;
         let mut params = self.parse_param_list();
         // Context parameters (`context(a: A) fun f()`), parsed at the declaration site into
         // `pending_context_params`, become LEADING value parameters (kotlinc's ABI) — prepend them and
@@ -3380,6 +3425,7 @@ impl<'a> Parser<'a> {
             non_null_type_params,
             reified_type_params,
             span: Span::new(start.lo, end.hi),
+            name_span,
             signature_span: Span::new(start.lo, signature_end),
             override_span,
             operator_span,
@@ -3880,14 +3926,8 @@ impl<'a> Parser<'a> {
         let context_params = std::mem::take(&mut self.pending_context_params);
         let start = self.tok().span;
         self.bump(); // 'class'
-        let name = if self.at(TokenKind::Ident) {
-            let n = self.text().to_string();
-            self.bump();
-            n
-        } else {
-            self.diags.error(self.tok().span, "expected class name");
-            "<error>".to_string()
-        };
+        let name = self.ident_or_error("class name");
+        let name_span = self.declaration_name_span;
         let (type_params, _, _, type_param_bounds, type_param_variances) = if self.at(TokenKind::Lt)
         {
             self.parse_type_params(start.lo)
@@ -4139,6 +4179,7 @@ impl<'a> Parser<'a> {
         let end = self.t[self.i.saturating_sub(1)].span;
         self.pop_lexical_type_params(lexical_type_param_lens);
         ClassDecl {
+            name_span,
             primary_ctor_visibility,
             name,
             visibility: Visibility::Public,
@@ -4431,6 +4472,7 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         self.bump(); // 'interface'
         let name = self.ident_or_error("interface name");
+        let name_span = self.declaration_name_span;
         let (type_params, _, _, type_param_bounds, type_param_variances) = if self.at(TokenKind::Lt)
         {
             self.parse_type_params(start.lo)
@@ -4524,6 +4566,7 @@ impl<'a> Parser<'a> {
         }
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
+            name_span,
             primary_ctor_visibility: Visibility::Public,
             name,
             visibility: Visibility::Public,
@@ -4652,6 +4695,7 @@ impl<'a> Parser<'a> {
         let synth = ClassDecl {
             primary_ctor_visibility: Visibility::Public,
             name: name.clone(),
+            name_span: span,
             visibility: Visibility::Public,
             annotations: Vec::new(),
             annotation_args: Vec::new(),
@@ -4708,6 +4752,7 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         self.bump(); // 'object'
         let name = self.ident_or_error("object name");
+        let name_span = self.declaration_name_span;
         // Capture the object's implemented INTERFACES (`object X : KSerializer<C>`) AND a base class
         // (`object A : Sealed()`): the general class lowering/emit handles the `extends` + `super(args)`.
         let (
@@ -4788,6 +4833,7 @@ impl<'a> Parser<'a> {
         }
         let end = self.t[self.i.saturating_sub(1)].span;
         ClassDecl {
+            name_span,
             primary_ctor_visibility: Visibility::Public,
             name,
             visibility: Visibility::Public,
@@ -7143,6 +7189,7 @@ impl<'a> Parser<'a> {
     }
 
     fn ident_or_error(&mut self, what: &str) -> String {
+        self.declaration_name_span = self.tok().span;
         if self.at(TokenKind::Ident) {
             let n = self.text().to_string();
             self.bump();

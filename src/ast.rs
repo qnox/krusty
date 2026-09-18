@@ -505,6 +505,8 @@ pub struct TypeAliasDecl {
     pub type_params: Vec<String>,
     pub target: TypeRef,
     pub span: Span,
+    /// Exact span of the alias's NAME, like [`FunDecl::name_span`].
+    pub name_span: Span,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -841,6 +843,9 @@ pub struct FunDecl {
     /// may use them concretely (`is T`, `as T`, `T::class`) and codegen specializes them per call.
     pub reified_type_params: std::collections::HashSet<String>,
     pub span: Span,
+    /// Exact span of the declaration's NAME. Kotlin diagnostics about a declaration as a whole
+    /// point here, not at its keyword.
+    pub name_span: Span,
     /// Source range from `fun` through the optional `where` clause, excluding the body.
     pub signature_span: Span,
     /// Exact span of the `override` modifier. Present exactly when [`Self::is_override`] is true.
@@ -1129,6 +1134,8 @@ pub struct ClassDecl {
     /// same `(annotation, args)` pairing every other declaration's annotations carry.
     pub primary_ctor_annotation_args: Vec<Vec<ExprId>>,
     pub span: Span,
+    /// Exact span of the classifier's NAME, like [`FunDecl::name_span`].
+    pub name_span: Span,
     /// 1-based source line of the class declaration (from `span.lo`), for the `LineNumberTable` of
     /// kotlinc's synthesized members (ctor/accessors), which all map to the class's declaration line.
     /// 0 = unknown (no debug tables emitted). Filled by a parser post-pass.
@@ -1405,6 +1412,8 @@ pub struct PropDecl {
     pub delegate: Option<ExprId>,
     pub explicit_backing_field: Option<ExplicitBackingField>,
     pub span: Span,
+    /// Exact span of the property's NAME, like [`FunDecl::name_span`].
+    pub name_span: Span,
 }
 
 impl PropDecl {
@@ -1510,6 +1519,14 @@ pub struct File {
     /// `actual` in the same compiled source set replaces them (see `strip_matched_expects`); an
     /// unmatched `expect` stays and fails checking like any body-less declaration.
     pub expect_decls: Vec<DeclId>,
+    /// Top-level declarations carrying the `actual` modifier, the mirror of [`Self::expect_decls`].
+    /// An `actual` is otherwise inert; this records it so an `actual` with no `expect` to actualize
+    /// can be rejected, which is an error in Kotlin.
+    pub actual_decls: Vec<DeclId>,
+    /// Indices into [`Self::type_alias_decls`] for aliases carrying `actual`. A `typealias` is not
+    /// a `Decl`, so it cannot ride [`Self::actual_decls`] — and `actual typealias S = String` is
+    /// exactly how an `expect class` is actualized, so it must be covered.
+    pub actual_type_aliases: Vec<usize>,
     /// Every `expect` or `actual` MODIFIER keyword this file writes, with its own span — members
     /// included, since the two are legal only in a multiplatform project and the diagnostic points
     /// at the keyword rather than at the declaration it precedes.
