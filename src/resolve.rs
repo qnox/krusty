@@ -73,6 +73,8 @@ mod stable_path;
 mod streaming_signature_bridge;
 #[cfg(test)]
 mod streaming_signature_tests;
+mod super_calls;
+pub use super_calls::ResolvedSuperCall;
 mod tailrec_declarations;
 mod type_join;
 
@@ -18667,80 +18669,6 @@ fn constructor_delegation_cycles(edges: &[Option<usize>]) -> Vec<Vec<usize>> {
 }
 
 #[derive(Clone, Debug)]
-pub struct ResolvedSuperCall {
-    /// Exact dispatch receiver selected by `super` / `super@Label`. A labeled super may target an
-    /// enclosing class instance, so the callable target alone is not enough for lowering.
-    pub receiver: ImplicitReceiverSelection,
-    pub owner: TypeName,
-    pub name: String,
-    pub params: Vec<Ty>,
-    pub ret: Ty,
-    pub physical_ret: Ty,
-    /// Empty for a source signature whose descriptor is derived from the semantic parameter types.
-    pub descriptor: String,
-    pub interface: bool,
-    /// Provider-owned physical realization of the selected semantic declaration. A JVM-default
-    /// holder is an ordinary direct realization; lowering does not rediscover it from a mode or
-    /// owner spelling.
-    pub realization: crate::libraries::MemberRealization,
-    /// Stable source declaration selected for this call. Dependency declarations leave this unset;
-    /// current-compilation defaults use it to retain their exact checked default-expression owner.
-    pub stable_declaration: Option<crate::fir::DeclarationId>,
-    /// Kotlin property declaration selected by property syntax. The callable declaration above is
-    /// still the exact accessor target used by FIR; editor/navigation consumers use this identity
-    /// to reach the source property rather than its generated getter or setter.
-    pub property_declaration: Option<crate::fir::DeclarationId>,
-    pub source_member: Option<crate::libraries::SourceMember>,
-    /// Exact semantic dependency property when this selection came from property syntax. The
-    /// callable identity remains available for ordinary accessor calls, but checked FIR uses this
-    /// declaration identity to retain property semantics through target-independent lowering.
-    pub external_property: Option<crate::fir::ExternalPropertyId>,
-}
-
-impl ResolvedSuperCall {
-    fn selected(
-        receiver: ImplicitReceiverSelection,
-        dispatch_owner: TypeName,
-        interface: bool,
-        member: crate::libraries::LibraryMember,
-    ) -> Option<Self> {
-        let realization = member.realization;
-        let stable_declaration = member.stable_declaration;
-        let source_member = member.source_member;
-        let external_property = member.external_property_identity;
-        let physical_owner = member.owner?;
-        let owner = match realization {
-            // A selected class declaration remains the exact non-virtual target even when it was
-            // inherited through another class. An interface declaration reached through a class
-            // supertype must instead name that direct class in the InterfaceMethodref search path;
-            // the normalized declaration kind, not its symbol-source origin, decides the shape.
-            crate::libraries::MemberRealization::Dispatch if member.is_interface() => {
-                dispatch_owner
-            }
-            crate::libraries::MemberRealization::Dispatch => physical_owner,
-            crate::libraries::MemberRealization::Direct { .. } => physical_owner,
-            crate::libraries::MemberRealization::Intrinsic(_)
-            | crate::libraries::MemberRealization::RangeConstruction { .. } => return None,
-        };
-        Some(Self {
-            receiver,
-            owner,
-            name: member.physical_name.unwrap_or(member.name),
-            params: member.params,
-            ret: member.ret,
-            physical_ret: member.physical_ret,
-            descriptor: member.descriptor,
-            interface,
-            realization,
-            stable_declaration,
-            property_declaration: None,
-            source_member,
-            external_property,
-        })
-    }
-}
-
-#[derive(Clone, Debug)]
 pub struct ResolvedDefaultMemberCall {
     pub owner: TypeName,
     pub name: String,
@@ -27418,6 +27346,9 @@ impl<'a> Checker<'a> {
                                 ) {
                                     return Ty::Error;
                                 }
+                                if self.reject_suspend_super_call(m.suspend(), span, &name) {
+                                    return Ty::Error;
+                                }
                                 let ret = m.ret;
                                 if let Some(target) = ResolvedSuperCall::selected(
                                     dispatch_receiver.clone(),
@@ -27477,6 +27408,9 @@ impl<'a> Checker<'a> {
                                 &member.call_sig,
                                 None,
                             ) {
+                                return Ty::Error;
+                            }
+                            if self.reject_suspend_super_call(member.suspend(), span, &name) {
                                 return Ty::Error;
                             }
                             let ret = member.ret;
