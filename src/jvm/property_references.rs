@@ -247,6 +247,8 @@ fn classifier_property(
         boxed_value_class: None,
         unboxed_receiver_value_class: None,
         owner_is_interface: false,
+        // A synthesized classifier property (`EnumEntries`) is an ordinary static member accessor.
+        accessor_role: crate::ir::PropertyAccessorRole::Member,
         prop_ty: property_type,
         bound: false,
         static_dispatch: true,
@@ -333,6 +335,13 @@ fn external_property(
                 callable_descriptor(&setter.callable)
             }
         }),
+        // A dependency's accessor arrives with its selected callable kind; an extension is the one
+        // that takes its receiver as the first argument.
+        accessor_role: if matches!(getter.1.kind, ExternalCallableKind::Extension) {
+            crate::ir::PropertyAccessorRole::Extension
+        } else {
+            crate::ir::PropertyAccessorRole::Member
+        },
         boxed_value_class: None,
         unboxed_receiver_value_class: None,
         owner_is_interface: callable.owner_is_interface,
@@ -475,6 +484,13 @@ fn module_property(
         static_dispatch,
         mutable: reference_mutable,
         ext_facade,
+        accessor_role: if access_bridge {
+            crate::ir::PropertyAccessorRole::AccessBridge
+        } else if !companion_associated && property.extension_receiver.is_some() {
+            crate::ir::PropertyAccessorRole::Extension
+        } else {
+            crate::ir::PropertyAccessorRole::Member
+        },
     })
 }
 

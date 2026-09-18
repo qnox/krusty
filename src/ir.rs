@@ -1929,9 +1929,30 @@ pub struct PropRef {
     pub mutable: bool,
     /// An EXTENSION property reference (`obj::ext`, `Type::ext` where `val Recv.ext`): the getter/setter
     /// are STATIC methods on this facade taking the receiver as the first argument (`getExt(Recv)` /
-    /// `setExt(Recv, v)`), unlike a member reference's instance `getExt()`. `None` for member/top-level
-    /// references. The reference's receiver-class metadata still lives in `owner_internal`.
+    /// `setExt(Recv, v)`), unlike a member reference's instance `getExt()`. Also `Some` — naming the
+    /// OWNER, not a facade — for a private member reached through an `access$…` bridge, whose
+    /// accessor is static in the same way. Read [`Self::accessor_role`] to tell the two apart.
     pub ext_facade: Option<Option<TypeName>>,
+    /// Which accessor realization the reference calls, recorded where the selection is made.
+    ///
+    /// `ext_facade` cannot answer this: it is `Some` for an extension AND for a private member
+    /// reached through an access bridge. A later representation pass that reads it as "this is an
+    /// extension" rebuilds an extension-mangled name for a member and emits a call to a method that
+    /// is declared nowhere.
+    pub accessor_role: PropertyAccessorRole,
+}
+
+/// The physical accessor a property reference calls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropertyAccessorRole {
+    /// An instance accessor on the owner (`Z.getXx()`), or a static one on the file facade for a
+    /// top-level property.
+    Member,
+    /// A static accessor on the declaring file's facade, taking the extension receiver first.
+    Extension,
+    /// A synthetic `access$…$p` on the owner, selected because the property (or its setter) is
+    /// private and the reference is built outside it.
+    AccessBridge,
 }
 
 impl FuncRef {

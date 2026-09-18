@@ -5173,6 +5173,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     signature needs no value-class hash of its own.
   - An **extension on** a value class is the same shape through its facade, with the hash-mangled
     name the declaration carries: `ExtKt.getXx-IQRRRT4(I)I`, not `getXx(LZ;)I`.
+  - Which of those two a reference is, is RECORDED, never inferred. `PropRef::ext_facade` is `Some`
+    for an extension AND for a private member reached through an `access$…` bridge — the bridge's
+    accessor is static in the same way, so it names an owner there rather than a facade. Reading it
+    as "this is an extension" rebuilt `getXx-IQRRRT4(I)I` for a private member whose declaration is
+    `getXx-impl(I)I`, and `(this::xx).get()` on a value class failed with
+    `NoSuchMethodError: 'int Z.getXx-IQRRRT4(int)'`. `PropRef::accessor_role` now carries the
+    selection made where the three cases are distinguishable, and a private member of a value class
+    takes the member rule: krusty publishes that accessor directly rather than behind a bridge, so
+    the member `-impl` form is the declaration's own name. (kotlinc keeps it `private` and calls
+    `Z.access$getXx-impl(I)I`; the visibility split is a separate declaration-side divergence.)
   - The value class's own **underlying** property is the exception and takes no rewrite: reading it
     is the unbox, and its accessor stays an ordinary instance getter on the box (`Z.getX()I` —
     which is also the signature the reference reports, exactly as kotlinc's does, even though
