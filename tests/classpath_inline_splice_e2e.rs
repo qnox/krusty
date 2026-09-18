@@ -99,21 +99,25 @@ fn an_ordinary_classpath_inline_body_is_spliced() {
 }
 
 /// String concatenation compiles to `invokedynamic makeConcatWithConstants` on JVM target 9 and
-/// above, and an `invokedynamic` cannot be relocated into the host without its `BootstrapMethods`
-/// entry — so the splice declines and a real call is emitted where kotlinc inlines.
+/// above. Its bootstrap is self-contained — a recipe string and constants — so the entry can be
+/// re-interned in the host and the body splices.
 #[test]
-fn a_classpath_inline_body_that_concatenates_declines() {
+fn a_classpath_inline_body_that_concatenates_is_spliced() {
     let Some(text) = krusty_main() else {
         eprintln!("skipping: reference kotlinc or javap unavailable");
         return;
     };
     assert!(
-        calls(
+        !calls(
             &text,
             "java.lang.String runConcat(java.lang.String)",
             "fixture/LibKt.tagPlain"
         ),
-        "expected a real call, the splice having declined:\n{text}"
+        "expected the body to be spliced:\n{text}"
+    );
+    assert!(
+        text.contains("makeConcatWithConstants"),
+        "expected the relocated bootstrap in the host:\n{text}"
     );
 }
 

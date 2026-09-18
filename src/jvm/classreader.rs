@@ -276,6 +276,14 @@ pub enum C {
     Float(u32), // raw bits
     Long(i64),
     Double(u64), // raw bits
+    /// `reference_kind`, `reference_index` — the handle a bootstrap method names.
+    MethodHandle(u8, u16),
+    /// `descriptor_index`.
+    MethodType(u16),
+    /// `bootstrap_method_attr_index`, `name_and_type_index`. The first indexes the DEFINING class's
+    /// `BootstrapMethods` attribute, not its constant pool, which is why splicing one into another
+    /// class needs that attribute as well as the pool.
+    InvokeDynamic(u16, u16),
     Other,
 }
 
@@ -302,25 +310,23 @@ fn parse_constant_pool(r: &mut Reader) -> Result<Vec<C>, ReadError> {
             9 => C::Fieldref(r.u2()?, r.u2()?),
             10 => C::Methodref(r.u2()?, r.u2()?),
             11 => C::InterfaceMethodref(r.u2()?, r.u2()?),
-            17 | 18 => {
+            18 => C::InvokeDynamic(r.u2()?, r.u2()?),
+            17 => {
                 r.u2()?;
                 r.u2()?;
                 C::Other
-            } // dynamic / invokedynamic
+            } // dynamic (constant), not yet modelled
             8 => C::String(r.u2()?),
-            16 | 19 | 20 => {
+            16 => C::MethodType(r.u2()?),
+            19 | 20 => {
                 r.u2()?;
                 C::Other
-            } // methodtype / module / package
+            } // module / package
             3 => C::Integer(r.u4()? as i32),
             4 => C::Float(r.u4()?),
             5 => C::Long(((r.u4()? as i64) << 32) | r.u4()? as i64),
             6 => C::Double(((r.u4()? as u64) << 32) | r.u4()? as u64),
-            15 => {
-                r.u1()?;
-                r.u2()?;
-                C::Other
-            }
+            15 => C::MethodHandle(r.u1()?, r.u2()?),
             _ => return Err(ReadError::BadConstant(tag)),
         };
         let two_slots = matches!(tag, 5 | 6);
@@ -355,6 +361,11 @@ pub struct MethodCode {
     /// Debug locals from the declaration body. Provider-side structural decoders use their source
     /// names only after bytecode flow has identified the exact semantic local role.
     pub locals: Vec<MethodLocal>,
+    /// The DEFINING class's `BootstrapMethods` entries, as `(method handle cp index, static argument
+    /// cp indices)`. An `invokedynamic` names one by index into this table rather than into the
+    /// constant pool, so relocating the instruction into another class means re-interning the entry
+    /// there too. Empty when the class declares none.
+    pub bootstrap_methods: Vec<(u16, Vec<u16>)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -411,6 +422,14 @@ pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<Me
     }
     // Methods — find the matching (name, descriptor), then its `Code` attribute.
     let nmethods = r.u2().ok()?;
+    let mut found: Option<(
+        u16,
+        u16,
+        Vec<u8>,
+        Option<Vec<u8>>,
+        Vec<ExcEntry>,
+        Vec<MethodLocal>,
+    )> = None;
     for _ in 0..nmethods {
         r.u2().ok()?; // access
         let mname = utf8(r.u2().ok()?).to_string();
@@ -467,21 +486,59 @@ pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<Me
                         }
                     }
                 }
-                return Some(MethodCode {
-                    max_stack,
-                    max_locals,
-                    code,
-                    source_cp: cp,
-                    stackmap,
-                    handlers,
-                    locals,
-                });
+                found = Some((max_stack, max_locals, code, stackmap, handlers, locals));
+                continue;
             }
             r.take(attr_len).ok()?;
         }
-        if matches {
+        if matches && found.is_none() {
             return None; // method found but has no Code (abstract/native)
         }
+    }
+    let (max_stack, max_locals, code, stackmap, handlers, locals) = found?;
+    // `BootstrapMethods` is a CLASS attribute, so it lies past the methods. An `invokedynamic` in the
+    // body indexes it rather than the constant pool, so a splice into another class cannot relocate
+    // one without it. Reached by finishing the scan rather than by parsing the class a second time:
+    // splicing is one of the hottest backend paths.
+    let bootstrap_methods = read_bootstrap_methods(&mut r, &cp).unwrap_or_default();
+    Some(MethodCode {
+        max_stack,
+        max_locals,
+        code,
+        source_cp: cp,
+        stackmap,
+        handlers,
+        locals,
+        bootstrap_methods,
+    })
+}
+
+/// The defining class's `BootstrapMethods` entries, as `(method handle cp index, static argument cp
+/// indices)`. `r` must be positioned at the start of the CLASS attribute table, which is why the
+/// method scan runs to completion rather than stopping at the method it wanted.
+fn read_bootstrap_methods(r: &mut Reader, cp: &[C]) -> Option<Vec<(u16, Vec<u16>)>> {
+    let nattr = r.u2().ok()?;
+    for _ in 0..nattr {
+        let name_index = r.u2().ok()?;
+        let len = r.u4().ok()? as usize;
+        let body = r.take(len).ok()?;
+        let is_bootstrap = matches!(cp.get(name_index as usize), Some(C::Utf8(name)) if name == "BootstrapMethods");
+        if !is_bootstrap {
+            continue;
+        }
+        let mut entries = Reader { b: body, i: 0 };
+        let count = entries.u2().ok()?;
+        let mut out = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let handle = entries.u2().ok()?;
+            let argc = entries.u2().ok()?;
+            let mut args = Vec::with_capacity(argc as usize);
+            for _ in 0..argc {
+                args.push(entries.u2().ok()?);
+            }
+            out.push((handle, args));
+        }
+        return Some(out);
     }
     None
 }

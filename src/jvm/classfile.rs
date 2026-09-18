@@ -2086,6 +2086,22 @@ impl ClassWriter {
     }
     /// Register a `BootstrapMethods` entry — `method_handle` is a `MethodHandle` cp index, `args` are
     /// the static-argument cp indices. Returns the `bootstrap_method_attr_index` (deduped).
+    /// Intern a `CONSTANT_MethodHandle` of ANY reference kind onto an already-interned member ref.
+    /// Relocating a bootstrap method from another class needs every kind, not only `invokestatic`.
+    pub fn method_handle_ref(&mut self, kind: u8, member: u16) -> u16 {
+        self.cp.intern(Const::MethodHandle(kind, member))
+    }
+
+    /// Intern a `CONSTANT_MethodType` for `descriptor`.
+    pub fn method_type_ref(&mut self, descriptor: &str) -> u16 {
+        self.cp.method_type(descriptor)
+    }
+
+    /// Intern a `CONSTANT_InvokeDynamic` naming a `BootstrapMethods` entry already registered here.
+    pub fn invoke_dynamic_ref(&mut self, bootstrap: u16, name: &str, descriptor: &str) -> u16 {
+        self.cp.invoke_dynamic(bootstrap, name, descriptor)
+    }
+
     pub fn add_bootstrap(&mut self, method_handle: u16, args: Vec<u16>) -> u16 {
         if let Some(i) = self
             .bootstrap_methods

@@ -184,8 +184,32 @@ pub fn relocate_const(src_cp: &[C], idx: u16, cw: &mut ClassWriter) -> Option<u1
             let (n, d) = name_and_type(src_cp, *nt)?;
             Some(cw.interface_methodref(&cn, &n.to_string(), &d.to_string()))
         }
+        // A bootstrap method is named by a handle onto a member, and its static arguments are
+        // ordinary constants plus, commonly, a `MethodType`. Both relocate through the member/utf8
+        // they wrap.
+        C::MethodHandle(kind, member) => {
+            let (kind, member) = (*kind, *member);
+            let relocated = relocate_const(src_cp, member, cw)?;
+            Some(cw.method_handle_ref(kind, relocated))
+        }
+        C::MethodType(descriptor) => {
+            let descriptor = utf8(src_cp, *descriptor)?.to_string();
+            Some(cw.method_type_ref(&descriptor))
+        }
         _ => None,
     }
+}
+
+/// Whether a bootstrap method's handle names a factory whose entry carries no reference back into
+/// the class that declared it, so re-interning it in another class is complete.
+fn is_self_contained_bootstrap(src_cp: &[C], handle: u16) -> bool {
+    let Some(C::MethodHandle(_, member)) = src_cp.get(handle as usize) else {
+        return false;
+    };
+    matches!(
+        methodref_target(src_cp, *member),
+        Some(("java/lang/invoke/StringConcatFactory", _))
+    )
 }
 
 /// Whether any instruction in `code` references (through `src_cp`) a method/field `is_private`
@@ -792,7 +816,12 @@ pub fn set_pool_operand(insn: &mut Insn, idx: u16) {
 /// counterpart of [`relocate_code`], so relocation composes with the local/return/reified transforms
 /// before reassembly). `None` on `invokedynamic` or an unsupported one-byte pool operand. An `ldc`
 /// whose relocated index exceeds a byte is widened to the identical-semantics `ldc_w` form.
-pub fn relocate_insns(insns: &mut [Insn], src_cp: &[C], cw: &mut ClassWriter) -> Option<()> {
+pub fn relocate_insns(
+    insns: &mut [Insn],
+    src_cp: &[C],
+    bootstraps: &[(u16, Vec<u16>)],
+    cw: &mut ClassWriter,
+) -> Option<()> {
     for insn in insns.iter_mut() {
         let Insn::Plain { op, operands } = insn else {
             continue;
@@ -801,19 +830,40 @@ pub fn relocate_insns(insns: &mut [Insn], src_cp: &[C], cw: &mut ClassWriter) ->
             continue;
         };
         if *op == 0xba {
-            // invokedynamic — unrelocatable without bootstrap-method handling, so the splice declines
-            // and the caller emits a real call.
+            // invokedynamic names a `BootstrapMethods` entry of its DEFINING class by index, not a
+            // constant pool entry, so relocating it means re-interning that entry here: the handle,
+            // its static arguments, and the name/type. `add_bootstrap` dedupes on the host side.
             //
-            // A lambda inside an `inline` function is NOT why: kotlinc compiles those as
-            // anonymous-class singletons (`getstatic …$N.INSTANCE`) precisely so an inliner can copy
-            // them. STRING CONCATENATION is: on JVM target 9 and above it compiles to
-            // `invokedynamic makeConcatWithConstants`, so any classpath inline body that builds a
-            // string reaches here and is not inlined, where kotlinc inlines it.
-            //
-            // Relocating one needs the DEFINING class's `BootstrapMethods` table, which `MethodCode`
-            // does not carry, plus `MethodHandle`/`MethodType` support in `relocate_const`;
-            // `ClassWriter::add_bootstrap` already dedupes the host-side entry.
-            return None;
+            // Kotlin reaches this through string concatenation, which compiles to
+            // `invokedynamic makeConcatWithConstants` from JVM target 9 — a lambda inside an
+            // `inline` function does not, kotlinc compiling those as anonymous-class singletons
+            // precisely so an inliner can copy them.
+            let o = off - 1;
+            let src_idx = (*operands.get(o)? as u16) << 8 | *operands.get(o + 1)? as u16;
+            let C::InvokeDynamic(bootstrap_index, name_and_type_index) =
+                *src_cp.get(src_idx as usize)?
+            else {
+                return None;
+            };
+            let (handle, arguments) = bootstraps.get(bootstrap_index as usize)?;
+            // Only a SELF-CONTAINED bootstrap can move. `StringConcatFactory` takes a recipe string
+            // and constants, so re-interning it here is complete. `LambdaMetafactory` instead names
+            // an implementation method handle in the DEFINING class — often private and synthetic —
+            // which the host has no right to reference, so those still decline.
+            if !is_self_contained_bootstrap(src_cp, *handle) {
+                return None;
+            }
+            let handle = relocate_const(src_cp, *handle, cw)?;
+            let arguments = arguments
+                .iter()
+                .map(|argument| relocate_const(src_cp, *argument, cw))
+                .collect::<Option<Vec<u16>>>()?;
+            let bootstrap = cw.add_bootstrap(handle, arguments);
+            let (name, descriptor) = name_and_type(src_cp, name_and_type_index)?;
+            let (name, descriptor) = (name.to_string(), descriptor.to_string());
+            let new = cw.invoke_dynamic_ref(bootstrap, &name, &descriptor);
+            *operands = vec![(new >> 8) as u8, (new & 0xff) as u8, 0, 0];
+            continue;
         }
         // `off` is relative to the opcode; in `operands` (opcode stripped) it is `off - 1`.
         let o = off - 1;
@@ -2075,7 +2125,7 @@ pub fn splice_unified(
             return None;
         }
     }
-    relocate_insns(&mut insns, &body.source_cp, cw)?;
+    relocate_insns(&mut insns, &body.source_cp, &body.bootstrap_methods, cw)?;
     // Repoint each reified type-bearing op at its concrete type (post-relocation, so the fresh CLASS pool
     // ref survives). An unmapped type-parameter name (`reified` lacks it) or a malformed type-bearing
     // instruction skips the whole splice rather than emitting the erased placeholder.
@@ -2472,7 +2522,7 @@ pub fn splice(
     let mut insns = disassemble(&body.code)?;
     // Reified first (nops the marker region) so its now-dead ldc isn't needlessly relocated.
     let patches = substitute_reified(&mut insns, &body.source_cp, cw, type_map);
-    relocate_insns(&mut insns, &body.source_cp, cw)?;
+    relocate_insns(&mut insns, &body.source_cp, &body.bootstrap_methods, cw)?;
     for (j, idx) in patches {
         set_pool_operand(&mut insns[j], idx);
     }
@@ -2772,6 +2822,7 @@ mod tests {
             stackmap: None,
             handlers: vec![],
             locals: vec![],
+            bootstrap_methods: Vec::new(),
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         let out =
@@ -2830,6 +2881,29 @@ mod tests {
     }
 
     #[test]
+    /// Only a bootstrap whose entry carries no reference back into its declaring class may move.
+    #[test]
+    fn only_a_self_contained_bootstrap_relocates() {
+        let concat = vec![
+            C::Other,
+            C::Utf8("java/lang/invoke/StringConcatFactory".to_string()),
+            C::Class(1),
+            C::Utf8("makeConcatWithConstants".to_string()),
+            C::Utf8("()V".to_string()),
+            C::NameAndType(3, 4),
+            C::Methodref(2, 5),
+            C::MethodHandle(6, 6),
+        ];
+        assert!(is_self_contained_bootstrap(&concat, 7));
+
+        let mut lambda = concat.clone();
+        lambda[1] = C::Utf8("java/lang/invoke/LambdaMetafactory".to_string());
+        assert!(
+            !is_self_contained_bootstrap(&lambda, 7),
+            "a lambda's bootstrap names an implementation handle in its own class"
+        );
+    }
+
     fn is_reified_inline_negative() {
         // A plain body (iconst_1; ireturn) with no marker is not reified-inline.
         let body = MethodCode {
@@ -2840,6 +2914,7 @@ mod tests {
             stackmap: None,
             handlers: vec![],
             locals: vec![],
+            bootstrap_methods: Vec::new(),
         };
         assert!(!is_reified_inline(&body));
     }
@@ -2855,6 +2930,7 @@ mod tests {
             stackmap: None,
             handlers: vec![],
             locals: vec![],
+            bootstrap_methods: Vec::new(),
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         let tm = HashMap::new();
@@ -2952,7 +3028,7 @@ mod tests {
         let code = [0xb8, 0x00, 0x06, 0xb1]; // invokestatic #6 ; return
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         let mut insns = disassemble(&code).unwrap();
-        relocate_insns(&mut insns, &src_cp, &mut cw).expect("relocate");
+        relocate_insns(&mut insns, &src_cp, &[], &mut cw).expect("relocate");
         let out = assemble(&insns);
         let expected = cw.methodref("Foo", "bar", "()V");
         assert_eq!((out[1] as u16) << 8 | out[2] as u16, expected);
