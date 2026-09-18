@@ -6178,7 +6178,6 @@ fn emit_class(
                     .chain(c.init_body),
             );
             e.next_slot = 1 + params_words;
-            e.free_exception_slots.clear();
             e.this_uninitialized = true;
             e.slots.insert(0, (0, Ty::obj(&fq_name)));
             let mut s = 1u16;
@@ -6878,8 +6877,6 @@ fn emit_class(
                 store(Ty::obj(&fq_name), 0, &mut clinit);
                 e.slots.insert(0, (0, Ty::obj(&fq_name)));
                 e.next_slot = 1;
-                e.free_exception_slots.clear();
-                e.free_exception_slots.clear();
             }
             // Per-initializer line numbers (kotlinc maps each store to its property's source line;
             // applied after add_method below) — only for the pure store-list shape.
@@ -7066,7 +7063,6 @@ fn emit_enum_entry_subclass(
     if let Some(init_body) = c.init_body {
         let mut e = Emitter::new(ir, &mut cw, env, &fq_name, facade, Ty::Unit, [init_body]);
         e.next_slot = 1 + ctor_words;
-        e.free_exception_slots.clear();
         e.slots.insert(0, (0, Ty::obj(&fq_name))); // `this`
         e.emit(init_body, &mut ctor);
         ctor_max = e.next_slot;
@@ -9973,7 +9969,6 @@ fn emit_enum_class(
     if let Some(init_body) = c.init_body {
         let mut e = Emitter::new(ir, &mut cw, env, &fq, facade, Ty::Unit, [init_body]);
         e.next_slot = 1 + ctor_words;
-        e.free_exception_slots.clear();
         e.slots.insert(0, (0, Ty::obj(&fq)));
         let mut s = 3u16;
         for (i, t) in all_param_tys.iter().enumerate() {
@@ -11341,7 +11336,6 @@ fn emit_method_inner_with_holder(
     if instance {
         e.slots.insert(0, (0, Ty::obj(owner)));
         e.next_slot = 1;
-        e.free_exception_slots.clear();
     }
     for (i, t) in param_tys.iter().enumerate() {
         let vi = i as u32 + if instance { 1 } else { 0 };
@@ -12655,7 +12649,6 @@ fn emit_default_stub(
     let _ = e.lease_temporary(slot, Ty::obj("java/lang/Object"));
     slot += 1;
     e.next_slot = slot;
-    e.free_exception_slots.clear();
 
     let mut code = CodeBuilder::new(slot);
     // An INTERFACE's stub is guarded too: `super<I>.m()` is a real call site, so kotlinc puts the
@@ -13023,7 +13016,6 @@ fn emit_facade_default_stub(
     let _ = e.lease_temporary(slot, marker);
     slot += 1;
     e.next_slot = slot;
-    e.free_exception_slots.clear();
 
     let mut code = CodeBuilder::new(slot);
     // A top-level EXTENSION's registered defaults/names carry a leading `$receiver` slot; the mask
@@ -13183,7 +13175,6 @@ fn emit_ctor_default_stub_with_prefix(
     let _ = e.lease_temporary(slot, marker);
     slot += 1;
     e.next_slot = slot;
-    e.free_exception_slots.clear();
 
     // The stackmap frame at each mask-branch target: `this` (slot 0) is UNINITIALIZED (the real `<init>`
     // has not run yet), the params keep their types, then the mask ints + marker. Built manually because
@@ -13407,6 +13398,9 @@ struct Emitter<'a> {
     /// lease. The exception a handler parks is dead once that handler has rethrown, so a nested
     /// handler's slot is reusable by the enclosing one — which is what kotlinc does, keeping the
     /// store in its one-byte form. Every entry holds a `Throwable`, so any of them fits any handler.
+    ///
+    /// The pool belongs to ONE emitter and starts empty by construction, so a slot returned by one
+    /// method's handler can never be handed to another's: an emitter emits one body.
     free_exception_slots: Vec<u16>,
     /// Protected-region accumulators for the active `try`s that have a `finally`, outermost first.
     /// A copy of a try's own finalizer must not lie inside that try's own ranges, or an exception

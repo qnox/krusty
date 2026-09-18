@@ -290,6 +290,63 @@ fn a_nested_finally_copy_stays_inside_the_outer_region() {
     );
 }
 
+/// A `finally` that contains a `try`/`catch` of its own records StackMapTable frames WHILE the
+/// outer handler's caught exception is still parked — it is re-raised after the finalizer runs. So
+/// that slot has to be typed in those frames, or the trailing `aload; athrow` reads what the
+/// verifier calls `top` and the class does not load.
+///
+/// The parked exception is a backend temporary and holds a lease for exactly that span. Comparing
+/// the complete frame list against kotlinc is what pins it: a missing lease shows up there before
+/// it shows up as a verify error.
+#[test]
+fn a_finally_with_its_own_handler_types_the_parked_exception() {
+    let src = "class Parked {\n\
+               \x20   fun risky(): Int = 1\n\
+               \x20   fun note() {}\n\
+               \x20   fun run(x: Int): Int {\n\
+               \x20       try {\n\
+               \x20           return x + 1\n\
+               \x20       } finally {\n\
+               \x20           try {\n\
+               \x20               risky()\n\
+               \x20           } catch (e: Exception) {\n\
+               \x20               note()\n\
+               \x20           }\n\
+               \x20       }\n\
+               \x20   }\n\
+               }\n";
+    let (reference, krusty) = disassemble_both("ParkedExceptionFrames", src, "Parked");
+    // The catch types and their order, not the offsets: krusty's finalizer copy is a few bytes
+    // longer than kotlinc's here, which is its own gap and not what this test is about.
+    let guarded = |text: &str| {
+        numeric_rows(text, "int run(int)", "Exception table:")
+            .into_iter()
+            .filter_map(|row| row.split_whitespace().nth(3).map(str::to_string))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        guarded(&krusty),
+        guarded(&reference),
+        "the guarded ranges kotlinc declares, in its order"
+    );
+    // Each frame's populated locals and its stack. The `top` padding is dropped: krusty opens one
+    // more local than kotlinc in this shape, so its parked exception sits a slot higher — its own
+    // gap, and not what a missing lease looks like, which is the Throwable absent from the frame.
+    let frames = |text: &str| {
+        method_section(text, "int run(int)", "StackMapTable")
+            .into_iter()
+            .filter(|row| row.starts_with("locals") || row.starts_with("stack"))
+            .map(|row| row.replace("top, ", "").replace(", top", ""))
+            .collect::<Vec<_>>()
+    };
+    let want = frames(&reference);
+    assert!(
+        want.iter().any(|row| row.contains("java/lang/Throwable")),
+        "kotlinc types the parked exception in a frame, which is what this pins: {want:?}"
+    );
+    assert_eq!(frames(&krusty), want, "run frames");
+}
+
 /// Kotlin runs a `finally` when control leaves its `try` by ANY route, not only by `return`.
 /// `break` and `continue` jumped straight to their loop labels, so the finalizer never ran — a
 /// silent wrong answer, not a byte difference.
