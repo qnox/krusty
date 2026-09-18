@@ -6244,8 +6244,8 @@ fn emit_class(
                 for &(slot, t, _) in &temps {
                     load(t, slot, &mut ctor);
                 }
-                for &(_, _, key) in &temps {
-                    e.slots.remove(&key);
+                for &(_, _, lease) in &temps {
+                    e.release_temporary(lease);
                 }
             } else {
                 ctor.aload(0);
@@ -10214,8 +10214,8 @@ fn emit_enum_class(
                         load(*ty, *slot, &mut clinit);
                     }
                 }
-                for &(_, _, key) in &temps {
-                    e.slots.remove(&key);
+                for &(_, _, lease) in &temps {
+                    e.release_temporary(lease);
                 }
             } else {
                 let mut supplied = args.iter().copied();
@@ -12628,13 +12628,13 @@ fn emit_default_stub(
             let s = slot;
             // The mask ints and the trailing marker are BACKEND temporaries: no semantic value
             // names them, they only have to be typed in every frame this stub records.
-            e.backend_temporaries.push((s, Ty::Int));
+            // Held for the whole stub: nothing releases a mask word before the method ends.
+            let _ = e.lease_temporary(s, Ty::Int);
             slot += 1;
             s
         })
         .collect();
-    e.backend_temporaries
-        .push((slot, Ty::obj("java/lang/Object")));
+    let _ = e.lease_temporary(slot, Ty::obj("java/lang/Object"));
     slot += 1;
     e.next_slot = slot;
 
@@ -12995,12 +12995,13 @@ fn emit_facade_default_stub(
         .map(|_| {
             let s = slot;
             // Backend temporaries — see the member stub: typed in frames, named by no value.
-            e.backend_temporaries.push((s, Ty::Int));
+            // Held for the whole stub: nothing releases a mask word before the method ends.
+            let _ = e.lease_temporary(s, Ty::Int);
             slot += 1;
             s
         })
         .collect();
-    e.backend_temporaries.push((slot, marker));
+    let _ = e.lease_temporary(slot, marker);
     slot += 1;
     e.next_slot = slot;
 
@@ -13153,12 +13154,13 @@ fn emit_ctor_default_stub_with_prefix(
         .map(|_| {
             let s = slot;
             // Backend temporaries — see the member stub: typed in frames, named by no value.
-            e.backend_temporaries.push((s, Ty::Int));
+            // Held for the whole stub: nothing releases a mask word before the method ends.
+            let _ = e.lease_temporary(s, Ty::Int);
             slot += 1;
             s
         })
         .collect();
-    e.backend_temporaries.push((slot, marker));
+    let _ = e.lease_temporary(slot, marker);
     slot += 1;
     e.next_slot = slot;
 
@@ -13323,6 +13325,13 @@ struct PropertyOperation<'a> {
     interface: bool,
 }
 
+/// Identity of a leased backend temporary slot.
+///
+/// A newtype on purpose: it is not a value id and cannot be mistaken for one, which is what the
+/// reserved numeric ranges in `Emitter::slots` could not guarantee.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct TemporaryLease(u32);
+
 struct Emitter<'a> {
     ir: &'a IrFile,
     cw: &'a mut ClassWriter,
@@ -13338,14 +13347,25 @@ struct Emitter<'a> {
     owner: String,
     facade: String,
     slots: HashMap<u32, (u16, Ty)>,
-    /// Verifier-live BACKEND temporaries: slots the emitter owns that no semantic value names — a
-    /// return value parked across a `finally`, a default stub's mask and marker. They must appear in
-    /// every frame recorded while they are live, but they are not semantic locals: `slots` is keyed
-    /// by real value ids, which `GetValue` looks up, lexical-scope restoration retains, and
-    /// `unassigned_values` filters by. Registering a temporary there under a reserved numeric range
-    /// would collide with a real value id and be filtered as unassigned; frame construction
-    /// combines the two explicitly instead.
-    backend_temporaries: Vec<(u16, Ty)>,
+    /// Verifier-live BACKEND temporaries: slots the emitter owns that no semantic value names — an
+    /// operand spilled across a branch, a `try` result parked across a `finally`, a catch-all's
+    /// caught throwable, a vararg array under construction, a default stub's mask and marker. They
+    /// must appear in every frame recorded while they are live, but they are not semantic locals:
+    /// `slots` is keyed by real value ids, which `GetValue` looks up, lexical-scope restoration
+    /// retains, and `unassigned_values` filters by.
+    ///
+    /// They are held here under a [`TemporaryLease`], which is a distinct type and therefore cannot
+    /// be a value id. Every one of these used to be registered in `slots` under a reserved numeric
+    /// range (`1_000_000` for a boolean spill, `2_000_000` for an operand or vararg array,
+    /// `3_000_000` for a `try` result, `4_000_000` for a caught throwable, `5_000_000` for a parked
+    /// return, `9_000_001` for a stub's masks): a value id that reached one of those ranges would
+    /// collide silently, and the temporary was also filtered as unassigned. Order is kept — a later
+    /// lease over the same slot wins, as the previous `Vec` did — and release is explicit at the
+    /// point the temporary dies, so the lifetime is visible rather than tied to a Rust scope.
+    backend_temporaries: Vec<(TemporaryLease, u16, Ty)>,
+    /// Source of the next [`TemporaryLease`]. Monotonic for the whole emitter, so a released lease's
+    /// identity is never handed out again and a stale release cannot free a live temporary.
+    next_temporary_lease: u32,
     /// Semantic locals that are in lexical scope but not definitely assigned on the current edge.
     /// JVM frames render their physical slots as `top` until every incoming edge has stored them.
     unassigned_values: HashSet<u32>,
@@ -13415,6 +13435,7 @@ impl<'a> Emitter<'a> {
             owner: owner.to_string(),
             facade: facade.to_string(),
             slots: HashMap::new(),
+            next_temporary_lease: 0,
             backend_temporaries: Vec::new(),
             unassigned_values: HashSet::new(),
             label_unassigned_values: HashMap::new(),
@@ -13841,6 +13862,13 @@ impl<'a> Emitter<'a> {
     }
 
     /// Slot-indexed caller locals for `0..upto` (long/double take two slots; `Top` fills the gaps).
+    ///
+    /// The one place the caller's physical frame is reconstructed: a frame recorded inside a
+    /// spliced body, and the collapsed form every other frame is built from. Both the semantic
+    /// locals and the BACKEND temporaries live in that frame — an argument already spilled to make
+    /// room for the one being spliced is still in its slot and still loaded afterwards — so both
+    /// are applied here, temporaries last because a temporary's slot is allocated above every
+    /// semantic one and only a stale semantic entry could sit under it.
     fn verif_slots_upto(&mut self, upto: u16) -> Vec<VerifType> {
         let mut raw = vec![VerifType::Top; upto as usize];
         let entries: Vec<(u16, Ty)> = self
@@ -13850,6 +13878,11 @@ impl<'a> Emitter<'a> {
             .map(|(_, slot)| *slot)
             .collect();
         for (slot, ty) in entries {
+            if (slot as usize) < raw.len() {
+                raw[slot as usize] = self.verif_single(ty);
+            }
+        }
+        for (_, slot, ty) in self.backend_temporaries.clone() {
             if (slot as usize) < raw.len() {
                 raw[slot as usize] = self.verif_single(ty);
             }
@@ -14098,29 +14131,8 @@ impl<'a> Emitter<'a> {
     /// NOT trimming trailing `Top` — the prefix a spliced branchy body's frames are concatenated onto
     /// (the body's own locals occupy slots `upto..`).
     fn verif_locals_upto(&mut self, upto: u16) -> Vec<VerifType> {
-        let mut raw = vec![VerifType::Top; upto as usize];
-        let entries: Vec<(u16, Ty)> = self
-            .slots
-            .iter()
-            .filter(|(value, _)| !self.unassigned_values.contains(value))
-            .map(|(_, slot)| *slot)
-            .collect();
-        for (slot, ty) in entries {
-            if (slot as usize) < raw.len() {
-                raw[slot as usize] = self.verif_single(ty);
-            }
-        }
-        if self.this_uninitialized && !raw.is_empty() {
-            raw[0] = VerifType::UninitializedThis;
-        }
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < raw.len() {
-            let wide = matches!(raw[i], VerifType::Long | VerifType::Double);
-            out.push(raw[i].clone());
-            i += if wide { 2 } else { 1 };
-        }
-        out
+        let raw = self.verif_slots_upto(upto);
+        collapse_locals(&raw)
     }
 
     /// Emit a constructor's lowered initializer block while retaining the start pc and declared
@@ -14777,8 +14789,8 @@ impl<'a> Emitter<'a> {
         if let Some(temps) = &spilled {
             let (slot, value_ty, _) = temps[1];
             load(value_ty, slot, code);
-            for &(_, _, key) in temps {
-                self.slots.remove(&key);
+            for &(_, _, lease) in temps {
+                self.release_temporary(lease);
             }
         } else {
             self.emit_value(value, code);
@@ -15895,8 +15907,8 @@ impl<'a> Emitter<'a> {
                             self.adapt_physical_operand_for(*argument, *ty, physical, code);
                         }
                     }
-                    for &(_, _, key) in &temps {
-                        self.slots.remove(&key);
+                    for &(_, _, lease) in &temps {
+                        self.release_temporary(lease);
                     }
                     if use_accessor {
                         code.aconst_null();
@@ -17162,8 +17174,8 @@ impl<'a> Emitter<'a> {
                             load(t, slot, code);
                             self.append_top(t, code);
                         }
-                        for &(_, _, key) in &temps {
-                            self.slots.remove(&key);
+                        for &(_, _, lease) in &temps {
+                            self.release_temporary(lease);
                         }
                     } else {
                         code.new_obj(sb);
@@ -17722,8 +17734,8 @@ impl<'a> Emitter<'a> {
                     for &(slot, t, _) in &temps {
                         load(t, slot, code);
                     }
-                    for &(_, _, key) in &temps {
-                        self.slots.remove(&key);
+                    for &(_, _, lease) in &temps {
+                        self.release_temporary(lease);
                     }
                 } else {
                     let ci = self.cw.class_ref(cls);
@@ -17766,8 +17778,8 @@ impl<'a> Emitter<'a> {
                     for &(slot, t, _) in &temps {
                         load(t, slot, code);
                     }
-                    for &(_, _, key) in &temps {
-                        self.slots.remove(&key);
+                    for &(_, _, lease) in &temps {
+                        self.release_temporary(lease);
                     }
                 } else {
                     self.emit_value(*holder, code);
@@ -17810,8 +17822,8 @@ impl<'a> Emitter<'a> {
                             code.array_store(0x53, 1); // aastore
                         }
                     }
-                    for &(_, _, key) in &temps {
-                        self.slots.remove(&key);
+                    for &(_, _, lease) in &temps {
+                        self.release_temporary(lease);
                     }
                 } else {
                     self.emit_value(*func, code);
@@ -18025,8 +18037,8 @@ impl<'a> Emitter<'a> {
                 load(t, slot, code);
                 self.append_top(t, code);
             }
-            for &(_, _, key) in &temps {
-                self.slots.remove(&key);
+            for &(_, _, lease) in &temps {
+                self.release_temporary(lease);
             }
         } else {
             code.new_obj(sb);
@@ -18475,8 +18487,8 @@ impl<'a> Emitter<'a> {
                 load(t, slot, code);
                 adapt(self, t, code);
             }
-            for &(_, _, key) in &temps {
-                self.slots.remove(&key);
+            for &(_, _, lease) in &temps {
+                self.release_temporary(lease);
             }
         } else {
             for &o in ops {
@@ -18631,10 +18643,14 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Evaluate each of `ops` into a fresh temp slot, in order. Each temp is registered in `self.slots`
-    /// (so a *later* op's frames see the earlier temps as live, not `Top`); the caller loads them and
-    /// then removes them (they're dead once loaded). Returns `(slot, ty, slots-key)` per op.
-    fn spill_to_temps(&mut self, ops: &[u32], code: &mut CodeBuilder) -> Vec<(u16, Ty, u32)> {
+    /// Evaluate each of `ops` into a fresh temp slot, in order. Each temp is leased (so a *later*
+    /// op's frames see the earlier temps as live, not `Top`); the caller loads them and then
+    /// releases them (they're dead once loaded). Returns `(slot, ty, lease)` per op.
+    fn spill_to_temps(
+        &mut self,
+        ops: &[u32],
+        code: &mut CodeBuilder,
+    ) -> Vec<(u16, Ty, TemporaryLease)> {
         let mut temps = Vec::new();
         for &o in ops {
             self.emit_value(o, code);
@@ -18647,9 +18663,8 @@ impl<'a> Emitter<'a> {
             let slot = self.next_slot;
             self.next_slot += slot_words(t);
             store(t, slot, code);
-            let key = 2_000_000 + slot as u32;
-            self.slots.insert(key, (slot, t));
-            temps.push((slot, t, key));
+            let lease = self.lease_temporary(slot, t);
+            temps.push((slot, t, lease));
         }
         temps
     }
@@ -18750,8 +18765,7 @@ impl<'a> Emitter<'a> {
                 self.emit_value(lhs, code);
                 let tmp = self.next_slot;
                 self.next_slot += 1;
-                let key = 1_000_000 + tmp as u32;
-                self.slots.insert(key, (tmp, Ty::Boolean));
+                let lease = self.lease_temporary(tmp, Ty::Boolean);
                 code.istore(tmp);
                 self.emit_value(rhs, code);
                 code.iload(tmp);
@@ -18760,7 +18774,7 @@ impl<'a> Emitter<'a> {
                 } else {
                     code.ior()
                 }
-                self.slots.remove(&key);
+                self.release_temporary(lease);
             }
             BitAnd | BitOr | BitXor => {
                 self.emit_binary_operands_over_frames(lhs, rhs, lt, code);
@@ -19532,7 +19546,6 @@ impl<'a> Emitter<'a> {
             self.next_slot += slot_words(rt);
             Some(s)
         };
-        const RESULT_KEY: u32 = 3_000_000;
         // A `finally` that diverges (`finally { throw }`) never falls through to `after`.
         let fin_diverges = finally.map_or(false, |f| self.discarding_diverges(f));
 
@@ -19568,7 +19581,16 @@ impl<'a> Emitter<'a> {
         let mut after_reachable = false;
         if !body_diverges {
             if let Some(f) = finally {
+                // The result has just been stored and is loaded again at `after`, so it is live
+                // across the finalizer inlined here. A finalizer that records frames of its own — a
+                // nested `try`, a `when`, a null-safe call — must type it in each of them, or the
+                // merge at `after`, which does type it, is rejected as inconsistent. The lease ends
+                // with this copy: the handler copies below are reached on edges that never stored it.
+                let parked = result_slot.map(|slot| self.lease_temporary(slot, rt));
                 self.emit(f, code);
+                if let Some(parked) = parked {
+                    self.release_temporary(parked);
+                }
             } // `finally` inlined on the normal path
             if !fin_diverges {
                 if let Some(f) = finally {
@@ -19642,7 +19664,12 @@ impl<'a> Emitter<'a> {
             }
             if !cbody_diverges {
                 if let Some(f) = finally {
+                    // Same as the normal path: this catch stored the result, and `after` loads it.
+                    let parked = result_slot.map(|slot| self.lease_temporary(slot, rt));
                     self.emit(f, code);
+                    if let Some(parked) = parked {
+                        self.release_temporary(parked);
+                    }
                 } // `finally` inlined after the catch
                 if !fin_diverges {
                     if let Some(f) = finally {
@@ -19676,12 +19703,10 @@ impl<'a> Emitter<'a> {
             // after it). Register it so any StackMapTable frame recorded WHILE emitting the finally —
             // e.g. a `finally` that itself contains a `try`/`catch` — lists `tslot` as an initialized
             // local; otherwise the trailing `aload tslot; athrow` reads a slot the verifier sees as `top`.
-            // Keyed by the slot number (unique, and disjoint from small value indices) so nested catch-all
-            // handlers each register their own live exception.
-            let thr_key = 4_000_000 + tslot as u32;
-            self.slots.insert(thr_key, (tslot, thr_ty));
+            // Each nested catch-all handler takes its own lease, so their lifetimes nest correctly.
+            let thr_lease = self.lease_temporary(tslot, thr_ty);
             self.emit(f, code);
-            self.slots.remove(&thr_key);
+            self.release_temporary(thr_lease);
             // Re-raise the caught exception after the `finally` — unless the `finally` itself transfers
             // control (`finally { return … }` / `finally { throw … }`), in which case the rethrow is
             // unreachable and emitting it would leave a dead instruction without a stackmap frame.
@@ -19696,14 +19721,15 @@ impl<'a> Emitter<'a> {
         }
 
         if after_reachable {
-            if let Some(slot) = result_slot {
-                self.slots.insert(RESULT_KEY, (slot, rt));
-            }
+            // The result is live from the merge frame at `after` until it is loaded.
+            let result_lease = result_slot.map(|slot| self.lease_temporary(slot, rt));
             self.frame(after, vec![], code);
             self.bind(after, code);
             if let Some(slot) = result_slot {
                 load(rt, slot, code);
-                self.slots.remove(&RESULT_KEY);
+            }
+            if let Some(lease) = result_lease {
+                self.release_temporary(lease);
             }
         } else {
             // Every path diverges — `after` is dead; bind it so any stray reference resolves, but emit
@@ -19800,6 +19826,35 @@ impl<'a> Emitter<'a> {
         self.verif_locals_with(&[])
     }
 
+    /// Take a slot the BACKEND owns and no semantic value names, for as long as it is live.
+    ///
+    /// The returned lease is the only way to give it back. It is deliberately not a `u32`: these
+    /// temporaries used to be registered in `slots` under reserved numeric ranges, where nothing
+    /// but the size of a real value id kept them apart.
+    fn lease_temporary(&mut self, slot: u16, ty: Ty) -> TemporaryLease {
+        debug_assert!(
+            !self.slots.values().any(|(held, _)| *held == slot),
+            "backend temporary at slot {slot} aliases a semantic local"
+        );
+        let lease = TemporaryLease(self.next_temporary_lease);
+        self.next_temporary_lease += 1;
+        self.backend_temporaries.push((lease, slot, ty));
+        lease
+    }
+
+    /// Give a leased temporary back. Its slot stops appearing in frames recorded from here on;
+    /// `next_slot` stays monotonic, so the slot itself is not reused behind the verifier's back.
+    fn release_temporary(&mut self, lease: TemporaryLease) {
+        let before = self.backend_temporaries.len();
+        self.backend_temporaries
+            .retain(|(held, _, _)| *held != lease);
+        debug_assert_eq!(
+            before - self.backend_temporaries.len(),
+            1,
+            "released a backend temporary that was not leased"
+        );
+    }
+
     fn verif_locals_with(&mut self, extra: &[(u16, Ty)]) -> Vec<VerifType> {
         let max = self.next_slot as usize;
         let mut raw = vec![VerifType::Top; max];
@@ -19814,7 +19869,7 @@ impl<'a> Emitter<'a> {
                 raw[slot as usize] = self.verif_single(ty);
             }
         }
-        for (slot, ty) in self.backend_temporaries.clone() {
+        for (_, slot, ty) in self.backend_temporaries.clone() {
             if (slot as usize) < raw.len() {
                 raw[slot as usize] = self.verif_single(ty);
             }

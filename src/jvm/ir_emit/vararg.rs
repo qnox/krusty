@@ -51,8 +51,8 @@ pub(super) fn emit(
         );
     }
     if let Some(temps) = temps {
-        for (_, _, key) in temps {
-            emitter.slots.remove(&key);
+        for (_, _, lease) in temps {
+            emitter.release_temporary(lease);
         }
     }
 }
@@ -62,7 +62,7 @@ fn emit_primitive_spread(
     element_type: Ty,
     elements: &[u32],
     spreads: &[bool],
-    temps: Option<&[(u16, Ty, u32)]>,
+    temps: Option<&[(u16, Ty, TemporaryLease)]>,
     code: &mut CodeBuilder,
 ) {
     let Some((builder, add_desc, array_desc)) = primitive_spread_builder(element_type) else {
@@ -111,7 +111,7 @@ fn emit_reference_spread(
     element_type: Ty,
     elements: &[u32],
     spreads: &[bool],
-    temps: Option<&[(u16, Ty, u32)]>,
+    temps: Option<&[(u16, Ty, TemporaryLease)]>,
     code: &mut CodeBuilder,
 ) {
     let builder = "kotlin/jvm/internal/SpreadBuilder";
@@ -206,8 +206,7 @@ fn emit_packed_array(
     let words = slot_words(array_type);
     emitter.next_slot += words;
     store(array_type, slot, code);
-    let slot_key = 2_000_000 + u32::from(slot);
-    emitter.slots.insert(slot_key, (slot, array_type));
+    let array_lease = emitter.lease_temporary(slot, array_type);
 
     let held = [emitter.verif_single(array_type), VerifType::Integer];
     let (store_op, width) = array_store_op(element_type, reference_array);
@@ -225,7 +224,7 @@ fn emit_packed_array(
     }
 
     load(array_type, slot, code);
-    emitter.slots.remove(&slot_key);
+    emitter.release_temporary(array_lease);
     if emitter.next_slot == slot + words {
         emitter.next_slot = slot;
     }
@@ -260,8 +259,7 @@ fn emit_packed_array_through_temps(
     let words = slot_words(jvm_array_type);
     emitter.next_slot += words;
     store(jvm_array_type, slot, code);
-    let slot_key = 2_000_000 + u32::from(slot);
-    emitter.slots.insert(slot_key, (slot, jvm_array_type));
+    let array_lease = emitter.lease_temporary(slot, jvm_array_type);
 
     let (store_op, width) = array_store_op(element_type, reference_array);
     let box_element = reference_array
@@ -276,12 +274,12 @@ fn emit_packed_array_through_temps(
         }
         code.array_store(store_op, width);
     }
-    for &(_, _, key) in &temps {
-        emitter.slots.remove(&key);
+    for &(_, _, lease) in &temps {
+        emitter.release_temporary(lease);
     }
 
     load(jvm_array_type, slot, code);
-    emitter.slots.remove(&slot_key);
+    emitter.release_temporary(array_lease);
     if emitter.next_slot == slot + words {
         emitter.next_slot = slot;
     }

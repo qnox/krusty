@@ -67,9 +67,9 @@ impl Emitter<'_> {
         // local: `slots` is keyed by real value ids, so parking it there under a reserved numeric
         // range could overwrite a value with that id, be filtered out as unassigned, and then be
         // removed when the transfer finishes.
-        self.backend_temporaries.push((slot, ret));
+        let parked = self.lease_temporary(slot, ret);
         let survives = self.emit_return_finalizers(code);
-        self.backend_temporaries.pop();
+        self.release_temporary(parked);
         if survives {
             load(ret, slot, code);
             debug_lines::mark_return(self.ir, returned, code);

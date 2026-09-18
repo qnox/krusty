@@ -56,6 +56,8 @@ mod arity_error_coverage_e2e;
 mod assert_intrinsic_e2e;
 #[path = "backend_rejection_coverage_e2e.rs"]
 mod backend_rejection_coverage_e2e;
+#[path = "backend_temporary_leases_e2e.rs"]
+mod backend_temporary_leases_e2e;
 #[path = "backing_field_accessor_e2e.rs"]
 mod backing_field_accessor_e2e;
 #[path = "backtick_identifier_e2e.rs"]
