@@ -362,10 +362,21 @@ fn attach_bridge_debug_tables(
     };
     let this_desc = format!("L{};", c.fq_name());
     {
+        // A bridge names its parameters after the method it delegates to. A SOURCE target carries
+        // those names in its lowered parameter record; a PLUGIN-GENERATED one has no source
+        // declaration and publishes its parameter identities through its generation contract
+        // instead, which is the same record its own debug table is written from.
         let target_names = bridge
             .target_function
-            .and_then(|function| ir.fn_params.get(&function))
-            .map(|parameters| parameters.names.as_slice())
+            .and_then(|function| {
+                ir.fn_params
+                    .get(&function)
+                    .map(|parameters| parameters.names.as_slice())
+                    .or_else(|| {
+                        ir.generated_function_publication(function)
+                            .map(|publication| publication.parameter_names.as_slice())
+                    })
+            })
             .unwrap_or_default();
         let mut locals = vec![(String::from("this"), this_desc.clone(), 0u16)];
         let mut slot = 1u16;
