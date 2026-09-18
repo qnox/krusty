@@ -48,10 +48,15 @@ enum Target {
         /// Value-parameter names in declaration order, excluding the extension receiver.
         parameters: Vec<String>,
         type_parameters: Vec<String>,
+        /// The modifier words between `actual` and `fun`, already in the reference compiler's
+        /// order — they are what the declaration WROTE, so syntax owns them.
+        modifiers: String,
     },
     Property {
         declaration: DeclId,
         name: String,
+        /// `const ` / `lateinit `, between `actual` and `val`/`var`.
+        modifiers: String,
     },
     Classifier {
         declaration: DeclId,
@@ -102,6 +107,7 @@ pub(super) fn collect(files: &[File]) -> Vec<UnmatchedActual> {
                             .map(|parameter| parameter.name.clone())
                             .collect(),
                         type_parameters: function.type_params.clone(),
+                        modifiers: callable_modifiers(function),
                     },
                 ),
                 Decl::Property(property) => (
@@ -112,6 +118,7 @@ pub(super) fn collect(files: &[File]) -> Vec<UnmatchedActual> {
                         Target::Property {
                             declaration,
                             name: property.name.clone(),
+                            modifiers: property_modifiers(property),
                         }
                     } else {
                         Target::Unrenderable
@@ -223,6 +230,7 @@ pub(super) fn report(
                 name,
                 parameters,
                 type_parameters,
+                modifiers,
             } => render_function(
                 symbols,
                 actual.file,
@@ -230,10 +238,13 @@ pub(super) fn report(
                 name,
                 parameters,
                 type_parameters,
+                modifiers,
             ),
-            Target::Property { declaration, name } => {
-                render_property(symbols, actual.file, *declaration, name)
-            }
+            Target::Property {
+                declaration,
+                name,
+                modifiers,
+            } => render_property(symbols, actual.file, *declaration, name, modifiers),
             Target::Classifier {
                 declaration,
                 name,
@@ -255,6 +266,46 @@ pub(super) fn report(
             format!("'{rendered}' has no corresponding expected declaration"),
         );
     }
+}
+
+/// The modifier words a function writes between `actual` and `fun`, in the reference compiler's
+/// measured order: `external` precedes `override`, and `inline` precedes `operator`, `infix` and
+/// `suspend`. Each was measured alone and the ordering pairs that are legal Kotlin were measured
+/// together; see `docs/PARITY_PROTOCOL.md`.
+fn callable_modifiers(function: &crate::ast::FunDecl) -> String {
+    [
+        ("external", function.is_external()),
+        ("override", function.is_override()),
+        ("inline", function.is_inline()),
+        ("operator", function.is_operator()),
+        ("infix", function.is_infix()),
+        ("tailrec", function.is_tailrec()),
+        ("suspend", function.is_suspend()),
+    ]
+    .into_iter()
+    .filter_map(|(word, written)| written.then_some(word))
+    .fold(String::new(), |mut words, word| {
+        words.push_str(word);
+        words.push(' ');
+        words
+    })
+}
+
+/// The same for a property, between `actual` and `val`/`var`. `const` and `lateinit` cannot both
+/// be written (one implies `val`, the other `var`), so their relative order never arises.
+fn property_modifiers(property: &crate::ast::PropDecl) -> String {
+    [
+        ("external", property.is_external),
+        ("const", property.is_const),
+        ("lateinit", property.is_lateinit),
+    ]
+    .into_iter()
+    .filter_map(|(word, written)| written.then_some(word))
+    .fold(String::new(), |mut words, word| {
+        words.push_str(word);
+        words.push(' ');
+        words
+    })
 }
 
 /// `public`/`internal`/`protected`/`private`, the way the reference compiler spells it.
@@ -288,6 +339,7 @@ fn type_parameters(names: &[String], bound: &dyn Fn(usize) -> Option<Ty>) -> Str
     format!("<{rendered}> ")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_function(
     symbols: &SymbolTable,
     file: u32,
@@ -295,6 +347,7 @@ fn render_function(
     name: &str,
     parameters: &[String],
     formals: &[String],
+    modifiers: &str,
 ) -> Option<String> {
     // A top-level extension function lives in its own receiver-keyed table rather than beside the
     // ordinary overloads, so both are searched by the declaration that produced them.
@@ -362,14 +415,8 @@ fn render_function(
         .collect::<Option<Vec<_>>>()?
         .join(", ");
     let formals = type_parameters(formals, &|index| declared_formal_bound(signature, index));
-    let suspend = if signature.is_suspend() {
-        "suspend "
-    } else {
-        ""
-    };
-    let inline = if signature.is_inline() { "inline " } else { "" };
     Some(format!(
-        "{} final actual {suspend}{inline}fun {formals}{receiver}{name}({rendered}): {}",
+        "{} final actual {modifiers}fun {formals}{receiver}{name}({rendered}): {}",
         visibility(signature.visibility),
         result.source_name()
     ))
@@ -439,13 +486,14 @@ fn render_property(
     file: u32,
     declaration: DeclId,
     name: &str,
+    modifiers: &str,
 ) -> Option<String> {
     if let Some(signature) = symbols.source_props.get(&(file, declaration.0)) {
         if signature.ty.mentions_pending() {
             return None;
         }
         return Some(format!(
-            "{} final actual {} {name}: {}",
+            "{} final actual {modifiers}{} {name}: {}",
             visibility(signature.visibility),
             if signature.is_var { "var" } else { "val" },
             signature.ty.source_name()
@@ -474,7 +522,7 @@ fn render_property(
             .and_then(declared_bound)
     });
     Some(format!(
-        "{} final actual {} {formals}{}.{name}: {}",
+        "{} final actual {modifiers}{} {formals}{}.{name}: {}",
         visibility(signature.visibility),
         if signature.is_var { "var" } else { "val" },
         signature.receiver.source_name(),

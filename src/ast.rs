@@ -632,6 +632,7 @@ impl FdFlags {
     const IS_OPERATOR: u16 = 1 << 7;
     const IS_INFIX: u16 = 1 << 8;
     const IS_COMPANION_EXTENSION: u16 = 1 << 9;
+    const IS_EXTERNAL: u16 = 1 << 10;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -686,6 +687,10 @@ impl FdFlags {
     #[inline]
     pub const fn with_is_companion_extension(self, on: bool) -> Self {
         self.with(Self::IS_COMPANION_EXTENSION, on)
+    }
+    #[inline]
+    pub const fn with_is_external(self, on: bool) -> Self {
+        self.with(Self::IS_EXTERNAL, on)
     }
 }
 
@@ -833,6 +838,12 @@ impl FunDecl {
     #[inline]
     pub fn is_companion_extension(&self) -> bool {
         self.flags.has(FdFlags::IS_COMPANION_EXTENSION)
+    }
+    /// The `external` modifier. krusty does not implement an external body; the modifier is
+    /// recorded because a declaration diagnostic renders it.
+    #[inline]
+    pub fn is_external(&self) -> bool {
+        self.flags.has(FdFlags::IS_EXTERNAL)
     }
 }
 

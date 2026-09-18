@@ -7122,6 +7122,7 @@ fn function_flags(modifiers: &[String]) -> FdFlags {
             "operator" => flags.with_is_operator(true),
             "infix" => flags.with_is_infix(true),
             "companion" => flags.with_is_companion_extension(true),
+            "external" => flags.with_is_external(true),
             _ => flags,
         };
     }
