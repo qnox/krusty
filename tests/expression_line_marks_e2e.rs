@@ -170,13 +170,67 @@ fn an_explicit_multi_line_return_is_byte_identical_to_kotlinc() {
 /// A finalizer changes the active line while the return value is parked in a local. The eventual
 /// return instruction must restore the explicit return's source line, not inherit the finalizer's.
 ///
-/// The finalizer calls a declared method rather than `println`: the latter is an `inline` stdlib
-/// function, and krusty's splice of an inline body parks the argument in a local where kotlinc keeps
-/// it on the stack and swaps. Those extra instructions sit ahead of the two entries this test is
-/// about, so keeping `println` here would assert that unrelated contract through their offsets.
+/// The finalizer here is `println`, an `inline` stdlib function. krusty's splice of an inline body
+/// parks the argument in a local where kotlinc keeps it on the stack and swaps, so the splice is
+/// seven bytes longer and every offset after it differs for a reason this test is not about. The
+/// LINE SEQUENCE is compared exactly against kotlinc, which is the contract — and it is what was
+/// wrong before the fix, the restored return line being absent rather than misplaced.
+/// `an_explicit_return_after_a_plain_call_finally_restores_its_line` covers the same contract with
+/// the offsets included.
 #[test]
 fn an_explicit_return_after_finally_restores_its_line() {
     let src = "class FinallySink {\n\
+               \x20   fun take(a: Int, b: String, c: Int): Int = a + c\n\
+               \x20   fun run(x: Int, y: String): Int {\n\
+               \x20       try {\n\
+               \x20           return take(\n\
+               \x20               a = x,\n\
+               \x20               b = y,\n\
+               \x20               c = x + 1,\n\
+               \x20           )\n\
+               \x20       } finally {\n\
+               \x20           println(\"done\")\n\
+               \x20       }\n\
+               \x20   }\n\
+               }\n";
+    let Some((reference, krusty)) = disassemble_both("ReturnAfterFinally", src, "FinallySink")
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let lines_only = |entries: Vec<String>| {
+        entries
+            .into_iter()
+            .map(|entry| {
+                entry
+                    .split(':')
+                    .next()
+                    .expect("a LineNumberTable row is `line N: offset`")
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+    };
+    let want = lines_only(method_lines(&reference, "run(int, java.lang.String)"));
+    assert_eq!(
+        want,
+        [
+            "line 4", "line 5", "line 6", "line 7", "line 8", "line 5", "line 11", "line 5",
+            "line 11"
+        ],
+        "kotlinc's own line sequence, spelled out so a reference change is visible here"
+    );
+    assert_eq!(
+        lines_only(method_lines(&krusty, "run(int, java.lang.String)")),
+        want,
+        "complete run line sequence"
+    );
+}
+
+/// The same contract with the offsets included, the finalizer calling a declared method so that no
+/// inline splice sits between the entries under test.
+#[test]
+fn an_explicit_return_after_a_plain_call_finally_restores_its_line() {
+    let src = "class PlainFinallySink {\n\
                \x20   fun take(a: Int, b: String, c: Int): Int = a + c\n\
                \x20   fun note() {}\n\
                \x20   fun run(x: Int, y: String): Int {\n\
@@ -191,7 +245,8 @@ fn an_explicit_return_after_finally_restores_its_line() {
                \x20       }\n\
                \x20   }\n\
                }\n";
-    let Some((reference, krusty)) = disassemble_both("ReturnAfterFinally", src, "FinallySink")
+    let Some((reference, krusty)) =
+        disassemble_both("ReturnAfterPlainFinally", src, "PlainFinallySink")
     else {
         eprintln!("skipping: reference kotlinc or javap unavailable");
         return;
