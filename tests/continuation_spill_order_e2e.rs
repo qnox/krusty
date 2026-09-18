@@ -211,12 +211,18 @@ fn disassemble_verbose(name: &str, src: &str, class: &str) -> Option<(String, St
         "-d".to_string(),
         reference_dir.to_string_lossy().into_owned(),
         "-jvm-target".to_string(),
-        "25".to_string(),
+        TARGET.to_string(),
         source.to_string_lossy().into_owned(),
     ])?;
     assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
-    let classes = common::compile_in_process(src, name, &[common::stdlib_jar()], None)
-        .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
+    let classes = common::compile_in_process_metadata_cp_module_target(
+        src,
+        name,
+        &[common::stdlib_jar()],
+        "main",
+        Some(TARGET_MAJOR),
+    )
+    .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
     for (internal, bytes) in &classes {
         let path = krusty_dir.join(format!("{internal}.class"));
         if let Some(parent) = path.parent() {
