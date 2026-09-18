@@ -177,6 +177,35 @@ fn krusty_dump(stem: &str, source: &str) -> std::collections::BTreeMap<String, S
         .collect()
 }
 
+/// The same dump from the REFERENCE compiler, so a declaration ABI can be compared rather than
+/// pinned: `javap -p` of one class it produced.
+fn kotlinc_dump(stem: &str, source: &str, class: &str) -> String {
+    let dir = common::scratch_dir().expect("scratch dir");
+    let out = dir.join(format!("{stem}-ref"));
+    std::fs::create_dir_all(&out).expect("reference dir");
+    let source_path = dir.join(format!("{stem}.kt"));
+    std::fs::write(&source_path, source).expect("write source");
+    let (code, stderr) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        out.to_string_lossy().into_owned(),
+        source_path.to_string_lossy().into_owned(),
+    ])
+    .expect("reference kotlinc unavailable under the test harness");
+    assert_eq!(code, 0, "{stem}: kotlinc failed: {stderr}");
+    common::javap(&["-p", "-c", "-cp", &out.to_string_lossy(), class])
+        .unwrap_or_else(|| panic!("{stem}: javap failed for {class}"))
+}
+
+/// Every method header of a dumped class, normalised to `<flags> <name>(<params>)`.
+fn method_headers(dump: &str) -> Vec<String> {
+    dump.lines()
+        .map(str::trim)
+        .filter(|line| line.ends_with(");") || line.ends_with(";") && line.contains('('))
+        .filter(|line| line.contains('('))
+        .map(|line| line.trim_end_matches(';').to_string())
+        .collect()
+}
+
 /// The instructions of the `get` override of the one reference class whose body starts with
 /// `first` and mentions `needle`.
 fn reference_get(
@@ -262,27 +291,51 @@ fn a_reference_to_a_private_member_of_a_value_class_resolves() {
     assert_eq!(run(source, "PrivateValueClassRef"), "OK");
 
     let dump = krusty_dump("PrivateValueClassRefDump", source);
+    // The DECLARATION side, compared rather than pinned. kotlinc keeps a private member's accessor
+    // private and publishes a synthetic bridge beside it; krusty used to publish the accessor
+    // itself, so the reference linked only because the declaration was wrong. Both `Z` surfaces are
+    // compared, so neither half can drift alone.
+    let reference_z = kotlinc_dump("PrivateValueClassRefRef", source, "Z");
+    let accessor_surface = |dump: &str| {
+        method_headers(dump)
+            .into_iter()
+            .filter(|header| header.contains("getXx"))
+            .collect::<Vec<_>>()
+    };
     assert_eq!(
-        reference_get(&dump, "aload_0", "Method Z.\"getXx-impl\""),
+        accessor_surface(dump.get("Z").expect("krusty emits Z")),
+        accessor_surface(&reference_z),
+        "the private accessor and its bridge are kotlinc's"
+    );
+    assert_eq!(
+        accessor_surface(&reference_z),
+        vec![
+            "private static final int getXx-impl(int)".to_string(),
+            "public static final int access$getXx-impl(int)".to_string(),
+        ],
+        "spelled out, so a reference change is visible here"
+    );
+    assert_eq!(
+        reference_get(&dump, "aload_0", "Method Z.\"access$getXx-impl\""),
         vec![
             "aload_0".to_string(),
             "getfield Field kotlin/jvm/internal/PropertyReference0Impl.receiver:Ljava/lang/Object;"
                 .to_string(),
             "checkcast class Z".to_string(),
             "invokevirtual Method Z.\"unbox-impl\":()I".to_string(),
-            "invokestatic Method Z.\"getXx-impl\":(I)I".to_string(),
+            "invokestatic Method Z.\"access$getXx-impl\":(I)I".to_string(),
             "invokestatic Method java/lang/Integer.valueOf:(I)Ljava/lang/Integer;".to_string(),
             "areturn".to_string(),
         ],
         "bound private value-class reference"
     );
     assert_eq!(
-        reference_get(&dump, "aload_1", "Method Z.\"getXx-impl\""),
+        reference_get(&dump, "aload_1", "Method Z.\"access$getXx-impl\""),
         vec![
             "aload_1".to_string(),
             "checkcast class Z".to_string(),
             "invokevirtual Method Z.\"unbox-impl\":()I".to_string(),
-            "invokestatic Method Z.\"getXx-impl\":(I)I".to_string(),
+            "invokestatic Method Z.\"access$getXx-impl\":(I)I".to_string(),
             "invokestatic Method java/lang/Integer.valueOf:(I)Ljava/lang/Integer;".to_string(),
             "areturn".to_string(),
         ],

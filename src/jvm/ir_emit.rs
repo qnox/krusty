@@ -7143,12 +7143,21 @@ fn emit_function_reference_access_bridge(
     let function = &ir.functions[fid as usize];
     let parameters = jvm_function_params(ir, fid);
     let result = jvm_declared_ty(&function.ret);
+    // A STATIC target — a value class's member accessor, realized over the carrier — is already
+    // callable without an instance, so the bridge takes exactly its parameters and `invokestatic`s
+    // it. An instance target keeps the owner ahead of them and a non-virtual call to the private
+    // declaration.
     let mut bridge_parameters = Vec::with_capacity(parameters.len() + 1);
-    bridge_parameters.push(Ty::obj(owner));
+    if !function.is_static {
+        bridge_parameters.push(Ty::obj(owner));
+    }
     bridge_parameters.extend(parameters.iter().copied());
     let mut code = CodeBuilder::new(bridge_parameters.iter().map(|ty| slot_words(*ty)).sum());
-    code.aload(0);
-    let mut slot = 1u16;
+    let mut slot = 0u16;
+    if !function.is_static {
+        code.aload(0);
+        slot = 1;
+    }
     for &parameter in &parameters {
         load(parameter, slot, &mut code);
         slot += slot_words(parameter);
@@ -7160,9 +7169,13 @@ fn emit_function_reference_access_bridge(
         cw.methodref(owner, &function.name, &descriptor)
     };
     let argument_words = parameters.iter().map(|ty| slot_words(*ty) as i32).sum();
-    code.invokespecial(method, argument_words, slot_words(result) as i32);
+    if function.is_static {
+        code.invokestatic(method, argument_words, slot_words(result) as i32);
+    } else {
+        code.invokespecial(method, argument_words, slot_words(result) as i32);
+    }
     emit_return(result, &mut code);
-    code.ensure_locals(slot);
+    code.ensure_locals(slot.max(1));
     code.link();
     cw.add_method(
         0x1019, // PUBLIC | STATIC | FINAL | SYNTHETIC
