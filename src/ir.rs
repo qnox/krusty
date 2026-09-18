@@ -2595,6 +2595,13 @@ pub struct IrFile {
     pub expr_source_lines: std::collections::HashMap<u32, u32>,
     /// Source end line for every lowered expression whose AST node has a source location.
     pub expr_end_lines: std::collections::HashMap<u32, u32>,
+    /// Implicit return identity → the expression body's closing source line.
+    ///
+    /// An explicit `return expression` keeps the call/return line already in effect. An
+    /// expression-bodied callable instead maps its generated return instruction to the end of the
+    /// body expression. Common lowering records that semantic distinction once; backends must not
+    /// infer it from a synthetic origin or expression shape.
+    pub(crate) implicit_return_end_lines: std::collections::HashMap<ExprId, u32>,
     /// Source names for `IrExpr::Variable` nodes included in `LocalVariableTable`.
     /// Compiler-generated temporaries are omitted.
     pub value_names: std::collections::HashMap<u32, String>,

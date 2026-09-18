@@ -147,8 +147,8 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 for &(slot, t, _) in &temps {
                     load(t, slot, &mut sctor);
                 }
-                for &(_, _, key) in &temps {
-                    e.slots.remove(&key);
+                for &(_, _, lease) in &temps {
+                    e.release_temporary(lease);
                 }
             } else {
                 sctor.aload(0);
