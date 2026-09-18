@@ -267,16 +267,15 @@ impl Emitter<'_> {
             let handler_protected_end = code.new_label();
             self.bind(handler_protected_end, code);
             fin_ranges.push((fin_handler, handler_protected_end));
-            // The caught exception is LIVE in `tslot` across the whole inlined `finally` (it is re-raised
-            // after it). Register it so any StackMapTable frame recorded WHILE emitting the finally —
-            // e.g. a `finally` that itself contains a `try`/`catch` — lists `tslot` as an initialized
-            // local; otherwise the trailing `aload tslot; athrow` reads a slot the verifier sees as `top`.
-            // Keyed by the slot number (unique, and disjoint from small value indices) so nested catch-all
-            // handlers each register their own live exception.
-            let thr_key = 4_000_000 + tslot as u32;
-            self.slots.insert(thr_key, (tslot, thr_ty));
+            // The caught exception is LIVE in `tslot` across the whole inlined `finally` (it is
+            // re-raised after it), so every StackMapTable frame recorded WHILE emitting the
+            // finalizer — a `finally` containing a `try`/`catch` of its own, say — has to type that
+            // slot; otherwise the trailing `aload tslot; athrow` reads what the verifier sees as
+            // `top`. It is a backend temporary, not a value, and holds its own lease: nested
+            // catch-all handlers each lease their own, and a lease cannot collide with a value id.
+            let parked = self.lease_temporary(tslot, thr_ty);
             self.emit(f, code);
-            self.slots.remove(&thr_key);
+            self.release_temporary(parked);
             // Re-raise the caught exception after the `finally` — unless the `finally` itself transfers
             // control (`finally { return … }` / `finally { throw … }`), in which case the rethrow is
             // unreachable and emitting it would leave a dead instruction without a stackmap frame.
@@ -316,16 +315,20 @@ impl Emitter<'_> {
     /// innermost if the label isn't found (a compilable program always has the labeled loop in
     /// scope).
     pub(super) fn loop_transfer_target(&self, label: &Option<String>) -> (Label, Label, usize) {
+        // A labelled transfer names a loop the checker resolved; reinterpreting an unknown label as
+        // the innermost loop would silently jump somewhere else, so the invariant is asserted.
         let entry = match label {
             Some(l) => self
                 .loop_stack
                 .iter()
                 .rev()
                 .find(|(_, _, sl, _)| sl.as_deref() == Some(l.as_str()))
-                .or_else(|| self.loop_stack.last()),
-            None => self.loop_stack.last(),
+                .unwrap_or_else(|| {
+                    panic!("break/continue names the loop `{l}@`, which is not in scope here")
+                }),
+            None => self.loop_stack.last().expect("break/continue outside loop"),
         };
-        let (cont, end, _, depth) = entry.expect("break/continue outside loop");
+        let (cont, end, _, depth) = entry;
         (*cont, *end, *depth)
     }
 
