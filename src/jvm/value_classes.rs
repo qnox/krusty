@@ -16,6 +16,8 @@
 //! NOTE: box/unbox insertion at representation boundaries (a value flowing to `Any`/generic, or back) is
 //! the next increment; this pass currently lowers the unboxed core (construction, access, erasure).
 
+mod bridge_returns;
+
 use crate::ir::{value_tails, Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::ir_emit::{ir_ty_to_jvm, jvm_tys};
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
@@ -1844,10 +1846,14 @@ pub fn lower_value_classes(
     // value-class GETTER bridge (`Child2.prop: Child` through `Base2.prop: Base`) needs the erase+box with
     // no mangling involved.
     {
+        // Return-adaptation plans, collected while `ir.classes` is borrowed and published after.
+        let mut return_unboxing = Vec::new();
         for c in &mut ir.classes {
             let owner_is_value = c.is_value;
             let owner_fq = c.fq_name();
-            for b in &mut c.bridges {
+            let owner_fq_id = c.fq_name_id();
+            for (bridge_index, b) in c.bridges.iter_mut().enumerate() {
+                let bridge_index = bridge_index as u32;
                 let lowered_member_target = b
                     .target_function
                     .and_then(|function| lowered_member_targets.get(&function))
@@ -2027,16 +2033,8 @@ pub fn lower_value_classes(
                     for p in b.erased_params.iter_mut() {
                         *p = erase(p, &under);
                     }
-                    let supertype_returns_unboxed_vc = b
-                        .erased_ret
-                        .non_null()
-                        .obj_internal()
-                        .is_some_and(|fq_name| {
-                            under.contains_key(&fq_name)
-                                && (!b.erased_ret.is_nullable()
-                                    || !nullable_is_boxed(fq_name, &under))
-                        });
-                    if supertype_returns_unboxed_vc {
+                    if let Some(plan) = bridge_returns::plan_unboxing(b, erased_ret_vc, &under) {
+                        return_unboxing.push(((owner_fq_id, bridge_index), plan));
                         b.erased_ret = erase(&b.erased_ret, &under);
                     }
                 } else if !owner_is_value && bridge_mentions_vc {
@@ -2094,6 +2092,7 @@ pub fn lower_value_classes(
                 }
             }
         }
+        ir.jvm_bridge_return_unboxing.extend(return_unboxing);
     }
 
     // 2. Erase class field + ctor-arg types; drop the `<init>` null-check on a constructor parameter
