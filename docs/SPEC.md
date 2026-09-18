@@ -4321,7 +4321,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   correction the naive read gets wrong: a generic callable's `Signature::params`/`ret` are ERASED
   (its declared shape is on `GenericSig`), a `vararg` parameter's declared type is the ARRAY it
   arrives as while the rendering names the ELEMENT, and a classifier's type parameters are stored
-  as semantic identities whose source spelling is what gets rendered. An unmatched `actual` is
+  as semantic identities whose source spelling is what gets rendered. The modifier words a
+  declaration wrote are rendered in the reference compiler's measured order —
+  `external override inline operator infix tailrec suspend` for a callable,
+  `external const lateinit` for a property, `inner data value fun` for a classifier — and omitting
+  them silently dropped `const val`, `lateinit var`, `operator fun` and `external fun` from the
+  message until the fixture was widened to include them. An unmatched `actual` is
   found by ACTUALIZATION ITSELF, not by a name/arity key: that matcher compares resolved type
   shapes and follows an `actual typealias`, so it pairs `expect val S.tag: S` with
   `actual val String.tag: String` where a key differing on the receiver spelling cannot (reporting

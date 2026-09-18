@@ -100,8 +100,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   kotlinc 2.4.10 so it need not be measured again:
 
   ```
-  <visibility> <modality> actual [suspend] [inline] [data|enum|annotation] <kind> <signature>
+  <visibility> <modality> actual [external] [override] [inline] [operator] [infix] [tailrec]
+                          [suspend] <kind> <signature>
   ```
+
+  A classifier's slot between `actual` and its kind keyword is
+  `[inner] [data] [value] [fun]`, and `enum`/`annotation` belong to the kind keyword itself
+  (`enum class`, `annotation class`). A property's is `[external] [const] [lateinit]`. The
+  modality slot is `final` by default, `abstract` for an interface (or a body-less interface
+  member), and `open`/`abstract`/`sealed` where the declaration says so — with `sealed` winning
+  over an interface's `abstract`, and an `override` of an `open` member rendering `open`.
 
   | shape | rendering |
   | --- | --- |
@@ -138,7 +146,16 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   | `actual typealias GenericAlias<T> = List<T>` | `… typealias GenericAlias<T> = List<T>` — the alias's own parameters bind to its name |
   | `actual typealias FunAlias = (Int) -> String` | `… typealias FunAlias = (Int) -> String` |
   | `actual val <T> List<T>.ext: Int` | `public final actual val <T> List<T>.ext: Int` |
+  | `actual external fun` / `actual operator fun` / `actual infix fun` / `actual tailrec fun` | the word follows `actual`, before `fun` |
+  | `actual const val K: Int = 1` / `actual lateinit var v: String` | `… actual const val K: Int` / `… actual lateinit var v: String` |
+  | `actual external override fun e()` | `public open actual external override fun e(): Int` — `external` precedes `override` |
+  | `actual inline infix fun` / `actual inline suspend fun` / `actual inline operator fun` | `inline` precedes `operator`, `infix` and `suspend` |
+  | `actual suspend operator fun invoke()` | `… actual operator suspend fun invoke(): Int` — `operator` precedes `suspend` |
   | a member `actual` | reported at its OWN name, not the class's — not implemented |
+  | a member `actual override fun` of an `open` member | `public open actual override fun …` — an override renders `open` |
+  | an interface member with a body / without one | `public open actual fun …` / `public abstract actual fun …` |
+  | `actual companion object` | `public final actual companion object Companion : Any`, at the `object` keyword |
+  | a member `actual constructor(x: Int)` | `public actual constructor(x: Int): Owner` — no modality slot, and the owner stands in for the return |
   | `actual class A { constructor(x: Int) { } }` | nothing: a secondary constructor is not reported |
 
   Rendering from the AST is not sufficient: kotlinc renders the RESOLVED type, so an inferred return

@@ -128,6 +128,26 @@ fn a_callable_is_rendered_as_the_reference_compiler_renders_it() {
     );
 }
 
+/// The modifier words between `actual` and `fun`, and their measured ORDER — `external` before
+/// `override`, `inline` before `operator`, `infix` and `suspend`. Each was rendered wrong first:
+/// the modifiers were simply missing, and a source with `actual operator fun` read as though it
+/// had not been written.
+#[test]
+fn a_callable_renders_every_modifier_it_wrote_in_order() {
+    assert_identical(
+        "package plib\n\
+         \n\
+         actual external fun ext(): Int\n\
+         actual operator fun Int.unaryMinus(): Int = 1\n\
+         actual infix fun Int.to2(other: Int): Int = other\n\
+         actual tailrec fun loop(n: Int): Int = if (n == 0) 0 else loop(n - 1)\n\
+         actual inline infix fun Int.both(other: Int): Int = other\n\
+         actual inline suspend fun sus(f: () -> Int): Int = f()\n\
+         actual inline operator fun Int.times2(other: Int): Int = other\n",
+        "Modifiers",
+    );
+}
+
 /// Properties: `val` and `var`, a function type, and an extension property whose type parameters
 /// precede its receiver.
 #[test]
@@ -139,7 +159,9 @@ fn a_property_is_rendered_as_the_reference_compiler_renders_it() {
          actual var mutable: String = \"\"\n\
          actual val lambdaProp: (Int) -> Unit = {}\n\
          actual val <T> List<T>.ext: Int get() = 1\n\
-         internal actual val internalProp: Int = 3\n",
+         internal actual val internalProp: Int = 3\n\
+         actual const val constant: Int = 4\n\
+         actual lateinit var late: String\n",
         "Properties",
     );
 }
