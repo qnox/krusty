@@ -1760,6 +1760,17 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Consume an `init` keyword and its block, recording the KEYWORD's span against the resulting
+    /// block expression. A diagnostic about an initializer block points at `init`, which the block
+    /// expression's own span (starting at `{`) does not cover.
+    fn parse_init_block(&mut self) -> ExprId {
+        let keyword = self.tok().span;
+        self.bump(); // 'init'
+        let block = self.parse_block_expr(false);
+        self.file.init_block_keywords.insert(block, keyword);
+        block
+    }
+
     /// Consume leading annotations (`@Foo`, `@file:Bar(...)`) and soft modifiers (`public`, `open`,
     /// `inline`, `operator`, `suspend`, …) that precede a declaration. Modifiers that change the
     /// declaration *kind* (`enum`, `annotation`, `data`, `object`, …) are left for their real
@@ -2208,6 +2219,7 @@ impl<'a> Parser<'a> {
         // (optionally preceded by a visibility modifier) — anything else ends the property.
         let mut getter: Option<FunBody> = None;
         let mut getter_declared = false;
+        let mut getter_span: Option<Span> = None;
         let mut getter_inline = false;
         let mut getter_ty: Option<TypeRef> = None;
         let mut setter: Option<PropAccessor> = None;
@@ -2291,6 +2303,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             let is_get = self.keyword_text("get");
+            let accessor_keyword = self.tok().span;
             self.bump(); // 'get' / 'set'
             accessor_external |= is_external;
             if is_get {
@@ -2300,6 +2313,13 @@ impl<'a> Parser<'a> {
                 // no body is the (redundant) explicit DEFAULT getter — consume its optional `()` and
                 // leave `getter` unset (the property keeps its default field accessor).
                 let had_parens = self.eat_accessor_parens(false).is_some();
+                // The accessor header — keyword through its parameter list, before any declared
+                // return type or body. A diagnostic about the accessor points at this, not at the
+                // property, so it is captured while the tokens are in hand.
+                getter_span = Some(Span::new(
+                    accessor_keyword.lo,
+                    self.t[self.i.saturating_sub(1)].span.hi,
+                ));
                 getter_ty = self.eat(TokenKind::Colon).then(|| self.parse_type());
                 if self.at(TokenKind::Eq) || self.at(TokenKind::LBrace) {
                     getter = Some(self.parse_accessor_body());
@@ -2315,6 +2335,10 @@ impl<'a> Parser<'a> {
             } else {
                 // setter: optional `(param)` then optional body; `private set` has neither.
                 let param = self.parse_setter_param();
+                let accessor_span = Span::new(
+                    accessor_keyword.lo,
+                    self.t[self.i.saturating_sub(1)].span.hi,
+                );
                 let body = if self.eat(TokenKind::Eq) {
                     self.skip_newlines();
                     Some(FunBody::Expr(self.parse_expr()))
@@ -2325,6 +2349,7 @@ impl<'a> Parser<'a> {
                 };
                 setter = Some(PropAccessor {
                     param,
+                    span: accessor_span,
                     body,
                     is_private,
                     is_inline,
@@ -2365,6 +2390,7 @@ impl<'a> Parser<'a> {
             is_expect: false,
             getter,
             getter_declared,
+            getter_span,
             getter_inline,
             getter_ty,
             getter_reads_field,
@@ -2630,8 +2656,7 @@ impl<'a> Parser<'a> {
                                 .get(self.i + 1)
                                 .is_some_and(|token| token.kind == TokenKind::LBrace) =>
                     {
-                        self.bump();
-                        init_order.push(ClassInit::Block(self.parse_block_expr(false)));
+                        init_order.push(ClassInit::Block(self.parse_init_block()));
                     }
                     TokenKind::Ident if self.keyword_text("typealias") => {
                         type_aliases.push(self.parse_type_alias_syntax());
@@ -2981,8 +3006,7 @@ impl<'a> Parser<'a> {
                                     .get(self.i + 1)
                                     .is_some_and(|token| token.kind == TokenKind::LBrace)
                             {
-                                self.bump(); // `init`
-                                init_order.push(ClassInit::Block(self.parse_block_expr(false)));
+                                init_order.push(ClassInit::Block(self.parse_init_block()));
                             } else {
                                 self.diags.error(
                                     self.tok().span,
@@ -3084,8 +3108,7 @@ impl<'a> Parser<'a> {
                                 .get(self.i + 1)
                                 .is_some_and(|token| token.kind == TokenKind::LBrace) =>
                     {
-                        self.bump();
-                        init_order.push(ClassInit::Block(self.parse_block_expr(false)));
+                        init_order.push(ClassInit::Block(self.parse_init_block()));
                     }
                     TokenKind::Ident if self.keyword_text("constructor") => {
                         secondary_ctors.push(self.parse_secondary_constructor(&emods));
@@ -3835,9 +3858,7 @@ impl<'a> Parser<'a> {
                                 .get(self.i + 1)
                                 .map_or(false, |t| t.kind == TokenKind::LBrace) =>
                     {
-                        self.bump(); // 'init'
-                        let block = self.parse_block_expr(false);
-                        init_order.push(ClassInit::Block(block));
+                        init_order.push(ClassInit::Block(self.parse_init_block()));
                     }
                     // A companion is a nested singleton declaration linked from this class.
                     TokenKind::Ident if self.at_companion_declaration() => {
@@ -4354,9 +4375,7 @@ impl<'a> Parser<'a> {
                                 .get(self.i + 1)
                                 .map_or(false, |t| t.kind == TokenKind::LBrace) =>
                     {
-                        self.bump();
-                        let block = self.parse_block_expr(false);
-                        init_order.push(ClassInit::Block(block));
+                        init_order.push(ClassInit::Block(self.parse_init_block()));
                     }
                     TokenKind::Ident if self.keyword_text("typealias") => {
                         type_aliases.push(self.parse_type_alias_syntax());
@@ -4500,9 +4519,7 @@ impl<'a> Parser<'a> {
                                 .get(self.i + 1)
                                 .map_or(false, |t| t.kind == TokenKind::LBrace) =>
                     {
-                        self.bump();
-                        let block = self.parse_block_expr(false);
-                        init_order.push(ClassInit::Block(block));
+                        init_order.push(ClassInit::Block(self.parse_init_block()));
                     }
                     TokenKind::Ident
                         if self.keyword_text("annotation")

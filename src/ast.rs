@@ -1224,6 +1224,10 @@ pub struct PropDecl {
     /// Whether a getter accessor was written at all. This distinguishes an absent accessor from an
     /// explicitly declared default/body-less accessor while keeping `getter` reserved for bodies.
     pub getter_declared: bool,
+    /// Source span of a written getter's `get`/`get()` header — the keyword through its parameter
+    /// list, excluding the body. `None` when no getter was written. An accessor is a declaration in
+    /// its own right and a diagnostic about it points here, not at the property.
+    pub getter_span: Option<Span>,
     /// The getter carries the semantic `inline` modifier and must retain checked FIR for call sites.
     pub getter_inline: bool,
     /// An explicit getter return type (`get(): T`). Kept apart from the property's annotation so
@@ -1274,6 +1278,9 @@ impl PropDecl {
 pub struct PropAccessor {
     /// Setter parameter name (`set(value) { … }` → `"value"`); `None` for a default-bodied setter.
     pub param: Option<String>,
+    /// Source span of the `set`/`set(v)` header — the keyword through its parameter list, excluding
+    /// the body — mirroring [`PropDecl::getter_span`].
+    pub span: Span,
     /// `None` = default accessor body (just a visibility change); `Some` = explicit body.
     pub body: Option<FunBody>,
     pub is_private: bool,
@@ -1370,6 +1377,10 @@ pub struct File {
     pub value_operator_spans: std::collections::HashMap<u32, Span>,
     /// Assignment lvalue spans keyed by statement ID.
     pub assignment_target_spans: std::collections::HashMap<u32, Span>,
+    /// Source span of the `init` KEYWORD introducing each initializer block, keyed by the block
+    /// expression [`ClassInit::Block`] records. A diagnostic about an `init` block points at the
+    /// keyword, which the block expression's own span (the `{`) does not cover.
+    pub init_block_keywords: std::collections::HashMap<ExprId, Span>,
     /// Labels written on declaration statements (`label@ val …`, `label@ fun …`), keyed by the
     /// declaration statement. The value retains both spelling and exact label-token span.
     pub statement_labels: std::collections::HashMap<StmtId, (String, Span)>,
@@ -1641,6 +1652,7 @@ impl File {
         // Both return-label span tables are keyed by the arenas released here.
         self.return_label_spans.clear();
         self.assignment_target_spans = Default::default();
+        self.init_block_keywords = Default::default();
         self.incdec_access_operands = Default::default();
         self.call_arg_names = Default::default();
         self.collection_literal_calls = Default::default();

@@ -375,7 +375,10 @@ const DIAGNOSTIC_PLATFORM: &str = "JVM";
 /// The span of the `expect` keyword introducing the declaration at `declaration`: the last one this
 /// file recorded that ends at or before it. Modifiers immediately precede their declaration, so the
 /// nearest preceding keyword is the declaration's own.
-fn expect_keyword_before(file: &File, declaration: crate::diag::Span) -> Option<crate::diag::Span> {
+pub(super) fn expect_keyword_before(
+    file: &File,
+    declaration: crate::diag::Span,
+) -> Option<crate::diag::Span> {
     file.multiplatform_modifiers
         .iter()
         .filter(|(modifier, span)| modifier == "expect" && span.hi <= declaration.lo)
@@ -387,6 +390,11 @@ fn expect_keyword_before(file: &File, declaration: crate::diag::Span) -> Option<
 /// This is a source-set semantic check, not a consequence of whether a particular expect spelling
 /// happens to have an executable body. Reporting it before exclusion also prevents body checking
 /// or a backend from accidentally treating a body-less expect function as an abstract declaration.
+///
+/// `silent` suppresses the DIAGNOSTIC only, never the source rejection: once any `expect`
+/// declaration carries a body the reference compiler never reaches actualization, so it says
+/// nothing about a missing `actual` anywhere in the compilation — but the sources still must not
+/// reach a backend that would read a body-less header as abstract.
 #[allow(clippy::too_many_arguments)]
 fn report_unmatched_expect_roots(
     headers: &crate::fir::StreamedHeaderModule,
@@ -394,6 +402,7 @@ fn report_unmatched_expect_roots(
     symbols: &FrontendSymbols,
     files: &[File],
     module_name: &str,
+    silent: bool,
     rejected_sources: &mut [bool],
     diags: &mut DiagSink,
 ) {
@@ -409,6 +418,9 @@ fn report_unmatched_expect_roots(
         let source = stub.source.raw() as usize;
         if let Some(rejected) = rejected_sources.get_mut(source) {
             *rejected = true;
+        }
+        if silent {
+            continue;
         }
         diags.set_file(stub.source.raw());
         let name = stub
@@ -861,6 +873,10 @@ where
     let diagnostics_start = diags.diags.len();
     let mut files = Vec::with_capacity(sources.len());
     let mut parse_errors = Vec::with_capacity(sources.len());
+    // Set when any file writes an `expect` declaration with an implementation. The reference
+    // compiler stops before actualization once one exists, so the unmatched-expect report below is
+    // skipped for the WHOLE compilation rather than per file.
+    let mut expect_bodies_rejected = false;
     let mut reparse_sources = Vec::with_capacity(sources.len());
     let mut pass1_builder = crate::fir::HeaderInventoryBuilder::default();
     let mut signature_constraints = crate::fir::SignatureConstraintExtractor::default();
@@ -916,6 +932,13 @@ where
                     );
                 }
             }
+            // An `expect` declaration that carries an implementation is an error on its own, with
+            // or without the feature — the reference compiler reports both sentences for a file
+            // that has neither, in this order. Once any such body exists it stops before
+            // actualization, so a body error suppresses the unmatched-expect report for the whole
+            // compilation, not just for this file (measured with two files: a body error in one
+            // silenced a clean unmatched `expect` in the other).
+            expect_bodies_rejected |= header_validation::validate_expect_bodies(&file, diags);
         }
         let parse_error = source.kind != SourceKind::Java
             && diags.diags[diagnostics_before..]
@@ -1094,6 +1117,7 @@ where
             &symbols,
             &files,
             module_name,
+            expect_bodies_rejected,
             &mut parse_errors,
             diags,
         );
