@@ -1490,6 +1490,7 @@ mod toplevel_prop_with_companion_const_e2e;
 mod toplevel_property_inference_e2e;
 #[path = "toplevel_property_ref_e2e.rs"]
 mod toplevel_property_ref_e2e;
+
 #[path = "tparam_bound_member_e2e.rs"]
 mod tparam_bound_member_e2e;
 #[path = "tparam_bounded_by_tparam_e2e.rs"]
@@ -1586,6 +1587,8 @@ mod value_class_map_key_e2e;
 mod value_class_nullable_widen_return_e2e;
 #[path = "value_class_param_generic_return_e2e.rs"]
 mod value_class_param_generic_return_e2e;
+#[path = "value_class_property_reference_e2e.rs"]
+mod value_class_property_reference_e2e;
 #[path = "value_class_template_lambda_e2e.rs"]
 mod value_class_template_lambda_e2e;
 #[path = "var_extension_property_e2e.rs"]

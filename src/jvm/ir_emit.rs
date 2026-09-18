@@ -7247,6 +7247,8 @@ struct PropertyCallTarget<'a> {
     params: &'a [Ty],
     owner_is_interface: bool,
     boxed_value_class: Option<TypeName>,
+    /// The receiver is a value class's boxed object while the accessor takes its carrier.
+    unboxed_receiver_value_class: Option<TypeName>,
     field_access: Option<&'a crate::jvm::inline::PropertyAccess>,
 }
 
@@ -7313,6 +7315,7 @@ impl PropertyReferenceTarget {
             params: &self.getter_params,
             owner_is_interface: property.owner_is_interface,
             boxed_value_class: property.boxed_value_class,
+            unboxed_receiver_value_class: property.unboxed_receiver_value_class,
             field_access: self.getter_field.as_ref(),
         }
     }
@@ -7333,6 +7336,7 @@ impl PropertyReferenceTarget {
             params,
             owner_is_interface: property.owner_is_interface,
             boxed_value_class: property.boxed_value_class,
+            unboxed_receiver_value_class: property.unboxed_receiver_value_class,
             field_access: self.setter_field.as_ref(),
         }
     }
@@ -7402,8 +7406,23 @@ impl PropertyCallTarget<'_> {
             code.checkcast(class);
             code.arraylength();
         } else if let Some(facade) = self.facade {
-            emit_object_as(cw, code, self.params[0]);
+            adapt_property_reference_value(
+                cw,
+                code,
+                self.unboxed_receiver_value_class,
+                self.params[0],
+            );
             let method = cw.methodref(facade, self.name, self.descriptor);
+            code.invokestatic(
+                method,
+                slot_words(ir_ty_to_jvm(&self.params[0])) as i32,
+                slot_words(ret) as i32,
+            );
+        } else if let Some(value_class) = self.unboxed_receiver_value_class {
+            // A MEMBER of a value class: its accessor is realized as a static method over the
+            // carrier on the value class itself, so the receiver is unboxed and the call is static.
+            adapt_property_reference_value(cw, code, Some(value_class), self.params[0]);
+            let method = cw.methodref(self.owner, self.name, self.descriptor);
             code.invokestatic(
                 method,
                 slot_words(ir_ty_to_jvm(&self.params[0])) as i32,
@@ -7446,7 +7465,12 @@ impl PropertyCallTarget<'_> {
             return;
         }
         if let Some(facade) = self.facade {
-            emit_object_as(cw, code, self.params[0]);
+            adapt_property_reference_value(
+                cw,
+                code,
+                self.unboxed_receiver_value_class,
+                self.params[0],
+            );
             code.aload(value_local);
             self.emit_property_value(cw, code, self.params[1]);
             let arg_words = self
@@ -7455,6 +7479,17 @@ impl PropertyCallTarget<'_> {
                 .map(|param| slot_words(ir_ty_to_jvm(param)) as i32)
                 .sum();
             let method = cw.methodref(facade, self.name, self.descriptor);
+            code.invokestatic(method, arg_words, 0);
+        } else if let Some(value_class) = self.unboxed_receiver_value_class {
+            adapt_property_reference_value(cw, code, Some(value_class), self.params[0]);
+            code.aload(value_local);
+            self.emit_property_value(cw, code, self.params[1]);
+            let arg_words = self
+                .params
+                .iter()
+                .map(|param| slot_words(ir_ty_to_jvm(param)) as i32)
+                .sum();
+            let method = cw.methodref(self.owner, self.name, self.descriptor);
             code.invokestatic(method, arg_words, 0);
         } else {
             emit_object_as(cw, code, Ty::obj(self.owner));
@@ -7472,17 +7507,28 @@ impl PropertyCallTarget<'_> {
     }
 
     fn emit_property_value(&self, cw: &mut ClassWriter, code: &mut CodeBuilder, physical: Ty) {
-        let Some(value_class) = self.boxed_value_class else {
-            emit_object_as(cw, code, physical);
-            return;
-        };
-        let owner = value_class.render();
-        let class = cw.class_ref(&owner);
-        code.checkcast(class);
-        let descriptor = format!("(){}", type_descriptor(ir_ty_to_jvm(&physical)));
-        let method = cw.methodref(&owner, "unbox-impl", &descriptor);
-        code.invokevirtual(method, 0, slot_words(ir_ty_to_jvm(&physical)) as i32);
+        adapt_property_reference_value(cw, code, self.boxed_value_class, physical);
     }
+}
+
+/// Bring an erased `Object` on the stack to the accessor's PHYSICAL parameter type: a value class's
+/// boxed object is cast and unboxed to its carrier, anything else is cast or unboxed as usual.
+fn adapt_property_reference_value(
+    cw: &mut ClassWriter,
+    code: &mut CodeBuilder,
+    boxed_value_class: Option<TypeName>,
+    physical: Ty,
+) {
+    let Some(value_class) = boxed_value_class else {
+        emit_object_as(cw, code, physical);
+        return;
+    };
+    let owner = value_class.render();
+    let class = cw.class_ref(&owner);
+    code.checkcast(class);
+    let descriptor = format!("(){}", type_descriptor(ir_ty_to_jvm(&physical)));
+    let method = cw.methodref(&owner, "unbox-impl", &descriptor);
+    code.invokevirtual(method, 0, slot_words(ir_ty_to_jvm(&physical)) as i32);
 }
 
 fn emit_prop_ref_class(
@@ -7617,6 +7663,9 @@ fn emit_toplevel_prop_ref_class(
 
     let prop_jvm = ir_ty_to_jvm(&pr.prop_ty);
     let prop_desc = type_descriptor(prop_jvm);
+    // A receiverless accessor's descriptor is its property's own type. The PropRef's recorded
+    // descriptor is not it: for a companion-block or access-bridged property that descriptor names
+    // the owner it is called with, which this reference does not pass.
     let getter_desc = format!("(){prop_desc}");
     let signature = format!("{}{}", pr.getter_name, getter_desc); // e.g. "getFoo()LBox;"
 

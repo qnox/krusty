@@ -1930,6 +1930,10 @@ pub struct PropRef {
     /// JVM-only property-reference boundary: the accessor uses this value class's erased carrier,
     /// while `KProperty.get`/`set` exchange the boxed value-class object through `Object`.
     pub boxed_value_class: Option<TypeName>,
+    /// The same boundary on the RECEIVER side: the reference's receiver is an instance of this value
+    /// class, so the accessor is a static realization over its erased carrier and the incoming
+    /// `Object` must be unboxed before the call. `None` for an ordinary receiver.
+    pub unboxed_receiver_value_class: Option<TypeName>,
     /// The selected member accessor is declared by an interface. Static extension/top-level
     /// accessors ignore this bit; instance references use it to choose `invokeinterface` without
     /// querying a class model again during emission.
