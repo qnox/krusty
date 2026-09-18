@@ -1112,3 +1112,108 @@ fn promote_tail_statement_to_value(
     };
     true
 }
+
+#[cfg(test)]
+mod tail_promotion_tests {
+    use super::promote_tail_statement_to_value;
+    use crate::ir::{ExprId, IrConst, IrExpr, IrFile};
+
+    fn statement(ir: &mut IrFile, value: i32) -> ExprId {
+        ir.add_expr(IrExpr::Const(IrConst::Int(value)))
+    }
+
+    fn statement_block(ir: &mut IrFile, stmts: Vec<ExprId>) -> ExprId {
+        ir.add_expr(IrExpr::Block { stmts, value: None })
+    }
+
+    fn shape(ir: &IrFile) -> String {
+        format!("{:?}", ir.exprs)
+    }
+
+    fn assert_block(ir: &IrFile, block: ExprId, stmts: &[ExprId], value: Option<ExprId>) {
+        let IrExpr::Block {
+            stmts: actual,
+            value: produced,
+        } = ir.expr(block)
+        else {
+            panic!("expression {block} is not a block");
+        };
+        assert_eq!(actual.as_slice(), stmts, "block {block} statements");
+        assert_eq!(*produced, value, "block {block} value");
+    }
+
+    /// The direct case: the expansion's body IS the block whose last statement is the tail.
+    #[test]
+    fn a_direct_tail_statement_becomes_the_blocks_value() {
+        let mut ir = IrFile::default();
+        let first = statement(&mut ir, 1);
+        let tail = statement(&mut ir, 2);
+        let block = statement_block(&mut ir, vec![first, tail]);
+
+        assert!(promote_tail_statement_to_value(&mut ir, block, tail));
+        assert_block(&ir, block, &[first], Some(tail));
+    }
+
+    /// A statement-bodied inline function wraps its body one level deeper, so the promotion has to
+    /// descend — and every block on that path becomes value-producing, or the value is discarded by
+    /// whichever block above it still ends in a statement.
+    #[test]
+    fn a_nested_tail_statement_promotes_every_block_on_its_path() {
+        let mut ir = IrFile::default();
+        let first = statement(&mut ir, 1);
+        let tail = statement(&mut ir, 2);
+        let inner = statement_block(&mut ir, vec![first, tail]);
+        let outer = statement_block(&mut ir, vec![inner]);
+
+        assert!(promote_tail_statement_to_value(&mut ir, outer, tail));
+        assert_block(&ir, outer, &[], Some(inner));
+        assert_block(&ir, inner, &[first], Some(tail));
+    }
+
+    /// The return is not the tail, which is the case that must keep the caller's result local and
+    /// labelled exit loop — a non-local return has to be able to carry its value out of the middle
+    /// of the body. Nothing may be left half-promoted when the answer is no.
+    #[test]
+    fn a_statement_after_the_return_changes_nothing() {
+        let mut ir = IrFile::default();
+        let tail = statement(&mut ir, 1);
+        let after = statement(&mut ir, 2);
+        let block = statement_block(&mut ir, vec![tail, after]);
+        let before = shape(&ir);
+
+        assert!(!promote_tail_statement_to_value(&mut ir, block, tail));
+        assert_eq!(shape(&ir), before, "a refused promotion mutates nothing");
+    }
+
+    /// Refusal deep in the path also leaves every block above it untouched: the mutation is the last
+    /// step at each level, so a failure below happens before any of them.
+    #[test]
+    fn a_refusal_below_leaves_the_blocks_above_untouched() {
+        let mut ir = IrFile::default();
+        let tail = statement(&mut ir, 1);
+        let after = statement(&mut ir, 2);
+        let inner = statement_block(&mut ir, vec![tail, after]);
+        let outer = statement_block(&mut ir, vec![inner]);
+        let before = shape(&ir);
+
+        assert!(!promote_tail_statement_to_value(&mut ir, outer, tail));
+        assert_eq!(shape(&ir), before, "a refused promotion mutates nothing");
+    }
+
+    /// A block that already produces a value is not a statement block, so there is no tail statement
+    /// to promote.
+    #[test]
+    fn a_value_producing_block_changes_nothing() {
+        let mut ir = IrFile::default();
+        let tail = statement(&mut ir, 1);
+        let produced = statement(&mut ir, 2);
+        let block = ir.add_expr(IrExpr::Block {
+            stmts: vec![tail],
+            value: Some(produced),
+        });
+        let before = shape(&ir);
+
+        assert!(!promote_tail_statement_to_value(&mut ir, block, tail));
+        assert_eq!(shape(&ir), before, "a refused promotion mutates nothing");
+    }
+}
