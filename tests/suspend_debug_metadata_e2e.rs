@@ -1179,3 +1179,83 @@ fn a_suspending_loops_continuation_is_byte_identical() {
             .unwrap_or(0)
     );
 }
+
+/// `i`, `s` and `n` are one zipped debugger contract: `i[k]` says which resume state `s[k]`/`n[k]`
+/// belong to. A single-suspension fixture cannot catch a misalignment between them, because every
+/// `i` entry is zero and the arrays cannot disagree about state boundaries.
+///
+/// Two suspensions with different live sets, and both kinds of non-reference spill, so the state
+/// concatenation and the per-state reset of the positions are both observable. Compared against
+/// kotlinc rather than pinned, so the contract stays tied to the reference compiler.
+#[test]
+fn continuation_metadata_zips_its_arrays_across_two_states() {
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+    let Some(javap) = javap_path() else {
+        return;
+    };
+
+    let source = "package demo\n\
+        suspend fun leaf(): String = \"\"\n\
+        suspend fun work(r: String, a: Int, b: Long): String {\n\
+        \x20 val first = a + 1\n\
+        \x20 val x = leaf()\n\
+        \x20 val before = r + x\n\
+        \x20 val between = b + 1\n\
+        \x20 val y = leaf()\n\
+        \x20 return before + between + first + y\n\
+        }\n";
+    let Some(reference) = kotlinc_class("TwoStates", source, "demo/TwoStatesKt$work$1") else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    let classes = common::compile_in_process_files(
+        &[("TwoStates", source)],
+        &[stdlib, jdk.clone()],
+        Some(jdk.as_path()),
+    )
+    .expect("compile two-state continuation");
+    let bytes = classes
+        .iter()
+        .find_map(|(name, bytes)| (name == "demo/TwoStatesKt$work$1").then_some(bytes))
+        .expect("work continuation");
+
+    let arrays = |text: &str| -> Vec<String> {
+        let annotation = text
+            .rsplit_once("RuntimeVisibleAnnotations:")
+            .map(|(_, annotation)| annotation)
+            .expect("runtime-visible annotations");
+        annotation
+            .split_whitespace()
+            .filter(|token| {
+                token.starts_with("i=[") || token.starts_with("s=[") || token.starts_with("n=[")
+            })
+            .map(str::to_string)
+            .collect()
+    };
+    let want = arrays(&disassemble(
+        &javap,
+        &reference,
+        "TwoStatesKt$work$1.class",
+        "two_states_reference",
+    ));
+    assert_eq!(
+        want,
+        [
+            "i=[0,0,0,0,1,1,1,1,1,1,1]",
+            "s=[\"L$0\",\"I$0\",\"J$0\",\"I$1\",\"L$0\",\"L$1\",\"L$2\",\"I$0\",\"J$0\",\"I$1\",\"J$1\"]",
+            "n=[\"r\",\"a\",\"b\",\"first\",\"r\",\"x\",\"before\",\"a\",\"b\",\"first\",\"between\"]",
+        ],
+        "kotlinc's own arrays, spelled out so a reference change is visible here"
+    );
+    assert_eq!(
+        arrays(&disassemble(
+            &javap,
+            bytes,
+            "TwoStatesKt$work$1.class",
+            "two_states"
+        )),
+        want,
+        "complete zipped DebugMetadata arrays"
+    );
+}
