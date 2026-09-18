@@ -265,6 +265,7 @@ pub(super) struct EmitEnv<'a> {
     bodies: &'a dyn MethodBodies,
     run: &'a EmitRun,
     continuation_metadata: &'a crate::jvm::suspend::ContinuationMetadataMap,
+    bridge_return_adaptations: &'a crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
     /// Semantic classifier declarations used only while translating Kotlin generic types into JVM
     /// `Signature` attributes. Declaration-site variance is a Kotlin fact; spelling it as JVM
     /// use-site wildcards is owned entirely by this emitter.
@@ -3796,6 +3797,7 @@ pub fn mark_must_inline_lambdas(ir: &mut IrFile) {
 pub(crate) struct EmitMetadata<'a> {
     pub facade: Option<&'a KotlinMetadata>,
     pub continuations: &'a crate::jvm::suspend::ContinuationMetadataMap,
+    pub bridge_returns: &'a crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
 }
 
 /// Checked semantic declarations plus JVM-only realization facts consumed by class emission.
@@ -3818,6 +3820,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         bodies,
         run,
         continuation_metadata: facts.metadata.continuations,
+        bridge_return_adaptations: facts.metadata.bridge_returns,
         signature_symbols: facts.signature_symbols,
         jvm_default: opts.jvm_default,
         lambda_modes: opts.lambda_modes,
@@ -6665,7 +6668,7 @@ fn emit_class(
     if c.has_primary_ctor && c.is_companion && has_ctor_marker_accessor(ir, c) {
         emit_ctor_marker_accessor(&fq_name, &class_ctor_jvm_tys(c), &mut cw);
     }
-    bridge_emission::emit_bridges(ir, c, &mut cw);
+    bridge_emission::emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
     // HOISTED companion properties: the private static field lives on THIS class, so the companion's
     // delegating accessors reach it through PUBLIC synthetic `access$get<X>$cp`/`access$set<X>$cp`
     // bridges — emitted AFTER the instance methods, right before `<clinit>` (kotlinc's order).
@@ -7139,7 +7142,7 @@ fn emit_enum_entry_subclass(
     // Entry-body override edges are checked and frozen in Pass 1 like ordinary class overrides.
     // Their anonymous subclass still needs the JVM descriptor adapters derived from those edges
     // (for example `apply(Object)` forwarding to `apply(String)`).
-    bridge_emission::emit_bridges(ir, c, &mut cw);
+    bridge_emission::emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
     cw.finish()
 }
 
@@ -10027,7 +10030,7 @@ fn emit_enum_class(
 
     // Erased bridges for a generic-interface method overridden at the enum level
     // (`enum E : A<String> { …; override fun foo(t: String) }` → bridge `foo(Object)`→`foo(String)`).
-    bridge_emission::emit_bridges(ir, c, &mut cw);
+    bridge_emission::emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
     // An enum is a VIEW of the same `IrClass` — compute its `@Metadata` (and hence debug tables /
     // annotations) through the shared path, exactly like `emit_class` and `emit_interface_class`.
     // An `enum class` implementing an interface needs the same holder forwarders an ordinary class
@@ -20513,6 +20516,8 @@ mod fail_soft_tests {
             crate::jvm::property_realizations::PropertyRealizations::default();
         let default_call_operands =
             crate::jvm::default_call_operands::DefaultCallOperands::default();
+        let bridge_returns =
+            crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations::default();
         emit_all_with_checked_classifiers(
             ir,
             facade,
@@ -20521,6 +20526,7 @@ mod fail_soft_tests {
                 metadata: EmitMetadata {
                     facade: None,
                     continuations: &continuations,
+                    bridge_returns: &bridge_returns,
                 },
                 signature_symbols: &NoClassifiers,
                 property_realizations: &property_realizations,

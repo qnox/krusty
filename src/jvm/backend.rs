@@ -27,11 +27,13 @@ pub enum SkipReason {
     SuperCalls,
 }
 
-/// JVM-only products accumulated by the post-lowering pass pipeline and consumed by emission.
+/// JVM-only products accumulated by the post-lowering representation pipeline and consumed by
+/// emission.
 #[derive(Default)]
 pub(crate) struct BackendPassFacts {
     continuation_metadata: crate::jvm::suspend::ContinuationMetadataMap,
     default_call_operands: crate::jvm::default_call_operands::DefaultCallOperands,
+    bridge_return_adaptations: crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
 }
 
 /// THE post-lowering, pre-emit JVM pass pipeline — the single definition every consumer (the real
@@ -149,6 +151,7 @@ fn run_backend_passes_after_plugins(
         classpath,
         module_value_classes,
         module_readable_value_classes,
+        &mut facts.bridge_return_adaptations,
     ) {
         return Err(SkipReason::ValueClasses);
     }
@@ -744,6 +747,7 @@ impl JvmBackend {
         let emit_metadata = crate::jvm::ir_emit::EmitMetadata {
             facade: metadata.as_ref(),
             continuations: &pass_facts.continuation_metadata,
+            bridge_returns: &pass_facts.bridge_return_adaptations,
         };
         let classes = crate::jvm::ir_emit::emit_all_with_checked_classifiers(
             &ir,

@@ -5,7 +5,20 @@
 //! afterwards. What comes out is a physical plan for emission, not a declaration fact.
 
 use super::*;
-use crate::ir::{Bridge, JvmBridgeReturnUnboxing};
+use crate::ir::Bridge;
+use crate::jvm::bridge_return_adaptations::BridgeReturnUnboxing;
+
+pub(super) fn mentions_value_class(
+    params: &[Ty],
+    ret: Ty,
+    under: &std::collections::HashMap<TypeName, Ty>,
+) -> bool {
+    params.iter().chain(std::iter::once(&ret)).any(|ty| {
+        ty.non_null()
+            .obj_internal()
+            .is_some_and(|name| under.contains_key(&name))
+    })
+}
 
 /// The unboxing this bridge's return needs, or `None` when the supertype does not spell the value
 /// class unboxed and the bridge's erased return therefore stays as it is. Where it is spelled
@@ -19,7 +32,7 @@ pub(super) fn plan_unboxing(
     bridge: &Bridge,
     value_class: Option<TypeName>,
     under: &std::collections::HashMap<TypeName, Ty>,
-) -> Option<JvmBridgeReturnUnboxing> {
+) -> Option<BridgeReturnUnboxing> {
     let owner = value_class?;
     // A nullable `X?` whose underlying is itself null-carrying stays UNBOXED and carries the null;
     // one that BOXES (over a primitive, or a null-capable chain) is a reference the bridge returns
@@ -27,9 +40,9 @@ pub(super) fn plan_unboxing(
     if bridge.erased_ret.is_nullable() && nullable_is_boxed(owner, under) {
         return None;
     }
-    Some(JvmBridgeReturnUnboxing {
+    Some(BridgeReturnUnboxing::new(
         owner,
         // `unbox-impl` is an instance call: a legally null result must go past it, not into it.
-        null_preserving: bridge.erased_ret.is_nullable(),
-    })
+        bridge.erased_ret.is_nullable(),
+    ))
 }

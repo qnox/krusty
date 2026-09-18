@@ -48,19 +48,3 @@ pub struct Bridge {
     /// concern, populated by the value-class pass; the front end leaves it empty.
     pub unbox_params: Vec<Option<TypeName>>,
 }
-
-/// How a bridge's RETURN value is adapted back to the carrier its descriptor declares.
-///
-/// A JVM/value-class realization plan, not a declaration fact: the value-class pass decides it and
-/// bridge emission executes it. It exists apart from [`Bridge`] because the class identity it names
-/// is knowable only while `erased_ret` is being rewritten to the carrier, and nothing in the bridge
-/// still names it afterwards.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct JvmBridgeReturnUnboxing {
-    /// The value class whose `unbox-impl` yields the carrier the bridge returns.
-    pub owner: TypeName,
-    /// The supertype declares the value class NULLABLE over a carrier that itself carries null, so
-    /// the delegated result may legally BE null. `unbox-impl` is an instance call: reaching it with
-    /// null throws where the declaration says the bridge returns null, so the plan branches.
-    pub null_preserving: bool,
-}

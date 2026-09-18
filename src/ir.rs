@@ -35,7 +35,7 @@ mod bottom_values;
 mod bridges;
 pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
-pub use bridges::{Bridge, BridgeKind, JvmBridgeReturnUnboxing};
+pub use bridges::{Bridge, BridgeKind};
 
 /// A compiler-supplied operation selected from a real semantic declaration. This is an operation
 /// identity, not a library name: backends implement it without recovering signature facts from text.
@@ -2491,11 +2491,6 @@ pub struct IrFile {
     /// Source type aliases declared directly in this file's package. Like classifier aliases, these
     /// carry a pending-free expansion and metadata spelling without retaining syntax coordinates.
     pub package_type_aliases: Vec<IrTypeAlias>,
-    /// How a bridge's RETURN value is adapted back to the carrier its descriptor declares, by
-    /// (owning class, index into its `bridges`). A physical realization plan: populated only by the
-    /// JVM value-class pass, consumed only by JVM bridge emission.
-    pub(crate) jvm_bridge_return_unboxing:
-        std::collections::HashMap<(TypeName, u32), JvmBridgeReturnUnboxing>,
     /// JVM value-class identity to secondary-constructor declarations consumed into static
     /// `constructor-impl` methods. Populated only by the JVM representation pass.
     pub(crate) jvm_value_class_secondary_ctors:

@@ -7,9 +7,9 @@
 
 use super::{
     box_prim_free, discard, emit_num_conv, emit_return, finish_code, ir_ty_to_jvm, jvm_declared_ty,
-    jvm_function_params, jvm_tys, load, local_variable_desc, method_descriptor,
-    semantic_scalar_adapter, slot_words, throw_assertion_error, type_descriptor, unbox_prim,
-    verif_for_jvm_free, ClassWriter, CodeBuilder, VerifType,
+    jvm_function_params, jvm_tys, load, local_variable_desc, method_descriptor, slot_words,
+    throw_assertion_error, type_descriptor, unbox_prim, verif_for_jvm_free, ClassWriter,
+    CodeBuilder, EmitRun, VerifType,
 };
 use crate::ir::IrFile;
 use crate::types::Ty;
@@ -53,11 +53,17 @@ fn emit_bridge_barrier_outcome(
 /// Emit `ACC_BRIDGE|ACC_SYNTHETIC` methods: each has the supertype's erased descriptor, adapts its
 /// arguments (type barrier / checkcast / unbox / numeric convert), delegates to the concrete override,
 /// and adapts the return value back (box / numeric convert).
-pub(super) fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
+pub(super) fn emit_bridges(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    cw: &mut ClassWriter,
+    return_adaptations: &crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
+    run: &EmitRun,
+) {
     for (bridge_index, b) in c.bridges.iter().enumerate() {
         let return_unboxing = u32::try_from(bridge_index)
             .ok()
-            .and_then(|index| ir.jvm_bridge_return_unboxing.get(&(c.fq_name_id(), index)));
+            .and_then(|index| return_adaptations.get(c.fq_name_id(), index));
         let ep = jvm_tys(&b.erased_params);
         let static_target = b.target_function.and_then(|function| {
             let target = ir.functions.get(function as usize)?;
@@ -282,17 +288,18 @@ pub(super) fn emit_bridges(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWr
                 // the bridge pushed the reference and emitted `ireturn`, an artifact the verifier
                 // rejects at the return with no diagnostic from the compiler. This is the inverse of
                 // the `er.is_reference() && cr.is_jvm_scalar()` box above, and it was simply absent.
-                // A BUILT-IN unsigned value class is a carrier the value-class pass deliberately
-                // does not lower, so nothing recorded it above and `er` has already been reduced to
-                // the signed carrier. Its wrapper identity survives on the SEMANTIC erased return:
-                // boxed `kotlin.UInt` is not a `java.lang.Number`, and it comes out of its own
-                // `unbox-impl` like any other value class.
-                let semantic = semantic_scalar_adapter(b.erased_ret, er);
-                if semantic != er {
-                    unbox_prim(cw, &mut code, semantic);
-                } else {
-                    unbox_bridge_return(cw, &mut code, cr, er);
+                // A native unsigned value class must have taken the typed plan above: its boxed
+                // wrapper is not a signed primitive wrapper or `Number`, and guessing here would
+                // emit a method with the wrong ABI. Refuse the file if the realization was lost.
+                if b.erased_ret.non_null().is_unsigned() {
+                    run.set_emit_error(format!(
+                        "missing JVM bridge return adaptation for {}.{}",
+                        c.fq_name(),
+                        b.name
+                    ));
+                    return;
                 }
+                unbox_bridge_return(cw, &mut code, cr, er);
             } else if er.is_reference()
                 && cr.is_reference()
                 && crate::jvm::names::instanceof_internal_name(cr) == "java/lang/Void"

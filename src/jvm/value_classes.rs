@@ -300,7 +300,7 @@ pub(crate) fn apply_override_final_drop(ir: &mut IrFile) {
 }
 
 #[must_use]
-pub fn lower_value_classes(
+pub(crate) fn lower_value_classes(
     ir: &mut IrFile,
     classpath: &crate::jvm::classpath::Classpath,
     // Same-module SOURCE value classes (internal name → sole-field underlying), collected from the
@@ -312,6 +312,7 @@ pub fn lower_value_classes(
     // Subset whose stable declaration headers describe a value-class shape supported by metadata
     // emission. This is frozen before Pass 2; no sibling body or source coordinate is retained.
     module_readable_value_classes: &std::collections::HashSet<TypeName>,
+    bridge_return_adaptations: &mut crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
 ) -> bool {
     crate::trace_compiler!(
         "value_classes",
@@ -1865,24 +1866,16 @@ pub fn lower_value_classes(
                 {
                     b.target_name = Some(m.clone());
                 }
-                let target_mentions_vc = b
-                    .concrete_params
-                    .iter()
-                    .chain(std::iter::once(&b.concrete_ret))
-                    .any(|ty| {
-                        ty.non_null()
-                            .obj_internal()
-                            .is_some_and(|name| under.contains_key(&name))
-                    });
-                let bridge_mentions_vc = b
-                    .erased_params
-                    .iter()
-                    .chain(std::iter::once(&b.erased_ret))
-                    .any(|ty| {
-                        ty.non_null()
-                            .obj_internal()
-                            .is_some_and(|name| under.contains_key(&name))
-                    });
+                let target_mentions_vc = bridge_returns::mentions_value_class(
+                    &b.concrete_params,
+                    b.concrete_ret,
+                    &callable_under,
+                );
+                let bridge_mentions_vc = bridge_returns::mentions_value_class(
+                    &b.erased_params,
+                    b.erased_ret,
+                    &callable_under,
+                );
                 if b.target_name.is_none()
                     && target_mentions_vc
                     && b.kind != crate::ir::BridgeKind::PropertyGetter
@@ -1891,7 +1884,7 @@ pub fn lower_value_classes(
                         &target,
                         &b.concrete_params,
                         &b.concrete_ret,
-                        &under,
+                        &callable_under,
                         false,
                         suspend_sig.contains(&(
                             Some(c.fq_name),
@@ -1914,14 +1907,14 @@ pub fn lower_value_classes(
                     b.box_ret
                 );
                 let concrete_ret_vc = match &b.concrete_ret {
-                    Ty::Obj(fq_name, _) if under.contains_key(fq_name) => Some(*fq_name),
+                    Ty::Obj(fq_name, _) if callable_under.contains_key(fq_name) => Some(*fq_name),
                     _ => None,
                 };
                 let erased_ret_vc = b
                     .erased_ret
                     .non_null()
                     .obj_internal()
-                    .filter(|fq_name| under.contains_key(fq_name));
+                    .filter(|fq_name| callable_under.contains_key(fq_name));
                 if !owner_is_value && !bridge_mentions_vc {
                     let vc_params: Vec<Option<TypeName>> = b
                         .concrete_params
@@ -1929,7 +1922,7 @@ pub fn lower_value_classes(
                         .zip(b.erased_params.iter())
                         .map(|(concrete, erased)| match concrete {
                             Ty::Obj(fq_name, _)
-                                if under.contains_key(fq_name) && is_ref(erased) =>
+                                if callable_under.contains_key(fq_name) && is_ref(erased) =>
                             {
                                 Some(*fq_name)
                             }
@@ -1938,7 +1931,7 @@ pub fn lower_value_classes(
                         .collect();
                     if vc_params.iter().any(Option::is_some) {
                         for parameter in &mut b.concrete_params {
-                            *parameter = erase(parameter, &under);
+                            *parameter = erase(parameter, &callable_under);
                         }
                         b.unbox_params = vc_params;
                     }
@@ -1958,7 +1951,7 @@ pub fn lower_value_classes(
                             &b.name,
                             &b.concrete_params,
                             &b.erased_ret,
-                            &under,
+                            &callable_under,
                             false,
                             suspend_sig.contains(&(
                                 Some(c.fq_name),
@@ -1975,7 +1968,7 @@ pub fn lower_value_classes(
                         .iter_mut()
                         .chain(b.concrete_params.iter_mut())
                     {
-                        *p = erase(p, &under);
+                        *p = erase(p, &callable_under);
                     }
                     // Whether the SUPERTYPE method returns the value class in its UNBOXED form — a non-null
                     // literal (`fun bar(): Gx`), OR a nullable `X?` whose underlying is a non-null reference
@@ -1988,11 +1981,11 @@ pub fn lower_value_classes(
                             .non_null()
                             .obj_internal()
                             .is_some_and(|fq_name| {
-                                under.contains_key(&fq_name)
+                                callable_under.contains_key(&fq_name)
                                     && (!b.erased_ret.is_nullable()
-                                        || !nullable_is_boxed(fq_name, &under))
+                                        || !nullable_is_boxed(fq_name, &callable_under))
                             });
-                    let concrete_carrier = erase(&b.concrete_ret, &under);
+                    let concrete_carrier = erase(&b.concrete_ret, &callable_under);
                     // An EXTERNAL value class (`Result`) is held unboxed (`Object`) everywhere in krusty —
                     // when the SUPERTYPE also carries it unboxed the bridge returns the override's already-
                     // `Object` result directly, NO `box-impl`. EXCEPTION: a GENERIC boundary — the supertype
@@ -2021,7 +2014,7 @@ pub fn lower_value_classes(
                             &b.name,
                             &b.concrete_params,
                             &b.erased_ret,
-                            &under,
+                            &callable_under,
                             false,
                             suspend_sig.contains(&(
                                 Some(c.fq_name),
@@ -2031,11 +2024,13 @@ pub fn lower_value_classes(
                         );
                     }
                     for p in b.erased_params.iter_mut() {
-                        *p = erase(p, &under);
+                        *p = erase(p, &callable_under);
                     }
-                    if let Some(plan) = bridge_returns::plan_unboxing(b, erased_ret_vc, &under) {
+                    if let Some(plan) =
+                        bridge_returns::plan_unboxing(b, erased_ret_vc, &callable_under)
+                    {
                         return_unboxing.push(((owner_fq_id, bridge_index), plan));
-                        b.erased_ret = erase(&b.erased_ret, &under);
+                        b.erased_ret = erase(&b.erased_ret, &callable_under);
                     }
                 } else if !owner_is_value && bridge_mentions_vc {
                     // A bridge (mangled `f-<hash>` OR same-name) delegating to a concrete method with a
@@ -2050,7 +2045,9 @@ pub fn lower_value_classes(
                         .iter()
                         .zip(b.erased_params.iter())
                         .map(|(cp, ep)| match cp {
-                            Ty::Obj(fq_name, _) if under.contains_key(fq_name) && is_ref(ep) => {
+                            Ty::Obj(fq_name, _)
+                                if callable_under.contains_key(fq_name) && is_ref(ep) =>
+                            {
                                 Some(*fq_name)
                             }
                             _ => None,
@@ -2058,7 +2055,7 @@ pub fn lower_value_classes(
                         .collect();
                     if vc_params.iter().any(Option::is_some) {
                         for p in b.concrete_params.iter_mut() {
-                            *p = erase(p, &under);
+                            *p = erase(p, &callable_under);
                         }
                         b.unbox_params = vc_params;
                     }
@@ -2092,7 +2089,7 @@ pub fn lower_value_classes(
                 }
             }
         }
-        ir.jvm_bridge_return_unboxing.extend(return_unboxing);
+        bridge_return_adaptations.extend(return_unboxing);
     }
 
     // 2. Erase class field + ctor-arg types; drop the `<init>` null-check on a constructor parameter

@@ -99,6 +99,14 @@ fn body(dump: &str, needle: &str) -> Vec<String> {
     found.into_iter().next().expect("method").1
 }
 
+fn assert_byte_identical(stem: &str, source: &str, class: &str) {
+    match common::byte_diff_against_kotlinc_cp(stem, source, class, &[common::stdlib_jar()]) {
+        Some(Ok(())) => {}
+        Some(Err(error)) => panic!("{error}"),
+        None => panic!("{stem}: reference toolchain unavailable"),
+    }
+}
+
 /// The generic base every fixture bridges from: an erased `T` slot behind a non-generic supertype.
 const BASE: &str = "open class A<T> {\n\
                     \x20   var slot: T? = null\n\
@@ -142,11 +150,14 @@ fn every_signed_primitive_return_matches_kotlinc() {
 #[test]
 fn a_bound_decides_whether_the_checkcast_is_emitted() {
     let source = "open class A<T : Number> {\n\
-                  \x20   var slot: T? = null\n\
-                  \x20   open val p: T get() = slot!!\n\
+                  \x20   open val p: T = 7 as T\n\
                   }\n\
                   interface C { val p: Int }\n\
-                  class B : C, A<Int>()\n";
+                  class B : C, A<Int>()\n\
+                  fun box(): String {\n\
+                  \x20 val c: C = B()\n\
+                  \x20 return if (c.p == 7) \"OK\" else \"FAIL\"\n\
+                  }\n";
     let (reference, ours) = javap_both("BridgeNumberBound", source, "B");
     let want = body(&reference, "getP()");
     assert_eq!(
@@ -160,10 +171,10 @@ fn a_bound_decides_whether_the_checkcast_is_emitted() {
         "kotlinc's own ledger, spelled out so a reference change is visible here"
     );
     assert_eq!(body(&ours, "getP()"), want, "Number-bound bridge body");
+    assert_eq!(run(source, "BridgeNumberBoundRun"), "OK");
 
     let source = "open class A<T : Comparable<T>> {\n\
-                  \x20   var slot: T? = null\n\
-                  \x20   open val p: T get() = slot!!\n\
+                  \x20   open val p: T = 7 as T\n\
                   }\n\
                   interface C { val p: Int }\n\
                   class B : C, A<Int>()\n";
@@ -244,30 +255,32 @@ fn a_value_class_with_a_reference_carrier_unboxes_through_it() {
 /// the adapter has to recover the wrapper identity from the SEMANTIC erased return, because boxed
 /// `kotlin.UInt` is not a `java.lang.Number`.
 ///
-/// The bridge's NAME is a separate, pre-existing gap: kotlinc publishes the mangled
-/// `foo-pVg5ArA()I` while krusty still names it `foo()I`, because the same exclusion keeps the
-/// unsigned return out of `vc_mangle`'s map. That is why this case compares the emitted BODY rather
-/// than running the program, and why it is asserted here rather than left unmeasured.
 #[test]
 fn an_unsigned_value_class_unboxes_through_its_own_wrapper() {
-    for (index, (kotlin_type, wrapper, carrier, ret)) in [
-        ("UByte", "kotlin/UByte", "()B", "ireturn"),
-        ("UShort", "kotlin/UShort", "()S", "ireturn"),
-        ("UInt", "kotlin/UInt", "()I", "ireturn"),
-        ("ULong", "kotlin/ULong", "()J", "lreturn"),
+    for (index, (kotlin_type, value, wrapper, carrier, ret)) in [
+        ("UByte", "7u.toUByte()", "kotlin/UByte", "()B", "ireturn"),
+        ("UShort", "7u.toUShort()", "kotlin/UShort", "()S", "ireturn"),
+        ("UInt", "7u", "kotlin/UInt", "()I", "ireturn"),
+        ("ULong", "7uL", "kotlin/ULong", "()J", "lreturn"),
     ]
     .into_iter()
     .enumerate()
     {
         let source = format!(
             "abstract class A<T> {{\n\
-             \x20   var t: T? = null\n\
-             \x20   fun foo(): T = t!!\n\
+             \x20   var value: T? = null\n\
+             \x20   fun foo(): T = value!!\n\
              }}\n\
              \n\
              interface I {{ fun foo(): {kotlin_type} }}\n\
              \n\
-             class B : A<{kotlin_type}>(), I\n"
+             class B : A<{kotlin_type}>(), I\n\
+             fun box(): String {{\n\
+             \x20 val b = B()\n\
+             \x20 b.value = {value}\n\
+             \x20 val i: I = b\n\
+             \x20 return if (i.foo() == {value}) \"OK\" else \"FAIL\"\n\
+             }}\n"
         );
         let (reference, ours) = javap_both(&format!("BridgeUnsigned{index}"), &source, "B");
         let want = body(&reference, "foo-");
@@ -283,10 +296,16 @@ fn an_unsigned_value_class_unboxes_through_its_own_wrapper() {
             "{kotlin_type}: kotlinc's own ledger"
         );
         assert_eq!(
-            body(&ours, "foo"),
+            body(&ours, "foo-"),
             want,
-            "{kotlin_type} bridge body (the mangled NAME is a separate pre-existing gap)"
+            "{kotlin_type} bridge body and mangled ABI name"
         );
+        assert_eq!(
+            run(&source, &format!("BridgeUnsignedRun{index}")),
+            "OK",
+            "{kotlin_type} interface dispatch"
+        );
+        assert_byte_identical(&format!("BridgeUnsignedBytes{index}"), &source, "B");
     }
 }
 

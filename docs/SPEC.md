@@ -6167,10 +6167,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `T : Comparable<T>` bound keeps the cast). A bridge whose supertype declares a VALUE CLASS in its
   unboxed form takes the carrier out of that class's own `unbox-impl` (`checkcast IC;
   IC.unbox-impl()I`) — the class identity is unknowable from the bridge at emission time, because the
-  value-class pass rewrites `erased_ret` to the carrier in the same step, so it is recorded on
-  `IrFile::jvm_bridge_return_unboxing` there — a physical realization plan the value-class pass
-  writes and bridge emission reads, keyed by the owning class and the bridge's own index, so no
-  classifier identity for a JVM boxing decision sits on the common `Bridge`. That holds for a
+  value-class pass rewrites `erased_ret` to the carrier in the same step, so the JVM pass records it
+  in `bridge_return_adaptations` — a backend-owned physical realization plan passed directly to
+  bridge emission and keyed by the owning class and bridge ordinal. No classifier identity for a JVM
+  boxing decision sits on common `Bridge` or `IrFile`. That holds for a
   REFERENCE carrier too (`checkcast Text; Text.unbox-impl()Ljava/lang/String;`): keying the adapter
   on the carrier alone sent a reference carrier down the ordinary `Object`-to-`String` narrowing,
   which never unboxed and handed the caller a `Text` where a `String` was declared. Nor may the two
@@ -6182,15 +6182,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   generic override may legally return `null` — `unbox-impl` is an instance call, and reaching it
   with null throws where the declaration says the bridge returns null. kotlinc branches around it
   (`checkcast Text; dup; ifnull → pop; aconst_null`, else `unbox-impl`) and so does krusty; the
-  regression asserts both the instruction ledger and that the interface call really answers null. And a BUILT-IN unsigned value class is
-  one the value-class pass deliberately does not lower, so nothing records it and the carrier has
-  already been reduced to the signed one: its wrapper identity survives only on the SEMANTIC erased
-  return (`semantic_scalar_adapter`), and boxed `kotlin.UInt` is not a `java.lang.Number`. Its
-  mangled bridge NAME is a separate, still-open gap — kotlinc publishes `foo-pVg5ArA()I` where
-  krusty names it `foo()I`, because the same exclusion keeps the unsigned return out of `vc_mangle`'s
-  map, so the interface entry is missing and the call fails with `AbstractMethodError`.
+  regression asserts both the instruction ledger and that the interface call really answers null.
+  A BUILT-IN unsigned value class stays out of the global expression-rewrite map, but the dedicated
+  callable-boundary value-class map retains its wrapper identity because boxed `kotlin.UInt` is not
+  a `java.lang.Number`. That map therefore owns both its `unbox-impl` adapter and mangled bridge
+  identity (`foo-pVg5ArA()I` for `UInt`). Tests exercise every unsigned bridge through its interface,
+  in addition to comparing the instruction ledger.
   Test: `tests/bridge_return_unbox_e2e.rs`, an instruction ledger against the reference compiler for
-  every signed primitive, both bounds, both value-class carriers and all four unsigned forms.
+  every signed primitive, both bounds, both value-class carriers and all four unsigned forms, plus
+  runtime interface dispatch.
 
 - **A `var` whose type is a BOUNDED type parameter emits an invalid `LineNumberTable` (open).**
   `open class P<T : Number> { var c: T? = null }` emits `setC` with a single line entry at
