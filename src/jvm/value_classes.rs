@@ -4774,7 +4774,20 @@ pub fn lower_value_classes(
         // An EXTENSION accessor already names its receiver in its descriptor and is mangled by the
         // hash; a MEMBER accessor names none and takes the structural `-impl` suffix, with the
         // carrier prepended after mangling — the same two rules the declaration side applies.
-        let extension = reference.ext_facade.is_some();
+        //
+        // The role is what the reference RECORDED, never what `ext_facade` looks like: that field is
+        // `Some` for an extension AND for a private member reached through an `access$…` bridge, so
+        // reading it as "this is an extension" rebuilt `getXx-<hash>(I)I` for a member whose
+        // declaration is `getXx-impl(I)I`, and the program failed at its first `get` with a
+        // `NoSuchMethodError`.
+        let extension = match reference.accessor_role {
+            crate::ir::PropertyAccessorRole::Extension => true,
+            crate::ir::PropertyAccessorRole::Member => false,
+            // A private member's accessor is realized statically over the carrier exactly like any
+            // other member of the value class; krusty publishes it directly rather than behind a
+            // bridge, so the member rule is the one that names the declaration.
+            crate::ir::PropertyAccessorRole::AccessBridge => false,
+        };
         let boxed_receiver = Ty::obj_name(receiver);
         let declared_params: &[Ty] = if extension {
             std::slice::from_ref(&boxed_receiver)
