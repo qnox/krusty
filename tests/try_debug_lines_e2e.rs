@@ -289,3 +289,74 @@ fn a_nested_finally_copy_stays_inside_the_outer_region() {
         "run exception table"
     );
 }
+
+/// Kotlin runs a `finally` when control leaves its `try` by ANY route, not only by `return`.
+/// `break` and `continue` jumped straight to their loop labels, so the finalizer never ran — a
+/// silent wrong answer, not a byte difference.
+///
+/// The loop below leaves its `try` by `continue` on the first iteration and by `break` on the
+/// second, so a correct compiler appends `F` twice.
+#[test]
+fn a_loop_transfer_out_of_a_try_runs_its_finally() {
+    let src = "fun box(): String {\n\
+               \x20   val sb = StringBuilder()\n\
+               \x20   for (i in 0..1) {\n\
+               \x20       try {\n\
+               \x20           sb.append(\"T\")\n\
+               \x20           if (i == 0) continue\n\
+               \x20           break\n\
+               \x20       } finally {\n\
+               \x20           sb.append(\"F\")\n\
+               \x20       }\n\
+               \x20   }\n\
+               \x20   return sb.toString()\n\
+               }\n";
+    let jdk = common::jdk_modules();
+    let Some(out) = common::compile_and_run_box(
+        src,
+        "LoopTransferFinally",
+        &[common::stdlib_jar()],
+        Some(jdk.as_path()),
+    ) else {
+        eprintln!("skipping: JVM runner unavailable");
+        return;
+    };
+    assert_eq!(out.trim(), "TFTF");
+}
+
+/// A `finally` that a loop transfer leaves is inlined on that path too, so its copy must be cut out
+/// of the protected region exactly as a `return`'s copy is. Compared against kotlinc rather than
+/// pinned, so the rule stays tied to the reference compiler.
+///
+/// A `while` loop, not `for (i in a..b)`: a counted range loop spills its bound into a local where
+/// kotlinc re-reads the parameter, which shifts every offset and would fail this comparison for a
+/// reason that has nothing to do with protected regions.
+#[test]
+fn a_loop_transfer_finalizer_copy_leaves_the_protected_region() {
+    let src = "class Looping {\n\
+               \x20   fun step() {}\n\
+               \x20   fun run(n: Int): Int {\n\
+               \x20       var seen = 0\n\
+               \x20       var i = 0\n\
+               \x20       while (i < n) {\n\
+               \x20           i += 1\n\
+               \x20           try {\n\
+               \x20               seen += i\n\
+               \x20               continue\n\
+               \x20           } finally {\n\
+               \x20               step()\n\
+               \x20           }\n\
+               \x20       }\n\
+               \x20       return seen\n\
+               \x20   }\n\
+               }\n";
+    let Some((reference, krusty)) = disassemble_both("LoopTransferRegion", src, "Looping") else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    assert_eq!(
+        numeric_rows(&krusty, "int run(int)", "Exception table:"),
+        numeric_rows(&reference, "int run(int)", "Exception table:"),
+        "run exception table"
+    );
+}
