@@ -4332,8 +4332,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `actual val String.tag: String` where a key differing on the receiver spelling cannot (reporting
   those was a real regression the harness caught). A name/arity key stands in only where
   resolution gave a declaration no stable identity, and for an `actual typealias`, which
-  actualization records as a type expansion rather than as a paired declaration. Remaining by design: a MEMBER `actual` (the reference compiler reports one
-  at its own name) — pinned by `a_member_actual_is_not_reported_yet`. Note the deliberate model
+  actualization records as a type expansion rather than as a paired declaration.
+
+  A MEMBER that wrote `actual` is reported too, at its own name, when its OWNER classifier is
+  itself unmatched — a member of a classifier that actualized nothing cannot have actualized
+  anything. The converse (a matched owner with an unmatched member) stays silent, and that is a
+  property of actualization rather than a shortcut: its pairing is TOP-LEVEL only
+  (`actualized_declaration_pairs` declines any declaration that has an owner), and a matched
+  classifier's members are excluded as a SUBTREE rather than paired, so there is no member-level
+  answer to consult. A member's modality slot is the part that is not `final`: an `override` of an
+  `open` member renders `open`, and an interface member renders `abstract` without a body and
+  `open` with one. A member's resolved signature is found by NAME and arity within its owner's
+  `ClassSig`, not by an AST coordinate: a streamed member signature leaves
+  `Signature::source_member` unset, because that field records a SELECTED member handed to
+  lowering rather than where a declaration came from. Overloads that tie on arity are left
+  unrendered rather than guessed. Remaining by design: a `companion object` and a nested
+  classifier (the parser hoists both out of their owner, so neither rides its member lists), a
+  member extension property, a primary-constructor property, a secondary constructor, and an
+  enum-entry member — each pinned by `four_member_shapes_are_not_reported_yet`.
+
+  Note the deliberate model
   difference this check makes visible: the reference compiler rejects an `expect` and its `actual`
   in the same module, while krusty compiles a platform module and its `dependsOn` chain as one
   source set, so a pair in one file is matched here and unmatched there. Tests:

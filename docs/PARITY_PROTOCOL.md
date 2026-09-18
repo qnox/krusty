@@ -90,7 +90,10 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   rendering, verified by comparing the two compilers' reports on the same source rather than
   against a transcription (`tests/no_expect_for_actual_e2e.rs`). A MEMBER `actual` is still
   accepted: the reference compiler reports one at its own name, and
-  `a_member_actual_is_not_reported_yet` pins that difference. (Without the feature both modifiers are rejected outright — that one IS
+  A MEMBER that wrote `actual` is reported when its OWNER classifier is itself unmatched; the
+  converse (a matched owner, an unmatched member) has no answer to consult, because actualization
+  pairs top-level declarations only and excludes a matched classifier's members as a subtree.
+  `four_member_shapes_are_not_reported_yet` pins the member shapes still missing. (Without the feature both modifiers are rejected outright — that one IS
   implemented; see `tests/mpp_requires_the_feature_e2e.rs`.) The message is
   `'<rendered declaration>' has no corresponding expected declaration`, reported at the declaration's
   NAME. The rendering is the substance: it is kotlinc's own declaration renderer over the RESOLVED
@@ -151,11 +154,14 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   | `actual external override fun e()` | `public open actual external override fun e(): Int` — `external` precedes `override` |
   | `actual inline infix fun` / `actual inline suspend fun` / `actual inline operator fun` | `inline` precedes `operator`, `infix` and `suspend` |
   | `actual suspend operator fun invoke()` | `… actual operator suspend fun invoke(): Int` — `operator` precedes `suspend` |
-  | a member `actual` | reported at its OWN name, not the class's — not implemented |
+  | a member `actual` | reported at its OWN name, not the class's |
   | a member `actual override fun` of an `open` member | `public open actual override fun …` — an override renders `open` |
   | an interface member with a body / without one | `public open actual fun …` / `public abstract actual fun …` |
-  | `actual companion object` | `public final actual companion object Companion : Any`, at the `object` keyword |
-  | a member `actual constructor(x: Int)` | `public actual constructor(x: Int): Owner` — no modality slot, and the owner stands in for the return |
+  | an UNMARKED member of an unmatched `actual` classifier | nothing: the diagnostic is about the modifier |
+  | `actual companion object` | `public final actual companion object Companion : Any`, at the `object` keyword — not implemented |
+  | a member `actual val Int.memberExt: Int` | `public final actual val Int.memberExt: Int` — not implemented |
+  | `actual annotation class Anno(actual val x: Int)` | the parameter property reports `public final actual val x: Int` — not implemented |
+  | a member `actual constructor(x: Int)` | `public actual constructor(x: Int): Owner` — no modality slot, the owner stands in for the return; not implemented |
   | `actual class A { constructor(x: Int) { } }` | nothing: a secondary constructor is not reported |
 
   Rendering from the AST is not sufficient: kotlinc renders the RESOLVED type, so an inferred return

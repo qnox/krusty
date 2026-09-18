@@ -366,27 +366,110 @@ fn the_check_needs_the_multiplatform_feature() {
     );
 }
 
-/// A MEMBER `actual` is the documented remainder: the reference compiler reports one and krusty
-/// does not yet. Pinned so the gap is visible and its closing is a test change, not a surprise.
+/// The MEMBERS of an unmatched `actual` classifier are reported too, each at its own name — a
+/// member of a classifier that actualized nothing cannot itself have actualized anything.
+///
+/// A member's modality is the part that is not `final`: an `override` of an `open` member renders
+/// `open`, an interface member renders `abstract` without a body and `open` with one. All measured.
 #[test]
-fn a_member_actual_is_not_reported_yet() {
+fn the_members_of_an_unmatched_actual_classifier_are_reported() {
+    assert_identical(
+        "package plib\n\
+         \n\
+         open class Base {\n\
+         \x20   open fun inherited(): Int = 0\n\
+         \x20   open suspend fun both(): Int = 0\n\
+         }\n\
+         \n\
+         actual class Derived : Base() {\n\
+         \x20   fun plain(): Int = 1\n\
+         \x20   actual fun marked(): Int = 2\n\
+         \x20   actual val markedProp: Int = 3\n\
+         \x20   actual var settable: Int = 4\n\
+         \x20   actual override fun inherited(): Int = 5\n\
+         \x20   actual override suspend fun both(): Int = 6\n\
+         \x20   actual operator fun plus(other: Int): Int = 7\n\
+         \x20   actual lateinit var late: String\n\
+         \x20   internal actual fun internalMember(): Int = 8\n\
+         \x20   protected actual fun prot(): Int = 9\n\
+         \x20   actual fun <T> generic(t: T): T = t\n\
+         }\n\
+         \n\
+         actual abstract class Abs {\n\
+         \x20   actual abstract fun abstractFun(): Int\n\
+         }\n\
+         \n\
+         actual interface Iface {\n\
+         \x20   actual val absProp: Int\n\
+         \x20   actual fun withDefault(): Int = 1\n\
+         }\n\
+         \n\
+         actual object Singleton {\n\
+         \x20   actual fun objFun(): Int = 2\n\
+         }\n",
+        "MemberShapes",
+    );
+}
+
+/// An unmarked member of an unmatched `actual` classifier stays silent: the diagnostic is about the
+/// modifier, not about the classifier's contents.
+#[test]
+fn an_unmarked_member_is_silent() {
+    let (reference, krusty) = both(
+        "package plib\n\
+         \n\
+         actual class Owner {\n\
+         \x20   fun plain(): Int = 1\n\
+         \x20   val plainProp: Int = 2\n\
+         }\n",
+        "Unmarked",
+    );
+    assert_eq!(
+        reference.len(),
+        1,
+        "only the classifier itself: {reference:?}"
+    );
+    assert_eq!(krusty, reference, "and krusty agrees");
+}
+
+/// Four member shapes the reference compiler reports and krusty does not yet. Pinned so each gap is
+/// visible and closing one is a test change, not a surprise.
+///
+/// A `companion object` and a nested classifier are hoisted out of their owner by the parser, so
+/// neither rides its owner's member lists; a member EXTENSION property and a
+/// primary-constructor property each live in a table this pass does not read. The measured
+/// renderings are recorded in `docs/PARITY_PROTOCOL.md`.
+#[test]
+fn four_member_shapes_are_not_reported_yet() {
     let (reference, krusty) = both(
         "package plib\n\
          \n\
          actual class Holder {\n\
-         \x20   actual fun member(): Int = 3\n\
-         }\n",
-        "Members",
+         \x20   actual val Int.memberExt: Int get() = 1\n\
+         \x20   actual companion object {\n\
+         \x20       actual fun companionFun(): Int = 2\n\
+         \x20   }\n\
+         }\n\
+         \n\
+         actual annotation class Anno(actual val x: Int)\n",
+        "Remainder",
+    );
+    let rendered = |report: &[Reported]| {
+        report
+            .iter()
+            .map(|entry| entry.rendered.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        rendered(&reference).len(),
+        6,
+        "the reference compiler reports both classifiers, the companion, and three members: \
+         {reference:?}"
     );
     assert_eq!(
-        reference.len(),
+        rendered(&krusty).len(),
         2,
-        "the reference compiler reports the class AND its member: {reference:?}"
-    );
-    assert_eq!(
-        krusty.len(),
-        1,
-        "krusty reports only the top-level classifier: {krusty:?}"
+        "krusty reports the two top-level classifiers only: {krusty:?}"
     );
     assert_eq!(
         krusty[0], reference[0],

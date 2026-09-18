@@ -1486,6 +1486,7 @@ impl<'a> Parser<'a> {
                     d.is_override = mods.iter().any(|m| m == "override");
                     d.is_external |= mods.iter().any(|m| m == "external");
                     d.is_expect = is_expect;
+                    d.is_actual = is_actual;
                     d.is_companion_extension = mods.iter().any(|m| m == "companion");
                     let id = self.file.add_decl(Decl::Property(d));
                     self.file.decls.push(id);
@@ -2411,6 +2412,7 @@ impl<'a> Parser<'a> {
             is_lateinit,
             is_external: accessor_external,
             is_expect: false,
+            is_actual: false,
             getter,
             getter_declared,
             getter_span,
@@ -2675,6 +2677,7 @@ impl<'a> Parser<'a> {
                         property.is_override = mods.iter().any(|m| m == "override");
                         property.is_external |= mods.iter().any(|m| m == "external");
                         property.is_expect = mods.iter().any(|m| m == "expect");
+                        property.is_actual = mods.iter().any(|m| m == "actual");
                         init_order.push(ClassInit::PropInit(props.len()));
                         props.push(property);
                     }
@@ -2808,6 +2811,8 @@ impl<'a> Parser<'a> {
                         .any(|modifier| modifier == "external");
                     property.is_expect =
                         member_modifiers.iter().any(|modifier| modifier == "expect");
+                    property.is_actual =
+                        member_modifiers.iter().any(|modifier| modifier == "actual");
                     property.is_companion_extension = true;
                     let declaration = self.file.add_decl(Decl::Property(property));
                     self.file.decls.push(declaration);
@@ -3028,6 +3033,7 @@ impl<'a> Parser<'a> {
                                 property.is_override = bmods.iter().any(|m| m == "override");
                                 property.is_external |= bmods.iter().any(|m| m == "external");
                                 property.is_expect = bmods.iter().any(|m| m == "expect");
+                                property.is_actual = bmods.iter().any(|m| m == "actual");
                                 init_order.push(ClassInit::PropInit(bprops.len()));
                                 bprops.push(property);
                             } else if self.at(TokenKind::Ident)
@@ -3129,6 +3135,7 @@ impl<'a> Parser<'a> {
                         p.is_override = emods.iter().any(|m| m == "override");
                         p.is_external |= emods.iter().any(|m| m == "external");
                         p.is_expect = emods.iter().any(|m| m == "expect");
+                        p.is_actual = emods.iter().any(|m| m == "actual");
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }
@@ -4084,6 +4091,7 @@ impl<'a> Parser<'a> {
                         p.is_override = mods.iter().any(|m| m == "override");
                         p.is_external |= mods.iter().any(|m| m == "external");
                         p.is_expect = mods.iter().any(|m| m == "expect");
+                        p.is_actual = mods.iter().any(|m| m == "actual");
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }
@@ -4542,6 +4550,7 @@ impl<'a> Parser<'a> {
                         p.is_override = imods.iter().any(|m| m == "override");
                         p.is_external |= imods.iter().any(|m| m == "external");
                         p.is_expect = imods.iter().any(|m| m == "expect");
+                        p.is_actual = imods.iter().any(|m| m == "actual");
                         body_props.push(p);
                     }
                     TokenKind::Ident if self.keyword_text("typealias") => {
@@ -4652,6 +4661,7 @@ impl<'a> Parser<'a> {
                         p.is_override = mods.iter().any(|m| m == "override");
                         p.is_external |= mods.iter().any(|m| m == "external");
                         p.is_expect = mods.iter().any(|m| m == "expect");
+                        p.is_actual = mods.iter().any(|m| m == "actual");
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }
@@ -4798,6 +4808,7 @@ impl<'a> Parser<'a> {
                         p.is_override = mods.iter().any(|m| m == "override");
                         p.is_external |= mods.iter().any(|m| m == "external");
                         p.is_expect = mods.iter().any(|m| m == "expect");
+                        p.is_actual = mods.iter().any(|m| m == "actual");
                         init_order.push(ClassInit::PropInit(body_props.len()));
                         body_props.push(p);
                     }
@@ -7365,6 +7376,7 @@ fn function_flags(modifiers: &[String]) -> FdFlags {
             "infix" => flags.with_is_infix(true),
             "companion" => flags.with_is_companion_extension(true),
             "external" => flags.with_is_external(true),
+            "actual" => flags.with_is_actual(true),
             _ => flags,
         };
     }
