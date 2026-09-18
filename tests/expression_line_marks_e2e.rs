@@ -11,30 +11,35 @@ use super::common;
 ///
 /// A line table is not a byte comparison — the rest of the class need not match for this contract
 /// to be testable, and on a multi-line call it does not yet.
-fn disassemble_both(name: &str, src: &str, class: &str) -> Option<(String, String)> {
-    let dir = common::scratch_dir()?;
+fn disassemble_both(name: &str, src: &str, class: &str) -> (String, String) {
+    let dir = common::scratch_dir()
+        .unwrap_or_else(|| panic!("{name}: no scratch directory for the differential"));
     let reference_dir = dir.join("ref");
     let krusty_dir = dir.join("out");
-    std::fs::create_dir_all(&reference_dir).ok()?;
-    std::fs::create_dir_all(&krusty_dir).ok()?;
+    std::fs::create_dir_all(&reference_dir).expect("reference dir");
+    std::fs::create_dir_all(&krusty_dir).expect("output dir");
     let source = dir.join(format!("{name}.kt"));
-    std::fs::write(&source, src).ok()?;
+    std::fs::write(&source, src).expect("write source");
     let (code, stderr) = common::kotlinc_compile(&[
         "-d".to_string(),
         reference_dir.to_string_lossy().into_owned(),
+        // Both sides must be one target: krusty emits its default major 52 here, so kotlinc
+        // compiles for 1.8 too. A target difference forks codegen (indy string concatenation, for
+        // one), and two differently-targeted classes are not an oracle for each other.
         "-jvm-target".to_string(),
-        "25".to_string(),
+        "1.8".to_string(),
         source.to_string_lossy().into_owned(),
-    ])?;
+    ])
+    .unwrap_or_else(|| panic!("{name}: reference kotlinc unavailable under the test harness"));
     assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
     let classes = common::compile_in_process(src, name, &[common::stdlib_jar()], None)
         .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
     for (internal, bytes) in &classes {
         let path = krusty_dir.join(format!("{internal}.class"));
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok()?;
+            std::fs::create_dir_all(parent).expect("class dir");
         }
-        std::fs::write(path, bytes).ok()?;
+        std::fs::write(path, bytes).expect("write class");
     }
     let reference = common::javap(&[
         "-p",
@@ -43,7 +48,8 @@ fn disassemble_both(name: &str, src: &str, class: &str) -> Option<(String, Strin
         "-cp",
         &reference_dir.to_string_lossy(),
         class,
-    ])?;
+    ])
+    .unwrap_or_else(|| panic!("{name}: javap unavailable for the reference class"));
     let krusty = common::javap(&[
         "-p",
         "-c",
@@ -51,9 +57,21 @@ fn disassemble_both(name: &str, src: &str, class: &str) -> Option<(String, Strin
         "-cp",
         &krusty_dir.to_string_lossy(),
         class,
-    ])?;
+    ])
+    .unwrap_or_else(|| panic!("{name}: javap unavailable for the emitted class"));
     let _ = std::fs::remove_dir_all(dir);
-    Some((reference, krusty))
+    (reference, krusty)
+}
+
+fn method_lines(text: &str, signature: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .skip_while(|line| !line.contains(signature))
+        .skip_while(|line| !line.starts_with("LineNumberTable"))
+        .skip(1)
+        .take_while(|line| line.starts_with("line "))
+        .map(str::to_string)
+        .collect()
 }
 
 /// The arguments of a multi-line call each map to their own line, and an argument on the line
@@ -67,20 +85,7 @@ fn a_multi_line_calls_arguments_each_map_to_their_line() {
                \x20   b = y,\n\
                \x20   c = x + 1,\n\
                )\n";
-    let Some(built) = disassemble_both("ExpressionLines", src, "ExpressionLinesKt") else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
-    let lines = |text: &str| {
-        text.lines()
-            .map(str::trim)
-            .skip_while(|line| !line.contains("make(int, java.lang.String)"))
-            .skip_while(|line| !line.starts_with("LineNumberTable"))
-            .skip(1)
-            .take_while(|line| line.starts_with("line "))
-            .map(str::to_string)
-            .collect::<Vec<_>>()
-    };
+    let built = disassemble_both("ExpressionLines", src, "ExpressionLinesKt");
     let argument_lines = |entries: Vec<String>| {
         entries
             .into_iter()
@@ -91,11 +96,247 @@ fn a_multi_line_calls_arguments_each_map_to_their_line() {
             })
             .collect::<Vec<_>>()
     };
-    let want = argument_lines(lines(&built.0));
+    let want = argument_lines(method_lines(&built.0, "make(int, java.lang.String)"));
     assert_eq!(want.len(), 3, "kotlinc maps all three arguments: {want:?}");
-    let got = argument_lines(lines(&built.1));
+    let got = argument_lines(method_lines(&built.1, "make(int, java.lang.String)"));
     assert_eq!(
         got, want,
         "complete argument-line projection, including bytecode offsets"
+    );
+}
+
+/// With the dispatch and return rules too, the whole class matches: the arguments map to their own
+/// lines, the constructor call maps BACK to the line it is written on, and the `return` maps to
+/// where the expression ends.
+#[test]
+fn a_multi_line_construction_is_byte_identical_to_kotlinc() {
+    let src = "class P(val a: Int, val b: String, val c: Int)\n\
+               \n\
+               fun make(x: Int, y: String): P = P(\n\
+               \x20   a = x,\n\
+               \x20   b = y,\n\
+               \x20   c = x + 1,\n\
+               )\n";
+    let result = common::byte_diff_against_kotlinc_cp(
+        "MultiLineConstruction",
+        src,
+        "MultiLineConstructionKt",
+        &[common::stdlib_jar()],
+    )
+    .unwrap_or_else(|| panic!("reference kotlinc unavailable under the test harness"));
+    result.expect("MultiLineConstructionKt byte-identical to kotlinc");
+}
+
+/// A single-line call adds no entries: the rules are about a line CHANGING, not about calls.
+#[test]
+fn a_single_line_call_is_unchanged() {
+    let src = "class Q(val a: Int)\n\
+               \n\
+               fun one(): Q = Q(1)\n";
+    let result = common::byte_diff_against_kotlinc_cp(
+        "SingleLineCall",
+        src,
+        "SingleLineCallKt",
+        &[common::stdlib_jar()],
+    )
+    .unwrap_or_else(|| panic!("reference kotlinc unavailable under the test harness"));
+    result.expect("SingleLineCallKt byte-identical to kotlinc");
+}
+
+/// An explicit return keeps the call line in effect; only the return synthesized for an expression
+/// body maps to the returned expression's closing line.
+#[test]
+fn an_explicit_multi_line_return_is_byte_identical_to_kotlinc() {
+    let src = "class R(val a: Int, val b: String, val c: Int)\n\
+               \n\
+               fun make(x: Int, y: String): R {\n\
+               \x20   return R(\n\
+               \x20       a = x,\n\
+               \x20       b = y,\n\
+               \x20       c = x + 1,\n\
+               \x20   )\n\
+               }\n";
+    let result = common::byte_diff_against_kotlinc_cp(
+        "ExplicitMultiLineReturn",
+        src,
+        "ExplicitMultiLineReturnKt",
+        &[common::stdlib_jar()],
+    )
+    .unwrap_or_else(|| panic!("reference kotlinc unavailable under the test harness"));
+    result.expect("explicit multi-line return byte-identical to kotlinc");
+}
+/// A finalizer changes the active line while the return value is parked in a local. The eventual
+/// return instruction must restore the explicit return's source line, not inherit the finalizer's.
+///
+/// The call is a CONSTRUCTOR so the whole table is owned here: an ordinary method's dispatch
+/// restoration arrives with the method-call PR above this one. The finalizer stays the inline
+/// `println("done")` it was written with — the entries this test exists for sit past it, and every
+/// LINE in the table is now kotlinc's. The two offsets that differ are the inline splice's, not
+/// this contract's: kotlinc keeps the argument on the stack and `swap`s the receiver under it
+/// (`ldc; getstatic; swap; invokevirtual`) where krusty round-trips it through two locals, seven
+/// bytes more. Both complete tables are spelled out so either compiler moving is visible here.
+#[test]
+fn an_explicit_return_after_finally_restores_its_line() {
+    let src = "class R(val a: Int, val b: String, val c: Int)\n\
+               class FinallySink {\n\
+               \x20   fun run(x: Int, y: String): R {\n\
+               \x20       try {\n\
+               \x20           return R(\n\
+               \x20               a = x,\n\
+               \x20               b = y,\n\
+               \x20               c = x + 1,\n\
+               \x20           )\n\
+               \x20       } finally {\n\
+               \x20           println(\"done\")\n\
+               \x20       }\n\
+               \x20   }\n\
+               }\n";
+    let (reference, krusty) = disassemble_both("ReturnAfterFinally", src, "FinallySink");
+    let want = method_lines(&reference, "R run(int, java.lang.String)");
+    assert_eq!(
+        want,
+        vec![
+            "line 4: 6".to_string(),
+            "line 5: 7".to_string(),
+            "line 6: 11".to_string(),
+            "line 7: 12".to_string(),
+            "line 8: 13".to_string(),
+            "line 5: 16".to_string(),
+            "line 11: 20".to_string(),
+            "line 5: 30".to_string(),
+            "line 11: 31".to_string(),
+        ],
+        "kotlinc's own table, spelled out so a reference change is visible here"
+    );
+    let ours = method_lines(&krusty, "R run(int, java.lang.String)");
+    assert_eq!(
+        ours.iter()
+            .map(|row| row.split(':').next().unwrap_or(row))
+            .collect::<Vec<_>>(),
+        want.iter()
+            .map(|row| row.split(':').next().unwrap_or(row))
+            .collect::<Vec<_>>(),
+        "every line, in kotlinc's order"
+    );
+    assert_eq!(
+        ours,
+        vec![
+            "line 4: 6".to_string(),
+            "line 5: 7".to_string(),
+            "line 6: 11".to_string(),
+            "line 7: 12".to_string(),
+            "line 8: 13".to_string(),
+            "line 5: 16".to_string(),
+            "line 11: 20".to_string(),
+            // +7: the inline `println` splice, past everything this test pins.
+            "line 5: 37".to_string(),
+            "line 11: 38".to_string(),
+        ],
+        "complete run LineNumberTable"
+    );
+}
+
+/// A BARE `return` through a `finally`. It emits nothing of its own, so without an anchor its line
+/// is claimed by the finalizer's first instruction and the restore at the physical return never
+/// happens: the whole table collapsed to the finalizer's single line. kotlinc anchors it on a `nop`
+/// ahead of the transfer and restores it at the `return`.
+#[test]
+fn a_bare_return_through_a_finally_restores_its_line() {
+    let src = "var t = 0\n\
+               fun step() { t++ }\n\
+               fun run() {\n\
+               \x20   try {\n\
+               \x20       return\n\
+               \x20   } finally {\n\
+               \x20       step()\n\
+               \x20   }\n\
+               }\n";
+    let (reference, krusty) = disassemble_both("BareReturnFinally", src, "BareReturnFinallyKt");
+    let want = method_lines(&reference, "void run()");
+    assert_eq!(
+        want,
+        vec![
+            "line 4: 0".to_string(),
+            "line 5: 1".to_string(),
+            "line 7: 2".to_string(),
+            "line 5: 5".to_string(),
+            "line 7: 6".to_string(),
+        ],
+        "kotlinc's own table, spelled out so a reference change is visible here"
+    );
+    assert_eq!(
+        method_lines(&krusty, "void run()"),
+        want,
+        "complete run LineNumberTable"
+    );
+}
+
+/// A VALUE return through a `finally`: its own expression anchors the line, and the reload before
+/// the physical return restores it. No `nop` — the value's first instruction already carries it.
+#[test]
+fn a_value_return_through_a_finally_restores_its_line() {
+    let src = "var t = 0\n\
+               fun step() { t++ }\n\
+               fun run(): Int {\n\
+               \x20   try {\n\
+               \x20       return 1\n\
+               \x20   } finally {\n\
+               \x20       step()\n\
+               \x20   }\n\
+               }\n";
+    let (reference, krusty) = disassemble_both("ValueReturnFinally", src, "ValueReturnFinallyKt");
+    let want = method_lines(&reference, "int run()");
+    assert_eq!(
+        want,
+        vec![
+            "line 4: 0".to_string(),
+            "line 5: 1".to_string(),
+            "line 7: 3".to_string(),
+            "line 5: 7".to_string(),
+            "line 7: 8".to_string(),
+        ],
+        "kotlinc's own table, spelled out so a reference change is visible here"
+    );
+    assert_eq!(
+        method_lines(&krusty, "int run()"),
+        want,
+        "complete run LineNumberTable"
+    );
+}
+
+/// An IMPLICIT `Unit` return after a `try`/`finally` that falls through. The `goto` leaving the
+/// normal-path finalizer copy carries the `finally` block's CLOSING line — without it the
+/// finalizer's own line stays in effect into the catch-all handler, whose identical mark then
+/// deduplicates away, so one missing entry costs two.
+#[test]
+fn an_implicit_unit_return_after_a_finally_keeps_every_line() {
+    let src = "var t = 0\n\
+               fun f() { t++ }\n\
+               fun g() { t += 2 }\n\
+               fun run() {\n\
+               \x20   try {\n\
+               \x20       f()\n\
+               \x20   } finally {\n\
+               \x20       g()\n\
+               \x20   }\n\
+               }\n";
+    let (reference, krusty) = disassemble_both("ImplicitUnitFinally", src, "ImplicitUnitFinallyKt");
+    let want = method_lines(&reference, "void run()");
+    assert_eq!(
+        want,
+        vec![
+            "line 5: 0".to_string(),
+            "line 6: 1".to_string(),
+            "line 8: 4".to_string(),
+            "line 9: 7".to_string(),
+            "line 8: 10".to_string(),
+            "line 10: 16".to_string(),
+        ],
+        "kotlinc's own table, spelled out so a reference change is visible here"
+    );
+    assert_eq!(
+        method_lines(&krusty, "void run()"),
+        want,
+        "complete run LineNumberTable"
     );
 }

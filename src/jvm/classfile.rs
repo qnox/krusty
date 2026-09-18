@@ -4068,6 +4068,11 @@ impl CodeBuilder {
     pub fn putfield(&mut self, fieldref: u16, words: i32) {
         self.op_u2(0xb5, fieldref, -(1 + words));
     }
+    /// `nop`: no operand-stack effect. Emitted to open a protected region so the exception table's
+    /// `from` is an instruction of the region's own, carrying the `try` keyword's line.
+    pub fn nop(&mut self) {
+        self.op(0x00, 0);
+    }
     pub fn pop(&mut self) {
         self.op(0x57, -1);
     }

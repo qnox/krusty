@@ -639,6 +639,9 @@ fn finish_callable_body(
             .pop()
             .ok_or(FirLoweringFailure::MissingBodyResult { origin })?;
         let return_value = ir.add_expr(crate::ir::IrExpr::Return(Some(value)));
+        if let Some(&end) = ir.expr_end_lines.get(&value) {
+            ir.implicit_return_end_lines.insert(return_value, end);
+        }
         roots.push(return_value);
         ir.add_expr(crate::ir::IrExpr::Block {
             stmts: roots,
