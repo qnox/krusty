@@ -9,21 +9,26 @@
 use super::common;
 
 /// The same source through both compilers, disassembled: `(kotlinc, krusty)`.
-fn disassemble_both(name: &str, src: &str, class: &str) -> Option<(String, String)> {
-    let dir = common::scratch_dir()?;
+fn disassemble_both(name: &str, src: &str, class: &str) -> (String, String) {
+    let dir = common::scratch_dir()
+        .unwrap_or_else(|| panic!("{name}: no scratch directory for the differential"));
     let reference_dir = dir.join("ref");
     let krusty_dir = dir.join("out");
-    std::fs::create_dir_all(&reference_dir).ok()?;
-    std::fs::create_dir_all(&krusty_dir).ok()?;
+    std::fs::create_dir_all(&reference_dir).expect("reference dir");
+    std::fs::create_dir_all(&krusty_dir).expect("output dir");
     let source = dir.join(format!("{name}.kt"));
-    std::fs::write(&source, src).ok()?;
+    std::fs::write(&source, src).expect("write source");
     let (code, stderr) = common::kotlinc_compile(&[
         "-d".to_string(),
         reference_dir.to_string_lossy().into_owned(),
+        // Both sides must be one target: krusty emits its default major 52 here, so kotlinc
+        // compiles for 1.8 too. A target difference forks codegen (indy string concatenation, for
+        // one), and two differently-targeted classes are not an oracle for each other.
         "-jvm-target".to_string(),
-        "25".to_string(),
+        "1.8".to_string(),
         source.to_string_lossy().into_owned(),
-    ])?;
+    ])
+    .unwrap_or_else(|| panic!("{name}: reference kotlinc unavailable under the test harness"));
     assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
     let jdk = common::jdk_modules();
     let classes =
@@ -32,9 +37,9 @@ fn disassemble_both(name: &str, src: &str, class: &str) -> Option<(String, Strin
     for (internal, bytes) in &classes {
         let path = krusty_dir.join(format!("{internal}.class"));
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok()?;
+            std::fs::create_dir_all(parent).expect("class dir");
         }
-        std::fs::write(path, bytes).ok()?;
+        std::fs::write(path, bytes).expect("write class");
     }
     let reference = common::javap(&[
         "-p",
@@ -43,7 +48,8 @@ fn disassemble_both(name: &str, src: &str, class: &str) -> Option<(String, Strin
         "-cp",
         &reference_dir.to_string_lossy(),
         class,
-    ])?;
+    ])
+    .unwrap_or_else(|| panic!("{name}: javap unavailable for the reference class"));
     let krusty = common::javap(&[
         "-p",
         "-c",
@@ -51,9 +57,10 @@ fn disassemble_both(name: &str, src: &str, class: &str) -> Option<(String, Strin
         "-cp",
         &krusty_dir.to_string_lossy(),
         class,
-    ])?;
+    ])
+    .unwrap_or_else(|| panic!("{name}: javap unavailable for the emitted class"));
     let _ = std::fs::remove_dir_all(dir);
-    Some((reference, krusty))
+    (reference, krusty)
 }
 
 /// The rows of a method's disassembly between two `javap` section headers.
@@ -92,10 +99,7 @@ fn a_try_finally_maps_every_line_like_kotlinc() {
                \x20       }\n\
                \x20   }\n\
                }\n";
-    let Some((reference, krusty)) = disassemble_both("TryFinallyLines", src, "Guarded") else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
+    let (reference, krusty) = disassemble_both("TryFinallyLines", src, "Guarded");
     let want = method_lines(&reference, "int run(int)");
     assert_eq!(
         want,
@@ -124,10 +128,7 @@ fn a_protected_region_starts_at_the_opening_nop() {
                \x20       }\n\
                \x20   }\n\
                }\n";
-    let Some((reference, krusty)) = disassemble_both("TryCatchRegion", src, "Caught") else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
+    let (reference, krusty) = disassemble_both("TryCatchRegion", src, "Caught");
     let code: Vec<String> = method_section(&krusty, "int run(int)", "Code:")
         .into_iter()
         .filter(|row| row.starts_with(|c: char| c.is_ascii_digit()))
@@ -154,10 +155,7 @@ fn a_single_line_try_adds_no_entry() {
                \x20       try { return x + 1 } finally { step() }\n\
                \x20   }\n\
                }\n";
-    let Some((reference, krusty)) = disassemble_both("SingleLineTry", src, "OneLine") else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
+    let (reference, krusty) = disassemble_both("SingleLineTry", src, "OneLine");
     let want = method_lines(&reference, "int run(int)");
     assert_eq!(want, vec!["line 4: 0".to_string()], "kotlinc's own table");
     assert_eq!(method_lines(&krusty, "int run(int)"), want, "run lines");

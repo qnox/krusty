@@ -20,6 +20,7 @@ use crate::jvm::names::{
 use crate::kt_string::{KtString, KtStringBuf};
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 
+mod backend_temporaries;
 mod block_scope;
 mod bottom_values;
 mod call_operands;
@@ -13325,13 +13326,6 @@ struct PropertyOperation<'a> {
     interface: bool,
 }
 
-/// Identity of a leased backend temporary slot.
-///
-/// A newtype on purpose: it is not a value id and cannot be mistaken for one, which is what the
-/// reserved numeric ranges in `Emitter::slots` could not guarantee.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct TemporaryLease(u32);
-
 struct Emitter<'a> {
     ir: &'a IrFile,
     cw: &'a mut ClassWriter,
@@ -13347,25 +13341,9 @@ struct Emitter<'a> {
     owner: String,
     facade: String,
     slots: HashMap<u32, (u16, Ty)>,
-    /// Verifier-live BACKEND temporaries: slots the emitter owns that no semantic value names — an
-    /// operand spilled across a branch, a `try` result parked across a `finally`, a catch-all's
-    /// caught throwable, a vararg array under construction, a default stub's mask and marker. They
-    /// must appear in every frame recorded while they are live, but they are not semantic locals:
-    /// `slots` is keyed by real value ids, which `GetValue` looks up, lexical-scope restoration
-    /// retains, and `unassigned_values` filters by.
-    ///
-    /// They are held here under a [`TemporaryLease`], which is a distinct type and therefore cannot
-    /// be a value id. Every one of these used to be registered in `slots` under a reserved numeric
-    /// range (`1_000_000` for a boolean spill, `2_000_000` for an operand or vararg array,
-    /// `3_000_000` for a `try` result, `4_000_000` for a caught throwable, `5_000_000` for a parked
-    /// return, `9_000_001` for a stub's masks): a value id that reached one of those ranges would
-    /// collide silently, and the temporary was also filtered as unassigned. Order is kept — a later
-    /// lease over the same slot wins, as the previous `Vec` did — and release is explicit at the
-    /// point the temporary dies, so the lifetime is visible rather than tied to a Rust scope.
-    backend_temporaries: Vec<(TemporaryLease, u16, Ty)>,
-    /// Source of the next [`TemporaryLease`]. Monotonic for the whole emitter, so a released lease's
-    /// identity is never handed out again and a stale release cannot free a live temporary.
-    next_temporary_lease: u32,
+    /// The slots the backend owns, leased and released by `backend_temporaries`. They are not
+    /// semantic locals and deliberately do not live in `slots`, which is keyed by real value ids.
+    temporaries: backend_temporaries::BackendTemporaries,
     /// Semantic locals that are in lexical scope but not definitely assigned on the current edge.
     /// JVM frames render their physical slots as `top` until every incoming edge has stored them.
     unassigned_values: HashSet<u32>,
@@ -13435,8 +13413,7 @@ impl<'a> Emitter<'a> {
             owner: owner.to_string(),
             facade: facade.to_string(),
             slots: HashMap::new(),
-            next_temporary_lease: 0,
-            backend_temporaries: Vec::new(),
+            temporaries: backend_temporaries::BackendTemporaries::default(),
             unassigned_values: HashSet::new(),
             label_unassigned_values: HashMap::new(),
             var_types: collect_body_var_types(ir, roots),
@@ -13863,30 +13840,15 @@ impl<'a> Emitter<'a> {
 
     /// Slot-indexed caller locals for `0..upto` (long/double take two slots; `Top` fills the gaps).
     ///
-    /// The one place the caller's physical frame is reconstructed: a frame recorded inside a
-    /// spliced body, and the collapsed form every other frame is built from. Both the semantic
-    /// locals and the BACKEND temporaries live in that frame — an argument already spilled to make
-    /// room for the one being spliced is still in its slot and still loaded afterwards — so both
-    /// are applied here, temporaries last because a temporary's slot is allocated above every
-    /// semantic one and only a stale semantic entry could sit under it.
+    /// Every frame in the emitter is laid out here: a frame recorded inside a spliced body, and the
+    /// collapsed form the ordinary frames are built from. Both the semantic locals and the backend
+    /// temporaries belong to the same physical frame, which is why one operation places them.
     fn verif_slots_upto(&mut self, upto: u16) -> Vec<VerifType> {
-        let mut raw = vec![VerifType::Top; upto as usize];
-        let entries: Vec<(u16, Ty)> = self
-            .slots
-            .iter()
-            .filter(|(value, _)| !self.unassigned_values.contains(value))
-            .map(|(_, slot)| *slot)
-            .collect();
-        for (slot, ty) in entries {
-            if (slot as usize) < raw.len() {
-                raw[slot as usize] = self.verif_single(ty);
-            }
-        }
-        for (_, slot, ty) in self.backend_temporaries.clone() {
-            if (slot as usize) < raw.len() {
-                raw[slot as usize] = self.verif_single(ty);
-            }
-        }
+        let semantic = self.assigned_semantic_slots();
+        let temporaries = self.temporaries.live();
+        let mut raw = backend_temporaries::frame_slots(upto, &semantic, &temporaries, &mut |ty| {
+            self.verif_single(ty)
+        });
         if self.this_uninitialized && !raw.is_empty() {
             raw[0] = VerifType::UninitializedThis;
         }
@@ -14132,7 +14094,7 @@ impl<'a> Emitter<'a> {
     /// (the body's own locals occupy slots `upto..`).
     fn verif_locals_upto(&mut self, upto: u16) -> Vec<VerifType> {
         let raw = self.verif_slots_upto(upto);
-        collapse_locals(&raw)
+        backend_temporaries::collapse(&raw)
     }
 
     /// Emit a constructor's lowered initializer block while retaining the start pc and declared
@@ -18650,7 +18612,7 @@ impl<'a> Emitter<'a> {
         &mut self,
         ops: &[u32],
         code: &mut CodeBuilder,
-    ) -> Vec<(u16, Ty, TemporaryLease)> {
+    ) -> Vec<(u16, Ty, backend_temporaries::TemporaryLease)> {
         let mut temps = Vec::new();
         for &o in ops {
             self.emit_value(o, code);
@@ -19826,69 +19788,36 @@ impl<'a> Emitter<'a> {
         self.verif_locals_with(&[])
     }
 
-    /// Take a slot the BACKEND owns and no semantic value names, for as long as it is live.
-    ///
-    /// The returned lease is the only way to give it back. It is deliberately not a `u32`: these
-    /// temporaries used to be registered in `slots` under reserved numeric ranges, where nothing
-    /// but the size of a real value id kept them apart.
-    fn lease_temporary(&mut self, slot: u16, ty: Ty) -> TemporaryLease {
+    /// Take a slot the backend owns for as long as it is live; see `backend_temporaries`.
+    fn lease_temporary(&mut self, slot: u16, ty: Ty) -> backend_temporaries::TemporaryLease {
         debug_assert!(
             !self.slots.values().any(|(held, _)| *held == slot),
             "backend temporary at slot {slot} aliases a semantic local"
         );
-        let lease = TemporaryLease(self.next_temporary_lease);
-        self.next_temporary_lease += 1;
-        self.backend_temporaries.push((lease, slot, ty));
-        lease
+        self.temporaries.lease(slot, ty)
     }
 
-    /// Give a leased temporary back. Its slot stops appearing in frames recorded from here on;
-    /// `next_slot` stays monotonic, so the slot itself is not reused behind the verifier's back.
-    fn release_temporary(&mut self, lease: TemporaryLease) {
-        let before = self.backend_temporaries.len();
-        self.backend_temporaries
-            .retain(|(held, _, _)| *held != lease);
-        debug_assert_eq!(
-            before - self.backend_temporaries.len(),
-            1,
-            "released a backend temporary that was not leased"
-        );
+    fn release_temporary(&mut self, lease: backend_temporaries::TemporaryLease) {
+        self.temporaries.release(lease);
     }
 
-    fn verif_locals_with(&mut self, extra: &[(u16, Ty)]) -> Vec<VerifType> {
-        let max = self.next_slot as usize;
-        let mut raw = vec![VerifType::Top; max];
-        let entries: Vec<(u16, Ty)> = self
-            .slots
+    /// The definitely-assigned semantic locals, as `(slot, type)`.
+    fn assigned_semantic_slots(&self) -> Vec<(u16, Ty)> {
+        self.slots
             .iter()
             .filter(|(value, _)| !self.unassigned_values.contains(value))
             .map(|(_, slot)| *slot)
-            .collect();
-        for (slot, ty) in entries {
-            if (slot as usize) < raw.len() {
-                raw[slot as usize] = self.verif_single(ty);
-            }
-        }
-        for (_, slot, ty) in self.backend_temporaries.clone() {
-            if (slot as usize) < raw.len() {
-                raw[slot as usize] = self.verif_single(ty);
-            }
-        }
+            .collect()
+    }
+
+    fn verif_locals_with(&mut self, extra: &[(u16, Ty)]) -> Vec<VerifType> {
+        let mut raw = self.verif_slots_upto(self.next_slot);
         for (slot, ty) in extra.iter().copied() {
             if (slot as usize) < raw.len() {
                 raw[slot as usize] = self.verif_single(ty);
             }
         }
-        if self.this_uninitialized && !raw.is_empty() {
-            raw[0] = VerifType::UninitializedThis;
-        }
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < raw.len() {
-            let wide = matches!(raw[i], VerifType::Long | VerifType::Double);
-            out.push(raw[i].clone());
-            i += if wide { 2 } else { 1 };
-        }
+        let mut out = backend_temporaries::collapse(&raw);
         while out.last() == Some(&VerifType::Top) {
             out.pop();
         }

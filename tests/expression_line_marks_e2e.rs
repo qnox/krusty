@@ -11,30 +11,35 @@ use super::common;
 ///
 /// A line table is not a byte comparison — the rest of the class need not match for this contract
 /// to be testable, and on a multi-line call it does not yet.
-fn disassemble_both(name: &str, src: &str, class: &str) -> Option<(String, String)> {
-    let dir = common::scratch_dir()?;
+fn disassemble_both(name: &str, src: &str, class: &str) -> (String, String) {
+    let dir = common::scratch_dir()
+        .unwrap_or_else(|| panic!("{name}: no scratch directory for the differential"));
     let reference_dir = dir.join("ref");
     let krusty_dir = dir.join("out");
-    std::fs::create_dir_all(&reference_dir).ok()?;
-    std::fs::create_dir_all(&krusty_dir).ok()?;
+    std::fs::create_dir_all(&reference_dir).expect("reference dir");
+    std::fs::create_dir_all(&krusty_dir).expect("output dir");
     let source = dir.join(format!("{name}.kt"));
-    std::fs::write(&source, src).ok()?;
+    std::fs::write(&source, src).expect("write source");
     let (code, stderr) = common::kotlinc_compile(&[
         "-d".to_string(),
         reference_dir.to_string_lossy().into_owned(),
+        // Both sides must be one target: krusty emits its default major 52 here, so kotlinc
+        // compiles for 1.8 too. A target difference forks codegen (indy string concatenation, for
+        // one), and two differently-targeted classes are not an oracle for each other.
         "-jvm-target".to_string(),
-        "25".to_string(),
+        "1.8".to_string(),
         source.to_string_lossy().into_owned(),
-    ])?;
+    ])
+    .unwrap_or_else(|| panic!("{name}: reference kotlinc unavailable under the test harness"));
     assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
     let classes = common::compile_in_process(src, name, &[common::stdlib_jar()], None)
         .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
     for (internal, bytes) in &classes {
         let path = krusty_dir.join(format!("{internal}.class"));
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok()?;
+            std::fs::create_dir_all(parent).expect("class dir");
         }
-        std::fs::write(path, bytes).ok()?;
+        std::fs::write(path, bytes).expect("write class");
     }
     let reference = common::javap(&[
         "-p",
@@ -43,7 +48,8 @@ fn disassemble_both(name: &str, src: &str, class: &str) -> Option<(String, Strin
         "-cp",
         &reference_dir.to_string_lossy(),
         class,
-    ])?;
+    ])
+    .unwrap_or_else(|| panic!("{name}: javap unavailable for the reference class"));
     let krusty = common::javap(&[
         "-p",
         "-c",
@@ -51,9 +57,10 @@ fn disassemble_both(name: &str, src: &str, class: &str) -> Option<(String, Strin
         "-cp",
         &krusty_dir.to_string_lossy(),
         class,
-    ])?;
+    ])
+    .unwrap_or_else(|| panic!("{name}: javap unavailable for the emitted class"));
     let _ = std::fs::remove_dir_all(dir);
-    Some((reference, krusty))
+    (reference, krusty)
 }
 
 fn method_lines(text: &str, signature: &str) -> Vec<String> {
@@ -78,10 +85,7 @@ fn a_multi_line_calls_arguments_each_map_to_their_line() {
                \x20   b = y,\n\
                \x20   c = x + 1,\n\
                )\n";
-    let Some(built) = disassemble_both("ExpressionLines", src, "ExpressionLinesKt") else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
+    let built = disassemble_both("ExpressionLines", src, "ExpressionLinesKt");
     let argument_lines = |entries: Vec<String>| {
         entries
             .into_iter()
@@ -113,15 +117,13 @@ fn a_multi_line_construction_is_byte_identical_to_kotlinc() {
                \x20   b = y,\n\
                \x20   c = x + 1,\n\
                )\n";
-    let Some(result) = common::byte_diff_against_kotlinc_cp(
+    let result = common::byte_diff_against_kotlinc_cp(
         "MultiLineConstruction",
         src,
         "MultiLineConstructionKt",
         &[common::stdlib_jar()],
-    ) else {
-        eprintln!("skipping: reference kotlinc unavailable");
-        return;
-    };
+    )
+    .unwrap_or_else(|| panic!("reference kotlinc unavailable under the test harness"));
     result.expect("MultiLineConstructionKt byte-identical to kotlinc");
 }
 
@@ -131,15 +133,13 @@ fn a_single_line_call_is_unchanged() {
     let src = "class Q(val a: Int)\n\
                \n\
                fun one(): Q = Q(1)\n";
-    let Some(result) = common::byte_diff_against_kotlinc_cp(
+    let result = common::byte_diff_against_kotlinc_cp(
         "SingleLineCall",
         src,
         "SingleLineCallKt",
         &[common::stdlib_jar()],
-    ) else {
-        eprintln!("skipping: reference kotlinc unavailable");
-        return;
-    };
+    )
+    .unwrap_or_else(|| panic!("reference kotlinc unavailable under the test harness"));
     result.expect("SingleLineCallKt byte-identical to kotlinc");
 }
 
@@ -156,15 +156,13 @@ fn an_explicit_multi_line_return_is_byte_identical_to_kotlinc() {
                \x20       c = x + 1,\n\
                \x20   )\n\
                }\n";
-    let Some(result) = common::byte_diff_against_kotlinc_cp(
+    let result = common::byte_diff_against_kotlinc_cp(
         "ExplicitMultiLineReturn",
         src,
         "ExplicitMultiLineReturnKt",
         &[common::stdlib_jar()],
-    ) else {
-        eprintln!("skipping: reference kotlinc unavailable");
-        return;
-    };
+    )
+    .unwrap_or_else(|| panic!("reference kotlinc unavailable under the test harness"));
     result.expect("explicit multi-line return byte-identical to kotlinc");
 }
 /// A finalizer changes the active line while the return value is parked in a local. The eventual
@@ -193,11 +191,7 @@ fn an_explicit_return_after_finally_restores_its_line() {
                \x20       }\n\
                \x20   }\n\
                }\n";
-    let Some((reference, krusty)) = disassemble_both("ReturnAfterFinally", src, "FinallySink")
-    else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
+    let (reference, krusty) = disassemble_both("ReturnAfterFinally", src, "FinallySink");
     let want = method_lines(&reference, "R run(int, java.lang.String)");
     assert_eq!(
         want,
@@ -257,12 +251,7 @@ fn a_bare_return_through_a_finally_restores_its_line() {
                \x20       step()\n\
                \x20   }\n\
                }\n";
-    let Some((reference, krusty)) =
-        disassemble_both("BareReturnFinally", src, "BareReturnFinallyKt")
-    else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
+    let (reference, krusty) = disassemble_both("BareReturnFinally", src, "BareReturnFinallyKt");
     let want = method_lines(&reference, "void run()");
     assert_eq!(
         want,
@@ -295,12 +284,7 @@ fn a_value_return_through_a_finally_restores_its_line() {
                \x20       step()\n\
                \x20   }\n\
                }\n";
-    let Some((reference, krusty)) =
-        disassemble_both("ValueReturnFinally", src, "ValueReturnFinallyKt")
-    else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
+    let (reference, krusty) = disassemble_both("ValueReturnFinally", src, "ValueReturnFinallyKt");
     let want = method_lines(&reference, "int run()");
     assert_eq!(
         want,
@@ -336,12 +320,7 @@ fn an_implicit_unit_return_after_a_finally_keeps_every_line() {
                \x20       g()\n\
                \x20   }\n\
                }\n";
-    let Some((reference, krusty)) =
-        disassemble_both("ImplicitUnitFinally", src, "ImplicitUnitFinallyKt")
-    else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
+    let (reference, krusty) = disassemble_both("ImplicitUnitFinally", src, "ImplicitUnitFinallyKt");
     let want = method_lines(&reference, "void run()");
     assert_eq!(
         want,

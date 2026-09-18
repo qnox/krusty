@@ -62,7 +62,7 @@ fn emit_primitive_spread(
     element_type: Ty,
     elements: &[u32],
     spreads: &[bool],
-    temps: Option<&[(u16, Ty, TemporaryLease)]>,
+    temps: Option<&[(u16, Ty, super::backend_temporaries::TemporaryLease)]>,
     code: &mut CodeBuilder,
 ) {
     let Some((builder, add_desc, array_desc)) = primitive_spread_builder(element_type) else {
@@ -111,7 +111,7 @@ fn emit_reference_spread(
     element_type: Ty,
     elements: &[u32],
     spreads: &[bool],
-    temps: Option<&[(u16, Ty, TemporaryLease)]>,
+    temps: Option<&[(u16, Ty, super::backend_temporaries::TemporaryLease)]>,
     code: &mut CodeBuilder,
 ) {
     let builder = "kotlin/jvm/internal/SpreadBuilder";
