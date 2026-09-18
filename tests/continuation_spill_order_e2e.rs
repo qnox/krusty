@@ -163,6 +163,53 @@ fn an_inline_expansions_parameters_and_receiver_are_named_spills() {
     );
 }
 
+/// More than one value parameter, so the lookup is positional rather than trivially the only one.
+#[test]
+fn a_spliced_lambda_names_each_of_its_value_parameters() {
+    let src = "suspend fun step(v: String): String = v\n\
+               \n\
+               inline fun <T> pair(block: (String, Int) -> T): T = block(\"x\", 1)\n\
+               \n\
+               suspend fun run(seed: String): String {\n\
+               \x20   return pair { text, count -> step(seed + text) + count }\n\
+               }\n";
+    let Some((slots, names)) =
+        debug_metadata_names(src, "LambdaTwoParameters", "LambdaTwoParametersKt$run$1")
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    assert_eq!(names, ["seed", "text", "count"]);
+    // As elsewhere in this file, the positions still carry an unnamed temporary of the expansion
+    // that kotlinc does not have. Stated rather than hidden; closing it fails this and updates it.
+    assert_eq!(slots, ["L$0", "L$2", "I$0"]);
+}
+
+/// A lambda declared INSIDE an inline function is spliced one expansion deeper, so its parameter
+/// gains an inline frame where a lambda written at the call site does not. The shallow case alone
+/// cannot show that the depth comes from the enclosing expansion rather than from the splice.
+#[test]
+fn a_lambda_declared_inside_an_inline_function_gains_its_frame() {
+    let src = "suspend fun step(v: String): String = v\n\
+               \n\
+               inline fun <T> feed(block: (String) -> T): T = block(\"x\")\n\
+               \n\
+               suspend inline fun outer(prefix: String): String = feed { p ->\n\
+               \x20   val got = step(prefix + p)\n\
+               \x20   got + p\n\
+               }\n\
+               \n\
+               suspend fun run(seed: String): String = outer(seed)\n";
+    let Some((slots, names)) =
+        debug_metadata_names(src, "LambdaInsideInline", "LambdaInsideInlineKt$run$1")
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    assert_eq!(names, ["seed", "prefix$iv", "p$iv"]);
+    assert_eq!(slots, ["L$0", "L$1", "L$4"]);
+}
+
 /// A member inline EXTENSION binds both receivers at once, and Kotlin keeps them distinct: the
 /// containing class's `this` and the receiver the callable extends are different values with
 /// different debug identities. One receiver role cannot stand for the other — doing so collapsed
