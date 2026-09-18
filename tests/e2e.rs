@@ -56,6 +56,8 @@ mod arity_error_coverage_e2e;
 mod assert_intrinsic_e2e;
 #[path = "backend_rejection_coverage_e2e.rs"]
 mod backend_rejection_coverage_e2e;
+#[path = "backend_temporary_leases_e2e.rs"]
+mod backend_temporary_leases_e2e;
 #[path = "backing_field_accessor_e2e.rs"]
 mod backing_field_accessor_e2e;
 #[path = "backtick_identifier_e2e.rs"]
@@ -1122,6 +1124,8 @@ mod object_value_inference_e2e;
 mod omitted_default_generic_overload_e2e;
 #[path = "one_armed_when_fallthrough_e2e.rs"]
 mod one_armed_when_fallthrough_e2e;
+#[path = "try_debug_lines_e2e.rs"]
+mod try_debug_lines_e2e;
 
 #[path = "declaration_debug_lines_e2e.rs"]
 mod declaration_debug_lines_e2e;
