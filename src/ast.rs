@@ -633,6 +633,7 @@ impl FdFlags {
     const IS_INFIX: u16 = 1 << 8;
     const IS_COMPANION_EXTENSION: u16 = 1 << 9;
     const IS_EXTERNAL: u16 = 1 << 10;
+    const IS_ACTUAL: u16 = 1 << 11;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -691,6 +692,10 @@ impl FdFlags {
     #[inline]
     pub const fn with_is_external(self, on: bool) -> Self {
         self.with(Self::IS_EXTERNAL, on)
+    }
+    #[inline]
+    pub const fn with_is_actual(self, on: bool) -> Self {
+        self.with(Self::IS_ACTUAL, on)
     }
 }
 
@@ -844,6 +849,12 @@ impl FunDecl {
     #[inline]
     pub fn is_external(&self) -> bool {
         self.flags.has(FdFlags::IS_EXTERNAL)
+    }
+    /// The `actual` modifier. It is semantically inert — actualization matches by shape, not by the
+    /// keyword — and is recorded because an `actual` that actualizes nothing is an error.
+    #[inline]
+    pub fn is_actual(&self) -> bool {
+        self.flags.has(FdFlags::IS_ACTUAL)
     }
 }
 
@@ -1235,6 +1246,9 @@ pub struct PropDecl {
     pub is_external: bool,
     /// `true` if the source declaration carried the `expect` modifier.
     pub is_expect: bool,
+    /// `true` if the source declaration carried the `actual` modifier. Inert semantically, but an
+    /// `actual` that actualizes nothing is an error.
+    pub is_actual: bool,
     /// A custom getter body (`val x: T get() = expr`/`get() { … }`). With no initializer and no
     /// `field` reference it is a computed property (no backing field); with an initializer or a
     /// `field` reference it reads the backing field.

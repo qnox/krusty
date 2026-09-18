@@ -64,6 +64,9 @@ enum Target {
         /// The syntactic half of a classifier's rendering: its kind, modality, and the modifier
         /// words that sit between `actual` and the kind keyword.
         shape: ClassifierShape,
+        /// The classifier's own `actual` members, reported only when the classifier itself is —
+        /// see [`report`].
+        members: Vec<Member>,
     },
     /// A declaration whose rendering is not derivable — see [`collect`].
     Unrenderable,
@@ -130,6 +133,7 @@ pub(super) fn collect(files: &[File]) -> Vec<UnmatchedActual> {
                         declaration,
                         name: class.name.clone(),
                         shape: ClassifierShape::of(class),
+                        members: actual_members(class),
                     },
                 ),
             };
@@ -249,7 +253,20 @@ pub(super) fn report(
                 declaration,
                 name,
                 shape,
-            } => render_classifier(symbols, actual.file, *declaration, name, shape),
+                members,
+            } => {
+                let rendered = render_classifier(symbols, actual.file, *declaration, name, shape);
+                // A member of an `actual` classifier that actualizes nothing cannot itself have
+                // actualized anything, so the reference compiler reports both — each at its own
+                // name. The converse (an owner that DID match, with a member that did not) needs
+                // member-level matching, which actualization does not do: its pairing is
+                // top-level only and a matched classifier's members are excluded as a subtree
+                // rather than paired. Those stay silent; see `docs/PARITY_PROTOCOL.md`.
+                if rendered.is_some() {
+                    report_members(members, symbols, actual.file, *declaration, diags);
+                }
+                rendered
+            }
             Target::Unrenderable => None,
             Target::TypeAlias {
                 qualified,
@@ -349,19 +366,20 @@ fn render_function(
     formals: &[String],
     modifiers: &str,
 ) -> Option<String> {
-    // A top-level extension function lives in its own receiver-keyed table rather than beside the
-    // ordinary overloads, so both are searched by the declaration that produced them.
-    let owns = |candidate: &&Signature| {
-        candidate.source_file == Some(file) && candidate.source_decl == Some(declaration)
-    };
-    let signature = symbols.funs.values().flatten().find(owns).or_else(|| {
-        symbols
-            .ext_funs
-            .values()
-            .flat_map(|receivers| receivers.values())
-            .flatten()
-            .find(owns)
-    })?;
+    let signature = function_signature(symbols, file, declaration)?;
+    // A top-level declaration is always `final`.
+    render_callable(signature, "final", modifiers, formals, name, parameters)
+}
+
+/// Render one callable — top-level or member — from its resolved signature and the syntax it wrote.
+fn render_callable(
+    signature: &Signature,
+    modality: &str,
+    modifiers: &str,
+    formals: &[String],
+    name: &str,
+    parameters: &[String],
+) -> Option<String> {
     // A generic callable's `params`/`ret` are ERASED (`fun <T> id(t: T): T` keys as `Any`); its
     // declared shape lives on the generic signature, which is what the source spells and what the
     // reference compiler renders.
@@ -416,7 +434,7 @@ fn render_function(
         .join(", ");
     let formals = type_parameters(formals, &|index| declared_formal_bound(signature, index));
     Some(format!(
-        "{} final actual {modifiers}fun {formals}{receiver}{name}({rendered}): {}",
+        "{} {modality} actual {modifiers}fun {formals}{receiver}{name}({rendered}): {}",
         visibility(signature.visibility),
         result.source_name()
     ))
@@ -688,4 +706,175 @@ fn render_type_alias(
         visibility(declared),
         target.source_name()
     ))
+}
+
+/// One `actual` member of a classifier: where its diagnostic is reported — its own name — plus the
+/// syntactic half of its rendering and the coordinate its resolved signature is keyed by.
+struct Member {
+    name: Span,
+    text: String,
+    /// The modality slot. A member's is not always `final`: an `override` of an `open` member
+    /// renders `open`, and an interface member renders `abstract` or `open` depending on whether
+    /// it has a body — both measured.
+    modality: &'static str,
+    kind: MemberKind,
+}
+
+enum MemberKind {
+    Function {
+        parameters: Vec<String>,
+        type_parameters: Vec<String>,
+        modifiers: String,
+    },
+    Property {
+        is_var: bool,
+        modifiers: String,
+    },
+}
+
+/// Every member of `class` that wrote `actual`, in declaration order.
+fn actual_members(class: &crate::ast::ClassDecl) -> Vec<Member> {
+    let interface = class.kind == crate::ast::ClassKind::Interface || class.is_fun_interface;
+    let mut members = Vec::new();
+    for function in &class.methods {
+        if !function.is_actual() {
+            continue;
+        }
+        members.push(Member {
+            name: function.name_span,
+            text: function.name.clone(),
+            modality: member_modality(
+                function.is_abstract(),
+                function.is_open(),
+                interface,
+                !matches!(function.body, crate::ast::FunBody::None),
+            ),
+            kind: MemberKind::Function {
+                parameters: function
+                    .params
+                    .iter()
+                    .skip(function.context_count)
+                    .map(|parameter| parameter.name.clone())
+                    .collect(),
+                type_parameters: function.type_params.clone(),
+                modifiers: callable_modifiers(function),
+            },
+        });
+    }
+    for property in &class.body_props {
+        if !property.is_actual {
+            continue;
+        }
+        members.push(Member {
+            name: property.name_span,
+            text: property.name.clone(),
+            modality: member_modality(
+                property.is_abstract,
+                property.is_open,
+                interface,
+                property.init.is_some() || property.getter.is_some(),
+            ),
+            kind: MemberKind::Property {
+                is_var: property.is_var,
+                modifiers: property_modifiers(property),
+            },
+        });
+    }
+    members
+}
+
+/// Kotlin's modality for a member, as the reference compiler renders it: an interface member is
+/// `abstract` with no body and `open` with one, an `override` of an `open` member is `open`, and
+/// everything else is `final` unless it says otherwise.
+fn member_modality(
+    is_abstract: bool,
+    is_open: bool,
+    interface: bool,
+    has_body: bool,
+) -> &'static str {
+    if is_abstract || (interface && !has_body) {
+        "abstract"
+    } else if is_open || interface {
+        "open"
+    } else {
+        "final"
+    }
+}
+
+fn report_members(
+    members: &[Member],
+    symbols: &SymbolTable,
+    file: u32,
+    owner: DeclId,
+    diags: &mut DiagSink,
+) {
+    let Some(class) = classifier_signature(symbols, file, owner) else {
+        return;
+    };
+    for member in members {
+        let Some(rendered) = render_member(member, class) else {
+            continue;
+        };
+        diags.error(
+            member.name,
+            format!("'{rendered}' has no corresponding expected declaration"),
+        );
+    }
+}
+
+fn render_member(member: &Member, class: &crate::resolve::ClassSig) -> Option<String> {
+    match &member.kind {
+        MemberKind::Function {
+            parameters,
+            type_parameters,
+            modifiers,
+        } => {
+            let signature = member_signature(class, &member.text, parameters.len())?;
+            render_callable(
+                signature,
+                member.modality,
+                modifiers,
+                type_parameters,
+                &member.text,
+                parameters,
+            )
+        }
+        MemberKind::Property { is_var, modifiers } => {
+            let property = class.declared_props.get(member.text.as_str())?;
+            if property.ty.mentions_pending() {
+                return None;
+            }
+            Some(format!(
+                "{} {} actual {modifiers}{} {}: {}",
+                visibility(property.visibility),
+                member.modality,
+                if *is_var { "var" } else { "val" },
+                member.text,
+                property.ty.source_name()
+            ))
+        }
+    }
+}
+
+/// The resolved signature of one of `class`'s member functions.
+///
+/// It is found by NAME and arity, not by an AST coordinate: a member signature collected through
+/// the streaming pass leaves `Signature::source_member` unset (that field records a SELECTED
+/// member handed to lowering, not where a declaration came from). Overloads that tie on arity are
+/// left unrendered rather than guessed — a wrong rendering names a declaration the source never
+/// wrote, while a missing one is the behaviour that shipped.
+fn member_signature<'symbols>(
+    class: &'symbols crate::resolve::ClassSig,
+    name: &str,
+    arity: usize,
+) -> Option<&'symbols Signature> {
+    let mut matching = class
+        .methods
+        .get(name)?
+        .iter()
+        .filter(|signature| signature.params.len() == arity);
+    match (matching.next(), matching.next()) {
+        (Some(signature), None) => Some(signature),
+        _ => None,
+    }
 }
