@@ -352,33 +352,36 @@ fn a_finally_with_its_own_handler_types_the_parked_exception() {
 /// silent wrong answer, not a byte difference.
 ///
 /// The loop below leaves its `try` by `continue` on the first iteration and by `break` on the
-/// second, so a correct compiler appends `F` twice.
+/// second. Its user-defined accumulator records body/finalizer as `1`/`2`, so a correct compiler
+/// produces `1212`. Keeping the mechanism in repository-owned declarations avoids accidentally
+/// testing a stdlib intrinsic instead of ordinary call/property emission.
 #[test]
 fn a_loop_transfer_out_of_a_try_runs_its_finally() {
-    let src = "fun box(): String {\n\
-               \x20   val sb = StringBuilder()\n\
+    let src = "class Velarium(var trace: Int = 0) {\n\
+               \x20   fun record(token: Int) { trace = trace * 10 + token }\n\
+               }\n\
+               fun box(): String {\n\
+               \x20   val state = Velarium()\n\
                \x20   for (i in 0..1) {\n\
                \x20       try {\n\
-               \x20           sb.append(\"T\")\n\
+               \x20           state.record(1)\n\
                \x20           if (i == 0) continue\n\
                \x20           break\n\
                \x20       } finally {\n\
-               \x20           sb.append(\"F\")\n\
+               \x20           state.record(2)\n\
                \x20       }\n\
                \x20   }\n\
-               \x20   return sb.toString()\n\
+               \x20   return if (state.trace == 1212) \"OK\" else \"FAIL\"\n\
                }\n";
     let jdk = common::jdk_modules();
-    let Some(out) = common::compile_and_run_box(
+    let out = common::compile_and_run_box(
         src,
         "LoopTransferFinally",
         &[common::stdlib_jar()],
         Some(jdk.as_path()),
-    ) else {
-        eprintln!("skipping: JVM runner unavailable");
-        return;
-    };
-    assert_eq!(out.trim(), "TFTF");
+    )
+    .expect("LoopTransferFinally: the required JVM runner must be available");
+    assert_eq!(out.trim(), "OK");
 }
 
 /// A `finally` that a loop transfer leaves is inlined on that path too, so its copy must be cut out
@@ -407,10 +410,7 @@ fn a_loop_transfer_finalizer_copy_leaves_the_protected_region() {
                \x20       return seen\n\
                \x20   }\n\
                }\n";
-    let Some((reference, krusty)) = disassemble_both("LoopTransferRegion", src, "Looping") else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
+    let (reference, krusty) = disassemble_both("LoopTransferRegion", src, "Looping");
     assert_eq!(
         numeric_rows(&krusty, "int run(int)", "Exception table:"),
         numeric_rows(&reference, "int run(int)", "Exception table:"),
