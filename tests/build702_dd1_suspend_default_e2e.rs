@@ -19,12 +19,12 @@ const LIB: &str = "package lib\n\
     \x20 suspend fun list(f: Filt = Filt()): Int = base + f.n\n\
     }\n";
 
-fn run(tag: &str, main: &str) -> Option<String> {
+fn run(tag: &str, main: &str) -> String {
     let jdk = common::jdk_modules();
     let sl = common::stdlib_jar();
     let coro = common::coroutines_jar();
-    let lo = common::compile_lib(tag, LIB)?;
-    common::compile_and_run_box(
+    let lo = common::compile_lib(tag, LIB).expect("the regression dependency must compile");
+    common::expect_box_run(
         main,
         "Main",
         &[lo, sl, coro, jdk.clone()],
@@ -42,10 +42,7 @@ fn suspend_default_call_in_if_condition() {
         \x20 val r = runBlocking { g(Service(10)) }\n\
         \x20 return if (r == 1) \"OK\" else \"fail: $r\"\n\
         }\n";
-    assert_eq!(
-        run("dd1_ifcond", MAIN).expect("suspend $default in if-cond"),
-        "OK"
-    );
+    assert_eq!(run("dd1_ifcond", MAIN), "OK");
 }
 
 #[test]
@@ -58,10 +55,7 @@ fn suspend_default_call_manually_bound() {
         \x20 val r = runBlocking { g(Service(10)) }\n\
         \x20 return if (r == 1) \"OK\" else \"fail: $r\"\n\
         }\n";
-    assert_eq!(
-        run("dd1_bound", MAIN).expect("suspend $default bound"),
-        "OK"
-    );
+    assert_eq!(run("dd1_bound", MAIN), "OK");
 }
 
 #[test]
@@ -73,8 +67,5 @@ fn suspend_default_call_in_runblocking_lambda_condition() {
         \x20 val s = Service(10)\n\
         \x20 if (s.list() == 15) \"OK\" else \"fail\"\n\
         }\n";
-    assert_eq!(
-        run("dd1_rb", MAIN).expect("suspend $default in runBlocking if-cond"),
-        "OK"
-    );
+    assert_eq!(run("dd1_rb", MAIN), "OK");
 }

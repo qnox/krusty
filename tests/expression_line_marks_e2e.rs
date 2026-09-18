@@ -63,6 +63,59 @@ fn disassemble_both(name: &str, src: &str, class: &str) -> (String, String) {
     (reference, krusty)
 }
 
+/// As [`disassemble_both`], for a source set compiled as ONE module.
+fn disassemble_both_files(name: &str, sources: &[(&str, &str)], class: &str) -> (String, String) {
+    let dir = common::scratch_dir()
+        .unwrap_or_else(|| panic!("{name}: no scratch directory for the differential"));
+    let reference_dir = dir.join("ref");
+    let krusty_dir = dir.join("out");
+    std::fs::create_dir_all(&reference_dir).expect("reference dir");
+    std::fs::create_dir_all(&krusty_dir).expect("output dir");
+    let mut arguments = vec![
+        "-d".to_string(),
+        reference_dir.to_string_lossy().into_owned(),
+        "-jvm-target".to_string(),
+        "1.8".to_string(),
+    ];
+    for (stem, text) in sources {
+        let path = dir.join(format!("{stem}.kt"));
+        std::fs::write(&path, text).expect("write source");
+        arguments.push(path.to_string_lossy().into_owned());
+    }
+    let (code, stderr) = common::kotlinc_compile(&arguments)
+        .unwrap_or_else(|| panic!("{name}: reference kotlinc unavailable under the test harness"));
+    assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
+    let classes = common::compile_in_process_files(sources, &[common::stdlib_jar()], None)
+        .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
+    for (internal, bytes) in &classes {
+        let path = krusty_dir.join(format!("{internal}.class"));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("class dir");
+        }
+        std::fs::write(path, bytes).expect("write class");
+    }
+    let reference = common::javap(&[
+        "-p",
+        "-c",
+        "-v",
+        "-cp",
+        &reference_dir.to_string_lossy(),
+        class,
+    ])
+    .unwrap_or_else(|| panic!("{name}: javap unavailable for the reference class"));
+    let krusty = common::javap(&[
+        "-p",
+        "-c",
+        "-v",
+        "-cp",
+        &krusty_dir.to_string_lossy(),
+        class,
+    ])
+    .unwrap_or_else(|| panic!("{name}: javap unavailable for the emitted class"));
+    let _ = std::fs::remove_dir_all(dir);
+    (reference, krusty)
+}
+
 fn method_lines(text: &str, signature: &str) -> Vec<String> {
     text.lines()
         .map(str::trim)
@@ -360,4 +413,97 @@ fn a_multi_line_method_call_is_byte_identical_to_kotlinc() {
     )
     .unwrap_or_else(|| panic!("reference kotlinc unavailable under the test harness"));
     result.expect("MultiLineMethodCallKt byte-identical to kotlinc");
+}
+
+/// A defaulted member dispatch uses its static `$default` entry point but keeps the source call's
+/// line contract.
+#[test]
+fn a_multi_line_defaulted_method_call_is_byte_identical_to_kotlinc() {
+    let src = "class DefaultSink {\n\
+               \x20   fun consumeDefaultsForFixture(a: Int, b: Int = 2): Int = a + b\n\
+               }\n\
+               \n\
+               fun run(s: DefaultSink, x: Int): Int = s.consumeDefaultsForFixture(\n\
+               \x20   a = x,\n\
+               )\n";
+    let result = common::byte_diff_against_kotlinc_cp(
+        "MultiLineDefaultedMethodCall",
+        src,
+        "MultiLineDefaultedMethodCallKt",
+        &[common::stdlib_jar()],
+    )
+    .unwrap_or_else(|| panic!("reference kotlinc unavailable under the test harness"));
+    result.expect("defaulted multi-line method call byte-identical to kotlinc");
+}
+
+/// An argument supplied BETWEEN two omitted ones splits the call's synthesized operands in two: the
+/// placeholder, then that argument's own line, then the mask and marker. Each synthesized group
+/// carries the call's line, so the table returns to it twice — a single mark at the invoke, or one
+/// at the first placeholder alone, both get this wrong.
+#[test]
+fn an_omitted_argument_before_a_supplied_one_is_byte_identical_to_kotlinc() {
+    let src = "class MiddleSink {
+                   fun consumeDefaultsForFixture(a: Int, b: Int = 2, c: Int = 3): Int = a + b + c
+               }
+
+               fun run(s: MiddleSink, x: Int, z: Int): Int = s.consumeDefaultsForFixture(
+                   a = x,
+                   c = z,
+               )
+";
+    let result = common::byte_diff_against_kotlinc_cp(
+        "OmittedMiddleArgument",
+        src,
+        "OmittedMiddleArgumentKt",
+        &[common::stdlib_jar()],
+    )
+    .unwrap_or_else(|| panic!("reference kotlinc unavailable under the test harness"));
+    result.expect("omitted middle argument byte-identical to kotlinc");
+}
+
+/// A same-file TOP-LEVEL default call reaches its target through the facade's `$default` synthetic,
+/// a different realization from a member dispatch. The synthesized operands are the call's on every
+/// one of these paths, so the rule is the same: the call's line goes back into effect at the start
+/// of each run of them.
+#[test]
+fn a_same_file_top_level_defaulted_call_is_byte_identical_to_kotlinc() {
+    let src = "fun consumeDefaultsForFixture(a: Int = 1, b: Int, c: Int = 3): Int = a + b + c\n\
+               \n\
+               fun run(x: Int): Int = consumeDefaultsForFixture(\n\
+               \x20   b = x,\n\
+               )\n";
+    let result = common::byte_diff_against_kotlinc_cp(
+        "TopLevelDefaultedCall",
+        src,
+        "TopLevelDefaultedCallKt",
+        &[common::stdlib_jar()],
+    )
+    .unwrap_or_else(|| panic!("reference kotlinc unavailable under the test harness"));
+    result.expect("same-file top-level defaulted call byte-identical to kotlinc");
+}
+
+/// The cross-file realization, which reaches the target through another file's facade. Its omitted
+/// `a` is supplied before `b`, so the call's line is restored twice: once for the leading
+/// placeholder and once for the mask/marker group after the supplied argument.
+#[test]
+fn a_cross_file_defaulted_call_maps_its_lines_like_kotlinc() {
+    let sources: &[(&str, &str)] = &[
+        (
+            "CrossDefaultTarget",
+            "fun consumeDefaultsForFixture(a: Int = 1, b: Int, c: Int = 3): Int = a + b + c\n",
+        ),
+        (
+            "CrossDefaultCaller",
+            "fun run(x: Int): Int = consumeDefaultsForFixture(\n\x20   b = x,\n)\n",
+        ),
+    ];
+    let (reference, krusty) =
+        disassemble_both_files("CrossFileDefault", sources, "CrossDefaultCallerKt");
+    let want = method_lines(&reference, "int run(int)");
+    assert_eq!(
+        want,
+        ["line 1: 0", "line 2: 1", "line 1: 2", "line 3: 8"],
+        "kotlinc's own table, spelled out so a reference change is visible here"
+    );
+    assert_eq!(method_lines(&krusty, "int run(int)"), want, "run lines");
 }

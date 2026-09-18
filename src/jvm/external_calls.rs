@@ -2,6 +2,8 @@ use super::classpath::{Classpath, ExternalCallableKind};
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
 use crate::ir::{Callee, IrCheckedOperation, IrExpr, IrFile};
 
+use super::default_call_operands::{DefaultCallOperand, DefaultCallOperands};
+
 /// Realize already-selected dependency declarations through the provider table shared with the
 /// frontend. This is an exact identity lookup, not name resolution or overload selection.
 #[derive(Clone, Copy, Debug)]
@@ -78,6 +80,7 @@ fn materialize_constructor_defaults(
 pub(super) fn realize(
     ir: &mut IrFile,
     classpath: &Classpath,
+    default_call_operands: &mut DefaultCallOperands,
 ) -> Result<(), ExternalDependencyTarget> {
     let expression_count = ir.exprs.len();
     for index in 0..expression_count {
@@ -591,6 +594,18 @@ pub(super) fn realize(
                 &omitted_parameters,
                 target,
             )?;
+            let mut operand_plan = realized_arguments
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(parameter, argument)| {
+                    if omitted_parameters.contains(&(parameter as u32)) {
+                        DefaultCallOperand::synthesized(argument)
+                    } else {
+                        DefaultCallOperand::supplied(argument)
+                    }
+                })
+                .collect::<Vec<_>>();
             {
                 let IrExpr::Call {
                     dispatch_receiver,
@@ -605,10 +620,14 @@ pub(super) fn realize(
                     ExternalCallableKind::TopLevel => {}
                     ExternalCallableKind::Extension => {
                         let receiver = dispatch_receiver.take().ok_or(target)?;
-                        args.insert(callable.context_count.min(args.len()), receiver);
+                        let position = callable.context_count.min(args.len());
+                        args.insert(position, receiver);
+                        operand_plan.insert(position, DefaultCallOperand::supplied(receiver));
                     }
                     ExternalCallableKind::Member => {
-                        args.insert(0, dispatch_receiver.take().ok_or(target)?);
+                        let receiver = dispatch_receiver.take().ok_or(target)?;
+                        args.insert(0, receiver);
+                        operand_plan.insert(0, DefaultCallOperand::supplied(receiver));
                     }
                     ExternalCallableKind::Constructor
                     | ExternalCallableKind::InstanceFieldRead
@@ -631,21 +650,30 @@ pub(super) fn realize(
                 .map(|mask| ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(mask))))
                 .collect::<Vec<_>>();
             let marker = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
-            let IrExpr::Call { callee, args, .. } = &mut ir.exprs[index] else {
-                unreachable!()
-            };
-            args.extend(mask_values);
-            args.push(marker);
-            *callee = Callee::Static {
-                owner: default.owner,
-                name: default.name.clone(),
-                descriptor: default.descriptor.clone(),
-                // A default bridge for an inline declaration is itself the selected executable
-                // body at this call site. In particular, a non-public/reified bridge must be
-                // spliced; erasing the declaration's inline contract here turns it into an
-                // illegal direct call to a package-part implementation class.
-                inline: callable.inline,
-            };
+            operand_plan.extend(
+                mask_values
+                    .iter()
+                    .copied()
+                    .map(DefaultCallOperand::synthesized_abi),
+            );
+            operand_plan.push(DefaultCallOperand::synthesized_abi(marker));
+            {
+                let IrExpr::Call { callee, args, .. } = &mut ir.exprs[index] else {
+                    unreachable!()
+                };
+                args.extend(mask_values);
+                args.push(marker);
+                *callee = Callee::Static {
+                    owner: default.owner,
+                    name: default.name.clone(),
+                    descriptor: default.descriptor.clone(),
+                    // A default bridge for an inline declaration is itself the selected executable
+                    // body at this call site. In particular, a non-public/reified bridge must be
+                    // spliced; erasing the declaration's inline contract here turns it into an
+                    // illegal direct call to a package-part implementation class.
+                    inline: callable.inline,
+                };
+            }
             publish_declared_call_params(
                 ir,
                 index as crate::ir::ExprId,
@@ -654,7 +682,9 @@ pub(super) fn realize(
                 true,
                 declared_params,
             );
-            bridge_external_result(ir, index, callable.physical_ret, semantic_ret);
+            let physical_call =
+                bridge_external_result(ir, index, callable.physical_ret, semantic_ret);
+            default_call_operands.record(physical_call, operand_plan);
             continue;
         }
         let IrExpr::Call {
@@ -929,9 +959,9 @@ fn bridge_external_result(
     index: usize,
     physical: crate::types::Ty,
     semantic: crate::types::Ty,
-) {
+) -> crate::ir::ExprId {
     if physical == semantic {
-        return;
+        return index as crate::ir::ExprId;
     }
     let call = ir.exprs[index].clone();
     let call = ir.add_expr(call);
@@ -948,6 +978,7 @@ fn bridge_external_result(
         arg: call,
         type_operand: semantic,
     };
+    call
 }
 
 /// Keep checker-selected call facts attached to the selected call when a backend boundary wraps it.

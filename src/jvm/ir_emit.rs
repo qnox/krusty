@@ -277,6 +277,8 @@ pub(super) struct EmitEnv<'a> {
     /// JVM-only realizations for already-resolved current-module property operations. Kept beside
     /// the emitter rather than on common IR so a backend field/accessor choice cannot leak into FIR.
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
+    /// Per-call JVM placeholder/mask/marker plans produced during default-call realization.
+    default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
     /// File-wide `InnerClasses` candidates prepared once from stable classifier identities.
     inner_classes: crate::jvm::inner_classes::InnerClasses,
     /// `-java-parameters`: name each declared parameter in a `MethodParameters` attribute.
@@ -3795,28 +3797,35 @@ pub(crate) struct EmitMetadata<'a> {
     pub continuations: &'a crate::jvm::suspend::ContinuationMetadataMap,
 }
 
+/// Checked semantic declarations plus JVM-only realization facts consumed by class emission.
+pub(crate) struct CheckedEmitFacts<'a> {
+    pub(crate) metadata: EmitMetadata<'a>,
+    pub(crate) signature_symbols: &'a dyn BackendClassifierSource,
+    pub(crate) property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
+    pub(crate) default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
+}
+
 pub(crate) fn emit_all_with_checked_classifiers(
     ir: &IrFile,
     facade: &str,
     bodies: &dyn MethodBodies,
-    metadata: EmitMetadata<'_>,
+    facts: CheckedEmitFacts<'_>,
     opts: &EmitOptions,
     run: &EmitRun,
-    signature_symbols: &dyn BackendClassifierSource,
-    property_realizations: &crate::jvm::property_realizations::PropertyRealizations,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     let env = EmitEnv {
         bodies,
         run,
-        continuation_metadata: metadata.continuations,
-        signature_symbols,
+        continuation_metadata: facts.metadata.continuations,
+        signature_symbols: facts.signature_symbols,
         jvm_default: opts.jvm_default,
         lambda_modes: opts.lambda_modes,
         java_parameters: opts.java_parameters,
-        property_realizations,
+        property_realizations: facts.property_realizations,
+        default_call_operands: facts.default_call_operands,
         inner_classes: crate::jvm::inner_classes::InnerClasses::new(ir),
     };
-    emit_all_with_class_meta(ir, facade, &env, metadata.facade, opts, &|_| None)
+    emit_all_with_class_meta(ir, facade, &env, facts.metadata.facade, opts, &|_| None)
 }
 
 /// `class_meta` may supply per-class `@kotlin.Metadata` keyed by the class's internal name. This
@@ -13338,6 +13347,7 @@ struct Emitter<'a> {
     /// `-jvm-default`, so a call site can tell where an interface's `$default` synthetic lives.
     jvm_default: JvmDefaultMode,
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
+    default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
     owner: String,
     facade: String,
     slots: HashMap<u32, (u16, Ty)>,
@@ -13410,6 +13420,7 @@ impl<'a> Emitter<'a> {
             run: env.run,
             jvm_default: env.jvm_default,
             property_realizations: env.property_realizations,
+            default_call_operands: env.default_call_operands,
             owner: owner.to_string(),
             facade: facade.to_string(),
             slots: HashMap::new(),
@@ -15958,6 +15969,11 @@ impl<'a> Emitter<'a> {
                         .checked_sub(recv_offset)
                         .expect("an extension receiver is a leading physical parameter");
                     let mut masks = vec![0i32; default_mask_count(logical_param_count)];
+                    // Every operand the CALL synthesizes — a placeholder standing in for an omitted
+                    // argument, and the trailing mask/marker group — carries the call's own line, so
+                    // an argument supplied between two of them puts its own line in effect and the
+                    // next group restores the call's. A call that omits nothing synthesizes nothing,
+                    // which is why an ordinary call's dispatch mark sits at its invoke.
                     for (i, arg) in args.iter().enumerate() {
                         match arg {
                             Some(a) => {
@@ -15967,6 +15983,7 @@ impl<'a> Emitter<'a> {
                                 }
                             }
                             None => {
+                                debug_lines::mark_expression_start(self.ir, e, code);
                                 push_zero(stub_param_tys[i], code, self.cw);
                                 let li = i
                                     .checked_sub(recv_offset)
@@ -15975,6 +15992,7 @@ impl<'a> Emitter<'a> {
                             }
                         }
                     }
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     for mask in masks {
                         code.push_int(mask, self.cw);
                     }
@@ -16175,7 +16193,7 @@ impl<'a> Emitter<'a> {
                     let param_tys =
                         static_default_stub_params(self.ir, *function, Ty::obj("java/lang/Object"));
                     let ret = jvm_declared_ty(&f.ret);
-                    self.emit_operands(args, code);
+                    self.emit_call_operands(e, args, code);
                     let argument_words: i32 =
                         param_tys.iter().map(|ty| slot_words(*ty) as i32).sum();
                     let descriptor = method_descriptor(&param_tys, ret);
@@ -16195,7 +16213,7 @@ impl<'a> Emitter<'a> {
                     let ret = jvm_declared_ty(&f.ret);
                     let name = format!("{}$default", f.name);
                     let args = args.clone();
-                    self.emit_operands(&args, code);
+                    self.emit_call_operands(e, &args, code);
                     let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
                     let owner = self.facade.clone();
                     let m = self
@@ -18295,7 +18313,7 @@ impl<'a> Emitter<'a> {
     /// op would be live on the stack across that frame), evaluate all ops into temps first, then load
     /// them — keeping the stack empty while each frame-recording op runs.
     fn emit_operands(&mut self, ops: &[u32], code: &mut CodeBuilder) {
-        self.emit_operands_adapted(ops, code, |_, _, _| {});
+        self.emit_operands_adapted(None, ops, code, |_, _, _| {});
     }
 
     /// Adapt one semantic value to the physical slot named by a JVM descriptor. Wrapper identity and
@@ -18439,13 +18457,28 @@ impl<'a> Emitter<'a> {
     /// after a right operand has landed above it, and a branchy right operand still requires both
     /// source expressions to be evaluated with an empty stack. Consumers supply only the boundary
     /// adapter; evaluation order, frame safety, temporary ownership, and cleanup remain centralized.
-    fn emit_operands_adapted<F>(&mut self, ops: &[u32], code: &mut CodeBuilder, mut adapt: F)
-    where
+    fn emit_operands_adapted<F>(
+        &mut self,
+        default_plan: Option<(
+            u32,
+            &[crate::jvm::default_call_operands::DefaultOperandOrigin],
+        )>,
+        ops: &[u32],
+        code: &mut CodeBuilder,
+        mut adapt: F,
+    ) where
         F: FnMut(&mut Self, Ty, &mut CodeBuilder),
     {
+        let mut inside_run = false;
         if ops.iter().skip(1).any(|&o| self.records_frame(o)) {
             let temps = self.spill_to_temps(ops, code);
-            for &(slot, t, _) in &temps {
+            for (operand_index, (&(slot, t, _), _)) in temps.iter().zip(ops).enumerate() {
+                self.mark_synthesized_operand_run(
+                    default_plan,
+                    operand_index,
+                    &mut inside_run,
+                    code,
+                );
                 load(t, slot, code);
                 adapt(self, t, code);
             }
@@ -18453,7 +18486,13 @@ impl<'a> Emitter<'a> {
                 self.release_temporary(lease);
             }
         } else {
-            for &o in ops {
+            for (operand_index, &o) in ops.iter().enumerate() {
+                self.mark_synthesized_operand_run(
+                    default_plan,
+                    operand_index,
+                    &mut inside_run,
+                    code,
+                );
                 self.emit_value(o, code);
                 adapt(self, self.value_ty(o), code);
             }
@@ -18482,7 +18521,7 @@ impl<'a> Emitter<'a> {
     /// swapped past it. The shared adapted-operand path owns evaluation order, frame-aware spilling,
     /// and temporary cleanup; identity supplies only the primitive-to-reference adapter.
     fn emit_identity_operands(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
-        self.emit_operands_adapted(&[lhs, rhs], code, Self::box_scalar_operand);
+        self.emit_operands_adapted(None, &[lhs, rhs], code, Self::box_scalar_operand);
     }
 
     fn emit_primitive_inc_dec_virtual(
@@ -19117,7 +19156,7 @@ impl<'a> Emitter<'a> {
             // accepts that with an always-false/true warning, whereas structural `x == null` is
             // rejected by the front end. Use the same adapted-operand primitive as mixed identity so
             // the `ifnull` reference slot receives a box; reference structural operands are a no-op.
-            self.emit_operands_adapted(&[operand], code, Self::box_scalar_operand);
+            self.emit_operands_adapted(None, &[operand], code, Self::box_scalar_operand);
             self.frame(target, vec![], code);
             if (op == Eq) == jt {
                 code.ifnull(target);
@@ -19139,7 +19178,7 @@ impl<'a> Emitter<'a> {
     /// Put the null-safe structural equality result for two references on the operand stack.
     fn emit_structural_equality(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
         // Spill if rhs is branchy (`x == when { ... }`) so lhs is not live across its merge frames.
-        self.emit_operands_adapted(&[lhs, rhs], code, Self::box_scalar_operand);
+        self.emit_operands_adapted(None, &[lhs, rhs], code, Self::box_scalar_operand);
         let m = self.cw.methodref(
             "kotlin/jvm/internal/Intrinsics",
             "areEqual",
@@ -20775,18 +20814,23 @@ mod fail_soft_tests {
         let continuations = crate::jvm::suspend::ContinuationMetadataMap::default();
         let property_realizations =
             crate::jvm::property_realizations::PropertyRealizations::default();
+        let default_call_operands =
+            crate::jvm::default_call_operands::DefaultCallOperands::default();
         emit_all_with_checked_classifiers(
             ir,
             facade,
             &NoBodies,
-            EmitMetadata {
-                facade: None,
-                continuations: &continuations,
+            CheckedEmitFacts {
+                metadata: EmitMetadata {
+                    facade: None,
+                    continuations: &continuations,
+                },
+                signature_symbols: &NoClassifiers,
+                property_realizations: &property_realizations,
+                default_call_operands: &default_call_operands,
             },
             &EmitOptions::default(),
             run,
-            &NoClassifiers,
-            &property_realizations,
         )
     }
 
