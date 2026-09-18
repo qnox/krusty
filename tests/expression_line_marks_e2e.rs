@@ -169,13 +169,21 @@ fn an_explicit_multi_line_return_is_byte_identical_to_kotlinc() {
 }
 /// A finalizer changes the active line while the return value is parked in a local. The eventual
 /// return instruction must restore the explicit return's source line, not inherit the finalizer's.
+///
+/// The call is a CONSTRUCTOR so the whole table is owned here: an ordinary method's dispatch
+/// restoration arrives with the method-call PR above this one. The finalizer stays the inline
+/// `println("done")` it was written with — the entries this test exists for sit past it, and every
+/// LINE in the table is now kotlinc's. The two offsets that differ are the inline splice's, not
+/// this contract's: kotlinc keeps the argument on the stack and `swap`s the receiver under it
+/// (`ldc; getstatic; swap; invokevirtual`) where krusty round-trips it through two locals, seven
+/// bytes more. Both complete tables are spelled out so either compiler moving is visible here.
 #[test]
 fn an_explicit_return_after_finally_restores_its_line() {
-    let src = "class FinallySink {\n\
-               \x20   fun take(a: Int, b: String, c: Int): Int = a + c\n\
-               \x20   fun run(x: Int, y: String): Int {\n\
+    let src = "class R(val a: Int, val b: String, val c: Int)\n\
+               class FinallySink {\n\
+               \x20   fun run(x: Int, y: String): R {\n\
                \x20       try {\n\
-               \x20           return take(\n\
+               \x20           return R(\n\
                \x20               a = x,\n\
                \x20               b = y,\n\
                \x20               c = x + 1,\n\
@@ -190,10 +198,165 @@ fn an_explicit_return_after_finally_restores_its_line() {
         eprintln!("skipping: reference kotlinc or javap unavailable");
         return;
     };
-    let want = method_lines(&reference, "run(int, java.lang.String)");
-    assert!(!want.is_empty(), "kotlinc run LineNumberTable");
+    let want = method_lines(&reference, "R run(int, java.lang.String)");
     assert_eq!(
-        method_lines(&krusty, "run(int, java.lang.String)"),
+        want,
+        vec![
+            "line 4: 6".to_string(),
+            "line 5: 7".to_string(),
+            "line 6: 11".to_string(),
+            "line 7: 12".to_string(),
+            "line 8: 13".to_string(),
+            "line 5: 16".to_string(),
+            "line 11: 20".to_string(),
+            "line 5: 30".to_string(),
+            "line 11: 31".to_string(),
+        ],
+        "kotlinc's own table, spelled out so a reference change is visible here"
+    );
+    let ours = method_lines(&krusty, "R run(int, java.lang.String)");
+    assert_eq!(
+        ours.iter()
+            .map(|row| row.split(':').next().unwrap_or(row))
+            .collect::<Vec<_>>(),
+        want.iter()
+            .map(|row| row.split(':').next().unwrap_or(row))
+            .collect::<Vec<_>>(),
+        "every line, in kotlinc's order"
+    );
+    assert_eq!(
+        ours,
+        vec![
+            "line 4: 6".to_string(),
+            "line 5: 7".to_string(),
+            "line 6: 11".to_string(),
+            "line 7: 12".to_string(),
+            "line 8: 13".to_string(),
+            "line 5: 16".to_string(),
+            "line 11: 20".to_string(),
+            // +7: the inline `println` splice, past everything this test pins.
+            "line 5: 37".to_string(),
+            "line 11: 38".to_string(),
+        ],
+        "complete run LineNumberTable"
+    );
+}
+
+/// A BARE `return` through a `finally`. It emits nothing of its own, so without an anchor its line
+/// is claimed by the finalizer's first instruction and the restore at the physical return never
+/// happens: the whole table collapsed to the finalizer's single line. kotlinc anchors it on a `nop`
+/// ahead of the transfer and restores it at the `return`.
+#[test]
+fn a_bare_return_through_a_finally_restores_its_line() {
+    let src = "var t = 0\n\
+               fun step() { t++ }\n\
+               fun run() {\n\
+               \x20   try {\n\
+               \x20       return\n\
+               \x20   } finally {\n\
+               \x20       step()\n\
+               \x20   }\n\
+               }\n";
+    let Some((reference, krusty)) =
+        disassemble_both("BareReturnFinally", src, "BareReturnFinallyKt")
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = method_lines(&reference, "void run()");
+    assert_eq!(
+        want,
+        vec![
+            "line 4: 0".to_string(),
+            "line 5: 1".to_string(),
+            "line 7: 2".to_string(),
+            "line 5: 5".to_string(),
+            "line 7: 6".to_string(),
+        ],
+        "kotlinc's own table, spelled out so a reference change is visible here"
+    );
+    assert_eq!(
+        method_lines(&krusty, "void run()"),
+        want,
+        "complete run LineNumberTable"
+    );
+}
+
+/// A VALUE return through a `finally`: its own expression anchors the line, and the reload before
+/// the physical return restores it. No `nop` — the value's first instruction already carries it.
+#[test]
+fn a_value_return_through_a_finally_restores_its_line() {
+    let src = "var t = 0\n\
+               fun step() { t++ }\n\
+               fun run(): Int {\n\
+               \x20   try {\n\
+               \x20       return 1\n\
+               \x20   } finally {\n\
+               \x20       step()\n\
+               \x20   }\n\
+               }\n";
+    let Some((reference, krusty)) =
+        disassemble_both("ValueReturnFinally", src, "ValueReturnFinallyKt")
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = method_lines(&reference, "int run()");
+    assert_eq!(
+        want,
+        vec![
+            "line 4: 0".to_string(),
+            "line 5: 1".to_string(),
+            "line 7: 3".to_string(),
+            "line 5: 7".to_string(),
+            "line 7: 8".to_string(),
+        ],
+        "kotlinc's own table, spelled out so a reference change is visible here"
+    );
+    assert_eq!(
+        method_lines(&krusty, "int run()"),
+        want,
+        "complete run LineNumberTable"
+    );
+}
+
+/// An IMPLICIT `Unit` return after a `try`/`finally` that falls through. The `goto` leaving the
+/// normal-path finalizer copy carries the `finally` block's CLOSING line — without it the
+/// finalizer's own line stays in effect into the catch-all handler, whose identical mark then
+/// deduplicates away, so one missing entry costs two.
+#[test]
+fn an_implicit_unit_return_after_a_finally_keeps_every_line() {
+    let src = "var t = 0\n\
+               fun f() { t++ }\n\
+               fun g() { t += 2 }\n\
+               fun run() {\n\
+               \x20   try {\n\
+               \x20       f()\n\
+               \x20   } finally {\n\
+               \x20       g()\n\
+               \x20   }\n\
+               }\n";
+    let Some((reference, krusty)) =
+        disassemble_both("ImplicitUnitFinally", src, "ImplicitUnitFinallyKt")
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = method_lines(&reference, "void run()");
+    assert_eq!(
+        want,
+        vec![
+            "line 5: 0".to_string(),
+            "line 6: 1".to_string(),
+            "line 8: 4".to_string(),
+            "line 9: 7".to_string(),
+            "line 8: 10".to_string(),
+            "line 10: 16".to_string(),
+        ],
+        "kotlinc's own table, spelled out so a reference change is visible here"
+    );
+    assert_eq!(
+        method_lines(&krusty, "void run()"),
         want,
         "complete run LineNumberTable"
     );

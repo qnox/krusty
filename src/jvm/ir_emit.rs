@@ -12624,17 +12624,17 @@ fn emit_default_stub(
         slot += slot_words(*t);
     }
     let mask_slots: Vec<u16> = (0..default_mask_count(logical_param_count))
-        .map(|mi| {
+        .map(|_| {
             let s = slot;
-            e.slots.insert(9_000_001 + mi as u32, (s, Ty::Int)); // register so frames type these slots
+            // The mask ints and the trailing marker are BACKEND temporaries: no semantic value
+            // names them, they only have to be typed in every frame this stub records.
+            e.backend_temporaries.push((s, Ty::Int));
             slot += 1;
             s
         })
         .collect();
-    e.slots.insert(
-        9_000_001 + mask_slots.len() as u32,
-        (slot, Ty::obj("java/lang/Object")),
-    );
+    e.backend_temporaries
+        .push((slot, Ty::obj("java/lang/Object")));
     slot += 1;
     e.next_slot = slot;
 
@@ -12992,15 +12992,15 @@ fn emit_facade_default_stub(
         slot += slot_words(*t);
     }
     let mask_slots: Vec<u16> = (0..default_mask_count(logical_param_count))
-        .map(|mi| {
+        .map(|_| {
             let s = slot;
-            e.slots.insert(9_000_001 + mi as u32, (s, Ty::Int)); // register so frames type these slots
+            // Backend temporaries — see the member stub: typed in frames, named by no value.
+            e.backend_temporaries.push((s, Ty::Int));
             slot += 1;
             s
         })
         .collect();
-    e.slots
-        .insert(9_000_001 + mask_slots.len() as u32, (slot, marker));
+    e.backend_temporaries.push((slot, marker));
     slot += 1;
     e.next_slot = slot;
 
@@ -13150,15 +13150,15 @@ fn emit_ctor_default_stub_with_prefix(
         slot += slot_words(*t);
     }
     let mask_slots: Vec<u16> = (0..default_mask_count(real_params.len()))
-        .map(|mi| {
+        .map(|_| {
             let s = slot;
-            e.slots.insert(9_000_001 + mi as u32, (s, Ty::Int));
+            // Backend temporaries — see the member stub: typed in frames, named by no value.
+            e.backend_temporaries.push((s, Ty::Int));
             slot += 1;
             s
         })
         .collect();
-    e.slots
-        .insert(9_000_001 + mask_slots.len() as u32, (slot, marker));
+    e.backend_temporaries.push((slot, marker));
     slot += 1;
     e.next_slot = slot;
 
@@ -13338,6 +13338,14 @@ struct Emitter<'a> {
     owner: String,
     facade: String,
     slots: HashMap<u32, (u16, Ty)>,
+    /// Verifier-live BACKEND temporaries: slots the emitter owns that no semantic value names — a
+    /// return value parked across a `finally`, a default stub's mask and marker. They must appear in
+    /// every frame recorded while they are live, but they are not semantic locals: `slots` is keyed
+    /// by real value ids, which `GetValue` looks up, lexical-scope restoration retains, and
+    /// `unassigned_values` filters by. Registering a temporary there under a reserved numeric range
+    /// would collide with a real value id and be filtered as unassigned; frame construction
+    /// combines the two explicitly instead.
+    backend_temporaries: Vec<(u16, Ty)>,
     /// Semantic locals that are in lexical scope but not definitely assigned on the current edge.
     /// JVM frames render their physical slots as `top` until every incoming edge has stored them.
     unassigned_values: HashSet<u32>,
@@ -13407,6 +13415,7 @@ impl<'a> Emitter<'a> {
             owner: owner.to_string(),
             facade: facade.to_string(),
             slots: HashMap::new(),
+            backend_temporaries: Vec::new(),
             unassigned_values: HashSet::new(),
             label_unassigned_values: HashMap::new(),
             var_types: collect_body_var_types(ir, roots),
@@ -17696,7 +17705,7 @@ impl<'a> Emitter<'a> {
             } => {
                 let catches = catches.clone();
                 let result = result.clone();
-                self.emit_try(*body, &catches, *finally, &result, code);
+                self.emit_try(e, *body, &catches, *finally, &result, code);
             }
             IrExpr::RefNew { elem, init } => {
                 let (cls, fdesc) = ref_class(elem);
@@ -19507,6 +19516,7 @@ impl<'a> Emitter<'a> {
     /// `top` there, since an exception may occur before they are assigned).
     fn emit_try(
         &mut self,
+        expression: u32,
         body: u32,
         catches: &[crate::ir::IrCatch],
         finally: Option<u32>,
@@ -19531,6 +19541,11 @@ impl<'a> Emitter<'a> {
         let after = code.new_label();
 
         self.bind(start, code);
+        // kotlinc opens every protected region with a `nop` carrying the `try` keyword's line, so the
+        // region starts at an instruction of its own rather than sharing the body's first one. The
+        // exception table's `from` is that `nop`.
+        debug_lines::mark_expression_start(self.ir, expression, code);
+        code.nop();
         let body_diverges = if is_stmt {
             self.discarding_diverges(body)
         } else {
@@ -19556,6 +19571,9 @@ impl<'a> Emitter<'a> {
                 self.emit(f, code);
             } // `finally` inlined on the normal path
             if !fin_diverges {
+                if let Some(f) = finally {
+                    debug_lines::mark_block_exit(self.ir, f, code);
+                }
                 code.goto(after);
                 after_reachable = true;
             }
@@ -19627,6 +19645,9 @@ impl<'a> Emitter<'a> {
                     self.emit(f, code);
                 } // `finally` inlined after the catch
                 if !fin_diverges {
+                    if let Some(f) = finally {
+                        debug_lines::mark_block_exit(self.ir, f, code);
+                    }
                     code.goto(after);
                     after_reachable = true;
                 }
@@ -19647,6 +19668,9 @@ impl<'a> Emitter<'a> {
             let thr_ty = Ty::obj("java/lang/Throwable");
             let tslot = self.next_slot;
             self.next_slot += 1;
+            // The handler's entry belongs to the finalizer copy it introduces, not to the `finally`
+            // keyword — mark it before the store so both copies open on the same line.
+            debug_lines::mark_block_entry(self.ir, f, code);
             store(thr_ty, tslot, code);
             // The caught exception is LIVE in `tslot` across the whole inlined `finally` (it is re-raised
             // after it). Register it so any StackMapTable frame recorded WHILE emitting the finally —
@@ -19786,6 +19810,11 @@ impl<'a> Emitter<'a> {
             .map(|(_, slot)| *slot)
             .collect();
         for (slot, ty) in entries {
+            if (slot as usize) < raw.len() {
+                raw[slot as usize] = self.verif_single(ty);
+            }
+        }
+        for (slot, ty) in self.backend_temporaries.clone() {
             if (slot as usize) < raw.len() {
                 raw[slot as usize] = self.verif_single(ty);
             }

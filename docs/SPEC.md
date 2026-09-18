@@ -6128,6 +6128,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   immediately followed by `:` for the name parse (a genuine modifier never precedes a colon) — which also
   handles an annotated modifier-keyword name (`@Anno open: Int`). (`build840_jj1_param_soft_keyword_e2e`)
 
+- **A `try` and a `return` own their own `LineNumberTable` entries.** Four rules, each measured
+  against the reference compiler and each previously absent, so a debugger stepping through a
+  guarded region saw the finalizer's line where the source says otherwise:
+  - A protected region OPENS on a `nop` carrying the `try` keyword's line, and the exception
+    table's `from` is that `nop`. Starting the region on the body's first instruction shifted every
+    offset in the method and lost the `try` line entirely — and, because a mark at an existing
+    offset replaces the one already there, the body's own first mark overwrote it.
+  - A `return` restores its own line at the PHYSICAL return instruction, after the parked value is
+    reloaded (`iload_0` at one offset, `line 5` on the `ireturn` at the next) — not before the
+    reload. A BARE `return` emits nothing of its own, so with a finalizer active its line would be
+    claimed by the finalizer's first instruction; kotlinc anchors it on a `nop` ahead of the
+    transfer and restores it again at the return. Both a value return and a void one therefore
+    carry provenance, and the void arm simply had none.
+  - The `goto` leaving an inlined `finally` on the normal path carries the `finally` block's
+    CLOSING line: the jump belongs to the end of the finalizer, not to the statement after the
+    `try`. Missing it costs two entries, not one — the finalizer's own line stays in effect into
+    the catch-all handler, whose identical mark then deduplicates away.
+  - The catch-all handler's entry — the `astore` parking the in-flight exception — belongs to the
+    finalizer copy it introduces, so it opens on the finalizer's FIRST line rather than the
+    `finally` keyword's.
+
+  Tests: `tests/expression_line_marks_e2e.rs` (a bare return, a value return and an implicit `Unit`
+  return each through a `finally`, plus an explicit return whose call is a constructor) and
+  `tests/try_debug_lines_e2e.rs`.
+
 - **An inline HOF lambda may call an ENCLOSING-class member (build.840 kk1).** `class H { fun f(es) =
   es.find { same(it.v, 3) }; fun same(a, b) = … }` — the inline-spliced `find` lambda calls `same`, a method
   of the enclosing class. krusty cleared `cur_class` for a spliced lambda's body (only a REAL closure

@@ -26,7 +26,16 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) {
         let Some(value) = value else {
+            // A void `return` emits nothing of its own, so with a finalizer active its line would
+            // otherwise be claimed by the finalizer's first instruction. kotlinc anchors it on a
+            // `nop` ahead of the transfer and restores it again at the physical return, exactly as
+            // a value return's own expression and reload do.
+            if !self.return_finalizers.is_empty() {
+                debug_lines::mark_return(self.ir, returned, code);
+                code.nop();
+            }
             if self.emit_return_finalizers(code) {
+                debug_lines::mark_return(self.ir, returned, code);
                 code.ret_void();
             }
             return;
@@ -54,11 +63,13 @@ impl Emitter<'_> {
         // until the finalizer chain either completes or overrides the transfer. Any branch or
         // handler frame created while emitting a finalizer must therefore carry this slot. Merely
         // reserving `next_slot` leaves it as `top`, which makes a later reload unverifiable after a
-        // branchy finalizer such as `null?.toString()`.
-        let return_key = 5_000_000 + slot as u32;
-        self.slots.insert(return_key, (slot, ret));
+        // branchy finalizer such as `null?.toString()`. It is a BACKEND temporary, not a semantic
+        // local: `slots` is keyed by real value ids, so parking it there under a reserved numeric
+        // range could overwrite a value with that id, be filtered out as unassigned, and then be
+        // removed when the transfer finishes.
+        self.backend_temporaries.push((slot, ret));
         let survives = self.emit_return_finalizers(code);
-        self.slots.remove(&return_key);
+        self.backend_temporaries.pop();
         if survives {
             load(ret, slot, code);
             debug_lines::mark_return(self.ir, returned, code);
