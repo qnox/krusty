@@ -4739,6 +4739,22 @@ pub(crate) fn lower_value_classes(
     // reference's `get(Object)` therefore unboxes its argument before the call, exactly as
     // kotlinc's does. Without this the reference named an instance accessor that is not declared
     // anywhere, and the program failed at its first `get` with a `NoSuchMethodError`.
+    // Method identities of every value-class owner, by final (already mangled) name: the loop below
+    // borrows `ir.classes` mutably and still has to name the exact accessor a bridge belongs to.
+    let mut value_class_methods: std::collections::HashMap<(TypeName, String), u32> =
+        std::collections::HashMap::new();
+    for class in ir
+        .classes
+        .iter()
+        .filter(|c| callable_under.contains_key(&c.fq_name))
+    {
+        for &fid in &class.methods {
+            if let Some(function) = ir.functions.get(fid as usize) {
+                value_class_methods.insert((class.fq_name, function.name.clone()), fid);
+            }
+        }
+    }
+    let mut access_bridges: Vec<u32> = Vec::new();
     for class in &mut ir.classes {
         let Some(reference) = class.prop_ref.as_mut() else {
             continue;
@@ -4831,12 +4847,28 @@ pub(crate) fn lower_value_classes(
                 desc(&erase(&value, &callable_under))
             ));
         }
+        // A PRIVATE member keeps its accessor private, as kotlinc does, and the reference reaches
+        // it through the synthetic bridge beside it: `access$getXx-impl(I)I`, not the declaration.
+        // The name is the DECLARATION's mangled one with the prefix — the bridge exists for this
+        // exact accessor — so the reference still names a method the class really has, which is
+        // what publishing the accessor instead only appeared to achieve.
+        if reference.accessor_role == crate::ir::PropertyAccessorRole::AccessBridge {
+            for name in
+                std::iter::once(&mut reference.getter_name).chain(reference.setter_name.as_mut())
+            {
+                if let Some(target) = value_class_methods.get(&(receiver, name.clone())) {
+                    access_bridges.push(*target);
+                }
+                name.insert_str(0, "access$");
+            }
+        }
         // A member's accessor is static on the value class itself; an extension's already routes
         // through its facade. Neither changes `ext_facade`, which the reference's reflection owner
         // and its top-level flag are read from — a member of a value class is still a MEMBER
         // reference (`ldc Z.class`, flags 0), and only the physical call shape changes.
         reference.unboxed_receiver_value_class = Some(receiver);
     }
+    ir.function_reference_access_bridges.extend(access_bridges);
 
     true
 }
