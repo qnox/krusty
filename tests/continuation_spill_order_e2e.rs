@@ -91,8 +91,7 @@ fn an_inline_expansions_parameters_and_receiver_are_named_spills() {
                }\n\
                \n\
                suspend fun run(host: Velarium, input: Nacre): Nacre = host.send(input)\n";
-    let (slots, names) =
-        debug_metadata_names(src, "InlineSpillNames", "InlineSpillNamesKt$run$1");
+    let (slots, names) = debug_metadata_names(src, "InlineSpillNames", "InlineSpillNamesKt$run$1");
     assert_eq!(
         names,
         [
@@ -123,25 +122,31 @@ fn an_inline_expansions_parameters_and_receiver_are_named_spills() {
 /// both to `$this$send$iv`.
 #[test]
 fn a_member_inline_extension_names_both_of_its_receivers() {
-    let src = "class Box(val name: String)\n\
+    let src = "class Nacre\n\
+               class Velarium(val seed: Nacre)\n\
                \n\
-               suspend fun fetch(v: String): String = v\n\
+               fun combine(first: Nacre, second: Nacre, third: Nacre): Nacre = first\n\
+               suspend fun fetch(value: Nacre): Nacre = value\n\
                \n\
-               class Host(val prefix: String) {\n\
-               \x20   suspend inline fun Box.send(url: String): String {\n\
-               \x20       val local = prefix + url + name\n\
+               class Solivane(val prefix: Nacre) {\n\
+               \x20   suspend inline fun Velarium.send(token: Nacre): Nacre {\n\
+               \x20       val local = combine(prefix, token, seed)\n\
                \x20       val got = fetch(local)\n\
                \x20       return got\n\
                \x20   }\n\
-               \x20   suspend fun run(b: Box, u: String): String = b.send(u)\n\
+               \x20   suspend fun run(receiver: Velarium, input: Nacre): Nacre = receiver.send(input)\n\
                }\n";
-    let Some((_, names)) = debug_metadata_spills(src, "BothReceivers", "Host$run$1") else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
+    let (_, names) = debug_metadata_spills(src, "BothReceivers", "Solivane$run$1");
     assert_eq!(
         names,
-        ["b", "u", "this_$iv", "$this$send$iv", "url$iv", "local$iv"]
+        [
+            "receiver",
+            "input",
+            "this_$iv",
+            "$this$send$iv",
+            "token$iv",
+            "local$iv"
+        ]
     );
 }
 
@@ -151,34 +156,32 @@ fn a_member_inline_extension_names_both_of_its_receivers() {
 /// escaped as an ordinary value.
 #[test]
 fn a_context_parameter_does_not_displace_the_inline_receiver() {
-    let src = "class Box(val name: String)\n\
-               class Ctx(val tag: String)\n\
+    let src = "class Nacre\n\
+               class Velarium(val seed: Nacre)\n\
+               class Cinder(val tag: Nacre)\n\
                \n\
-               suspend fun fetch(v: String): String = v\n\
+               fun combine(first: Nacre, second: Nacre, third: Nacre): Nacre = first\n\
+               suspend fun fetch(value: Nacre): Nacre = value\n\
                \n\
-               context(ctx: Ctx)\n\
-               suspend inline fun Box.send(url: String): String {\n\
-               \x20   val local = ctx.tag + url + name\n\
+               context(scope: Cinder)\n\
+               suspend inline fun Velarium.send(token: Nacre): Nacre {\n\
+               \x20   val local = combine(scope.tag, token, seed)\n\
                \x20   val got = fetch(local)\n\
-               \x20   return got + name\n\
+               \x20   return combine(got, seed, scope.tag)\n\
                }\n\
                \n\
-               context(ctx: Ctx)\n\
-               suspend fun run(b: Box, u: String): String = b.send(u)\n";
-    let Some((_, names)) = debug_metadata_spills(src, "ContextReceiver", "ContextReceiverKt$run$1")
-    else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
+               context(scope: Cinder)\n\
+               suspend fun run(receiver: Velarium, input: Nacre): Nacre = receiver.send(input)\n";
+    let (_, names) = debug_metadata_spills(src, "ContextReceiver", "ContextReceiverKt$run$1");
     assert_eq!(
         names,
         [
-            "ctx",
-            "b",
-            "u",
-            "ctx$iv",
+            "scope",
+            "receiver",
+            "input",
+            "scope$iv",
             "$this$send$iv",
-            "url$iv",
+            "token$iv",
             "local$iv"
         ]
     );

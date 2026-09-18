@@ -79,12 +79,12 @@ mod tests {
     #[test]
     fn inline_extension_receiver_uses_the_jvm_receiver_convention() {
         let mut ir = IrFile::default();
-        let declaration = local(&mut ir, "map");
+        let declaration = local(&mut ir, "velarium");
         ir.set_debug_local_provenance(
             declaration,
             IrDebugLocalProvenance::inline_value(IrInlineLocalRole::ExtensionReceiver, 1),
         );
-        assert_eq!(name(&ir, declaration).as_deref(), Some("$this$map$iv"));
+        assert_eq!(name(&ir, declaration).as_deref(), Some("$this$velarium$iv"));
     }
 
     /// The callable's OWN `this` is a different value from the receiver it extends, and kotlinc
