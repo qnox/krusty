@@ -27,6 +27,13 @@ pub enum SkipReason {
     SuperCalls,
 }
 
+/// JVM-only products accumulated by the post-lowering pass pipeline and consumed by emission.
+#[derive(Default)]
+pub(crate) struct BackendPassFacts {
+    continuation_metadata: crate::jvm::suspend::ContinuationMetadataMap,
+    default_call_operands: crate::jvm::default_call_operands::DefaultCallOperands,
+}
+
 /// THE post-lowering, pre-emit JVM pass pipeline — the single definition every consumer (the real
 /// backend, `tests/common`, the conformance harness, `bytediff`, `survey`) must call, so a newly
 /// added pass lands in all of them by construction. Hand-replicating this sequence has twice
@@ -78,8 +85,8 @@ pub(crate) fn run_backend_passes(
     module_name: &str,
     classifiers: &CheckedBackendClassifiers<'_>,
     classpath: &crate::jvm::classpath::Classpath,
-    continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
     stems: &[String],
+    facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
     crate::plugins::run_enabled(ir, module_name, jvm_plugin_type_descriptor, classifiers);
     run_backend_passes_after_plugins(
@@ -88,8 +95,8 @@ pub(crate) fn run_backend_passes(
         classifiers.module().source_value_classes(),
         classifiers.module().metadata_readable_value_classes(),
         classpath,
-        continuation_metadata,
         Some(stems),
+        facts,
     )
 }
 
@@ -99,8 +106,8 @@ fn run_backend_passes_after_plugins(
     module_value_classes: &std::collections::HashMap<crate::types::TypeName, Ty>,
     module_readable_value_classes: &std::collections::HashSet<crate::types::TypeName>,
     classpath: &crate::jvm::classpath::Classpath,
-    continuation_metadata: &mut crate::jvm::suspend::ContinuationMetadataMap,
     stems: Option<&[String]>,
+    facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
     // Plugins produce backend-neutral checked IR. Realize any semantic super dispatch they add at
     // the same JVM boundary as source super calls, never in the plugin itself or the emitter.
@@ -146,11 +153,20 @@ fn run_backend_passes_after_plugins(
         return Err(SkipReason::ValueClasses);
     }
     if let Some(stems) = stems {
-        crate::jvm::module_calls::realize_default_calls(ir, stems)
-            .map_err(|_| SkipReason::DefaultCalls)?;
+        crate::jvm::module_calls::realize_default_calls(
+            ir,
+            stems,
+            &mut facts.default_call_operands,
+        )
+        .map_err(|_| SkipReason::DefaultCalls)?;
     }
     crate::jvm::shared_captures::lower_class_capture_slots(ir);
-    if !crate::jvm::suspend::lower_suspend(ir, facade, continuation_metadata) {
+    if !crate::jvm::suspend::lower_suspend(
+        ir,
+        facade,
+        &mut facts.continuation_metadata,
+        &mut facts.default_call_operands,
+    ) {
         return Err(SkipReason::Suspend);
     }
     crate::jvm::ir_emit::realize_lambda_impl_names(ir);
@@ -638,6 +654,7 @@ impl JvmBackend {
         &self,
         file: crate::backend::CheckedIrFile<'_>,
         property_realizations: crate::jvm::property_realizations::PropertyRealizations,
+        default_call_operands: crate::jvm::default_call_operands::DefaultCallOperands,
         state: &mut JvmState,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
@@ -651,15 +668,18 @@ impl JvmBackend {
         let stem = &stems[source.raw() as usize];
         let package = ir.package.clone().unwrap_or_default();
         let facade_name = file_class_name(stem, ir.package.as_deref());
-        let mut continuation_metadata = crate::jvm::suspend::ContinuationMetadataMap::default();
+        let mut pass_facts = BackendPassFacts {
+            default_call_operands,
+            ..BackendPassFacts::default()
+        };
         if let Err(reason) = run_backend_passes(
             &mut ir,
             &facade_name,
             module_name,
             &classifiers,
             &self.cp,
-            &mut continuation_metadata,
             stems,
+            &mut pass_facts,
         ) {
             report_backend_pass_failure(reason, diags);
             return Vec::new();
@@ -680,7 +700,7 @@ impl JvmBackend {
             package,
             &classifiers,
             inner_class_resolver,
-            continuation_metadata,
+            pass_facts,
             metadata,
             has_facade_members,
             property_realizations,
@@ -699,7 +719,7 @@ impl JvmBackend {
         package: String,
         signature_symbols: &dyn BackendClassifierSource,
         inner_class_resolver: crate::jvm::classfile::InnerClassResolver,
-        continuation_metadata: crate::jvm::suspend::ContinuationMetadataMap,
+        pass_facts: BackendPassFacts,
         metadata: Option<crate::jvm::ir_emit::KotlinMetadata>,
         has_facade_members: bool,
         property_realizations: crate::jvm::property_realizations::PropertyRealizations,
@@ -723,17 +743,20 @@ impl JvmBackend {
         let run = crate::jvm::ir_emit::EmitRun::default();
         let emit_metadata = crate::jvm::ir_emit::EmitMetadata {
             facade: metadata.as_ref(),
-            continuations: &continuation_metadata,
+            continuations: &pass_facts.continuation_metadata,
         };
         let classes = crate::jvm::ir_emit::emit_all_with_checked_classifiers(
             &ir,
             &facade_name,
             &*self.cp,
-            emit_metadata,
+            crate::jvm::ir_emit::CheckedEmitFacts {
+                metadata: emit_metadata,
+                signature_symbols,
+                property_realizations: &property_realizations,
+                default_call_operands: &pass_facts.default_call_operands,
+            },
             &emit_opts,
             &run,
-            signature_symbols,
-            &property_realizations,
         );
         let Some(classes) = classes else {
             if let Some(reason) = run.inline_bail() {
@@ -847,7 +870,11 @@ impl Backend for JvmBackend {
         // realizes it as a generated concrete implementation before ordinary dependency
         // constructors are assigned physical descriptors/default stubs.
         crate::jvm::annotation_constructions::lower_annotation_constructions(&mut file.ir, &facade);
-        if let Err(target) = crate::jvm::external_calls::realize(&mut file.ir, &self.cp) {
+        let mut default_call_operands =
+            crate::jvm::default_call_operands::DefaultCallOperands::default();
+        if let Err(target) =
+            crate::jvm::external_calls::realize(&mut file.ir, &self.cp, &mut default_call_operands)
+        {
             diags.error(
                 crate::diag::Span::new(0, 0),
                 format!("internal error: missing JVM dependency realization for {target}"),
@@ -877,7 +904,13 @@ impl Backend for JvmBackend {
             );
             return Vec::new();
         }
-        self.emit_streamed_ir(file, property_realizations, state, diags)
+        self.emit_streamed_ir(
+            file,
+            property_realizations,
+            default_call_operands,
+            state,
+            diags,
+        )
     }
 
     fn finalize(&self, state: JvmState, module_name: &str) -> Vec<Artifact> {

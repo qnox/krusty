@@ -13,6 +13,7 @@ mod constructor_debug;
 mod constructor_metadata;
 mod debug_local_names;
 mod declaration_collisions;
+mod default_call_operands;
 mod external_calls;
 mod function_classifiers;
 mod function_references;

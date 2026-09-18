@@ -39,20 +39,33 @@ pub fn clone_expression_dag(ir: &mut IrFile, root: ExprId) -> (ExprId, HashMap<E
 /// one parent also changes the other parent without putting its prerequisites in scope. Keeping the
 /// root identity lets callers preserve function-body and side-table ownership while all mutable
 /// descendants become a tree.
+#[cfg(test)]
 pub(crate) fn make_expression_children_unique(ir: &mut IrFile, root: ExprId) {
-    fn clone_use(ir: &mut IrFile, source: ExprId) -> ExprId {
+    let _ = make_expression_children_unique_tracked(ir, root);
+}
+
+/// As [`make_expression_children_unique`], returning every `(source, clone)` identity so backend
+/// side tables can copy their exact per-expression contracts instead of inferring them again.
+pub(crate) fn make_expression_children_unique_tracked(
+    ir: &mut IrFile,
+    root: ExprId,
+) -> Vec<(ExprId, ExprId)> {
+    fn clone_use(ir: &mut IrFile, source: ExprId, clones: &mut Vec<(ExprId, ExprId)>) -> ExprId {
         let mut expression = ir.exprs[source as usize].clone();
-        remap_direct_children(&mut expression, |child| clone_use(ir, child));
+        remap_direct_children(&mut expression, |child| clone_use(ir, child, clones));
         let target = ir.add_expr(expression);
         copy_expression_facts(ir, source, target);
+        clones.push((source, target));
         target
     }
 
     crate::wide_stack::on_wide_stack(|| {
+        let mut clones = Vec::new();
         let mut expression = ir.exprs[root as usize].clone();
-        remap_direct_children(&mut expression, |child| clone_use(ir, child));
+        remap_direct_children(&mut expression, |child| clone_use(ir, child, &mut clones));
         ir.exprs[root as usize] = expression;
-    });
+        clones
+    })
 }
 
 fn map_option(value: &mut Option<ExprId>, map: &mut impl FnMut(ExprId) -> ExprId) {

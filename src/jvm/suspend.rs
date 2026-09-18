@@ -31,6 +31,8 @@ mod debug_metadata;
 mod get_or_create;
 mod hoisting;
 use hoisting::hoist_suspensions;
+mod spill_layout;
+use spill_layout::{suspension_points_in_order, SpillLayout};
 mod statement_normalization;
 mod value_liveness;
 
@@ -172,10 +174,11 @@ fn trace_residual_parents(ir: &IrFile, expression: ExprId) {
 /// name (e.g. `SKt`) — the continuation class for `bar` is `SKt$bar$1`. Returns `false` (skip the whole
 /// file, never miscompile) on any suspend shape this pass can't yet transform.
 #[must_use]
-pub fn lower_suspend(
+pub(crate) fn lower_suspend(
     ir: &mut IrFile,
     facade: &str,
     continuation_metadata: &mut ContinuationMetadataMap,
+    default_call_operands: &mut crate::jvm::default_call_operands::DefaultCallOperands,
 ) -> bool {
     realize_safe_coroutine_points(ir);
     let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
@@ -207,7 +210,15 @@ pub fn lower_suspend(
         // authoritative keys used by every later coroutine phase.
         if let (Some(b), None) = (body, forward) {
             if expr_calls_suspend(ir, b, &suspend_set) {
-                crate::ir::make_expression_children_unique(ir, b);
+                let clones = crate::ir::make_expression_children_unique_tracked(ir, b);
+                for (source, target) in clones {
+                    let IrExpr::Call { args, .. } = &ir.exprs[target as usize] else {
+                        continue;
+                    };
+                    if !default_call_operands.clone_call(source, target, args) {
+                        return false;
+                    }
+                }
             }
         }
         // Capture the per-suspension lexical scope lists BEFORE splice/hoist reshape the body:
@@ -403,7 +414,9 @@ pub fn lower_suspend(
             // callee and return its `Object` result directly. No state machine, no continuation class —
             // exactly kotlinc's tail-call optimization.
             let cont = ir.add_expr(IrExpr::GetValue(p_old));
-            append_continuation(ir, call, cont);
+            if !append_continuation(ir, call, cont, default_call_operands) {
+                return false;
+            }
             // Checked expression bodies carry one source-oriented grouping block around the actual
             // statements. Normalize that transparent wrapper now that the forward decision has been
             // made; the call id remains stable and `make_forward_body` can rewrite the function's
@@ -440,6 +453,7 @@ pub fn lower_suspend(
                 pre_splice_scopes.remove(&fid),
                 &suspension_lines,
                 continuation_metadata,
+                default_call_operands,
             ) {
                 return false;
             }
@@ -455,12 +469,13 @@ pub fn lower_suspend(
             field_base,
             &orig_rets,
             pre_splice_scopes.remove(&fid),
+            default_call_operands,
         ) {
             return false;
         }
     }
     finalize_suspend_bridges(ir);
-    true
+    default_call_operands.synchronize(ir)
 }
 
 /// Canonicalize `try { body } catch { arms } finally { cleanup }` as an inner `try/catch` wrapped by
@@ -2094,35 +2109,60 @@ fn default_suspend_continuation_index(params: &[Ty]) -> Option<usize> {
 /// `MethodCall`) — the CPS parameter the callee now expects. For a cross-unit `Callee::Static` (resolved
 /// by its logical signature), also rewrite the descriptor to the physical CPS form so the emitted
 /// `invokestatic` matches the callee. Returns the (unchanged) `ExprId`.
-fn append_continuation(ir: &mut IrFile, call_e: ExprId, cont: ExprId) -> ExprId {
+fn append_continuation(
+    ir: &mut IrFile,
+    call_e: ExprId,
+    cont: ExprId,
+    default_call_operands: &mut crate::jvm::default_call_operands::DefaultCallOperands,
+) -> bool {
     crate::trace_compiler!(
         "suspend",
         "append continuation call={call_e} continuation={cont} node={:?}",
         ir.exprs.get(call_e as usize),
     );
+    let planned_index = match default_call_operands.insert_continuation(call_e, cont) {
+        Ok(index) => index,
+        Err(()) => {
+            crate::trace_compiler!(
+                "suspend",
+                "append continuation BAIL: default operand plan has no ABI suffix call={call_e}"
+            );
+            return false;
+        }
+    };
     match &mut ir.exprs[call_e as usize] {
         IrExpr::Call {
             args,
-            callee: Callee::Static {
-                descriptor, name, ..
-            },
+            callee: Callee::Static { descriptor, .. },
             ..
         } => {
-            // A `suspend` method's `$default` synthetic already spells the `Continuation` in its descriptor
-            // — BEFORE the trailing mask words and marker. Insert the value at the descriptor-owned
-            // slot and leave the descriptor unchanged.
-            if name.ends_with("$default") {
+            // A selected default bridge already spells the `Continuation` in its descriptor — BEFORE
+            // the trailing mask words and marker. The recorded operand plan identifies that semantic
+            // realization without recovering it from the emitted method name.
+            if let Some(planned_index) = planned_index {
                 let Some((params, _)) = crate::jvm::ir_emit::parse_physical_method_desc(descriptor)
                 else {
-                    return call_e;
+                    crate::trace_compiler!(
+                        "suspend",
+                        "append continuation BAIL: invalid default descriptor call={call_e} descriptor={descriptor}"
+                    );
+                    return false;
                 };
                 let Some(index) = default_suspend_continuation_index(&params) else {
                     crate::trace_compiler!(
                         "suspend",
                         "default suspend call={call_e} has no continuation slot descriptor={descriptor} params={params:?}"
                     );
-                    return call_e;
+                    return false;
                 };
+                if planned_index != index || index > args.len() {
+                    crate::trace_compiler!(
+                        "suspend",
+                        "append continuation BAIL: operand-plan boundary mismatch call={call_e} planned={planned_index} descriptor={index} args={} descriptor_text={descriptor}",
+                        args.len()
+                    );
+                    return false;
+                }
                 crate::trace_compiler!(
                     "suspend",
                     "insert default continuation call={call_e} index={index} descriptor={descriptor} args_before={args:?}"
@@ -2137,12 +2177,32 @@ fn append_continuation(ir: &mut IrFile, call_e: ExprId, cont: ExprId) -> ExprId 
         // the return to `Object` (the JVM backend builds the descriptor from these `Ty`s).
         IrExpr::Call {
             args,
-            callee: Callee::CrossFile { params, ret, .. },
+            callee:
+                Callee::CrossFile {
+                    params,
+                    ret,
+                    module_default_call,
+                    ..
+                },
             ..
         } => {
-            params.push(continuation_ty());
+            if *module_default_call {
+                let Some(index) = planned_index else {
+                    return false;
+                };
+                if index > args.len() || index > params.len() {
+                    return false;
+                }
+                params.insert(index, continuation_ty());
+                args.insert(index, cont);
+            } else {
+                if planned_index.is_some() {
+                    return false;
+                }
+                params.push(continuation_ty());
+                args.push(cont);
+            }
             *ret = object_ty();
-            args.push(cont);
         }
         IrExpr::Call {
             args,
@@ -2151,6 +2211,9 @@ fn append_continuation(ir: &mut IrFile, call_e: ExprId, cont: ExprId) -> ExprId 
             },
             ..
         } => {
+            if planned_index.is_some() {
+                return false;
+            }
             if let Some((params, ret)) = params {
                 params.push(continuation_ty());
                 *ret = object_ty();
@@ -2159,8 +2222,31 @@ fn append_continuation(ir: &mut IrFile, call_e: ExprId, cont: ExprId) -> ExprId 
             }
             args.push(cont);
         }
-        IrExpr::Call { args, .. } => args.push(cont),
-        IrExpr::MethodCall { args, .. } => args.push(Some(cont)),
+        IrExpr::Call {
+            args,
+            callee: Callee::LocalDefault(_) | Callee::ClassStaticDefault { .. },
+            ..
+        } => {
+            let Some(index) = planned_index else {
+                return false;
+            };
+            if index > args.len() {
+                return false;
+            }
+            args.insert(index, cont);
+        }
+        IrExpr::Call { args, .. } => {
+            if planned_index.is_some() {
+                return false;
+            }
+            args.push(cont);
+        }
+        IrExpr::MethodCall { args, .. } => {
+            if planned_index.is_some() {
+                return false;
+            }
+            args.push(Some(cont));
+        }
         // A suspend function VALUE call (`block(a)`): the value implements `Function{N+1}`, so append the
         // continuation — the emitter picks `Function{N+1}.invoke` from the arg count. The CPS result is
         // the raw erased `Object` (COROUTINE_SUSPENDED or the boxed value): erase `ret` so the emitter
@@ -2169,13 +2255,20 @@ fn append_continuation(ir: &mut IrFile, call_e: ExprId, cont: ExprId) -> ExprId 
         IrExpr::InvokeFunction {
             args, params, ret, ..
         } => {
+            if planned_index.is_some() {
+                return false;
+            }
             *ret = object_ty();
             args.push(cont);
             params.push(continuation_ty());
         }
-        _ => {}
+        _ => {
+            if planned_index.is_some() {
+                return false;
+            }
+        }
     }
-    call_e
+    true
 }
 
 /// Whether `e`'s subtree contains any call to a suspend function (used to reject shapes this pass can't
@@ -2220,6 +2313,7 @@ fn build_state_machine(
     captured_scopes: Option<SuspensionScopes>,
     suspension_lines: &std::collections::HashMap<ExprId, (u32, u32)>,
     continuation_metadata: &mut ContinuationMetadataMap,
+    default_call_operands: &mut crate::jvm::default_call_operands::DefaultCallOperands,
 ) -> bool {
     crate::trace_compiler!(
         "suspend",
@@ -2624,8 +2718,8 @@ fn build_state_machine(
             .collect::<Vec<_>>()
     );
     let mut layout = SpillLayout::default();
-    for (call, scope) in &susp_scopes {
-        if live_calls.contains(call) {
+    for call in suspension_points_in_order(ir, b, &suspend_set) {
+        if let Some(scope) = susp_scopes.get(&call) {
             layout.add_list(&scope.values);
         }
     }
@@ -2649,6 +2743,7 @@ fn build_state_machine(
     // Flatten the body into a state graph.
     let mut flat = Flat {
         ir,
+        default_call_operands,
         suspend: &suspend_set,
         cont_v,
         r_v,
@@ -2699,15 +2794,12 @@ fn build_state_machine(
         for (state_idx, call) in resume_points.iter().enumerate() {
             let scope = &flat.scopes[call];
             let mut positions = kind_positions(&scope.values);
-            positions.sort_by_key(|&(_, _, kind, pos)| {
-                (
-                    SPILL_KIND_ORDER
-                        .iter()
-                        .position(|&entry| entry == kind)
-                        .unwrap_or(SPILL_KIND_ORDER.len()),
-                    pos,
-                )
-            });
+            // `@DebugMetadata`'s `n`/`s` lists hoist the REFERENCE spills ahead of the rest and
+            // otherwise keep the order the locals were spilled in. They are not grouped by kind:
+            // kotlinc lists `J$0` between `I$0` and `I$1` when the `long` was declared between the
+            // two `int`s. Nor do they follow the class's field layout, which groups by kind — the
+            // two orders are independent and only look alike when they agree.
+            positions.sort_by_key(|&(_, _, kind, _)| u8::from(kind != REFERENCE_SPILL_KIND));
             for (slot, _ty, kind, pos) in positions {
                 let name = scope
                     .names
@@ -2976,6 +3068,7 @@ fn build_lambda_state_machine(
     field_base: u32,
     orig_rets: &[Ty],
     captured_scopes: Option<SuspensionScopes>,
+    default_call_operands: &mut crate::jvm::default_call_operands::DefaultCallOperands,
 ) -> bool {
     let Some(b) = ir.functions[fid as usize].body else {
         return false;
@@ -3104,8 +3197,8 @@ fn build_lambda_state_machine(
         return false;
     }
     let mut layout = SpillLayout::default();
-    for (call, scope) in &susp_scopes {
-        if live_calls.contains(call) {
+    for call in suspension_points_in_order(ir, b, &suspend_set) {
+        if let Some(scope) = susp_scopes.get(&call) {
             layout.add_list(&scope.values);
         }
     }
@@ -3131,6 +3224,7 @@ fn build_lambda_state_machine(
 
     let mut flat = Flat {
         ir,
+        default_call_operands,
         suspend: &suspend_set,
         cont_v: 0, // `this`
         r_v,
@@ -3397,6 +3491,7 @@ fn build_lambda_state_machine(
 /// `label = next` transitions (see [`build_state_machine`]).
 struct Flat<'a> {
     ir: &'a mut IrFile,
+    default_call_operands: &'a mut crate::jvm::default_call_operands::DefaultCallOperands,
     suspend: &'a HashSet<u32>,
     cont_v: u32,
     r_v: u32,
@@ -3580,7 +3675,7 @@ impl Flat<'_> {
                 self.gv(idx)
             })
             .collect();
-        match &mut self.ir.exprs[point as usize] {
+        let rebound_arguments = match &mut self.ir.exprs[point as usize] {
             IrExpr::Call {
                 dispatch_receiver,
                 args,
@@ -3591,13 +3686,23 @@ impl Flat<'_> {
                     *r = it.next().expect("receiver operand was typed first");
                 }
                 *args = it.collect();
+                Some(args.clone())
             }
             IrExpr::MethodCall { receiver, args, .. } => {
                 let mut it = reads.iter().copied();
                 *receiver = it.next().expect("receiver operand was typed first");
                 *args = it.map(Some).collect();
+                None
             }
             _ => return false,
+        };
+        if let Some(arguments) = rebound_arguments {
+            if !self
+                .default_call_operands
+                .replace_operands(point, &arguments)
+            {
+                return false;
+            }
         }
         true
     }
@@ -3656,7 +3761,10 @@ impl Flat<'_> {
         };
         // Callable points receive the CPS continuation argument. An intrinsic block already embeds
         // its continuation placeholder and is intentionally unchanged by `append_continuation`.
-        append_continuation(self.ir, point, cont_arg);
+        if !append_continuation(self.ir, point, cont_arg, self.default_call_operands) {
+            self.failed = true;
+            return;
+        }
         let vv = self.fresh();
         let var = self.add(IrExpr::Variable {
             index: vv,
@@ -3931,6 +4039,11 @@ impl Flat<'_> {
             // jump into the dispatch loop. Bail those; a jump-free/suspension-free `when` binding is
             // the ordinary case and stays structural.
             if self.expr_has_loop_jump(init) || expr_calls_suspend(self.ir, init, self.suspend) {
+                crate::trace_compiler!(
+                    "suspend",
+                    "conditional suspension BAIL: hidden control in binding init={:?}",
+                    self.ir.exprs[init as usize]
+                );
                 self.failed = true;
             }
             return None;
@@ -3954,6 +4067,11 @@ impl Flat<'_> {
                 && (expr_calls_suspend(self.ir, *v, self.suspend)
                     || self.expr_jumps_to_active_frame(*v))
             {
+                crate::trace_compiler!(
+                    "suspend",
+                    "conditional suspension BAIL: hidden control in branch value={:?}",
+                    self.ir.exprs[*v as usize]
+                );
                 self.failed = true;
                 return None;
             }
@@ -5850,8 +5968,10 @@ fn spill_kind(ty: &Ty) -> char {
     }
 }
 
-/// Fixed kind order for field layout (names within a kind are positional: `L$0..`, `I$0..`).
-const SPILL_KIND_ORDER: [char; 9] = ['L', 'I', 'J', 'F', 'D', 'Z', 'C', 'B', 'S'];
+/// The spill kind of a reference local. `@DebugMetadata`'s `n`/`s` arrays list these first and keep
+/// every other spill in the order it was spilled; field layout instead groups by kind, in the
+/// first-spill order recorded by [`SpillLayout`].
+const REFERENCE_SPILL_KIND: char = 'L';
 
 /// Annotate each scope-list entry with its kind and position WITHIN that kind (kotlinc's
 /// per-suspension positional slot).
@@ -5884,64 +6004,6 @@ fn kind_positions(list: &[(u32, Ty)]) -> Vec<(u32, Ty, char, u32)> {
             (l, ty, k, pos)
         })
         .collect()
-}
-
-/// The positional spill-field layout: per-kind maxima over every suspension's scope list.
-#[derive(Clone, Default)]
-struct SpillLayout {
-    max: std::collections::HashMap<char, u32>,
-}
-
-impl SpillLayout {
-    fn add_list(&mut self, list: &[(u32, Ty)]) {
-        let mut counts: std::collections::HashMap<char, u32> = std::collections::HashMap::new();
-        for (_, ty) in list {
-            if is_rematerialized_null(ty) {
-                continue;
-            }
-            *counts.entry(spill_kind(ty)).or_insert(0) += 1;
-        }
-        for (k, c) in counts {
-            let e = self.max.entry(k).or_insert(0);
-            if c > *e {
-                *e = c;
-            }
-        }
-    }
-    /// Field index of `(kind, pos)` RELATIVE to the first spill field (caller adds `result`/`label`
-    /// offset + `field_base`).
-    fn slot(&self, kind: char, pos: u32) -> u32 {
-        let mut off = 0u32;
-        for &k in &SPILL_KIND_ORDER {
-            if k == kind {
-                return off + pos;
-            }
-            off += self.max.get(&k).copied().unwrap_or(0);
-        }
-        off + pos
-    }
-    /// `(name, field type)` for every spill field, kind-ordered (`L$0.., I$0.., …`).
-    fn fields(&self) -> Vec<(String, Ty)> {
-        let mut out = Vec::new();
-        for &k in &SPILL_KIND_ORDER {
-            let n = self.max.get(&k).copied().unwrap_or(0);
-            let ty = match k {
-                'L' => object_ty(),
-                'J' => Ty::Long,
-                'F' => Ty::Float,
-                'D' => Ty::Double,
-                'Z' => Ty::Boolean,
-                'C' => Ty::Char,
-                'B' => Ty::Byte,
-                'S' => Ty::Short,
-                _ => Ty::Int,
-            };
-            for i in 0..n {
-                out.push((format!("{k}${i}"), ty));
-            }
-        }
-        out
-    }
 }
 
 fn spill_field_ty(ty: Ty) -> Ty {

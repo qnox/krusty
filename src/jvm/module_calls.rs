@@ -7,6 +7,8 @@ use crate::jvm::inline::PropertyAccess;
 use crate::jvm::property_realizations::PropertyRealizations;
 use crate::types::TypeName;
 
+use super::default_call_operands::{DefaultCallOperand, DefaultCallOperands};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ModuleRealizationTarget {
     Callable(CallableId),
@@ -172,7 +174,7 @@ fn realize_default_arguments(
     arguments: Vec<ExprId>,
     defaults: &[u32],
     extension_receiver_parameter: Option<u32>,
-) -> Option<(Vec<crate::types::Ty>, Vec<ExprId>)> {
+) -> Option<(Vec<crate::types::Ty>, Vec<ExprId>, Vec<DefaultCallOperand>)> {
     if defaults.is_empty() {
         return None;
     }
@@ -189,6 +191,7 @@ fn realize_default_arguments(
     let mut masks = vec![0i32; logical_count.div_ceil(32).max(1)];
     let mut supplied = arguments.into_iter();
     let mut physical = Vec::with_capacity(parameters.len() + masks.len() + 1);
+    let mut plan = Vec::with_capacity(parameters.len() + masks.len() + 1);
     for (parameter, ty) in parameters.iter().copied().enumerate() {
         let parameter = u32::try_from(parameter).ok()?;
         if defaults.contains(&parameter) {
@@ -198,23 +201,30 @@ fn realize_default_arguments(
                 _ => parameter,
             } as usize;
             masks[logical / 32] |= 1i32 << (logical % 32);
-            physical.push(ir.add_expr(IrExpr::Const(crate::ir::IrConst::zero_for_value_type(ty))));
+            let placeholder =
+                ir.add_expr(IrExpr::Const(crate::ir::IrConst::zero_for_value_type(ty)));
+            physical.push(placeholder);
+            plan.push(DefaultCallOperand::synthesized(placeholder));
         } else {
-            physical.push(supplied.next()?);
+            let argument = supplied.next()?;
+            physical.push(argument);
+            plan.push(DefaultCallOperand::supplied(argument));
         }
     }
     if supplied.next().is_some() {
         return None;
     }
-    physical.extend(
-        masks
-            .iter()
-            .map(|mask| ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(*mask)))),
-    );
-    physical.push(ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null)));
+    for mask in &masks {
+        let word = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(*mask)));
+        physical.push(word);
+        plan.push(DefaultCallOperand::synthesized_abi(word));
+    }
+    let marker = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
+    physical.push(marker);
+    plan.push(DefaultCallOperand::synthesized_abi(marker));
     parameters.extend(std::iter::repeat_n(crate::types::Ty::Int, masks.len()));
     parameters.push(crate::types::Ty::obj("java/lang/Object"));
-    Some((parameters, physical))
+    Some((parameters, physical, plan))
 }
 
 fn local_default_parameters(
@@ -242,7 +252,7 @@ fn realize_local_default_arguments(
     function: crate::ir::FunId,
     defaults: &[u32],
     args: Vec<ExprId>,
-) -> Result<Vec<ExprId>, ModuleRealizationTarget> {
+) -> Result<(Vec<ExprId>, Vec<DefaultCallOperand>), ModuleRealizationTarget> {
     let parameters = local_default_parameters(ir, function)?;
     let extension_receiver_parameter = ir.extension_receiver_fns.contains(&function).then(|| {
         u32::try_from(
@@ -254,7 +264,7 @@ fn realize_local_default_arguments(
         .expect("too many context parameters")
     });
     realize_default_arguments(ir, parameters, args, defaults, extension_receiver_parameter)
-        .map(|(_, args)| args)
+        .map(|(_, args, plan)| (args, plan))
         .ok_or(ModuleRealizationTarget::Function(function))
 }
 
@@ -265,6 +275,7 @@ fn realize_local_default_arguments(
 pub(super) fn realize_default_calls(
     ir: &mut IrFile,
     stems: &[String],
+    default_call_operands: &mut DefaultCallOperands,
 ) -> Result<(), ModuleRealizationTarget> {
     for raw in 0..ir.exprs.len() {
         let replacement = match ir.exprs[raw].clone() {
@@ -273,12 +284,15 @@ pub(super) fn realize_default_calls(
                 dispatch_receiver,
                 args,
             } => {
-                let args = realize_local_default_arguments(ir, function, &defaults, args)?;
-                Some(IrExpr::Call {
-                    callee: Callee::LocalDefault(function),
-                    dispatch_receiver,
-                    args,
-                })
+                let (args, plan) = realize_local_default_arguments(ir, function, &defaults, args)?;
+                Some((
+                    IrExpr::Call {
+                        callee: Callee::LocalDefault(function),
+                        dispatch_receiver,
+                        args,
+                    },
+                    plan,
+                ))
             }
             IrExpr::Call {
                 callee:
@@ -290,12 +304,15 @@ pub(super) fn realize_default_calls(
                 dispatch_receiver,
                 args,
             } => {
-                let args = realize_local_default_arguments(ir, function, &defaults, args)?;
-                Some(IrExpr::Call {
-                    callee: Callee::ClassStaticDefault { owner, function },
-                    dispatch_receiver,
-                    args,
-                })
+                let (args, plan) = realize_local_default_arguments(ir, function, &defaults, args)?;
+                Some((
+                    IrExpr::Call {
+                        callee: Callee::ClassStaticDefault { owner, function },
+                        dispatch_receiver,
+                        args,
+                    },
+                    plan,
+                ))
             }
             IrExpr::Call {
                 callee:
@@ -328,7 +345,7 @@ pub(super) fn realize_default_calls(
                     .owner
                     .or_else(|| facade_for(callable.source, stems))
                     .ok_or(failure)?;
-                let (mut params, mut args) = realize_default_arguments(
+                let (mut params, mut args, mut plan) = realize_default_arguments(
                     ir,
                     params,
                     args,
@@ -339,26 +356,31 @@ pub(super) fn realize_default_calls(
                 if let Some(receiver) = dispatch_receiver {
                     params.insert(0, dispatch_receiver_ty.ok_or(failure)?);
                     args.insert(0, receiver);
+                    plan.insert(0, DefaultCallOperand::supplied(receiver));
                 } else if dispatch_receiver_ty.is_some() {
                     return Err(failure);
                 }
-                Some(IrExpr::Call {
-                    callee: Callee::CrossFile {
-                        facade: owner,
-                        name: format!("{physical_name}$default"),
-                        params,
-                        ret,
-                        module_target: Some(target),
-                        module_default_call: true,
+                Some((
+                    IrExpr::Call {
+                        callee: Callee::CrossFile {
+                            facade: owner,
+                            name: format!("{physical_name}$default"),
+                            params,
+                            ret,
+                            module_target: Some(target),
+                            module_default_call: true,
+                        },
+                        dispatch_receiver: None,
+                        args,
                     },
-                    dispatch_receiver: None,
-                    args,
-                })
+                    plan,
+                ))
             }
             _ => None,
         };
-        if let Some(replacement) = replacement {
+        if let Some((replacement, plan)) = replacement {
             ir.exprs[raw] = replacement;
+            default_call_operands.record(raw as ExprId, plan);
         }
     }
     Ok(())
