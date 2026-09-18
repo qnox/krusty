@@ -20,11 +20,13 @@ use crate::jvm::names::{
 use crate::kt_string::{KtString, KtStringBuf};
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 
+mod access_bridges;
 mod backend_temporaries;
 mod block_scope;
 mod bottom_values;
 mod call_operands;
 mod debug_lines;
+mod enum_entry_subclass;
 mod enum_metadata;
 mod field_write;
 mod function_debug;
@@ -5753,7 +5755,7 @@ fn emit_class(
         return emit_interface_class(ir, c, facade, env, opts, class_meta, extra);
     }
     if let Some(user_tys) = &c.enum_entry_of {
-        return emit_enum_entry_subclass(ir, c, facade, env, opts, user_tys);
+        return enum_entry_subclass::emit_enum_entry_subclass(ir, c, facade, env, opts, user_tys);
     }
     if c.prop_ref.is_some() {
         return emit_prop_ref_class(c, facade, env, opts);
@@ -6519,10 +6521,14 @@ fn emit_class(
                 .borrow()
                 .contains(&fid)
             {
-                emit_private_member_access_bridge(ir, fid, &fq_name, &mut cw, false);
+                access_bridges::emit_private_member_access_bridge(
+                    ir, fid, &fq_name, &mut cw, false,
+                );
             }
             if ir.function_reference_access_bridges.contains(&fid) {
-                emit_function_reference_access_bridge(ir, fid, &fq_name, &mut cw, false);
+                access_bridges::emit_function_reference_access_bridge(
+                    ir, fid, &fq_name, &mut cw, false,
+                );
             }
         } else {
             cw.add_abstract_method_sig(
@@ -7000,189 +7006,6 @@ fn emit_class(
         cw.seed_inner_class_names();
     }
     cw.finish()
-}
-
-/// Emit a synthesized enum-entry subclass (`Enum$ENTRY extends Enum`) for an entry with a body: a
-/// package-private `final` class with one constructor `(String name, int ordinal, <user fields>)V`
-/// that delegates to the enum's `(String,int,<user>)V` constructor, plus the entry's overriding
-/// methods. It has no fields of its own — overrides read the enum's fields via the inherited `this`.
-fn emit_enum_entry_subclass(
-    ir: &IrFile,
-    c: &crate::ir::IrClass,
-    facade: &str,
-    env: &EmitEnv,
-    opts: &EmitOptions,
-    user_tys: &[Ty],
-) -> Vec<u8> {
-    let superclass = c.superclass();
-    let fq_name = c.fq_name();
-    let signature_formatter = JvmSignatureFormatter::new(ir, env);
-    let mut cw = new_writer(&fq_name, &superclass, opts);
-    cw.set_access(0x0010 | 0x0020); // FINAL | SUPER (package-private)
-
-    // Entry-body PROPERTIES are private backing fields (read via synthesized getters, like kotlinc).
-    for field in c.fields.iter() {
-        let acc = 0x0002 | if field.is_final() { 0x0010 } else { 0 };
-        cw.add_field(acc, &field.name, &ir_type_desc(&field.ty));
-    }
-
-    // Constructor: `(String, int, <user>)V` → `super(name, ordinal, <user>)`, then the property
-    // initializers (`this.<prop> = <init>`, from `init_body`).
-    let user_jvm = jvm_tys(user_tys);
-    let ctor_params: Vec<Ty> = [Ty::String, Ty::Int]
-        .into_iter()
-        .chain(user_jvm.iter().copied())
-        .collect();
-    let ctor_words: u16 = ctor_params.iter().map(|t| slot_words(*t)).sum();
-    let mut ctor = CodeBuilder::new(1 + ctor_words);
-    ctor.aload(0);
-    let mut slot = 1u16;
-    for t in &ctor_params {
-        load(*t, slot, &mut ctor);
-        slot += slot_words(*t);
-    }
-    let super_init = cw.methodref(
-        &superclass,
-        "<init>",
-        &method_descriptor(&ctor_params, Ty::Unit),
-    );
-    let argw: i32 = ctor_params.iter().map(|t| slot_words(*t) as i32).sum();
-    ctor.invokespecial(super_init, argw, 0);
-    let mut ctor_max = 1 + ctor_words;
-    if let Some(init_body) = c.init_body {
-        let mut e = Emitter::new(ir, &mut cw, env, &fq_name, facade, Ty::Unit, [init_body]);
-        e.next_slot = 1 + ctor_words;
-        e.slots.insert(0, (0, Ty::obj(&fq_name))); // `this`
-        e.emit(init_body, &mut ctor);
-        ctor_max = e.next_slot;
-    }
-    ctor.ret_void();
-    ctor.ensure_locals(ctor_max);
-    ctor.link();
-    cw.add_method(
-        0x0000,
-        "<init>",
-        &method_descriptor(&ctor_params, Ty::Unit),
-        &ctor,
-    );
-    if let Some(defaults) = ir
-        .class_ctor_defaults(&superclass)
-        .filter(|defaults| defaults.iter().any(Option::is_some))
-    {
-        emit_ctor_default_stub_with_prefix(
-            ir,
-            &fq_name,
-            facade,
-            &[Ty::String, Ty::Int],
-            0,
-            &user_jvm,
-            defaults,
-            false,
-            0x1000,
-            &mut cw,
-            env,
-        );
-    }
-
-    // The overriding methods + synthesized property getters.
-    emit_declared_property_accessors(
-        ir,
-        c,
-        &mut cw,
-        &PropertyAccessorEmit {
-            fq_name: &fq_name,
-            facade,
-            formatter: &signature_formatter,
-            param_assertions: opts.param_assertions,
-            env,
-        },
-    );
-    let markers = property_annotation_marker_fids(ir, c);
-    for &fid in &c.methods {
-        if markers.contains(&fid) || standalone_method_is_elided(ir, fid, env) {
-            continue; // already emitted beside its property's accessors
-        }
-        // Lambda implementation helpers reparented into an enum-entry subclass remain static; only
-        // source member overrides consume an instance receiver. The ordinary class/enum writers
-        // already honor this IR bit, and entry subclasses must use the same rule.
-        let function = &ir.functions[fid as usize];
-        emit_method(ir, fid, &fq_name, facade, &mut cw, !function.is_static, env);
-        if ir.function_reference_access_bridges.contains(&fid) {
-            emit_function_reference_access_bridge(ir, fid, &fq_name, &mut cw, false);
-        }
-        if let Some(defaults) = ir.param_defaults(fid) {
-            if function.is_static {
-                emit_facade_default_stub(
-                    ir,
-                    fid,
-                    &fq_name,
-                    &mut cw,
-                    defaults,
-                    env,
-                    Ty::obj("java/lang/Object"),
-                );
-            } else {
-                emit_default_stub(ir, fid, &fq_name, facade, &mut cw, defaults, env, false);
-            }
-        }
-    }
-    // Entry-body override edges are checked and frozen in Pass 1 like ordinary class overrides.
-    // Their anonymous subclass still needs the JVM descriptor adapters derived from those edges
-    // (for example `apply(Object)` forwarding to `apply(String)`).
-    emit_bridges(ir, c, &mut cw);
-    cw.finish()
-}
-
-fn emit_function_reference_access_bridge(
-    ir: &IrFile,
-    fid: u32,
-    owner: &str,
-    cw: &mut ClassWriter,
-    owner_is_interface: bool,
-) {
-    let function = &ir.functions[fid as usize];
-    let parameters = jvm_function_params(ir, fid);
-    let result = jvm_declared_ty(&function.ret);
-    // A STATIC target — a value class's member accessor, realized over the carrier — is already
-    // callable without an instance, so the bridge takes exactly its parameters and `invokestatic`s
-    // it. An instance target keeps the owner ahead of them and a non-virtual call to the private
-    // declaration.
-    let mut bridge_parameters = Vec::with_capacity(parameters.len() + 1);
-    if !function.is_static {
-        bridge_parameters.push(Ty::obj(owner));
-    }
-    bridge_parameters.extend(parameters.iter().copied());
-    let mut code = CodeBuilder::new(bridge_parameters.iter().map(|ty| slot_words(*ty)).sum());
-    let mut slot = 0u16;
-    if !function.is_static {
-        code.aload(0);
-        slot = 1;
-    }
-    for &parameter in &parameters {
-        load(parameter, slot, &mut code);
-        slot += slot_words(parameter);
-    }
-    let descriptor = method_descriptor(&parameters, result);
-    let method = if owner_is_interface {
-        cw.interface_methodref(owner, &function.name, &descriptor)
-    } else {
-        cw.methodref(owner, &function.name, &descriptor)
-    };
-    let argument_words = parameters.iter().map(|ty| slot_words(*ty) as i32).sum();
-    if function.is_static {
-        code.invokestatic(method, argument_words, slot_words(result) as i32);
-    } else {
-        code.invokespecial(method, argument_words, slot_words(result) as i32);
-    }
-    emit_return(result, &mut code);
-    code.ensure_locals(slot.max(1));
-    code.link();
-    cw.add_method(
-        0x1019, // PUBLIC | STATIC | FINAL | SYNTHETIC
-        &format!("access${}", function.name),
-        &method_descriptor(&bridge_parameters, result),
-        &code,
-    );
 }
 
 /// Emit a synthesized property-reference singleton (`Type$prop$N extends PropertyReference1Impl`):
@@ -9527,10 +9350,12 @@ fn emit_interface_class(
                 .borrow()
                 .contains(&fid)
             {
-                emit_private_member_access_bridge(ir, fid, &fq_name, &mut cw, true);
+                access_bridges::emit_private_member_access_bridge(ir, fid, &fq_name, &mut cw, true);
             }
             if ir.function_reference_access_bridges.contains(&fid) {
-                emit_function_reference_access_bridge(ir, fid, &fq_name, &mut cw, true);
+                access_bridges::emit_function_reference_access_bridge(
+                    ir, fid, &fq_name, &mut cw, true,
+                );
             }
             // A PRIVATE default stays a plain private instance method: kotlinc gives it no bridge,
             // no holder entry, and no forwarders anywhere (measured: an interface whose only body
@@ -10116,7 +9941,7 @@ fn emit_enum_class(
                 // static call (`IncompatibleClassChangeError`).
                 emit_method(ir, fid, &fq, facade, cw, !f.is_static, env);
                 if ir.function_reference_access_bridges.contains(&fid) {
-                    emit_function_reference_access_bridge(ir, fid, &fq, cw, false);
+                    access_bridges::emit_function_reference_access_bridge(ir, fid, &fq, cw, false);
                 }
                 // A defaulted member needs its `<name>$default` synthetic here too. The enum writer is a
                 // separate path from `emit_class`, so a member declared `fun m(a: Int = 1)` on an enum
@@ -10430,63 +10255,6 @@ fn emit_enum_class(
     // in the finished table's sorted order — the same seeding every other classifier path does.
     cw.seed_inner_class_names();
     cw.finish()
-}
-
-/// Emit the Java-8 realization of a Kotlin private member used by a lexically related class.
-/// The bridge takes the semantic dispatch receiver as its leading static operand, then forwards to
-/// the already-selected declaration. No lookup or overload selection occurs here.
-fn emit_private_member_access_bridge(
-    ir: &IrFile,
-    fid: u32,
-    owner: &str,
-    cw: &mut ClassWriter,
-    owner_is_interface: bool,
-) {
-    let function = &ir.functions[fid as usize];
-    debug_assert!(!function.is_static);
-    let parameters = jvm_function_params(ir, fid);
-    let result = jvm_declared_ty(&function.ret);
-    let target_descriptor = method_descriptor(&parameters, result);
-    let mut bridge_parameters = Vec::with_capacity(parameters.len() + 1);
-    bridge_parameters.push(Ty::obj(owner));
-    bridge_parameters.extend(parameters.iter().copied());
-    let bridge_descriptor = method_descriptor(&bridge_parameters, result);
-    let bridge_name = format!("access${}", function.name);
-    let mut code = CodeBuilder::new(
-        bridge_parameters
-            .iter()
-            .map(|parameter| slot_words(*parameter))
-            .sum(),
-    );
-    code.aload(0);
-    let mut slot = 1;
-    for parameter in &parameters {
-        load(*parameter, slot, &mut code);
-        slot += slot_words(*parameter);
-    }
-    let target = if owner_is_interface {
-        cw.interface_methodref(owner, &function.name, &target_descriptor)
-    } else {
-        cw.methodref(owner, &function.name, &target_descriptor)
-    };
-    let argument_words = parameters
-        .iter()
-        .map(|parameter| slot_words(*parameter) as i32)
-        .sum();
-    code.invokespecial(target, argument_words, slot_words(result) as i32);
-    emit_return(result, &mut code);
-    code.ensure_locals(slot);
-    code.link();
-    cw.add_method(
-        if owner_is_interface {
-            0x1009 // PUBLIC | STATIC | SYNTHETIC (FINAL is illegal on an interface method)
-        } else {
-            0x1019 // PUBLIC | STATIC | FINAL | SYNTHETIC
-        },
-        &bridge_name,
-        &bridge_descriptor,
-        &code,
-    );
 }
 
 /// Emit function `fid` as a method on `owner`. `instance` = an instance method (`this` in slot 0).
