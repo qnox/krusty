@@ -198,7 +198,10 @@ fn realize_default_arguments(
                 _ => parameter,
             } as usize;
             masks[logical / 32] |= 1i32 << (logical % 32);
-            physical.push(ir.add_expr(IrExpr::Const(crate::ir::IrConst::zero_for_value_type(ty))));
+            let placeholder =
+                ir.add_expr(IrExpr::Const(crate::ir::IrConst::zero_for_value_type(ty)));
+            ir.note_synthesized_default_operand(placeholder);
+            physical.push(placeholder);
         } else {
             physical.push(supplied.next()?);
         }
@@ -206,12 +209,14 @@ fn realize_default_arguments(
     if supplied.next().is_some() {
         return None;
     }
-    physical.extend(
-        masks
-            .iter()
-            .map(|mask| ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(*mask)))),
-    );
-    physical.push(ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null)));
+    for mask in &masks {
+        let word = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(*mask)));
+        ir.note_synthesized_default_operand(word);
+        physical.push(word);
+    }
+    let marker = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
+    ir.note_synthesized_default_operand(marker);
+    physical.push(marker);
     parameters.extend(std::iter::repeat_n(crate::types::Ty::Int, masks.len()));
     parameters.push(crate::types::Ty::obj("java/lang/Object"));
     Some((parameters, physical))
