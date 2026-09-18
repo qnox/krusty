@@ -265,6 +265,8 @@ pub struct LibraryMember {
     /// Annotation class identities declared on this member. Consumers decide which annotations affect
     /// resolution/emission; the library layer only records their qualified identities.
     pub annotations: Vec<crate::types::TypeName>,
+    /// Effective return-value-use contract published by the declaration provider.
+    pub return_value_status: crate::types::ReturnValueStatus,
     /// Declared contract effects from metadata.
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
     /// Compiler-known strict-equality refinement for the `equals(Any?)` parameter.
@@ -774,6 +776,7 @@ impl LibraryMember {
             call_sig: CallSig::default(),
             context_count: 0,
             annotations: Vec::new(),
+            return_value_status: crate::types::ReturnValueStatus::Unspecified,
             contract: None,
             equality_bound: None,
             default_values: Vec::new(),
@@ -1822,6 +1825,8 @@ pub struct FunctionInfo {
     /// Annotation class identities declared on this callable. Consumers decide which annotations affect
     /// resolution/emission; the library layer only records their qualified identities.
     pub annotations: Vec<crate::types::TypeName>,
+    /// Effective return-value-use contract of this exact declaration.
+    pub return_value_status: crate::types::ReturnValueStatus,
 }
 
 /// Where an extension receiver sits among a callable's PHYSICAL parameters. Kotlin puts the leading
@@ -2039,6 +2044,7 @@ impl FunctionInfo {
             source_member: None,
             implicit_classifier_callable: None,
             annotations: Vec::new(),
+            return_value_status: crate::types::ReturnValueStatus::Unspecified,
         }
     }
 
@@ -2097,6 +2103,7 @@ impl FunctionInfo {
         candidate.flags.is_abstract = member.is_abstract();
         candidate.flags.is_final = member.is_final();
         candidate.annotations = member.annotations.clone();
+        candidate.return_value_status = member.return_value_status;
         candidate.default_values = member.default_values.clone();
         candidate.stable_declaration = member.stable_declaration;
         candidate.source_member = member.source_member;
@@ -2142,6 +2149,7 @@ impl FunctionInfo {
         member.inline = self.flags.inline;
         member.reified = self.flags.reified;
         member.annotations = self.annotations.clone();
+        member.return_value_status = self.return_value_status;
         member.visibility = self.visibility;
         member.set_suspend(self.flags.suspend);
         member.set_is_operator(self.flags.operator);

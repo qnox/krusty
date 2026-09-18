@@ -2015,6 +2015,33 @@ pub enum Visibility {
     PackagePrivate,
 }
 
+/// Kotlin's declaration-level return-value-use contract. This is a three-state semantic fact, not
+/// a boolean flag: an override may explicitly make an inherited must-use result ignorable.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum ReturnValueStatus {
+    #[default]
+    Unspecified,
+    MustUse,
+    ExplicitlyIgnorable,
+}
+
+impl ReturnValueStatus {
+    pub(crate) fn from_annotations(
+        annotations: &[TypeName],
+        owner_annotations: &[TypeName],
+    ) -> Self {
+        let ignorable_return_value = type_name("kotlin/IgnorableReturnValue");
+        let must_use_return_values = type_name("kotlin/MustUseReturnValues");
+        if annotations.contains(&ignorable_return_value) {
+            Self::ExplicitlyIgnorable
+        } else if owner_annotations.contains(&must_use_return_values) {
+            Self::MustUse
+        } else {
+            Self::Unspecified
+        }
+    }
+}
+
 /// Kotlin annotation retention after frontend resolution. `Default` is runtime retention without
 /// an explicit `@Retention` declaration; keeping it distinct lets metadata emission omit the Kotlin
 /// meta-annotation while still stamping the JVM runtime policy.

@@ -31082,6 +31082,7 @@ fun box(): String {
                         call_sig: CallSig::default(),
                         context_count: 0,
                         annotations: Vec::new(),
+                        return_value_status: crate::types::ReturnValueStatus::Unspecified,
                         contract: None,
                         equality_bound: None,
                         default_values: Vec::new(),

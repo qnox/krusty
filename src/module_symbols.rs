@@ -137,8 +137,9 @@ impl<'a> ModuleSymbols<'a> {
             .methods
             .iter()
             .flat_map(|(n, sigs)| {
-                sigs.iter()
-                    .map(move |s| lib_member(n, s, c.internal_name(), c.is_interface()))
+                sigs.iter().map(move |s| {
+                    lib_member(n, s, c.internal_name(), c.is_interface(), &c.annotations)
+                })
             })
             .collect();
         // Class-body extensions are declarations of the classifier just like ordinary methods, even
@@ -153,6 +154,7 @@ impl<'a> ModuleSymbols<'a> {
                     extension.signature(),
                     c.internal_name(),
                     c.is_interface(),
+                    &c.annotations,
                 );
                 // A member extension is an instance method carrying the extension receiver among its
                 // method parameters, AFTER the leading context parameters. Publish the same shape as
@@ -575,7 +577,13 @@ impl<'a> ModuleSymbols<'a> {
             return; // a classpath supertype — not owned by the module source
         };
         for sig in c.methods_named(name) {
-            out.push(lib_member(name, sig, c.internal_name(), c.is_interface()));
+            out.push(lib_member(
+                name,
+                sig,
+                c.internal_name(),
+                c.is_interface(),
+                &c.annotations,
+            ));
         }
         for i in c.interfaces.iter_ids() {
             self.collect_member_libs(i, name, out, seen);
@@ -651,6 +659,8 @@ impl<'a> ModuleSymbols<'a> {
                     generic.receiver.get_or_insert(declared_receiver);
                     function.callable.generic_sig = Some(Box::new(generic.clone()));
                 }
+                function.return_value_status =
+                    declared_return_value_status(&signature.annotations, &class.annotations);
                 function
             })
             .collect::<Vec<_>>();
@@ -668,6 +678,10 @@ impl<'a> ModuleSymbols<'a> {
                 Origin::Module { facade: internal },
             );
             function.source_key = None;
+            function.return_value_status = declared_return_value_status(
+                &declaration.signature().annotations,
+                &class.annotations,
+            );
             function
         }));
         let mut properties = class
@@ -807,8 +821,23 @@ impl<'a> ModuleSymbols<'a> {
 /// A user [`Signature`] as a [`LibraryMember`] — the module-source shape of a class method. Carries the
 /// source call-shape (`call_sig`) so a named / omitted-default member call resolves through the type
 /// interface.
-fn lib_member(name: &str, sig: &Signature, owner: TypeName, is_interface: bool) -> LibraryMember {
-    member_from_signature(name, sig, owner, is_interface)
+fn declared_return_value_status(
+    annotations: &[TypeName],
+    owner_annotations: &[TypeName],
+) -> crate::types::ReturnValueStatus {
+    crate::types::ReturnValueStatus::from_annotations(annotations, owner_annotations)
+}
+
+fn lib_member(
+    name: &str,
+    sig: &Signature,
+    owner: TypeName,
+    is_interface: bool,
+    owner_annotations: &[TypeName],
+) -> LibraryMember {
+    let mut member = member_from_signature(name, sig, owner, is_interface);
+    member.return_value_status = declared_return_value_status(&sig.annotations, owner_annotations);
+    member
 }
 
 pub(crate) fn member_from_signature(
@@ -825,6 +854,7 @@ pub(crate) fn member_from_signature(
     m.set_is_final(sig.is_final());
     m.set_suspend(sig.is_suspend());
     m.visibility = sig.visibility;
+    m.return_value_status = declared_return_value_status(&sig.annotations, &[]);
     m.inline = crate::libraries::InlineKind::from_flags(sig.is_inline(), sig.requires_splice());
     m.reified = sig.has_reified_type_params();
     m.call_sig = sig.call_sig();
@@ -944,6 +974,7 @@ fn fn_info(
         },
         visibility: sig.visibility,
         annotations: sig.annotations.clone(),
+        return_value_status: declared_return_value_status(&sig.annotations, &[]),
         ..FunctionInfo::plain(kind, receiver, callable)
     }
 }

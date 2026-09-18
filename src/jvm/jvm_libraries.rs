@@ -1070,6 +1070,7 @@ impl JvmLibraries {
                     is_final: function.is_final(),
                 },
                 annotations: function.annotations.clone(),
+                return_value_status: function.return_value_status,
                 ..FunctionInfo::plain(
                     if receiver.is_some() {
                         FnKind::Extension
@@ -1892,6 +1893,7 @@ impl JvmLibraries {
                     );
                     member.reified = declaration.has_reified_type_params();
                     member.annotations = declaration.annotations.clone();
+                    member.return_value_status = declaration.return_value_status;
                     member.contract = declaration.contract.clone();
                     member.equality_bound = declaration.equality_bound;
                     member.set_is_member_extension(declaration.is_extension());
@@ -4845,6 +4847,7 @@ impl JvmLibraries {
                         is_final: mf.is_final(),
                     },
                     annotations: mf.annotations.clone(),
+                    return_value_status: mf.return_value_status,
                     call_sig,
                     ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
                 });
@@ -5669,6 +5672,7 @@ impl JvmLibraries {
                                 is_final: m.is_final(),
                             },
                             annotations: m.annotations.clone(),
+                            return_value_status: m.return_value_status,
                             ..FunctionInfo::plain(FnKind::Member, Some(receiver), callable)
                         });
                         if let Some(function) = overloads.last_mut() {

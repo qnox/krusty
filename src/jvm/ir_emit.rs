@@ -755,7 +755,32 @@ fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -> u64 {
     } else {
         0
     };
-    (visibility << 1) | (modality << 4) | operator | infix | inline
+    let return_value_status = ir
+        .function_return_value_statuses
+        .get(&fid)
+        .copied()
+        .or_else(|| {
+            ir.function_overrides
+                .values()
+                .flat_map(|overrides| overrides.iter())
+                .filter(|edge| {
+                    edge.implementation_function == Some(fid)
+                        || matches!(
+                            edge.implementation,
+                            crate::fir::ResolvedFunctionOverrideTarget::Module(callable)
+                                if ir.checked_callable_functions.get(&callable) == Some(&fid)
+                        )
+                })
+                .min_by_key(|edge| edge.depth)
+                .map(|edge| edge.return_value_status)
+        })
+        .unwrap_or_default();
+    let return_value_status = match return_value_status {
+        crate::types::ReturnValueStatus::Unspecified => 0,
+        crate::types::ReturnValueStatus::MustUse => 1 << 16,
+        crate::types::ReturnValueStatus::ExplicitlyIgnorable => 2 << 16,
+    };
+    (visibility << 1) | (modality << 4) | operator | infix | inline | return_value_status
 }
 
 /// The primary constructor's parameter descriptors. Only the LEADING `ctor_param_count` fields are

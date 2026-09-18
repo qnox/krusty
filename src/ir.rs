@@ -2308,6 +2308,10 @@ pub struct IrFile {
     /// same reason [`IrClass::field_annotations`] is one: the overwhelming majority of functions
     /// carry none, and every synthesized function stays constructible without naming them.
     pub function_annotations: std::collections::HashMap<u32, DeclarationAnnotations>,
+    /// Effective source-declared return-value-use policy for a function. Inherited policies travel
+    /// on exact override edges; this sparse table owns explicit function/class annotation policy.
+    pub function_return_value_statuses:
+        std::collections::HashMap<u32, crate::types::ReturnValueStatus>,
     /// `(class, property name)` → the synthetic `get<Name>$annotations()` marker method that carries
     /// that property's annotations. The property's `JvmPropertySignature` names the marker, so
     /// emission reads its FINAL name from here (the value-class pass may have mangled it).
@@ -3039,6 +3043,8 @@ pub struct IrFunctionOverride {
     pub applied_result: Ty,
     pub implementation_parameters: Vec<Ty>,
     pub implementation_result: Ty,
+    /// Effective return-value-use contract of the implementing declaration.
+    pub return_value_status: crate::types::ReturnValueStatus,
     pub suspend: bool,
     pub depth: u32,
 }

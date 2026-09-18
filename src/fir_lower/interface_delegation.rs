@@ -304,6 +304,7 @@ fn materialize_delegation(
                             .map(|parameter| parameter.get())
                             .collect(),
                         implementation_result: member.call.result.get(),
+                        return_value_status: member.overridden.return_value_status,
                         suspend: member.call.suspend,
                         depth: 0,
                     });

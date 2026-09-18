@@ -1820,6 +1820,7 @@ pub struct ResolvedDelegatedFunctionDeclaration {
     pub parameters: Box<[ResolvedTy]>,
     pub result: ResolvedTy,
     pub interface: bool,
+    pub return_value_status: crate::types::ReturnValueStatus,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2462,6 +2463,79 @@ impl ResolvedModuleIndex {
             self.function_overrides.insert(owner, overrides).is_none(),
             "a source classifier or enum entry may publish function overrides only once"
         );
+    }
+
+    /// Close return-value-use inheritance over exact module override identities while all selected
+    /// edges are still frontend facts. A backend receives the effective status and never traverses
+    /// names, descriptors, or classpath hierarchies to recreate it.
+    pub(crate) fn finalize_function_return_value_statuses(&mut self) {
+        use crate::types::ReturnValueStatus;
+
+        fn effective(
+            target: super::ResolvedFunctionOverrideTarget,
+            edges: &[super::ResolvedFunctionOverride],
+            memo: &mut HashMap<super::ResolvedFunctionOverrideTarget, ReturnValueStatus>,
+            visiting: &mut std::collections::HashSet<super::ResolvedFunctionOverrideTarget>,
+        ) -> ReturnValueStatus {
+            if let Some(status) = memo.get(&target) {
+                return *status;
+            }
+            if !visiting.insert(target) {
+                return ReturnValueStatus::Unspecified;
+            }
+            let nearest = edges
+                .iter()
+                .filter(|edge| edge.implementation == target)
+                .map(|edge| edge.depth)
+                .min();
+            let mut statuses = nearest
+                .into_iter()
+                .flat_map(|depth| {
+                    edges
+                        .iter()
+                        .filter(move |edge| edge.implementation == target && edge.depth == depth)
+                })
+                .map(|edge| {
+                    if edge.return_value_status != ReturnValueStatus::Unspecified {
+                        edge.return_value_status
+                    } else {
+                        effective(edge.overridden, edges, memo, visiting)
+                    }
+                })
+                .filter(|status| *status != ReturnValueStatus::Unspecified)
+                .collect::<Vec<_>>();
+            statuses.sort_by_key(|status| match status {
+                ReturnValueStatus::Unspecified => 0,
+                ReturnValueStatus::MustUse => 1,
+                ReturnValueStatus::ExplicitlyIgnorable => 2,
+            });
+            statuses.dedup();
+            let status = if statuses.len() == 1 {
+                statuses[0]
+            } else {
+                ReturnValueStatus::Unspecified
+            };
+            visiting.remove(&target);
+            memo.insert(target, status);
+            status
+        }
+
+        let snapshot = self
+            .function_overrides
+            .values()
+            .flat_map(|overrides| overrides.iter().cloned())
+            .collect::<Vec<_>>();
+        let mut memo = HashMap::new();
+        for overrides in self.function_overrides.values_mut() {
+            for edge in overrides.iter_mut() {
+                edge.return_value_status = effective(
+                    edge.implementation,
+                    &snapshot,
+                    &mut memo,
+                    &mut std::collections::HashSet::new(),
+                );
+            }
+        }
     }
 
     pub fn type_alias_header(

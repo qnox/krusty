@@ -171,6 +171,13 @@ fn resolved_types(types: impl IntoIterator<Item = Ty>, what: &str) -> Box<[Resol
         .into_boxed_slice()
 }
 
+fn declaration_return_value_status(
+    annotations: &[crate::types::TypeName],
+    owner_annotations: &[crate::types::TypeName],
+) -> crate::types::ReturnValueStatus {
+    crate::types::ReturnValueStatus::from_annotations(annotations, owner_annotations)
+}
+
 fn declaration_formals(
     index: &ResolvedModuleIndex,
     declaration: crate::fir::DeclarationId,
@@ -305,6 +312,12 @@ fn publish_inherited_interface_function_plans(
                             .apply(implementation_declared.callable.ret),
                         "inherited implementation result",
                     ),
+                    return_value_status: match implementation.return_value_status {
+                        crate::types::ReturnValueStatus::Unspecified => {
+                            declared.return_value_status
+                        }
+                        status => status,
+                    },
                     suspend: implementation.flags.suspend,
                     depth: supertype.depth,
                 });
@@ -544,6 +557,7 @@ fn append_function_override_edges(
     implementation_formals: &[String],
     implementation_parameters: &[Ty],
     implementation_result: Ty,
+    implementation_return_value_status: crate::types::ReturnValueStatus,
     suspend: bool,
     hierarchy: &[crate::fir::ResolvedAppliedClassifier],
     seen: &mut HashSet<ResolvedFunctionOverrideTarget>,
@@ -631,6 +645,10 @@ fn append_function_override_edges(
                     implementation_result,
                     "overriding function result",
                 ),
+                return_value_status: match implementation_return_value_status {
+                    crate::types::ReturnValueStatus::Unspecified => declared.return_value_status,
+                    status => status,
+                },
                 suspend,
                 depth: supertype.depth,
             });
@@ -676,6 +694,7 @@ fn function_override_plans(
                 &implementation_formals,
                 &implementation_parameters,
                 implementation_result,
+                declaration_return_value_status(&implementation.annotations, &class.annotations),
                 implementation.is_suspend(),
                 hierarchy,
                 &mut seen,
@@ -798,6 +817,10 @@ fn enum_entry_override_plans(
                         &formals,
                         &parameters,
                         signature.result.get().canonical_semantic(),
+                        declaration_return_value_status(
+                            index.declaration_annotations(member),
+                            index.declaration_annotations(parent),
+                        ),
                         header.flags.has(DeclarationFlags::SUSPEND),
                         &hierarchy,
                         &mut seen,
@@ -907,6 +930,10 @@ pub(crate) fn publish_checked_local_override_plans(
                                 &implementation_formals,
                                 &parameters,
                                 signature.result.get().canonical_semantic(),
+                                declaration_return_value_status(
+                                    index.declaration_annotations(declaration),
+                                    index.declaration_annotations(classifier),
+                                ),
                                 member.flags.has(DeclarationFlags::SUSPEND),
                                 &hierarchy,
                                 &mut seen,
@@ -950,6 +977,7 @@ pub(crate) fn publish_checked_local_override_plans(
             index.publish_function_overrides(classifier, functions);
         }
     }
+    index.finalize_function_return_value_statuses();
 }
 
 pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &SymbolTable) {
@@ -990,4 +1018,5 @@ pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &Sy
         index.publish_property_overrides(entry, properties);
         index.publish_function_overrides(entry, functions);
     }
+    index.finalize_function_return_value_statuses();
 }
