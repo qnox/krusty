@@ -11,6 +11,7 @@ use crate::libraries::{EmptySymbolSource, SemanticPlatform};
 
 mod header_validation;
 mod inline_preparation;
+mod no_expect_for_actual;
 mod retained_syntax;
 pub use crate::resolve::ClassFlags as FrontendClassFlags;
 pub(crate) use crate::resolve::ClassSig as FrontendClassSig;
@@ -227,7 +228,7 @@ impl StreamedPassState {
 /// The package-qualified expect/actual match key: `(package, kind, name, ext-receiver, arity)`.
 type ExpectKey = (String, u8, String, String, usize);
 
-fn expect_key(file: &File, id: crate::ast::DeclId) -> ExpectKey {
+pub(super) fn expect_key(file: &File, id: crate::ast::DeclId) -> ExpectKey {
     let pkg = file.package.clone().unwrap_or_default();
     let (kind, name, recv, arity) = match file.decl(id) {
         crate::ast::Decl::Fun(function) => (
@@ -324,9 +325,16 @@ fn actualize_headers_and_collect_inherited_defaults(
     headers: &mut crate::fir::StreamedHeaderModule,
 ) -> (
     std::collections::HashSet<crate::fir::DeclarationId>,
+    std::collections::HashSet<crate::fir::DeclarationId>,
     Vec<crate::fir::DefaultArgumentProvider>,
 ) {
-    let inherited_defaults = crate::fir::actualized_declaration_pairs(headers)
+    let pairs = crate::fir::actualized_declaration_pairs(headers);
+    // The declarations that actualized something, which is the authority on whether an `actual`
+    // found its `expect`: this matcher compares resolved type SHAPES and follows an
+    // `actual typealias`, so it pairs `expect val S.tag: S` with `actual val String.tag: String`
+    // where a name-and-arity key cannot.
+    let actualized_targets = pairs.iter().map(|pair| pair.actual).collect();
+    let inherited_defaults = pairs
         .into_iter()
         .filter_map(|pair| {
             let source_parameters = match headers.syntax.declaration(pair.expect)?.kind {
@@ -365,7 +373,11 @@ fn actualize_headers_and_collect_inherited_defaults(
     // already authoritative for signature collection, while inherited defaults still need their
     // provider declaration long enough to become checked target-owned FIR. Removing the parser
     // declaration here forced later code to recover it by `(file, TextRange)`.
-    (crate::fir::matched_expect_declarations(headers), work)
+    (
+        crate::fir::matched_expect_declarations(headers),
+        actualized_targets,
+        work,
+    )
 }
 
 /// The compilation target a diagnostic names. krusty compiles for the JVM; when a second target
@@ -990,6 +1002,15 @@ where
         files.push(file);
     }
 
+    // Which `actual` declarations actualize nothing is a question about the SOURCE SET, so it is
+    // answered here, while every file's syntax is still live and before Pass-1 compaction. The
+    // diagnostic itself names the declaration as the reference compiler's renderer does, so it is
+    // reported once resolution has published the types it renders.
+    let unmatched_actuals = if multiplatform {
+        no_expect_for_actual::collect(&files)
+    } else {
+        Vec::new()
+    };
     assert!(checked_count <= inferred_count && inferred_count <= files.len());
     let mut pass1_headers = pass1_builder.finish();
     let source_classifiers = pass1_headers.source_classifier_names();
@@ -1050,37 +1071,39 @@ where
         diags.set_file(error.source as u32);
         diags.error(Span::new(0, 0), error.message);
     }
-    let (mut signature_default_work_items, matched_expect_declarations) = if multiplatform {
-        let (matched, defaults) =
-            actualize_headers_and_collect_inherited_defaults(&mut pass1_headers);
-        pass1_headers.exclude_declaration_subtrees(&matched);
-        // Explicit expect→actual default mappings remain valid after exclusion because their
-        // provider anchors and bounded syntax live through the rest of Pass 1. Enumerate ordinary
-        // self-owned defaults only after exclusion so a removed expect constructor cannot schedule
-        // an orphan target with no surviving signature or callable.
-        let signature_default_work_items = signature_default_work(&pass1_headers, &defaults);
-        // Actualization publishes stable expect-default providers before syntax is compacted. Once
-        // that source-set operation is complete, retain only Pass-1 signature/inline fragments.
-        if !retain_inspection_analysis {
-            for (file, _source) in files
-                .iter_mut()
-                .zip(&mut reparse_sources)
-                .take(inferred_count)
-            {
-                retained_syntax::compact(file);
-                #[cfg(test)]
+    let (mut signature_default_work_items, matched_expect_declarations, actualized_targets) =
+        if multiplatform {
+            let (matched, actualized_targets, defaults) =
+                actualize_headers_and_collect_inherited_defaults(&mut pass1_headers);
+            pass1_headers.exclude_declaration_subtrees(&matched);
+            // Explicit expect→actual default mappings remain valid after exclusion because their
+            // provider anchors and bounded syntax live through the rest of Pass 1. Enumerate ordinary
+            // self-owned defaults only after exclusion so a removed expect constructor cannot schedule
+            // an orphan target with no surviving signature or callable.
+            let signature_default_work_items = signature_default_work(&pass1_headers, &defaults);
+            // Actualization publishes stable expect-default providers before syntax is compacted. Once
+            // that source-set operation is complete, retain only Pass-1 signature/inline fragments.
+            if !retain_inspection_analysis {
+                for (file, _source) in files
+                    .iter_mut()
+                    .zip(&mut reparse_sources)
+                    .take(inferred_count)
                 {
-                    _source.released_before_collection = true;
+                    retained_syntax::compact(file);
+                    #[cfg(test)]
+                    {
+                        _source.released_before_collection = true;
+                    }
                 }
             }
-        }
-        (signature_default_work_items, matched)
-    } else {
-        (
-            signature_default_work(&pass1_headers, &[]),
-            std::collections::HashSet::new(),
-        )
-    };
+            (signature_default_work_items, matched, actualized_targets)
+        } else {
+            (
+                signature_default_work(&pass1_headers, &[]),
+                std::collections::HashSet::new(),
+                std::collections::HashSet::new(),
+            )
+        };
     let platform = if inferred_count < files.len() {
         let mut dependency_diags = DiagSink::new();
         let mut dependency_symbols =
@@ -1181,6 +1204,14 @@ where
         pass1_headers.publish_declaration_inventory(&mut index);
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
         crate::resolve::finalize_streamed_top_level_conflicts(&pass1_headers, &mut symbols, diags);
+        // An `actual` that actualizes nothing is named by the reference compiler's declaration
+        // renderer over its RESOLVED signature, so it is reported only once finalization has
+        // published one: an inferred return (`actual fun f() = 1`) is `<not determined>` before
+        // this point. The declarations themselves were selected while every file's syntax was
+        // still live.
+        if !expect_bodies_rejected {
+            no_expect_for_actual::report(&unmatched_actuals, &actualized_targets, &symbols, diags);
+        }
         // A `const val` initializer is a stable declaration dependency. Check each such bounded
         // fragment now, while Pass 1 still owns its AST and exact operator selections can be
         // consumed; retain only the folded payload before the signature graph and arenas die.

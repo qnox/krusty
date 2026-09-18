@@ -4468,6 +4468,36 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   module <name> for JVM` at the `expect` keyword, naming the `-module-name` it looked in. Tests:
   `mpp_requires_the_feature_e2e`, `expect_declaration_body_e2e`.
 
+- **An `actual` with no `expect` to actualize is an error, named by a declaration renderer.** With
+  `+MultiPlatformProjects` on, a top-level `actual` that actualizes nothing reports
+  `'<rendered declaration>' has no corresponding expected declaration` at the declaration's NAME
+  (`actual fun simple(): Int = 1` → column 12, under `simple`). krusty used to accept it and emit.
+  The message names the declaration the way the reference compiler's own renderer does — the full
+  measured grammar is in `docs/PARITY_PROTOCOL.md` — and that rendering is a HYBRID by necessity:
+  source syntax owns what the declaration WROTE (kind, name, parameter names, which parameter
+  carries `vararg` or a default, and a classifier's modifier words), while resolution owns every
+  TYPE, because an inferred return (`actual fun f() = 1` → `Int`) and a supertype named through a
+  typealias (`class ViaAlias : AliasBase()` → `: Base`) have no written form to copy. The two
+  halves are read at different TIMES: which `actual` is unmatched is a source-set question,
+  answerable only while every file's syntax is live, and the rendering is not built until Pass-1
+  signature finalization has published the types it names. Three resolved facts each need a
+  correction the naive read gets wrong: a generic callable's `Signature::params`/`ret` are ERASED
+  (its declared shape is on `GenericSig`), a `vararg` parameter's declared type is the ARRAY it
+  arrives as while the rendering names the ELEMENT, and a classifier's type parameters are stored
+  as semantic identities whose source spelling is what gets rendered. An unmatched `actual` is
+  found by ACTUALIZATION ITSELF, not by a name/arity key: that matcher compares resolved type
+  shapes and follows an `actual typealias`, so it pairs `expect val S.tag: S` with
+  `actual val String.tag: String` where a key differing on the receiver spelling cannot (reporting
+  those was a real regression the harness caught). A name/arity key stands in only where
+  resolution gave a declaration no stable identity, and for an `actual typealias`, which
+  actualization records as a type expansion rather than as a paired declaration. Remaining by design: a MEMBER `actual` (the reference compiler reports one
+  at its own name) — pinned by `a_member_actual_is_not_reported_yet`. Note the deliberate model
+  difference this check makes visible: the reference compiler rejects an `expect` and its `actual`
+  in the same module, while krusty compiles a platform module and its `dependsOn` chain as one
+  source set, so a pair in one file is matched here and unmatched there. Tests:
+  `no_expect_for_actual_e2e` — differential against the reference compiler on the same source,
+  because a rendering this detailed is exactly what a transcription gets wrong.
+
 - **Operator extensions on nullable PRIMITIVE receivers dispatch by call-site nullability.**
   `operator fun Int?.inc()`, `Long?.compareTo(Long?)`, `Int?.times(Int)` (the dispatchable set:
   `plus`/`minus`/`times`/`div`/`rem`/`compareTo`/`inc`/`dec`) are accepted and routed: a receiver
