@@ -15447,27 +15447,6 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Where a non-virtual call to an interface member must go under `-jvm-default=disable`.
-    ///
-    /// `super.f()` and a call to a private interface member both push the receiver first and then
-    /// `invokespecial` the interface. Under `disable` the interface holds no body, so the call has to
-    /// become `invokestatic <Iface>$DefaultImpls.f(LIface;…)` — the receiver already on the stack is
-    /// exactly the holder static's parameter 0. Returns `None` when the call should stay as it is.
-    fn holder_call(
-        &self,
-        owner: &str,
-        descriptor: &str,
-        current_source_body: bool,
-    ) -> Option<(String, String)> {
-        if self.jvm_default != JvmDefaultMode::Disable || !current_source_body {
-            return None;
-        }
-        let holder_descriptor = descriptor
-            .strip_prefix('(')
-            .map(|rest| format!("(L{owner};{rest}"))?;
-        Some((format!("{owner}$DefaultImpls"), holder_descriptor))
-    }
-
     fn emit_value_node(&mut self, e: u32, node: &IrExpr, code: &mut CodeBuilder) {
         match node {
             IrExpr::BottomValue { producer, .. } => {
@@ -16031,6 +16010,7 @@ impl<'a> Emitter<'a> {
                     } else {
                         self.cw.methodref(stub_owner, &stub_name, &stub_desc)
                     };
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     code.invokestatic(m, aw, physical_call_result_words(ret));
                     return;
                 }
@@ -16078,12 +16058,14 @@ impl<'a> Emitter<'a> {
                         } else {
                             self.cw.methodref(&owner, &bridge_name, &bridge_desc)
                         };
+                        debug_lines::mark_expression_start(self.ir, e, code);
                         code.invokestatic(method, aw + 1, physical_call_result_words(ret));
                     } else if let Some((holder, holder_desc)) = is_iface
                         .then(|| self.holder_call(&owner, &desc, true))
                         .flatten()
                     {
                         let m = self.cw.methodref(&holder, &name, &holder_desc);
+                        debug_lines::mark_expression_start(self.ir, e, code);
                         code.invokestatic(m, aw + 1, physical_call_result_words(ret));
                     } else {
                         let m = if is_iface {
@@ -16091,14 +16073,17 @@ impl<'a> Emitter<'a> {
                         } else {
                             self.cw.methodref(&owner, &name, &desc)
                         };
+                        debug_lines::mark_expression_start(self.ir, e, code);
                         code.invokespecial(m, aw, physical_call_result_words(ret));
                     }
                 } else if is_iface {
                     // Dispatch through an interface — `invokeinterface I.m`.
                     let m = self.cw.interface_methodref(&owner, &name, &desc);
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     code.invokeinterface(m, aw, physical_call_result_words(ret));
                 } else {
                     let m = self.cw.methodref(&owner, &name, &desc);
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     code.invokevirtual(m, aw, physical_call_result_words(ret));
                 }
             }
@@ -16150,6 +16135,7 @@ impl<'a> Emitter<'a> {
                     let m = self
                         .cw
                         .methodref(&owner, &name, &method_descriptor(&param_tys, ret));
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     code.invokestatic(m, aw, physical_call_result_words(ret));
                 }
                 Callee::ClassStatic { owner, function } => {
@@ -16181,6 +16167,7 @@ impl<'a> Emitter<'a> {
                     } else {
                         self.cw.methodref(&owner, &f.name, &descriptor)
                     };
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     code.invokestatic(method, argument_words, physical_call_result_words(ret));
                 }
                 Callee::ClassStaticDefault { owner, function } => {
@@ -16196,6 +16183,7 @@ impl<'a> Emitter<'a> {
                     let method =
                         self.cw
                             .methodref(&owner, &format!("{}$default", f.name), &descriptor);
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     code.invokestatic(method, argument_words, physical_call_result_words(ret));
                 }
                 Callee::LocalDefault(fid) => {
@@ -16213,6 +16201,7 @@ impl<'a> Emitter<'a> {
                     let m = self
                         .cw
                         .methodref(&owner, &name, &method_descriptor(&param_tys, ret));
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     code.invokestatic(m, aw, physical_call_result_words(ret));
                 }
                 Callee::Intrinsic { operation, .. } => match operation {
@@ -16506,6 +16495,7 @@ impl<'a> Emitter<'a> {
                     } else {
                         self.cw.methodref(target_owner, &name, &desc)
                     };
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     code.invokestatic(m, aw, physical_call_result_words(ret));
                 }
                 Callee::Module { .. }
@@ -16615,6 +16605,7 @@ impl<'a> Emitter<'a> {
                     } else {
                         self.cw.methodref(&owner, &name, &descriptor)
                     };
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     code.invokestatic(m, aw, slot_words(ret) as i32);
                 }
                 Callee::Virtual {
@@ -16710,6 +16701,7 @@ impl<'a> Emitter<'a> {
                                 realization.name,
                                 realization.descriptor,
                             );
+                            debug_lines::mark_expression_start(self.ir, e, code);
                             code.invokestatic(
                                 method,
                                 argument_words,
@@ -16733,9 +16725,11 @@ impl<'a> Emitter<'a> {
                         let aw: i32 = ptys.iter().map(|t| slot_words(*t) as i32).sum();
                         if interface {
                             let m = self.cw.interface_methodref(&owner, &name, &descriptor);
+                            debug_lines::mark_expression_start(self.ir, e, code);
                             code.invokeinterface(m, aw, physical_call_result_words(ret));
                         } else {
                             let m = self.cw.methodref(&owner, &name, &descriptor);
+                            debug_lines::mark_expression_start(self.ir, e, code);
                             code.invokevirtual(m, aw, physical_call_result_words(ret));
                         }
                         return;
@@ -16789,6 +16783,7 @@ impl<'a> Emitter<'a> {
                         }
                         let aw: i32 = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
                         let m = self.cw.methodref(&owner, &name, &descriptor);
+                        debug_lines::mark_expression_start(self.ir, e, code);
                         code.invokestatic(m, aw, slot_words(ret) as i32);
                         return;
                     }
@@ -16809,6 +16804,7 @@ impl<'a> Emitter<'a> {
                         }
                         let aw: i32 = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
                         let m = self.cw.methodref(&owner, &name, &descriptor);
+                        debug_lines::mark_expression_start(self.ir, e, code);
                         code.invokestatic(m, aw, slot_words(ret) as i32);
                         return;
                     }
@@ -16836,9 +16832,11 @@ impl<'a> Emitter<'a> {
                     let jvm_name = mapped_builtin_virtual_name(&owner, &name, &descriptor);
                     if interface {
                         let m = self.cw.interface_methodref(&owner, jvm_name, &descriptor);
+                        debug_lines::mark_expression_start(self.ir, e, code);
                         code.invokeinterface(m, aw, slot_words(ret) as i32);
                     } else {
                         let m = self.cw.methodref(&owner, jvm_name, &descriptor);
+                        debug_lines::mark_expression_start(self.ir, e, code);
                         code.invokevirtual(m, aw, slot_words(ret) as i32);
                     }
                 }
@@ -16883,6 +16881,7 @@ impl<'a> Emitter<'a> {
                         .flatten()
                     {
                         let m = self.cw.methodref(&holder, &name, &holder_desc);
+                        debug_lines::mark_expression_start(self.ir, e, code);
                         code.invokestatic(m, aw + 1, slot_words(ret) as i32);
                     } else {
                         let m = if interface {
@@ -16890,6 +16889,7 @@ impl<'a> Emitter<'a> {
                         } else {
                             self.cw.methodref(&owner, &name, &descriptor)
                         };
+                        debug_lines::mark_expression_start(self.ir, e, code);
                         code.invokespecial(m, aw, slot_words(ret) as i32);
                     }
                 }

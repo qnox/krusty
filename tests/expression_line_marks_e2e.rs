@@ -340,3 +340,24 @@ fn an_implicit_unit_return_after_a_finally_keeps_every_line() {
         "complete run LineNumberTable"
     );
 }
+fn a_multi_line_method_call_is_byte_identical_to_kotlinc() {
+    let src = "class Sink {\n\
+               \x20   fun take(a: Int, b: String, c: Int): Int = a + c\n\
+               }\n\
+               \n\
+               fun run(s: Sink, x: Int, y: String): Int = s.take(\n\
+               \x20   a = x,\n\
+               \x20   b = y,\n\
+               \x20   c = x + 1,\n\
+               )\n";
+    let Some(result) = common::byte_diff_against_kotlinc_cp(
+        "MultiLineMethodCall",
+        src,
+        "MultiLineMethodCallKt",
+        &[common::stdlib_jar()],
+    ) else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    result.expect("MultiLineMethodCallKt byte-identical to kotlinc");
+}
