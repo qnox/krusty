@@ -217,11 +217,11 @@ fn realize_default_arguments(
     for mask in &masks {
         let word = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(*mask)));
         physical.push(word);
-        plan.push(DefaultCallOperand::synthesized(word));
+        plan.push(DefaultCallOperand::synthesized_abi(word));
     }
     let marker = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
     physical.push(marker);
-    plan.push(DefaultCallOperand::synthesized(marker));
+    plan.push(DefaultCallOperand::synthesized_abi(marker));
     parameters.extend(std::iter::repeat_n(crate::types::Ty::Int, masks.len()));
     parameters.push(crate::types::Ty::obj("java/lang/Object"));
     Some((parameters, physical, plan))

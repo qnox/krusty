@@ -654,9 +654,9 @@ pub(super) fn realize(
                 mask_values
                     .iter()
                     .copied()
-                    .map(DefaultCallOperand::synthesized),
+                    .map(DefaultCallOperand::synthesized_abi),
             );
-            operand_plan.push(DefaultCallOperand::synthesized(marker));
+            operand_plan.push(DefaultCallOperand::synthesized_abi(marker));
             {
                 let IrExpr::Call { callee, args, .. } = &mut ir.exprs[index] else {
                     unreachable!()
@@ -674,7 +674,6 @@ pub(super) fn realize(
                     inline: callable.inline,
                 };
             }
-            default_call_operands.record(expression, operand_plan);
             publish_declared_call_params(
                 ir,
                 index as crate::ir::ExprId,
@@ -683,7 +682,9 @@ pub(super) fn realize(
                 true,
                 declared_params,
             );
-            bridge_external_result(ir, index, callable.physical_ret, semantic_ret);
+            let physical_call =
+                bridge_external_result(ir, index, callable.physical_ret, semantic_ret);
+            default_call_operands.record(physical_call, operand_plan);
             continue;
         }
         let IrExpr::Call {
@@ -958,9 +959,9 @@ fn bridge_external_result(
     index: usize,
     physical: crate::types::Ty,
     semantic: crate::types::Ty,
-) {
+) -> crate::ir::ExprId {
     if physical == semantic {
-        return;
+        return index as crate::ir::ExprId;
     }
     let call = ir.exprs[index].clone();
     let call = ir.add_expr(call);
@@ -977,6 +978,7 @@ fn bridge_external_result(
         arg: call,
         type_operand: semantic,
     };
+    call
 }
 
 /// Keep checker-selected call facts attached to the selected call when a backend boundary wraps it.

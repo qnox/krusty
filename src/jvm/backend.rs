@@ -161,7 +161,12 @@ fn run_backend_passes_after_plugins(
         .map_err(|_| SkipReason::DefaultCalls)?;
     }
     crate::jvm::shared_captures::lower_class_capture_slots(ir);
-    if !crate::jvm::suspend::lower_suspend(ir, facade, &mut facts.continuation_metadata) {
+    if !crate::jvm::suspend::lower_suspend(
+        ir,
+        facade,
+        &mut facts.continuation_metadata,
+        &mut facts.default_call_operands,
+    ) {
         return Err(SkipReason::Suspend);
     }
     crate::jvm::ir_emit::realize_lambda_impl_names(ir);
