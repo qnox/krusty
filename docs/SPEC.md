@@ -6128,6 +6128,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   immediately followed by `:` for the name parse (a genuine modifier never precedes a colon) — which also
   handles an annotated modifier-keyword name (`@Anno open: Int`). (`build840_jj1_param_soft_keyword_e2e`)
 
+- **A `super` call to a `suspend` member is refused by the CHECKER, at the `super` keyword.**
+  Threading a continuation through a NON-VIRTUAL dispatch and resuming back into it is not modeled
+  (the corpus's `coroutines/suspendFunctionAsCoroutine/superCall*`), and the project's rule for a
+  construct it does not model is to decline the source. Emitting it anyway produced
+  `invokespecial A.f:()Ljava/lang/String;` — the SOURCE descriptor, fixed when `module_calls`
+  realized the super call — against a declaration that is
+  `A.f:(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;`, so the class could not link
+  (`NoSuchMethodError: 'java.lang.String A.suspendHere()'`): an unlinkable artifact emitted with no
+  diagnostic. The refusal belongs to the phase that SELECTED the target and has its suspend shape
+  in hand. A backend guard has to rediscover that fact from a realization which no longer names it,
+  and can then only recognize the call shapes reaching one particular node: the identical source
+  with its superclass in a SIBLING FILE or in a DEPENDENCY has no same-file predeclaration to
+  recover from, and an `@Outer`-labeled ENCLOSING dispatch is wrapped in a generated bridge that is
+  not itself recorded as suspend — all three compiled and emitted the unlinkable call. One check,
+  where `ResolvedSuperCall` is built, covers every spelling and every origin. A `super` call to an
+  ORDINARY member and an ordinary virtual suspend call are both untouched: the rule keys on the
+  TARGET being suspend, not on the dispatch being non-virtual. Test:
+  `tests/suspend_super_call_refusal_e2e.rs`, which asserts the complete ordered ledger with
+  positions for the direct, parameterized, typed, labeled-enclosing, sibling-file and dependency
+  spellings, plus both negative controls.
 - **A `try` and a `return` own their own `LineNumberTable` entries.** Four rules, each measured
   against the reference compiler and each previously absent, so a debugger stepping through a
   guarded region saw the finalizer's line where the source says otherwise:
@@ -6152,7 +6172,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/expression_line_marks_e2e.rs` (a bare return, a value return and an implicit `Unit`
   return each through a `finally`, plus an explicit return whose call is a constructor) and
   `tests/try_debug_lines_e2e.rs`.
-
 - **An inline HOF lambda may call an ENCLOSING-class member (build.840 kk1).** `class H { fun f(es) =
   es.find { same(it.v, 3) }; fun same(a, b) = … }` — the inline-spliced `find` lambda calls `same`, a method
   of the enclosing class. krusty cleared `cur_class` for a spliced lambda's body (only a REAL closure
