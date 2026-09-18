@@ -42,6 +42,23 @@ impl DescriptorArityMismatch {
 }
 
 impl Emitter<'_> {
+    fn default_operand_origins(
+        &self,
+        call: u32,
+        operands: &[u32],
+        required: bool,
+    ) -> Vec<crate::jvm::default_call_operands::DefaultOperandOrigin> {
+        if let Some(plan) = self.default_call_operands.matching(call, operands) {
+            return plan.iter().map(|operand| operand.origin).collect();
+        }
+        if required || self.default_call_operands.contains(call) {
+            self.run.set_emit_error(format!(
+                "default call operand plan does not match expression {call}"
+            ));
+        }
+        vec![crate::jvm::default_call_operands::DefaultOperandOrigin::Supplied; operands.len()]
+    }
+
     /// Where a non-virtual call to an interface member must go under `-jvm-default=disable`.
     ///
     /// `super.f()` and a call to a private interface member both push the receiver first and then
@@ -121,21 +138,27 @@ impl Emitter<'_> {
     /// the next run restores the call's, which is what kotlinc records. A call that synthesizes
     /// nothing marks nothing here and takes its line at the invoke, as before.
     pub(super) fn emit_call_operands(&mut self, call: u32, ops: &[u32], code: &mut CodeBuilder) {
-        self.emit_operands_adapted(Some(call), ops, code, |_, _, _| {});
+        let origins = self.default_operand_origins(call, ops, true);
+        self.emit_operands_adapted(Some((call, &origins)), ops, code, |_, _, _| {});
     }
 
     /// Put `call`'s line in effect if `operand` opens a run of synthesized operands.
     pub(super) fn mark_synthesized_operand_run(
         &mut self,
-        call: Option<u32>,
-        operand: u32,
+        call: Option<(
+            u32,
+            &[crate::jvm::default_call_operands::DefaultOperandOrigin],
+        )>,
+        operand_index: usize,
         inside_run: &mut bool,
         code: &mut CodeBuilder,
     ) {
-        let Some(call) = call else {
+        let Some((call, origins)) = call else {
             return;
         };
-        let synthesized = self.ir.is_synthesized_default_operand(operand);
+        let synthesized = origins.get(operand_index).is_some_and(|origin| {
+            *origin == crate::jvm::default_call_operands::DefaultOperandOrigin::Synthesized
+        });
         if synthesized && !*inside_run {
             debug_lines::mark_expression_start(self.ir, call, code);
         }
@@ -153,20 +176,26 @@ impl Emitter<'_> {
         let mut index = 0usize;
         // The call owns any operand a default-argument realization synthesized for it, so its own
         // line goes back into effect at the start of each such run.
-        self.emit_operands_adapted(Some(call_expression), ops, code, |this, source, code| {
-            let parameter_index = index;
-            let expression = ops[parameter_index];
-            let target = physical[parameter_index];
-            index += 1;
-            this.adapt_physical_call_operand_for(
-                call_expression,
-                parameter_index,
-                expression,
-                source,
-                target,
-                code,
-            );
-        });
+        let origins = self.default_operand_origins(call_expression, ops, false);
+        self.emit_operands_adapted(
+            Some((call_expression, &origins)),
+            ops,
+            code,
+            |this, source, code| {
+                let parameter_index = index;
+                let expression = ops[parameter_index];
+                let target = physical[parameter_index];
+                index += 1;
+                this.adapt_physical_call_operand_for(
+                    call_expression,
+                    parameter_index,
+                    expression,
+                    source,
+                    target,
+                    code,
+                );
+            },
+        );
         Ok(())
     }
 

@@ -2587,12 +2587,6 @@ pub struct IrFile {
     /// initializer. A later assignment can target the same field with the same value, so backend
     /// storage passes must consume this linkage instead of recognizing stores by shape or spelling.
     pub(crate) property_initializer_stores: std::collections::HashSet<ExprId>,
-    /// Operands a default-argument realization synthesized for one call: the placeholder standing in
-    /// for an omitted argument, and the trailing mask/marker group. They belong to the CALL rather
-    /// than to anything the source wrote, which is what lets debug information attribute them to the
-    /// call's own line instead of the last supplied argument's. Recorded because a realized operand
-    /// vector is otherwise indistinguishable from source constants by shape.
-    pub(crate) synthesized_default_operands: std::collections::HashSet<ExprId>,
     /// Sparse `ExprId` → 1-based source line for the `LineNumberTable`: statement roots, loop
     /// updates, and the implicit `Unit` return (the block's closing-brace line, kotlinc's mapping).
     /// Absent = no line mark starts at that expression.
@@ -3660,16 +3654,6 @@ impl IrFile {
     pub fn param_defaults_stub_only(&self, fid: u32) -> bool {
         self.fn_params.get(&fid).is_some_and(|info| info.stub_only)
     }
-    /// Whether `operand` was synthesized by default-argument realization for its call.
-    pub(crate) fn is_synthesized_default_operand(&self, operand: ExprId) -> bool {
-        self.synthesized_default_operands.contains(&operand)
-    }
-
-    /// Record `operand` as synthesized by default-argument realization.
-    pub(crate) fn note_synthesized_default_operand(&mut self, operand: ExprId) {
-        self.synthesized_default_operands.insert(operand);
-    }
-
     pub fn param_names(&self, fid: u32) -> Option<&[String]> {
         Some(&self.fn_params.get(&fid)?.names)
     }

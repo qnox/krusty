@@ -277,6 +277,8 @@ pub(super) struct EmitEnv<'a> {
     /// JVM-only realizations for already-resolved current-module property operations. Kept beside
     /// the emitter rather than on common IR so a backend field/accessor choice cannot leak into FIR.
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
+    /// Per-call JVM placeholder/mask/marker plans produced during default-call realization.
+    default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
     /// File-wide `InnerClasses` candidates prepared once from stable classifier identities.
     inner_classes: crate::jvm::inner_classes::InnerClasses,
     /// `-java-parameters`: name each declared parameter in a `MethodParameters` attribute.
@@ -3795,28 +3797,35 @@ pub(crate) struct EmitMetadata<'a> {
     pub continuations: &'a crate::jvm::suspend::ContinuationMetadataMap,
 }
 
+/// Checked semantic declarations plus JVM-only realization facts consumed by class emission.
+pub(crate) struct CheckedEmitFacts<'a> {
+    pub(crate) metadata: EmitMetadata<'a>,
+    pub(crate) signature_symbols: &'a dyn BackendClassifierSource,
+    pub(crate) property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
+    pub(crate) default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
+}
+
 pub(crate) fn emit_all_with_checked_classifiers(
     ir: &IrFile,
     facade: &str,
     bodies: &dyn MethodBodies,
-    metadata: EmitMetadata<'_>,
+    facts: CheckedEmitFacts<'_>,
     opts: &EmitOptions,
     run: &EmitRun,
-    signature_symbols: &dyn BackendClassifierSource,
-    property_realizations: &crate::jvm::property_realizations::PropertyRealizations,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     let env = EmitEnv {
         bodies,
         run,
-        continuation_metadata: metadata.continuations,
-        signature_symbols,
+        continuation_metadata: facts.metadata.continuations,
+        signature_symbols: facts.signature_symbols,
         jvm_default: opts.jvm_default,
         lambda_modes: opts.lambda_modes,
         java_parameters: opts.java_parameters,
-        property_realizations,
+        property_realizations: facts.property_realizations,
+        default_call_operands: facts.default_call_operands,
         inner_classes: crate::jvm::inner_classes::InnerClasses::new(ir),
     };
-    emit_all_with_class_meta(ir, facade, &env, metadata.facade, opts, &|_| None)
+    emit_all_with_class_meta(ir, facade, &env, facts.metadata.facade, opts, &|_| None)
 }
 
 /// `class_meta` may supply per-class `@kotlin.Metadata` keyed by the class's internal name. This
@@ -13338,6 +13347,7 @@ struct Emitter<'a> {
     /// `-jvm-default`, so a call site can tell where an interface's `$default` synthetic lives.
     jvm_default: JvmDefaultMode,
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
+    default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
     owner: String,
     facade: String,
     slots: HashMap<u32, (u16, Ty)>,
@@ -13410,6 +13420,7 @@ impl<'a> Emitter<'a> {
             run: env.run,
             jvm_default: env.jvm_default,
             property_realizations: env.property_realizations,
+            default_call_operands: env.default_call_operands,
             owner: owner.to_string(),
             facade: facade.to_string(),
             slots: HashMap::new(),
@@ -18448,7 +18459,10 @@ impl<'a> Emitter<'a> {
     /// adapter; evaluation order, frame safety, temporary ownership, and cleanup remain centralized.
     fn emit_operands_adapted<F>(
         &mut self,
-        call: Option<u32>,
+        default_plan: Option<(
+            u32,
+            &[crate::jvm::default_call_operands::DefaultOperandOrigin],
+        )>,
         ops: &[u32],
         code: &mut CodeBuilder,
         mut adapt: F,
@@ -18458,8 +18472,13 @@ impl<'a> Emitter<'a> {
         let mut inside_run = false;
         if ops.iter().skip(1).any(|&o| self.records_frame(o)) {
             let temps = self.spill_to_temps(ops, code);
-            for (&(slot, t, _), &o) in temps.iter().zip(ops) {
-                self.mark_synthesized_operand_run(call, o, &mut inside_run, code);
+            for (operand_index, (&(slot, t, _), _)) in temps.iter().zip(ops).enumerate() {
+                self.mark_synthesized_operand_run(
+                    default_plan,
+                    operand_index,
+                    &mut inside_run,
+                    code,
+                );
                 load(t, slot, code);
                 adapt(self, t, code);
             }
@@ -18467,8 +18486,13 @@ impl<'a> Emitter<'a> {
                 self.release_temporary(lease);
             }
         } else {
-            for &o in ops {
-                self.mark_synthesized_operand_run(call, o, &mut inside_run, code);
+            for (operand_index, &o) in ops.iter().enumerate() {
+                self.mark_synthesized_operand_run(
+                    default_plan,
+                    operand_index,
+                    &mut inside_run,
+                    code,
+                );
                 self.emit_value(o, code);
                 adapt(self, self.value_ty(o), code);
             }
@@ -20790,18 +20814,23 @@ mod fail_soft_tests {
         let continuations = crate::jvm::suspend::ContinuationMetadataMap::default();
         let property_realizations =
             crate::jvm::property_realizations::PropertyRealizations::default();
+        let default_call_operands =
+            crate::jvm::default_call_operands::DefaultCallOperands::default();
         emit_all_with_checked_classifiers(
             ir,
             facade,
             &NoBodies,
-            EmitMetadata {
-                facade: None,
-                continuations: &continuations,
+            CheckedEmitFacts {
+                metadata: EmitMetadata {
+                    facade: None,
+                    continuations: &continuations,
+                },
+                signature_symbols: &NoClassifiers,
+                property_realizations: &property_realizations,
+                default_call_operands: &default_call_operands,
             },
             &EmitOptions::default(),
             run,
-            &NoClassifiers,
-            &property_realizations,
         )
     }
 
