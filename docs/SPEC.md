@@ -4278,6 +4278,33 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same-file). Tests: `mpp_expect_actual_e2e`; corpus `multiplatform/` 75 PASS / 0 FAIL
   (box total 2744 → 2825).
 
+- **`expect`/`actual` requires the multiplatform feature, and an `expect` declaration may not carry
+  a body.** Two independent checks, both syntactic and both measured against the reference
+  compiler. (1) Without `+MultiPlatformProjects`, every `expect`/`actual` MODIFIER is an error
+  (`'expect' and 'actual' declarations can be used only in multiplatform projects. Learn more about
+  Kotlin Multiplatform: https://kotl.in/multiplatform-setup`), reported at the keyword, members
+  included; the sentence does not vary with which modifier was written. Accepting it emitted an
+  artifact that could not link — a call to an unmatched `expect fun` was written as an
+  `invokestatic` of a method the facade does not declare. (2) An `expect` declaration that carries
+  an implementation is an error regardless of the feature, so a file without the feature gets BOTH
+  sentences, the gate first. `expected declaration cannot have a body.` covers a function with an
+  expression or block body, a property ACCESSOR with a body, an `init` block, and any of these on a
+  member of an `expect` classifier; `expected property cannot have an initializer.` covers an
+  initializer; `expected property cannot be delegated.` covers a `by` delegate. Positions are
+  measured, not derived: a top-level declaration is reported at its
+  `expect` keyword, a member at its own declaration, an accessor at its header (`get()` / `set(v)`,
+  hence `PropDecl::getter_span` and `PropAccessor::span`), an `init` block at the KEYWORD (hence
+  `File::init_block_keywords` — the block expression's own span starts at `{`), and a property
+  initializer under the INITIALIZER EXPRESSION (`expect val x: Int = 3` → column 31), and a
+  delegate under the DELEGATE EXPRESSION (`by lazy { 1 }` → under `lazy`). A secondary
+  constructor with a body inside an `expect class` is NOT reported, though an `init` block in the
+  same position is. Once any body error exists the reference compiler never reaches actualization,
+  so the unmatched-expect report is suppressed for the WHOLE compilation, not per file (measured
+  with two files: a body error in one silenced a clean unmatched `expect` in the other). An
+  unmatched `expect` with the feature ON reports `expected <name> has no actual declaration in
+  module <name> for JVM` at the `expect` keyword, naming the `-module-name` it looked in. Tests:
+  `mpp_requires_the_feature_e2e`, `expect_declaration_body_e2e`.
+
 - **Operator extensions on nullable PRIMITIVE receivers dispatch by call-site nullability.**
   `operator fun Int?.inc()`, `Long?.compareTo(Long?)`, `Int?.times(Int)` (the dispatchable set:
   `plus`/`minus`/`times`/`div`/`rem`/`compareTo`/`inc`/`dec`) are accepted and routed: a receiver
