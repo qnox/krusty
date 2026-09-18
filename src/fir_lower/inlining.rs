@@ -76,16 +76,26 @@ impl BodyLowering<'_> {
             ));
         }
         // An EXTENSION receiver is a leading physical parameter whose recorded name already carries
-        // the receiver spelling. Hand it to debug naming as the function's own name in the receiver
-        // ROLE instead, so the JVM boundary spells `$this$send` rather than escaping the `$`s of a
-        // name that was pre-spelled here.
-        let extension_receiver = self.ir.extension_receiver_fns.contains(&function);
+        // the receiver spelling, so passing it through as a value would escape its `$`s. Hand it to
+        // debug naming as the callable's own name in the extension-receiver ROLE instead.
+        //
+        // WHERE it sits is a semantic coordinate, not position zero: Kotlin signs a context
+        // extension `(contexts…, receiver, values…)`, so the receiver follows the context
+        // parameters the callable declares.
+        let extension_receiver_position =
+            self.ir.extension_receiver_fns.contains(&function).then(|| {
+                self.ir
+                    .fn_context_counts
+                    .get(&function)
+                    .copied()
+                    .unwrap_or(0)
+            });
         if let Some(names) = self.ir.param_names(function) {
             parameter_names.extend(names.iter().enumerate().map(|(position, name)| {
-                if extension_receiver && position == 0 {
+                if extension_receiver_position == Some(position) {
                     (
                         self.ir.functions[function as usize].name.clone(),
-                        IrInlineLocalRole::DispatchReceiver,
+                        IrInlineLocalRole::ExtensionReceiver,
                     )
                 } else {
                     (name.clone(), IrInlineLocalRole::Value)

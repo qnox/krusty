@@ -117,6 +117,73 @@ fn an_inline_expansions_parameters_and_receiver_are_named_spills() {
     );
 }
 
+/// A member inline EXTENSION binds both receivers at once, and Kotlin keeps them distinct: the
+/// containing class's `this` and the receiver the callable extends are different values with
+/// different debug identities. One receiver role cannot stand for the other — doing so collapsed
+/// both to `$this$send$iv`.
+#[test]
+fn a_member_inline_extension_names_both_of_its_receivers() {
+    let src = "class Box(val name: String)\n\
+               \n\
+               suspend fun fetch(v: String): String = v\n\
+               \n\
+               class Host(val prefix: String) {\n\
+               \x20   suspend inline fun Box.send(url: String): String {\n\
+               \x20       val local = prefix + url + name\n\
+               \x20       val got = fetch(local)\n\
+               \x20       return got\n\
+               \x20   }\n\
+               \x20   suspend fun run(b: Box, u: String): String = b.send(u)\n\
+               }\n";
+    let Some((_, names)) = debug_metadata_spills(src, "BothReceivers", "Host$run$1") else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    assert_eq!(
+        names,
+        ["b", "u", "this_$iv", "$this$send$iv", "url$iv", "local$iv"]
+    );
+}
+
+/// Kotlin signs a context extension `(contexts…, receiver, values…)`, so the extension receiver is
+/// the leading physical parameter only when the callable declares no `context(…)` clause. Selecting
+/// it by position zero labelled the CONTEXT parameter as the receiver and left the real one to be
+/// escaped as an ordinary value.
+#[test]
+fn a_context_parameter_does_not_displace_the_inline_receiver() {
+    let src = "class Box(val name: String)\n\
+               class Ctx(val tag: String)\n\
+               \n\
+               suspend fun fetch(v: String): String = v\n\
+               \n\
+               context(ctx: Ctx)\n\
+               suspend inline fun Box.send(url: String): String {\n\
+               \x20   val local = ctx.tag + url + name\n\
+               \x20   val got = fetch(local)\n\
+               \x20   return got + name\n\
+               }\n\
+               \n\
+               context(ctx: Ctx)\n\
+               suspend fun run(b: Box, u: String): String = b.send(u)\n";
+    let Some((_, names)) = debug_metadata_spills(src, "ContextReceiver", "ContextReceiverKt$run$1")
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    assert_eq!(
+        names,
+        [
+            "ctx",
+            "b",
+            "u",
+            "ctx$iv",
+            "$this$send$iv",
+            "url$iv",
+            "local$iv"
+        ]
+    );
+}
+
 /// `@DebugMetadata`'s `n`/`s` lists are neither the field layout nor a grouping by kind: kotlinc
 /// hoists the REFERENCE spills and then keeps the order the locals were spilled in. Declaring a
 /// `Long` between two `Int`s puts `J$0` between `I$0` and `I$1`, which no kind grouping produces —
