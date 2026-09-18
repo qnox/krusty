@@ -12854,13 +12854,11 @@ struct Emitter<'a> {
     var_types: HashMap<u32, Ty>,
     next_slot: u16,
     ret: Ty,
-    /// Stack of enclosing loops' `(continue_label, break_label)` — `break`/`continue` target the top.
-    /// Stack of enclosing loops: `(continue_label, break_label, source_label)`. A labeled
-    /// `break@l`/`continue@l` targets the entry whose `source_label == Some(l)`; an unlabeled one
-    /// targets the innermost (top).
-    /// Active loops: `(continue target, break target, source label, active-finalizer depth on
-    /// entry)`. The depth makes a `break`/`continue` able to run exactly the finalizers it leaves —
-    /// those pushed inside the loop — and no outer one.
+    /// Active loops: `(continue target, break target, checked common-IR target identity,
+    /// active-finalizer depth on entry)`. FIR checking resolves a source label to a control target;
+    /// lowering replaces its spelling with this generated identity before the backend sees it. The
+    /// depth makes a `break`/`continue` run exactly the finalizers it leaves — those pushed inside
+    /// the loop — and no outer one.
     loop_stack: Vec<(Label, Label, Option<String>, usize)>,
     /// Operand-stack verification types sitting BELOW the expression currently being emitted (an
     /// arithmetic LHS held on the stack across a branchy RHS, e.g. a data-class `hashCode` accumulator
