@@ -1045,21 +1045,10 @@ impl BodyLowering<'_> {
         } else {
             None
         };
-        // A `tailrec` LOCAL gets the same loop transform a declared one gets in `sink.rs`. It
-        // was never applied here, so `tailrec fun` inside a function kept its self-call and
-        // overflowed the stack at the depth the modifier exists to make safe.
-        //
-        // The frame's parameter COUNT is the declared one, not the IR list's. A local's IR
-        // parameters lead with its captures, and `BodySlots::first_parameter` already points past
-        // them — so counting the whole list would have the loop step write from the wrong slot.
-        // `is_self_call` compares the call's argument count against this, so a mismatch leaves the
-        // call alone rather than stepping it wrongly.
-        let declared_parameters = body
-            .parameters()
-            .len()
-            .saturating_sub(body.context_value_count() as usize);
-        let frame = tailrec
-            .then(|| TailrecFrame::of_body(function, nested.body_slots(), declared_parameters));
+        // A `tailrec` LOCAL gets the same loop transform a declared one gets in `sink.rs`. It was
+        // never applied here, so `tailrec fun` inside a function kept its self-call and overflowed
+        // the stack at the depth the modifier exists to make safe.
+        let frame = tailrec.then(|| local_tailrec_frame(nested.ir, function, nested.body_slots()));
         let callable = if let Some(frame) = frame {
             finish_tailrec_body(nested.ir, roots, frame, body_origin(body))?
         } else {
@@ -1216,4 +1205,31 @@ fn body_origin(body: &FirBody) -> crate::fir::OriginId {
         .map_or(crate::fir::OriginId::from_raw(0), |statement| {
             statement.origin
         })
+}
+
+/// The tail-call frame of a LOCAL function: a physical capture prefix, then its logical parameters.
+///
+/// A local function's IR parameter list leads with its CAPTURES — values the lifting added, which
+/// the declaration never wrote and a recursive call never passes — and `BodySlots::first_parameter`
+/// already points past them. Everything after that point is a logical parameter, in declaration
+/// order: the context parameters, the extension receiver where there is one, then the value
+/// parameters. A self-call passes exactly those, and the loop step must reassign every one of them
+/// and touch no capture.
+///
+/// Counting either side alone is what left whole source forms recursive. Taking the IR list's
+/// length writes a capture slot; taking the declaration's parameter count and subtracting the
+/// context values makes `is_self_call` compare the call's argument list against a smaller number,
+/// so a contextual local declined silently — and an extension receiver, which the IR carries as an
+/// ordinary parameter at its own position, was miscounted the same way. The difference between the
+/// two ends of the list is the one number that is right for all of them.
+fn local_tailrec_frame(
+    ir: &crate::ir::IrFile,
+    function: crate::ir::FunId,
+    slots: super::BodySlots,
+) -> TailrecFrame {
+    let logical_parameters = ir.functions[function as usize]
+        .params
+        .len()
+        .saturating_sub(slots.first_parameter as usize);
+    TailrecFrame::of_local_body(function, slots, logical_parameters)
 }

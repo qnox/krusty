@@ -4385,13 +4385,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   business. Being conservative costs only a missed rewrite, and a missed rewrite is the program that
   was compiled before.
 
-  A CONTEXT PARAMETER is still left recursing: it takes slots between the receiver and the
-  parameters, and nothing here tests that layout.
+  **A LOCAL function's frame is a physical capture prefix and then its logical parameters.** The
+  rewrite is driven from declaration lowering, and a local function reaches the IR by another path
+  that never ran it, so every `tailrec fun` inside a function kept its self-call and overflowed at
+  the depth the modifier exists to make safe. Lifting gives a local its captures as LEADING
+  parameters, and every call to it — the recursive one included — passes them; `BodySlots::
+  first_parameter` already points past them. Everything after that point is a logical parameter in
+  declaration order: the context parameters, an extension receiver where there is one, then the
+  declared value parameters. The loop reassigns exactly those and leaves the capture slots alone,
+  which is sound because a self-call's capture arguments re-read the frame's own capture
+  parameters — checked, not assumed, so a call whose prefix is anything else stays an ordinary
+  call.
+
+  Counting either end of the list alone is what left whole source forms recursive, each a normal
+  Kotlin program that kotlinc runs flat: taking the IR list's length writes a capture slot, and
+  taking the declaration's parameters minus its context values makes the self-call test compare the
+  call's whole argument list against a smaller number, so a CONTEXTUAL local declined in silence —
+  and a local EXTENSION, whose receiver the IR carries as an ordinary parameter at its own
+  position, was miscounted the same way. A capture is an implementation detail of lifting, not a
+  Kotlin reason to revoke the constant-stack contract.
   Tests: `tests/tailrec_e2e.rs` (`a_member_tailrec_runs_flat`, `an_extension_tailrec_runs_flat`,
-  `a_member_call_on_another_instance_still_recurses`, and
-  `member_and_extension_tailrec_agree_with_kotlinc`, which asks the reference compiler the same
-  questions — a `StackOverflowError` on one side and an answer on the other is the divergence it
-  reports).
+  `a_member_call_on_another_instance_still_recurses`, `a_local_tailrec_runs_flat`,
+  `a_capturing_local_tailrec_runs_flat` — read-only, mutated, and both at once —
+  `a_contextual_local_tailrec_runs_flat`, `an_extension_local_tailrec_runs_flat`, each a million
+  deep and each asking the reference compiler the same question, and
+  `member_and_extension_tailrec_agree_with_kotlinc` — a `StackOverflowError` on one side and an
+  answer on the other is the divergence they report).
 
 - **A `return` is a tail position wherever it stands.** `tailrec` rewrites a tail self-call into a
   loop step, and the tail positions of a function are not only its last expression: nothing of the

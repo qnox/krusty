@@ -413,14 +413,7 @@ fun box(): String {\n\
 /// The rewrite is driven from the declaration lowering in `sink.rs`, and a local function reaches
 /// the IR by another path that never ran it — so `tailrec fun` inside a function kept its self-call
 /// and overflowed the stack at the depth the modifier exists to make safe. kotlinc runs all of
-/// these flat.
-///
-/// A local whose self-call carries CAPTURES is still left recursing, and the arity check is what
-/// says so rather than a rule written here: a local's IR parameters lead with its captures while
-/// `BodySlots::first_parameter` points past them, so the frame counts the DECLARED parameters and
-/// `is_self_call` rejects a call whose argument count includes the captures. That leaves the call
-/// alone instead of stepping it from the wrong slot — the failure mode is a missed optimization,
-/// never a wrong value. `a_local_tailrec_that_captures_is_left_recursing` pins that boundary.
+/// these flat, and so does krusty now, for every shape a local declaration can have.
 ///
 /// Every expectation is kotlinc's, taken by compiling and running the same `box()` under it.
 #[test]
@@ -444,21 +437,89 @@ fun box(): String {\n\
     assert_eq!(out, "OK");
 }
 
-/// The boundary: a local `tailrec` that CAPTURES is left recursing rather than stepped wrongly.
+/// A local `tailrec` that CAPTURES, at the depth the modifier exists for.
 ///
-/// This is not an aspiration — it is what the arity check produces, and the test states it so the
-/// next change to the frame layout has to confront it. A million deep would overflow, so the depth
-/// here is one a recursive call survives: the point is that the answer is RIGHT, not that the stack
-/// is flat.
+/// A capture is an implementation detail of lifting, not a Kotlin reason to revoke the
+/// constant-stack contract: the IR parameter list leads with the captured values, and the loop must
+/// leave those slots exactly as they are while reassigning every logical parameter after them. A
+/// frame that counted the whole list would write a capture; one that counted the declaration alone
+/// declined the rewrite and overflowed here. Both a READ-ONLY capture and a MUTATED one are
+/// covered, because the second is the one a wrong slot write would corrupt silently.
 #[test]
-fn a_local_tailrec_that_captures_is_left_recursing() {
-    const SRC: &str = "fun test(): Int {\n\
+fn a_capturing_local_tailrec_runs_flat() {
+    const SRC: &str = "fun mutated(): Int {\n\
     var seen = 0\n\
     tailrec fun go(n: Int) { if (n > 0) { seen = seen + 1; go(n - 1) } }\n\
-    go(1000)\n\
+    go(1000000)\n\
     return seen\n\
 }\n\
-fun box(): String = if (test() == 1000) \"OK\" else \"fail \" + test()\n";
-    let out = run(SRC);
-    assert_eq!(out, "OK");
+fun readOnly(): Int {\n\
+    val step = 2\n\
+    tailrec fun go(n: Int, acc: Int): Int = if (n == 0) acc else go(n - 1, acc + step)\n\
+    return go(1000000, 0)\n\
+}\n\
+fun both(): Int {\n\
+    val step = 3\n\
+    var calls = 0\n\
+    tailrec fun go(n: Int, acc: Int): Int {\n\
+        calls = calls + 1\n\
+        return if (n == 0) acc else go(n - 1, acc + step)\n\
+    }\n\
+    val total = go(1000000, 0)\n\
+    return if (calls == 1000001) total else -1\n\
+}\n\
+fun box(): String {\n\
+    if (mutated() != 1000000) return \"fail mutated: \" + mutated()\n\
+    if (readOnly() != 2000000) return \"fail readOnly: \" + readOnly()\n\
+    if (both() != 3000000) return \"fail both: \" + both()\n\
+    return \"OK\"\n\
+}\n";
+    let reference = common::kotlinc_box_result(SRC);
+    let krusty = run(SRC);
+    assert_eq!(krusty, reference, "krusty and kotlinc disagree");
+    assert_eq!(krusty, "OK");
+}
+
+/// A CONTEXTUAL local `tailrec`: its context parameters are logical parameters the recursive call
+/// carries, and the loop has to rebind them like any other.
+///
+/// Subtracting them from the frame's count made `is_self_call` compare the call's whole argument
+/// list against a smaller number, so the rewrite declined in silence and the function overflowed.
+/// The result is context-sensitive on purpose — dropping or misplacing the implicit argument gives
+/// a different number, not just a deeper stack.
+#[test]
+fn a_contextual_local_tailrec_runs_flat() {
+    const SRC: &str = "// LANGUAGE: +ContextParameters\n\
+class Step(val value: Int)\n\
+\n\
+context(step: Step)\n\
+fun run(): String {\n\
+    context(current: Step)\n\
+    tailrec fun go(n: Int, acc: Int): Int =\n\
+        if (n == 0) acc + current.value else go(n - 1, acc + 1)\n\
+    return if (go(1000000, 0) == 1000007) \"OK\" else \"FAIL \" + go(1000000, 0)\n\
+}\n\
+\n\
+fun box(): String = with(Step(7)) { run() }\n";
+    let reference = common::kotlinc_box_result(SRC);
+    let krusty = run(SRC);
+    assert_eq!(krusty, reference, "krusty and kotlinc disagree");
+    assert_eq!(krusty, "OK");
+}
+
+/// A local EXTENSION `tailrec`: the receiver is an ordinary parameter at its own position in the
+/// IR list, so the loop carries it like any other — reassigned from the recursive call's own
+/// receiver operand, not left at its entry value.
+#[test]
+fn an_extension_local_tailrec_runs_flat() {
+    const SRC: &str = "fun test(): Int {\n\
+    tailrec fun Int.go(acc: Int): Int =\n\
+        if (this == 0) acc else (this - 1).go(acc + 1)\n\
+    return 1000000.go(7)\n\
+}\n\
+fun box(): String = if (test() == 1000007) \"OK\" else \"FAIL \" + test()\n";
+    let reference = common::kotlinc_box_result(SRC);
+    let krusty = run(SRC);
+    assert_eq!(krusty, reference, "krusty and kotlinc disagree");
+    assert_eq!(krusty, "OK");
 }
