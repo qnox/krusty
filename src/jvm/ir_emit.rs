@@ -13378,7 +13378,10 @@ struct Emitter<'a> {
     /// Stack of enclosing loops: `(continue_label, break_label, source_label)`. A labeled
     /// `break@l`/`continue@l` targets the entry whose `source_label == Some(l)`; an unlabeled one
     /// targets the innermost (top).
-    loop_stack: Vec<(Label, Label, Option<String>)>,
+    /// Active loops: `(continue target, break target, source label, active-finalizer depth on
+    /// entry)`. The depth makes a `break`/`continue` able to run exactly the finalizers it leaves —
+    /// those pushed inside the loop — and no outer one.
+    loop_stack: Vec<(Label, Label, Option<String>, usize)>,
     /// Operand-stack verification types sitting BELOW the expression currently being emitted (an
     /// arithmetic LHS held on the stack across a branchy RHS, e.g. a data-class `hashCode` accumulator
     /// `result*31 + <branchy nullable-field hash>`). Prepended to every recorded stack-map frame's stack
@@ -14390,7 +14393,8 @@ impl<'a> Emitter<'a> {
                 } else {
                     start
                 };
-                self.loop_stack.push((bottom, end, label.clone()));
+                self.loop_stack
+                    .push((bottom, end, label.clone(), self.return_finalizers.len()));
                 let enclosing_terminal_target = self.terminal_statement_target.replace(bottom);
                 let retained_body_scope = if post_test {
                     match self.ir.expr(body).clone() {
@@ -14446,16 +14450,8 @@ impl<'a> Emitter<'a> {
                 self.frame(end, vec![], code);
                 self.bind(end, code);
             }
-            IrExpr::Break { label } => {
-                let (_, end) = self.loop_target(&label);
-                self.frame(end, vec![], code);
-                code.goto(end);
-            }
-            IrExpr::Continue { label } => {
-                let (cont, _) = self.loop_target(&label);
-                self.frame(cont, vec![], code);
-                code.goto(cont);
-            }
+            IrExpr::Break { label } => self.emit_loop_transfer(&label, true, code),
+            IrExpr::Continue { label } => self.emit_loop_transfer(&label, false, code),
             other => {
                 self.emit_discarding_node(e, &other, code);
             }
@@ -15481,13 +15477,11 @@ impl<'a> Emitter<'a> {
             // `break`/`continue` are `Nothing`-typed: in value position (e.g. `x ?: break`) they diverge
             // — emit the jump and push nothing; the consuming branch is dead past this point.
             IrExpr::Break { label } => {
-                let (_, end) = self.loop_target(label);
-                code.goto(end);
+                self.emit_loop_transfer(label, true, code);
                 return;
             }
             IrExpr::Continue { label } => {
-                let (cont, _) = self.loop_target(label);
-                code.goto(cont);
+                self.emit_loop_transfer(label, false, code);
                 return;
             }
             IrExpr::Const(c) => match c {
@@ -19325,7 +19319,9 @@ impl<'a> Emitter<'a> {
     /// The loop label a branch body jumps to when it does nothing else.
     ///
     /// `None` unless the body IS a `break` or `continue` — one that also computed something would
-    /// have to emit that first, and the jump could then not be fused into the condition.
+    /// have to emit that first, and the jump could then not be fused into the condition. Leaving a
+    /// `try` counts as computing something: the transfer runs every `finally` it leaves, so a fused
+    /// jump would skip them.
     fn loop_jump_target(&self, body: u32) -> Option<Label> {
         let mut node = self.ir.expr(body);
         if let IrExpr::Block { stmts, value } = node {
@@ -19337,11 +19333,16 @@ impl<'a> Emitter<'a> {
             }
             node = self.ir.expr(*only);
         }
-        match node {
-            IrExpr::Break { label } => Some(self.loop_target(label).1),
-            IrExpr::Continue { label } => Some(self.loop_target(label).0),
-            _ => None,
+        let (label, brk) = match node {
+            IrExpr::Break { label } => (label, true),
+            IrExpr::Continue { label } => (label, false),
+            _ => return None,
+        };
+        let (cont, end, depth) = self.loop_transfer_target(label);
+        if self.return_finalizers.len() > depth {
+            return None;
         }
+        Some(if brk { end } else { cont })
     }
 
     fn emit_when(
@@ -19816,21 +19817,46 @@ impl<'a> Emitter<'a> {
     }
 
     /// Whether emitting `e` as a value always transfers control away (returns/throws), so control
-    /// Resolve a `break`/`continue` target to `(continue_label, break_label)`. `None` → the innermost
-    /// loop; `Some(l)` → the nearest enclosing loop carrying `l@`. Falls back to the innermost if the
-    /// label isn't found (a compilable program always has the labeled loop in scope).
-    fn loop_target(&self, label: &Option<String>) -> (Label, Label) {
+    /// The loop `label` names, as `(continue target, break target, active-finalizer depth on
+    /// entry)`. A transfer to it runs every finalizer pushed above that depth. `None` → the
+    /// innermost loop; `Some(l)` → the nearest enclosing loop carrying `l@`. Falls back to the
+    /// innermost if the label isn't found (a compilable program always has the labeled loop in
+    /// scope).
+    fn loop_transfer_target(&self, label: &Option<String>) -> (Label, Label, usize) {
         let entry = match label {
             Some(l) => self
                 .loop_stack
                 .iter()
                 .rev()
-                .find(|(_, _, sl)| sl.as_deref() == Some(l.as_str()))
+                .find(|(_, _, sl, _)| sl.as_deref() == Some(l.as_str()))
                 .or_else(|| self.loop_stack.last()),
             None => self.loop_stack.last(),
         };
-        let (cont, end, _) = entry.expect("break/continue outside loop");
-        (*cont, *end)
+        let (cont, end, _, depth) = entry.expect("break/continue outside loop");
+        (*cont, *end, *depth)
+    }
+
+    /// Leave the loop `label` names, running every `finally` between here and it first.
+    ///
+    /// Kotlin executes a finalizer when control leaves its `try` by ANY route, not only by `return`.
+    /// The finalizers above the loop's entry depth are exactly the ones this transfer leaves; an
+    /// outer one belongs to a `try` the loop is nested in and must not run. A finalizer that itself
+    /// transfers overrides the pending jump, which is why the emission reports whether it survives.
+    fn emit_loop_transfer(&mut self, label: &Option<String>, brk: bool, code: &mut CodeBuilder) {
+        let (cont, end, depth) = self.loop_transfer_target(label);
+        let target = if brk { end } else { cont };
+        if self.return_finalizers.len() > depth {
+            // kotlinc closes the protected region on a transfer that leaves a `try` with a `nop`,
+            // so the region ends at an instruction of its own rather than at the first byte of the
+            // finalizer copy that follows — the same boundary rule as the `nop` that opens it.
+            code.nop();
+        }
+        let survives = self.emit_transfer_finalizers(depth, code);
+        if survives {
+            self.frame(target, vec![], code);
+            code.goto(target);
+        }
+        self.reopen_finally_segments(code);
     }
 
     /// never falls through past it. Used to suppress dead `goto`s and unreachable merge frames.
