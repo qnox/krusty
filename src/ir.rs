@@ -236,7 +236,7 @@ pub enum Callee {
         /// The call appears in a different lexical classifier and therefore needs a target-specific
         /// owner bridge; emitting `invokespecial` directly from the inner class is verifier-invalid.
         enclosing_dispatch: bool,
-        kind: crate::fir::FirSuperCallKind,
+        kind: IrSuperCallKind,
         name: String,
         params: Vec<Ty>,
         ret: Ty,
@@ -270,6 +270,15 @@ pub enum Callee {
         /// coordinate is deliberately absent.
         source: Option<crate::fir::CallableId>,
     },
+}
+
+/// Source-level member operation selected for a semantic `super` dispatch. This common-IR identity
+/// is target-neutral; backends realize the getter/setter spelling and physical invocation shape.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrSuperCallKind {
+    Function,
+    PropertyGetter,
+    PropertySetter,
 }
 
 impl Callee {
@@ -1670,18 +1679,6 @@ pub struct IrClass {
     /// their own [`IrClass`] ownership; this list is only for generated declarations whose producer
     /// explicitly owns the language-level publication contract (for example `$serializer`).
     pub published_nested_classifiers: Vec<String>,
-    /// For a class a producer GENERATED: the functions Kotlin metadata describes, in the order they
-    /// are declared. The producer owns the whole function record of such a class — a generated
-    /// function absent from this list is not described at all, which is how a non-generic
-    /// `$serializer` omits `typeParametersSerializers`. `None` on a source-declared class, whose
-    /// members are described from their own declarations; `Some([])` remains meaningful for a
-    /// generated class whose producer deliberately publishes no functions.
-    ///
-    /// Held apart from `IrFile::fn_source_order` because the two orders genuinely differ: the
-    /// backend EMITS a serializer's members in kotlinc's class-file order while kotlinc DECLARES
-    /// them in another, and `fn_source_order` drives emission. A generated PROPERTY states its own
-    /// position through [`IrProperty::source_order`], in the same numbering as this list's indices.
-    pub published_generated_functions: Option<Vec<FunId>>,
     /// Secondary constructors — each an extra `<init>(params)` that delegates to the primary
     /// constructor (`constructor(…) : this(args)`) then runs its body. Empty for most classes.
     pub secondary_ctors: Vec<IrSecondaryCtor>,
@@ -2054,7 +2051,6 @@ impl IrClass {
             is_companion: false,
             companion_class: None,
             published_nested_classifiers: Vec::new(),
-            published_generated_functions: None,
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             applied_annotations: DeclarationAnnotations::default(),
@@ -2165,7 +2161,6 @@ impl IrClass {
             is_companion: flags.has(crate::fir::DeclarationFlags::COMPANION),
             companion_class: None,
             published_nested_classifiers: Vec::new(),
-            published_generated_functions: None,
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             applied_annotations: DeclarationAnnotations::default(),
@@ -2256,8 +2251,16 @@ pub struct IrSecondaryCtor {
     pub params: Vec<Ty>,
     /// SOURCE parameter names paired with SEMANTIC (checker-resolved) types — what the class
     /// `@Metadata` `Constructor` record describes (`params` above are the erased IR realization,
-    /// which loses fun-type shapes and generic arguments). Empty for a synthesized constructor.
+    /// which loses fun-type shapes and generic arguments). This is metadata payload, not a
+    /// publication sentinel: [`Self::metadata_visibility`] alone decides whether a record exists.
     pub named_params: Vec<(String, Ty)>,
+    /// Publish this constructor in Kotlin metadata with the recorded semantic visibility. `None`
+    /// means the constructor is a target/compiler realization with no Kotlin declaration record,
+    /// independently of its parameter names, arity, descriptor, or [`Self::synthetic`] flag.
+    pub metadata_visibility: Option<crate::types::Visibility>,
+    /// Debug representation for a compiler-generated constructor. Source constructors derive their
+    /// own tables from source declarations and leave this as `None`.
+    pub generated_debug: IrGeneratedDeclarationDebug,
     /// Index into `named_params` of a `vararg` parameter, for the `Constructor` metadata record.
     pub vararg_index: Option<usize>,
     pub defaults: Vec<Option<ExprId>>,
@@ -2296,6 +2299,7 @@ pub struct IrJvmValueClassSecondaryCtor {
     pub param_defaults: Vec<bool>,
     pub vararg_index: Option<usize>,
     pub annotations: DeclarationAnnotations,
+    pub metadata_visibility: crate::types::Visibility,
     pub descriptor: String,
 }
 
@@ -2416,6 +2420,10 @@ pub struct IrFile {
     /// Guards the active-unit metadata handoff when a source is checked in several body groups.
     pub(crate) file_annotations_attached: bool,
     pub functions: Vec<IrFunction>,
+    /// Exact generated function metadata/debug contracts, keyed by semantic owning classifier.
+    /// Producers publish once; backends consume function identities without name/descriptor scans.
+    generated_member_publications:
+        std::collections::HashMap<TypeName, IrGeneratedMemberPublication>,
     /// Stable checked-FIR callable identity to its realization in this file's function arena.
     /// Common lowering publishes the edge once; checked-operation realization consumes it without
     /// name lookup or overload reconstruction.
@@ -2587,6 +2595,13 @@ pub struct IrFile {
     pub expr_source_lines: std::collections::HashMap<u32, u32>,
     /// Source end line for every lowered expression whose AST node has a source location.
     pub expr_end_lines: std::collections::HashMap<u32, u32>,
+    /// Implicit return identity → the expression body's closing source line.
+    ///
+    /// An explicit `return expression` keeps the call/return line already in effect. An
+    /// expression-bodied callable instead maps its generated return instruction to the end of the
+    /// body expression. Common lowering records that semantic distinction once; backends must not
+    /// infer it from a synthetic origin or expression shape.
+    pub(crate) implicit_return_end_lines: std::collections::HashMap<ExprId, u32>,
     /// Source names for `IrExpr::Variable` nodes included in `LocalVariableTable`.
     /// Compiler-generated temporaries are omitted.
     pub value_names: std::collections::HashMap<u32, String>,
@@ -3684,8 +3699,13 @@ impl IrFile {
 }
 
 mod debug_locals;
+mod generated_members;
 pub use debug_locals::IrLambdaOrigin;
 pub(crate) use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
+pub use generated_members::{
+    IrGeneratedDeclarationDebug, IrGeneratedFunctionMetadata, IrGeneratedFunctionMetadataScope,
+    IrGeneratedFunctionPublication, IrGeneratedMemberPublication,
+};
 mod function_parameters;
 pub use function_parameters::FnParamInfo;
 mod traversal;

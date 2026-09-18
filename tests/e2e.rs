@@ -56,6 +56,8 @@ mod arity_error_coverage_e2e;
 mod assert_intrinsic_e2e;
 #[path = "backend_rejection_coverage_e2e.rs"]
 mod backend_rejection_coverage_e2e;
+#[path = "backend_temporary_leases_e2e.rs"]
+mod backend_temporary_leases_e2e;
 #[path = "backing_field_accessor_e2e.rs"]
 mod backing_field_accessor_e2e;
 #[path = "backtick_identifier_e2e.rs"]
@@ -472,6 +474,8 @@ mod dep_resolution;
 mod dependency_property_reference_name_e2e;
 #[path = "descriptor_arity_fails_closed_e2e.rs"]
 mod descriptor_arity_fails_closed_e2e;
+#[path = "deserialize_dispatch_shape_e2e.rs"]
+mod deserialize_dispatch_shape_e2e;
 #[path = "destructure_component_extension_e2e.rs"]
 mod destructure_component_extension_e2e;
 #[path = "destructure_e2e.rs"]
@@ -574,6 +578,8 @@ mod explicit_import_shadows_same_package_e2e;
 mod expr_completeness_e2e;
 #[path = "expression_compound_assignment_e2e.rs"]
 mod expression_compound_assignment_e2e;
+#[path = "expression_line_marks_e2e.rs"]
+mod expression_line_marks_e2e;
 #[path = "ext_on_subtype_receiver_e2e.rs"]
 mod ext_on_subtype_receiver_e2e;
 #[path = "ext_receiver_tparam_binding_e2e.rs"]
@@ -1118,7 +1124,11 @@ mod object_value_inference_e2e;
 mod omitted_default_generic_overload_e2e;
 #[path = "one_armed_when_fallthrough_e2e.rs"]
 mod one_armed_when_fallthrough_e2e;
+#[path = "try_debug_lines_e2e.rs"]
+mod try_debug_lines_e2e;
 
+#[path = "declaration_debug_lines_e2e.rs"]
+mod declaration_debug_lines_e2e;
 #[path = "extension_receiver_specificity_e2e.rs"]
 mod extension_receiver_specificity_e2e;
 #[path = "int_when_switch_e2e.rs"]
@@ -1317,6 +1327,8 @@ mod secondary_ctor_this_sibling_e2e;
 mod serialization_companion_byte_parity_e2e;
 #[path = "serialization_coverage_e2e.rs"]
 mod serialization_coverage_e2e;
+#[path = "serialization_default_member_e2e.rs"]
+mod serialization_default_member_e2e;
 #[path = "serialization_krusty_only_e2e.rs"]
 mod serialization_krusty_only_e2e;
 #[path = "serialization_roundtrip_e2e.rs"]

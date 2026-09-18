@@ -1,7 +1,7 @@
 //! `krusty-ir` → JVM bytecode. The JVM backend's lowering of backend-agnostic IR maps Kotlin
 //! identities to JVM descriptors here; common IR never carries descriptors.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::backend::BackendClassifierSource;
 use crate::ir::{
@@ -20,14 +20,19 @@ use crate::jvm::names::{
 use crate::kt_string::{KtString, KtStringBuf};
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 
+mod backend_temporaries;
+mod block_scope;
 mod bottom_values;
 mod call_operands;
+mod debug_lines;
 mod enum_metadata;
 mod field_write;
+mod function_debug;
 mod inline_body_emission;
 mod interface_compatibility;
 mod member_schedule;
 mod operand_stack;
+mod return_emission;
 mod secondary_constructor;
 mod vararg;
 mod when;
@@ -1117,16 +1122,8 @@ fn build_class_metadata(
             !accessor_shaped && !data_method_names.contains(n) && !value_method_names.contains(n)
         })
         .collect();
-    // A GENERATED class states its own function record on itself: which of its members Kotlin
-    // metadata describes, and in which order. The two differ from what the class emits — a
-    // non-generic `$serializer` emits `typeParametersSerializers` but does not describe it.
-    let published = c.published_generated_functions.as_deref();
-    if let Some(described) = published {
-        declared_fids.retain(|fid| described.contains(fid));
-        declared_fids.sort_by_key(|fid| described.iter().position(|described| described == fid));
-    } else {
-        declared_fids.sort_by_key(|fid| ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX));
-    }
+    declared_fids.sort_by_key(|fid| ir.fn_source_order.get(fid).copied().unwrap_or(u32::MAX));
+    let generated_publication = ir.generated_member_publication(c.fq_name_id());
     // A VALUE-CLASS-INVOLVED MEMBER is now DESCRIBED. The writer could always produce kotlinc's exact
     // payload for one (the byte-identity tests proved it); what was missing was the READ half, and the
     // classpath value-class RETURN model supplies it — `MetadataCallFacts::value_class_ret` reports
@@ -1156,19 +1153,29 @@ fn build_class_metadata(
                 && !value_class_is_readable(ir, fq_name)
         })
     };
-    if declared_fids.iter().any(|fid| {
-        ir.vc_declared_sigs
-            .get(fid)
-            .is_some_and(|(_, params, ret)| {
-                params
-                    .iter()
-                    .chain(std::iter::once(ret))
-                    .any(mentions_undescribed_value_class)
-            })
-    }) || c
-        .properties
+    if declared_fids
         .iter()
-        .any(|p| p.getter_jvm_name.is_some() && mentions_undescribed_value_class(&p.ty))
+        .copied()
+        .chain(
+            generated_publication
+                .into_iter()
+                .flat_map(|publication| publication.functions.iter())
+                .filter(|member| member.metadata.is_some())
+                .map(|member| member.function),
+        )
+        .any(|fid| {
+            ir.vc_declared_sigs
+                .get(&fid)
+                .is_some_and(|(_, params, ret)| {
+                    params
+                        .iter()
+                        .chain(std::iter::once(ret))
+                        .any(mentions_undescribed_value_class)
+                })
+        })
+        || c.properties
+            .iter()
+            .any(|p| p.getter_jvm_name.is_some() && mentions_undescribed_value_class(&p.ty))
     {
         return None;
     }
@@ -1805,7 +1812,7 @@ fn build_class_metadata(
             .collect::<Vec<_>>()
     };
     let class_ty = Ty::obj(&c.fq_name());
-    let methods: Vec<FnMeta> = if c.is_data {
+    let inferred_methods: Vec<FnMeta> = if c.is_data {
         let field_tys: Vec<Ty> = data_component_fields.iter().map(|f| f.ty).collect();
         let mut m: Vec<FnMeta> = data_component_fields
             .iter()
@@ -2001,6 +2008,14 @@ fn build_class_metadata(
     } else {
         declared_methods()
     };
+    let mut methods = match generated_publication.map(|publication| publication.metadata_scope) {
+        Some(crate::ir::IrGeneratedFunctionMetadataScope::Exclusive) => Vec::new(),
+        Some(crate::ir::IrGeneratedFunctionMetadataScope::Additive) | None => inferred_methods,
+    };
+    let inferred_method_count = methods.len();
+    if let Some(publication) = generated_publication {
+        methods.extend(super::generated_member_metadata::functions(ir, publication));
+    }
     let type_aliases = ir
         .class_type_aliases
         .get(&c.fq_name_id())
@@ -2026,24 +2041,56 @@ fn build_class_metadata(
                 .enumerate()
                 .map(|(index, order)| (order, ClassMemberOrder::Property(index))),
         );
-        ordered.extend(
-            declared_fids
+        if !matches!(
+            generated_publication.map(|publication| publication.metadata_scope),
+            Some(crate::ir::IrGeneratedFunctionMetadataScope::Exclusive)
+        ) {
+            ordered.extend(
+                declared_fids
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(index, fid)| {
+                        (
+                            ir.fn_source_order.get(&fid).copied().unwrap_or(u32::MAX),
+                            ClassMemberOrder::Function(index),
+                        )
+                    }),
+            );
+        }
+        let generated_order_base = if matches!(
+            generated_publication.map(|publication| publication.metadata_scope),
+            Some(crate::ir::IrGeneratedFunctionMetadataScope::Exclusive)
+        ) {
+            0
+        } else {
+            ordered
                 .iter()
-                .copied()
-                .enumerate()
-                .map(|(index, fid)| {
-                    let order = match published {
-                        // The stated list's own index, in the same numbering a generated property
-                        // uses for `IrProperty::source_order`.
-                        Some(described) => described
-                            .iter()
-                            .position(|described| *described == fid)
-                            .map_or(u32::MAX, |order| order as u32),
-                        None => ir.fn_source_order.get(&fid).copied().unwrap_or(u32::MAX),
-                    };
-                    (order, ClassMemberOrder::Function(index))
-                }),
-        );
+                .map(|(order, _)| *order)
+                .chain(
+                    type_aliases
+                        .iter()
+                        .map(|alias| u32::try_from(alias.decl_order).unwrap_or(u32::MAX)),
+                )
+                .filter(|order| *order != u32::MAX)
+                .max()
+                .map_or(0, |order| order.saturating_add(1))
+        };
+        if let Some(publication) = generated_publication {
+            ordered.extend(
+                publication
+                    .functions
+                    .iter()
+                    .filter(|member| member.metadata.is_some())
+                    .enumerate()
+                    .map(|(index, _)| {
+                        (
+                            generated_order_base.saturating_add(index as u32),
+                            ClassMemberOrder::Function(inferred_method_count + index),
+                        )
+                    }),
+            );
+        }
         ordered.extend(type_aliases.iter().enumerate().map(|(index, alias)| {
             (
                 u32::try_from(alias.decl_order).unwrap_or(u32::MAX),
@@ -2154,58 +2201,16 @@ fn build_class_metadata(
         .cloned()
         .unwrap_or_default();
     let supertype_spellings = class_spellings.supertype_spellings(has_declared_superclass);
-    // DECLARED secondary constructors → `Class.constructor` records (flags 22 = public secondary),
-    // described from their recorded source names + SEMANTIC types (fun-type parameters keep their
-    // shape — `Cfg.() -> Unit` — where the erased realization is a bare `Function1`). Synthetic
-    // ctors get no record, matching kotlinc.
-    let mut secondary_ctor_shapes: Vec<SecondaryCtorShape> = c
-        .secondary_ctors
-        .iter()
-        .filter(|sc| !sc.synthetic)
-        .map(|sc| SecondaryCtorShape {
-            params: sc.named_params.clone(),
-            param_defaults: sc.defaults.iter().map(Option::is_some).collect(),
-            desc: format!(
-                "({}{}{})V",
-                sc.prefix_params
-                    .iter()
-                    .map(|&t| desc(t))
-                    .collect::<String>(),
-                sc.params.iter().map(|&t| desc(t)).collect::<String>(),
-                if sc.vc_params {
-                    "Lkotlin/jvm/internal/DefaultConstructorMarker;"
-                } else {
-                    ""
-                }
-            ),
-            sig_name: None,
-            vararg_index: sc.vararg_index,
-            annotations: sc.annotations.applications().cloned().collect(),
-        })
-        .collect();
-    secondary_ctor_shapes.extend(
-        ir.jvm_value_class_secondary_ctors
-            .get(&c.fq_name_id())
-            .into_iter()
-            .flatten()
-            .map(|constructor| SecondaryCtorShape {
-                params: constructor.params.clone(),
-                param_defaults: constructor.param_defaults.clone(),
-                desc: constructor.descriptor.clone(),
-                sig_name: Some("constructor-impl"),
-                vararg_index: constructor.vararg_index,
-                annotations: constructor.annotations.applications().cloned().collect(),
-            }),
-    );
+    let secondary_ctor_shapes = super::constructor_metadata::secondary_constructor_shapes(ir, c);
     let secondary_ctor_metas: Vec<crate::metadata::class_builder::CtorMeta> = secondary_ctor_shapes
         .iter()
         .map(|shape| crate::metadata::class_builder::CtorMeta {
             params: &shape.params,
             param_defaults: &shape.param_defaults,
-            desc: &shape.desc,
-            sig_name: shape.sig_name,
+            desc: &shape.descriptor,
+            sig_name: shape.signature_name,
             vararg_index: shape.vararg_index,
-            flags: crate::metadata::class_builder::SECONDARY_CTOR_FLAGS,
+            flags: shape.flags,
             annotations: &shape.annotations,
         })
         .collect();
@@ -2335,13 +2340,12 @@ fn class_metadata_common_shape_admitted(_ir: &IrFile, c: &crate::ir::IrClass) ->
         || c.enum_entry_of.is_some()
         || c.prop_ref.is_some()
         || c.func_ref.is_some()
-        // A DECLARED secondary constructor is described (`Class.constructor`, flags 22) from its
-        // recorded source names + semantic types; one without that record (an unmodeled synthesis
-        // path) would be published with wrong parameters, so the class declines instead. Synthetic
-        // ctors (`@Serializable` deserialization) get no record, matching kotlinc.
+        // A published secondary constructor is described from its recorded semantic parameter
+        // identities. A malformed publication contract would advertise the wrong parameter list,
+        // so the class declines instead. Unpublished target realizations carry no record.
         || c.secondary_ctors
             .iter()
-            .any(|sc| !sc.synthetic && sc.named_params.len() != sc.params.len())
+            .any(|sc| sc.metadata_visibility.is_some() && sc.named_params.len() != sc.params.len())
         || (!c.has_primary_ctor
             && c.secondary_ctors.is_empty()
             && !c.is_interface
@@ -2764,68 +2768,13 @@ fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_, '_>, cw: &mut ClassWriter)
     }
 }
 
-/// One synthesized value-class member's debug shape: `(jvm name, jvm descriptor, LocalVariableTable
-/// entries as `(name, descriptor, slot)`)`.
+/// One synthesized value-class member's JVM name, descriptor, and local-variable table entries.
 type VcDebugMethod = (String, String, Vec<(String, String, u16)>);
-
-/// Attach kotlinc's `LineNumberTable` + `LocalVariableTable` to a class's DECLARED methods (as opposed
-/// to the synthesized ctor/accessors handled by [`attach_synth_debug_tables`]). kotlinc maps a method's
-/// table to its own `fun` line — recorded per-FunId by the lowering — and lists `this` plus each
-/// parameter for the whole method.
-fn attach_declared_function_debug(ir: &IrFile, fid: u32, owner: &str, cw: &mut ClassWriter) {
-    let Some(f) = ir.functions.get(fid as usize) else {
-        return;
-    };
-    let Some(&line) = ir.fn_decl_lines.get(&fid) else {
-        return;
-    };
-    if f.body.is_none() {
-        return;
-    }
-    let this_desc = format!("L{owner};");
-    // `aload <slot>` byte length: 1 (aload_0..3), 2 (aload u1), or 4 (wide aload u2).
-    let aload_len = |slot: u16| -> u16 {
-        if slot <= 3 {
-            1
-        } else if slot <= 255 {
-            2
-        } else {
-            4
-        }
-    };
-    let param_tys = jvm_function_params(ir, fid);
-    let ret = jvm_declared_ty(&f.ret);
-    let desc = method_descriptor(&param_tys, ret);
-    let mut locals: Vec<(String, String, u16)> = Vec::new();
-    let mut slot = 0u16;
-    if !f.is_static {
-        locals.push(("this".to_string(), this_desc, 0));
-        slot = 1;
-    }
-    // kotlinc attributes the `fun` line to the first instruction of the BODY, not to the
-    // `checkNotNullParameter` guards it emits ahead of it — so the entry starts past that
-    // prologue, measured the same way the constructor's is.
-    let mut body_pc = 0u16;
-    for (i, t) in param_tys.iter().enumerate() {
-        let name = ir
-            .param_names(fid)
-            .and_then(|ns| ns.get(i).cloned())
-            .or_else(|| f.param_checks.get(i).and_then(|n| n.clone()))
-            .unwrap_or_else(|| format!("p{i}"));
-        if let Some(Some(guarded)) = f.param_checks.get(i) {
-            // guard = aload(slot) + ldc(param-name String) + invokestatic checkNotNullParameter(3)
-            body_pc += aload_len(slot) + cw.string_ldc_len(guarded).unwrap_or(2) + 3;
-        }
-        locals.push((name, crate::jvm::names::type_descriptor(*t), slot));
-        slot += slot_words(*t);
-    }
-    cw.set_method_debug(&f.name, &desc, Some((body_pc, line)), &locals);
-}
 
 fn attach_declared_method_debug(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassWriter) {
     let owner = c.fq_name();
     for &fid in &c.methods {
-        attach_declared_function_debug(ir, fid, &owner, cw);
+        function_debug::attach_declared_function_debug(ir, fid, &owner, cw);
     }
 }
 
@@ -4232,7 +4181,7 @@ fn emit_pass(
             continue;
         }
         emit_method_maybe_rescued(ir, i as u32, facade, facade, &mut cw, false, env, rescued);
-        attach_declared_function_debug(ir, i as u32, facade, &mut cw);
+        function_debug::attach_declared_function_debug(ir, i as u32, facade, &mut cw);
         facade_has_method = true;
         // A PARAMETERLESS `fun main()` is not a JVM entry point on its own: the launcher looks for
         // `main([Ljava/lang/String;)V`, and the no-arg form is only recognized by JEP 445 (Java 21+
@@ -5667,20 +5616,6 @@ fn anonymous_scope<'a>(
     Some((owner, function))
 }
 
-/// One DECLARED secondary constructor's metadata shape: its source parameter names/types, its JVM
-/// descriptor, and the position of a `vararg` parameter.
-struct SecondaryCtorShape {
-    params: Vec<(String, Ty)>,
-    param_defaults: Vec<bool>,
-    desc: String,
-    sig_name: Option<&'static str>,
-    vararg_index: Option<usize>,
-    /// The constructor's applied annotations, rejoined across the retention split (see
-    /// [`crate::metadata::class_builder::FnMeta::annotations`]) — owned so the borrowed `CtorMeta`
-    /// built from this shape outlives the fold.
-    annotations: Vec<crate::ir::AppliedAnnotation>,
-}
-
 /// The `ACC_PUBLIC` bit a class's own access flags carry. A `private` declaration — of ANY kind, at
 /// top level or nested — is package-private in the class file: the JVM has no class-level private,
 /// so kotlinc drops the bit and records the real visibility in `@Metadata` and `InnerClasses`.
@@ -6310,8 +6245,8 @@ fn emit_class(
                 for &(slot, t, _) in &temps {
                     load(t, slot, &mut ctor);
                 }
-                for &(_, _, key) in &temps {
-                    e.slots.remove(&key);
+                for &(_, _, lease) in &temps {
+                    e.release_temporary(lease);
                 }
             } else {
                 ctor.aload(0);
@@ -10280,8 +10215,8 @@ fn emit_enum_class(
                         load(*ty, *slot, &mut clinit);
                     }
                 }
-                for &(_, _, key) in &temps {
-                    e.slots.remove(&key);
+                for &(_, _, lease) in &temps {
+                    e.release_temporary(lease);
                 }
             } else {
                 let mut supplied = args.iter().copied();
@@ -11381,7 +11316,11 @@ fn emit_method_inner_with_holder(
     let ret = jvm_declared_ty(&f.ret);
     let mut e = Emitter::new(ir, cw, env, owner, facade, ret, [body]);
     // Suspend lowering does not preserve source-local expression IDs.
-    e.record_locals = (ir.fn_decl_lines.contains_key(&fid) || ir.fn_debug_locals.contains(&fid))
+    e.record_locals = (ir.fn_decl_lines.contains_key(&fid)
+        || ir.fn_debug_locals.contains(&fid)
+        || ir
+            .generated_function_publication(fid)
+            .is_some_and(|publication| publication.debug.records_locals()))
         && !ir.suspend_funs.contains(&fid);
     if instance {
         e.slots.insert(0, (0, Ty::obj(owner)));
@@ -11623,6 +11562,14 @@ fn emit_method_inner_with_holder(
     // stable and reflection/debug tooling still expects `$completion` (plus the declared receiver and
     // arguments) in the LocalVariableTable.
     if e.record_locals || ir.suspend_funs.contains(&fid) || holder_receiver.is_some() {
+        let generated_parameters = ir.generated_function_publication(fid);
+        if let Some(publication) = generated_parameters {
+            assert_eq!(
+                publication.parameter_names.len(),
+                param_tys.len(),
+                "generated debug parameter identities exactly match physical arity"
+            );
+        }
         if instance {
             let this_desc = format!("L{owner};");
             let receiver_name = if holder_receiver.is_some() {
@@ -11636,9 +11583,9 @@ fn emit_method_inner_with_holder(
         }
         let mut slot = u16::from(instance);
         for (i, t) in param_tys.iter().enumerate() {
-            let pname = ir
-                .param_names(fid)
-                .and_then(|ns| ns.get(i).cloned())
+            let pname = generated_parameters
+                .map(|publication| publication.parameter_names[i].clone())
+                .or_else(|| ir.param_names(fid).and_then(|ns| ns.get(i).cloned()))
                 .or_else(|| f.param_checks.get(i).and_then(|n| n.clone()))
                 .unwrap_or_else(|| format!("p{i}"));
             let pdesc = local_variable_desc(*t);
@@ -12678,17 +12625,17 @@ fn emit_default_stub(
         slot += slot_words(*t);
     }
     let mask_slots: Vec<u16> = (0..default_mask_count(logical_param_count))
-        .map(|mi| {
+        .map(|_| {
             let s = slot;
-            e.slots.insert(9_000_001 + mi as u32, (s, Ty::Int)); // register so frames type these slots
+            // The mask ints and the trailing marker are BACKEND temporaries: no semantic value
+            // names them, they only have to be typed in every frame this stub records.
+            // Held for the whole stub: nothing releases a mask word before the method ends.
+            let _ = e.lease_temporary(s, Ty::Int);
             slot += 1;
             s
         })
         .collect();
-    e.slots.insert(
-        9_000_001 + mask_slots.len() as u32,
-        (slot, Ty::obj("java/lang/Object")),
-    );
+    let _ = e.lease_temporary(slot, Ty::obj("java/lang/Object"));
     slot += 1;
     e.next_slot = slot;
 
@@ -13046,15 +12993,16 @@ fn emit_facade_default_stub(
         slot += slot_words(*t);
     }
     let mask_slots: Vec<u16> = (0..default_mask_count(logical_param_count))
-        .map(|mi| {
+        .map(|_| {
             let s = slot;
-            e.slots.insert(9_000_001 + mi as u32, (s, Ty::Int)); // register so frames type these slots
+            // Backend temporaries — see the member stub: typed in frames, named by no value.
+            // Held for the whole stub: nothing releases a mask word before the method ends.
+            let _ = e.lease_temporary(s, Ty::Int);
             slot += 1;
             s
         })
         .collect();
-    e.slots
-        .insert(9_000_001 + mask_slots.len() as u32, (slot, marker));
+    let _ = e.lease_temporary(slot, marker);
     slot += 1;
     e.next_slot = slot;
 
@@ -13204,15 +13152,16 @@ fn emit_ctor_default_stub_with_prefix(
         slot += slot_words(*t);
     }
     let mask_slots: Vec<u16> = (0..default_mask_count(real_params.len()))
-        .map(|mi| {
+        .map(|_| {
             let s = slot;
-            e.slots.insert(9_000_001 + mi as u32, (s, Ty::Int));
+            // Backend temporaries — see the member stub: typed in frames, named by no value.
+            // Held for the whole stub: nothing releases a mask word before the method ends.
+            let _ = e.lease_temporary(s, Ty::Int);
             slot += 1;
             s
         })
         .collect();
-    e.slots
-        .insert(9_000_001 + mask_slots.len() as u32, (slot, marker));
+    let _ = e.lease_temporary(slot, marker);
     slot += 1;
     e.next_slot = slot;
 
@@ -13392,6 +13341,15 @@ struct Emitter<'a> {
     owner: String,
     facade: String,
     slots: HashMap<u32, (u16, Ty)>,
+    /// The slots the backend owns, leased and released by `backend_temporaries`. They are not
+    /// semantic locals and deliberately do not live in `slots`, which is keyed by real value ids.
+    temporaries: backend_temporaries::BackendTemporaries,
+    /// Semantic locals that are in lexical scope but not definitely assigned on the current edge.
+    /// JVM frames render their physical slots as `top` until every incoming edge has stored them.
+    unassigned_values: HashSet<u32>,
+    /// Incoming definite-assignment state by control-flow label. Union is the verifier lattice:
+    /// unassigned on any incoming edge means `top` at the merge.
+    label_unassigned_values: HashMap<Label, HashSet<u32>>,
     /// Every `Variable` index → its JVM type (file-wide); a `value_ty(GetValue)` fallback for a slot not
     /// yet registered in `slots` (queried before its declaration emits — e.g. an inline result temp).
     var_types: HashMap<u32, Ty>,
@@ -13421,6 +13379,10 @@ struct Emitter<'a> {
     /// Active `finally` bodies, outermost first. A source-level control transfer executes these
     /// before leaving its protected region; the stack carries exact IR identities, not syntax.
     return_finalizers: Vec<u32>,
+    /// A statement at the lexical tail of a loop body may branch directly to the loop's next
+    /// iteration. This is an emitter control-flow target, not a semantic `continue` manufactured in
+    /// common IR. Blocks pass it only to their terminal statement.
+    terminal_statement_target: Option<Label>,
     /// A generated class initializer has no source expression that owns JVM reference-boundary
     /// casts. Keep that representation choice in emission instead of inserting semantic casts into
     /// common/plugin IR.
@@ -13451,6 +13413,9 @@ impl<'a> Emitter<'a> {
             owner: owner.to_string(),
             facade: facade.to_string(),
             slots: HashMap::new(),
+            temporaries: backend_temporaries::BackendTemporaries::default(),
+            unassigned_values: HashSet::new(),
+            label_unassigned_values: HashMap::new(),
             var_types: collect_body_var_types(ir, roots),
             next_slot: 0,
             ret,
@@ -13462,6 +13427,7 @@ impl<'a> Emitter<'a> {
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,
             return_finalizers: Vec::new(),
+            terminal_statement_target: None,
             generated_initializer: false,
         }
     }
@@ -13492,59 +13458,6 @@ impl<'a> Emitter<'a> {
         if internal != "java/lang/Object" {
             let class = self.cw.class_ref(&internal);
             code.checkcast(class);
-        }
-    }
-
-    /// Emit every active `finally` from inner to outer before a `return`. The active entry is popped
-    /// while its body emits so a return *inside* that finally overrides the pending transfer without
-    /// recursively entering the same finally again. Returns whether the original transfer survives.
-    fn emit_return_finalizers(&mut self, code: &mut CodeBuilder) -> bool {
-        let Some(finalizer) = self.return_finalizers.pop() else {
-            return true;
-        };
-        self.emit(finalizer, code);
-        let survives = !self.discarding_diverges(finalizer) && self.emit_return_finalizers(code);
-        self.return_finalizers.push(finalizer);
-        survives
-    }
-
-    fn emit_return_node(&mut self, value: Option<u32>, code: &mut CodeBuilder) {
-        let Some(value) = value else {
-            if self.emit_return_finalizers(code) {
-                code.ret_void();
-            }
-            return;
-        };
-        let ret = self.ret;
-        self.emit_value_as(value, &ret, code);
-        // `return <diverging>` has already transferred control and must not grow dead bytecode.
-        if self.diverges(value) {
-            return;
-        }
-        let words = slot_words(ret);
-        if self.return_finalizers.is_empty() || words == 0 {
-            if self.emit_return_finalizers(code) {
-                emit_return(ret, code);
-            }
-            return;
-        }
-        // Kotlin evaluates the return expression before `finally`. Spill that value so arbitrary
-        // branchy finalizers run on an empty operand stack, then reload it only if none overrides.
-        let slot = self.next_slot;
-        self.next_slot += words;
-        store(ret, slot, code);
-        // The pending return value is initialized before every active `finally` and remains live
-        // until the finalizer chain either completes or overrides the transfer. Any branch or
-        // handler frame created while emitting a finalizer must therefore carry this slot. Merely
-        // reserving `next_slot` leaves it as `top`, which makes a later reload unverifiable after a
-        // branchy finalizer such as `null?.toString()`.
-        let return_key = 5_000_000 + slot as u32;
-        self.slots.insert(return_key, (slot, ret));
-        let survives = self.emit_return_finalizers(code);
-        self.slots.remove(&return_key);
-        if survives {
-            load(ret, slot, code);
-            emit_return(ret, code);
         }
     }
 
@@ -13865,7 +13778,7 @@ impl<'a> Emitter<'a> {
         );
         if bs.join_required {
             let join = code.new_label();
-            code.bind(join);
+            self.bind(join, code);
             let join_stack: Vec<VerifType> = bs.join_stack.iter().map(vtype_to_verif).collect();
             code.add_frame_if_new(join, prefix, join_stack);
         }
@@ -13926,14 +13839,16 @@ impl<'a> Emitter<'a> {
     }
 
     /// Slot-indexed caller locals for `0..upto` (long/double take two slots; `Top` fills the gaps).
+    ///
+    /// Every frame in the emitter is laid out here: a frame recorded inside a spliced body, and the
+    /// collapsed form the ordinary frames are built from. Both the semantic locals and the backend
+    /// temporaries belong to the same physical frame, which is why one operation places them.
     fn verif_slots_upto(&mut self, upto: u16) -> Vec<VerifType> {
-        let mut raw = vec![VerifType::Top; upto as usize];
-        let entries: Vec<(u16, Ty)> = self.slots.values().copied().collect();
-        for (slot, ty) in entries {
-            if (slot as usize) < raw.len() {
-                raw[slot as usize] = self.verif_single(ty);
-            }
-        }
+        let semantic = self.assigned_semantic_slots();
+        let temporaries = self.temporaries.live();
+        let mut raw = backend_temporaries::frame_slots(upto, &semantic, &temporaries, &mut |ty| {
+            self.verif_single(ty)
+        });
         if self.this_uninitialized && !raw.is_empty() {
             raw[0] = VerifType::UninitializedThis;
         }
@@ -14168,7 +14083,7 @@ impl<'a> Emitter<'a> {
         );
         // Join frame: the redirected returns land at the continuation right after the spliced body.
         let join = code.new_label();
-        code.bind(join);
+        self.bind(join, code);
         let join_stack: Vec<VerifType> = bs.join_stack.iter().map(vtype_to_verif).collect();
         code.add_frame_if_new(join, prefix, join_stack);
         true
@@ -14178,24 +14093,8 @@ impl<'a> Emitter<'a> {
     /// NOT trimming trailing `Top` — the prefix a spliced branchy body's frames are concatenated onto
     /// (the body's own locals occupy slots `upto..`).
     fn verif_locals_upto(&mut self, upto: u16) -> Vec<VerifType> {
-        let mut raw = vec![VerifType::Top; upto as usize];
-        let entries: Vec<(u16, Ty)> = self.slots.values().copied().collect();
-        for (slot, ty) in entries {
-            if (slot as usize) < raw.len() {
-                raw[slot as usize] = self.verif_single(ty);
-            }
-        }
-        if self.this_uninitialized && !raw.is_empty() {
-            raw[0] = VerifType::UninitializedThis;
-        }
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < raw.len() {
-            let wide = matches!(raw[i], VerifType::Long | VerifType::Double);
-            out.push(raw[i].clone());
-            i += if wide { 2 } else { 1 };
-        }
-        out
+        let raw = self.verif_slots_upto(upto);
+        backend_temporaries::collapse(&raw)
     }
 
     /// Emit a constructor's lowered initializer block while retaining the start pc and declared
@@ -14232,12 +14131,13 @@ impl<'a> Emitter<'a> {
                 // (its slot must read as `Top` once out of scope — else a sibling branch that never
                 // initialized it fails verification).
                 let saved = self.slots.clone();
-                self.emit_open_block(stmts, value, code);
+                let terminal_target = self.terminal_statement_target.take();
+                self.emit_open_block(stmts, value, terminal_target, code);
                 self.close_scope_locals(code);
                 self.block_depth -= 1;
-                self.slots = saved;
+                self.restore_slot_scope(saved);
             }
-            IrExpr::Return(value) => self.emit_return_node(value, code),
+            IrExpr::Return(value) => self.emit_return_node(e, value, code),
             IrExpr::Variable {
                 index, ty, init, ..
             } => {
@@ -14286,6 +14186,7 @@ impl<'a> Emitter<'a> {
                         s
                     });
                     self.slots.insert(index, (slot, jt));
+                    self.unassigned_values.remove(&index);
                     store(jt, slot, code);
                     // A source local becomes visible after its initializing store.
                     if let Some(name) = self
@@ -14310,6 +14211,7 @@ impl<'a> Emitter<'a> {
                         s
                     });
                     self.slots.insert(index, (slot, jt));
+                    self.unassigned_values.insert(index);
                     // An uninitialized source local (`lateinit var`) still has a lexical lifetime.
                     // Its declaration emits no store, so open the debug range at the declaration's
                     // current bytecode position; the later checked assignment only initializes the
@@ -14368,6 +14270,7 @@ impl<'a> Emitter<'a> {
                         store(jt, slot, code);
                     }
                 }
+                self.unassigned_values.remove(&var);
             }
             IrExpr::SetField {
                 receiver,
@@ -14439,7 +14342,7 @@ impl<'a> Emitter<'a> {
                 let cont = code.new_label();
                 let end = code.new_label();
                 self.frame(start, vec![], code);
-                code.bind(start);
+                self.bind(start, code);
                 // A pre-test loop checks the condition before the body; a `do…while` skips this and
                 // tests at the bottom (`cont`), so the body always runs once.
                 if !post_test && self.emit_cond_branch(cond, end, false, code) {
@@ -14447,7 +14350,7 @@ impl<'a> Emitter<'a> {
                     // that would follow are unreachable — emitting them leaves frameless dead code
                     // the verifier rejects. kotlinc emits no body for a never-entered loop either.
                     self.frame(end, vec![], code);
-                    code.bind(end);
+                    self.bind(end, code);
                     return;
                 }
                 // `continue` targets `cont` (run the update / bottom test); `break` targets `end`.
@@ -14464,6 +14367,7 @@ impl<'a> Emitter<'a> {
                     start
                 };
                 self.loop_stack.push((bottom, end, label.clone()));
+                let enclosing_terminal_target = self.terminal_statement_target.replace(bottom);
                 let retained_body_scope = if post_test {
                     match self.ir.expr(body).clone() {
                         // Kotlin's `do` body and bottom condition share one lexical scope. Keep the
@@ -14473,7 +14377,7 @@ impl<'a> Emitter<'a> {
                         // authorizes this lifetime, so no source-shape lookup is involved.
                         IrExpr::Block { stmts, value } => {
                             let saved = self.slots.clone();
-                            self.emit_open_block(stmts, value, code);
+                            self.emit_open_block(stmts, value, Some(bottom), code);
                             Some(saved)
                         }
                         _ => {
@@ -14485,11 +14389,12 @@ impl<'a> Emitter<'a> {
                     self.emit(body, code);
                     None
                 };
+                self.terminal_statement_target = enclosing_terminal_target;
                 // A pre-test body's block has restored its slot map. A post-test body's block stays
                 // open here because `continue` and the condition are inside that same Kotlin scope.
                 if bottom == cont {
                     self.frame(cont, vec![], code);
-                    code.bind(cont);
+                    self.bind(cont, code);
                 }
                 // The update is part of the loop, so it keeps the `break`/`continue` scope active — the
                 // non-overflowing counted loop puts its `if (i == end) break` here (before the increment)
@@ -14508,81 +14413,27 @@ impl<'a> Emitter<'a> {
                     if let Some(saved) = retained_body_scope {
                         self.close_scope_locals(code);
                         self.block_depth -= 1;
-                        self.slots = saved;
+                        self.restore_slot_scope(saved);
                     }
                 } else {
                     self.frame(start, vec![], code);
                     code.goto(start);
                 }
                 self.frame(end, vec![], code);
-                code.bind(end);
+                self.bind(end, code);
             }
             IrExpr::Break { label } => {
                 let (_, end) = self.loop_target(&label);
+                self.frame(end, vec![], code);
                 code.goto(end);
             }
             IrExpr::Continue { label } => {
                 let (cont, _) = self.loop_target(&label);
+                self.frame(cont, vec![], code);
                 code.goto(cont);
             }
             other => {
                 self.emit_discarding_node(e, &other, code);
-            }
-        }
-    }
-
-    /// Emit one IR block while leaving its lexical slot scope open. The ordinary `Block` arm closes
-    /// it immediately; a post-test loop closes it only after emitting the bottom condition, whose
-    /// Kotlin scope includes declarations from the body.
-    fn emit_open_block(&mut self, stmts: Vec<u32>, value: Option<u32>, code: &mut CodeBuilder) {
-        self.block_depth += 1;
-        let mut dead = false;
-        for statement in stmts {
-            // A statement root carrying a source line starts a `LineNumberTable` entry at its first
-            // instruction (kotlinc's per-statement mapping).
-            if let Some(&line) = self.ir.expr_lines.get(&statement) {
-                code.mark_line(line);
-            }
-            // A statement nets zero, so reset the tracked height afterward to undo an approximate
-            // branchy-splice drift.
-            let base = code.stack_height();
-            self.emit(statement, code);
-            if self.discarding_diverges(statement) {
-                dead = true;
-                break;
-            }
-            code.set_stack(base.max(0) as u16);
-        }
-        if !dead {
-            if let Some(value) = value {
-                if let Some(&line) = self.ir.expr_lines.get(&value) {
-                    code.mark_line(line);
-                }
-                self.emit_discarding(value, code);
-            }
-        }
-    }
-
-    /// Close locals declared in the current nested block.
-    fn close_scope_locals(&mut self, code: &mut CodeBuilder) {
-        if self.block_depth <= 1 {
-            return;
-        }
-        let end = code.bytes.len().min(u16::MAX as usize) as u16;
-        let depth = self.block_depth;
-        let mut i = 0;
-        while i < self.open_locals.len() {
-            if self.open_locals[i].0 >= depth {
-                let (_, slot, start, name, desc) = self.open_locals.remove(i);
-                // kotlinc interns a local's debug strings when its lexical scope closes, before
-                // the enclosing method's parameter table. A consuming FIR body commonly has one
-                // additional block wrapper, so deferring these strings until class serialization
-                // would reorder an otherwise identical constant pool.
-                self.cw.seed_utf8(&name);
-                self.cw.seed_utf8(&desc);
-                code.add_local_entry(start, Some(end.saturating_sub(start)), slot, &name, &desc);
-            } else {
-                i += 1;
             }
         }
     }
@@ -14620,6 +14471,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_value(&mut self, e: u32, code: &mut CodeBuilder) {
+        debug_lines::mark_expression_start(self.ir, e, code);
         let node = self.ir.expr(e).clone();
         self.emit_value_node(e, &node, code);
     }
@@ -14899,8 +14751,8 @@ impl<'a> Emitter<'a> {
         if let Some(temps) = &spilled {
             let (slot, value_ty, _) = temps[1];
             load(value_ty, slot, code);
-            for &(_, _, key) in temps {
-                self.slots.remove(&key);
+            for &(_, _, lease) in temps {
+                self.release_temporary(lease);
             }
         } else {
             self.emit_value(value, code);
@@ -15483,7 +15335,7 @@ impl<'a> Emitter<'a> {
                     code.invokestatic(m, 1, 0);
                     let st = self.verif_stack(jt);
                     self.frame(lbl, st, code);
-                    code.bind(lbl);
+                    self.bind(lbl, code);
                 }
                 jt
             }
@@ -15593,27 +15445,6 @@ impl<'a> Emitter<'a> {
             let ci = self.cw.class_ref(&internal);
             code.checkcast(ci);
         }
-    }
-
-    /// Where a non-virtual call to an interface member must go under `-jvm-default=disable`.
-    ///
-    /// `super.f()` and a call to a private interface member both push the receiver first and then
-    /// `invokespecial` the interface. Under `disable` the interface holds no body, so the call has to
-    /// become `invokestatic <Iface>$DefaultImpls.f(LIface;…)` — the receiver already on the stack is
-    /// exactly the holder static's parameter 0. Returns `None` when the call should stay as it is.
-    fn holder_call(
-        &self,
-        owner: &str,
-        descriptor: &str,
-        current_source_body: bool,
-    ) -> Option<(String, String)> {
-        if self.jvm_default != JvmDefaultMode::Disable || !current_source_body {
-            return None;
-        }
-        let holder_descriptor = descriptor
-            .strip_prefix('(')
-            .map(|rest| format!("(L{owner};{rest}"))?;
-        Some((format!("{owner}$DefaultImpls"), holder_descriptor))
     }
 
     fn emit_value_node(&mut self, e: u32, node: &IrExpr, code: &mut CodeBuilder) {
@@ -15832,7 +15663,7 @@ impl<'a> Emitter<'a> {
                     // At the join the field value (non-null on the taken path) is on the stack.
                     let st = self.verif_stack(jt);
                     self.frame(lbl, st, code);
-                    code.bind(lbl);
+                    self.bind(lbl, code);
                 }
             }
             IrExpr::LateinitInitialized {
@@ -16017,8 +15848,8 @@ impl<'a> Emitter<'a> {
                             self.adapt_physical_operand_for(*argument, *ty, physical, code);
                         }
                     }
-                    for &(_, _, key) in &temps {
-                        self.slots.remove(&key);
+                    for &(_, _, lease) in &temps {
+                        self.release_temporary(lease);
                     }
                     if use_accessor {
                         code.aconst_null();
@@ -16030,6 +15861,7 @@ impl<'a> Emitter<'a> {
                         self.cw,
                     );
                     let m = self.cw.methodref(&owner, "<init>", &desc);
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     code.invokespecial(m, aw, 0);
                 } else {
                     let ci = self.cw.class_ref(&owner);
@@ -16080,6 +15912,7 @@ impl<'a> Emitter<'a> {
                         self.cw,
                     );
                     let m = self.cw.methodref(&owner, "<init>", &desc);
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     code.invokespecial(m, aw, 0);
                 }
             }
@@ -16177,6 +16010,7 @@ impl<'a> Emitter<'a> {
                     } else {
                         self.cw.methodref(stub_owner, &stub_name, &stub_desc)
                     };
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     code.invokestatic(m, aw, physical_call_result_words(ret));
                     return;
                 }
@@ -16224,12 +16058,14 @@ impl<'a> Emitter<'a> {
                         } else {
                             self.cw.methodref(&owner, &bridge_name, &bridge_desc)
                         };
+                        debug_lines::mark_expression_start(self.ir, e, code);
                         code.invokestatic(method, aw + 1, physical_call_result_words(ret));
                     } else if let Some((holder, holder_desc)) = is_iface
                         .then(|| self.holder_call(&owner, &desc, true))
                         .flatten()
                     {
                         let m = self.cw.methodref(&holder, &name, &holder_desc);
+                        debug_lines::mark_expression_start(self.ir, e, code);
                         code.invokestatic(m, aw + 1, physical_call_result_words(ret));
                     } else {
                         let m = if is_iface {
@@ -16237,14 +16073,17 @@ impl<'a> Emitter<'a> {
                         } else {
                             self.cw.methodref(&owner, &name, &desc)
                         };
+                        debug_lines::mark_expression_start(self.ir, e, code);
                         code.invokespecial(m, aw, physical_call_result_words(ret));
                     }
                 } else if is_iface {
                     // Dispatch through an interface — `invokeinterface I.m`.
                     let m = self.cw.interface_methodref(&owner, &name, &desc);
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     code.invokeinterface(m, aw, physical_call_result_words(ret));
                 } else {
                     let m = self.cw.methodref(&owner, &name, &desc);
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     code.invokevirtual(m, aw, physical_call_result_words(ret));
                 }
             }
@@ -16296,6 +16135,7 @@ impl<'a> Emitter<'a> {
                     let m = self
                         .cw
                         .methodref(&owner, &name, &method_descriptor(&param_tys, ret));
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     code.invokestatic(m, aw, physical_call_result_words(ret));
                 }
                 Callee::ClassStatic { owner, function } => {
@@ -16327,6 +16167,7 @@ impl<'a> Emitter<'a> {
                     } else {
                         self.cw.methodref(&owner, &f.name, &descriptor)
                     };
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     code.invokestatic(method, argument_words, physical_call_result_words(ret));
                 }
                 Callee::ClassStaticDefault { owner, function } => {
@@ -16342,6 +16183,7 @@ impl<'a> Emitter<'a> {
                     let method =
                         self.cw
                             .methodref(&owner, &format!("{}$default", f.name), &descriptor);
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     code.invokestatic(method, argument_words, physical_call_result_words(ret));
                 }
                 Callee::LocalDefault(fid) => {
@@ -16359,6 +16201,7 @@ impl<'a> Emitter<'a> {
                     let m = self
                         .cw
                         .methodref(&owner, &name, &method_descriptor(&param_tys, ret));
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     code.invokestatic(m, aw, physical_call_result_words(ret));
                 }
                 Callee::Intrinsic { operation, .. } => match operation {
@@ -16652,6 +16495,7 @@ impl<'a> Emitter<'a> {
                     } else {
                         self.cw.methodref(target_owner, &name, &desc)
                     };
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     code.invokestatic(m, aw, physical_call_result_words(ret));
                 }
                 Callee::Module { .. }
@@ -16761,6 +16605,7 @@ impl<'a> Emitter<'a> {
                     } else {
                         self.cw.methodref(&owner, &name, &descriptor)
                     };
+                    debug_lines::mark_expression_start(self.ir, e, code);
                     code.invokestatic(m, aw, slot_words(ret) as i32);
                 }
                 Callee::Virtual {
@@ -16856,6 +16701,7 @@ impl<'a> Emitter<'a> {
                                 realization.name,
                                 realization.descriptor,
                             );
+                            debug_lines::mark_expression_start(self.ir, e, code);
                             code.invokestatic(
                                 method,
                                 argument_words,
@@ -16879,9 +16725,11 @@ impl<'a> Emitter<'a> {
                         let aw: i32 = ptys.iter().map(|t| slot_words(*t) as i32).sum();
                         if interface {
                             let m = self.cw.interface_methodref(&owner, &name, &descriptor);
+                            debug_lines::mark_expression_start(self.ir, e, code);
                             code.invokeinterface(m, aw, physical_call_result_words(ret));
                         } else {
                             let m = self.cw.methodref(&owner, &name, &descriptor);
+                            debug_lines::mark_expression_start(self.ir, e, code);
                             code.invokevirtual(m, aw, physical_call_result_words(ret));
                         }
                         return;
@@ -16935,6 +16783,7 @@ impl<'a> Emitter<'a> {
                         }
                         let aw: i32 = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
                         let m = self.cw.methodref(&owner, &name, &descriptor);
+                        debug_lines::mark_expression_start(self.ir, e, code);
                         code.invokestatic(m, aw, slot_words(ret) as i32);
                         return;
                     }
@@ -16955,6 +16804,7 @@ impl<'a> Emitter<'a> {
                         }
                         let aw: i32 = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
                         let m = self.cw.methodref(&owner, &name, &descriptor);
+                        debug_lines::mark_expression_start(self.ir, e, code);
                         code.invokestatic(m, aw, slot_words(ret) as i32);
                         return;
                     }
@@ -16982,9 +16832,11 @@ impl<'a> Emitter<'a> {
                     let jvm_name = mapped_builtin_virtual_name(&owner, &name, &descriptor);
                     if interface {
                         let m = self.cw.interface_methodref(&owner, jvm_name, &descriptor);
+                        debug_lines::mark_expression_start(self.ir, e, code);
                         code.invokeinterface(m, aw, slot_words(ret) as i32);
                     } else {
                         let m = self.cw.methodref(&owner, jvm_name, &descriptor);
+                        debug_lines::mark_expression_start(self.ir, e, code);
                         code.invokevirtual(m, aw, slot_words(ret) as i32);
                     }
                 }
@@ -17029,6 +16881,7 @@ impl<'a> Emitter<'a> {
                         .flatten()
                     {
                         let m = self.cw.methodref(&holder, &name, &holder_desc);
+                        debug_lines::mark_expression_start(self.ir, e, code);
                         code.invokestatic(m, aw + 1, slot_words(ret) as i32);
                     } else {
                         let m = if interface {
@@ -17036,6 +16889,7 @@ impl<'a> Emitter<'a> {
                         } else {
                             self.cw.methodref(&owner, &name, &descriptor)
                         };
+                        debug_lines::mark_expression_start(self.ir, e, code);
                         code.invokespecial(m, aw, slot_words(ret) as i32);
                     }
                 }
@@ -17282,8 +17136,8 @@ impl<'a> Emitter<'a> {
                             load(t, slot, code);
                             self.append_top(t, code);
                         }
-                        for &(_, _, key) in &temps {
-                            self.slots.remove(&key);
+                        for &(_, _, lease) in &temps {
+                            self.release_temporary(lease);
                         }
                     } else {
                         code.new_obj(sb);
@@ -17427,10 +17281,7 @@ impl<'a> Emitter<'a> {
                 self.block_depth += 1;
                 let mut dead = false;
                 for s in stmts {
-                    // A statement root carrying a source line starts a `LineNumberTable` entry.
-                    if let Some(&l) = self.ir.expr_lines.get(s) {
-                        code.mark_line(l);
-                    }
+                    debug_lines::mark_statement(self.ir, *s, code);
                     // A statement nets zero on the operand stack (its value is stored/discarded). Reset
                     // the tracked height to that baseline afterward: a branchy lambda splice (`takeIf`)
                     // tracks its internal branches only approximately and can leave `cur_stack` drifted
@@ -17446,15 +17297,13 @@ impl<'a> Emitter<'a> {
                 }
                 if !dead {
                     if let Some(v) = value {
-                        if let Some(&l) = self.ir.expr_lines.get(v) {
-                            code.mark_line(l);
-                        }
+                        debug_lines::mark_statement(self.ir, *v, code);
                         self.emit_value(*v, code);
                     }
                 }
                 self.close_scope_locals(code);
                 self.block_depth -= 1;
-                self.slots = saved;
+                self.restore_slot_scope(saved);
             }
             IrExpr::Lambda {
                 impl_fn,
@@ -17794,7 +17643,7 @@ impl<'a> Emitter<'a> {
                 let jt = self.value_ty(*operand);
                 let st = self.verif_stack(jt);
                 self.frame(lbl, st, code);
-                code.bind(lbl);
+                self.bind(lbl, code);
             }
             IrExpr::Throw { operand } => {
                 self.emit_value(*operand, code);
@@ -17802,7 +17651,7 @@ impl<'a> Emitter<'a> {
             }
             // `return v` in value position (`x ?: return v`): emit the return; control transfers away, so
             // (like `throw`) nothing is left for the surrounding merge.
-            IrExpr::Return(value) => self.emit_return_node(*value, code),
+            IrExpr::Return(value) => self.emit_return_node(e, *value, code),
             IrExpr::Vararg {
                 array_type,
                 elements,
@@ -17830,7 +17679,7 @@ impl<'a> Emitter<'a> {
             } => {
                 let catches = catches.clone();
                 let result = result.clone();
-                self.emit_try(*body, &catches, *finally, &result, code);
+                self.emit_try(e, *body, &catches, *finally, &result, code);
             }
             IrExpr::RefNew { elem, init } => {
                 let (cls, fdesc) = ref_class(elem);
@@ -17847,8 +17696,8 @@ impl<'a> Emitter<'a> {
                     for &(slot, t, _) in &temps {
                         load(t, slot, code);
                     }
-                    for &(_, _, key) in &temps {
-                        self.slots.remove(&key);
+                    for &(_, _, lease) in &temps {
+                        self.release_temporary(lease);
                     }
                 } else {
                     let ci = self.cw.class_ref(cls);
@@ -17891,8 +17740,8 @@ impl<'a> Emitter<'a> {
                     for &(slot, t, _) in &temps {
                         load(t, slot, code);
                     }
-                    for &(_, _, key) in &temps {
-                        self.slots.remove(&key);
+                    for &(_, _, lease) in &temps {
+                        self.release_temporary(lease);
                     }
                 } else {
                     self.emit_value(*holder, code);
@@ -17935,8 +17784,8 @@ impl<'a> Emitter<'a> {
                             code.array_store(0x53, 1); // aastore
                         }
                     }
-                    for &(_, _, key) in &temps {
-                        self.slots.remove(&key);
+                    for &(_, _, lease) in &temps {
+                        self.release_temporary(lease);
                     }
                 } else {
                     self.emit_value(*func, code);
@@ -18150,8 +17999,8 @@ impl<'a> Emitter<'a> {
                 load(t, slot, code);
                 self.append_top(t, code);
             }
-            for &(_, _, key) in &temps {
-                self.slots.remove(&key);
+            for &(_, _, lease) in &temps {
+                self.release_temporary(lease);
             }
         } else {
             code.new_obj(sb);
@@ -18600,8 +18449,8 @@ impl<'a> Emitter<'a> {
                 load(t, slot, code);
                 adapt(self, t, code);
             }
-            for &(_, _, key) in &temps {
-                self.slots.remove(&key);
+            for &(_, _, lease) in &temps {
+                self.release_temporary(lease);
             }
         } else {
             for &o in ops {
@@ -18756,10 +18605,14 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Evaluate each of `ops` into a fresh temp slot, in order. Each temp is registered in `self.slots`
-    /// (so a *later* op's frames see the earlier temps as live, not `Top`); the caller loads them and
-    /// then removes them (they're dead once loaded). Returns `(slot, ty, slots-key)` per op.
-    fn spill_to_temps(&mut self, ops: &[u32], code: &mut CodeBuilder) -> Vec<(u16, Ty, u32)> {
+    /// Evaluate each of `ops` into a fresh temp slot, in order. Each temp is leased (so a *later*
+    /// op's frames see the earlier temps as live, not `Top`); the caller loads them and then
+    /// releases them (they're dead once loaded). Returns `(slot, ty, lease)` per op.
+    fn spill_to_temps(
+        &mut self,
+        ops: &[u32],
+        code: &mut CodeBuilder,
+    ) -> Vec<(u16, Ty, backend_temporaries::TemporaryLease)> {
         let mut temps = Vec::new();
         for &o in ops {
             self.emit_value(o, code);
@@ -18772,9 +18625,8 @@ impl<'a> Emitter<'a> {
             let slot = self.next_slot;
             self.next_slot += slot_words(t);
             store(t, slot, code);
-            let key = 2_000_000 + slot as u32;
-            self.slots.insert(key, (slot, t));
-            temps.push((slot, t, key));
+            let lease = self.lease_temporary(slot, t);
+            temps.push((slot, t, lease));
         }
         temps
     }
@@ -18875,8 +18727,7 @@ impl<'a> Emitter<'a> {
                 self.emit_value(lhs, code);
                 let tmp = self.next_slot;
                 self.next_slot += 1;
-                let key = 1_000_000 + tmp as u32;
-                self.slots.insert(key, (tmp, Ty::Boolean));
+                let lease = self.lease_temporary(tmp, Ty::Boolean);
                 code.istore(tmp);
                 self.emit_value(rhs, code);
                 code.iload(tmp);
@@ -18885,7 +18736,7 @@ impl<'a> Emitter<'a> {
                 } else {
                     code.ior()
                 }
-                self.slots.remove(&key);
+                self.release_temporary(lease);
             }
             BitAnd | BitOr | BitXor => {
                 self.emit_binary_operands_over_frames(lhs, rhs, lt, code);
@@ -18962,10 +18813,10 @@ impl<'a> Emitter<'a> {
         code.push_int(1, self.cw);
         self.frame(end, vec![VerifType::Integer], code);
         code.goto(end);
-        code.bind(f);
+        self.bind(f, code);
         code.set_stack(merged);
         code.push_int(0, self.cw);
-        code.bind(end);
+        self.bind(end, code);
     }
 
     /// Realize the already-selected Kotlin assertion operation. The runtime guard is emitted before
@@ -19027,7 +18878,7 @@ impl<'a> Emitter<'a> {
             code.invokespecial(constructor, i32::from(args.len() == 2), 0);
             code.athrow();
         }
-        code.bind(end);
+        self.bind(end, code);
         code.set_stack(entry_stack);
     }
 
@@ -19472,6 +19323,8 @@ impl<'a> Emitter<'a> {
             .map(|result| ir_ty_to_jvm(&result))
             .unwrap_or_else(|| self.value_ty_of_when(branches));
         let is_stmt = (!has_else && exhaustive_result.is_none()) || result_ty == Ty::Unit;
+        let enclosing_terminal_target = self.terminal_statement_target.take();
+        let terminal_target = is_stmt.then_some(enclosing_terminal_target).flatten();
         let result_stack = if is_stmt {
             vec![]
         } else {
@@ -19483,7 +19336,14 @@ impl<'a> Emitter<'a> {
         if let Some(plan) = self.int_switch_plan(branches) {
             self.emit_int_switch(
                 &plan,
-                when::Emission::new(is_stmt, result_ty, &result_stack, entry_height, end),
+                when::Emission::new(
+                    is_stmt,
+                    result_ty,
+                    &result_stack,
+                    entry_height,
+                    end,
+                    terminal_target,
+                ),
                 code,
             );
             return;
@@ -19535,7 +19395,7 @@ impl<'a> Emitter<'a> {
                         if !body_diverges {
                             end_reachable = true;
                         }
-                        code.bind(next);
+                        self.bind(next, code);
                         code.set_stack(entry_height);
                         continue;
                     }
@@ -19576,7 +19436,7 @@ impl<'a> Emitter<'a> {
                     }
                     // `next` is a branch target at this offset, so the merge shares its frame.
                     end_targeted = true;
-                    code.bind(next);
+                    self.bind(next, code);
                     // `next` is reached only via the conditional jump above, where the stack is back at the
                     // pre-branch baseline — reset the linear counter (the just-emitted branch body left its
                     // value on the counter, but not on this control path).
@@ -19622,7 +19482,7 @@ impl<'a> Emitter<'a> {
         if end_reachable && end_targeted {
             self.frame(end, result_stack, code);
         }
-        code.bind(end);
+        self.bind(end, code);
     }
 
     /// `try { body } catch (v: E) { … } …` (no `finally`). The body value (and each catch value) is
@@ -19632,6 +19492,7 @@ impl<'a> Emitter<'a> {
     /// `top` there, since an exception may occur before they are assigned).
     fn emit_try(
         &mut self,
+        expression: u32,
         body: u32,
         catches: &[crate::ir::IrCatch],
         finally: Option<u32>,
@@ -19647,7 +19508,6 @@ impl<'a> Emitter<'a> {
             self.next_slot += slot_words(rt);
             Some(s)
         };
-        const RESULT_KEY: u32 = 3_000_000;
         // A `finally` that diverges (`finally { throw }`) never falls through to `after`.
         let fin_diverges = finally.map_or(false, |f| self.discarding_diverges(f));
 
@@ -19655,7 +19515,12 @@ impl<'a> Emitter<'a> {
         let end = code.new_label();
         let after = code.new_label();
 
-        code.bind(start);
+        self.bind(start, code);
+        // kotlinc opens every protected region with a `nop` carrying the `try` keyword's line, so the
+        // region starts at an instruction of its own rather than sharing the body's first one. The
+        // exception table's `from` is that `nop`.
+        debug_lines::mark_expression_start(self.ir, expression, code);
+        code.nop();
         let body_diverges = if is_stmt {
             self.discarding_diverges(body)
         } else {
@@ -19674,13 +19539,25 @@ impl<'a> Emitter<'a> {
         if finally.is_some() {
             self.return_finalizers.pop();
         }
-        code.bind(end);
+        self.bind(end, code);
         let mut after_reachable = false;
         if !body_diverges {
             if let Some(f) = finally {
+                // The result has just been stored and is loaded again at `after`, so it is live
+                // across the finalizer inlined here. A finalizer that records frames of its own — a
+                // nested `try`, a `when`, a null-safe call — must type it in each of them, or the
+                // merge at `after`, which does type it, is rejected as inconsistent. The lease ends
+                // with this copy: the handler copies below are reached on edges that never stored it.
+                let parked = result_slot.map(|slot| self.lease_temporary(slot, rt));
                 self.emit(f, code);
+                if let Some(parked) = parked {
+                    self.release_temporary(parked);
+                }
             } // `finally` inlined on the normal path
             if !fin_diverges {
+                if let Some(f) = finally {
+                    debug_lines::mark_block_exit(self.ir, f, code);
+                }
                 code.goto(after);
                 after_reachable = true;
             }
@@ -19709,7 +19586,7 @@ impl<'a> Emitter<'a> {
             let local_start =
                 (code.bytes.len() <= u16::MAX as usize).then_some(code.bytes.len() as u16);
             let cbody_start = code.new_label();
-            code.bind(cbody_start);
+            self.bind(cbody_start, code);
             let cbody_diverges = if is_stmt {
                 self.discarding_diverges(c.body)
             } else {
@@ -19731,7 +19608,7 @@ impl<'a> Emitter<'a> {
             // The catch body is protected by the finally handler (a throw in a catch runs the finally),
             // but the catch's own inlined finally (below) is not.
             let cbody_end = code.new_label();
-            code.bind(cbody_end);
+            self.bind(cbody_end, code);
             if self.record_locals {
                 if let (Some(name), Some(start_pc)) = (c.name.as_deref(), local_start) {
                     let end_pc = code.bytes.len().min(u16::MAX as usize) as u16;
@@ -19749,9 +19626,17 @@ impl<'a> Emitter<'a> {
             }
             if !cbody_diverges {
                 if let Some(f) = finally {
+                    // Same as the normal path: this catch stored the result, and `after` loads it.
+                    let parked = result_slot.map(|slot| self.lease_temporary(slot, rt));
                     self.emit(f, code);
+                    if let Some(parked) = parked {
+                        self.release_temporary(parked);
+                    }
                 } // `finally` inlined after the catch
                 if !fin_diverges {
+                    if let Some(f) = finally {
+                        debug_lines::mark_block_exit(self.ir, f, code);
+                    }
                     code.goto(after);
                     after_reachable = true;
                 }
@@ -19772,17 +19657,18 @@ impl<'a> Emitter<'a> {
             let thr_ty = Ty::obj("java/lang/Throwable");
             let tslot = self.next_slot;
             self.next_slot += 1;
+            // The handler's entry belongs to the finalizer copy it introduces, not to the `finally`
+            // keyword — mark it before the store so both copies open on the same line.
+            debug_lines::mark_block_entry(self.ir, f, code);
             store(thr_ty, tslot, code);
             // The caught exception is LIVE in `tslot` across the whole inlined `finally` (it is re-raised
             // after it). Register it so any StackMapTable frame recorded WHILE emitting the finally —
             // e.g. a `finally` that itself contains a `try`/`catch` — lists `tslot` as an initialized
             // local; otherwise the trailing `aload tslot; athrow` reads a slot the verifier sees as `top`.
-            // Keyed by the slot number (unique, and disjoint from small value indices) so nested catch-all
-            // handlers each register their own live exception.
-            let thr_key = 4_000_000 + tslot as u32;
-            self.slots.insert(thr_key, (tslot, thr_ty));
+            // Each nested catch-all handler takes its own lease, so their lifetimes nest correctly.
+            let thr_lease = self.lease_temporary(tslot, thr_ty);
             self.emit(f, code);
-            self.slots.remove(&thr_key);
+            self.release_temporary(thr_lease);
             // Re-raise the caught exception after the `finally` — unless the `finally` itself transfers
             // control (`finally { return … }` / `finally { throw … }`), in which case the rethrow is
             // unreachable and emitting it would leave a dead instruction without a stackmap frame.
@@ -19797,19 +19683,20 @@ impl<'a> Emitter<'a> {
         }
 
         if after_reachable {
-            if let Some(slot) = result_slot {
-                self.slots.insert(RESULT_KEY, (slot, rt));
-            }
+            // The result is live from the merge frame at `after` until it is loaded.
+            let result_lease = result_slot.map(|slot| self.lease_temporary(slot, rt));
             self.frame(after, vec![], code);
-            code.bind(after);
+            self.bind(after, code);
             if let Some(slot) = result_slot {
                 load(rt, slot, code);
-                self.slots.remove(&RESULT_KEY);
+            }
+            if let Some(lease) = result_lease {
+                self.release_temporary(lease);
             }
         } else {
             // Every path diverges — `after` is dead; bind it so any stray reference resolves, but emit
             // no frame (nothing reaches it) and leave no value (the `try` is `Nothing`-typed).
-            code.bind(after);
+            self.bind(after, code);
         }
     }
 
@@ -19849,8 +19736,42 @@ impl<'a> Emitter<'a> {
         self.value_ty(e).array_elem().unwrap_or(Ty::Error)
     }
 
+    fn record_label_assignment_state(&mut self, label: Label, code: &CodeBuilder) {
+        // A switch marks the linear stream dead before its case frames are registered. Its targets
+        // are seeded at dispatch time, so later case emission must not merge the preceding case's
+        // state into the next one merely because both are emitted linearly.
+        if code.is_dead() && self.label_unassigned_values.contains_key(&label) {
+            return;
+        }
+        self.label_unassigned_values
+            .entry(label)
+            .and_modify(|unassigned| unassigned.extend(self.unassigned_values.iter().copied()))
+            .or_insert_with(|| self.unassigned_values.clone());
+    }
+
+    fn bind(&mut self, label: Label, code: &mut CodeBuilder) {
+        if !code.is_dead() {
+            self.label_unassigned_values
+                .entry(label)
+                .and_modify(|unassigned| unassigned.extend(self.unassigned_values.iter().copied()))
+                .or_insert_with(|| self.unassigned_values.clone());
+        }
+        if let Some(unassigned) = self.label_unassigned_values.get(&label) {
+            self.unassigned_values.clone_from(unassigned);
+        }
+        code.bind(label);
+    }
+
     fn frame(&mut self, label: Label, stack: Vec<VerifType>, code: &mut CodeBuilder) {
+        self.record_label_assignment_state(label, code);
+        let current_unassigned = std::mem::take(&mut self.unassigned_values);
+        self.unassigned_values = self
+            .label_unassigned_values
+            .get(&label)
+            .cloned()
+            .unwrap_or_default();
         let locals = self.verif_locals();
+        self.unassigned_values = current_unassigned;
         // Prepend any operand held on the stack below the current expression (an arithmetic LHS across a
         // branchy RHS), so the frame types the full operand stack the verifier sees.
         let stack = if self.pending_stack.is_empty() {
@@ -19867,30 +19788,36 @@ impl<'a> Emitter<'a> {
         self.verif_locals_with(&[])
     }
 
+    /// Take a slot the backend owns for as long as it is live; see `backend_temporaries`.
+    fn lease_temporary(&mut self, slot: u16, ty: Ty) -> backend_temporaries::TemporaryLease {
+        debug_assert!(
+            !self.slots.values().any(|(held, _)| *held == slot),
+            "backend temporary at slot {slot} aliases a semantic local"
+        );
+        self.temporaries.lease(slot, ty)
+    }
+
+    fn release_temporary(&mut self, lease: backend_temporaries::TemporaryLease) {
+        self.temporaries.release(lease);
+    }
+
+    /// The definitely-assigned semantic locals, as `(slot, type)`.
+    fn assigned_semantic_slots(&self) -> Vec<(u16, Ty)> {
+        self.slots
+            .iter()
+            .filter(|(value, _)| !self.unassigned_values.contains(value))
+            .map(|(_, slot)| *slot)
+            .collect()
+    }
+
     fn verif_locals_with(&mut self, extra: &[(u16, Ty)]) -> Vec<VerifType> {
-        let max = self.next_slot as usize;
-        let mut raw = vec![VerifType::Top; max];
-        let entries: Vec<(u16, Ty)> = self.slots.values().copied().collect();
-        for (slot, ty) in entries {
-            if (slot as usize) < raw.len() {
-                raw[slot as usize] = self.verif_single(ty);
-            }
-        }
+        let mut raw = self.verif_slots_upto(self.next_slot);
         for (slot, ty) in extra.iter().copied() {
             if (slot as usize) < raw.len() {
                 raw[slot as usize] = self.verif_single(ty);
             }
         }
-        if self.this_uninitialized && !raw.is_empty() {
-            raw[0] = VerifType::UninitializedThis;
-        }
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < raw.len() {
-            let wide = matches!(raw[i], VerifType::Long | VerifType::Double);
-            out.push(raw[i].clone());
-            i += if wide { 2 } else { 1 };
-        }
+        let mut out = backend_temporaries::collapse(&raw);
         while out.last() == Some(&VerifType::Top) {
             out.pop();
         }
@@ -20170,7 +20097,7 @@ fn boxed_descriptor(t: Ty) -> String {
 /// semantic SAM and the provider-supplied method spelling. Arrays are references just like objects,
 /// while primitive and `void` spellings are not. Keeping this tiny predicate shared by parameter and
 /// return specialization prevents the two halves of a LambdaMetafactory boundary from drifting.
-fn descriptor_is_reference(descriptor: &str) -> bool {
+pub(super) fn descriptor_is_reference(descriptor: &str) -> bool {
     descriptor.starts_with('L') || descriptor.starts_with('[')
 }
 

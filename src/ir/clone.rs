@@ -329,6 +329,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(expr_lines);
     copy_map!(expr_source_lines);
     copy_map!(expr_end_lines);
+    copy_map!(implicit_return_end_lines);
     copy_map!(value_names);
     copy_map!(logical_types);
     copy_map!(exhaustive_whens);

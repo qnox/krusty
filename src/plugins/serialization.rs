@@ -32,7 +32,7 @@ use crate::types::{type_name, Ty, TypeName};
 use deserialization_constructor::{add_cached_descriptor, add_deserialization_constructor};
 use deserialize_body::DeserializeBody;
 use element_serializer::{element_serializer_expr, element_serializer_plan};
-use generated_members::{add_serializer_members, GeneratedSerializerMembers};
+use generated_members::{add_serializer_members, publish_write_self, GeneratedSerializerMembers};
 use serialize_body::SerializeBody;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -633,7 +633,7 @@ fn ty_descriptor(ctx: &PluginContext, ty: &Ty) -> Option<String> {
 
 /// The `CompositeDecoder.decode<T>Element` method + descriptor for a property type, or `None` for a
 /// reference/richer type (which needs `decodeSerializableElement`). Covers the full primitive set +
-/// String; Long/Double are 2-slot and their field locals are sized via `slot_width`.
+/// String; backend lowering owns any wider physical carrier/local representation.
 fn decode_element_method(ty: &Ty) -> Option<(&'static str, &'static str)> {
     let fq = ty.kotlin_class_internal()?;
     Some(if fq.matches("kotlin/Int") {
@@ -669,18 +669,6 @@ fn decode_element_method(ty: &Ty) -> Option<(&'static str, &'static str)> {
     } else {
         return None; // reference/richer types: decodeSerializableElement (future work)
     })
-}
-
-/// JVM local-slot width of a field type. Semantic non-null `Long`/`Double` values take two slots;
-/// nullable forms are references and therefore take one. Choosing their physical wrapper class is
-/// a backend concern and does not enter this plugin decision.
-fn slot_width(ty: &Ty) -> u32 {
-    match *ty {
-        // `Ty::Long` and `Ty::Double` are the common semantic classifier identities. Their nullable
-        // wrappers fall through to the one-slot reference case.
-        Ty::Long | Ty::Double => 2,
-        _ => 1,
-    }
 }
 
 /// An `invokeinterface` callee on a runtime interface (`Encoder`/`CompositeEncoder`/…).
@@ -1372,6 +1360,9 @@ impl IrPlugin for SerializationPlugin {
             .iter()
             .map(|&parameter| Ty::obj_args_name(serializer, &[parameter]))
             .collect::<Vec<_>>();
+        let param_names = (0..params.len())
+            .map(|index| format!("typeSerial{index}"))
+            .collect::<Vec<_>>();
         let ret = Ty::obj_args_name(serializer, &[class]);
         let generic_sig = (!parameters.is_empty()).then(|| crate::libraries::GenericSig {
             formals: ctx.type_parameters.type_params().clone(),
@@ -1396,6 +1387,7 @@ impl IrPlugin for SerializationPlugin {
             },
             name: "serializer".to_string(),
             params,
+            param_names,
             ret,
             generic_sig,
             plugin_expression: Some(crate::libraries::PluginExpressionDeclaration {
@@ -1612,7 +1604,13 @@ impl IrPlugin for SerializationPlugin {
                 deserialize,
                 child_serializers: child,
                 type_parameter_serializers: type_params_ser,
-            } = add_serializer_members(ir, serializer_name, serialized_ty, owner_start_line);
+            } = add_serializer_members(
+                ir,
+                serializer_name,
+                serialized_ty,
+                owner_start_line,
+                !type_params.is_empty(),
+            );
 
             let foo_fields: Vec<(String, Ty)> = ir.classes[class_id as usize]
                 .fields
@@ -1627,35 +1625,26 @@ impl IrPlugin for SerializationPlugin {
                 .iter()
                 .map(crate::ir::IrField::has_default)
                 .collect();
-            // Generic `@Serializable class C<T…>`: the `$serializer` is a CLASS (not a singleton object)
-            // with one `KSerializer` constructor parameter per type parameter (`typeSerialK`, stored at
-            // fields `1..=N`, after the `descriptor` field 0), used as the element serializer for any
-            // type-parameter-typed property. A non-generic class keeps the singleton-object form.
+            // A generic `$serializer` stores one `KSerializer` per type parameter; a non-generic
+            // serializer keeps the singleton-object form.
             let n_tp = type_params.len();
             let is_generic = n_tp > 0;
             let mut ser = synthetic_class(&ser_fq);
-            // The generated class stands where the annotated declaration does: kotlinc roots its
-            // constructor's `LineNumberTable` there, and the local-variable table naming `this`
-            // rides on the same record. Every other generated member already carried both through
-            // `record_debug_tables`; the constructor is emitted from the CLASS, so the generated
-            // class retains both the annotation-inclusive start and the distinct header line. Its
-            // CLOSING line comes along too: the class initializer's trailing `return` maps there.
+            // The generated class stands where the annotated declaration does. Its member debug
+            // shape is producer-published; its constructor and class initializer retain the class
+            // start/header/end lines used by their separate JVM emission paths.
             ser.decl_line = owner_header_line;
             ser.decl_start_line = owner_start_line;
             ser.decl_end_line = ir.classes[class_id as usize].decl_end_line;
             ser.applied_annotations = generated_serializer_annotations();
-            ser.is_object = !is_generic; // non-generic `$serializer` is a singleton object (INSTANCE)
-                                         // Implement `GeneratedSerializer` (extends `KSerializer`) — it declares `childSerializers()`
-                                         // (we generate it) and a DEFAULT `typeParametersSerializers()`, and it lets the descriptor
-                                         // (built with `this` below) derive element descriptors for `getElementDescriptor`/introspection.
+            ser.is_object = !is_generic;
+            // `GeneratedSerializer` supplies the default type-parameter serializer member.
             ser.interfaces = vec![crate::types::type_name(GENERATED_SERIALIZER_FQ)].into();
             ser.type_params = type_params.clone();
             ser.type_param_bounds = type_param_bounds;
             ser.supertypes = vec![kserializer_of(serialized_ty)];
-            // Field 0 is the `descriptor` (a `PluginGeneratedSerialDescriptor`), built in <init>. A generic
-            // serializer adds one `KSerializer` field per type parameter (`typeSerial0..N` at fields 1..=N),
-            // set from the constructor parameters.
-            // Field 0 `descriptor` + each `typeSerial{k}` are `final` private fields.
+            // Field 0 is the final descriptor; generic serializer fields 1..=N hold the final
+            // type-parameter serializers supplied to the constructor.
             let descriptor_field = ser.fields.len() as u32;
             ser.fields.push(
                 crate::ir::IrField::new(
@@ -1698,12 +1687,7 @@ impl IrPlugin for SerializationPlugin {
             // `typeParametersSerializers` only when there are type-parameter serializers to pass
             // along; and `getDescriptor` is described as the accessor of a `descriptor` PROPERTY,
             // registered below rather than as a function.
-            let mut described = vec![child, deserialize, serialize];
-            if is_generic {
-                described.push(type_params_ser);
-            }
-            let descriptor_order = described.len() as u32;
-            ser.published_generated_functions = Some(described);
+            let descriptor_order = 3 + u32::from(is_generic);
             ser.properties.push(crate::ir::IrProperty {
                 name: "descriptor".to_string(),
                 context_params: Vec::new(),
@@ -2023,7 +2007,9 @@ impl IrPlugin for SerializationPlugin {
                 });
                 ir.synthetic_methods.insert(write_self);
                 ir.classes[class_id as usize].methods.push(write_self);
-                self.record_write_self(ir.classes[class_id as usize].fq_name_id(), write_self);
+                let owner = ir.classes[class_id as usize].fq_name_id();
+                publish_write_self(ir, owner, write_self, owner_start_line);
+                self.record_write_self(owner, write_self);
             }
 
             // `<getter>$annotations()` markers for properties kotlinc preserves the serialization
@@ -2057,7 +2043,6 @@ impl IrPlugin for SerializationPlugin {
             }
 
             if plain_data_class {
-                let field_types = foo_fields.iter().map(|(_, ty)| *ty).collect::<Vec<_>>();
                 let cached_descriptor = if is_generic {
                     let elements = foo_fields
                         .iter()
@@ -2085,7 +2070,7 @@ impl IrPlugin for SerializationPlugin {
                     ir,
                     class_id,
                     ser_id,
-                    &field_types,
+                    &foo_fields,
                     cached_descriptor,
                 );
             }
@@ -2430,7 +2415,9 @@ impl IrPlugin for SerializationPlugin {
                         });
                         ir.functions[fid as usize].body = Some(body);
                     }
-                    "typeParametersSerializers" => {
+                    // A serializer without type parameters keeps the semantic interface-default
+                    // delegation installed when its member was declared.
+                    "typeParametersSerializers" if !class_type_params.is_empty() => {
                         let elements: Vec<ExprId> = (1..=class_type_params.len() as u32)
                             .map(|fidx| {
                                 let this = ir.add_expr(IrExpr::GetValue(0));
@@ -2501,6 +2488,7 @@ mod tests {
                     KSERIALIZER_FQ,
                     &[Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")))],
                 )],
+                param_names: vec!["typeSerial0".to_string()],
                 ret: Ty::obj_args_name(
                     type_name(KSERIALIZER_FQ),
                     &[Ty::obj_args_name(
@@ -2847,6 +2835,44 @@ mod tests {
     }
 
     #[test]
+    fn deserialize_uses_symbolic_local_identities_for_wide_values() {
+        let (mut ir, ctx, _) = serializable_class("demo/Wide", &["kotlin/Long", "kotlin/Double"]);
+        run(&mut ir, &ctx);
+
+        let serializer = find_class(&ir, "demo/Wide$$serializer");
+        let deserialize = serializer
+            .methods
+            .iter()
+            .copied()
+            .find(|function| ir.functions[*function as usize].name == "deserialize")
+            .expect("generated deserialize function");
+        let body = ir.functions[deserialize as usize]
+            .body
+            .expect("generated deserialize body");
+        let IrExpr::Block { stmts, .. } = ir.expr(body) else {
+            panic!("deserialize body is not a block");
+        };
+        let locals = stmts
+            .iter()
+            .filter_map(|statement| match ir.expr(*statement) {
+                IrExpr::Variable { index, .. } => Some(*index),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            locals,
+            [2, 3, 4, 5, 6, 7, 8],
+            "semantic identities stay consecutive; a backend assigns wide physical slots"
+        );
+        assert!(
+            !ir.exprs
+                .iter()
+                .any(|expression| matches!(expression, IrExpr::Continue { .. })),
+            "common IR must not encode the JVM's terminal switch jump as continue"
+        );
+    }
+
+    #[test]
     fn deser_ctor_seq_mask_count_is_floor_div_32_plus_1() {
         for (n, expect) in [(1usize, 1usize), (31, 1), (32, 2), (33, 2), (64, 3)] {
             let tys: Vec<&str> = std::iter::repeat_n("kotlin/String", n).collect();
@@ -2864,6 +2890,44 @@ mod tests {
             );
             assert_eq!(ctor.params.len(), expect + n + 1, "n={n} total ctor params");
         }
+    }
+
+    #[test]
+    fn deserialization_constructor_publishes_exact_internal_metadata_shape() {
+        let (mut ir, ctx, class) =
+            serializable_class("demo/Published", &["kotlin/Int", "kotlin/String"]);
+        run(&mut ir, &ctx);
+
+        let ordinal = ir
+            .generated_secondary_constructor(
+                class,
+                crate::ir::IrSecondaryConstructorRole::SerializationDeserialization,
+            )
+            .expect("deserialization constructor identity");
+        let constructor = &ir.classes[class as usize].secondary_ctors[ordinal as usize];
+        assert!(
+            constructor.synthetic,
+            "the classfile constructor stays synthetic"
+        );
+        assert_eq!(
+            constructor.metadata_visibility,
+            Some(crate::types::Visibility::Internal)
+        );
+        assert_eq!(
+            constructor.named_params,
+            [
+                ("seen0".to_string(), Ty::Int),
+                ("f0".to_string(), Ty::Int),
+                ("f1".to_string(), class_ty("kotlin/String")),
+                (
+                    "serializationConstructorMarker".to_string(),
+                    Ty::nullable(class_ty(
+                        "kotlinx/serialization/internal/SerializationConstructorMarker"
+                    )),
+                ),
+            ],
+            "metadata parameters are the mask, declaration-ordered fields, and nullable marker"
+        );
     }
 
     #[test]

@@ -6911,22 +6911,25 @@ fn synth_value_members(
     let secondary_metadata = ir.classes[class_id as usize]
         .secondary_ctors
         .iter()
-        .filter(|constructor| !constructor.synthetic)
-        .map(|constructor| crate::ir::IrJvmValueClassSecondaryCtor {
-            params: constructor.named_params.clone(),
-            param_defaults: constructor.defaults.iter().map(Option::is_some).collect(),
-            vararg_index: constructor.vararg_index,
-            annotations: constructor.annotations.clone(),
-            descriptor: method_descriptor(
-                &jvm_tys(
-                    &constructor
-                        .params
-                        .iter()
-                        .map(|parameter| erase(parameter, under))
-                        .collect::<Vec<_>>(),
+        .filter_map(|constructor| {
+            let metadata_visibility = constructor.metadata_visibility?;
+            Some(crate::ir::IrJvmValueClassSecondaryCtor {
+                params: constructor.named_params.clone(),
+                param_defaults: constructor.defaults.iter().map(Option::is_some).collect(),
+                vararg_index: constructor.vararg_index,
+                annotations: constructor.annotations.clone(),
+                metadata_visibility,
+                descriptor: method_descriptor(
+                    &jvm_tys(
+                        &constructor
+                            .params
+                            .iter()
+                            .map(|parameter| erase(parameter, under))
+                            .collect::<Vec<_>>(),
+                    ),
+                    ir_ty_to_jvm(&eu),
                 ),
-                ir_ty_to_jvm(&eu),
-            ),
+            })
         })
         .collect::<Vec<_>>();
     if !secondary_metadata.is_empty() {
