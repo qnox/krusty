@@ -16182,7 +16182,7 @@ impl<'a> Emitter<'a> {
                     let param_tys =
                         static_default_stub_params(self.ir, *function, Ty::obj("java/lang/Object"));
                     let ret = jvm_declared_ty(&f.ret);
-                    self.emit_operands(args, code);
+                    self.emit_call_operands(e, args, code);
                     let argument_words: i32 =
                         param_tys.iter().map(|ty| slot_words(*ty) as i32).sum();
                     let descriptor = method_descriptor(&param_tys, ret);
@@ -16202,7 +16202,7 @@ impl<'a> Emitter<'a> {
                     let ret = jvm_declared_ty(&f.ret);
                     let name = format!("{}$default", f.name);
                     let args = args.clone();
-                    self.emit_operands(&args, code);
+                    self.emit_call_operands(e, &args, code);
                     let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
                     let owner = self.facade.clone();
                     let m = self
@@ -18302,7 +18302,7 @@ impl<'a> Emitter<'a> {
     /// op would be live on the stack across that frame), evaluate all ops into temps first, then load
     /// them — keeping the stack empty while each frame-recording op runs.
     fn emit_operands(&mut self, ops: &[u32], code: &mut CodeBuilder) {
-        self.emit_operands_adapted(ops, code, |_, _, _| {});
+        self.emit_operands_adapted(None, ops, code, |_, _, _| {});
     }
 
     /// Adapt one semantic value to the physical slot named by a JVM descriptor. Wrapper identity and
@@ -18446,13 +18446,20 @@ impl<'a> Emitter<'a> {
     /// after a right operand has landed above it, and a branchy right operand still requires both
     /// source expressions to be evaluated with an empty stack. Consumers supply only the boundary
     /// adapter; evaluation order, frame safety, temporary ownership, and cleanup remain centralized.
-    fn emit_operands_adapted<F>(&mut self, ops: &[u32], code: &mut CodeBuilder, mut adapt: F)
-    where
+    fn emit_operands_adapted<F>(
+        &mut self,
+        call: Option<u32>,
+        ops: &[u32],
+        code: &mut CodeBuilder,
+        mut adapt: F,
+    ) where
         F: FnMut(&mut Self, Ty, &mut CodeBuilder),
     {
+        let mut inside_run = false;
         if ops.iter().skip(1).any(|&o| self.records_frame(o)) {
             let temps = self.spill_to_temps(ops, code);
-            for &(slot, t, _) in &temps {
+            for (&(slot, t, _), &o) in temps.iter().zip(ops) {
+                self.mark_synthesized_operand_run(call, o, &mut inside_run, code);
                 load(t, slot, code);
                 adapt(self, t, code);
             }
@@ -18461,6 +18468,7 @@ impl<'a> Emitter<'a> {
             }
         } else {
             for &o in ops {
+                self.mark_synthesized_operand_run(call, o, &mut inside_run, code);
                 self.emit_value(o, code);
                 adapt(self, self.value_ty(o), code);
             }
@@ -18489,7 +18497,7 @@ impl<'a> Emitter<'a> {
     /// swapped past it. The shared adapted-operand path owns evaluation order, frame-aware spilling,
     /// and temporary cleanup; identity supplies only the primitive-to-reference adapter.
     fn emit_identity_operands(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
-        self.emit_operands_adapted(&[lhs, rhs], code, Self::box_scalar_operand);
+        self.emit_operands_adapted(None, &[lhs, rhs], code, Self::box_scalar_operand);
     }
 
     fn emit_primitive_inc_dec_virtual(
@@ -19124,7 +19132,7 @@ impl<'a> Emitter<'a> {
             // accepts that with an always-false/true warning, whereas structural `x == null` is
             // rejected by the front end. Use the same adapted-operand primitive as mixed identity so
             // the `ifnull` reference slot receives a box; reference structural operands are a no-op.
-            self.emit_operands_adapted(&[operand], code, Self::box_scalar_operand);
+            self.emit_operands_adapted(None, &[operand], code, Self::box_scalar_operand);
             self.frame(target, vec![], code);
             if (op == Eq) == jt {
                 code.ifnull(target);
@@ -19146,7 +19154,7 @@ impl<'a> Emitter<'a> {
     /// Put the null-safe structural equality result for two references on the operand stack.
     fn emit_structural_equality(&mut self, lhs: u32, rhs: u32, code: &mut CodeBuilder) {
         // Spill if rhs is branchy (`x == when { ... }`) so lhs is not live across its merge frames.
-        self.emit_operands_adapted(&[lhs, rhs], code, Self::box_scalar_operand);
+        self.emit_operands_adapted(None, &[lhs, rhs], code, Self::box_scalar_operand);
         let m = self.cw.methodref(
             "kotlin/jvm/internal/Intrinsics",
             "areEqual",

@@ -106,13 +106,40 @@ impl Emitter<'_> {
         // `JVM backend inline error: call arity mismatch`. Emitting an unverifiable call is worse,
         // and so is panicking — that loses the diagnostic and takes down the whole compilation
         let mut index = 0usize;
-        self.emit_operands_adapted(ops, code, |this, source, code| {
+        self.emit_operands_adapted(None, ops, code, |this, source, code| {
             let expression = ops[index];
             let target = physical[index];
             index += 1;
             this.adapt_physical_operand_for(expression, source, target, code);
         });
         Ok(())
+    }
+
+    /// Operands of `call`, with the call's own line put back in effect at the start of every run of
+    /// operands the CALL synthesized — the placeholder for an omitted argument, and the trailing
+    /// mask/marker group. A supplied argument between two such runs puts its own line in effect, and
+    /// the next run restores the call's, which is what kotlinc records. A call that synthesizes
+    /// nothing marks nothing here and takes its line at the invoke, as before.
+    pub(super) fn emit_call_operands(&mut self, call: u32, ops: &[u32], code: &mut CodeBuilder) {
+        self.emit_operands_adapted(Some(call), ops, code, |_, _, _| {});
+    }
+
+    /// Put `call`'s line in effect if `operand` opens a run of synthesized operands.
+    pub(super) fn mark_synthesized_operand_run(
+        &mut self,
+        call: Option<u32>,
+        operand: u32,
+        inside_run: &mut bool,
+        code: &mut CodeBuilder,
+    ) {
+        let Some(call) = call else {
+            return;
+        };
+        let synthesized = self.ir.is_synthesized_default_operand(operand);
+        if synthesized && !*inside_run {
+            debug_lines::mark_expression_start(self.ir, call, code);
+        }
+        *inside_run = synthesized;
     }
 
     pub(super) fn emit_call_descriptor_operands(
@@ -124,7 +151,9 @@ impl Emitter<'_> {
     ) -> Result<(), DescriptorArityMismatch> {
         DescriptorArityMismatch::check(None, ops.len(), physical.len())?;
         let mut index = 0usize;
-        self.emit_operands_adapted(ops, code, |this, source, code| {
+        // The call owns any operand a default-argument realization synthesized for it, so its own
+        // line goes back into effect at the start of each such run.
+        self.emit_operands_adapted(Some(call_expression), ops, code, |this, source, code| {
             let parameter_index = index;
             let expression = ops[parameter_index];
             let target = physical[parameter_index];
@@ -163,7 +192,7 @@ impl Emitter<'_> {
         });
         physical.extend_from_slice(physical_params);
         let mut index = 0usize;
-        self.emit_operands_adapted(&ops, code, |this, source, code| {
+        self.emit_operands_adapted(None, &ops, code, |this, source, code| {
             let operand = ops[index];
             let target = physical[index];
             if index == 0 {
