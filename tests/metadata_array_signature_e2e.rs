@@ -104,3 +104,39 @@ fn a_primitive_array_and_a_nested_array_record_no_descriptor() {
         fun nested(xs: List<Array<String>>): Int = xs.size\n";
     assert_identical("ArrNested", SRC, "app/ArrNestedKt");
 }
+
+/// The same rule for a CLASS MEMBER. The facade path consulted the shared predicate; the
+/// class-member path had a narrower copy of its own that only recognized an array whose element
+/// carried a STAR PROJECTION, so `Array<String>` on a member recorded nothing and `Array<*>` did.
+///
+/// This is the shape every generated serializer has — `childSerializers(): Array<KSerializer<*>>`
+/// is a member — but it is not specific to one: an ordinary member returning `Array<String>` was
+/// just as wrong.
+#[test]
+fn a_members_array_signature_records_its_descriptor() {
+    const SRC: &str = "package app\n\
+        \n\
+        class Holder {\n\
+        \x20   fun plain(): Array<String> = arrayOf()\n\
+        \x20   fun boxed(): Array<Int> = arrayOf()\n\
+        \x20   fun nested(): Array<Array<String>> = arrayOf()\n\
+        \x20   fun takes(xs: Array<String>): Int = xs.size\n\
+        \x20   fun nullable(): Array<String>? = null\n\
+        }\n";
+    assert_identical("MemberArraySig", SRC, "app/Holder");
+}
+
+/// And the members whose descriptors a reader CAN derive record none, on the same path: a
+/// primitive array is its own Kotlin class with a table entry, and an array nested inside another
+/// type is erased away before the descriptor.
+#[test]
+fn a_members_derivable_signature_records_no_descriptor() {
+    const SRC: &str = "package app\n\
+        \n\
+        class Plain {\n\
+        \x20   fun ints(xs: IntArray): Int = xs.size\n\
+        \x20   fun inside(xs: List<Array<String>>): Int = xs.size\n\
+        \x20   fun text(): String = \"\"\n\
+        }\n";
+    assert_identical("MemberDerivableSig", SRC, "app/Plain");
+}

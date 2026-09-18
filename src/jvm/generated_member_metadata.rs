@@ -52,13 +52,15 @@ pub(super) fn functions(ir: &IrFile, publication: &IrGeneratedMemberPublication)
             );
             let declared_descriptor =
                 crate::jvm::names::method_descriptor(&crate::jvm::ir_emit::jvm_tys(params), ret);
-            if physical_descriptor != declared_descriptor
-                || super::ir_emit::array_of_star_projection(ret)
-                || params
-                    .iter()
-                    .copied()
-                    .any(super::ir_emit::array_of_star_projection)
-            {
+            // The descriptor is recorded when it differs from the declared one, and also when a
+            // reader could not derive it from the recorded types at all — a `kotlin/Array` anywhere
+            // in the signature, whose descriptor depends on the type ARGUMENT. That is the rule
+            // every other metadata path applies, and it is why kotlinc records one for a generated
+            // `childSerializers(): Array<KSerializer<*>>` while recording none for its siblings.
+            let underivable = std::iter::once(ret)
+                .chain(params.iter().copied())
+                .any(crate::metadata::descriptor_needs_recording);
+            if physical_descriptor != declared_descriptor || underivable {
                 result.jvm_sig = Some(physical_descriptor);
             }
             if function.name != metadata.source_name {
