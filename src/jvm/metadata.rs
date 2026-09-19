@@ -6104,13 +6104,14 @@ mod module_reader_tests {
 
     #[test]
     fn raw_klib_package_fragment_exposes_js_static_annotation() {
-        let Some(library_dir) = crate::toolchain::kotlinc_lib_dir() else {
-            return;
-        };
+        // The reference distribution is a harness prerequisite, not an optional extra: a missing
+        // one is a broken harness, and returning early here turned that into a passing test that
+        // asserted nothing.
+        let library_dir = crate::toolchain::kotlinc_lib_dir()
+            .expect("the reference Kotlin distribution is a harness prerequisite");
         let klib = library_dir.join("kotlin-stdlib-wasm-js.klib");
-        let Some(archive) = crate::klib::KlibArchive::open(&klib) else {
-            return;
-        };
+        let archive = crate::klib::KlibArchive::open(&klib)
+            .unwrap_or_else(|error| panic!("the distribution's wasm-js klib must open: {error}"));
         let bytes = archive
             .read("default/linkdata/package_kotlin.js/13_js.knm")
             .expect("Kotlin common JS annotation header metadata fragment");

@@ -10,21 +10,27 @@ use std::collections::BTreeSet;
 
 use krusty::klib::KlibArchive;
 
-fn reference_klib(name: &str) -> Option<KlibArchive> {
-    let directory = krusty::toolchain::kotlinc_lib_dir()?;
+/// One klib from the reference distribution.
+///
+/// The distribution is a harness prerequisite, not an optional extra, so its absence fails these
+/// tests rather than passing them: returning early here turned a missing toolchain — and a renamed
+/// or corrupt klib — into a test that asserted nothing at all.
+fn reference_klib(name: &str) -> KlibArchive {
+    let directory = krusty::toolchain::kotlinc_lib_dir()
+        .expect("the reference Kotlin distribution is a harness prerequisite");
     let path = directory.join(name);
-    if !path.is_file() {
-        return None;
-    }
-    KlibArchive::open(&path)
+    assert!(
+        path.is_file(),
+        "the distribution must ship {name}: {}",
+        path.display()
+    );
+    KlibArchive::open(&path).unwrap_or_else(|error| panic!("{name} must open as a klib: {error}"))
 }
 
 #[test]
 fn js_stdlib_klib_reports_its_identity_and_packages() {
-    let Some(archive) = reference_klib("kotlin-stdlib-js.klib") else {
-        return;
-    };
-    let manifest = archive.manifest();
+    let archive = reference_klib("kotlin-stdlib-js.klib");
+    let manifest = archive.manifest().expect("the manifest reads");
     assert_eq!(manifest.unique_name(), Some("kotlin"));
     assert_eq!(manifest.builtins_platform(), Some("JS"));
     assert!(
@@ -70,9 +76,10 @@ fn js_stdlib_klib_reports_its_identity_and_packages() {
         "a listed fragment reads back"
     );
     assert!(
-        archive
+        !archive
             .module_header()
-            .is_some_and(|bytes| !bytes.is_empty()),
+            .expect("the module header reads")
+            .is_empty(),
         "the module header is present"
     );
     assert!(
@@ -88,19 +95,19 @@ fn js_stdlib_klib_reports_its_identity_and_packages() {
 /// second platform's stdlib has to disagree with the first exactly there and nowhere else.
 #[test]
 fn the_wasm_stdlib_klib_differs_only_in_its_platform() {
-    let (Some(js), Some(wasm)) = (
-        reference_klib("kotlin-stdlib-js.klib"),
-        reference_klib("kotlin-stdlib-wasm-js.klib"),
-    ) else {
-        return;
-    };
-    assert_eq!(js.manifest().unique_name(), wasm.manifest().unique_name());
-    assert_eq!(wasm.manifest().builtins_platform(), Some("WASM"));
-    assert_eq!(wasm.manifest().targets(), vec!["wasm-js"]);
+    let js = reference_klib("kotlin-stdlib-js.klib")
+        .manifest()
+        .expect("the JS manifest reads");
+    let wasm = reference_klib("kotlin-stdlib-wasm-js.klib")
+        .manifest()
+        .expect("the wasm manifest reads");
+    assert_eq!(js.unique_name(), wasm.unique_name());
+    assert_eq!(wasm.builtins_platform(), Some("WASM"));
+    assert_eq!(wasm.targets(), vec!["wasm-js"]);
     assert!(
-        js.manifest().targets().is_empty(),
+        js.targets().is_empty(),
         "a JS klib has one target and does not name it: {:?}",
-        js.manifest().targets()
+        js.targets()
     );
 }
 
@@ -114,10 +121,8 @@ fn the_wasm_stdlib_klib_differs_only_in_its_platform() {
 /// `depends` is pinned by the unit tests beside `src/klib.rs`, against a manifest that has one.)
 #[test]
 fn a_second_distribution_klib_is_told_apart_by_name_and_packages() {
-    let Some(archive) = reference_klib("kotlin-test-js.klib") else {
-        return;
-    };
-    let manifest = archive.manifest();
+    let archive = reference_klib("kotlin-test-js.klib");
+    let manifest = archive.manifest().expect("the manifest reads");
     assert_eq!(manifest.unique_name(), Some("kotlin-test"));
     assert_eq!(manifest.builtins_platform(), Some("JS"));
     assert!(
@@ -138,4 +143,159 @@ fn a_second_distribution_klib_is_told_apart_by_name_and_packages() {
         !packages.contains("kotlin.collections"),
         "and not the stdlib's packages: {packages:?}"
     );
+}
+
+/// The ZIP shape's own rules, on fixtures this repository writes.
+///
+/// The unit tests beside `src/klib.rs` pin the UNPACKED shape — containment, escapes, an absent
+/// manifest — because that is the shape whose entries touch the filesystem. These pin the zip
+/// shape's four answers, which no distribution klib can exercise: a distribution ships only valid
+/// ones, so "not a zip", "not a klib" and "lists an entry it cannot produce" would never be reached.
+mod synthetic {
+    use super::*;
+    use std::io::Write as _;
+    use std::path::{Path, PathBuf};
+
+    fn scratch(tag: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+        let directory =
+            std::env::temp_dir().join(format!("krusty-{tag}-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("create the fixture directory");
+        directory
+    }
+
+    fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
+        let file = std::fs::File::create(path).expect("create the fixture archive");
+        let mut archive = zip::ZipWriter::new(file);
+        for (name, contents) in entries {
+            archive
+                .start_file(
+                    *name,
+                    zip::write::SimpleFileOptions::default()
+                        .compression_method(zip::CompressionMethod::Deflated),
+                )
+                .expect("start the fixture entry");
+            archive
+                .write_all(contents)
+                .expect("write the fixture entry");
+        }
+        archive.finish().expect("finish the fixture archive");
+    }
+
+    /// The shape a distribution ships, written here so the three failures below are told apart from
+    /// a success rather than only from each other.
+    #[test]
+    fn a_zip_klib_reads_its_manifest_fragments_and_ir() {
+        let directory = scratch("klib-zip-valid");
+        let path = directory.join("fixture.klib");
+        write_zip(
+            &path,
+            &[
+                (
+                    "default/manifest",
+                    b"unique_name=fixture\nbuiltins_platform=JS\n",
+                ),
+                ("default/linkdata/module", b"module-header"),
+                ("default/linkdata/root_package/00_.knm", b"root"),
+                ("default/linkdata/package_fixture.core/01_core.knm", b"core"),
+                ("default/ir/irDeclarations.knd", b"ir"),
+            ],
+        );
+
+        let archive = KlibArchive::open(&path).expect("the fixture opens as a klib");
+        let manifest = archive.manifest().expect("the manifest reads");
+        assert_eq!(manifest.unique_name(), Some("fixture"));
+        assert_eq!(manifest.builtins_platform(), Some("JS"));
+        assert_eq!(
+            archive.module_header().expect("the module header reads"),
+            b"module-header"
+        );
+        assert_eq!(
+            archive
+                .package_fragments()
+                .iter()
+                .map(|fragment| fragment.package_fqname.clone())
+                .collect::<Vec<_>>(),
+            ["", "fixture.core"],
+            "the root package is listed beside the named one"
+        );
+        assert_eq!(archive.ir_entries(), vec!["default/ir/irDeclarations.knd"]);
+    }
+
+    /// A file that is not a zip at all. Something is there and cannot be read, which is not the
+    /// same answer as nothing being there — and both produced `None` before.
+    #[test]
+    fn a_file_that_does_not_parse_as_a_zip_is_malformed() {
+        let directory = scratch("klib-zip-invalid");
+        let path = directory.join("fixture.klib");
+        std::fs::write(
+            &path,
+            b"PK\x03\x04 and then nothing that follows the format",
+        )
+        .expect("write the fixture");
+        let error = KlibArchive::open(&path).err().expect("not a zip");
+        assert!(
+            !error.is_absence(),
+            "a corrupt archive is not an absent library: {error}"
+        );
+    }
+
+    /// A zip with no `default/` tree is some other archive — a jar on the wrong path — and is an
+    /// ABSENT library. Both on-disk shapes answer this the same way.
+    #[test]
+    fn a_zip_without_a_default_tree_is_not_a_klib() {
+        let directory = scratch("klib-zip-not-a-klib");
+        let path = directory.join("fixture.klib");
+        write_zip(
+            &path,
+            &[("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\n")],
+        );
+        let error = KlibArchive::open(&path).err().expect("not a klib");
+        assert!(
+            error.is_absence(),
+            "a zip that is not a klib is an absent library, not a failed one: {error}"
+        );
+    }
+
+    /// An entry the central directory LISTS and whose payload does not inflate. The archive
+    /// advertises a fragment it cannot hand back, which is corruption; skipping it would publish a
+    /// library with silently fewer declarations than it claims.
+    #[test]
+    fn an_entry_that_cannot_be_inflated_is_reported_not_skipped() {
+        let directory = scratch("klib-zip-bad-entry");
+        let path = directory.join("fixture.klib");
+        write_zip(
+            &path,
+            &[
+                ("default/manifest", b"unique_name=fixture\n"),
+                (
+                    "default/linkdata/package_fixture.core/01_core.knm",
+                    b"a payload long enough that corrupting it cannot still inflate",
+                ),
+            ],
+        );
+        // Corrupt the deflate stream in place, leaving the central directory — and so the entry
+        // listing — intact. The archive still says it has the fragment.
+        let mut bytes = std::fs::read(&path).expect("read the fixture back");
+        let start = bytes.len() / 3;
+        for byte in &mut bytes[start..start + 24] {
+            *byte ^= 0xff;
+        }
+        std::fs::write(&path, &bytes).expect("write the corrupted fixture");
+
+        let archive = KlibArchive::open(&path).expect("the archive still opens");
+        let entry = "default/linkdata/package_fixture.core/01_core.knm";
+        assert!(
+            archive.entries().iter().any(|listed| listed == entry),
+            "the archive still lists the fragment: {:?}",
+            archive.entries()
+        );
+        assert!(
+            archive.read(entry).is_err(),
+            "and reading it is a failure, not an empty fragment"
+        );
+    }
 }

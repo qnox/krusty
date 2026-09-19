@@ -72,35 +72,137 @@ enum Source {
     Directory,
 }
 
+/// Why a klib could not be ingested.
+///
+/// The distinction the variants draw is the point of the type: [`Self::NotALibrary`] is an OPTIONAL
+/// absence — the path is simply not a klib, which every caller may skip — while every other variant
+/// is a library that exists and cannot be read. Collapsing the two, as an `Option` does, turns a
+/// corrupt archive, an unreadable file and an absent optional dependency into one answer, and a
+/// caller that skips absences then silently skips corruption too.
+#[derive(Debug)]
+pub enum KlibError {
+    /// The path is not a klib: not a zip, and not a directory with a `default/` tree. Callers for
+    /// which a klib is optional stop here; nothing is wrong.
+    NotALibrary { path: PathBuf },
+    /// The path exists but could not be opened or walked.
+    Unreadable {
+        path: PathBuf,
+        cause: std::io::Error,
+    },
+    /// The file is a zip whose central directory does not parse, or whose entry cannot be inflated.
+    Malformed { path: PathBuf, cause: String },
+    /// An entry the archive LISTS could not be produced. A library that advertises a fragment it
+    /// cannot hand back is corrupt, whatever the cause.
+    MissingEntry { path: PathBuf, entry: String },
+    /// An entry names a location outside the archive root — through `..`, an absolute or
+    /// platform-prefixed path, or a symlink that resolves out of the tree. This is refused before
+    /// the filesystem is touched, or after resolution for a symlink, and never read.
+    EscapesArchive { path: PathBuf, entry: String },
+}
+
+impl std::fmt::Display for KlibError {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotALibrary { path } => {
+                write!(out, "'{}' is not a Kotlin library", path.display())
+            }
+            Self::Unreadable { path, cause } => {
+                write!(out, "'{}' cannot be read: {cause}", path.display())
+            }
+            Self::Malformed { path, cause } => {
+                write!(
+                    out,
+                    "'{}' is not a readable archive: {cause}",
+                    path.display()
+                )
+            }
+            Self::MissingEntry { path, entry } => write!(
+                out,
+                "'{}' lists '{entry}' but cannot produce it",
+                path.display()
+            ),
+            Self::EscapesArchive { path, entry } => write!(
+                out,
+                "'{}' contains an entry that resolves outside it: '{entry}'",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl KlibError {
+    /// Whether this is the optional absence rather than a library that failed to read.
+    pub fn is_absence(&self) -> bool {
+        matches!(self, Self::NotALibrary { .. })
+    }
+}
+
 impl KlibArchive {
     /// Open `path` as a klib, accepting either a zip file or an unpacked directory.
-    ///
-    /// Returns `None` when the path is neither — including a zip that does not parse and a directory
-    /// with no `default/` tree, both of which mean "this is not a library" rather than an error a
-    /// caller can act on.
-    pub fn open(path: &Path) -> Option<Self> {
+    pub fn open(path: &Path) -> Result<Self, KlibError> {
         if path.is_dir() {
             if !path.join(ARCHIVE_COMPONENT).is_dir() {
-                return None;
+                return Err(KlibError::NotALibrary {
+                    path: path.to_path_buf(),
+                });
             }
+            // The root is canonicalized ONCE, here, and every read is checked against it. An entry
+            // path is data the library supplies, so containment cannot be a property of how that
+            // path is spelled: a symlink spelled with no `..` in it still resolves wherever it
+            // points.
+            let root = path.canonicalize().map_err(|cause| KlibError::Unreadable {
+                path: path.to_path_buf(),
+                cause,
+            })?;
             let mut entries = Vec::new();
-            collect_directory_entries(path, String::new(), 0, &mut entries);
+            collect_directory_entries(&root, String::new(), 0, &mut entries).map_err(|cause| {
+                KlibError::Unreadable {
+                    path: path.to_path_buf(),
+                    cause,
+                }
+            })?;
             entries.sort();
-            return Some(Self {
-                root: path.to_path_buf(),
+            return Ok(Self {
+                root,
                 source: Source::Directory,
                 entries,
             });
         }
-        let file = std::fs::File::open(path).ok()?;
-        let archive = zip::ZipArchive::new(file).ok()?;
+        let file = std::fs::File::open(path).map_err(|cause| {
+            if cause.kind() == std::io::ErrorKind::NotFound {
+                KlibError::NotALibrary {
+                    path: path.to_path_buf(),
+                }
+            } else {
+                KlibError::Unreadable {
+                    path: path.to_path_buf(),
+                    cause,
+                }
+            }
+        })?;
+        let archive = zip::ZipArchive::new(file).map_err(|cause| KlibError::Malformed {
+            path: path.to_path_buf(),
+            cause: cause.to_string(),
+        })?;
         let mut entries: Vec<String> = archive
             .file_names()
             .filter(|name| !name.ends_with('/'))
             .map(str::to_string)
             .collect();
         entries.sort();
-        Some(Self {
+        // The same test the directory shape applies, so the two shapes answer alike: a zip with no
+        // `default/` tree is some other archive — a jar on the wrong path, say — and is an absent
+        // library rather than a corrupt one. Without this only the directory shape could say "not a
+        // klib", and any zip at all opened as one.
+        if !entries.iter().any(|entry| {
+            entry.starts_with(ARCHIVE_COMPONENT)
+                && entry[ARCHIVE_COMPONENT.len()..].starts_with('/')
+        }) {
+            return Err(KlibError::NotALibrary {
+                path: path.to_path_buf(),
+            });
+        }
+        Ok(Self {
             root: path.to_path_buf(),
             source: Source::Zip(Mutex::new(archive)),
             entries,
@@ -117,41 +219,87 @@ impl KlibArchive {
         &self.entries
     }
 
-    /// Read one entry's bytes. `None` for an absent entry or an I/O failure — a klib that lists an
-    /// entry it cannot produce is corrupt, and every caller here treats that as a missing symbol
-    /// source rather than aborting the compilation.
-    pub fn read(&self, entry: &str) -> Option<Vec<u8>> {
+    /// Read one entry's bytes.
+    ///
+    /// An entry this archive LISTS and cannot produce is corruption, not absence, and says so. An
+    /// entry that resolves outside the archive root is refused rather than read.
+    pub fn read(&self, entry: &str) -> Result<Vec<u8>, KlibError> {
         match &self.source {
             Source::Zip(archive) => {
                 let mut archive = archive
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let mut file = archive.by_name(entry).ok()?;
+                let mut file = archive
+                    .by_name(entry)
+                    .map_err(|_| KlibError::MissingEntry {
+                        path: self.root.clone(),
+                        entry: entry.to_string(),
+                    })?;
                 let mut bytes = Vec::with_capacity(file.size() as usize);
-                file.read_to_end(&mut bytes).ok()?;
-                Some(bytes)
+                file.read_to_end(&mut bytes)
+                    .map_err(|cause| KlibError::Malformed {
+                        path: self.root.clone(),
+                        cause: format!("entry '{entry}': {cause}"),
+                    })?;
+                Ok(bytes)
             }
             Source::Directory => {
-                // Reject anything that could escape the archive root before touching the filesystem:
-                // an entry path is data from the library, not a caller-supplied path.
-                if entry.split('/').any(|part| part == ".." || part.is_empty()) {
-                    return None;
-                }
-                std::fs::read(self.root.join(entry)).ok()
+                let resolved = self.resolve(entry)?;
+                std::fs::read(resolved).map_err(|_| KlibError::MissingEntry {
+                    path: self.root.clone(),
+                    entry: entry.to_string(),
+                })
             }
         }
     }
 
-    /// The parsed `default/manifest`. An absent or unreadable manifest yields an empty one, which
-    /// reports `None` for every field — the same answer a caller gets for a key the manifest omits.
-    pub fn manifest(&self) -> KlibManifest {
+    /// Where an entry of an UNPACKED klib really lives, or a refusal.
+    ///
+    /// Two checks, because neither alone is containment. The path must be made only of ordinary
+    /// components, which refuses `..`, an absolute path and a platform prefix (`C:`, `\\?\`) — the
+    /// spellings a textual `/`-split test misses on a platform whose separator is not `/`. Then the
+    /// resolved location must still sit under the canonical root, which is the only thing that
+    /// refuses a symlink: a symlink's own spelling is perfectly ordinary, and `read` follows it.
+    fn resolve(&self, entry: &str) -> Result<PathBuf, KlibError> {
+        let escapes = || KlibError::EscapesArchive {
+            path: self.root.clone(),
+            entry: entry.to_string(),
+        };
+        let relative = Path::new(entry);
+        if relative.components().count() == 0
+            || !relative
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(escapes());
+        }
+        let joined = self.root.join(relative);
+        // A path that does not exist has nothing to resolve and nothing to escape through; report
+        // it as the missing entry it is, not as an escape.
+        let Ok(canonical) = joined.canonicalize() else {
+            return Err(KlibError::MissingEntry {
+                path: self.root.clone(),
+                entry: entry.to_string(),
+            });
+        };
+        if !canonical.starts_with(&self.root) {
+            return Err(escapes());
+        }
+        Ok(canonical)
+    }
+
+    /// The parsed `default/manifest`.
+    ///
+    /// A klib without a manifest is not a klib; one whose manifest cannot be read is corrupt. Both
+    /// are reported, because an empty manifest answers `None` for every field and is therefore
+    /// indistinguishable from one that simply omits the key the caller asked about.
+    pub fn manifest(&self) -> Result<KlibManifest, KlibError> {
         self.read("default/manifest")
             .map(|bytes| KlibManifest::parse(&bytes))
-            .unwrap_or_default()
     }
 
     /// The `default/linkdata/module` header protobuf, which names the packages the library declares.
-    pub fn module_header(&self) -> Option<Vec<u8>> {
+    pub fn module_header(&self) -> Result<Vec<u8>, KlibError> {
         self.read("default/linkdata/module")
     }
 
@@ -220,14 +368,26 @@ fn chunk_number(entry: &str) -> u32 {
     digits.parse().unwrap_or(u32::MAX)
 }
 
-fn collect_directory_entries(root: &Path, prefix: String, depth: usize, out: &mut Vec<String>) {
+/// Walk an unpacked klib, recording every ordinary file below `root`.
+///
+/// A directory that cannot be read is reported rather than skipped: a library whose tree is half
+/// unreadable would otherwise present as a library with fewer declarations. Depth is bounded so a
+/// symlink cycle terminates; a klib's own tree is three levels deep.
+///
+/// `DirEntry::file_type` does not follow symlinks, so a symlink is neither `is_dir` nor `is_file`
+/// here and is left out of the listing entirely. `read` refuses one that slipped in anyway, by
+/// resolution rather than by spelling.
+fn collect_directory_entries(
+    root: &Path,
+    prefix: String,
+    depth: usize,
+    out: &mut Vec<String>,
+) -> std::io::Result<()> {
     if depth > MAX_DIRECTORY_DEPTH {
-        return;
+        return Ok(());
     }
-    let Ok(directory) = std::fs::read_dir(root.join(&prefix)) else {
-        return;
-    };
-    for child in directory.flatten() {
+    for child in std::fs::read_dir(root.join(&prefix))? {
+        let child = child?;
         let Ok(name) = child.file_name().into_string() else {
             continue;
         };
@@ -236,12 +396,14 @@ fn collect_directory_entries(root: &Path, prefix: String, depth: usize, out: &mu
         } else {
             format!("{prefix}/{name}")
         };
-        match child.file_type() {
-            Ok(kind) if kind.is_dir() => collect_directory_entries(root, path, depth + 1, out),
-            Ok(_) => out.push(path),
-            Err(_) => {}
+        let kind = child.file_type()?;
+        if kind.is_dir() {
+            collect_directory_entries(root, path, depth + 1, out)?;
+        } else if kind.is_file() {
+            out.push(path);
         }
     }
+    Ok(())
 }
 
 /// A klib's `default/manifest`: the library's identity, versions and target set.
@@ -543,11 +705,12 @@ mod tests {
         write(&root, "default/ir/bodies.knb", b"bodies");
 
         let archive = KlibArchive::open(&root).expect("open unpacked klib");
-        assert_eq!(archive.manifest().unique_name(), Some("stdlib"));
-        assert_eq!(archive.manifest().builtins_platform(), Some("NATIVE"));
+        let manifest = archive.manifest().expect("the manifest reads");
+        assert_eq!(manifest.unique_name(), Some("stdlib"));
+        assert_eq!(manifest.builtins_platform(), Some("NATIVE"));
         assert_eq!(
-            archive.module_header().as_deref(),
-            Some(&b"module-header"[..])
+            archive.module_header().expect("the module header reads"),
+            b"module-header"
         );
         assert_eq!(archive.ir_entries(), vec!["default/ir/bodies.knb"]);
 
@@ -575,18 +738,139 @@ mod tests {
             "fragments order by package, then by the serializer's chunk number"
         );
         assert_eq!(
-            archive.read(&fragments[1].entry).as_deref(),
-            Some(&b"three"[..])
+            archive
+                .read(&fragments[1].entry)
+                .expect("a listed fragment"),
+            b"three"
         );
-        assert_eq!(archive.read("default/ir/absent.knb"), None);
-        assert_eq!(archive.read("../outside"), None, "no escape from the root");
+        assert!(
+            matches!(
+                archive.read("default/ir/absent.knb"),
+                Err(KlibError::MissingEntry { .. })
+            ),
+            "an entry the archive does not have is missing, not an escape",
+        );
     }
 
     #[test]
     fn a_directory_without_a_default_tree_is_not_a_klib() {
         let root = temp_dir("klib-not-a-klib");
         write(&root, "META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\n");
-        assert!(KlibArchive::open(&root).is_none());
+        let error = KlibArchive::open(&root).err().expect("not a klib");
+        assert!(
+            error.is_absence(),
+            "a directory that is not a klib is an ABSENT library, not a failed one: {error}",
+        );
+    }
+
+    /// Containment is not a property of how an entry path is SPELLED.
+    ///
+    /// A symlink's own spelling is perfectly ordinary — no `..`, no prefix, nothing a textual test
+    /// would object to — and `std::fs::read` follows it. Only resolving the path and checking it
+    /// against the canonical root refuses this, which is why the check is there and not in the
+    /// spelling. The entry is also absent from the listing, because the walk records ordinary files
+    /// and a symlink is neither a file nor a directory to `DirEntry::file_type`.
+    #[test]
+    #[cfg(unix)]
+    fn a_symlink_out_of_the_archive_is_refused_and_unlisted() {
+        // The archive root is a SUBDIRECTORY here, so the target genuinely sits outside it.
+        let enclosing = temp_dir("klib-symlink-escape");
+        let secret = enclosing.join("outside-the-archive");
+        std::fs::write(&secret, b"not the library's to hand out").expect("write the outside file");
+        let root = enclosing.join("library");
+        write(&root, "default/manifest", b"unique_name=stdlib\n");
+        let inside = root.join("default").join("linkdata");
+        std::fs::create_dir_all(&inside).expect("create linkdata");
+        std::os::unix::fs::symlink(&secret, inside.join("escape.knm"))
+            .expect("create the escaping symlink");
+
+        let archive = KlibArchive::open(&root).expect("open unpacked klib");
+        assert!(
+            !archive
+                .entries()
+                .iter()
+                .any(|entry| entry.ends_with("escape.knm")),
+            "a symlink is not an ordinary file and is not listed: {:?}",
+            archive.entries(),
+        );
+        assert!(
+            matches!(
+                archive.read("default/linkdata/escape.knm"),
+                Err(KlibError::EscapesArchive { .. })
+            ),
+            "the symlink resolves outside the root and is refused",
+        );
+    }
+
+    /// The spellings a `/`-split test misses. `..` it catches; an absolute path, a platform prefix
+    /// and a backslash-separated path it does not, and on a platform whose separator is `\\` the
+    /// last of those is a real traversal.
+    #[test]
+    fn every_escaping_spelling_is_refused_before_the_filesystem() {
+        let root = temp_dir("klib-escaping-spellings");
+        write(&root, "default/manifest", b"unique_name=stdlib\n");
+        let archive = KlibArchive::open(&root).expect("open unpacked klib");
+        for entry in [
+            "../outside",
+            "default/../../outside",
+            "/etc/passwd",
+            "",
+            ".",
+            "./default/manifest",
+        ] {
+            assert!(
+                matches!(archive.read(entry), Err(KlibError::EscapesArchive { .. })),
+                "'{entry}' must be refused as an escape, not read",
+            );
+        }
+        #[cfg(windows)]
+        for entry in ["..\\outside", "C:\\Windows", "\\\\?\\C:\\Windows"] {
+            assert!(
+                matches!(archive.read(entry), Err(KlibError::EscapesArchive { .. })),
+                "'{entry}' must be refused as an escape, not read",
+            );
+        }
+    }
+
+    /// A file that is not a zip is a MALFORMED archive, not an absent library: something is there
+    /// and it cannot be read. Collapsing the two is what let a corrupt distribution look exactly
+    /// like a distribution without one.
+    #[test]
+    fn a_file_that_is_not_an_archive_is_malformed_not_absent() {
+        let root = temp_dir("klib-not-an-archive");
+        std::fs::create_dir_all(&root).expect("create the directory");
+        let path = root.join("broken.klib");
+        std::fs::write(&path, b"this is not a zip central directory").expect("write the file");
+        let error = KlibArchive::open(&path).err().expect("not an archive");
+        assert!(
+            matches!(error, KlibError::Malformed { .. }),
+            "a file that is not a zip is malformed: {error}",
+        );
+        assert!(!error.is_absence(), "and it is not an absence: {error}");
+    }
+
+    /// A path that does not exist at all IS an absence, and the one case a caller may skip.
+    #[test]
+    fn a_path_that_does_not_exist_is_an_absence() {
+        let root = temp_dir("klib-absent");
+        let error = KlibArchive::open(&root.join("never-written.klib"))
+            .err()
+            .expect("nothing there");
+        assert!(error.is_absence(), "{error}");
+    }
+
+    /// A klib with no manifest is reported rather than answering an empty one. An empty manifest
+    /// says `None` for every field, which is exactly what a manifest that omits one key says, so a
+    /// caller could not tell "this library declares no unique name" from "there is no manifest".
+    #[test]
+    fn a_missing_manifest_is_reported_not_answered_empty() {
+        let root = temp_dir("klib-no-manifest");
+        write(&root, "default/linkdata/module", b"module-header");
+        let archive = KlibArchive::open(&root).expect("open unpacked klib");
+        assert!(
+            matches!(archive.manifest(), Err(KlibError::MissingEntry { .. })),
+            "an absent manifest is a missing entry, not an empty manifest",
+        );
     }
 
     /// The root package has its own directory name, which is NOT `package_` with an empty tail: every

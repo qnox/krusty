@@ -20,6 +20,8 @@ use crate::types::{type_name, Ty, TypeName, TypeNameList, TypeParameters};
 #[derive(Default)]
 pub(super) struct CommonExpectationIndex {
     classifiers: HashMap<TypeName, Arc<LibraryType>>,
+    /// Set exactly when a klib was present and could not be ingested. See [`Self::ingestion_failure`].
+    failure: Option<String>,
 }
 
 impl CommonExpectationIndex {
@@ -47,14 +49,30 @@ impl CommonExpectationIndex {
         self.classifiers.contains_key(&internal)
     }
 
+    /// Why this index is empty, when it is empty for a reason a caller should hear about.
+    ///
+    /// An absent optional klib leaves this `None`: nothing is wrong and nothing is reported. A klib
+    /// that exists and cannot be read leaves the reason here, so the compilation says the common
+    /// expectations are missing instead of behaving as though the library declared none. Those two
+    /// produced the same empty index before, which is how a corrupt distribution looked exactly like
+    /// a distribution without one.
+    pub(super) fn ingestion_failure(&self) -> Option<&str> {
+        self.failure.as_deref()
+    }
+
     fn read(path: &Path) -> Self {
-        let Some(archive) = KlibArchive::open(path) else {
-            return Self::default();
+        let archive = match KlibArchive::open(path) {
+            Ok(archive) => archive,
+            Err(error) if error.is_absence() => return Self::default(),
+            Err(error) => return Self::failed(error),
         };
         let mut classifiers = HashMap::new();
         for fragment in archive.package_fragments() {
-            let Some(bytes) = archive.read(&fragment.entry) else {
-                continue;
+            let bytes = match archive.read(&fragment.entry) {
+                Ok(bytes) => bytes,
+                // The archive listed this fragment and cannot produce it. Skipping it would publish
+                // a partial expectation index that no diagnostic explains.
+                Err(error) => return Self::failed(error),
             };
             for (internal, declaration) in super::metadata::parse_package_fragment(&bytes).classes {
                 if declaration.kind != TypeKind::Annotation || !declaration.is_expect {
@@ -66,7 +84,17 @@ impl CommonExpectationIndex {
                     .or_insert_with(|| Arc::new(annotation_type(declaration)));
             }
         }
-        Self { classifiers }
+        Self {
+            classifiers,
+            failure: None,
+        }
+    }
+
+    fn failed(error: crate::klib::KlibError) -> Self {
+        Self {
+            classifiers: HashMap::new(),
+            failure: Some(error.to_string()),
+        }
     }
 }
 
