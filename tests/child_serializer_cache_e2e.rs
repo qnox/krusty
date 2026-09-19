@@ -26,29 +26,22 @@ fn class_initializer(disassembly: &str) -> Vec<String> {
         .map(str::trim)
         .skip_while(|line| !line.starts_with("static {}"))
         .skip_while(|line| !line.starts_with("0:"))
-        .map(|line| {
-            let mut out = String::new();
-            let mut rest = line;
-            while let Some(at) = rest.find('#') {
-                out.push_str(&rest[..at]);
-                out.push('#');
-                rest = rest[at + 1..].trim_start_matches(|c: char| c.is_ascii_digit());
-            }
-            out.push_str(rest);
-            out
+        .filter_map(|line| {
+            let (pc, instruction) = line.split_once(": ")?;
+            let pc = pc.parse::<u32>().ok()?;
+            let instruction = instruction
+                .split_whitespace()
+                .map(|token| if token.starts_with('#') { "#" } else { token })
+                .collect::<Vec<_>>()
+                .join(" ");
+            Some((pc, format!("{pc}: {instruction}")))
         })
-        .take_while(|row| {
-            let Some(pc) = row
-                .split(':')
-                .next()
-                .and_then(|pc| pc.trim().parse::<u32>().ok())
-            else {
-                return false;
-            };
-            let advances = last.is_none_or(|previous| pc > previous);
-            last = Some(pc);
+        .take_while(|(pc, _)| {
+            let advances = last.is_none_or(|previous| *pc > previous);
+            last = Some(*pc);
             advances
         })
+        .map(|(_, row)| row)
         .collect()
 }
 
@@ -68,24 +61,98 @@ const LEAF_FIRST: &str = "import kotlinx.serialization.Serializable\n\
                           @Serializable\n\
                           data class Branch(val count: Int, val leaves: List<Leaf>)\n";
 
+fn branch_initializer() -> Vec<String> {
+    [
+        "0: new # // class Branch$Companion",
+        "3: dup",
+        "4: aconst_null",
+        "5: invokespecial # // Method Branch$Companion.\"<init>\":(Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
+        "8: putstatic # // Field Companion:LBranch$Companion;",
+        "11: iconst_2",
+        "12: anewarray # // class kotlin/Lazy",
+        "15: astore_0",
+        "16: aload_0",
+        "17: iconst_0",
+        "18: aconst_null",
+        "19: aastore",
+        "20: aload_0",
+        "21: iconst_1",
+        "22: getstatic # // Field Leaf$$serializer.INSTANCE:LLeaf$$serializer;",
+        "25: invokestatic # // Method kotlinx/serialization/builtins/BuiltinSerializersKt.ListSerializer:(Lkotlinx/serialization/KSerializer;)Lkotlinx/serialization/KSerializer;",
+        "28: invokestatic # // Method kotlin/LazyKt.lazyOf:(Ljava/lang/Object;)Lkotlin/Lazy;",
+        "31: aastore",
+        "32: aload_0",
+        "33: putstatic # // Field $childSerializers:[Lkotlin/Lazy;",
+        "36: return",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn cycle_initializer(owner: &str, nested: &str) -> Vec<String> {
+    vec![
+        format!("0: new # // class {owner}$Companion"),
+        "3: dup".to_string(),
+        "4: aconst_null".to_string(),
+        format!(
+            "5: invokespecial # // Method {owner}$Companion.\"<init>\":(Lkotlin/jvm/internal/DefaultConstructorMarker;)V"
+        ),
+        format!("8: putstatic # // Field Companion:L{owner}$Companion;"),
+        "11: iconst_1".to_string(),
+        "12: anewarray # // class kotlin/Lazy".to_string(),
+        "15: astore_0".to_string(),
+        "16: aload_0".to_string(),
+        "17: iconst_0".to_string(),
+        format!(
+            "18: getstatic # // Field {nested}$$serializer.INSTANCE:L{nested}$$serializer;"
+        ),
+        "21: invokestatic # // Method kotlinx/serialization/builtins/BuiltinSerializersKt.ListSerializer:(Lkotlinx/serialization/KSerializer;)Lkotlinx/serialization/KSerializer;".to_string(),
+        "24: invokestatic # // Method kotlin/LazyKt.lazyOf:(Ljava/lang/Object;)Lkotlin/Lazy;"
+            .to_string(),
+        "27: aastore".to_string(),
+        "28: aload_0".to_string(),
+        "29: putstatic # // Field $childSerializers:[Lkotlin/Lazy;".to_string(),
+        "32: return".to_string(),
+    ]
+}
+
 /// The composed slot holds the nested class's own serializer rather than a null, and the reference
 /// defers each one behind a lazy over a bound factory.
 #[test]
 fn a_composed_element_serializer_is_cached_rather_than_left_null() {
     let (reference, krusty) = built("ComposedCache", LEAF_FIRST, "Branch");
-    let expected = class_initializer(&reference);
-    assert!(
-        expected
-            .iter()
-            .any(|row| row.contains("kotlin/LazyKt.lazy:"))
-            && expected.iter().any(|row| row.contains("invokedynamic")),
-        "the reference defers each composed serializer behind a lazy over a bound factory:\n\
-         {expected:#?}"
+    assert_eq!(
+        class_initializer(&reference),
+        vec![
+            "0: new # // class Branch$Companion",
+            "3: dup",
+            "4: aconst_null",
+            "5: invokespecial # // Method Branch$Companion.\"<init>\":(Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
+            "8: putstatic # // Field Companion:LBranch$Companion;",
+            "11: iconst_2",
+            "12: anewarray # // class kotlin/Lazy",
+            "15: astore_0",
+            "16: aload_0",
+            "17: iconst_0",
+            "18: aconst_null",
+            "19: aastore",
+            "20: aload_0",
+            "21: iconst_1",
+            "22: getstatic # // Field kotlin/LazyThreadSafetyMode.PUBLICATION:Lkotlin/LazyThreadSafetyMode;",
+            "25: invokedynamic # 0 // InvokeDynamic #",
+            "30: invokestatic # // Method kotlin/LazyKt.lazy:(Lkotlin/LazyThreadSafetyMode;Lkotlin/jvm/functions/Function0;)Lkotlin/Lazy;",
+            "33: aastore",
+            "34: aload_0",
+            "35: putstatic # // Field $childSerializers:[Lkotlin/Lazy;",
+            "38: return",
+        ],
+        "kotlinc's complete normalized initializer"
     );
-    let actual = class_initializer(&krusty);
-    assert!(
-        actual.iter().any(|row| row.contains("Leaf$$serializer")),
-        "krusty's cache must reach the nested class's serializer, not store a null:\n{actual:#?}"
+    assert_eq!(
+        class_initializer(&krusty),
+        branch_initializer(),
+        "krusty's complete normalized initializer"
     );
 }
 
@@ -106,9 +173,10 @@ fn the_declaration_order_does_not_change_the_cache() {
     let (_, owner_first) = built("CacheOwnerFirst", branch_first, "Branch");
 
     let expected = class_initializer(&leaf_first);
-    assert!(
-        expected.iter().any(|row| row.contains("Leaf$$serializer")),
-        "the baseline order must reach the nested serializer:\n{expected:#?}"
+    assert_eq!(
+        expected,
+        branch_initializer(),
+        "the baseline order's complete initializer"
     );
     assert_eq!(
         class_initializer(&owner_first),
@@ -131,18 +199,15 @@ fn mutually_referential_classes_each_cache_the_other() {
     let (_, edge) = built("CacheCycleEdge", source, "Edge");
 
     let node_cache = class_initializer(&node);
-    assert!(
-        node_cache
-            .iter()
-            .any(|row| row.contains("Edge$$serializer")),
-        "`Node`'s cache must reach `Edge`'s serializer:\n{node_cache:#?}"
-    );
     let edge_cache = class_initializer(&edge);
-    assert!(
-        edge_cache
-            .iter()
-            .any(|row| row.contains("Node$$serializer")),
-        "`Edge`'s cache must reach `Node`'s serializer — neither can be generated first:\n\
-         {edge_cache:#?}"
+    assert_eq!(
+        node_cache,
+        cycle_initializer("Node", "Edge"),
+        "`Node`'s complete cache initializer"
+    );
+    assert_eq!(
+        edge_cache,
+        cycle_initializer("Edge", "Node"),
+        "`Edge`'s complete cache initializer — neither class can be generated first"
     );
 }
