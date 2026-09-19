@@ -2228,6 +2228,15 @@ pub struct IrStatic {
     /// accessors; cross-class reads inside the file go through a synthesized `access$get<X>$p` bridge
     /// (kotlinc's shape).
     pub visibility: crate::types::Visibility,
+    /// The setter's JVM name when it is not the ordinary `set<X>` spelling — a value-class-typed
+    /// property mangles it, because a value-class PARAMETER always does. `None` ⇒ the ordinary name.
+    pub setter_jvm_name: Option<String>,
+    /// The value class this static's storage was REALIZED over, when the JVM pass erased it to that
+    /// class's carrier (a file facade's property, which kotlinc erases the same way). Every reader —
+    /// the boxing analysis and the emitter alike — consults this rather than re-deciding, so a read
+    /// of the field and the field itself can never disagree. `None` ⇒ the storage keeps the boxed
+    /// value-class object, or holds no value class at all.
+    pub erased_value_class: Option<crate::types::TypeName>,
     /// `true` when this backing field has a CUSTOM accessor (`val x = init get() = field…`): the field
     /// is still emitted + initialized in `<clinit>`, but the trivial `getX`/`setX` accessors are NOT
     /// auto-generated here — the custom `getX`/`setX` are emitted as ordinary facade methods (their

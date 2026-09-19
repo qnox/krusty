@@ -10,9 +10,9 @@ use super::*;
 /// Realize every synthesized property reference against the value classes around it.
 pub(super) fn realize(
     ir: &mut IrFile,
-    under: &Under,
     callable_under: &Under,
     vc_properties: &HashMap<TypeName, String>,
+    erased_top_level_statics: &HashSet<String>,
 ) {
     // Property references cross the erased `KProperty` Object boundary. A value-class property accessor
     // itself uses the mangled name and carrier descriptor, but `get` must box that carrier and `set` must
@@ -22,12 +22,13 @@ pub(super) fn realize(
         let Some(reference) = class.prop_ref.as_mut() else {
             continue;
         };
-        // A TOP-LEVEL property of value-class type is still realized boxed here: its backing field
-        // and accessors keep the declared `LZ;` rather than the carrier (unlike kotlinc, which
-        // erases them — a separate declaration-side work item). Mangling the reference's accessor
-        // name while the declaration keeps its plain one named a method that does not exist, so the
-        // reference must stay on the same boxed convention as the declaration it calls.
-        if reference.static_dispatch {
+        // A reference follows the DECLARATION it calls. A top-level property of value-class type is
+        // realized over the carrier above, so its reference mangles like any other; a COMPANION one
+        // keeps the boxed convention, and mangling its accessor name while the declaration keeps its
+        // plain one would name a method that does not exist. The declaration side says which is
+        // which — the erased statics it produced — rather than this deciding it a second time.
+        let top_level = reference.static_dispatch;
+        if top_level && !erased_top_level_statics.contains(&reference.prop_name) {
             continue;
         }
         let Some(value_class) = reference
@@ -42,28 +43,33 @@ pub(super) fn realize(
         // selected declaration still exposes `getFirst(): Object`. That object is already the boxed
         // value and the declaration is not value-class-mangled. Only a descriptor returning this
         // value class's actual carrier denotes a concrete value-class property accessor.
-        if reference
-            .getter_descriptor
-            .as_ref()
-            .is_some_and(|descriptor| {
-                let physical_ret = descriptor.rsplit_once(')').map(|(_, ret)| ret);
-                let carrier = callable_under
-                    .get(&value_class)
-                    .map(|underlying| desc(&erase(underlying, &callable_under)));
-                physical_ret
-                    .zip(carrier.as_deref())
-                    .is_some_and(|(ret, carrier)| ret != carrier)
-            })
+        if !top_level
+            && reference
+                .getter_descriptor
+                .as_ref()
+                .is_some_and(|descriptor| {
+                    let physical_ret = descriptor.rsplit_once(')').map(|(_, ret)| ret);
+                    let carrier = callable_under
+                        .get(&value_class)
+                        .map(|underlying| desc(&erase(underlying, &callable_under)));
+                    physical_ret
+                        .zip(carrier.as_deref())
+                        .is_some_and(|(ret, carrier)| ret != carrier)
+                })
         {
             continue;
         }
         reference.boxed_value_class = Some(value_class);
+        // A TOP-LEVEL property is realized on the file facade, where kotlinc suppresses RETURN
+        // mangling: `getTopLevel()I` keeps its plain name while a member's `getZ-a_XrcN0()I` does
+        // not. Its SETTER still mangles — a value-class PARAMETER always does — which is why the
+        // two accessors of the same property do not agree on it.
         reference.getter_name = vc_mangle(
             &property_getter_name(&reference.prop_name),
             &[],
             &reference.prop_ty,
             &callable_under,
-            false,
+            top_level,
             false,
         );
         // The accessor exchanges the value class's erased CARRIER, never the boxed object. A
@@ -85,7 +91,7 @@ pub(super) fn realize(
                 std::slice::from_ref(&reference.prop_ty),
                 &Ty::Unit,
                 &callable_under,
-                false,
+                top_level,
                 false,
             ));
         }

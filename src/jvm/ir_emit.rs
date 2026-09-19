@@ -5065,7 +5065,12 @@ fn emit_statics(
         );
         cw.set_method_nullability(&gname, &format!("(){desc}"), acc_ann, &[None]);
         if s.is_var {
-            let sname = property_setter_name(&s.name);
+            // A value-class-typed property's setter carries the value-class mangle: the parameter
+            // it takes is the carrier, and a value-class PARAMETER always mangles.
+            let sname = s
+                .setter_jvm_name
+                .clone()
+                .unwrap_or_else(|| property_setter_name(&s.name));
             cw.reserve_method_name(&sname);
             cw.seed_utf8(&format!("({desc})V"));
             if let Some(signature) = &signatures.setter {
@@ -7504,7 +7509,20 @@ fn emit_toplevel_prop_ref_class(
     // A receiverless accessor's descriptor is its property's own type. The PropRef's recorded
     // descriptor is not it: for a companion-block or access-bridged property that descriptor names
     // the owner it is called with, which this reference does not pass.
-    let getter_desc = format!("(){prop_desc}");
+    //
+    // A VALUE-CLASS-typed one is the exception, and the only one: its accessors exchange the
+    // class's CARRIER, which is what the reference realization recorded on this exact target. The
+    // boxed convention this path used to keep named `getTopLevel()LZ;` where the declaration is
+    // `getTopLevel()I`.
+    let carrier = pr.boxed_value_class.is_some();
+    let getter_desc = match (&pr.getter_descriptor, carrier) {
+        (Some(descriptor), true) => descriptor.clone(),
+        _ => format!("(){prop_desc}"),
+    };
+    let getter_jvm = getter_desc
+        .rsplit_once(')')
+        .map(|(_, ret)| ty_from_field_descriptor(ret))
+        .unwrap_or(prop_jvm);
     let signature = format!("{}{}", pr.getter_name, getter_desc); // e.g. "getFoo()LBox;"
 
     // `<init>()V`: super(owner.class, "name", "getName()desc", 1).
@@ -7526,8 +7544,10 @@ fn emit_toplevel_prop_ref_class(
     // `get()Object`: invokestatic <facade>.getName(), boxed if primitive.
     let mut get = CodeBuilder::new(1);
     let gref = cw.methodref(&call_owner, &pr.getter_name, &getter_desc);
-    get.invokestatic(gref, 0, slot_words(prop_jvm) as i32);
-    if prop_jvm.is_jvm_scalar() {
+    get.invokestatic(gref, 0, slot_words(getter_jvm) as i32);
+    if carrier {
+        box_property_reference_value(&mut cw, &mut get, pr, getter_jvm);
+    } else if prop_jvm.is_jvm_scalar() {
         box_prim_free(
             &mut cw,
             &mut get,
@@ -7539,11 +7559,35 @@ fn emit_toplevel_prop_ref_class(
 
     // `set(Object)V` (a `var`): invokestatic <facade>.setName(v) after casting/unboxing the argument.
     if pr.mutable {
-        let setter = property_setter_name(&pr.prop_name);
-        let setter_desc = format!("({prop_desc})V");
+        let (setter, setter_desc) = match (&pr.setter_name, &pr.setter_descriptor, carrier) {
+            (Some(name), Some(descriptor), true) => (name.clone(), descriptor.clone()),
+            _ => (
+                property_setter_name(&pr.prop_name),
+                format!("({prop_desc})V"),
+            ),
+        };
+        let setter_jvm = setter_desc
+            .strip_prefix('(')
+            .and_then(|rest| rest.split_once(')'))
+            .map(|(parameter, _)| ty_from_field_descriptor(parameter))
+            .unwrap_or(prop_jvm);
         let mut set = CodeBuilder::new(2);
         set.aload(1);
-        if prop_jvm.is_jvm_scalar() {
+        if carrier {
+            // The argument arrives as the BOXED value class through the erased `set(Object)`; the
+            // accessor takes the carrier.
+            if let Some(value_class) = pr.boxed_value_class {
+                let owner = value_class.render();
+                let cref = cw.class_ref(&owner);
+                set.checkcast(cref);
+                let unbox = cw.methodref(
+                    &owner,
+                    "unbox-impl",
+                    &format!("(){}", type_descriptor(setter_jvm)),
+                );
+                set.invokevirtual(unbox, 0, slot_words(setter_jvm) as i32);
+            }
+        } else if prop_jvm.is_jvm_scalar() {
             let adapter = semantic_scalar_adapter(pr.prop_ty, prop_jvm);
             let wref = cw.class_ref(
                 crate::jvm::jvm_class_map::wrapper_internal(adapter).unwrap_or("java/lang/Object"),
@@ -7555,7 +7599,7 @@ fn emit_toplevel_prop_ref_class(
             set.checkcast(cref);
         }
         let sref = cw.methodref(&call_owner, &setter, &setter_desc);
-        set.invokestatic(sref, slot_words(prop_jvm) as i32, 0);
+        set.invokestatic(sref, slot_words(setter_jvm) as i32, 0);
         set.ret_void();
         finish_code::<0x0001>(&mut cw, "set", "(Ljava/lang/Object;)V", &mut set, 2);
     }
