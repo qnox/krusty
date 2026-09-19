@@ -338,7 +338,14 @@ impl SignatureConstraintExtractor {
                     result = if stub.signature_inference
                         == Some(super::InferredSignatureKind::DelegatedProperty)
                     {
-                        let origin = constraint_origin;
+                        // A delegate refusal is reported where kotlinc reports it, on the `by`
+                        // keyword rather than on the delegate expression the constraint is built
+                        // from. The parser already retains that span for the checker's own
+                        // convention diagnostics.
+                        let origin = source_property(file, stub.range)
+                            .and_then(|property| property.delegate_by_span)
+                            .map(&mut origin)
+                            .unwrap_or(constraint_origin);
                         self.graph.add_expr(SigExpr::Delegate {
                             declaration: stub.id,
                             delegate: result,

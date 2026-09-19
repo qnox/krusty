@@ -5669,7 +5669,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         &self,
         declaration: crate::fir::DeclarationId,
         scope: crate::fir::SignatureScope,
-        _origin: crate::fir::OriginId,
+        origin: crate::fir::OriginId,
         delegate: crate::fir::ResolvedTy,
         local: bool,
         demand: &mut dyn FnMut(
@@ -5677,144 +5677,10 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        let this_ref = if local {
-            Ty::Null
-        } else {
-            self.delegate_this_ref(declaration)
-        };
-        // The classifier is resolved through the same source that answers applicability, so this
-        // probe and the checked selection agree on which declaration `KProperty` is — and a
-        // dependency set that declares none answers `None` here, exactly as a missing convention
-        // does.
-        let property_reference = self.with_resolver(scope, |resolver| {
-            crate::resolve::delegated_properties::delegate_property_reference_type(resolver)
-        })?;
-        let arguments = [this_ref, property_reference];
-        let provided = self.with_resolver(scope, |resolver| {
-            Some(super::super::select_delegate_operator(
-                resolver,
-                delegate.get(),
-                "provideDelegate",
-                &arguments,
-            ))
-        })?;
-        crate::trace_compiler!(
-            "signature",
-            "delegate provide receiver={:?} selection={:?}",
-            delegate.get(),
-            match &provided {
-                crate::symbol_resolver::CandidateSelection::Selected((selected, result)) => Some((
-                    selected.semantic_receiver(),
-                    selected.semantic_params(),
-                    *result,
-                )),
-                crate::symbol_resolver::CandidateSelection::None
-                | crate::symbol_resolver::CandidateSelection::Ambiguous => None,
-            },
-        );
-        let stored = match provided {
-            crate::symbol_resolver::CandidateSelection::None => {
-                let selected = self
-                    .implicit_receivers(scope)
-                    .into_iter()
-                    .find_map(|dispatch| {
-                        self.signature_member_extension_call(
-                            scope,
-                            delegate.get(),
-                            dispatch,
-                            "provideDelegate",
-                            super::lookups::SignatureMemberExtensionArguments {
-                                types: &arguments,
-                                ..Default::default()
-                            },
-                            None,
-                            super::super::MemberExtensionSelection::Operators,
-                        )
-                    });
-                match selected {
-                    Some((_result, Some(declaration)))
-                        if self
-                            .headers
-                            .stub(declaration)
-                            .is_some_and(|stub| stub.signature_inference.is_some()) =>
-                    {
-                        demand(declaration)?.result
-                    }
-                    Some((result, _)) => {
-                        crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure())?
-                    }
-                    None => delegate,
-                }
-            }
-            crate::symbol_resolver::CandidateSelection::Ambiguous => return Err(Self::failure()),
-            crate::symbol_resolver::CandidateSelection::Selected((selected, result)) => self
-                .selected_convention_result(
-                    delegate.get(),
-                    &selected,
-                    result,
-                    &arguments,
-                    demand,
-                )?,
-        };
-        let selected = self.with_resolver(scope, |resolver| {
-            Some(super::super::select_delegate_operator(
-                resolver,
-                stored.get(),
-                "getValue",
-                &arguments,
-            ))
-        })?;
-        crate::trace_compiler!(
-            "signature",
-            "delegate get receiver={:?} selection={:?}",
-            stored.get(),
-            match &selected {
-                crate::symbol_resolver::CandidateSelection::Selected((selected, result)) => Some((
-                    selected.semantic_receiver(),
-                    selected.semantic_params(),
-                    *result,
-                )),
-                crate::symbol_resolver::CandidateSelection::None
-                | crate::symbol_resolver::CandidateSelection::Ambiguous => None,
-            },
-        );
-        match selected {
-            crate::symbol_resolver::CandidateSelection::Selected((selected, result)) => {
-                self.selected_convention_result(stored.get(), &selected, result, &arguments, demand)
-            }
-            crate::symbol_resolver::CandidateSelection::None => {
-                for dispatch in self.implicit_receivers(scope) {
-                    let Some((result, declaration)) = self.signature_member_extension_call(
-                        scope,
-                        stored.get(),
-                        dispatch,
-                        "getValue",
-                        super::lookups::SignatureMemberExtensionArguments {
-                            types: &arguments,
-                            ..Default::default()
-                        },
-                        None,
-                        super::super::MemberExtensionSelection::Operators,
-                    ) else {
-                        continue;
-                    };
-                    if let Some(declaration) = declaration {
-                        if self
-                            .headers
-                            .stub(declaration)
-                            .is_some_and(|stub| stub.signature_inference.is_some())
-                        {
-                            return demand(declaration).map(|signature| signature.result);
-                        }
-                    }
-                    return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
-                }
-                Err(Self::failure())
-            }
-            crate::symbol_resolver::CandidateSelection::Ambiguous => Err(Self::failure()),
-        }
+        // The delegated-property signature boundary is one responsibility and lives in its own
+        // module; this is the trait's entry into it.
+        self.select_delegate_signature(declaration, scope, origin, delegate, local, demand)
     }
-
     fn least_upper_bound(
         &self,
         scope: crate::fir::SignatureScope,

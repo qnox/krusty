@@ -104,8 +104,9 @@ enum DelegateConventionFailure {
     /// Nothing of that name is visible on the delegate at all.
     Missing,
     /// Functions of that name exist and none is applicable. Carries them rendered as kotlinc lists
-    /// them, in the order the delegate's scope offers them.
-    NoneApplicable(Vec<String>),
+    /// them, in the order the delegate's scope offers them, and — when exactly one is to blame —
+    /// the result type kotlinc then reports the property as having.
+    NoneApplicable(Vec<String>, Option<Ty>),
 }
 
 /// Render a type the way a delegate diagnostic names it. The literal null type prints as `Nothing?`,
@@ -321,66 +322,137 @@ pub(super) fn select_delegate_operator(
     }
 }
 
-impl Checker<'_> {
-    /// Classify a convention that was not selected, and render the candidates kotlinc would list.
-    ///
-    /// The candidate set is every function of that name the delegate's scope offers, whatever
-    /// excluded it from selection — kotlinc lists an inapplicable overload, a missing `operator`
-    /// modifier and a context-prefixed declaration alike, because each one is a thing the author
-    /// plausibly meant to be the convention.
-    fn delegate_convention_failure(
-        &self,
-        delegate_ty: Ty,
-        name: &str,
-    ) -> DelegateConventionFailure {
-        let callables = self.resolver().receiver_callables(delegate_ty, name);
-        let candidates = callables
-            .functions()
-            .iter()
-            .map(|candidate| {
-                let parameters = candidate
-                    .callable
-                    .params
-                    .iter()
-                    .enumerate()
-                    .map(|(index, parameter)| {
-                        let parameter_name = candidate
-                            .call_sig
-                            .param_names
-                            .get(index)
-                            .cloned()
-                            .unwrap_or_else(|| format!("p{index}"));
-                        format!("{parameter_name}: {}", delegate_diagnostic_ty(*parameter))
-                    })
-                    .collect::<Vec<_>>();
-                let (context, value) = parameters.split_at(
-                    // A provider states its context count independently of its parameter list; a
-                    // disagreement must render a shorter prefix, never index past the list.
-                    candidate.context_count.min(parameters.len()),
-                );
-                let context = if context.is_empty() {
-                    String::new()
-                } else {
-                    format!("context({}) ", context.join(", "))
-                };
-                format!(
-                    "{context}fun {name}({}): {}",
-                    value.join(", "),
-                    delegate_diagnostic_ty(candidate.callable.ret),
-                )
-            })
-            .collect::<Vec<_>>();
-        if candidates.is_empty() {
-            DelegateConventionFailure::Missing
-        } else {
-            DelegateConventionFailure::NoneApplicable(candidates)
-        }
-    }
+/// Classify a convention that was not selected, and render the candidates kotlinc would list.
+///
+/// The candidate set is every function of that name the delegate's scope offers, whatever
+/// excluded it from selection — kotlinc lists an inapplicable overload, a missing `operator`
+/// modifier and a context-prefixed declaration alike, because each one is a thing the author
+/// plausibly meant to be the convention.
+fn delegate_convention_failure(
+    resolver: &crate::symbol_resolver::SymbolResolver,
+    delegate_ty: Ty,
+    name: &str,
+    candidate_result: &mut dyn FnMut(&crate::libraries::FunctionInfo) -> Ty,
+) -> Option<DelegateConventionFailure> {
+    let callables = resolver.receiver_callables(delegate_ty, name);
+    let functions = callables.functions();
+    let candidates = functions
+        .iter()
+        .map(|candidate| {
+            let parameters = candidate
+                .callable
+                .params
+                .iter()
+                .enumerate()
+                .map(|(index, parameter)| {
+                    let parameter_name = candidate
+                        .call_sig
+                        .param_names
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| format!("p{index}"));
+                    format!("{parameter_name}: {}", delegate_diagnostic_ty(*parameter))
+                })
+                .collect::<Vec<_>>();
+            let (context, value) = parameters.split_at(
+                // A provider states its context count independently of its parameter list; a
+                // disagreement must render a shorter prefix, never index past the list.
+                candidate.context_count.min(parameters.len()),
+            );
+            let context = if context.is_empty() {
+                String::new()
+            } else {
+                format!("context({}) ", context.join(", "))
+            };
+            format!(
+                "{context}fun {name}({}): {}",
+                value.join(", "),
+                delegate_diagnostic_ty(candidate_result(candidate)),
+            )
+        })
+        .collect::<Vec<_>>();
+    Some(if candidates.is_empty() {
+        DelegateConventionFailure::Missing
+    } else {
+        let sole_result = match functions {
+            [only] => Some(candidate_result(only)),
+            _ => None,
+        };
+        DelegateConventionFailure::NoneApplicable(candidates, sole_result)
+    })
+}
 
+/// The exact wording kotlinc gives a convention the delegate does not supply, or `None` when the
+/// failure must stay silent.
+///
+/// `value` is the written value's type, present exactly for `setValue`: it is the third slot of the
+/// signature the message demands, and the reason the message ends differently.
+///
+/// This is a free function because the SIGNATURE phase needs the identical wording: a delegated
+/// property with no declared type cannot finalize once `getValue` is missing, so the body check
+/// that would otherwise report it never runs for that declaration. Both callers producing the same
+/// string is what lets the duplicate collapse if they ever both reach the sink.
+pub(crate) fn delegate_convention_message(
+    resolver: &crate::symbol_resolver::SymbolResolver,
+    site: DelegateConventionSite,
+    delegate_ty: Ty,
+    name: &str,
+    this_ref: Ty,
+    property: Option<Ty>,
+    value: Option<Ty>,
+    candidate_result: &mut dyn FnMut(&crate::libraries::FunctionInfo) -> Ty,
+) -> Option<String> {
+    // A delegate whose own type failed to check has already been reported; naming it here would
+    // only repeat that failure under a second heading.
+    if delegate_ty.mentions_error()
+        || delegate_ty.mentions_pending()
+        || this_ref.mentions_error()
+        || value.is_some_and(|value| value.mentions_error() || value.mentions_pending())
+    {
+        return None;
+    }
+    let failure = delegate_convention_failure(resolver, delegate_ty, name, candidate_result)?;
+    // kotlinc names the property reference exactly when one candidate is to blame; with several
+    // it falls back to star projections, and with none it never built the reference at all.
+    let blamed = match &failure {
+        DelegateConventionFailure::NoneApplicable(candidates, _) => candidates.len() == 1,
+        DelegateConventionFailure::Missing => false,
+    };
+    // With no declared type of its own, the property's type is the one candidate's result — which
+    // is what kotlinc then names in the reference it demands.
+    let sole_result = match &failure {
+        DelegateConventionFailure::NoneApplicable(_, result) => *result,
+        DelegateConventionFailure::Missing => None,
+    };
+    let reference = property
+        .filter(|property| !property.mentions_error() && !property.mentions_pending())
+        .or(sole_result)
+        .filter(|property| blamed && !property.mentions_error() && !property.mentions_pending())
+        .map(|property| site.applied_reference(property))
+        .unwrap_or_else(|| site.star_projected_reference());
+    let mut signature = vec![delegate_diagnostic_ty(this_ref), reference];
+    signature.extend(value.map(delegate_diagnostic_ty));
+    let signature = format!("{name}({})", signature.join(", "));
+    Some(match failure {
+        DelegateConventionFailure::Missing => format!(
+            "type '{}' has no method '{signature}', so it cannot serve as a delegate{}.",
+            delegate_diagnostic_ty(delegate_ty),
+            if value.is_some() {
+                " for var (read-write property)"
+            } else {
+                ""
+            },
+        ),
+        DelegateConventionFailure::NoneApplicable(candidates, _) => format!(
+            "property delegate must have a '{signature}' method. None of the following \
+             functions is applicable:\n{}",
+            candidates.join("\n"),
+        ),
+    })
+}
+
+impl Checker<'_> {
     /// Report a convention the delegate does not supply, anchored on `by` as kotlinc anchors it.
-    ///
-    /// `value` is the written value's type, present exactly for `setValue`: it is the third slot of
-    /// the signature the message demands, and the reason the message ends differently.
     fn report_delegate_convention_failure(
         &mut self,
         site: DelegateConventionSite,
@@ -390,44 +462,19 @@ impl Checker<'_> {
         property: Option<Ty>,
         value: Option<Ty>,
     ) {
-        // A delegate whose own type failed to check has already been reported; naming it here would
-        // only repeat that failure under a second heading.
-        if delegate_ty.mentions_error()
-            || delegate_ty.mentions_pending()
-            || this_ref.mentions_error()
-            || value.is_some_and(|value| value.mentions_error() || value.mentions_pending())
-        {
+        // The checker renders a candidate from the type its own declaration already carries; the
+        // signature phase, where one may still be undetermined, resolves it first.
+        let Some(message) = delegate_convention_message(
+            &self.resolver(),
+            site,
+            delegate_ty,
+            name,
+            this_ref,
+            property,
+            value,
+            &mut |candidate| candidate.callable.ret,
+        ) else {
             return;
-        }
-        let failure = self.delegate_convention_failure(delegate_ty, name);
-        // kotlinc names the property reference exactly when one candidate is to blame; with several
-        // it falls back to star projections, and with none it never built the reference at all.
-        let blamed = match &failure {
-            DelegateConventionFailure::NoneApplicable(candidates) => candidates.len() == 1,
-            DelegateConventionFailure::Missing => false,
-        };
-        let reference = property
-            .filter(|property| blamed && !property.mentions_error() && !property.mentions_pending())
-            .map(|property| site.applied_reference(property))
-            .unwrap_or_else(|| site.star_projected_reference());
-        let mut signature = vec![delegate_diagnostic_ty(this_ref), reference];
-        signature.extend(value.map(delegate_diagnostic_ty));
-        let signature = format!("{name}({})", signature.join(", "));
-        let message = match failure {
-            DelegateConventionFailure::Missing => format!(
-                "type '{}' has no method '{signature}', so it cannot serve as a delegate{}.",
-                delegate_diagnostic_ty(delegate_ty),
-                if value.is_some() {
-                    " for var (read-write property)"
-                } else {
-                    ""
-                },
-            ),
-            DelegateConventionFailure::NoneApplicable(candidates) => format!(
-                "property delegate must have a '{signature}' method. None of the following \
-                 functions is applicable:\n{}",
-                candidates.join("\n"),
-            ),
         };
         self.diags.error(site.by_span, message);
     }

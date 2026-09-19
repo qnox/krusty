@@ -3335,6 +3335,42 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc), `fir_lower::tests::a_delegated_accessor_result_crosses_exactly_one_coercion`.
   The lowering lives in `src/fir_lower/delegated_properties.rs`.
 
+- **A delegate convention resolves `kotlin.reflect.KProperty`; it does not assume it.** The operand
+  type the `getValue`/`setValue` lookup passes is obtained from the symbol source that answers
+  applicability, so a dependency set declaring no `KProperty` reports the ordinary convention failure
+  instead of selecting against a classifier name that denotes nothing. Because the `by` clause is a
+  LANGUAGE construct, `EmptySymbolSource` publishes the declaration the way it already publishes
+  `Enum` and `Function`: a target with no stdlib artifact still has it. Tests:
+  `streaming_signature_bridge::delegates::tests::a_dependency_set_without_kproperty_refuses_the_convention_instead_of_assuming_it`
+  (the same source accepted with the declaration present, refused without it) and the delegate
+  ledgers in `tests/delegate_scalar_boundary_e2e.rs`.
+
+- **Signature finalization names the convention it could not find, and does not suppress the file.**
+  A delegated property with NO declared type has nothing to infer its type from once `getValue` is
+  missing, so its signature cannot finalize — and the body check that would have reported it never
+  runs for that declaration. Declining silently made finalization fail with no cause named, which
+  skipped body checking for the WHOLE file: the file then reported nothing at all, its unrelated
+  diagnostics included. `select_delegate_signature` records the refusal instead, in the same wording
+  the checker uses, so the two collapse wherever both reach the sink. Three rules the differential
+  pinned:
+
+  * it points at the `by` keyword, as kotlinc does, so the delegate operation carries its own origin
+    rather than the delegate expression's (`by` is column 13 where `Plain()` is column 16);
+  * a candidate whose own return is still undetermined is RESOLVED before it is rendered, through
+    the same `demand` a selected convention's result goes through. Rendering `<not determined>`
+    produced a second, differently worded message for one mistake once the body check reported it;
+  * with exactly one candidate to blame and no declared type, the reference names that candidate's
+    result — `getValue(Nothing?, KProperty0<Int>)`, not `KProperty0<*>` — which is the type kotlinc
+    reports the property as having.
+
+  Measured divergence, pinned by both complete ordered ledgers: for `var untyped by Plain()` kotlinc
+  reports THREE errors and krusty two. kotlinc cascades a second `setValue` refusal whose value slot
+  renders the failed inference itself (`??? (Unresolved name: getValue)`); krusty suppresses every
+  delegate-convention message whose operand types are already errors, which is what stops one failure
+  being repeated under a second heading. Both compilers report the missing `getValue` at the `by`
+  keyword and the file's unrelated diagnostic. Test:
+  `delegate_scalar_boundary_e2e::an_untyped_delegated_property_names_its_missing_convention_and_the_rest_of_the_file`.
+
 - **String-template interpolation allows line breaks around the expression.** `"${" NL* expression
   NL* "}"` per the Kotlin grammar — a multiline lambda inside `${…}` (common in raw strings) parses.
   Plain line breaks only; an explicit `;` still terminates the expression. Test:

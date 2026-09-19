@@ -16,6 +16,7 @@ mod callable_references;
 mod declaration_aliases;
 mod declaration_conflicts;
 mod declaration_spellings;
+mod delegates;
 mod header_projection;
 mod local_signatures;
 mod lookups;
@@ -378,33 +379,6 @@ impl ProductionSignatureSemantics<'_> {
                     .find(|property| property.stable_declaration() == Some(declaration))
                     .map(|property| property.receiver_ty())
             })
-    }
-
-    /// The `thisRef` passed to delegated-property conventions belongs to the property declaration,
-    /// not to the last receiver in its scope tower. An extension property's receiver wins; an
-    /// ordinary member uses its nearest classifier owner; a top-level property has a null receiver.
-    fn delegate_this_ref(&self, declaration: crate::fir::DeclarationId) -> Ty {
-        if let Some(receiver) = self.extension_receivers.get(&declaration) {
-            return receiver.get();
-        }
-        let mut owner = self
-            .headers
-            .declarations
-            .anchor(declaration)
-            .and_then(|anchor| anchor.owner);
-        while let Some(declaration) = owner {
-            let Some(anchor) = self.headers.declarations.anchor(declaration) else {
-                break;
-            };
-            if anchor.kind == crate::fir::DeclarationKind::Classifier {
-                return self
-                    .classifier_signature(declaration)
-                    .map(semantic_classifier_self)
-                    .unwrap_or(Ty::Null);
-            }
-            owner = anchor.owner;
-        }
-        Ty::Null
     }
 
     fn header_type_parameters(
