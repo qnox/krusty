@@ -255,17 +255,46 @@ pub fn ensure_maven(group: &str, artifact: &str, version: &str) -> Option<PathBu
         "https://repo1.maven.org/maven2/{}/{artifact}/{version}/{artifact}-{version}.jar",
         group.replace('.', "/")
     );
+    let download = maven_download_path(&file);
     let status = std::process::Command::new("curl")
         .args(["-sfL", "--max-time", "60", "-o"])
-        .arg(&file)
+        .arg(&download)
         .arg(&url)
         .status()
         .ok()?;
-    if status.success() && file.is_file() {
-        Some(file)
+    if status.success() && download.is_file() {
+        publish_maven_download(&download, &file)
     } else {
-        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_file(&download);
         None
+    }
+}
+
+/// A download is private to one caller until it is complete. The test suite has several independent
+/// consumers of the same Maven artifact; writing the final path directly lets one consumer open a
+/// partially downloaded JAR while another is still filling it.
+fn maven_download_path(file: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_DOWNLOAD: AtomicU64 = AtomicU64::new(0);
+    let sequence = NEXT_DOWNLOAD.fetch_add(1, Ordering::Relaxed);
+    file.with_extension(format!("jar.download-{}-{sequence}", std::process::id()))
+}
+
+/// Publish a completed download with one rename, so the shared final path is never partially
+/// visible. Another process may win the same download race; on platforms that refuse to replace an
+/// existing file, its already-published result is equally usable.
+fn publish_maven_download(download: &Path, file: &Path) -> Option<PathBuf> {
+    match std::fs::rename(download, file) {
+        Ok(()) => Some(file.to_path_buf()),
+        Err(_) if file.is_file() => {
+            let _ = std::fs::remove_file(download);
+            Some(file.to_path_buf())
+        }
+        Err(_) => {
+            let _ = std::fs::remove_file(download);
+            None
+        }
     }
 }
 
@@ -512,5 +541,39 @@ mod tests {
             ),
             Some(PathBuf::from("/primary-jdk"))
         );
+    }
+
+    #[test]
+    fn maven_download_is_hidden_until_atomic_publication() {
+        let directory = std::env::temp_dir().join(format!(
+            "krusty-maven-publication-{}-{}",
+            std::process::id(),
+            maven_download_path(Path::new("sequence.jar"))
+                .extension()
+                .expect("download suffix")
+                .to_string_lossy()
+        ));
+        std::fs::create_dir(&directory).expect("create isolated Maven cache");
+        let file = directory.join("dependency-1.0.jar");
+        let download = maven_download_path(&file);
+        let concurrent_download = maven_download_path(&file);
+        assert_ne!(
+            download, concurrent_download,
+            "concurrent callers need private paths"
+        );
+        std::fs::write(&download, b"complete jar").expect("write private download");
+
+        assert!(
+            !file.exists(),
+            "the final cache path must not expose a partial download"
+        );
+        assert_eq!(publish_maven_download(&download, &file), Some(file.clone()));
+        assert_eq!(std::fs::read(&file).unwrap(), b"complete jar");
+        assert!(
+            !download.exists(),
+            "the private path was renamed, not copied"
+        );
+
+        std::fs::remove_dir_all(directory).expect("remove isolated Maven cache");
     }
 }
