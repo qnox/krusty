@@ -471,6 +471,7 @@ fn validate_class(class: &IrClass) -> Result<(), UndeterminedIrType> {
                 "secondary constructor delegation parameter",
                 target_params.iter().copied(),
             )?,
+            CtorDelegateTarget::ImplicitEnumBase => {}
         }
     }
     Ok(())

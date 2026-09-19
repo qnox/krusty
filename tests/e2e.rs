@@ -562,6 +562,8 @@ mod enum_generic_interface_e2e;
 mod enum_implements_interface_e2e;
 #[path = "enum_inner_class_chain_e2e.rs"]
 mod enum_inner_class_chain_e2e;
+#[path = "enum_secondary_constructor_e2e.rs"]
+mod enum_secondary_constructor_e2e;
 #[path = "enum_value_of_intrinsic_e2e.rs"]
 mod enum_value_of_intrinsic_e2e;
 #[path = "enum_vararg_e2e.rs"]
