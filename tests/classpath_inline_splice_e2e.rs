@@ -90,10 +90,15 @@ fn krusty_classes() -> Vec<(String, Vec<u8>)> {
     static CLASSES: OnceLock<Vec<(String, Vec<u8>)>> = OnceLock::new();
     CLASSES
         .get_or_init(|| {
+            // The JDK jimage is on the compile classpath, not just the bootclasspath, because the
+            // splice decides whether a relocated `BootstrapMethods` entry's members are reachable
+            // and must be able to READ `java/lang/invoke/StringConcatFactory` to answer. Without
+            // it the owner is simply unknown and the entry declines — correctly, but for a reason
+            // the fixture invented rather than one the shape has.
             let classes = common::compile_in_process_metadata_cp_module_target(
                 MAIN,
                 "Main",
-                &[library(), common::stdlib_jar()],
+                &[library(), common::stdlib_jar(), common::jdk_modules()],
                 "main",
                 Some(TARGET_MAJOR),
             )
@@ -127,10 +132,137 @@ fn main_disassembly() -> String {
                 .expect("create the class output directory");
             std::fs::write(path, bytes).expect("write the emitted class");
         }
-        common::javap(&["-p", "-c", "-cp", &dir.to_string_lossy(), "MainKt"])
+        // `-v` as well as `-c`: the `BootstrapMethods` table is a verbose-only section, and the
+        // differential below compares it.
+        common::javap(&["-p", "-c", "-v", "-cp", &dir.to_string_lossy(), "MainKt"])
             .expect("javap must be available to this regression")
     })
     .clone()
+}
+
+/// kotlinc's own `MainKt`, compiled against the same library at the same target — the reference
+/// half of the differential below.
+fn reference_disassembly() -> String {
+    static TEXT: OnceLock<String> = OnceLock::new();
+    TEXT.get_or_init(|| {
+        let root = common::scratch_dir().expect("a scratch directory for the reference");
+        let out = root.join("ref");
+        std::fs::create_dir_all(&out).expect("create the reference output directory");
+        let source = root.join("Main.kt");
+        std::fs::write(&source, MAIN).expect("write the reference source");
+        let (code, stderr) = common::kotlinc_compile(&[
+            "-d".to_string(),
+            out.to_string_lossy().into_owned(),
+            "-jvm-target".to_string(),
+            TARGET.to_string(),
+            "-classpath".to_string(),
+            format!("{}:{}", library().display(), common::stdlib_jar().display()),
+            source.to_string_lossy().into_owned(),
+        ])
+        .expect("the reference compiler must be available to this regression");
+        assert_eq!(code, 0, "kotlinc failed to build the reference: {stderr}");
+        common::javap(&["-p", "-c", "-v", "-cp", &out.to_string_lossy(), "MainKt"])
+            .expect("javap must be available to this regression")
+    })
+    .clone()
+}
+
+/// A class's methods in DECLARATION order, as javap prints their signatures.
+fn methods(disassembly: &str) -> Vec<String> {
+    disassembly
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.ends_with(");") && !line.starts_with("descriptor:"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The `BootstrapMethods` table in order: each entry's handle and its static arguments, with
+/// constant-pool indices erased because their numbering is an emission-order artifact.
+fn bootstrap_methods(disassembly: &str) -> Vec<String> {
+    disassembly
+        .lines()
+        .skip_while(|line| !line.trim_start().starts_with("BootstrapMethods:"))
+        .skip(1)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            line.split_whitespace()
+                .filter(|word| !word.starts_with('#'))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
+
+/// The complete ordered method list and `BootstrapMethods` table, against kotlinc's own, at one
+/// target.
+///
+/// Both sides are spelled out rather than asserted equal, because they are NOT equal and this is
+/// where the difference is recorded rather than described.
+///
+/// The spliced shapes agree: `runPlainInt`, `runConcat` and `box` carry no lambda implementation
+/// method on either side, so the bodies AND the lambdas passed to them were inlined. What remains
+/// is the DECLINED case — `runSuspend`, whose `suspend inline` callee is spliced after suspend
+/// lowering has already built the state machine — and its lambda is the one method krusty has that
+/// kotlinc does not, along with the `LambdaMetafactory` entry that binds it.
+///
+/// Pinning both sides means neither direction can move silently: a splice that regressed to a real
+/// call and a splice that grew to cover the suspend case both fail this test.
+#[test]
+fn the_emitted_shape_against_kotlincs_own_at_the_same_target() {
+    assert_eq!(
+        methods(&reference_disassembly()),
+        vec![
+            "public static final int runPlainInt(int);",
+            "public static final java.lang.String runConcat(java.lang.String);",
+            "public static final java.lang.Object runSuspend(int, kotlin.coroutines.Continuation<? super java.lang.Integer>);",
+            "public static final java.lang.String box();",
+        ],
+        "the reference emits no lambda implementation methods at all"
+    );
+    assert_eq!(
+        methods(&main_disassembly()),
+        vec![
+            "public static final int runPlainInt(int);",
+            "public static final java.lang.String runConcat(java.lang.String);",
+            "public static final java.lang.Object runSuspend(int, kotlin.coroutines.Continuation<? super java.lang.Integer>);",
+            "public static final java.lang.String box();",
+            "private static final int runSuspend$lambda$0(int);",
+        ],
+        "the one extra method is the DECLINED suspend splice's lambda"
+    );
+
+    // The tables, by what each entry's handle names. Counting the handles rather than comparing
+    // the tables verbatim is deliberate: the recipe strings are the SAME on both sides but their
+    // order follows emission, and pinning that order here would assert an artifact.
+    let handles =
+        |rows: Vec<String>, factory: &str| rows.iter().filter(|row| row.contains(factory)).count();
+    let reference = bootstrap_methods(&reference_disassembly());
+    assert_eq!(
+        handles(reference.clone(), "StringConcatFactory"),
+        4,
+        "the reference has four concatenations — the library body's, the lambda's, and the two \
+         `box()` reports:\n{reference:#?}"
+    );
+    assert_eq!(
+        handles(reference.clone(), "LambdaMetafactory"),
+        0,
+        "and binds no lambda through a bootstrap at all:\n{reference:#?}"
+    );
+
+    let krusty = bootstrap_methods(&main_disassembly());
+    assert_eq!(
+        handles(krusty.clone(), "StringConcatFactory"),
+        4,
+        "krusty has all four too — the two relocated out of the library body and its lambda, and \
+         the two compiled from `box()`'s own templates:\n{krusty:#?}"
+    );
+    assert_eq!(
+        handles(krusty.clone(), "LambdaMetafactory"),
+        1,
+        "and binds exactly one lambda: the one whose splice DECLINED:\n{krusty:#?}"
+    );
 }
 
 /// Whether `method`'s body still calls `callee` — i.e. the splice was declined.

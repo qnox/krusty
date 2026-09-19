@@ -100,6 +100,9 @@ impl FieldSig {
     pub fn is_private(&self) -> bool {
         self.access & ACC_PRIVATE != 0
     }
+    pub fn is_public(&self) -> bool {
+        self.access & ACC_PUBLIC != 0
+    }
 }
 
 /// A field's compile-time constant value (from the `ConstantValue` attribute).
@@ -493,7 +496,11 @@ pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<Me
     // body indexes it rather than the constant pool, so a splice into another class cannot relocate
     // one without it. Reached by finishing the scan rather than by parsing the class a second time:
     // splicing is one of the hottest backend paths.
-    let bootstrap_methods = read_bootstrap_methods(&mut r, &cp).unwrap_or_default();
+    // A table that is THERE but unreadable makes the whole body untrustworthy: an `invokedynamic`
+    // in it names an entry by index, and an index into a table this reader could not parse is not
+    // something to guess at. Declining the body costs a real call at the call site; guessing costs
+    // a relocated entry naming the wrong handle.
+    let bootstrap_methods = read_bootstrap_methods(&mut r, &cp)?;
     Some(MethodCode {
         max_stack,
         max_locals,
@@ -520,6 +527,18 @@ type ScannedCode = (
 /// The defining class's `BootstrapMethods` entries, as `(method handle cp index, static argument cp
 /// indices)`. `r` must be positioned at the start of the CLASS attribute table, which is why the
 /// method scan runs to completion rather than stopping at the method it wanted.
+///
+/// `Some(vec![])` means the class DECLARES no such attribute — a class with no `invokedynamic`,
+/// which is most of them. `None` means the table is there but could not be read: a truncated
+/// attribute table, a body that does not end exactly where its declared length says, or an entry
+/// running past it. Those are different answers and the caller must not conflate them, because an
+/// empty table makes every `invokedynamic` in the body unrelocatable while an unreadable one makes
+/// the whole body untrustworthy.
+///
+/// Exact consumption is checked rather than assumed. JVMS 4.7.23 fixes the attribute's length from
+/// its own contents, so a body with bytes left over — or one that wanted more than it declared —
+/// is not a `BootstrapMethods` attribute this reader understands, and guessing at the remainder is
+/// how a relocated entry silently names the wrong handle.
 fn read_bootstrap_methods(r: &mut Reader, cp: &[C]) -> Option<Vec<(u16, Vec<u16>)>> {
     let nattr = r.u2().ok()?;
     for _ in 0..nattr {
@@ -542,9 +561,12 @@ fn read_bootstrap_methods(r: &mut Reader, cp: &[C]) -> Option<Vec<(u16, Vec<u16>
             }
             out.push((handle, args));
         }
+        if entries.i != body.len() {
+            return None;
+        }
         return Some(out);
     }
-    None
+    Some(Vec::new())
 }
 
 pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {

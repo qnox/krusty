@@ -5756,6 +5756,21 @@ impl super::inline::MethodBodies for Classpath {
                     .any(|f| f.name == name && f.descriptor == descriptor && f.is_private())
         })
     }
+    fn member_is_publicly_reachable(&self, owner: &str, name: &str, descriptor: &str) -> bool {
+        self.find(owner).is_some_and(|ci| {
+            // The OWNER must be public too. A public member of a package-private class is
+            // reachable only from that package, and a relocated bootstrap entry has no package.
+            ci.access & crate::jvm::classreader::ACC_PUBLIC != 0
+                && (ci
+                    .methods
+                    .iter()
+                    .any(|m| m.name == name && m.descriptor == descriptor && m.is_public())
+                    || ci
+                        .fields
+                        .iter()
+                        .any(|f| f.name == name && f.descriptor == descriptor && f.is_public()))
+        })
+    }
     fn property_read_access(
         &self,
         owner: &str,

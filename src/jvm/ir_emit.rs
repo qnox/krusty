@@ -13428,6 +13428,7 @@ impl<'a> Emitter<'a> {
             &body.source_cp,
             &body.bootstrap_methods,
             &mut |o, n, d| self.bodies.member_is_private(o, n, d),
+            &mut |o, n, d| self.bodies.member_is_publicly_reachable(o, n, d),
         ) {
             crate::trace_compiler!(
                 "splice",
