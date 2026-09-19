@@ -60,20 +60,42 @@ pub(super) fn load_cache_statement(
     })
 }
 
-/// Element `k`'s serializer taken OUT of the cache and narrowed to the interface its consumer
-/// accepts, or `None` when it has no slot in this plan.
+/// Element `k`'s serializer taken OUT of the cache for `childSerializers()`, or `None` when it has
+/// no slot in this plan.
 ///
-/// The cache already holds the complete serializer, including nullable wrapping. `Lazy.getValue`
-/// erases it to `Object`, so the reader must restore the consumer's interface (`KSerializer`,
-/// `SerializationStrategy`, or `DeserializationStrategy`) at this boundary. The arity is checked
-/// against the caller's own element count by [`ChildSerializerCachePlan::caches`].
+/// `childSerializers()` exposes a property's serializer shape, so a nullable property wraps the
+/// cached base serializer here. Unlike a call-argument consumer, the result array's store does not
+/// add a redundant `KSerializer` cast. The arity is checked against the caller's own element count
+/// by [`ChildSerializerCachePlan::caches`].
 pub(super) fn cached_element(
     ir: &mut IrFile,
     plan: Option<&ChildSerializerCachePlan>,
     cache_local: Option<u32>,
     k: usize,
     elements: usize,
-    consumer_interface: &str,
+    ty: &Ty,
+) -> Option<ExprId> {
+    let local = cache_local?;
+    if !plan?.caches(k, elements) {
+        return None;
+    }
+    let cached = read_cached_slot(ir, local, k);
+    Some(if super::is_nullable(ty) {
+        super::wrap_nullable_serializer(ir, cached)
+    } else {
+        cached
+    })
+}
+
+/// Element `k`'s cached serializer narrowed from `Lazy.getValue()`'s erased `Object` to the
+/// strategy interface consumed by an encode/decode call.
+pub(super) fn cached_strategy(
+    ir: &mut IrFile,
+    plan: Option<&ChildSerializerCachePlan>,
+    cache_local: Option<u32>,
+    k: usize,
+    elements: usize,
+    strategy_interface: &str,
 ) -> Option<ExprId> {
     let local = cache_local?;
     if !plan?.caches(k, elements) {
@@ -83,7 +105,7 @@ pub(super) fn cached_element(
     Some(ir.add_expr(IrExpr::TypeOp {
         op: IrTypeOp::Cast,
         arg: cached,
-        type_operand: class_ty(consumer_interface),
+        type_operand: class_ty(strategy_interface),
     }))
 }
 
@@ -475,7 +497,7 @@ impl ChildSerializersBody<'_> {
                     cache_local,
                     i,
                     serializer_field_types.len(),
-                    super::KSERIALIZER_FQ,
+                    &serializer_field_types[i],
                 ) {
                     cached
                 } else if let Some(inst) = super::contextual_serializer_for(

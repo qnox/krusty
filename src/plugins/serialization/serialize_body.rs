@@ -110,7 +110,7 @@ impl SerializeBody<'_> {
         // built here. The PLAN decides, so this can never read a slot the serialized class did not
         // write.
         let element_serializer = |ir: &mut IrFile, ctx: &PluginContext, i: usize, ty: &Ty| {
-            if let Some(cached) = super::child_serializer_cache::cached_element(
+            if let Some(cached) = super::child_serializer_cache::cached_strategy(
                 ir,
                 plan.as_ref(),
                 Some(cache_local),

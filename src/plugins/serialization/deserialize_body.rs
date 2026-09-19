@@ -35,7 +35,7 @@ impl ElementDecode<'_> {
     /// the decode call's `DeserializationStrategy` parameter, exactly as kotlinc does.
     fn cached_slot(&self, ir: &mut IrFile, k: usize) -> Option<ExprId> {
         let (local, plan) = self.cache?;
-        super::child_serializer_cache::cached_element(
+        super::child_serializer_cache::cached_strategy(
             ir,
             Some(plan),
             Some(local),
