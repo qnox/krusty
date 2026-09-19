@@ -2303,6 +2303,8 @@ impl IrPlugin for SerializationPlugin {
                             write_self: self
                                 .write_self_method(ir.classes[foo_id as usize].fq_name_id()),
                             write_self_name: self.write_self_name(),
+                            cache: self
+                                .child_serializer_cache(ir.classes[foo_id as usize].fq_name_id()),
                         }
                         .generate(ir, ctx);
                     }
