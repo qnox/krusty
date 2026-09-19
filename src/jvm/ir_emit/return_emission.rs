@@ -6,17 +6,38 @@ use crate::jvm::classfile::CodeBuilder;
 use super::{debug_lines, emit_return, load, slot_words, store, Emitter};
 
 impl Emitter<'_> {
-    /// Emit every active `finally` from inner to outer before a `return`. The active entry is popped
-    /// while its body emits so a return *inside* that finally overrides the pending transfer without
-    /// recursively entering the same finally again. Returns whether the original transfer survives.
-    fn emit_return_finalizers(&mut self, code: &mut CodeBuilder) -> bool {
-        let Some(finalizer) = self.return_finalizers.pop() else {
+    /// Emit the active `finally` bodies down to `floor`, inner to outer, before a control transfer.
+    ///
+    /// `floor` is how many finalizers the transfer does NOT leave: `0` for a `return`, which leaves
+    /// the whole method, and a loop's entry depth for a `break`/`continue`, which leaves only the
+    /// `try`s opened inside that loop. The active entry is popped while its body emits, so a
+    /// transfer *inside* that finalizer overrides the pending one through this same operation
+    /// instead of re-entering the finalizer. Returns whether the original transfer survives.
+    pub(super) fn emit_transfer_finalizers(
+        &mut self,
+        floor: usize,
+        code: &mut CodeBuilder,
+    ) -> bool {
+        if self.return_finalizers.len() <= floor {
             return true;
-        };
+        }
+        let finalizer = self
+            .return_finalizers
+            .pop()
+            .expect("the stack is longer than the floor");
+        // This copy of `finalizer` lies in the middle of its own try's protected region. Close the
+        // open segment ahead of it; the caller reopens once the whole transfer is emitted.
+        self.close_finally_segment(finalizer, code);
         self.emit(finalizer, code);
-        let survives = !self.discarding_diverges(finalizer) && self.emit_return_finalizers(code);
+        let survives =
+            !self.discarding_diverges(finalizer) && self.emit_transfer_finalizers(floor, code);
         self.return_finalizers.push(finalizer);
         survives
+    }
+
+    /// Every active `finally`, for a `return` — which leaves them all.
+    fn emit_return_finalizers(&mut self, code: &mut CodeBuilder) -> bool {
+        self.emit_transfer_finalizers(0, code)
     }
 
     pub(super) fn emit_return_node(
@@ -38,6 +59,7 @@ impl Emitter<'_> {
                 debug_lines::mark_return(self.ir, returned, code);
                 code.ret_void();
             }
+            self.reopen_finally_segments(code);
             return;
         };
         let ret = self.ret;
@@ -52,6 +74,7 @@ impl Emitter<'_> {
                 debug_lines::mark_return(self.ir, returned, code);
                 emit_return(ret, code);
             }
+            self.reopen_finally_segments(code);
             return;
         }
         // Kotlin evaluates the return expression before `finally`. Spill that value so arbitrary
@@ -75,5 +98,6 @@ impl Emitter<'_> {
             debug_lines::mark_return(self.ir, returned, code);
             emit_return(ret, code);
         }
+        self.reopen_finally_segments(code);
     }
 }

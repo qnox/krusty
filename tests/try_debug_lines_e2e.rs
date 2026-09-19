@@ -1,3 +1,5 @@
+//! The class-file facts a `try` produces: its debug lines, and its protected ranges.
+//!
 //! A `try` is three separate debug-line facts, none of which krusty recorded.
 //!
 //! kotlinc opens every protected region with a `nop` carrying the `try` keyword's own line, so the
@@ -77,6 +79,21 @@ fn method_section(text: &str, signature: &str, section: &str) -> Vec<String> {
         .collect()
 }
 
+/// The offset-keyed rows of a `javap` section: the instructions under `Code:`, or the ranges under
+/// `Exception table:`. Each section opens with a header line (`stack=…`, `from  to  target type`)
+/// and ends at the first row that no longer starts with an offset.
+fn numeric_rows(text: &str, signature: &str, section: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .skip_while(|line| !line.contains(signature))
+        .skip_while(|line| !line.starts_with(section))
+        .skip(1)
+        .skip_while(|line| !line.starts_with(|c: char| c.is_ascii_digit()))
+        .take_while(|line| line.starts_with(|c: char| c.is_ascii_digit()))
+        .map(str::to_string)
+        .collect()
+}
+
 fn method_lines(text: &str, signature: &str) -> Vec<String> {
     method_section(text, signature, "LineNumberTable")
         .into_iter()
@@ -129,18 +146,15 @@ fn a_protected_region_starts_at_the_opening_nop() {
                \x20   }\n\
                }\n";
     let (reference, krusty) = disassemble_both("TryCatchRegion", src, "Caught");
-    let code: Vec<String> = method_section(&krusty, "int run(int)", "Code:")
-        .into_iter()
-        .filter(|row| row.starts_with(|c: char| c.is_ascii_digit()))
-        .collect();
+    let code = numeric_rows(&krusty, "int run(int)", "Code:");
     assert_eq!(
         code.first().map(String::as_str),
         Some("0: nop"),
         "krusty run code: {code:?}"
     );
     assert_eq!(
-        method_section(&krusty, "int run(int)", "Exception table:"),
-        method_section(&reference, "int run(int)", "Exception table:"),
+        numeric_rows(&krusty, "int run(int)", "Exception table:"),
+        numeric_rows(&reference, "int run(int)", "Exception table:"),
         "run exception table"
     );
 }
@@ -159,4 +173,314 @@ fn a_single_line_try_adds_no_entry() {
     let want = method_lines(&reference, "int run(int)");
     assert_eq!(want, vec!["line 4: 0".to_string()], "kotlinc's own table");
     assert_eq!(method_lines(&krusty, "int run(int)"), want, "run lines");
+}
+
+/// A `return` out of a `try` inlines a copy of the finalizer in the MIDDLE of the protected region.
+/// That copy must not be protected by the handler it belongs to: an exception raised while the
+/// finalizer runs would re-enter the same handler and run the finalizer a second time. kotlinc
+/// closes the region ahead of the copy and protects the handler's own entry separately.
+#[test]
+fn a_returning_finally_keeps_its_own_copy_out_of_its_region() {
+    let src = "class Guarded {\n\
+               \x20   fun step() {}\n\
+               \x20   fun run(x: Int): Int {\n\
+               \x20       try {\n\
+               \x20           return x + 1\n\
+               \x20       } finally {\n\
+               \x20           step()\n\
+               \x20       }\n\
+               \x20   }\n\
+               }\n";
+    let (reference, krusty) = disassemble_both("TryFinallyRegion", src, "Guarded");
+    let want = numeric_rows(&reference, "int run(int)", "Exception table:");
+    assert_eq!(
+        want,
+        vec![
+            "0     5    11   any".to_string(),
+            "11    12    11   any".to_string()
+        ],
+        "kotlinc's own table, spelled out so a reference change is visible here"
+    );
+    assert_eq!(
+        numeric_rows(&krusty, "int run(int)", "Exception table:"),
+        want,
+        "run exception table"
+    );
+    assert_eq!(
+        numeric_rows(&krusty, "int run(int)", "Code:"),
+        numeric_rows(&reference, "int run(int)", "Code:"),
+        "run code"
+    );
+}
+
+/// Typed catches obey the same protected-range boundary as the synthetic catch-all. A `return`
+/// inlines the finalizer inside the emitted body; if the typed handler still guarded one broad
+/// `[start, end)` range, an exception from that copy would enter the sibling catch and execute the
+/// finalizer a second time.
+#[test]
+fn a_typed_catch_does_not_guard_its_own_finalizer_copy() {
+    let src = "class AmberSignal : RuntimeException()\n\
+               class BrassMeter(var hits: Int = 0) {\n\
+               \x20   fun finish() { hits += 1; throw AmberSignal() }\n\
+               }\n\
+               class SegmentedGuard {\n\
+               \x20   fun run(meter: BrassMeter): Int {\n\
+               \x20       try {\n\
+               \x20           return 1\n\
+               \x20       } catch (caught: AmberSignal) {\n\
+               \x20           return 2\n\
+               \x20       } finally {\n\
+               \x20           meter.finish()\n\
+               \x20       }\n\
+               \x20   }\n\
+               }\n\
+               fun box(): String {\n\
+               \x20   val meter = BrassMeter()\n\
+               \x20   try {\n\
+               \x20       SegmentedGuard().run(meter)\n\
+               \x20       return \"FAIL: returned\"\n\
+               \x20   } catch (caught: AmberSignal) {\n\
+               \x20       return if (meter.hits == 1) \"OK\" else \"FAIL: repeated\"\n\
+               \x20   }\n\
+               }\n";
+
+    let jdk = common::jdk_modules();
+    let out = common::compile_and_run_box(
+        src,
+        "TypedCatchFinallyRuntime",
+        &[common::stdlib_jar()],
+        Some(jdk.as_path()),
+    )
+    .expect("TypedCatchFinallyRuntime: the required JVM runner must be available");
+    assert_eq!(out.trim(), "OK");
+
+    let (reference, krusty) = disassemble_both("TypedCatchFinallyTable", src, "SegmentedGuard");
+    let want = numeric_rows(&reference, "int run(BrassMeter)", "Exception table:");
+    assert_eq!(
+        want,
+        vec![
+            "6     9    15   Class AmberSignal".to_string(),
+            "6     9    26   any".to_string(),
+            "15    19    26   any".to_string(),
+            "26    27    26   any".to_string(),
+        ],
+        "kotlinc's complete exception table"
+    );
+    let got = numeric_rows(&krusty, "int run(BrassMeter)", "Exception table:");
+    assert_eq!(
+        got,
+        vec![
+            "6     9    15   Class AmberSignal".to_string(),
+            "6     9    26   any".to_string(),
+            "16    19    26   any".to_string(),
+            "26    28    26   any".to_string(),
+        ],
+        "krusty's complete exception table"
+    );
+    assert_eq!(got[0], want[0], "typed catch range");
+}
+
+/// The same rule where the body falls through instead of returning: the finalizer copy sits after
+/// the body, so the region simply ends before it — but the handler's own entry is still protected.
+#[test]
+fn a_falling_through_finally_protects_its_handler_entry() {
+    let src = "class Falls {\n\
+               \x20   fun step() {}\n\
+               \x20   fun run(x: Int): Int {\n\
+               \x20       var k = 0\n\
+               \x20       try {\n\
+               \x20           k = x + 1\n\
+               \x20       } finally {\n\
+               \x20           step()\n\
+               \x20       }\n\
+               \x20       return k\n\
+               \x20   }\n\
+               }\n";
+    let (reference, krusty) = disassemble_both("TryFinallyFallThrough", src, "Falls");
+    assert_eq!(
+        numeric_rows(&krusty, "int run(int)", "Exception table:"),
+        numeric_rows(&reference, "int run(int)", "Exception table:"),
+        "run exception table"
+    );
+    assert_eq!(
+        numeric_rows(&krusty, "int run(int)", "Code:"),
+        numeric_rows(&reference, "int run(int)", "Code:"),
+        "run code"
+    );
+}
+
+/// An INNER finalizer's copy is ordinary code as far as the outer `try` is concerned: it stays
+/// inside the outer region, and only the outer's own copies are cut out of it. A rule that excluded
+/// every finalizer copy from every enclosing region would drop the outer's cover of the inner one.
+#[test]
+fn a_nested_finally_copy_stays_inside_the_outer_region() {
+    let src = "class Nested {\n\
+               \x20   fun a() {}\n\
+               \x20   fun b() {}\n\
+               \x20   fun run(x: Int): Int {\n\
+               \x20       try {\n\
+               \x20           try {\n\
+               \x20               return x + 1\n\
+               \x20           } finally {\n\
+               \x20               a()\n\
+               \x20           }\n\
+               \x20       } finally {\n\
+               \x20           b()\n\
+               \x20       }\n\
+               \x20   }\n\
+               }\n";
+    let (reference, krusty) = disassemble_both("NestedFinallyRegion", src, "Nested");
+    let want = numeric_rows(&reference, "int run(int)", "Exception table:");
+    assert_eq!(
+        want,
+        vec![
+            "1     6    16   any".to_string(),
+            "16    17    16   any".to_string(),
+            "0    10    23   any".to_string(),
+            "16    23    23   any".to_string(),
+            "23    24    23   any".to_string(),
+        ],
+        "kotlinc's own table: the outer region covers the inner finalizer copy at 6..10"
+    );
+    assert_eq!(
+        numeric_rows(&krusty, "int run(int)", "Exception table:"),
+        want,
+        "run exception table"
+    );
+    // The handler temporaries are leased, so the outer handler reuses the dead inner one's slot and
+    // its store keeps kotlinc's one-byte form. Comparing the code as well keeps that honest: a
+    // regression there would move the table's offsets rather than its structure.
+    assert_eq!(
+        numeric_rows(&krusty, "int run(int)", "Code:"),
+        numeric_rows(&reference, "int run(int)", "Code:"),
+        "run code"
+    );
+}
+
+/// A `finally` that contains a `try`/`catch` of its own records StackMapTable frames WHILE the
+/// outer handler's caught exception is still parked — it is re-raised after the finalizer runs. So
+/// that slot has to be typed in those frames, or the trailing `aload; athrow` reads what the
+/// verifier calls `top` and the class does not load.
+///
+/// The parked exception is a backend temporary and holds a lease for exactly that span. Comparing
+/// the complete frame list against kotlinc is what pins it: a missing lease shows up there before
+/// it shows up as a verify error.
+#[test]
+fn a_finally_with_its_own_handler_types_the_parked_exception() {
+    let src = "class Parked {\n\
+               \x20   fun risky(): Int = 1\n\
+               \x20   fun note() {}\n\
+               \x20   fun run(x: Int): Int {\n\
+               \x20       try {\n\
+               \x20           return x + 1\n\
+               \x20       } finally {\n\
+               \x20           try {\n\
+               \x20               risky()\n\
+               \x20           } catch (e: Exception) {\n\
+               \x20               note()\n\
+               \x20           }\n\
+               \x20       }\n\
+               \x20   }\n\
+               }\n";
+    let (reference, krusty) = disassemble_both("ParkedExceptionFrames", src, "Parked");
+    // The catch types and their order, not the offsets: krusty's finalizer copy is a few bytes
+    // longer than kotlinc's here, which is its own gap and not what this test is about.
+    let guarded = |text: &str| {
+        numeric_rows(text, "int run(int)", "Exception table:")
+            .into_iter()
+            .filter_map(|row| row.split_whitespace().nth(3).map(str::to_string))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        guarded(&krusty),
+        guarded(&reference),
+        "the guarded ranges kotlinc declares, in its order"
+    );
+    // Each frame's populated locals and its stack. The `top` padding is dropped: krusty opens one
+    // more local than kotlinc in this shape, so its parked exception sits a slot higher — its own
+    // gap, and not what a missing lease looks like, which is the Throwable absent from the frame.
+    let frames = |text: &str| {
+        method_section(text, "int run(int)", "StackMapTable")
+            .into_iter()
+            .filter(|row| row.starts_with("locals") || row.starts_with("stack"))
+            .map(|row| row.replace("top, ", "").replace(", top", ""))
+            .collect::<Vec<_>>()
+    };
+    let want = frames(&reference);
+    assert!(
+        want.iter().any(|row| row.contains("java/lang/Throwable")),
+        "kotlinc types the parked exception in a frame, which is what this pins: {want:?}"
+    );
+    assert_eq!(frames(&krusty), want, "run frames");
+}
+
+/// Kotlin runs a `finally` when control leaves its `try` by ANY route, not only by `return`.
+/// `break` and `continue` jumped straight to their loop labels, so the finalizer never ran — a
+/// silent wrong answer, not a byte difference.
+///
+/// The loop below leaves its `try` by `continue` on the first iteration and by `break` on the
+/// second. Its user-defined accumulator records body/finalizer as `1`/`2`, so a correct compiler
+/// produces `1212`. Keeping the mechanism in repository-owned declarations avoids accidentally
+/// testing a stdlib intrinsic instead of ordinary call/property emission.
+#[test]
+fn a_loop_transfer_out_of_a_try_runs_its_finally() {
+    let src = "class Velarium(var trace: Int = 0) {\n\
+               \x20   fun record(token: Int) { trace = trace * 10 + token }\n\
+               }\n\
+               fun box(): String {\n\
+               \x20   val state = Velarium()\n\
+               \x20   for (i in 0..1) {\n\
+               \x20       try {\n\
+               \x20           state.record(1)\n\
+               \x20           if (i == 0) continue\n\
+               \x20           break\n\
+               \x20       } finally {\n\
+               \x20           state.record(2)\n\
+               \x20       }\n\
+               \x20   }\n\
+               \x20   return if (state.trace == 1212) \"OK\" else \"FAIL\"\n\
+               }\n";
+    let jdk = common::jdk_modules();
+    let out = common::compile_and_run_box(
+        src,
+        "LoopTransferFinally",
+        &[common::stdlib_jar()],
+        Some(jdk.as_path()),
+    )
+    .expect("LoopTransferFinally: the required JVM runner must be available");
+    assert_eq!(out.trim(), "OK");
+}
+
+/// A `finally` that a loop transfer leaves is inlined on that path too, so its copy must be cut out
+/// of the protected region exactly as a `return`'s copy is. Compared against kotlinc rather than
+/// pinned, so the rule stays tied to the reference compiler.
+///
+/// A `while` loop, not `for (i in a..b)`: a counted range loop spills its bound into a local where
+/// kotlinc re-reads the parameter, which shifts every offset and would fail this comparison for a
+/// reason that has nothing to do with protected regions.
+#[test]
+fn a_loop_transfer_finalizer_copy_leaves_the_protected_region() {
+    let src = "class Looping {\n\
+               \x20   fun step() {}\n\
+               \x20   fun run(n: Int): Int {\n\
+               \x20       var seen = 0\n\
+               \x20       var i = 0\n\
+               \x20       while (i < n) {\n\
+               \x20           i += 1\n\
+               \x20           try {\n\
+               \x20               seen += i\n\
+               \x20               continue\n\
+               \x20           } finally {\n\
+               \x20               step()\n\
+               \x20           }\n\
+               \x20       }\n\
+               \x20       return seen\n\
+               \x20   }\n\
+               }\n";
+    let (reference, krusty) = disassemble_both("LoopTransferRegion", src, "Looping");
+    assert_eq!(
+        numeric_rows(&krusty, "int run(int)", "Exception table:"),
+        numeric_rows(&reference, "int run(int)", "Exception table:"),
+        "run exception table"
+    );
 }
