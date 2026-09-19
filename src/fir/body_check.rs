@@ -4151,20 +4151,8 @@ impl BodyFirChecker<'_> {
             Stmt::LocalFun(function) => {
                 return self.local_function_statement(statement, function, origin);
             }
-            Stmt::LocalDelegate {
-                is_var,
-                name,
-                ty,
-                delegate,
-            } => {
-                return self.local_delegate_statement(
-                    statement,
-                    *is_var,
-                    name,
-                    ty.as_ref(),
-                    *delegate,
-                    origin,
-                );
+            Stmt::LocalDelegate { .. } => {
+                return self.local_delegate_statement(statement, origin);
             }
             Stmt::LocalTypeAlias(_) => FirStatementKind::LocalTypeAlias,
             Stmt::LocalClass(class) => {

@@ -443,3 +443,38 @@ pub fn kotlinc_source_result_with_args(
     let _ = std::fs::remove_dir_all(work);
     result
 }
+
+/// Front-end diagnostics rendered as `line:col: severity: message`, in emission order.
+///
+/// A diagnostic's position is part of its contract, so a test that pins the message alone cannot
+/// tell a correctly anchored diagnostic from one reported against the wrong declaration.
+pub fn front_end_diagnostics_located(
+    src: &str,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Vec<String> {
+    let cp = common::cached_classpath(cp_jars, jdk_modules);
+    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
+    let inputs = [krusty::source::SourceInput::kotlin(src)];
+    let mut diags = krusty::diag::DiagSink::new();
+    let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
+        &inputs,
+        platform,
+        &krusty::features::LangFeatures::new(),
+        |_, _| {},
+        &mut diags,
+    );
+    let _ = krusty::compiler::check_frontend_only(analysis, &mut diags);
+    diags
+        .diags
+        .iter()
+        .map(|diagnostic| {
+            let (line, column) = krusty::diag::line_col(src, diagnostic.span.lo);
+            let severity = match diagnostic.severity {
+                krusty::diag::Severity::Error => "error",
+                _ => "warning",
+            };
+            format!("{line}:{column}: {severity}: {}", diagnostic.msg)
+        })
+        .collect()
+}

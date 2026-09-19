@@ -157,100 +157,6 @@ fn catch_parameter_name_survives_checked_fir_lowering() {
 }
 
 #[test]
-fn local_delegate_storage_name_survives_checked_fir_lowering() {
-    let ir = lower_single_source(
-        "class Delegate { operator fun getValue(owner: Any?, property: Any?): Int = 1 }\n\
-         fun read(): Int { val value: Int by Delegate(); return value }\n",
-        "LocalDelegateName",
-    );
-    assert!(
-        ir.value_names.values().any(|name| name == "value$delegate"),
-        "common IR must retain the checked delegate-storage debug identity: {:?}",
-        ir.value_names
-    );
-}
-
-#[test]
-fn generic_member_delegate_result_keeps_its_erased_call_boundary() {
-    let ir = lower_single_source(
-        "class Delegate<T>(val value: T) {\n\
-             operator fun getValue(owner: Any?, property: Any?): T = value\n\
-         }\n\
-         class Owner { val number: Int by Delegate(1) }\n",
-        "GenericDelegateResult",
-    );
-    let getter = ir
-        .functions
-        .iter()
-        .find(|function| function.name == "getNumber")
-        .expect("generated delegated-property getter");
-    let IrExpr::Block { stmts, value: None } = ir.expr(getter.body.expect("concrete getter body"))
-    else {
-        panic!("getter body must be a statement block");
-    };
-    let [returned] = stmts.as_slice() else {
-        panic!("getter body must contain one return");
-    };
-    let IrExpr::Return(Some(converted)) = ir.expr(*returned) else {
-        panic!("getter must return its delegated call");
-    };
-    let IrExpr::TypeOp {
-        op: IrTypeOp::ImplicitCoercion,
-        arg: call,
-        type_operand: Ty::Int,
-    } = ir.expr(*converted)
-    else {
-        panic!("generic getValue result must cross an explicit Int coercion");
-    };
-    assert!(matches!(ir.expr(*call), IrExpr::MethodCall { .. }));
-    assert_eq!(
-        ir.physical_types.get(call),
-        Some(&Ty::obj("kotlin/Any")),
-        "the declaration returns its erased T slot before the selected Int result"
-    );
-}
-
-#[test]
-fn sibling_extension_provide_delegate_keeps_receiver_in_module_call_shape() {
-    let ir = lower_source_from_set(
-        &[
-            (
-                "inline operator fun String.provideDelegate(owner: Any?, property: Any): String = this",
-                "Delegate",
-            ),
-            (
-                "operator fun String.getValue(owner: Any?, property: Any): String = this\n\
-                 val value by \"OK\"",
-                "Consumer",
-            ),
-        ],
-        1,
-    );
-
-    let (parameters, arguments) = ir
-        .exprs
-        .iter()
-        .find_map(|expression| match expression {
-            IrExpr::Call {
-                callee: Callee::Module { name, params, .. },
-                args,
-                ..
-            } if name == "provideDelegate" => Some((params, args)),
-            _ => None,
-        })
-        .expect("sibling provideDelegate call");
-    assert_eq!(
-        parameters,
-        &[
-            Ty::String,
-            Ty::nullable(Ty::obj("kotlin/Any")),
-            Ty::obj("kotlin/Any"),
-        ]
-    );
-    assert_eq!(arguments.len(), parameters.len());
-}
-
-#[test]
 fn lateinit_local_materializes_null_storage_before_checked_reads() {
     let ir = lower_single_source(
         "fun read(): String { lateinit var value: String; return value }\n",
@@ -3397,7 +3303,7 @@ fn unsigned_range_containment_stays_semantic_until_backend_realization() {
     ));
 }
 
-fn lower_single_source(source: &str, stem: &str) -> IrFile {
+pub(super) fn lower_single_source(source: &str, stem: &str) -> IrFile {
     lower_single_source_with_platform(source, stem, Box::new(crate::libraries::EmptySymbolSource))
 }
 
@@ -3465,7 +3371,7 @@ fn lower_single_source_with_platform(
     ir
 }
 
-fn lower_source_from_set(sources: &[(&str, &str)], active_source: usize) -> IrFile {
+pub(super) fn lower_source_from_set(sources: &[(&str, &str)], active_source: usize) -> IrFile {
     #[derive(Default)]
     struct DeferredBodies(Vec<(crate::fir::BodyOwnerId, FirBody)>);
 

@@ -1200,26 +1200,59 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         evaluate_expression(semantics, result, graph, demand, memo, computing)
                     }
                     SigExpr::Delegate {
-                        declaration,
                         delegate,
                         scope,
-                        origin,
-                        local,
+                        site,
                     } => {
                         let delegate = evaluate_expression(
                             semantics, delegate, graph, demand, memo, computing,
                         )?;
+                        let site = graph
+                            .delegate_site(site)
+                            .expect("a delegated signature retains its graph-owned site");
+                        let kind = match site.kind {
+                            SignatureDelegateSiteKind::TopLevel { extension } => {
+                                ResolvedSignatureDelegateSiteKind::TopLevel { extension }
+                            }
+                            SignatureDelegateSiteKind::Member {
+                                dispatch,
+                                extension,
+                            } => ResolvedSignatureDelegateSiteKind::Member {
+                                dispatch: evaluate_expression(
+                                    semantics, dispatch, graph, demand, memo, computing,
+                                )?,
+                                extension,
+                            },
+                            SignatureDelegateSiteKind::StatementLocal => {
+                                ResolvedSignatureDelegateSiteKind::StatementLocal
+                            }
+                        };
+                        let site = ResolvedSignatureDelegateSite {
+                            diagnostic_owner: site.diagnostic_owner,
+                            kind,
+                            mutable: site.mutable,
+                            dispatch_diagnostic_name: if site.dispatch_diagnostic_name.is_none() {
+                                None
+                            } else if site.dispatch_diagnostic_name.is_anonymous() {
+                                Some(ResolvedDelegateDispatchName::Anonymous)
+                            } else {
+                                let name = site
+                                    .dispatch_diagnostic_name
+                                    .source_name()
+                                    .expect("a named delegate dispatch retains its graph identity");
+                                Some(ResolvedDelegateDispatchName::Source(
+                                    graph
+                                        .name(name)
+                                        .expect("a delegate dispatch spelling belongs to its graph")
+                                        .into(),
+                                ))
+                            },
+                            by_origin: site.by_origin,
+                        };
                         let scope = graph
                             .scope(scope)
                             .expect("a delegated signature must retain its declaration scope");
-                        semantics.select_delegate(
-                            declaration,
-                            scope,
-                            origin,
-                            delegate,
-                            local,
-                            demand,
-                        )
+                        semantics.select_delegate(scope, delegate, site, demand)
                     }
                     SigExpr::Join {
                         operands,

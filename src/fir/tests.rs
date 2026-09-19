@@ -2442,11 +2442,9 @@ impl SignatureSemantics for TestSignatureSemantics {
 
     fn select_delegate(
         &self,
-        _declaration: DeclarationId,
         _scope: SignatureScope,
-        _origin: OriginId,
         delegate: ResolvedTy,
-        _local: bool,
+        _site: ResolvedSignatureDelegateSite,
         _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedTy, DiagnosticId> {
         self.operations.borrow_mut().push("delegate".into());

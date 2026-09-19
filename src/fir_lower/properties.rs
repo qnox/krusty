@@ -1,13 +1,11 @@
 use crate::fir::{
-    DeclarationFlags, DeclarationId, DeclarationKind, FirBody, FirCallTarget,
-    FirCallableReferenceBinding, FirDelegateCall, FirDelegateDispatchReceiver,
-    FirPropertyReferenceTarget, ResolvedModuleIndex, SourceFileId,
+    DeclarationFlags, DeclarationId, DeclarationKind, FirBody, ResolvedModuleIndex, SourceFileId,
 };
 use std::collections::HashMap;
 
 use crate::ir::{
-    Callee, ExprId, FunId, IrCheckedOperation, IrCheckedProperty, IrExpr, IrField, IrFile,
-    IrFunction, IrLocalPropertyLayout, IrNodeOrigin, IrProperty, IrStatic, IrfFlags,
+    ExprId, FunId, IrCheckedOperation, IrCheckedProperty, IrExpr, IrField, IrFile, IrFunction,
+    IrLocalPropertyLayout, IrNodeOrigin, IrProperty, IrStatic, IrfFlags,
 };
 use crate::types::{Ty, TypeName};
 
@@ -16,7 +14,7 @@ use super::{
     lower_body_with_context, FirFileLoweringFailure, LocalCallableLoweringContext,
 };
 
-fn declaration_source_order(
+pub(super) fn declaration_source_order(
     index: &ResolvedModuleIndex,
     declaration: DeclarationId,
 ) -> Result<u32, FirFileLoweringFailure> {
@@ -25,7 +23,7 @@ fn declaration_source_order(
         .ok_or(FirFileLoweringFailure::MissingSourceOrder(declaration))
 }
 
-fn named_context_parameters(
+pub(super) fn named_context_parameters(
     index: &ResolvedModuleIndex,
     declaration: DeclarationId,
     types: &[Ty],
@@ -49,7 +47,7 @@ fn named_context_parameters(
         .collect()
 }
 
-fn set_extension_accessor_parameter_names(
+pub(super) fn set_extension_accessor_parameter_names(
     index: &ResolvedModuleIndex,
     property: DeclarationId,
     property_name: &str,
@@ -286,7 +284,7 @@ pub(super) fn finalize_properties(
     Ok(())
 }
 
-fn apply_property_decl_line(ir: &mut IrFile, layout: &IrLocalPropertyLayout, line: u32) {
+pub(super) fn apply_property_decl_line(ir: &mut IrFile, layout: &IrLocalPropertyLayout, line: u32) {
     match layout {
         IrLocalPropertyLayout::TopLevelStorage {
             storage,
@@ -344,7 +342,7 @@ fn materialize_member_extension_property(
     initialization: &mut HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>>,
 ) -> Result<(), FirFileLoweringFailure> {
     if property.delegate.is_some() || property.delegate_plan.is_some() {
-        return materialize_member_extension_delegate(
+        return super::delegated_properties::materialize_member_extension_delegate(
             index,
             source_order,
             property_id,
@@ -375,6 +373,7 @@ fn materialize_member_extension_property(
             getter_parameters,
             property.ty,
             body,
+            AccessorResult::AsDeclared,
             true,
             Some(owner),
         ),
@@ -405,6 +404,7 @@ fn materialize_member_extension_property(
             setter_parameters(),
             Ty::Unit,
             body,
+            AccessorResult::AsDeclared,
             false,
             Some(owner),
         )),
@@ -484,7 +484,7 @@ fn materialize_top_level_property(
     realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
 ) -> Result<(), FirFileLoweringFailure> {
     if property.delegate.is_some() || property.delegate_plan.is_some() {
-        return materialize_top_level_delegate(
+        return super::delegated_properties::materialize_top_level_delegate(
             source_order,
             property_id,
             property,
@@ -536,6 +536,7 @@ fn materialize_top_level_property(
                 Vec::new(),
                 property.ty,
                 body,
+                AccessorResult::AsDeclared,
                 true,
                 None,
             )
@@ -547,6 +548,7 @@ fn materialize_top_level_property(
                 vec![property.ty],
                 Ty::Unit,
                 body,
+                AccessorResult::AsDeclared,
                 false,
                 None,
             )
@@ -580,6 +582,7 @@ fn materialize_top_level_property(
         receiver_parameters.clone(),
         property.ty,
         getter_body,
+        AccessorResult::AsDeclared,
         true,
         None,
     );
@@ -592,6 +595,7 @@ fn materialize_top_level_property(
             parameters,
             Ty::Unit,
             body,
+            AccessorResult::AsDeclared,
             false,
             None,
         )
@@ -619,877 +623,7 @@ fn materialize_top_level_property(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn materialize_top_level_delegate(
-    source_order: u32,
-    property_id: crate::fir::PropertyId,
-    mut property: IrCheckedProperty,
-    extension_receiver: Option<Ty>,
-    context_parameters: Vec<Ty>,
-    index: &ResolvedModuleIndex,
-    ir: &mut IrFile,
-    realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
-) -> Result<(), FirFileLoweringFailure> {
-    if !context_parameters.is_empty() {
-        return Err(FirFileLoweringFailure::UnsupportedPropertyShape(
-            property.declaration,
-        ));
-    }
-    let initializer =
-        property
-            .delegate
-            .take()
-            .ok_or(FirFileLoweringFailure::UnsupportedPropertyShape(
-                property.declaration,
-            ))?;
-    let plan =
-        property
-            .delegate_plan
-            .take()
-            .ok_or(FirFileLoweringFailure::UnsupportedPropertyShape(
-                property.declaration,
-            ))?;
-    let cause = ir.fir_origins.get(&initializer).map(|origin| match origin {
-        IrNodeOrigin::Fir(origin) => *origin,
-        IrNodeOrigin::Synthetic { cause, .. } => *cause,
-    });
-    let first_generated = ir.exprs.len();
-    let property_reference = delegated_property_reference(
-        ir,
-        property_id,
-        extension_receiver.is_some(),
-        property.flags,
-    );
-    let property_reference_static = push_delegate_static(
-        ir,
-        format!("{}$kprop", property.name),
-        Ty::obj("kotlin/reflect/KProperty"),
-        property_reference,
-        None,
-        source_order,
-    )?;
-    let owner = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
-    let storage_initializer = if let Some(provide) = &plan.provide_delegate {
-        let property_reference = ir.add_expr(IrExpr::GetStatic(property_reference_static));
-        delegated_call(
-            index,
-            ir,
-            provide,
-            initializer,
-            vec![owner, property_reference],
-        )?
-    } else {
-        initializer
-    };
-    let delegate_static = push_delegate_static(
-        ir,
-        format!("{}$delegate", property.name),
-        plan.storage_type.get(),
-        storage_initializer,
-        None,
-        source_order,
-    )?;
-    let receiver = ir.add_expr(IrExpr::GetStatic(delegate_static));
-    let owner = if extension_receiver.is_some() {
-        ir.add_expr(IrExpr::GetValue(0))
-    } else {
-        ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null))
-    };
-    let property_reference = ir.add_expr(IrExpr::GetStatic(property_reference_static));
-    let read = delegated_call(
-        index,
-        ir,
-        &plan.get_value,
-        receiver,
-        vec![owner, property_reference],
-    )?;
-    let getter = add_accessor_function(
-        ir,
-        crate::names::property_getter_name(&property.name),
-        extension_receiver.into_iter().collect(),
-        property.ty,
-        read,
-        true,
-        None,
-    );
-    let setter = plan
-        .set_value
-        .as_ref()
-        .map(|set_value| {
-            let receiver = ir.add_expr(IrExpr::GetStatic(delegate_static));
-            let owner = if extension_receiver.is_some() {
-                ir.add_expr(IrExpr::GetValue(0))
-            } else {
-                ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null))
-            };
-            let property_reference = ir.add_expr(IrExpr::GetStatic(property_reference_static));
-            let value = ir.add_expr(IrExpr::GetValue(u32::from(extension_receiver.is_some())));
-            let write = delegated_call(
-                index,
-                ir,
-                set_value,
-                receiver,
-                vec![owner, property_reference, value],
-            )?;
-            Ok(add_accessor_function(
-                ir,
-                crate::names::property_setter_name(&property.name),
-                extension_receiver
-                    .into_iter()
-                    .chain(std::iter::once(property.ty))
-                    .collect(),
-                Ty::Unit,
-                write,
-                false,
-                None,
-            ))
-        })
-        .transpose()?;
-    ir.fn_source_order.insert(getter, source_order);
-    if let Some(setter) = setter {
-        ir.fn_source_order.insert(setter, source_order);
-    }
-    realizations.insert(
-        property_id,
-        IrLocalPropertyLayout::TopLevelAccessor {
-            getter,
-            setter,
-            receiver: extension_receiver,
-            context_parameters: Vec::new(),
-        },
-    );
-    stamp_generated_property_nodes(ir, first_generated, cause);
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn materialize_member_delegate(
-    index: &ResolvedModuleIndex,
-    source_order: u32,
-    property_id: crate::fir::PropertyId,
-    mut property: IrCheckedProperty,
-    class_id: crate::ir::ClassId,
-    context_parameters: Vec<Ty>,
-    ir: &mut IrFile,
-    realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
-    initialization: &mut HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>>,
-) -> Result<(), FirFileLoweringFailure> {
-    if !context_parameters.is_empty() {
-        return Err(FirFileLoweringFailure::UnsupportedPropertyShape(
-            property.declaration,
-        ));
-    }
-    let initializer =
-        property
-            .delegate
-            .take()
-            .ok_or(FirFileLoweringFailure::UnsupportedPropertyShape(
-                property.declaration,
-            ))?;
-    let plan =
-        property
-            .delegate_plan
-            .take()
-            .ok_or(FirFileLoweringFailure::UnsupportedPropertyShape(
-                property.declaration,
-            ))?;
-    let cause = ir.fir_origins.get(&initializer).map(|origin| match origin {
-        IrNodeOrigin::Fir(origin) => *origin,
-        IrNodeOrigin::Synthetic { cause, .. } => *cause,
-    });
-    let first_generated = ir.exprs.len();
-    let owner_type = ir.classes[class_id as usize].fq_name;
-    let delegate_field = u32::try_from(ir.classes[class_id as usize].fields.len())
-        .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
-    ir.classes[class_id as usize].fields.push(
-        IrField::new(
-            format!("{}$delegate", property.name),
-            plan.storage_type.get(),
-        )
-        .with_is_final(true)
-        .with_is_private(true),
-    );
-    let property_reference = delegated_property_reference(ir, property_id, true, property.flags);
-    let property_reference_static = push_delegate_static(
-        ir,
-        format!("{}$kprop", property.name),
-        Ty::obj("kotlin/reflect/KProperty"),
-        property_reference,
-        Some(owner_type),
-        source_order,
-    )?;
-    let this_ref = ir.add_expr(IrExpr::GetValue(0));
-    let storage_initializer = if let Some(provide) = &plan.provide_delegate {
-        let property_reference = ir.add_expr(IrExpr::GetStatic(property_reference_static));
-        delegated_call(
-            index,
-            ir,
-            provide,
-            initializer,
-            vec![this_ref, property_reference],
-        )?
-    } else {
-        initializer
-    };
-    let receiver = ir.add_expr(IrExpr::GetValue(0));
-    let store = ir.add_expr(IrExpr::SetField {
-        receiver,
-        class: class_id,
-        index: delegate_field,
-        value: storage_initializer,
-    });
-    ir.property_initializer_stores.insert(store);
-    initialization.entry(class_id).or_default().push((
-        property
-            .initialization_order
-            .ok_or(FirFileLoweringFailure::UnsupportedPropertyShape(
-                property.declaration,
-            ))?,
-        store,
-    ));
-
-    let this_ref = ir.add_expr(IrExpr::GetValue(0));
-    let receiver = ir.add_expr(IrExpr::GetField {
-        receiver: this_ref,
-        class: class_id,
-        index: delegate_field,
-    });
-    let this_ref = ir.add_expr(IrExpr::GetValue(0));
-    let property_reference = ir.add_expr(IrExpr::GetStatic(property_reference_static));
-    let read = delegated_call(
-        index,
-        ir,
-        &plan.get_value,
-        receiver,
-        vec![this_ref, property_reference],
-    )?;
-    let getter = add_accessor_function(
-        ir,
-        crate::names::property_getter_name(&property.name),
-        Vec::new(),
-        property.ty,
-        read,
-        true,
-        Some(owner_type),
-    );
-    let setter = plan
-        .set_value
-        .as_ref()
-        .map(|set_value| {
-            let this_ref = ir.add_expr(IrExpr::GetValue(0));
-            let receiver = ir.add_expr(IrExpr::GetField {
-                receiver: this_ref,
-                class: class_id,
-                index: delegate_field,
-            });
-            let this_ref = ir.add_expr(IrExpr::GetValue(0));
-            let property_reference = ir.add_expr(IrExpr::GetStatic(property_reference_static));
-            let value = ir.add_expr(IrExpr::GetValue(1));
-            let write = delegated_call(
-                index,
-                ir,
-                set_value,
-                receiver,
-                vec![this_ref, property_reference, value],
-            )?;
-            Ok(add_accessor_function(
-                ir,
-                crate::names::property_setter_name(&property.name),
-                vec![property.ty],
-                Ty::Unit,
-                write,
-                false,
-                Some(owner_type),
-            ))
-        })
-        .transpose()?;
-    ir.classes[class_id as usize].methods.push(getter);
-    if let Some(setter) = setter {
-        ir.classes[class_id as usize].methods.push(setter);
-    }
-    ir.fn_source_order.insert(getter, source_order);
-    if let Some(setter) = setter {
-        ir.fn_source_order.insert(setter, source_order);
-    }
-    let property_index = ir.classes[class_id as usize].properties.len() as u32;
-    ir.classes[class_id as usize].properties.push(IrProperty {
-        name: property.name.clone(),
-        context_params: Vec::new(),
-        source_order,
-        decl_line: 0,
-        ty: property.ty,
-        visibility: property.visibility,
-        annotations: Box::new([]),
-        initializer: None,
-        storage_ty: None,
-        backing_field: None,
-        is_var: property.flags.has(DeclarationFlags::MUTABLE),
-        is_open: property.flags.has(DeclarationFlags::OPEN),
-        is_private: property.visibility.is_private(),
-        setter_is_private: setter_is_private(index, property.declaration),
-        getter: Some(getter),
-        setter,
-        getter_jvm_name: None,
-        setter_jvm_name: None,
-        needs_access_bridge: false,
-    });
-    realizations.insert(
-        property_id,
-        IrLocalPropertyLayout::Member {
-            class: class_id,
-            owner: owner_type,
-            backing_field: None,
-            getter: Some(getter),
-            setter,
-            interface: false,
-            name: property.name,
-            ty: property.ty,
-            mutable: property.flags.has(DeclarationFlags::MUTABLE),
-            private: property.visibility.is_private(),
-            context_parameters: Vec::new(),
-            property: property_index,
-        },
-    );
-    stamp_generated_property_nodes(ir, first_generated, cause);
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn materialize_member_extension_delegate(
-    index: &ResolvedModuleIndex,
-    source_order: u32,
-    property_id: crate::fir::PropertyId,
-    mut property: IrCheckedProperty,
-    class_id: crate::ir::ClassId,
-    extension_receiver: Ty,
-    context_parameters: Vec<Ty>,
-    ir: &mut IrFile,
-    realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
-    initialization: &mut HashMap<crate::ir::ClassId, Vec<(u32, ExprId)>>,
-) -> Result<(), FirFileLoweringFailure> {
-    if !context_parameters.is_empty() || ir.classes[class_id as usize].is_interface {
-        return Err(FirFileLoweringFailure::UnsupportedPropertyShape(
-            property.declaration,
-        ));
-    }
-    let initializer =
-        property
-            .delegate
-            .take()
-            .ok_or(FirFileLoweringFailure::UnsupportedPropertyShape(
-                property.declaration,
-            ))?;
-    let plan =
-        property
-            .delegate_plan
-            .take()
-            .ok_or(FirFileLoweringFailure::UnsupportedPropertyShape(
-                property.declaration,
-            ))?;
-    let cause = ir.fir_origins.get(&initializer).map(|origin| match origin {
-        IrNodeOrigin::Fir(origin) => *origin,
-        IrNodeOrigin::Synthetic { cause, .. } => *cause,
-    });
-    let first_generated = ir.exprs.len();
-    let owner = ir.classes[class_id as usize].fq_name;
-    let delegate_field = u32::try_from(ir.classes[class_id as usize].fields.len())
-        .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
-    ir.classes[class_id as usize].fields.push(
-        IrField::new(
-            format!("{}$delegate", property.name),
-            plan.storage_type.get(),
-        )
-        .with_is_final(true)
-        .with_is_private(true),
-    );
-
-    // A member extension property has two semantic receivers. Its declaration reference is the
-    // unbound KProperty2-like value; the dispatch instance is supplied separately to
-    // `provideDelegate`, while accessors supply the extension receiver to getValue/setValue.
-    let property_reference = delegated_property_reference(ir, property_id, true, property.flags);
-    let property_reference_static = push_delegate_static(
-        ir,
-        format!("{}$kprop", property.name),
-        Ty::obj("kotlin/reflect/KProperty"),
-        property_reference,
-        Some(owner),
-        source_order,
-    )?;
-    let storage_initializer = if let Some(provide) = &plan.provide_delegate {
-        let dispatch = ir.add_expr(IrExpr::GetValue(0));
-        let property_reference = ir.add_expr(IrExpr::GetStatic(property_reference_static));
-        delegated_call(
-            index,
-            ir,
-            provide,
-            initializer,
-            vec![dispatch, property_reference],
-        )?
-    } else {
-        initializer
-    };
-    let dispatch = ir.add_expr(IrExpr::GetValue(0));
-    let store = ir.add_expr(IrExpr::SetField {
-        receiver: dispatch,
-        class: class_id,
-        index: delegate_field,
-        value: storage_initializer,
-    });
-    ir.property_initializer_stores.insert(store);
-    initialization.entry(class_id).or_default().push((
-        property
-            .initialization_order
-            .ok_or(FirFileLoweringFailure::UnsupportedPropertyShape(
-                property.declaration,
-            ))?,
-        store,
-    ));
-
-    let dispatch = ir.add_expr(IrExpr::GetValue(0));
-    let delegate = ir.add_expr(IrExpr::GetField {
-        receiver: dispatch,
-        class: class_id,
-        index: delegate_field,
-    });
-    let extension = ir.add_expr(IrExpr::GetValue(1));
-    let property_reference = ir.add_expr(IrExpr::GetStatic(property_reference_static));
-    let read = delegated_call(
-        index,
-        ir,
-        &plan.get_value,
-        delegate,
-        vec![extension, property_reference],
-    )?;
-    let getter = add_accessor_function(
-        ir,
-        crate::names::property_getter_name(&property.name),
-        vec![extension_receiver],
-        property.ty,
-        read,
-        true,
-        Some(owner),
-    );
-    let setter = plan
-        .set_value
-        .as_ref()
-        .map(|set_value| {
-            let dispatch = ir.add_expr(IrExpr::GetValue(0));
-            let delegate = ir.add_expr(IrExpr::GetField {
-                receiver: dispatch,
-                class: class_id,
-                index: delegate_field,
-            });
-            let extension = ir.add_expr(IrExpr::GetValue(1));
-            let property_reference = ir.add_expr(IrExpr::GetStatic(property_reference_static));
-            let value = ir.add_expr(IrExpr::GetValue(2));
-            let write = delegated_call(
-                index,
-                ir,
-                set_value,
-                delegate,
-                vec![extension, property_reference, value],
-            )?;
-            Ok(add_accessor_function(
-                ir,
-                crate::names::property_setter_name(&property.name),
-                vec![extension_receiver, property.ty],
-                Ty::Unit,
-                write,
-                false,
-                Some(owner),
-            ))
-        })
-        .transpose()?;
-
-    let type_params = declaration_type_parameters(index, property.declaration);
-    for function in std::iter::once(getter).chain(setter) {
-        ir.fn_source_order.insert(function, source_order);
-        ir.fresh_method_decls.push(function);
-        if property.visibility.is_private() {
-            ir.private_methods.insert(function);
-        }
-        if property.flags.has(DeclarationFlags::OPEN) {
-            ir.open_methods.insert(function);
-        }
-        ir.classes[class_id as usize].methods.push(function);
-        if !type_params.is_empty() {
-            let signature = &ir.functions[function as usize];
-            ir.signatures.insert(
-                function,
-                crate::ir::IrGenericSig {
-                    type_params: type_params.clone(),
-                    params: signature.params.clone(),
-                    ret: Some(signature.ret),
-                    supers: Vec::new(),
-                },
-            );
-        }
-    }
-    ir.member_ext_props
-        .entry(owner)
-        .or_default()
-        .push(crate::ir::MemberExtProp {
-            name: property.name.clone(),
-            receiver: extension_receiver,
-            ty: property.ty,
-            is_var: property.flags.has(DeclarationFlags::MUTABLE),
-            is_abstract: false,
-            getter,
-            setter,
-            visibility: property.visibility,
-            type_params,
-        });
-    realizations.insert(
-        property_id,
-        IrLocalPropertyLayout::MemberExtension {
-            owner,
-            interface: false,
-            name: property.name,
-            getter,
-            setter,
-            receiver: extension_receiver,
-            ty: property.ty,
-            context_parameters,
-        },
-    );
-    stamp_generated_property_nodes(ir, first_generated, cause);
-    Ok(())
-}
-
-fn delegated_property_reference(
-    ir: &mut IrFile,
-    property: crate::fir::PropertyId,
-    unbound: bool,
-    flags: DeclarationFlags,
-) -> ExprId {
-    ir.add_expr(IrExpr::Checked(IrCheckedOperation::PropertyReference {
-        target: FirPropertyReferenceTarget::Module(property),
-        delegated: true,
-        binding: if unbound {
-            FirCallableReferenceBinding::Unbound
-        } else {
-            FirCallableReferenceBinding::Static
-        },
-        dispatch_receiver: None,
-        extension_receiver: None,
-        mutable: flags.has(DeclarationFlags::MUTABLE),
-        substitutions: Vec::new(),
-        adaptation: None,
-    }))
-}
-
-fn push_delegate_static(
-    ir: &mut IrFile,
-    name: String,
-    ty: Ty,
-    init: ExprId,
-    owner: Option<TypeName>,
-    source_order: u32,
-) -> Result<u32, FirFileLoweringFailure> {
-    let index = u32::try_from(ir.statics.len())
-        .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
-    ir.statics.push(IrStatic {
-        name,
-        ty,
-        init,
-        is_var: false,
-        is_const: false,
-        owner,
-        visibility: crate::types::Visibility::Private,
-        custom_accessor: true,
-        line: 0,
-        source_order,
-    });
-    Ok(index)
-}
-
-fn delegated_call(
-    index: &ResolvedModuleIndex,
-    ir: &mut IrFile,
-    call: &FirDelegateCall,
-    receiver: ExprId,
-    arguments: Vec<ExprId>,
-) -> Result<ExprId, FirFileLoweringFailure> {
-    match &call.target {
-        FirCallTarget::Module(target) => {
-            let callable =
-                index
-                    .callable(*target)
-                    .ok_or(FirFileLoweringFailure::MissingCallable(
-                        DeclarationId::from_raw(target.raw()),
-                    ))?;
-            let signature = index.signature(callable.declaration).ok_or(
-                FirFileLoweringFailure::MissingCallable(callable.declaration),
-            )?;
-            let owner = index.enclosing_classifier(callable.declaration);
-            if let Some(dispatch) = &call.dispatch_receiver {
-                let dispatch = match dispatch {
-                    FirDelegateDispatchReceiver::Scoped {
-                        current: true,
-                        depth: 0,
-                        ..
-                    } => ir.add_expr(IrExpr::GetValue(0)),
-                    FirDelegateDispatchReceiver::Singleton { classifier, .. } => {
-                        ir.add_expr(IrExpr::SingletonValue {
-                            classifier: *classifier,
-                        })
-                    }
-                    FirDelegateDispatchReceiver::Scoped { .. }
-                    | FirDelegateDispatchReceiver::ContextBinding { .. } => {
-                        return Err(FirFileLoweringFailure::UnsupportedPropertyShape(
-                            callable.declaration,
-                        ));
-                    }
-                };
-                let owner = owner.ok_or(FirFileLoweringFailure::MissingCallable(
-                    callable.declaration,
-                ))?;
-                let class = ir
-                    .checked_classifier_classes
-                    .get(&owner.declaration)
-                    .copied()
-                    .ok_or(FirFileLoweringFailure::MissingClassifier(owner.declaration))?;
-                let function = ir.checked_callable_functions.get(target).copied().ok_or(
-                    FirFileLoweringFailure::MissingCallable(callable.declaration),
-                )?;
-                let method = ir.classes[class as usize]
-                    .methods
-                    .iter()
-                    .position(|candidate| *candidate == function)
-                    .ok_or(FirFileLoweringFailure::MissingCallable(
-                        callable.declaration,
-                    ))? as u32;
-                let mut arguments = arguments;
-                arguments.insert(callable.shape.context_parameter_count as usize, receiver);
-                let expression = ir.add_expr(IrExpr::MethodCall {
-                    class,
-                    index: method,
-                    receiver: dispatch,
-                    args: arguments.into_iter().map(Some).collect(),
-                });
-                return Ok(materialize_delegated_result(
-                    ir,
-                    expression,
-                    signature.result.get(),
-                    call.result.get(),
-                ));
-            }
-            if !call.extension {
-                if let Some(owner) = owner {
-                    if let (Some(class), Some(function)) = (
-                        ir.checked_classifier_classes
-                            .get(&owner.declaration)
-                            .copied(),
-                        ir.checked_callable_functions.get(target).copied(),
-                    ) {
-                        let method = ir.classes[class as usize]
-                            .methods
-                            .iter()
-                            .position(|candidate| *candidate == function)
-                            .ok_or(FirFileLoweringFailure::MissingCallable(
-                                callable.declaration,
-                            ))? as u32;
-                        let expression = ir.add_expr(IrExpr::MethodCall {
-                            class,
-                            index: method,
-                            receiver,
-                            args: arguments.into_iter().map(Some).collect(),
-                        });
-                        return Ok(materialize_delegated_result(
-                            ir,
-                            expression,
-                            signature.result.get(),
-                            call.result.get(),
-                        ));
-                    }
-                    let expression = ir.add_expr(IrExpr::Call {
-                        callee: Callee::Virtual {
-                            owner: owner.classifier,
-                            name: index
-                                .callable_name(*target)
-                                .ok_or(FirFileLoweringFailure::MissingCallable(
-                                    callable.declaration,
-                                ))?
-                                .to_owned(),
-                            descriptor: String::new(),
-                            params: Some((
-                                signature.parameters.iter().map(|ty| ty.get()).collect(),
-                                signature.result.get(),
-                            )),
-                            interface: index.declaration_header(owner.declaration).is_some_and(
-                                |header| header.flags.has(DeclarationFlags::INTERFACE),
-                            ),
-                        },
-                        dispatch_receiver: Some(receiver),
-                        args: arguments,
-                    });
-                    return Ok(materialize_delegated_result(
-                        ir,
-                        expression,
-                        signature.result.get(),
-                        call.result.get(),
-                    ));
-                }
-            }
-            let mut arguments = arguments;
-            let mut parameters = signature
-                .parameters
-                .iter()
-                .map(|ty| ty.get())
-                .collect::<Vec<_>>();
-            if call.extension {
-                let position = callable.shape.context_parameter_count as usize;
-                let extension_receiver = callable.shape.extension_receiver.ok_or(
-                    FirFileLoweringFailure::MissingCallable(callable.declaration),
-                )?;
-                if position > arguments.len() || position > parameters.len() {
-                    let expected = u32::try_from(parameters.len() + 1)
-                        .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
-                    let actual = u32::try_from(arguments.len() + 1)
-                        .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
-                    return Err(FirFileLoweringFailure::InvalidDelegatedCallShape {
-                        expected,
-                        actual,
-                    });
-                }
-                arguments.insert(position, receiver);
-                parameters.insert(position, extension_receiver.get());
-            }
-            let function = ir.checked_callable_functions.get(target).copied();
-            let callee = match function {
-                Some(function) => Callee::Local(function),
-                None => Callee::Module {
-                    target: *target,
-                    name: index
-                        .callable_name(*target)
-                        .ok_or(FirFileLoweringFailure::MissingCallable(
-                            callable.declaration,
-                        ))?
-                        .to_owned(),
-                    params: parameters,
-                    ret: signature.result.get(),
-                },
-            };
-            let expression = ir.add_expr(IrExpr::Call {
-                callee,
-                dispatch_receiver: None,
-                args: arguments,
-            });
-            Ok(materialize_delegated_result(
-                ir,
-                expression,
-                signature.result.get(),
-                call.result.get(),
-            ))
-        }
-        FirCallTarget::External {
-            declaration,
-            default_provider,
-            receiver: _,
-            declared_receiver,
-            parameters,
-            result,
-            declared_result,
-            suspend,
-            inline_plan: _,
-            extension_receiver_parameter,
-            ..
-        } => {
-            let mut arguments = arguments;
-            let dispatch_receiver = if let Some(dispatch) = &call.dispatch_receiver {
-                let dispatch = match dispatch {
-                    FirDelegateDispatchReceiver::Scoped {
-                        current: true,
-                        depth: 0,
-                        ..
-                    } => ir.add_expr(IrExpr::GetValue(0)),
-                    FirDelegateDispatchReceiver::Singleton { classifier, .. } => {
-                        ir.add_expr(IrExpr::SingletonValue {
-                            classifier: *classifier,
-                        })
-                    }
-                    FirDelegateDispatchReceiver::Scoped { .. }
-                    | FirDelegateDispatchReceiver::ContextBinding { .. } => {
-                        return Err(FirFileLoweringFailure::UnsupportedPropertyShape(
-                            DeclarationId::from_raw(0),
-                        ));
-                    }
-                };
-                let parameter = extension_receiver_parameter.ok_or(
-                    FirFileLoweringFailure::UnsupportedPropertyShape(DeclarationId::from_raw(0)),
-                )? as usize;
-                if parameter > arguments.len() {
-                    return Err(FirFileLoweringFailure::UnsupportedPropertyShape(
-                        DeclarationId::from_raw(0),
-                    ));
-                }
-                arguments.insert(parameter, receiver);
-                dispatch
-            } else {
-                if extension_receiver_parameter.is_some() {
-                    return Err(FirFileLoweringFailure::UnsupportedPropertyShape(
-                        DeclarationId::from_raw(0),
-                    ));
-                }
-                receiver
-            };
-            let expression = ir.add_expr(IrExpr::Call {
-                callee: Callee::External {
-                    target: *declaration,
-                    default_provider: *default_provider,
-                    params: parameters.iter().map(|ty| ty.get()).collect(),
-                    ret: result.get(),
-                    substitutions: Vec::new(),
-                    defaults: Vec::new(),
-                    extension_receiver_parameter: None,
-                },
-                dispatch_receiver: Some(dispatch_receiver),
-                args: arguments,
-            });
-            if let Some(declared_receiver) = declared_receiver {
-                ir.ext_call_source_receiver
-                    .insert(expression, declared_receiver.get());
-            }
-            if let Some(declared_result) = declared_result {
-                ir.call_declared_ret
-                    .insert(expression, declared_result.get());
-            }
-            if *suspend {
-                ir.suspend_calls.insert(expression, result.get());
-            }
-            Ok(expression)
-        }
-        FirCallTarget::Intrinsic { .. }
-        | FirCallTarget::Classifier { .. }
-        | FirCallTarget::Super { .. } => Err(FirFileLoweringFailure::UnsupportedPropertyShape(
-            DeclarationId::from_raw(0),
-        )),
-    }
-}
-
-/// Preserve the selected call-site result separately from the declaration's erased result slot.
-/// This is the same mechanical boundary used by ordinary checked calls: the frontend has already
-/// specialized `result`, while the declaration signature remains authoritative for the physical
-/// value produced by the call.
-fn materialize_delegated_result(
-    ir: &mut IrFile,
-    expression: ExprId,
-    declared: Ty,
-    result: Ty,
-) -> ExprId {
-    if declared == result {
-        return expression;
-    }
-    ir.call_declared_ret.insert(expression, declared);
-    ir.physical_types.insert(expression, declared.erased_recv());
-    ir.add_expr(IrExpr::TypeOp {
-        op: crate::ir::IrTypeOp::ImplicitCoercion,
-        arg: expression,
-        type_operand: result,
-    })
-}
-
-fn stamp_generated_property_nodes(
+pub(super) fn stamp_generated_property_nodes(
     ir: &mut IrFile,
     first: usize,
     cause: Option<crate::fir::OriginId>,
@@ -1538,7 +672,7 @@ fn materialize_member_property(
         .map(|header| header.flags)
         .unwrap_or_default();
     if property.delegate.is_some() || property.delegate_plan.is_some() {
-        return materialize_member_delegate(
+        return super::delegated_properties::materialize_member_delegate(
             index,
             source_order,
             property_id,
@@ -1736,6 +870,7 @@ fn materialize_member_property(
             context_parameters.clone(),
             property.ty,
             body,
+            AccessorResult::AsDeclared,
             true,
             Some(owner),
         );
@@ -1788,6 +923,7 @@ fn materialize_member_property(
                 .collect(),
             Ty::Unit,
             body,
+            AccessorResult::AsDeclared,
             false,
             Some(owner),
         );
@@ -1845,15 +981,51 @@ fn materialize_member_property(
     Ok(())
 }
 
-fn add_accessor_function(
+/// What an accessor RETURNS, at the boundary the accessor owns.
+///
+/// An accessor's return type is the property's, which is not always the type of the value it has
+/// in hand. Which of the two it is, is a fact the caller holds; reading it back off the generated
+/// node's shape guesses at it, and guessed wrong in both directions (a missing coercion does not
+/// verify, a duplicated one wraps a coercion in a coercion).
+pub(super) enum AccessorResult {
+    /// The value already has the accessor's own return type: a source-written body, which the
+    /// checker typed as the property's type, or a setter, which returns nothing.
+    AsDeclared,
+    /// A delegated read, carrying the CHECKED result of the selected operator. That is the
+    /// DECLARATION's type and not the property's — `Map<K, out V>.getValue` is checked as `V`, so
+    /// `val age: Int by map` has an `Object` in hand where `getAge()I` must return an `int`.
+    Delegated(Ty),
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn add_accessor_function(
     ir: &mut IrFile,
     name: String,
     params: Vec<Ty>,
     ret: Ty,
     value: ExprId,
+    result: AccessorResult,
     returns_value: bool,
     dispatch_receiver: Option<TypeName>,
 ) -> FunId {
+    // A delegated getter returns the PROPERTY's type while the operator it calls returns the
+    // declaration's. Cross that boundary here, where the accessor owns it, exactly when the two
+    // CHECKED types differ — so the accessor carries one adaptation node and never one wrapping
+    // another. Whether the node costs an unbox, a `checkcast` or no instruction at all is the
+    // backend's to decide from the physical types.
+    let crosses_boundary = match result {
+        AccessorResult::Delegated(checked) => returns_value && checked != ret,
+        AccessorResult::AsDeclared => false,
+    };
+    let value = if crosses_boundary {
+        ir.add_expr(IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg: value,
+            type_operand: ret,
+        })
+    } else {
+        value
+    };
     let returned = ir.add_expr(IrExpr::Return(returns_value.then_some(value)));
     let body = if returns_value {
         ir.add_expr(IrExpr::Block {
@@ -1915,7 +1087,7 @@ fn add_abstract_accessor_function(
     function
 }
 
-fn setter_is_private(index: &ResolvedModuleIndex, declaration: DeclarationId) -> bool {
+pub(super) fn setter_is_private(index: &ResolvedModuleIndex, declaration: DeclarationId) -> bool {
     (0..index.declaration_count()).any(|raw| {
         let accessor = DeclarationId::from_raw(raw as u32);
         index.declaration_anchor(accessor).is_some_and(|anchor| {

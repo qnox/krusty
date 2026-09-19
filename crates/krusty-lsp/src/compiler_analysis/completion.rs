@@ -500,6 +500,7 @@ impl FileAnalysis {
                     name,
                     ty,
                     delegate: init,
+                    ..
                 } => {
                     let inferred = ty
                         .as_ref()

@@ -1,3 +1,4 @@
+use super::delegate_calls::{FirDelegateCall, FirPropertyDelegatePlan};
 use super::local_callables::BodyLocalCallableDeclarationId;
 use std::collections::HashMap;
 
@@ -383,17 +384,6 @@ pub struct FirCall {
     pub substitutions: Box<[FirTypeSubstitution]>,
 }
 
-/// One checker-selected delegated-property convention. `extension` records receiver placement;
-/// the target itself is already a stable module/provider identity with its final semantic types.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FirDelegateCall {
-    pub target: FirCallTarget,
-    pub parameters: Box<[ResolvedTy]>,
-    pub result: ResolvedTy,
-    pub extension: bool,
-    pub dispatch_receiver: Option<FirDelegateDispatchReceiver>,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct LocalBinding {
     pub(crate) value: LocalValueId,
@@ -492,38 +482,6 @@ impl ClassBodyContext {
         self.receivers.extend(context.receivers);
         self.enclosing_property = context.enclosing_property.or(self.enclosing_property);
     }
-}
-
-/// Exact implicit dispatch receiver selected for a member-extension delegate convention. The
-/// delegate storage remains the extension receiver; this coordinate identifies the independent
-/// receiver that owns the selected convention declaration.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum FirDelegateDispatchReceiver {
-    Scoped {
-        ty: ResolvedTy,
-        current: bool,
-        depth: u32,
-    },
-    ContextBinding {
-        ty: ResolvedTy,
-        name: Box<str>,
-        shadow_depth: u32,
-    },
-    Singleton {
-        ty: ResolvedTy,
-        classifier: TypeName,
-    },
-}
-
-/// Declaration-level semantics attached only to a delegated-property body unit. The ordinary body
-/// arena still owns the delegate initializer expression; this compact plan is enough for common
-/// lowering to synthesize storage and accessor bodies without retaining syntax or resolver state.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FirPropertyDelegatePlan {
-    pub storage_type: ResolvedTy,
-    pub provide_delegate: Option<FirDelegateCall>,
-    pub get_value: FirDelegateCall,
-    pub set_value: Option<FirDelegateCall>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -7,13 +7,26 @@ impl BodyFirChecker<'_> {
     pub(super) fn local_delegate_statement(
         &mut self,
         statement: StmtId,
-        mutable: bool,
-        name: &str,
-        explicit_type: Option<&crate::ast::TypeRef>,
-        delegate: ExprId,
         origin: OriginId,
     ) -> Result<FirStatementId, BodyCheckFailure> {
         let span = self.file.stmt_spans.get(statement.0 as usize).copied();
+        // The statement's own syntax, read from the file the body belongs to rather than passed
+        // down field by field: every field below is this one declaration's.
+        let Stmt::LocalDelegate {
+            is_var: mutable,
+            name,
+            ty: explicit_type,
+            delegate,
+            ..
+        } = self.file.stmt(statement)
+        else {
+            return Err(self.failure(
+                span,
+                BodyCheckFailureKind::UnsupportedStatement(StatementForm::LocalDelegate),
+            ));
+        };
+        let (mutable, delegate) = (*mutable, *delegate);
+        let (name, explicit_type) = (name.as_str(), explicit_type.as_ref());
         let delegate_ty = self.expression_type(delegate)?;
         let property_ty = match explicit_type {
             Some(ty) => self.info.resolved_type(ty).ok_or_else(|| {
@@ -380,6 +393,11 @@ impl BodyFirChecker<'_> {
         })
     }
 
+    /// The `KProperty` value a LOCAL delegated property's conventions receive.
+    ///
+    /// Its type is the classifier resolution answered with when it selected those conventions — the
+    /// same recorded fact a member or top-level delegated property publishes on its plan, so the
+    /// local path does not spell the name a second time.
     fn local_property_reference(
         &mut self,
         cause: OriginId,
@@ -389,10 +407,13 @@ impl BodyFirChecker<'_> {
         let origin = self
             .origins
             .synthetic(cause, SyntheticOriginKind::GeneratedAccessor);
+        let reference_type = self
+            .info
+            .delegate_property_reference_type()
+            .expect("a selected delegate convention resolved its KProperty classifier");
         self.body.add_expr(FirExpr {
             origin,
-            ty: ResolvedTy::new(Ty::obj("kotlin/reflect/KProperty"))
-                .expect("KProperty is publishable FIR"),
+            ty: ResolvedTy::new(reference_type).expect("KProperty is publishable FIR"),
             kind: FirExprKind::LocalPropertyReference {
                 name: name.into(),
                 property_type,
@@ -483,10 +504,47 @@ pub(super) fn property_delegate_plan(
         .transpose()?;
     Ok(FirPropertyDelegatePlan {
         storage_type,
+        // The classifier RESOLUTION answered with when it selected these conventions, not a name
+        // this phase spells for itself.
+        property_reference_type: ResolvedTy::new(info.delegate_property_reference_type().ok_or(
+            BodyCheckFailure {
+                span,
+                kind: BodyCheckFailureKind::MissingStableCallTarget,
+            },
+        )?)
+        .map_err(|error| BodyCheckFailure {
+            span,
+            kind: BodyCheckFailureKind::UnpublishableType(error),
+        })?,
         provide_delegate,
         get_value,
         set_value,
     })
+}
+
+/// The DECLARED value parameters of a selected convention, as the declaration spells them.
+///
+/// `applied` is how many the call actually supplies, and the two must agree: a delegate operator's
+/// own value parameters are the whole contract here, because a context-prefixed operator is not a
+/// convention at all and is excluded during selection. A disagreement means the selected shape is
+/// not one this boundary can map, and it is refused rather than trimmed to fit.
+fn declared_parameters(
+    declared: &[Ty],
+    applied: usize,
+    resolved: impl Fn(Ty) -> Result<ResolvedTy, BodyCheckFailure>,
+) -> Result<Box<[ResolvedTy]>, BodyCheckFailure> {
+    if declared.len() != applied {
+        return Err(BodyCheckFailure {
+            span: None,
+            kind: BodyCheckFailureKind::UnsupportedCallShape,
+        });
+    }
+    Ok(declared
+        .iter()
+        .copied()
+        .map(resolved)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_boxed_slice())
 }
 
 fn selected_delegate_call(
@@ -510,6 +568,7 @@ fn selected_delegate_call(
             external_identity,
             external_default_provider,
             params,
+            declared_params,
             ret,
             ..
         } => {
@@ -519,6 +578,8 @@ fn selected_delegate_call(
                 .map(resolved)
                 .collect::<Result<Vec<_>, _>>()?
                 .into_boxed_slice();
+            let declared_parameters =
+                declared_parameters(declared_params, parameters.len(), resolved)?;
             if let Some(declaration) = stable_declaration {
                 crate::trace_compiler!(
                     "fir",
@@ -534,9 +595,12 @@ fn selected_delegate_call(
                 return Ok(FirDelegateCall {
                     target: callable.id.into(),
                     parameters,
+                    declared_parameters,
                     result: resolved(*ret)?,
                     extension: false,
                     dispatch_receiver: None,
+                    receiver,
+                    declared_receiver: None,
                 });
             }
             let declaration = external_identity
@@ -556,9 +620,12 @@ fn selected_delegate_call(
                     extension_receiver_parameter: None,
                 },
                 parameters,
+                declared_parameters,
                 result: resolved(*ret)?,
                 extension: false,
                 dispatch_receiver: None,
+                receiver,
+                declared_receiver: None,
             })
         }
         DelegateGetValueTarget::Extension {
@@ -574,6 +641,21 @@ fn selected_delegate_call(
                 .map(resolved)
                 .collect::<Result<Vec<_>, _>>()?
                 .into_boxed_slice();
+            // The provider's declaration fact where it recorded one; otherwise the declaration is
+            // not generic and its ordinary parameter list IS its spelling. Either way the extension
+            // receiver leads the list and is not one of the operator's value parameters.
+            let declared = callable
+                .declared_params
+                .as_deref()
+                .unwrap_or(&callable.params);
+            let declared_start = declared
+                .len()
+                .checked_sub(parameters.len())
+                .ok_or_else(|| failure(BodyCheckFailureKind::UnsupportedCallShape))?;
+            let declared = declared
+                .get(declared_start..)
+                .ok_or_else(|| failure(BodyCheckFailureKind::UnsupportedCallShape))?;
+            let declared_parameters = declared_parameters(declared, parameters.len(), resolved)?;
             if let Some(declaration) = stable_declaration {
                 let result = resolved(callable.ret)?;
                 let header = index
@@ -582,9 +664,12 @@ fn selected_delegate_call(
                 return Ok(FirDelegateCall {
                     target: header.id.into(),
                     parameters,
+                    declared_parameters,
                     result,
                     extension: true,
                     dispatch_receiver: None,
+                    receiver,
+                    declared_receiver: callable.source_receiver.map(resolved).transpose()?,
                 });
             }
             let declaration = callable
@@ -609,9 +694,12 @@ fn selected_delegate_call(
                     extension_receiver_parameter: None,
                 },
                 parameters,
+                declared_parameters,
                 result: resolved(callable.ret)?,
                 extension: true,
                 dispatch_receiver: None,
+                receiver,
+                declared_receiver: callable.source_receiver.map(resolved).transpose()?,
             })
         }
         DelegateGetValueTarget::MemberExtension {
@@ -622,6 +710,7 @@ fn selected_delegate_call(
             dispatch_receiver,
             context_count,
             params,
+            declared_params,
             ret,
             inline,
             inline_body_plan,
@@ -635,6 +724,8 @@ fn selected_delegate_call(
                 .map(resolved)
                 .collect::<Result<Vec<_>, _>>()?
                 .into_boxed_slice();
+            let declared_parameters =
+                declared_parameters(declared_params, call_parameters.len(), resolved)?;
             let target = if let Some(declaration) = stable_declaration {
                 let callable = index
                     .callable_for_declaration(*declaration)
@@ -679,9 +770,12 @@ fn selected_delegate_call(
             Ok(FirDelegateCall {
                 target,
                 parameters: call_parameters,
+                declared_parameters,
                 result: resolved(*ret)?,
                 extension: true,
                 dispatch_receiver: Some(delegate_dispatch_receiver(dispatch_receiver, &resolved)?),
+                receiver,
+                declared_receiver: Some(resolved(*extension_receiver)?),
             })
         }
     }
@@ -716,4 +810,40 @@ fn delegate_dispatch_receiver(
             kind: BodyCheckFailureKind::UnsupportedCallShape,
         })?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_extension_declaration_shorter_than_its_applied_shape_is_rejected() {
+        let mut callable = crate::libraries::LibraryCallable::library(
+            crate::types::type_name("fixture/Operators"),
+            "read",
+            vec![Ty::Int, Ty::Null, Ty::obj("fixture/PropertyToken")],
+            Ty::Int,
+            Ty::Int,
+            "(ILjava/lang/Object;Ljava/lang/Object;)I",
+        );
+        callable.source_receiver = Some(Ty::Int);
+        callable.declared_params = Some(vec![Ty::Int].into_boxed_slice());
+        let target = DelegateGetValueTarget::Extension {
+            callable: Box::new(callable),
+            stable_declaration: None,
+        };
+
+        let failure = selected_delegate_call(
+            &ResolvedModuleIndex::default(),
+            None,
+            ResolvedTy::new(Ty::Int).expect("fixture receiver is publishable"),
+            &target,
+        )
+        .expect_err("a truncated declaration shape must fail closed");
+
+        assert!(matches!(
+            failure.kind,
+            BodyCheckFailureKind::UnsupportedCallShape
+        ));
+    }
 }
