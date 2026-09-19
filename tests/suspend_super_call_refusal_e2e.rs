@@ -30,7 +30,9 @@ use super::common;
 fn located_diagnostics(sources: &[&str], cp_jars: &[std::path::PathBuf]) -> Vec<String> {
     let jdk = common::jdk_modules();
     let cp = common::cached_classpath(cp_jars, Some(jdk.as_path()));
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),
+    );
     let inputs = sources
         .iter()
         .map(|source| krusty::frontend::SourceInput::kotlin(source))

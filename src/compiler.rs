@@ -1098,6 +1098,13 @@ mod tests {
     use crate::source::SourceInput;
     use crate::types::Ty;
 
+    fn initialized_jvm_libraries(
+        classpath: std::rc::Rc<crate::jvm::classpath::Classpath>,
+    ) -> crate::jvm::jvm_libraries::JvmLibraries {
+        crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+            .expect("JVM provider initialization")
+    }
+
     fn emitted_diagnostics(diags: &DiagSink) -> Vec<(u32, &str)> {
         diags
             .diags
@@ -1423,7 +1430,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = analyze_source_set_with_features(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+            Box::new(initialized_jvm_libraries(classpath)),
             &LangFeatures::new(),
             &mut diagnostics,
         );
@@ -1992,7 +1999,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+            Box::new(initialized_jvm_libraries(classpath)),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -2050,7 +2057,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+            Box::new(initialized_jvm_libraries(classpath)),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -2091,7 +2098,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+            Box::new(initialized_jvm_libraries(classpath)),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -2156,7 +2163,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+            Box::new(initialized_jvm_libraries(classpath)),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -2196,7 +2203,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+            Box::new(initialized_jvm_libraries(classpath)),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -2294,9 +2301,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-                classpath.clone(),
-            )),
+            Box::new(initialized_jvm_libraries(classpath.clone())),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -2344,9 +2349,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-                classpath.clone(),
-            )),
+            Box::new(initialized_jvm_libraries(classpath.clone())),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -2383,9 +2386,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-                classpath.clone(),
-            )),
+            Box::new(initialized_jvm_libraries(classpath.clone())),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -2447,9 +2448,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-                classpath.clone(),
-            )),
+            Box::new(initialized_jvm_libraries(classpath.clone())),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -2487,9 +2486,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-                classpath.clone(),
-            )),
+            Box::new(initialized_jvm_libraries(classpath.clone())),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -2523,9 +2520,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-                classpath.clone(),
-            )),
+            Box::new(initialized_jvm_libraries(classpath.clone())),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -2559,9 +2554,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-                classpath.clone(),
-            )),
+            Box::new(initialized_jvm_libraries(classpath.clone())),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -2612,9 +2605,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-                classpath.clone(),
-            )),
+            Box::new(initialized_jvm_libraries(classpath.clone())),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -2679,9 +2670,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-                classpath.clone(),
-            )),
+            Box::new(initialized_jvm_libraries(classpath.clone())),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -2723,9 +2712,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-                classpath.clone(),
-            )),
+            Box::new(initialized_jvm_libraries(classpath.clone())),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -2772,9 +2759,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-                classpath.clone(),
-            )),
+            Box::new(initialized_jvm_libraries(classpath.clone())),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -2809,9 +2794,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-                classpath.clone(),
-            )),
+            Box::new(initialized_jvm_libraries(classpath.clone())),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -2858,9 +2841,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-                classpath.clone(),
-            )),
+            Box::new(initialized_jvm_libraries(classpath.clone())),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -2941,9 +2922,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-                classpath.clone(),
-            )),
+            Box::new(initialized_jvm_libraries(classpath.clone())),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -2990,9 +2969,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-                classpath.clone(),
-            )),
+            Box::new(initialized_jvm_libraries(classpath.clone())),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -3035,9 +3012,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-                classpath.clone(),
-            )),
+            Box::new(initialized_jvm_libraries(classpath.clone())),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -3105,9 +3080,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-                classpath.clone(),
-            )),
+            Box::new(initialized_jvm_libraries(classpath.clone())),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -3156,9 +3129,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-                classpath.clone(),
-            )),
+            Box::new(initialized_jvm_libraries(classpath.clone())),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -3218,9 +3189,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-                classpath.clone(),
-            )),
+            Box::new(initialized_jvm_libraries(classpath.clone())),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,
@@ -3268,9 +3237,7 @@ mod tests {
         let mut diagnostics = DiagSink::new();
         let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
             &inputs,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-                classpath.clone(),
-            )),
+            Box::new(initialized_jvm_libraries(classpath.clone())),
             &LangFeatures::new(),
             |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
             &mut diagnostics,

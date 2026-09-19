@@ -98,9 +98,10 @@ fn compile_java_parameters(
     let stems = vec![source_name.to_string()];
     let inputs = vec![SourceInput::kotlin(source).with_file_stem(source_name)];
     let classpath = common::cached_classpath(cp_jars, jdk_modules);
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(
-        classpath.clone(),
-    ));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
+            .expect("JVM provider initialization"),
+    );
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
         platform,

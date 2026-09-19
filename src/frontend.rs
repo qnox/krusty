@@ -618,7 +618,7 @@ pub fn parse_source_with_detected_features(src: &str, diags: &mut DiagSink) -> F
 /// Analyze a source set with project-wide and per-source language features.
 pub fn analyze_source_set_with_features(
     sources: &[SourceInput<'_>],
-    platform: Box<dyn SemanticPlatform>,
+    platform: impl Into<PlatformProvider>,
     project_features: &LangFeatures,
     diags: &mut DiagSink,
 ) -> SourceSetAnalysis {
@@ -626,7 +626,7 @@ pub fn analyze_source_set_with_features(
         sources,
         sources.len(),
         sources.len(),
-        platform,
+        platform.into(),
         project_features,
         |_, _| {},
         diags,
@@ -635,12 +635,43 @@ pub fn analyze_source_set_with_features(
     )
 }
 
+/// A platform provider is either fully constructed or a terminal initialization diagnostic. The
+/// failed state does not implement symbol lookup and therefore cannot leak dependency corruption as
+/// ordinary absence before the frontend reports it.
+pub struct PlatformProvider(
+    Result<Box<dyn SemanticPlatform>, crate::libraries::PlatformInitializationError>,
+);
+
+impl From<Box<dyn SemanticPlatform>> for PlatformProvider {
+    fn from(platform: Box<dyn SemanticPlatform>) -> Self {
+        Self(Ok(platform))
+    }
+}
+
+impl<T> From<Box<T>> for PlatformProvider
+where
+    T: SemanticPlatform + 'static,
+{
+    fn from(platform: Box<T>) -> Self {
+        Self(Ok(platform))
+    }
+}
+
+impl<T> From<Result<T, crate::libraries::PlatformInitializationError>> for PlatformProvider
+where
+    T: SemanticPlatform + 'static,
+{
+    fn from(platform: Result<T, crate::libraries::PlatformInitializationError>) -> Self {
+        Self(platform.map(|platform| Box::new(platform) as Box<dyn SemanticPlatform>))
+    }
+}
+
 /// Analyze a source set with checked, inferred, and declaration-only file prefixes.
 pub fn analyze_source_set_prefix_with_features(
     sources: &[SourceInput<'_>],
     checked_count: usize,
     inferred_count: usize,
-    platform: Box<dyn SemanticPlatform>,
+    platform: impl Into<PlatformProvider>,
     project_features: &LangFeatures,
     diags: &mut DiagSink,
 ) -> SourceSetAnalysis {
@@ -648,7 +679,7 @@ pub fn analyze_source_set_prefix_with_features(
         sources,
         checked_count,
         inferred_count,
-        platform,
+        platform.into(),
         project_features,
         |_, _| {},
         diags,
@@ -662,7 +693,7 @@ pub fn analyze_source_set_prefix_with_features_trimmed(
     sources: &[SourceInput<'_>],
     checked_count: usize,
     inferred_count: usize,
-    platform: Box<dyn SemanticPlatform>,
+    platform: impl Into<PlatformProvider>,
     project_features: &LangFeatures,
     diags: &mut DiagSink,
 ) -> SourceSetAnalysis {
@@ -670,7 +701,7 @@ pub fn analyze_source_set_prefix_with_features_trimmed(
         sources,
         checked_count,
         inferred_count,
-        platform,
+        platform.into(),
         project_features,
         |_, _| {},
         diags,
@@ -679,21 +710,22 @@ pub fn analyze_source_set_prefix_with_features_trimmed(
     )
 }
 
-pub fn analyze_source_set_with_features_and_prepare<F>(
+pub fn analyze_source_set_with_features_and_prepare<F, P>(
     sources: &[SourceInput<'_>],
-    platform: Box<dyn SemanticPlatform>,
+    platform: P,
     project_features: &LangFeatures,
     prepare_symbols: F,
     diags: &mut DiagSink,
 ) -> SourceSetAnalysis
 where
     F: FnOnce(&[File], &mut FrontendSymbols),
+    P: Into<PlatformProvider>,
 {
     analyze_source_set_with_features_and_prepare_prefix(
         sources,
         sources.len(),
         sources.len(),
-        platform,
+        platform.into(),
         project_features,
         prepare_symbols,
         diags,
@@ -706,7 +738,7 @@ where
 /// solving or Pass-2 body checking.
 pub fn analyze_source_set_streaming_with_features(
     sources: &[SourceInput<'_>],
-    platform: Box<dyn SemanticPlatform>,
+    platform: impl Into<PlatformProvider>,
     project_features: &LangFeatures,
     diags: &mut DiagSink,
 ) -> StreamingSourceSetAnalysis {
@@ -714,7 +746,7 @@ pub fn analyze_source_set_streaming_with_features(
         sources,
         sources.len(),
         sources.len(),
-        platform,
+        platform.into(),
         project_features,
         |_, _| {},
         diags,
@@ -728,7 +760,7 @@ fn analyze_source_set_with_features_and_prepare_prefix<F>(
     sources: &[SourceInput<'_>],
     checked_count: usize,
     inferred_count: usize,
-    platform: Box<dyn SemanticPlatform>,
+    platform: PlatformProvider,
     project_features: &LangFeatures,
     prepare_symbols: F,
     diags: &mut DiagSink,
@@ -754,7 +786,7 @@ fn analyze_source_set_impl<F>(
     sources: &[SourceInput<'_>],
     checked_count: usize,
     inferred_count: usize,
-    platform: Box<dyn SemanticPlatform>,
+    platform: PlatformProvider,
     project_features: &LangFeatures,
     prepare_symbols: F,
     diags: &mut DiagSink,
@@ -870,6 +902,45 @@ where
             },
         )
         .collect::<Vec<_>>();
+    let platform = match platform.0 {
+        Ok(platform) => platform,
+        Err(error) => {
+            diags.set_file(0);
+            diags.error(Span::new(0, 0), error.message);
+            diags.collapse_duplicates_from(diagnostics_start);
+            let types = files.iter().map(|_| None).collect();
+            return SourceSetAnalysis {
+                files: if retain_inspection_analysis {
+                    files
+                } else {
+                    Vec::new()
+                },
+                symbols: FrontendSymbols::default(),
+                types,
+                parse_errors,
+                reparse_sources,
+                streamed: None,
+            };
+        }
+    };
+    if let Err(error) = platform.validate_initialization() {
+        diags.set_file(0);
+        diags.error(Span::new(0, 0), error.message);
+        diags.collapse_duplicates_from(diagnostics_start);
+        let types = files.iter().map(|_| None).collect();
+        return SourceSetAnalysis {
+            files: if retain_inspection_analysis {
+                files
+            } else {
+                Vec::new()
+            },
+            symbols: FrontendSymbols::default(),
+            types,
+            parse_errors,
+            reparse_sources,
+            streamed: None,
+        };
+    }
     if let Err(error) =
         platform.install_source_module_headers(&platform_sources, &source_classifiers)
     {

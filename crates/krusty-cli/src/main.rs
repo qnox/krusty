@@ -169,7 +169,9 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         effective_classpath,
         opts.friend_paths.clone(),
     ));
-    let platform = Box::new(JvmLibraries::new(cp.clone()));
+    // Construction is fallible: a corrupt selected dependency remains a terminal frontend
+    // diagnostic and never becomes a queryable provider with an empty symbol index.
+    let platform = JvmLibraries::new(cp.clone());
     let source_inputs = opts
         .sources
         .iter()

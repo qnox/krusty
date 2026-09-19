@@ -63,6 +63,25 @@ pub fn materialize(
     member_name: &str,
     member_descriptor: &str,
     use_sources: bool,
+) -> Result<Option<MaterializedSource>, krusty::libraries::PlatformInitializationError> {
+    let libraries = JvmLibraries::new(classpath.clone())?;
+    Ok(materialize_with_libraries(
+        classpath,
+        &libraries,
+        internal,
+        member_name,
+        member_descriptor,
+        use_sources,
+    ))
+}
+
+pub(crate) fn materialize_with_libraries(
+    classpath: &Rc<Classpath>,
+    libraries: &JvmLibraries,
+    internal: &str,
+    member_name: &str,
+    member_descriptor: &str,
+    use_sources: bool,
 ) -> Option<MaterializedSource> {
     if use_sources {
         if let Some((text, span)) = classpath.declaring_jar(internal).and_then(|jar| {
@@ -71,8 +90,8 @@ pub fn materialize(
             return Some(MaterializedSource::Attached { text, span });
         }
     }
-    let libraries = JvmLibraries::new(classpath.clone());
-    let mut lib = (*libraries.classifier(type_name(internal))?).clone();
+    let classifier = libraries.classifier(type_name(internal))?;
+    let mut lib = (*classifier).clone();
     let mut meta = classpath
         .find(internal)
         .map(|class| class.meta.clone())

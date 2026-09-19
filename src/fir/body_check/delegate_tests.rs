@@ -23,7 +23,10 @@ fn assert_production_frontend_accepts(source: &str) {
     let mut diagnostics = crate::diag::DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &crate::features::LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,

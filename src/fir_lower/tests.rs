@@ -1857,12 +1857,14 @@ fn interface_property_accessors_share_source_order_with_functions() {
 
 #[test]
 fn consuming_lowering_retains_constructor_initialized_storage_read_by_custom_getter() {
-    let platform: Box<dyn crate::libraries::SemanticPlatform> =
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-                crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
+    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+                "// WITH_STDLIB",
             )),
-        ));
+        ))
+        .expect("JVM provider initialization"),
+    );
     let ir = lower_single_source_with_platform(
         "class A {\n\
              val value: String\n\
@@ -1982,12 +1984,14 @@ fn consuming_lowering_preserves_class_literal_without_checked_placeholder() {
 
 #[test]
 fn same_file_inline_call_specializes_reified_types_fixed_by_callable_argument() {
-    let platform: Box<dyn crate::libraries::SemanticPlatform> =
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-                crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
+    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+                "// WITH_STDLIB",
             )),
-        ));
+        ))
+        .expect("JVM provider initialization"),
+    );
     let ir = lower_single_source_with_platform(
         "fun <T, R> generic(value: T): R = value as R\n\
          inline fun <reified T, reified R> inspect(\n\
@@ -2015,12 +2019,14 @@ fn same_file_inline_call_specializes_reified_types_fixed_by_callable_argument() 
 
 #[test]
 fn same_file_inline_call_specializes_reified_type_inside_nested_inline_lambda() {
-    let platform: Box<dyn crate::libraries::SemanticPlatform> =
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-                crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
+    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+                "// WITH_STDLIB",
             )),
-        ));
+        ))
+        .expect("JVM provider initialization"),
+    );
     let ir = lower_single_source_with_platform(
         "inline fun <reified T> countOfType(values: List<Any>): Int =\n\
              values.count { it is T }\n\
@@ -2041,12 +2047,14 @@ fn same_file_inline_call_specializes_reified_type_inside_nested_inline_lambda() 
 
 #[test]
 fn same_file_inline_call_specializes_sized_array_allocation_type() {
-    let platform: Box<dyn crate::libraries::SemanticPlatform> =
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-                crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
+    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+                "// WITH_STDLIB",
             )),
-        ));
+        ))
+        .expect("JVM provider initialization"),
+    );
     let ir = lower_single_source_with_platform(
         "inline fun <reified T> pair(first: T, second: T): Array<T> =\n\
              Array<T>(2) { if (it == 0) first else second }\n\

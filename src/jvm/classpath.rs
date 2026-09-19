@@ -2085,7 +2085,7 @@ impl Classpath {
                 return None;
             }
             let klib = stdlib.parent()?.join("kotlin-stdlib-wasm-js.klib");
-            klib.is_file().then_some(klib)
+            klib.exists().then_some(klib)
         });
         // Per-cache LRU caps (entry counts). Sized ABOVE the conformance working set: entries are
         // Rc-shared records, so the practical bound is the queried vocabulary, and an undersized cap
@@ -7411,8 +7411,8 @@ mod fq_tests {
         invalid[0] = 0;
         std::fs::write(&class_file, invalid).expect("write incomplete class");
         let classpath = std::rc::Rc::new(Classpath::new(vec![directory.clone()]));
-        let libraries = crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone());
-
+        let libraries =
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone()).expect("provider");
         let namespace = SymbolNamespace::Package(type_name("recovered"));
         assert!(libraries.symbols(namespace, "Later").classifier.is_none());
         std::fs::write(&class_file, valid).expect("recover class");
@@ -8103,7 +8103,7 @@ mod fq_tests {
             return;
         };
         let cp = std::rc::Rc::new(Classpath::new(vec![jar]));
-        let libs = crate::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
+        let libs = crate::jvm::jvm_libraries::JvmLibraries::new(cp.clone()).expect("provider");
         let kotlin = SymbolNamespace::Package(type_name("kotlin"));
         let inline_only = libs.symbols(kotlin, "run");
         assert!(
@@ -8332,7 +8332,8 @@ mod fq_tests {
         let lib =
             crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(Classpath::new(vec![
                 jar,
-            ])));
+            ])))
+            .expect("provider");
         // Classifier namespace: a class fqn resolves its classifier, no callables.
         let c = lib.symbols(SymbolNamespace::Package(type_name("kotlin")), "Pair");
         assert!(c.classifier.is_some(), "kotlin/Pair is a classifier");
@@ -8359,7 +8360,6 @@ mod fq_tests {
             "map resolves as an extension callable"
         );
     }
-
     #[test]
     fn builtin_member_misses_are_cached() {
         let cp = Classpath::empty();
