@@ -93,6 +93,43 @@ impl SerializeBody<'_> {
         let encoder_slot = if delegate { 1 } else { 3 };
         let mut bail = false;
         let mut stmts: Vec<ExprId> = Vec::new();
+        // `write$Self` is a static member of the serialized class, so it reaches
+        // `$childSerializers` with a plain `getstatic` rather than through the `access$…$cp`
+        // bridge the `$serializer` needs. The local is the first free one after its three
+        // parameters. The inlined generic shape lives on the `$serializer` and has no such reach,
+        // so it keeps building its element serializers.
+        let cached = super::cached_element_serializers(ir, ctx, class_id, fields);
+        let cache_static = delegate
+            .then(|| {
+                ir.statics
+                    .iter()
+                    .position(|s| s.name == "$childSerializers" && s.owner_matches(&class_internal))
+            })
+            .flatten();
+        let cache_local = 3u32;
+        // The element serializer for property `i`: the cache slot when the class caches it, else
+        // built here. One question decides it — `cached_element_serializers` — so this can never
+        // read a slot the serialized class did not write.
+        let element_serializer = |ir: &mut IrFile, ctx: &PluginContext, i: usize, ty: &Ty| {
+            if cache_static.is_some() && cached[i] {
+                let cache = ir.add_expr(IrExpr::GetValue(cache_local));
+                let index = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
+                let slot = ir.add_expr(IrExpr::Call {
+                    callee: Callee::Intrinsic {
+                        operation: crate::ir::IrIntrinsic::ArrayGet,
+                        ret: super::lazy_cache_element_ty(),
+                    },
+                    dispatch_receiver: Some(cache),
+                    args: vec![index],
+                });
+                return Some(ir.add_expr(IrExpr::Call {
+                    callee: virtual_iface("kotlin/Lazy", "getValue", "()Ljava/lang/Object;"),
+                    dispatch_receiver: Some(slot),
+                    args: vec![],
+                }));
+            }
+            element_serializer_expr(ir, ctx, ty)
+        };
         // `write$Self` is a STATIC MEMBER of the serialized class, so it reads the
         // property's private backing FIELD directly — which is what kotlinc emits.
         // (The old inlined shape lived on the `$serializer`, which cannot, and had to
@@ -204,7 +241,7 @@ impl SerializeBody<'_> {
                 // Element(desc, i, <element serializer>, value.getX()) — `$serializer.INSTANCE`
                 // / `Foo.serializer(A_ser)` / `ListSerializer(…)`. The nullable variant shares
                 // the SAME descriptor (writes JSON null) — a method-name swap.
-                let Some(inst) = element_serializer_expr(ir, ctx, ty) else {
+                let Some(inst) = element_serializer(ir, ctx, i, ty) else {
                     bail = true;
                     break;
                 };
@@ -225,7 +262,7 @@ impl SerializeBody<'_> {
             } else if is_nullable(ty) {
                 // Any derivable nullable element — builtin, interface-polymorphic, sealed, or
                 // nested — uses the nullable serializable call so the encoder can write JSON null.
-                if let Some(inst) = element_serializer_expr(ir, ctx, ty) {
+                if let Some(inst) = element_serializer(ir, ctx, i, ty) {
                     stmts.push(ir.add_expr(IrExpr::Call {
                         callee: virtual_iface(
                             "kotlinx/serialization/encoding/CompositeEncoder",
@@ -249,7 +286,7 @@ impl SerializeBody<'_> {
                     dispatch_receiver: Some(c),
                     args: vec![d, idx, v],
                 }));
-            } else if let Some(inst) = element_serializer_expr(ir, ctx, ty) {
+            } else if let Some(inst) = element_serializer(ir, ctx, i, ty) {
                 // A non-null reference element with a builtin/derivable serializer (e.g.
                 // `Uuid`) — encodeSerializableElement(desc, i, <Elem>Serializer, value.getX()).
                 stmts.push(ir.add_expr(IrExpr::Call {
@@ -326,6 +363,16 @@ impl SerializeBody<'_> {
             });
             ir.functions[fid as usize].body = Some(body);
         } else if let Some(write_self) = delegated_write_self {
+            if let Some(index) = cache_static {
+                let read = ir.add_expr(IrExpr::GetStatic(index as u32));
+                let declaration = ir.add_expr(IrExpr::Variable {
+                    index: cache_local,
+                    ty: super::lazy_cache_ty(),
+                    init: Some(read),
+                    named: false,
+                });
+                stmts.insert(0, declaration);
+            }
             let ws_ret = ir.add_expr(IrExpr::Return(None));
             stmts.push(ws_ret);
             let ws_body = ir.add_expr(IrExpr::Block { stmts, value: None });
