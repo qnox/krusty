@@ -158,12 +158,12 @@ impl BodyLowering<'_> {
         let local_base = self.next_temporary;
         self.next_temporary = self.next_temporary.checked_add(local_count)?;
 
-        let result_slot = (result_ty != Ty::Unit).then(|| {
-            let slot = self.next_temporary;
-            self.next_temporary += 1;
-            slot
-        });
-        let label = format!("$fir_inline${}_{}", target.raw(), self.next_temporary);
+        // Every return this expansion contains, COLLECTED but not yet rewritten. Which shape the
+        // expansion takes is decided from this list, and only the loop shape costs a result local
+        // and a break per return — so nothing is reserved or allocated until the shape is known.
+        // Reserving first left a hole in the local numbering and a pair of unreachable arena nodes
+        // behind every successful tail promotion, which shifts every later local identity.
+        let mut returns: Vec<(ExprId, Option<ExprId>)> = Vec::new();
 
         for (&source, &copy) in &cloned {
             let generated_zero = match self.ir.expr(source) {
@@ -235,27 +235,13 @@ impl BodyLowering<'_> {
                 _ => None,
             };
             if let Some(value) = returned {
-                // This return has crossed its checked callable boundary and is now represented by
-                // the expression-local break below.  The sparse depth fact belongs to the old
-                // `Return` node shape; leaving it on the replacement block makes an enclosing
-                // inline-lambda template try to consume the same return a second time.
+                returns.push((copy, value));
+                // This return has crossed its checked callable boundary and will be represented by
+                // the block that replaces it, in EITHER shape. The sparse depth fact belongs to the
+                // old `Return` node; leaving it on the replacement makes an enclosing inline-lambda
+                // template try to consume the same return a second time. Removing it is a fact
+                // about the node, not a commitment to the loop shape, so it happens here.
                 self.ir.checked_return_depths.remove(&copy);
-                let exit = self.ir.add_expr(IrExpr::Break {
-                    label: Some(label.clone()),
-                });
-                self.ir.exprs[copy as usize] =
-                    if let (Some(slot), Some(value)) = (result_slot, value) {
-                        let assign = self.ir.add_expr(IrExpr::SetValue { var: slot, value });
-                        IrExpr::Block {
-                            stmts: vec![assign, exit],
-                            value: None,
-                        }
-                    } else {
-                        IrExpr::Block {
-                            stmts: vec![exit],
-                            value: None,
-                        }
-                    };
             }
         }
 
@@ -275,6 +261,50 @@ impl BodyLowering<'_> {
             .collect::<Vec<_>>();
         for invocation in inline_invocations {
             self.splice_inline_lambda_invocation(invocation)?;
+        }
+
+        // An expansion whose ONLY return is its tail needs neither a result local nor the loop that
+        // carries a non-local return out: the value is simply the body's value, which is what kotlinc
+        // emits — it leaves it on the operand stack. The loop form costs an unnamed local, and when
+        // the expansion crosses a suspension that local takes a continuation field kotlinc has no
+        // counterpart for.
+        if let [(tail, value)] = returns[..] {
+            if produce_sole_tail_return(self.ir, cloned_root, tail, value) {
+                let mut statements = operand_declarations;
+                statements.push(cloned_root);
+                let value = statements.pop();
+                return Some(self.ir.add_expr(IrExpr::Block {
+                    stmts: statements,
+                    value,
+                }));
+            }
+        }
+
+        // The loop shape, and only now: the result local is reserved here, so a promoted expansion
+        // above leaves no hole in the numbering, and each return is rewritten into the break that
+        // carries it out.
+        let result_slot = (result_ty != Ty::Unit).then(|| {
+            let slot = self.next_temporary;
+            self.next_temporary += 1;
+            slot
+        });
+        let label = format!("$fir_inline${}_{}", target.raw(), self.next_temporary);
+        for (copy, value) in returns {
+            let exit = self.ir.add_expr(IrExpr::Break {
+                label: Some(label.clone()),
+            });
+            self.ir.exprs[copy as usize] = if let (Some(slot), Some(value)) = (result_slot, value) {
+                let assign = self.ir.add_expr(IrExpr::SetValue { var: slot, value });
+                IrExpr::Block {
+                    stmts: vec![assign, exit],
+                    value: None,
+                }
+            } else {
+                IrExpr::Block {
+                    stmts: vec![exit],
+                    value: None,
+                }
+            };
         }
 
         let mut statements = operand_declarations;
@@ -1011,5 +1041,244 @@ fn specialize_checked_operation(
         IrCheckedOperation::LateinitFieldRead { .. }
         | IrCheckedOperation::BackingFieldRead { .. }
         | IrCheckedOperation::BackingFieldWrite { .. } => {}
+    }
+}
+
+/// Rewrite `root` to PRODUCE the value of its sole rewritten return, or leave it exactly as it was.
+///
+/// The shape is PROVED before anything changes, and proving it cannot change anything: the chain of
+/// statement blocks from `root` down to `tail` is collected from a shared reference. Only once that
+/// answers does the `Unit` placeholder get allocated and the blocks rewritten. Ordering it the other
+/// way left an orphan `UnitInstance` in the arena whenever the answer turned out to be no — the
+/// block shapes were restored, but the allocation was not, so a refused optimization still shifted
+/// every expression identity after it.
+fn produce_sole_tail_return(
+    ir: &mut crate::ir::IrFile,
+    root: ExprId,
+    tail: ExprId,
+    value: Option<ExprId>,
+) -> bool {
+    let Some(chain) = tail_statement_block_chain(ir, root, tail) else {
+        return false;
+    };
+    let produced = value.unwrap_or_else(|| ir.add_expr(IrExpr::UnitInstance));
+    ir.exprs[tail as usize] = IrExpr::Block {
+        stmts: Vec::new(),
+        value: Some(produced),
+    };
+    for &block in &chain {
+        let IrExpr::Block { stmts, value: None } = ir.expr(block).clone() else {
+            unreachable!("the chain was proved to be statement blocks")
+        };
+        let mut stmts = stmts;
+        let last = stmts.pop().expect("a chained block ends in a statement");
+        ir.exprs[block as usize] = IrExpr::Block {
+            stmts,
+            value: Some(last),
+        };
+    }
+    true
+}
+
+/// The statement blocks from `block` down to `tail`, outermost first — the ones that must become
+/// value-producing for `tail`'s value to reach `block`.
+///
+/// `None` unless the path is a chain of statement blocks each ending in the next, which is every
+/// case that has to keep the caller's result local and labelled exit loop: a `return` anywhere but
+/// the tail must be able to carry its value out of the middle of the body.
+fn tail_statement_block_chain(
+    ir: &crate::ir::IrFile,
+    block: ExprId,
+    tail: ExprId,
+) -> Option<Vec<ExprId>> {
+    let mut chain = Vec::new();
+    let mut current = block;
+    loop {
+        let IrExpr::Block { stmts, value: None } = ir.expr(current) else {
+            return None;
+        };
+        let &last = stmts.last()?;
+        chain.push(current);
+        if last == tail {
+            return Some(chain);
+        }
+        current = last;
+    }
+}
+
+#[cfg(test)]
+mod tail_promotion_tests {
+    use super::{produce_sole_tail_return, tail_statement_block_chain};
+    use crate::ir::{ExprId, IrConst, IrExpr, IrFile};
+
+    fn statement(ir: &mut IrFile, value: i32) -> ExprId {
+        ir.add_expr(IrExpr::Const(IrConst::Int(value)))
+    }
+
+    fn statement_block(ir: &mut IrFile, stmts: Vec<ExprId>) -> ExprId {
+        ir.add_expr(IrExpr::Block { stmts, value: None })
+    }
+
+    /// Everything the arena holds, as text: both its LENGTH and every node, so a refusal that
+    /// allocated or replaced anything at all shows up.
+    fn arena(ir: &IrFile) -> String {
+        format!("{} nodes: {:?}", ir.exprs.len(), ir.exprs)
+    }
+
+    fn assert_block(ir: &IrFile, block: ExprId, stmts: &[ExprId], value: Option<ExprId>) {
+        let IrExpr::Block {
+            stmts: actual,
+            value: produced,
+        } = ir.expr(block)
+        else {
+            panic!("expression {block} is not a block");
+        };
+        assert_eq!(actual.as_slice(), stmts, "block {block} statements");
+        assert_eq!(*produced, value, "block {block} value");
+    }
+
+    /// The direct case: the expansion's body IS the block whose last statement is the tail.
+    #[test]
+    fn a_direct_tail_statement_becomes_the_blocks_value() {
+        let mut ir = IrFile::default();
+        let first = statement(&mut ir, 1);
+        let returned = statement(&mut ir, 2);
+        let tail = statement_block(&mut ir, vec![]);
+        let block = statement_block(&mut ir, vec![first, tail]);
+
+        assert!(produce_sole_tail_return(
+            &mut ir,
+            block,
+            tail,
+            Some(returned)
+        ));
+        assert_block(&ir, block, &[first], Some(tail));
+        assert_block(&ir, tail, &[], Some(returned));
+    }
+
+    /// A statement-bodied inline function wraps its body one level deeper, so the promotion has to
+    /// descend — and every block on that path becomes value-producing, or the value is discarded by
+    /// whichever block above it still ends in a statement.
+    #[test]
+    fn a_nested_tail_statement_promotes_every_block_on_its_path() {
+        let mut ir = IrFile::default();
+        let first = statement(&mut ir, 1);
+        let returned = statement(&mut ir, 2);
+        let tail = statement_block(&mut ir, vec![]);
+        let inner = statement_block(&mut ir, vec![first, tail]);
+        let outer = statement_block(&mut ir, vec![inner]);
+
+        assert!(produce_sole_tail_return(
+            &mut ir,
+            outer,
+            tail,
+            Some(returned)
+        ));
+        assert_block(&ir, outer, &[], Some(inner));
+        assert_block(&ir, inner, &[first], Some(tail));
+        assert_block(&ir, tail, &[], Some(returned));
+    }
+
+    /// The return is not the tail, which is the case that must keep the caller's result local and
+    /// labelled exit loop — a non-local return has to be able to carry its value out of the middle
+    /// of the body. Nothing may be left half-promoted when the answer is no.
+    #[test]
+    fn a_statement_after_the_return_changes_nothing() {
+        let mut ir = IrFile::default();
+        let returned = statement(&mut ir, 1);
+        let tail = statement_block(&mut ir, vec![]);
+        let after = statement(&mut ir, 2);
+        let block = statement_block(&mut ir, vec![tail, after]);
+        let before = arena(&ir);
+
+        assert!(!produce_sole_tail_return(
+            &mut ir,
+            block,
+            tail,
+            Some(returned)
+        ));
+        assert_eq!(arena(&ir), before, "a refused promotion mutates nothing");
+    }
+
+    /// The `Unit` case, which is the one that used to allocate before it knew the answer: there is
+    /// no returned expression, so the promotion has to materialize `Unit` itself. A refusal must
+    /// leave the arena at exactly its previous LENGTH — the block shapes being restored is not
+    /// enough, because an orphan allocation shifts every later expression identity.
+    #[test]
+    fn a_refused_unit_return_allocates_nothing() {
+        let mut ir = IrFile::default();
+        let tail = statement_block(&mut ir, vec![]);
+        let after = statement(&mut ir, 1);
+        let block = statement_block(&mut ir, vec![tail, after]);
+        let before = arena(&ir);
+
+        assert!(!produce_sole_tail_return(&mut ir, block, tail, None));
+        assert_eq!(
+            arena(&ir),
+            before,
+            "a refused Unit promotion allocates no placeholder"
+        );
+    }
+
+    /// Refusal deep in the path also leaves every block above it untouched: the chain is proved
+    /// before anything is written, so a failure below happens before any of them is reached.
+    #[test]
+    fn a_refusal_below_leaves_the_blocks_above_untouched() {
+        let mut ir = IrFile::default();
+        let returned = statement(&mut ir, 1);
+        let tail = statement_block(&mut ir, vec![]);
+        let after = statement(&mut ir, 2);
+        let inner = statement_block(&mut ir, vec![tail, after]);
+        let outer = statement_block(&mut ir, vec![inner]);
+        let before = arena(&ir);
+
+        assert!(!produce_sole_tail_return(
+            &mut ir,
+            outer,
+            tail,
+            Some(returned)
+        ));
+        assert_eq!(arena(&ir), before, "a refused promotion mutates nothing");
+    }
+
+    /// A block that already produces a value is not a statement block, so there is no tail
+    /// statement to promote.
+    #[test]
+    fn a_value_producing_block_changes_nothing() {
+        let mut ir = IrFile::default();
+        let returned = statement(&mut ir, 1);
+        let tail = statement_block(&mut ir, vec![]);
+        let produced = statement(&mut ir, 2);
+        let block = ir.add_expr(IrExpr::Block {
+            stmts: vec![tail],
+            value: Some(produced),
+        });
+        let before = arena(&ir);
+
+        assert!(!produce_sole_tail_return(
+            &mut ir,
+            block,
+            tail,
+            Some(returned)
+        ));
+        assert_eq!(arena(&ir), before, "a refused promotion mutates nothing");
+    }
+
+    /// The proof itself takes a SHARED reference, so it cannot write even in principle. Asserted
+    /// here as a contract rather than left to the signature alone.
+    #[test]
+    fn the_chain_is_proved_without_touching_the_arena() {
+        let mut ir = IrFile::default();
+        let first = statement(&mut ir, 1);
+        let tail = statement_block(&mut ir, vec![]);
+        let inner = statement_block(&mut ir, vec![first, tail]);
+        let outer = statement_block(&mut ir, vec![inner]);
+        let before = arena(&ir);
+
+        assert_eq!(
+            tail_statement_block_chain(&ir, outer, tail),
+            Some(vec![outer, inner])
+        );
+        assert_eq!(arena(&ir), before, "proving the chain reads only");
     }
 }

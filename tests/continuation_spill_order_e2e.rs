@@ -94,22 +94,110 @@ fn debug_metadata_keeps_the_spill_order_after_the_references() {
     );
 }
 
+/// An inline expansion whose ONLY return is its tail needs neither a result local nor the loop that
+/// carries a non-local return out of it. kotlinc leaves that value on the operand stack; krusty
+/// always built `var result = zero; loop@ while (true) { body; break@loop }; result`, and the
+/// unnamed result local took a continuation FIELD whenever the expansion crossed a suspension.
+///
+/// That field is the user-visible cost of the loop form and the reason this change is worth making.
+/// Counting `While` nodes says the loop is gone; only this says what its absence buys.
+///
+/// Both compilers' complete arrays and field lists are stated, because they do not yet agree and
+/// the remaining difference is not this change's: krusty names only `tag` where kotlinc also names
+/// `tag$iv` and `p`, the inline expansion's own parameters. Giving those their own slots is the
+/// spill-provenance work, not this; asserting kotlinc's numbers on both sides here would be
+/// asserting that work instead.
+///
+/// What IS this change's is measured against the branch's own base: three reference fields there,
+/// two here. The one that went is the expansion's result local — a slot the source never wrote,
+/// live across the suspension for as long as the loop form allocated it before the body ran.
+#[test]
+fn a_tail_only_inline_expansion_keeps_its_value_on_the_stack() {
+    let src = "suspend fun step(v: String): String = v\n\
+               \n\
+               inline fun <T> quick(tag: String, block: (String) -> T): T = block(tag + \"!\")\n\
+               \n\
+               suspend fun run(tag: String): String {\n\
+               \x20   return quick(tag) { p -> step(p) + p }\n\
+               }\n";
+    let (reference, krusty) =
+        disassemble_verbose("TailInlineExpansion", src, "TailInlineExpansionKt$run$1");
+    assert_eq!(
+        (
+            metadata_array(&reference, "s"),
+            metadata_array(&reference, "n")
+        ),
+        (
+            vec!["L$0".to_string(), "L$1".to_string(), "L$2".to_string()],
+            vec!["tag".to_string(), "tag$iv".to_string(), "p".to_string()],
+        ),
+        "kotlinc's complete spill arrays",
+    );
+    assert_eq!(
+        (metadata_array(&krusty, "s"), metadata_array(&krusty, "n")),
+        (vec!["L$0".to_string()], vec!["tag".to_string()]),
+        "krusty's complete spill arrays: `tag$iv` and `p` are #1037's, not this change's",
+    );
+
+    // The field layout is the half the `@DebugMetadata` arrays cannot show, and the half this
+    // change moves: the third reference field was the expansion's result local.
+    let (reference, krusty) = disassemble_both(
+        "TailInlineExpansionFields",
+        src,
+        "TailInlineExpansionFieldsKt$run$1",
+    );
+    assert_eq!(
+        continuation_fields(&reference),
+        ["L$0", "L$1", "L$2"],
+        "kotlinc's complete field list",
+    );
+    assert_eq!(
+        continuation_fields(&krusty),
+        ["L$0", "L$1"],
+        "krusty's complete field list, one shorter than this branch's base",
+    );
+}
+
 /// The `s` and `n` arrays of a continuation's `@DebugMetadata`, from BOTH compilers — asserted
 /// equal, and returned so the test can also state what they are.
+/// One `@DebugMetadata` array of a disassembled continuation class.
+///
+/// An absent attribute is a failure, not an empty array: a case that expects no spills at all would
+/// otherwise pass against a class that carries no `@DebugMetadata` whatsoever, which is the one
+/// thing these differentials exist to catch.
+fn metadata_array(text: &str, key: &str) -> Vec<String> {
+    let list = text
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix(key)?.strip_prefix("=["))
+        .unwrap_or_else(|| panic!("no `{key}` array in the class's @DebugMetadata:\n{text}"));
+    let list = list.trim_end_matches(']');
+    if list.is_empty() {
+        return Vec::new();
+    }
+    list.split(',')
+        .map(|entry| entry.trim().trim_matches('"').to_string())
+        .collect()
+}
+
+/// The spill fields of a disassembled continuation class, in layout order.
+fn continuation_fields(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter_map(|line| line.split_whitespace().last())
+        .filter_map(|last| last.strip_suffix(';'))
+        .filter(|name| {
+            let mut parts = name.split('$');
+            matches!(parts.next(), Some("L" | "I" | "J"))
+                && parts.next().is_some_and(|n| n.parse::<u32>().is_ok())
+        })
+        .map(str::to_string)
+        .collect()
+}
+
 fn debug_metadata_spills(src: &str, name: &str, class: &str) -> (Vec<String>, Vec<String>) {
     let (reference, krusty) = disassemble_verbose(name, src, class);
-    let array = |text: &str, key: &str| {
-        text.lines()
-            .map(str::trim)
-            .find_map(|line| line.strip_prefix(key)?.strip_prefix("=["))
-            .map(|list| {
-                list.trim_end_matches(']')
-                    .split(',')
-                    .map(|entry| entry.trim().trim_matches('"').to_string())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
-    };
+    let array = |text: &str, key: &str| metadata_array(text, key);
     let want = (array(&reference, "s"), array(&reference, "n"));
     assert!(
         !want.0.is_empty(),
@@ -127,19 +215,7 @@ fn debug_metadata_spills(src: &str, name: &str, class: &str) -> (Vec<String>, Ve
 /// equal, and returned so the test can also state what they are.
 fn spill_fields(src: &str, name: &str, class: &str) -> Vec<String> {
     let (reference, krusty) = disassemble_both(name, src, class);
-    let fields = |text: &str| {
-        text.lines()
-            .map(str::trim)
-            .filter_map(|line| line.split_whitespace().last())
-            .filter_map(|last| last.strip_suffix(';'))
-            .filter(|name| {
-                let mut parts = name.split('$');
-                matches!(parts.next(), Some("L" | "I" | "J"))
-                    && parts.next().is_some_and(|n| n.parse::<u32>().is_ok())
-            })
-            .map(str::to_string)
-            .collect::<Vec<_>>()
-    };
+    let fields = continuation_fields;
     let want = fields(&reference);
     assert!(!want.is_empty(), "{class}: kotlinc spills something");
     assert_eq!(fields(&krusty), want, "{class} spill field layout");
