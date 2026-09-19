@@ -66,3 +66,13 @@ impl<'a> Pb<'a> {
         Some(())
     }
 }
+
+/// Read a packed repeated integer field atomically.
+pub(crate) fn packed_varints(body: &[u8]) -> Option<Vec<u64>> {
+    let mut protobuf = Pb::new(body);
+    let mut values = Vec::new();
+    while !protobuf.at_end() {
+        values.push(protobuf.varint()?);
+    }
+    Some(values)
+}

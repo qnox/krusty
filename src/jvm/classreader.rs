@@ -259,6 +259,7 @@ pub enum ReadError {
     NotAClass,
     Truncated,
     BadConstant(u8),
+    BadKotlinMetadata(crate::jvm::metadata::MetadataDecodeError),
 }
 
 /// Constant-pool entry. Public so a lazily read [`MethodCode`] can carry its defining class's pool;
@@ -665,7 +666,8 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         &this_class,
         attrs.pn.as_deref(),
         &methods,
-    );
+    )
+    .map_err(ReadError::BadKotlinMetadata)?;
     Ok(ClassInfo {
         major,
         access,

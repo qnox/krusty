@@ -5,8 +5,8 @@
 
 use super::BuiltinPackage;
 use crate::metadata::decode::{
-    decode_package_fragment, field, parse_type_node, require_wire, Cursor, DecodedPackageFragment,
-    ParsedTypeArgument, QName,
+    decode_package_fragment, field, parse_type_node, parse_type_param, parse_value_parameter,
+    require_wire, Cursor, DecodedPackageFragment, ParsedTypeArgument, ParsedVariance, QName,
 };
 
 pub(crate) use crate::metadata::decode::{parse_module_header, PackageFragmentDecodeError};
