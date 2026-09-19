@@ -65,6 +65,11 @@ mod tests {
     }
 
     #[test]
+    fn metadata_wire_decoders_are_target_neutral() {
+        assert_allowed_crate_modules_in_tree("src/metadata/decode", &[]);
+    }
+
+    #[test]
     fn backend_contract_uses_only_frontend_handoff_dependencies() {
         // The streaming handoff owns one common-IR unit plus a classifier-only semantic view.
         // `CheckedIrFile` cannot expose parser arenas, source maps, resolver entry points, or the
