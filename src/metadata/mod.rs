@@ -4,6 +4,7 @@ use protobuf::Pb;
 
 pub mod builder;
 pub mod class_builder;
+pub(crate) mod decode;
 pub mod encoding;
 pub mod module;
 pub mod protobuf;
