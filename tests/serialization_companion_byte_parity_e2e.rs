@@ -3180,3 +3180,57 @@ fn deserialize_opens_kotlincs_locals_and_switches_on_the_index() {
         "element-index dispatch"
     );
 }
+
+/// A CLASS-owned static whose Kotlin type has type arguments carries its generic `Signature`, the
+/// same rule a facade static and an instance field already follow.
+///
+/// The class-owned path wrote its field through the one writer that takes no signature argument, so
+/// erasure was the whole record: `$childSerializers` declared `[Lkotlin/Lazy;` where kotlinc also
+/// says `[Lkotlin/Lazy<Lkotlinx/serialization/KSerializer<Ljava/lang/Object;>;>;`. Asserted against
+/// the reference rather than spelled out, so the expectation cannot drift from what kotlinc writes.
+#[test]
+fn a_class_owned_static_records_its_parameterized_signature() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let source = "import kotlinx.serialization.Serializable\n\
+                  @Serializable\n\
+                  data class Twig(val id: Int)\n\
+                  @Serializable\n\
+                  data class Bough(val count: Int, val twigs: List<Twig>)\n";
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let Some(built) =
+        compare_with_kotlinc_plugin("StaticSignature", source, "Bough", &cp, "25", &extra)
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // The `Signature:` line javap prints for the named field, with its constant-pool index erased.
+    let field_signature = |text: &str, field: &str| {
+        text.lines()
+            .skip_while(|line| !line.contains(&format!(" {field};")))
+            .skip(1)
+            .take_while(|line| !line.trim().is_empty())
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("Signature:")?
+                    .split("// ")
+                    .nth(1)
+                    .map(str::to_string)
+            })
+    };
+    let want = field_signature(&built.reference, "$childSerializers").unwrap_or_else(|| {
+        panic!(
+            "the reference must record the cache's parameterized signature:\n{}",
+            built.reference
+        )
+    });
+    let got = field_signature(&built.krusty, "$childSerializers");
+    assert_eq!(
+        got.as_deref(),
+        Some(want.as_str()),
+        "krusty must record the same field signature:\n{}",
+        built.krusty
+    );
+}

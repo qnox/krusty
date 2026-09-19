@@ -6098,7 +6098,13 @@ fn emit_class(
                 "Lorg/jetbrains/annotations/NotNull;"
             }
         });
-        cw.add_field_late(acc, &s.name, &desc, cv, ann);
+        // A CLASS-owned static records its generic `Signature` under the same rule a facade static
+        // and an instance field already follow: the Kotlin type has type arguments that erasure
+        // loses. This path wrote through the one field writer that takes no signature at all, so a
+        // parameterized static declared only its erasure — `[Lkotlin/Lazy;` where kotlinc also says
+        // `[Lkotlin/Lazy<Lkotlinx/serialization/KSerializer<Ljava/lang/Object;>;>;`.
+        let signature = property_jvm_signatures(&signature_formatter, &s.ty, None).field;
+        cw.add_field_late_sig(acc, &s.name, &desc, signature.as_deref(), cv, ann);
         // A `@JvmField` field carries the property's FIELD-targeted annotations (`JvmField` itself
         // among them) as `RuntimeInvisibleAnnotations`, BEFORE the nullability entry — kotlinc's
         // attribute order. The records live on the declaring COMPANION class.
