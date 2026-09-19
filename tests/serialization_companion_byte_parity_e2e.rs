@@ -1668,7 +1668,7 @@ fn serialize_maps_its_return_to_the_class_header_line() {
 
 /// Instruction rows for one method, with only constant-pool indices erased. javap comments retain
 /// the exact selected owner/member/descriptor identity.
-fn method_instructions(disassembly: &str, marker: &str) -> Vec<String> {
+pub(super) fn method_instructions(disassembly: &str, marker: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut inside = false;
     for raw in disassembly.lines() {
@@ -2120,6 +2120,9 @@ fn an_element_typed_by_a_serializable_enum_uses_its_accessor() {
         eprintln!("skipping: reference kotlinc or javap unavailable");
         return;
     };
+    // kotlinc's contract, spelled out so a change in the reference is visible here rather than
+    // silently agreed with: the enum's serializer is ALLOCATED, so it is cached and the element is
+    // taken out of the cache; the `String` element's singleton is not.
     let want = method_instructions(&built.reference, "childSerializers()");
     assert_eq!(
         want,
@@ -2147,23 +2150,8 @@ fn an_element_typed_by_a_serializable_enum_uses_its_accessor() {
     );
     assert_eq!(
         method_instructions(&built.krusty, "childSerializers()"),
-        vec![
-            "0: iconst_2",
-            "1: anewarray # // class kotlinx/serialization/KSerializer",
-            "4: astore_1",
-            "5: aload_1",
-            "6: iconst_0",
-            "7: getstatic # // Field Action$Type.Companion:LAction$Type$Companion;",
-            "10: invokevirtual # // Method Action$Type$Companion.serializer:()Lkotlinx/serialization/KSerializer;",
-            "13: aastore",
-            "14: aload_1",
-            "15: iconst_1",
-            "16: getstatic # // Field kotlinx/serialization/internal/StringSerializer.INSTANCE:Lkotlinx/serialization/internal/StringSerializer;",
-            "19: aastore",
-            "20: aload_1",
-            "21: areturn",
-        ],
-        "krusty enum element serializer contract"
+        want,
+        "krusty reads the enum element out of the same cache"
     );
 }
 
@@ -2223,23 +2211,9 @@ fn a_contextual_element_inside_a_collection_is_derivable() {
     );
     assert_eq!(
         method_instructions(&built.krusty, "childSerializers()"),
-        vec![
-            "0: iconst_1",
-            "1: anewarray # // class kotlinx/serialization/KSerializer",
-            "4: astore_1",
-            "5: aload_1",
-            "6: iconst_0",
-            "7: new # // class kotlinx/serialization/ContextualSerializer",
-            "10: dup",
-            "11: ldc # // class Flexible$FlexibleMap",
-            "13: invokestatic # // Method kotlin/jvm/internal/Reflection.getOrCreateKotlinClass:(Ljava/lang/Class;)Lkotlin/reflect/KClass;",
-            "16: invokespecial # // Method kotlinx/serialization/ContextualSerializer.\"<init>\":(Lkotlin/reflect/KClass;)V",
-            "19: invokestatic # // Method kotlinx/serialization/builtins/BuiltinSerializersKt.ListSerializer:(Lkotlinx/serialization/KSerializer;)Lkotlinx/serialization/KSerializer;",
-            "22: aastore",
-            "23: aload_1",
-            "24: areturn",
-        ],
-        "krusty contextual collection element contract"
+        want,
+        "krusty reads the contextual collection element out of the same cache, and wraps the \
+         property's own nullability at the use site exactly where kotlinc does"
     );
 }
 
