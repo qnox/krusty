@@ -869,13 +869,15 @@ pub fn check_frontend_only(
         // Still nothing: the refusal genuinely has no source diagnostic behind it. That is a
         // conformance failure in its own right and stays one — recovery must not become a way for
         // an unexplained signature refusal to pass as a clean run.
-        census.failures.push(reported_frontend_error(diags).unwrap_or(FrontendFailure {
-            stage: FrontendStage::Signatures,
-            source: 0,
-            span: None,
-            kind: "MissingSignatureDiagnostic".to_string(),
-            detail: "signature recovery module had no reported source diagnostic".to_string(),
-        }));
+        census
+            .failures
+            .push(reported_frontend_error(diags).unwrap_or(FrontendFailure {
+                stage: FrontendStage::Signatures,
+                source: 0,
+                span: None,
+                kind: "MissingSignatureDiagnostic".to_string(),
+                detail: "signature recovery module had no reported source diagnostic".to_string(),
+            }));
         return census;
     }
     let (mut index, mut inline_bodies, mut default_arguments, mut source_map) = module.into_parts();
