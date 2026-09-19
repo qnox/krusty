@@ -1365,6 +1365,14 @@ impl ImportPath {
     }
 }
 
+/// A top-level `expect` declaration and the keyword that introduced it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExpectDeclaration {
+    pub declaration: DeclId,
+    /// The `expect` modifier's own span, recorded where the parser consumed it.
+    pub keyword: Span,
+}
+
 /// One parsed source file: its package, and arenas for every node kind.
 #[derive(Default)]
 pub struct File {
@@ -1389,10 +1397,16 @@ pub struct File {
     pub decls: Vec<DeclId>,
     /// Kotlin script statements in source order.
     pub script_body: Option<ExprId>,
-    /// Top-level declarations carrying the `expect` modifier (multiplatform headers). A matched
-    /// `actual` in the same compiled source set replaces them (see `strip_matched_expects`); an
-    /// unmatched `expect` stays and fails checking like any body-less declaration.
-    pub expect_decls: Vec<DeclId>,
+    /// Top-level declarations carrying the `expect` modifier (multiplatform headers), each paired
+    /// with the span of the KEYWORD that introduced it. A matched `actual` in the same compiled
+    /// source set replaces them (see `strip_matched_expects`); an unmatched `expect` stays and
+    /// fails checking like any body-less declaration.
+    ///
+    /// The keyword travels with the declaration because every diagnostic about an `expect` points
+    /// at it. Recovering it afterwards means searching the file's modifiers for the nearest one
+    /// that ends before the declaration — a guess that has no answer when the declaration was
+     /// synthesized, and a wrong one whenever two headers share a line.
+     pub expect_decls: Vec<ExpectDeclaration>,
     /// Top-level declarations carrying the `actual` modifier, the mirror of [`Self::expect_decls`].
     /// An `actual` is otherwise inert; this records it so an `actual` with no `expect` to actualize
     /// can be rejected, which is an error in Kotlin.

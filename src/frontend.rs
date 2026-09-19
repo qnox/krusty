@@ -269,7 +269,11 @@ pub fn strip_matched_expects(files: &mut [File]) {
     let mut actuals: std::collections::HashSet<ExpectKey> = std::collections::HashSet::new();
     for file in files.iter() {
         for &d in &file.decls {
-            if !file.expect_decls.contains(&d) {
+            if !file
+                .expect_decls
+                .iter()
+                .any(|expect| expect.declaration == d)
+            {
                 actuals.insert(expect_key(file, d));
             }
         }
@@ -289,10 +293,10 @@ pub fn strip_matched_expects(files: &mut [File]) {
         .flat_map(|(file_index, file)| {
             file.expect_decls.iter().copied().filter_map({
                 let actuals = &actuals;
-                move |declaration| {
+                move |expect| {
                     actuals
-                        .contains(&expect_key(file, declaration))
-                        .then_some((file_index as u32, declaration))
+                        .contains(&expect_key(file, expect.declaration))
+                        .then_some((file_index as u32, expect.declaration))
                 }
             })
         })
@@ -310,11 +314,14 @@ fn strip_selected_expects(
         let expects = std::mem::take(&mut file.expect_decls);
         let drop: Vec<crate::ast::DeclId> = expects
             .iter()
-            .filter(|&&declaration| matched.contains(&(file_index as u32, declaration)))
-            .copied()
+            .filter(|expect| matched.contains(&(file_index as u32, expect.declaration)))
+            .map(|expect| expect.declaration)
             .collect();
         file.decls.retain(|d| !drop.contains(d));
-        file.expect_decls = expects.into_iter().filter(|d| !drop.contains(d)).collect();
+        file.expect_decls = expects
+            .into_iter()
+            .filter(|expect| !drop.contains(&expect.declaration))
+            .collect();
     }
 }
 
@@ -384,20 +391,6 @@ fn actualize_headers_and_collect_inherited_defaults(
 /// ships, this belongs to the platform provider rather than to the frontend.
 const DIAGNOSTIC_PLATFORM: &str = "JVM";
 
-/// The span of the `expect` keyword introducing the declaration at `declaration`: the last one this
-/// file recorded that ends at or before it. Modifiers immediately precede their declaration, so the
-/// nearest preceding keyword is the declaration's own.
-pub(super) fn expect_keyword_before(
-    file: &File,
-    declaration: crate::diag::Span,
-) -> Option<crate::diag::Span> {
-    file.multiplatform_modifiers
-        .iter()
-        .filter(|(modifier, span)| modifier == "expect" && span.hi <= declaration.lo)
-        .map(|(_, span)| *span)
-        .next_back()
-}
-
 /// Reject every top-level expect subtree for which compact actualization found no platform root.
 /// This is a source-set semantic check, not a consequence of whether a particular expect spelling
 /// happens to have an executable body. Reporting it before exclusion also prevents body checking
@@ -412,7 +405,6 @@ fn report_unmatched_expect_roots(
     headers: &crate::fir::StreamedHeaderModule,
     matched: &std::collections::HashSet<crate::fir::DeclarationId>,
     symbols: &FrontendSymbols,
-    files: &[File],
     module_name: &str,
     silent: bool,
     rejected_sources: &mut [bool],
@@ -440,12 +432,20 @@ fn report_unmatched_expect_roots(
             .and_then(|name| headers.lookup_names.get(name))
             .unwrap_or("<anonymous>");
         // The reference compiler points at the `expect` KEYWORD, not at the declaration it
-        // precedes: the nearest one this file records before the stub. Falling back to the stub's
-        // own range keeps the diagnostic where it used to be rather than dropping it.
-        let range = files
-            .get(stub.source.raw() as usize)
-            .and_then(|file| expect_keyword_before(file, stub.range))
-            .unwrap_or(stub.range);
+        // precedes. The header module recorded that keyword beside the flag that makes this stub an
+        // expect at all, so there is nothing to search for and nothing to substitute: a stub
+        // flagged `EXPECT` without one is a broken header product, and saying so is the only honest
+        // answer — relocating the message to the declaration hides which position is wrong.
+        let Some(&range) = headers.expect_keywords.get(&stub.id) else {
+            diags.error(
+                stub.range,
+                format!(
+                    "internal error: expect declaration {name} reached actualization with no \
+                     recorded `expect` keyword"
+                ),
+            );
+            continue;
+        };
         diags.error(
             range,
             format!(
@@ -1138,7 +1138,6 @@ where
             &pass1_headers,
             &matched_expect_declarations,
             &symbols,
-            &files,
             module_name,
             expect_bodies_rejected,
             &mut parse_errors,

@@ -1281,6 +1281,9 @@ struct ExtractedFileStubs {
     stubs: Vec<DeclarationStub>,
     /// Stable identity parallel to every entry of the transient parser's `File::decls` array.
     source_declarations: Vec<DeclarationId>,
+    /// The `expect` keyword each header declaration of this file was introduced by, recorded while
+    /// the parser unit is live because nothing afterwards can answer it.
+    expect_keywords: Vec<(DeclarationId, TextRange)>,
 }
 
 /// Extract syntax-independent declaration/body locations from one transient file AST. The returned
@@ -1946,6 +1949,7 @@ fn extract_file_stub_inventory(
     let mut stubs = Vec::new();
     let mut source_declarations = vec![None; file.decls.len()];
     let mut declaration_blocks = Vec::new();
+    let mut expect_keywords = Vec::new();
     for (index, declaration) in file.decls.iter().enumerate() {
         if companion_declarations.contains(declaration) {
             continue;
@@ -2002,8 +2006,13 @@ fn extract_file_stub_inventory(
                 .flags
                 .with(DeclarationFlags::ANONYMOUS_OBJECT, true);
         }
-        if file.expect_decls.contains(declaration) {
+        if let Some(expect) = file
+            .expect_decls
+            .iter()
+            .find(|expect| expect.declaration == *declaration)
+        {
             stubs[first_stub].flags = stubs[first_stub].flags.with(DeclarationFlags::EXPECT, true);
+            expect_keywords.push((stubs[first_stub].id, expect.keyword));
         }
         declaration_blocks.push((*declaration, first_stub..stubs.len()));
     }
@@ -2136,6 +2145,7 @@ fn extract_file_stub_inventory(
                 declaration.expect("every parser declaration has a stable header identity")
             })
             .collect(),
+        expect_keywords,
     }
 }
 
@@ -2907,6 +2917,14 @@ pub struct StreamedHeaderModule {
     stub_positions: std::collections::HashMap<DeclarationId, usize>,
     /// How many leading entries of `stubs` the position table covers.
     indexed_stubs: usize,
+    /// The `expect` KEYWORD each header declaration was introduced by.
+    ///
+    /// Every diagnostic about an unactualized header points there, and the keyword is knowable only
+    /// while the parser unit is live. Recorded here beside the `EXPECT` flag it belongs to rather
+    /// than recovered afterwards by searching a file's modifiers for the nearest one preceding the
+    /// declaration — a search with no answer for a synthesized declaration and a wrong one whenever
+    /// two headers share a line. One entry per `expect` declaration.
+    pub expect_keywords: std::collections::HashMap<DeclarationId, TextRange>,
     /// Complete parser declaration-stream order before semantic exclusions. These are stable
     /// header identities, not source offsets or parser arena ids.
     pub(super) inventory: Vec<DeclarationId>,
@@ -3582,6 +3600,7 @@ pub struct HeaderInventoryBuilder {
     visibility_suppressions: HeaderVisibilitySuppressionArena,
     stubs: Vec<DeclarationStub>,
     inventory: Vec<DeclarationId>,
+    expect_keywords: std::collections::HashMap<DeclarationId, TextRange>,
     source_declarations: Vec<Vec<DeclarationId>>,
     local_classifier_lexical_roots: std::collections::HashMap<DeclarationId, DeclarationId>,
     inventoried: Vec<bool>,
@@ -3649,6 +3668,7 @@ impl HeaderInventoryBuilder {
         let mut stubs = extracted.stubs;
         order_file_stubs(&mut stubs, &self.declarations);
         self.source_declarations[source.raw() as usize] = extracted.source_declarations;
+        self.expect_keywords.extend(extracted.expect_keywords);
         self.visibility_suppressions.add_file(source, file, &stubs);
         let primary_stub = |declaration: DeclId| {
             let (kind, range) = match file.decl(declaration) {
@@ -3762,6 +3782,7 @@ impl HeaderInventoryBuilder {
             annotation_policies: self.annotation_policies,
             visibility_suppressions: self.visibility_suppressions,
             stubs: self.stubs,
+            expect_keywords: self.expect_keywords,
             inventory: self.inventory,
             source_declarations: self.source_declarations,
             local_classifier_lexical_roots: self.local_classifier_lexical_roots,
