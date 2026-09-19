@@ -13426,6 +13426,7 @@ impl<'a> Emitter<'a> {
         if crate::jvm::inline::references_private_member(
             &body.code,
             &body.source_cp,
+            &body.bootstrap_methods,
             &mut |o, n, d| self.bodies.member_is_private(o, n, d),
         ) {
             crate::trace_compiler!(

@@ -422,14 +422,7 @@ pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<Me
     }
     // Methods — find the matching (name, descriptor), then its `Code` attribute.
     let nmethods = r.u2().ok()?;
-    let mut found: Option<(
-        u16,
-        u16,
-        Vec<u8>,
-        Option<Vec<u8>>,
-        Vec<ExcEntry>,
-        Vec<MethodLocal>,
-    )> = None;
+    let mut found: Option<ScannedCode> = None;
     for _ in 0..nmethods {
         r.u2().ok()?; // access
         let mname = utf8(r.u2().ok()?).to_string();
@@ -512,6 +505,17 @@ pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<Me
         bootstrap_methods,
     })
 }
+
+/// One method's `Code` attribute as the single-method scan recovers it, before the class attributes
+/// that follow it are read: `(max_stack, max_locals, code, StackMapTable, handlers, debug locals)`.
+type ScannedCode = (
+    u16,
+    u16,
+    Vec<u8>,
+    Option<Vec<u8>>,
+    Vec<ExcEntry>,
+    Vec<MethodLocal>,
+);
 
 /// The defining class's `BootstrapMethods` entries, as `(method handle cp index, static argument cp
 /// indices)`. `r` must be positioned at the start of the CLASS attribute table, which is why the

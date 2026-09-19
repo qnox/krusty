@@ -200,26 +200,82 @@ pub fn relocate_const(src_cp: &[C], idx: u16, cw: &mut ClassWriter) -> Option<u1
     }
 }
 
-/// Whether a bootstrap method's handle names a factory whose entry carries no reference back into
-/// the class that declared it, so re-interning it in another class is complete.
-fn is_self_contained_bootstrap(src_cp: &[C], handle: u16) -> bool {
-    let Some(C::MethodHandle(_, member)) = src_cp.get(handle as usize) else {
-        return false;
-    };
-    matches!(
-        methodref_target(src_cp, *member),
-        Some(("java/lang/invoke/StringConcatFactory", _))
-    )
+/// Every member one `BootstrapMethods` entry reaches, as `(owner, name, descriptor)`: the handle
+/// naming the factory, and each static argument that names a member in turn.
+///
+/// This is the complete dependency graph an `invokedynamic` carries. Relocating the instruction
+/// into another class re-interns every one of these in the HOST's pool, so the property that
+/// decides whether the entry may move is structural, not a question of which factory it names: the
+/// host must be allowed to reference each member, and each entry must be a constant kind
+/// [`relocate_const`] can re-intern. A `StringConcatFactory` entry reaches only its own public
+/// factory, a recipe string and constants; a `LambdaMetafactory` one also names an implementation
+/// handle in the DEFINING class, which is usually private and synthetic — but a concat entry may
+/// equally carry a handle to an inaccessible member, which is why the answer cannot come from the
+/// factory's spelling.
+///
+/// `None` when any reachable entry is a kind relocation cannot carry (a `CONSTANT_Dynamic`, a
+/// handle onto something that is not a member, an index past the pool). Fail closed: the caller
+/// cannot vouch for what it cannot read, and declining only means a real call is emitted.
+pub fn bootstrap_members<'a>(
+    src_cp: &'a [C],
+    handle: u16,
+    arguments: &[u16],
+) -> Option<Vec<(&'a str, &'a str, &'a str)>> {
+    // JVMS 4.7.23: a bootstrap method is named by a `CONSTANT_MethodHandle` and nothing else. A
+    // slot holding anything else is a table this walk cannot read, not an entry with no members.
+    if !matches!(src_cp.get(handle as usize), Some(C::MethodHandle(..))) {
+        return None;
+    }
+    let mut members = Vec::new();
+    let mut pending: Vec<u16> = Vec::with_capacity(1 + arguments.len());
+    pending.push(handle);
+    pending.extend_from_slice(arguments);
+    while let Some(index) = pending.pop() {
+        match src_cp.get(index as usize)? {
+            // A handle is the only entry that names a member the host would have to reference.
+            C::MethodHandle(_, member) => {
+                let (class, signature) = match src_cp.get(*member as usize)? {
+                    C::Methodref(c, nt) | C::InterfaceMethodref(c, nt) | C::Fieldref(c, nt) => {
+                        (*c, *nt)
+                    }
+                    _ => return None,
+                };
+                let owner = class_name(src_cp, class)?;
+                let (name, descriptor) = name_and_type(src_cp, signature)?;
+                members.push((owner, name, descriptor));
+            }
+            // A `MethodType` and the value constants re-intern as themselves, reaching nothing. A
+            // `Class` argument names a type, whose own accessibility the verifier decides at the
+            // use site exactly as it does for a `checkcast` the body already carries.
+            C::MethodType(_)
+            | C::Class(_)
+            | C::String(_)
+            | C::Integer(_)
+            | C::Float(_)
+            | C::Long(_)
+            | C::Double(_) => {}
+            _ => return None,
+        }
+    }
+    Some(members)
 }
 
-/// Whether any instruction in `code` references (through `src_cp`) a method/field `is_private`
-/// flags as `ACC_PRIVATE`. Such a body runs legally only inside its DEFINING class: spliced into a
-/// caller, the reference is an `IllegalAccessError` (kotlinc rewrites it to a synthetic `access$…`
-/// bridge — unmodelled here), so the splicer must decline. A malformed body reports `true` — the
-/// caller cannot verify what it cannot walk, and declining is always safe (a real call instead).
+/// Whether `code` references (through `src_cp`) a method/field `is_private` flags as `ACC_PRIVATE`.
+/// Such a body runs legally only inside its DEFINING class: spliced into a caller, the reference is
+/// an `IllegalAccessError` (kotlinc rewrites it to a synthetic `access$…` bridge — unmodelled
+/// here), so the splicer must decline. A malformed body reports `true` — the caller cannot verify
+/// what it cannot walk, and declining is always safe (a real call instead).
+///
+/// Both ways a body reaches a member are walked: an instruction's constant-pool operand, and the
+/// dependency graph of a `BootstrapMethods` entry an `invokedynamic` names. The second is not
+/// visible in any instruction operand — the handle and its static arguments live in the entry — and
+/// an inaccessible one there fails at bootstrap LINKAGE the first time the relocated instruction
+/// executes, not at verification. `bootstraps` is the DEFINING class's table, indexed as
+/// `CONSTANT_InvokeDynamic` indexes it.
 pub fn references_private_member(
     code: &[u8],
     src_cp: &[C],
+    bootstraps: &[(u16, Vec<u16>)],
     is_private: &mut dyn FnMut(&str, &str, &str) -> bool,
 ) -> bool {
     let mut pc = 0;
@@ -236,6 +292,24 @@ pub fn references_private_member(
             let member = match src_cp.get(idx as usize) {
                 Some(C::Methodref(c, nt) | C::InterfaceMethodref(c, nt) | C::Fieldref(c, nt)) => {
                     class_name(src_cp, *c).zip(name_and_type(src_cp, *nt))
+                }
+                // An `invokedynamic` names a bootstrap entry rather than a member. Its whole graph
+                // is walked; an unreadable one reports `true` for the same reason a malformed
+                // instruction does.
+                Some(C::InvokeDynamic(entry, _)) => {
+                    let Some((handle, arguments)) = bootstraps.get(*entry as usize) else {
+                        return true;
+                    };
+                    let Some(members) = bootstrap_members(src_cp, *handle, arguments) else {
+                        return true;
+                    };
+                    if members
+                        .into_iter()
+                        .any(|(owner, name, descriptor)| is_private(owner, name, descriptor))
+                    {
+                        return true;
+                    }
+                    None
                 }
                 _ => None,
             };
@@ -846,13 +920,11 @@ pub fn relocate_insns(
                 return None;
             };
             let (handle, arguments) = bootstraps.get(bootstrap_index as usize)?;
-            // Only a SELF-CONTAINED bootstrap can move. `StringConcatFactory` takes a recipe string
-            // and constants, so re-interning it here is complete. `LambdaMetafactory` instead names
-            // an implementation method handle in the DEFINING class — often private and synthetic —
-            // which the host has no right to reference, so those still decline.
-            if !is_self_contained_bootstrap(src_cp, *handle) {
-                return None;
-            }
+            // The entry moves only if its COMPLETE dependency graph can move with it. Walking it
+            // here rejects an unsupported constant kind before anything is interned; whether the
+            // host may reference the members it reaches is decided by the splice-eligibility check
+            // that owns the accessibility predicate, alongside the instruction-level one.
+            bootstrap_members(src_cp, *handle, arguments)?;
             let handle = relocate_const(src_cp, *handle, cw)?;
             let arguments = arguments
                 .iter()
@@ -2880,11 +2952,12 @@ mod tests {
         assert_eq!(assemble(&t), [0x15, 0x0a, 0xb1]); // iload 10; return
     }
 
+    /// A bootstrap entry's dependency graph is every member the host would have to reference.
     #[test]
-    /// Only a bootstrap whose entry carries no reference back into its declaring class may move.
-    #[test]
-    fn only_a_self_contained_bootstrap_relocates() {
-        let concat = vec![
+    fn a_bootstrap_entry_reports_the_members_it_reaches() {
+        // 1 …7: the factory handle. 8…13: a `MethodType` argument and a second handle, onto a
+        // member of the class that declared the `invokedynamic`.
+        let pool = vec![
             C::Other,
             C::Utf8("java/lang/invoke/StringConcatFactory".to_string()),
             C::Class(1),
@@ -2893,17 +2966,96 @@ mod tests {
             C::NameAndType(3, 4),
             C::Methodref(2, 5),
             C::MethodHandle(6, 6),
+            C::MethodType(4),
+            C::Utf8("fixture/LibKt".to_string()),
+            C::Class(9),
+            C::Utf8("helper$private".to_string()),
+            C::NameAndType(11, 4),
+            C::Methodref(10, 12),
+            C::MethodHandle(6, 13),
         ];
-        assert!(is_self_contained_bootstrap(&concat, 7));
 
-        let mut lambda = concat.clone();
-        lambda[1] = C::Utf8("java/lang/invoke/LambdaMetafactory".to_string());
-        assert!(
-            !is_self_contained_bootstrap(&lambda, 7),
-            "a lambda's bootstrap names an implementation handle in its own class"
+        assert_eq!(
+            bootstrap_members(&pool, 7, &[]),
+            Some(vec![(
+                "java/lang/invoke/StringConcatFactory",
+                "makeConcatWithConstants",
+                "()V"
+            )]),
+            "the factory handle is itself a member the host must be allowed to reference"
+        );
+
+        assert_eq!(
+            bootstrap_members(&pool, 7, &[8, 14]),
+            Some(vec![
+                ("fixture/LibKt", "helper$private", "()V"),
+                ("java/lang/invoke/StringConcatFactory", "makeConcatWithConstants", "()V"),
+            ]),
+            "a handle reached through a STATIC ARGUMENT is part of the graph too — this is the \
+             shape a `LambdaMetafactory` entry has, and the factory's own spelling cannot reveal it"
+        );
+
+        // A `CONSTANT_Dynamic` (or any entry this reader does not model) parses as `C::Other`.
+        assert_eq!(
+            bootstrap_members(&pool, 7, &[0]),
+            None,
+            "an unsupported static argument fails closed rather than relocating unread"
+        );
+        assert_eq!(
+            bootstrap_members(&pool, 8, &[]),
+            None,
+            "a bootstrap whose handle slot is not a method handle fails closed"
+        );
+        assert_eq!(
+            bootstrap_members(&pool, 999, &[]),
+            None,
+            "an index past the pool fails closed"
         );
     }
 
+    /// A body whose `invokedynamic` reaches a PRIVATE member through its bootstrap entry declines,
+    /// although no instruction operand names that member. Without the bootstrap walk the splice is
+    /// accepted and the relocated instruction throws `BootstrapMethodError` when it first runs.
+    #[test]
+    fn a_bootstrap_reaching_a_private_member_declines() {
+        let mut pool = vec![
+            C::Other,
+            C::Utf8("java/lang/invoke/LambdaMetafactory".to_string()),
+            C::Class(1),
+            C::Utf8("metafactory".to_string()),
+            C::Utf8("()V".to_string()),
+            C::NameAndType(3, 4),
+            C::Methodref(2, 5),
+            C::MethodHandle(6, 6),
+            C::Utf8("fixture/LibKt".to_string()),
+            C::Class(8),
+            C::Utf8("lambda$0".to_string()),
+            C::NameAndType(10, 4),
+            C::Methodref(9, 11),
+            C::MethodHandle(6, 12),
+            C::NameAndType(3, 4),
+        ];
+        pool.push(C::InvokeDynamic(0, 14));
+        let code = [0xba, 0x00, 0x0f, 0x00, 0x00, 0xb1]; // invokedynamic #15; return
+        let bootstraps = vec![(7u16, vec![13u16])];
+
+        assert!(
+            references_private_member(&code, &pool, &bootstraps, &mut |owner, name, _| {
+                owner == "fixture/LibKt" && name == "lambda$0"
+            }),
+            "the implementation handle is reached only through the bootstrap entry"
+        );
+        assert!(
+            !references_private_member(&code, &pool, &bootstraps, &mut |_, _, _| false),
+            "an entry whose members are all accessible does not decline"
+        );
+        assert!(
+            references_private_member(&code, &pool, &[], &mut |_, _, _| false),
+            "an `invokedynamic` naming an entry the table does not have fails closed"
+        );
+    }
+
+    #[test]
     fn is_reified_inline_negative() {
         // A plain body (iconst_1; ireturn) with no marker is not reified-inline.
         let body = MethodCode {
