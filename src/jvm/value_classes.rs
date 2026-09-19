@@ -315,6 +315,10 @@ pub(crate) fn lower_value_classes(
     // emission. This is frozen before Pass 2; no sibling body or source coordinate is retained.
     module_readable_value_classes: &std::collections::HashSet<TypeName>,
     bridge_return_adaptations: &mut crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
+    // What the property-reference pass already selected for each synthesized reference class.
+    // Realizing those accessors over a carrier is the one thing left to decide about them, and it
+    // is decided from these recorded facts rather than from the reference's spelling.
+    property_reference_realizations: &mut crate::jvm::property_references::PropertyReferenceRealizations,
 ) -> bool {
     crate::trace_compiler!(
         "value_classes",
@@ -4702,7 +4706,7 @@ pub(crate) fn lower_value_classes(
         }
     }
 
-    property_references::realize(ir, &callable_under, &vc_properties)
+    property_references::realize(ir, &callable_under, property_reference_realizations)
 }
 
 /// Box an unboxed value-class result at every tail position of `id` (recursing `when`/block/return

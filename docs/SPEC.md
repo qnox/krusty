@@ -5180,8 +5180,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     accessor is static in the same way, so it names an owner there rather than a facade. Reading it
     as "this is an extension" rebuilt `getXx-IQRRRT4(I)I` for a private member whose declaration is
     `getXx-impl(I)I`, and `(this::xx).get()` on a value class failed with
-    `NoSuchMethodError: 'int Z.getXx-IQRRRT4(int)'`. `PropRef::accessor_role` now carries the
-    selection made where the three cases are distinguishable, and a private member of a value class
+    `NoSuchMethodError: 'int Z.getXx-IQRRRT4(int)'`. `PropertyReferenceRealization::accessor_role`
+    now carries the selection made where the three cases are distinguishable, and a private member
+    of a value class
     takes the member rule with kotlinc's bridge in front of it: `Z` declares
     `private static final getXx-impl(I)I` and publishes `public static final access$getXx-impl(I)I`
     beside it, and the reference calls the bridge. Publishing the accessor ITSELF was a declaration
@@ -5197,7 +5198,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   - The value class's own **underlying** property is the exception and takes no rewrite: reading it
     is the unbox, and its accessor stays an ordinary instance getter on the box (`Z.getX()I` —
     which is also the signature the reference reports, exactly as kotlinc's does, even though
-    kotlinc's body shortcuts to `unbox-impl`).
+    kotlinc's body shortcuts to `unbox-impl`). WHICH property that is, is the declaration's own
+    storage position — a value class has exactly one field, and the property that owns it is the
+    underlying one — or, for a dependency, the underlying property its `@Metadata` names. It is not
+    a spelling: `x` names the underlying property of `Z`, of `S`, and of any unrelated class that
+    happens to declare one, so comparing the reference's property name against a list of underlying
+    names answers for the wrong declaration as readily as the right one.
   - A property whose **TYPE** is a value class already carried the mangled accessor name, but a
     member or top-level property has no written descriptor, so the one synthesized from its
     semantic type (`()LZ;`) named a method the declaration does not have: it exchanges the carrier
@@ -5230,9 +5236,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type rather than the `PropRef`'s recorded one, which for a companion-block or access-bridged
   property names the owner it is called with — a descriptor this reference passes nothing for (it
   emitted an `invokestatic` on an empty stack). Tests:
-  `tests/value_class_property_reference_e2e.rs` — the member, private-member and top-level cases
-  each diff krusty's emitted accessor surface against the reference compiler's rather than against
-  a pinned expectation — and
+  Every one of these answers is a JVM realization fact, so it is recorded where the selection is
+  made — in `jvm::property_references::PropertyReferenceRealization`, keyed by the synthesized
+  reference class's own internal name — and not on the common-IR `PropRef`, which says which
+  property a reference names and what its `KProperty` surface is. The record carries the accessor
+  names the declaration wrote, the realization shape, whether the storage is a facade's own,
+  whether the property IS its value class's storage, the PHYSICAL return the selected getter
+  declares, and the exact module functions the accessors are. The last two are what a later pass
+  would otherwise rebuild from a rendering: reading a return back out of a descriptor this compiler
+  itself synthesized makes a spelling the authority over a declaration, and an `access$…` bridge
+  found by rebuilding a mangled name and looking for a method that answers to it is a bridge to
+  whatever happens to be spelled that way. The bridge is now named after the function the selection
+  recorded, and a reference with no recorded accessor refuses the file rather than naming something
+  nothing declares. Tests:
+  `tests/value_class_property_reference_e2e.rs` — the member, private-member, underlying and
+  top-level cases each compare krusty's COMPLETE emitted class list and method surface against the
+  reference compiler's, and name each reference class rather than searching the dump for one whose
+  body looks right — and
   `companion_e2e::companion_block_mutable_property_reference_is_receiverless`.
 - **A property on a BUILTIN receiver is one table, read by both phases.** `String.length`, `Char.code`
   and an array's `size` have no class file to resolve against. The body checker knew them; the

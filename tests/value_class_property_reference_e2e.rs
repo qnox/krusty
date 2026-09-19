@@ -77,25 +77,73 @@ fn a_reference_to_an_extension_on_a_value_class_resolves() {
 /// The value class's own UNDERLYING property is the exception: reading it is the unbox, and its
 /// accessor stays an ordinary instance getter on the box (`Z.getX()I`). A reference to it must not
 /// be rewritten — doing so named `Z.getX-impl(I)I`, which does not exist.
+///
+/// Which property that is, is the DECLARATION's storage position — a value class's sole field —
+/// and not a spelling: `x` here names the underlying property of `Z` and of `S`, and would equally
+/// name an ordinary member of an unrelated class. The three reference bodies are pinned in full,
+/// because a run alone cannot tell a correct realization from a lucky one.
 #[test]
 fn a_reference_to_a_value_classs_underlying_property_resolves() {
+    let source = "@JvmInline\n\
+                  value class Z(val x: Int)\n\
+                  \n\
+                  @JvmInline\n\
+                  value class S(val x: String)\n\
+                  \n\
+                  fun box(): String {\n\
+                  \x20   if ((Z::x).get(Z(42)) != 42) return \"FAIL1\"\n\
+                  \x20   if ((S::x).get(S(\"ab\")) != \"ab\") return \"FAIL2\"\n\
+                  \x20   if (Z(7)::x.get() != 7) return \"FAIL3\"\n\
+                  \x20   return \"OK\"\n\
+                  }\n";
+    assert_eq!(run(source, "ValueClassUnderlyingRef"), "OK");
+
+    let dump = krusty_dump("ValueClassUnderlyingRefDump", source);
     assert_eq!(
-        run(
-            "@JvmInline\n\
-             value class Z(val x: Int)\n\
-             \n\
-             @JvmInline\n\
-             value class S(val x: String)\n\
-             \n\
-             fun box(): String {\n\
-             \x20   if ((Z::x).get(Z(42)) != 42) return \"FAIL1\"\n\
-             \x20   if ((S::x).get(S(\"ab\")) != \"ab\") return \"FAIL2\"\n\
-             \x20   if (Z(7)::x.get() != 7) return \"FAIL3\"\n\
-             \x20   return \"OK\"\n\
-             }\n",
-            "ValueClassUnderlyingRef",
-        ),
-        "OK"
+        emitted_classes(&dump),
+        vec![
+            "S".to_string(),
+            "ValueClassUnderlyingRefDumpKt".to_string(),
+            "ValueClassUnderlyingRefDumpKt$fir$property$2".to_string(),
+            "ValueClassUnderlyingRefDumpKt$fir$property$3".to_string(),
+            "ValueClassUnderlyingRefDumpKt$fir$property$4".to_string(),
+            "Z".to_string(),
+        ],
+        "one reference class per `::x`, and nothing else",
+    );
+    assert_eq!(
+        reference_get(&dump, "ValueClassUnderlyingRefDumpKt$fir$property$2"),
+        vec![
+            "aload_1".to_string(),
+            "checkcast class Z".to_string(),
+            "invokevirtual Method Z.getX:()I".to_string(),
+            "invokestatic Method java/lang/Integer.valueOf:(I)Ljava/lang/Integer;".to_string(),
+            "areturn".to_string(),
+        ],
+        "`Z::x` reads the box's own instance getter, never a static `getX-impl`",
+    );
+    assert_eq!(
+        reference_get(&dump, "ValueClassUnderlyingRefDumpKt$fir$property$3"),
+        vec![
+            "aload_1".to_string(),
+            "checkcast class S".to_string(),
+            "invokevirtual Method S.getX:()Ljava/lang/String;".to_string(),
+            "areturn".to_string(),
+        ],
+        "the same for a REFERENCE carrier, whose box needs no valueOf",
+    );
+    assert_eq!(
+        reference_get(&dump, "ValueClassUnderlyingRefDumpKt$fir$property$4"),
+        vec![
+            "aload_0".to_string(),
+            "getfield Field kotlin/jvm/internal/PropertyReference0Impl.receiver:Ljava/lang/Object;"
+                .to_string(),
+            "checkcast class Z".to_string(),
+            "invokevirtual Method Z.getX:()I".to_string(),
+            "invokestatic Method java/lang/Integer.valueOf:(I)Ljava/lang/Integer;".to_string(),
+            "areturn".to_string(),
+        ],
+        "and a BOUND reference reads its captured receiver the same way",
     );
 }
 
@@ -169,37 +217,35 @@ fn a_reference_to_a_value_class_typed_top_level_property_resolves() {
         source,
         "ValueClassTopLevelDeclRefKt",
     );
-    let surface = |dump: &str| {
-        method_headers(dump)
-            .into_iter()
-            .filter(|header| header.contains("TopLevel") || header.contains("ReadOnly"))
-            .collect::<Vec<_>>()
-    };
     assert_eq!(
-        surface(
-            ours.get("ValueClassTopLevelDeclKt")
-                .expect("krusty emits the facade")
-        ),
-        surface(&reference),
-        "the top-level accessors are kotlinc's"
+        emitted_classes(&ours),
+        vec!["ValueClassTopLevelDeclKt".to_string(), "Z".to_string(),],
+        "the whole artifact set, so an extra or missing class shows here"
+    );
+    let ours_facade = ours
+        .get("ValueClassTopLevelDeclKt")
+        .expect("krusty emits the facade");
+    assert_eq!(
+        method_headers(ours_facade),
+        method_headers(&reference),
+        "the facade's COMPLETE method surface is kotlinc's"
     );
     assert_eq!(
-        surface(&reference),
+        method_headers(&reference),
         vec![
-            "public static final int getTopLevel()".to_string(),
-            "public static final void setTopLevel-IQRRRT4(int)".to_string(),
             "public static final int getReadOnly()".to_string(),
+            "public static final int getTopLevel()".to_string(),
+            "public static final int read-IQRRRT4(int)".to_string(),
+            "public static final void setTopLevel-IQRRRT4(int)".to_string(),
+            "public static int read-IQRRRT4$default(int, int, java.lang.Object)".to_string(),
         ],
-        "spelled out, so a reference change is visible here"
+        "spelled out in full, so a reference change is visible here"
     );
 
     // The STORAGE those accessors read, and one reader of it. The field descriptor is the decision
     // the accessor names follow, and a defaulted parameter is the reader that exposes a disagreement
     // between the two: while the declaration said `LZ;` and the field said `I`, the default-argument
     // path boxed the carrier back into an `Integer` and cast it to `Z`.
-    let ours_facade = ours
-        .get("ValueClassTopLevelDeclKt")
-        .expect("krusty emits the facade");
     assert_eq!(
         field_lines(ours_facade),
         field_lines(&reference),
@@ -312,68 +358,82 @@ fn kotlinc_dump(stem: &str, source: &str, class: &str) -> String {
         .unwrap_or_else(|| panic!("{stem}: javap failed for {class}"))
 }
 
-/// Every method header of a dumped class, normalised to `<flags> <name>(<params>)`.
+/// EVERY method header of a dumped class, normalised to `<flags> <name>(<params>)` and sorted.
+///
+/// Complete, because a filtered surface cannot say whether a method the reference must name
+/// stopped being emitted, or one it must not name appeared beside it. Sorted, because the two
+/// compilers lay a class's methods out in different orders and that order is not what any test
+/// here is about — a name, a descriptor or a count changing still shows.
 fn method_headers(dump: &str) -> Vec<String> {
-    dump.lines()
+    let mut headers: Vec<String> = dump
+        .lines()
         .map(str::trim)
-        .filter(|line| line.ends_with(");") || line.ends_with(";") && line.contains('('))
-        .filter(|line| line.contains('('))
+        // A disassembled instruction can end in `);` too — `// Method "box-impl":(I)LZ;` — and
+        // reading one as a declaration silently padded every ledger below with call sites.
+        .filter(|line| !is_disassembled_instruction(line))
+        .filter(|line| line.ends_with(");"))
         .map(|line| line.trim_end_matches(';').to_string())
-        .collect()
+        .collect();
+    headers.sort();
+    headers
 }
 
-/// The instructions of the `get` override of the one reference class whose body starts with
-/// `first` and mentions `needle`.
-fn reference_get(
-    dump: &std::collections::BTreeMap<String, String>,
-    first: &str,
-    needle: &str,
-) -> Vec<String> {
-    let mut found: Vec<Vec<String>> = Vec::new();
-    for text in dump.values() {
-        let mut body = Vec::new();
-        let mut inside = false;
-        for line in text.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("public java.lang.Object get(") {
-                inside = true;
-                body.clear();
-                continue;
-            }
-            if !inside {
-                continue;
-            }
-            let Some((offset, rest)) = trimmed.split_once(": ") else {
-                if trimmed.is_empty() {
-                    inside = false;
-                }
-                continue;
-            };
-            if !offset.chars().all(|c| c.is_ascii_digit()) || offset.is_empty() {
-                continue;
-            }
-            let row = match rest.split_once("// ") {
-                Some((code, comment)) => format!(
-                    "{} {}",
-                    code.split_whitespace().next().unwrap_or(""),
-                    comment.trim()
-                ),
-                None => rest.split_whitespace().collect::<Vec<_>>().join(" "),
-            };
-            body.push(row);
+/// A `javap -c` body line: `<offset>: <mnemonic> …`.
+fn is_disassembled_instruction(line: &str) -> bool {
+    line.split_once(": ")
+        .is_some_and(|(offset, _)| offset.parse::<u32>().is_ok())
+}
+
+/// Every class krusty emitted for one source, in name order.
+///
+/// Pinning this is what makes the per-reference assertions a complete account: a reference class
+/// that stopped being emitted, or an extra one that appeared, changes this list first.
+fn emitted_classes(dump: &std::collections::BTreeMap<String, String>) -> Vec<String> {
+    dump.keys().cloned().collect()
+}
+
+/// The instructions of the `get` override of ONE NAMED reference class.
+///
+/// The class is named, not searched for: selecting it by "the body that starts like this and
+/// mentions that" made the assertion its own filter — a body that stopped calling what it should
+/// would simply have selected a different class, or none, instead of failing on its contents.
+fn reference_get(dump: &std::collections::BTreeMap<String, String>, class: &str) -> Vec<String> {
+    let text = dump
+        .get(class)
+        .unwrap_or_else(|| panic!("{class} is one of the emitted classes"));
+    let mut body = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("public java.lang.Object get(") {
+            inside = true;
+            body.clear();
+            continue;
         }
-        if body.first().is_some_and(|row| row == first)
-            && body.iter().any(|row| row.contains(needle))
-        {
-            found.push(body);
+        if !inside {
+            continue;
         }
+        let Some((offset, rest)) = trimmed.split_once(": ") else {
+            if trimmed.is_empty() {
+                inside = false;
+            }
+            continue;
+        };
+        if !offset.chars().all(|c| c.is_ascii_digit()) || offset.is_empty() {
+            continue;
+        }
+        let row = match rest.split_once("// ") {
+            Some((code, comment)) => format!(
+                "{} {}",
+                code.split_whitespace().next().unwrap_or(""),
+                comment.trim()
+            ),
+            None => rest.split_whitespace().collect::<Vec<_>>().join(" "),
+        };
+        body.push(row);
     }
-    assert_eq!(
-        found.len(),
-        1,
-        "exactly one reference {first:?} calling {needle:?}"
-    );
-    found.into_iter().next().expect("reference body")
+    assert!(!body.is_empty(), "{class} overrides get");
+    body
 }
 
 /// A PRIVATE member of a value class, bound and unbound. The reference's accessor is selected as a
@@ -407,32 +467,56 @@ fn a_reference_to_a_private_member_of_a_value_class_resolves() {
     assert_eq!(run(source, "PrivateValueClassRef"), "OK");
 
     let dump = krusty_dump("PrivateValueClassRefDump", source);
+    // The whole artifact set. Three property references are synthesized here — `this::xx` and
+    // `Z::xx` inside the value class, `this::p` inside the ordinary one — and each is asserted
+    // below by NAME, so a reference that stopped being emitted fails here rather than quietly
+    // taking another one's assertion.
+    assert_eq!(
+        emitted_classes(&dump),
+        vec![
+            "Ord".to_string(),
+            "PrivateValueClassRefDumpKt".to_string(),
+            "PrivateValueClassRefDumpKt$fir$property$2".to_string(),
+            "PrivateValueClassRefDumpKt$fir$property$3".to_string(),
+            "PrivateValueClassRefDumpKt$fir$property$4".to_string(),
+            "Z".to_string(),
+        ],
+    );
     // The DECLARATION side, compared rather than pinned. kotlinc keeps a private member's accessor
     // private and publishes a synthetic bridge beside it; krusty used to publish the accessor
-    // itself, so the reference linked only because the declaration was wrong. Both `Z` surfaces are
-    // compared, so neither half can drift alone.
+    // itself, so the reference linked only because the declaration was wrong. `Z`'s COMPLETE
+    // method surface is compared, so neither half can drift alone and nothing can appear beside
+    // the accessor unnoticed.
     let reference_z = kotlinc_dump("PrivateValueClassRefRef", source, "Z");
-    let accessor_surface = |dump: &str| {
-        method_headers(dump)
-            .into_iter()
-            .filter(|header| header.contains("getXx"))
-            .collect::<Vec<_>>()
-    };
     assert_eq!(
-        accessor_surface(dump.get("Z").expect("krusty emits Z")),
-        accessor_surface(&reference_z),
-        "the private accessor and its bridge are kotlinc's"
+        method_headers(dump.get("Z").expect("krusty emits Z")),
+        method_headers(&reference_z),
+        "Z's whole method surface is kotlinc's"
     );
     assert_eq!(
-        accessor_surface(&reference_z),
+        method_headers(&reference_z),
         vec![
+            "private Z(int)".to_string(),
             "private static final int getXx-impl(int)".to_string(),
+            "public boolean equals(java.lang.Object)".to_string(),
+            "public final int getX()".to_string(),
+            "public final int unbox-impl()".to_string(),
+            "public int hashCode()".to_string(),
+            "public java.lang.String toString()".to_string(),
+            "public static boolean equals-impl(int, java.lang.Object)".to_string(),
+            "public static final Z box-impl(int)".to_string(),
+            "public static final boolean equals-impl0(int, int)".to_string(),
             "public static final int access$getXx-impl(int)".to_string(),
+            "public static final int bound-impl(int)".to_string(),
+            "public static final int unbound-impl(int)".to_string(),
+            "public static int constructor-impl(int)".to_string(),
+            "public static int hashCode-impl(int)".to_string(),
+            "public static java.lang.String toString-impl(int)".to_string(),
         ],
-        "spelled out, so a reference change is visible here"
+        "spelled out in full, so a reference change is visible here"
     );
     assert_eq!(
-        reference_get(&dump, "aload_0", "Method Z.\"access$getXx-impl\""),
+        reference_get(&dump, "PrivateValueClassRefDumpKt$fir$property$2"),
         vec![
             "aload_0".to_string(),
             "getfield Field kotlin/jvm/internal/PropertyReference0Impl.receiver:Ljava/lang/Object;"
@@ -446,7 +530,7 @@ fn a_reference_to_a_private_member_of_a_value_class_resolves() {
         "bound private value-class reference"
     );
     assert_eq!(
-        reference_get(&dump, "aload_1", "Method Z.\"access$getXx-impl\""),
+        reference_get(&dump, "PrivateValueClassRefDumpKt$fir$property$3"),
         vec![
             "aload_1".to_string(),
             "checkcast class Z".to_string(),
@@ -460,7 +544,7 @@ fn a_reference_to_a_private_member_of_a_value_class_resolves() {
     // An ORDINARY class's private member keeps the `access$…$p` bridge it already had: the role is
     // recorded, not inferred, so naming the access-bridge case did not disturb it.
     assert_eq!(
-        reference_get(&dump, "aload_0", "access$getP$p"),
+        reference_get(&dump, "PrivateValueClassRefDumpKt$fir$property$4"),
         vec![
             "aload_0".to_string(),
             "getfield Field kotlin/jvm/internal/PropertyReference0Impl.receiver:Ljava/lang/Object;"
@@ -502,38 +586,43 @@ fn a_nullable_value_class_property_is_realized_like_kotlincs() {
         source,
         "NullableValueClassDeclRefKt",
     );
+    assert_eq!(
+        emitted_classes(&ours),
+        vec![
+            "Crate".to_string(),
+            "Label".to_string(),
+            "NullableValueClassDeclKt".to_string(),
+        ],
+        "the whole artifact set, so an extra or missing class shows here"
+    );
     let facade = ours
         .get("NullableValueClassDeclKt")
         .expect("krusty emits the facade");
-    let surface = |dump: &str| {
-        method_headers(dump)
-            .into_iter()
-            .filter(|header| {
-                header.contains("NullableScalar")
-                    || header.contains("NonNullScalar")
-                    || header.contains("NullableReference")
-                    || header.contains("NonNullReference")
-            })
-            .collect::<Vec<_>>()
-    };
     assert_eq!(
-        surface(facade),
-        surface(&reference),
-        "the accessors are kotlinc's"
+        method_headers(facade),
+        method_headers(&reference),
+        "the facade's COMPLETE method surface is kotlinc's"
     );
     assert_eq!(
-        surface(&reference),
+        method_headers(&reference),
         vec![
             "public static final Crate getNullableScalar()".to_string(),
-            "public static final void setNullableScalar-r2IY7fI(Crate)".to_string(),
             "public static final int getNonNullScalar()".to_string(),
-            "public static final void setNonNullScalar-7VWGoa4(int)".to_string(),
-            "public static final java.lang.String getNullableReference()".to_string(),
-            "public static final void setNullableReference-JN_5DKc(java.lang.String)".to_string(),
+            "public static final int readScalar-r2IY7fI(Crate)".to_string(),
             "public static final java.lang.String getNonNullReference()".to_string(),
+            "public static final java.lang.String getNullableReference()".to_string(),
+            "public static final java.lang.String readReference-JN_5DKc(java.lang.String)"
+                .to_string(),
             "public static final void setNonNullReference-tTogt1o(java.lang.String)".to_string(),
+            "public static final void setNonNullScalar-7VWGoa4(int)".to_string(),
+            "public static final void setNullableReference-JN_5DKc(java.lang.String)".to_string(),
+            "public static final void setNullableScalar-r2IY7fI(Crate)".to_string(),
+            "public static int readScalar-r2IY7fI$default(Crate, int, java.lang.Object)"
+                .to_string(),
+            "public static java.lang.String readReference-JN_5DKc$default(java.lang.String, int, java.lang.Object)"
+                .to_string(),
         ],
-        "spelled out, so a change in the reference compiler is visible here"
+        "spelled out in full, so a change in the reference compiler is visible here"
     );
     assert_eq!(
         field_lines(facade),

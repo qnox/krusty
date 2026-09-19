@@ -89,22 +89,6 @@ pub struct PropRef {
     /// property reference (`Derived::p` reflects on `Derived` but may invoke `Base.getP`).
     pub call_owner_internal: Option<TypeName>,
     pub prop_name: String,
-    /// The accessor names the DECLARATION carries, before any `access$…` bridge is put in front of
-    /// them and before any target-specific mangling.
-    ///
-    /// Selection already resolved these — a `@get:JvmName("readY")` accessor is named `readY` here,
-    /// whatever the property is spelled. A later representation pass that rebuilds them from
-    /// [`Self::prop_name`] discards that answer and names a method the declaration does not have.
-    pub declared_getter_name: String,
-    pub declared_setter_name: Option<String>,
-    /// The referenced property's storage lives on a FILE FACADE and has no accessor of its own:
-    /// the shape whose value-class-typed storage a target may realize over the carrier.
-    ///
-    /// Recorded from the selected declaration's own facts, so a reference from another file of the
-    /// module answers the same as the declaration there. Joining the two sides by property spelling
-    /// instead could not see a sibling file's declaration at all, and could match an unrelated
-    /// same-spelled one.
-    pub facade_storage: bool,
     pub getter_name: String,
     pub getter_descriptor: Option<String>,
     pub setter_name: Option<String>,
@@ -136,28 +120,9 @@ pub struct PropRef {
     /// are STATIC methods on this facade taking the receiver as the first argument (`getExt(Recv)` /
     /// `setExt(Recv, v)`), unlike a member reference's instance `getExt()`. Also `Some` — naming the
     /// OWNER, not a facade — for a private member reached through an `access$…` bridge, whose
-    /// accessor is static in the same way. Read [`Self::accessor_role`] to tell the two apart.
+    /// accessor is static in the same way. Which of the two this is, is a JVM selection answer,
+    /// recorded with the rest of them in `jvm::property_references::PropertyReferenceRealization`.
     pub ext_facade: Option<Option<TypeName>>,
-    /// Which accessor realization the reference calls, recorded where the selection is made.
-    ///
-    /// `ext_facade` cannot answer this: it is `Some` for an extension AND for a private member
-    /// reached through an access bridge. A later representation pass that reads it as "this is an
-    /// extension" rebuilds an extension-mangled name for a member and emits a call to a method that
-    /// is declared nowhere.
-    pub accessor_role: PropertyAccessorRole,
-}
-
-/// The physical accessor a property reference calls.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PropertyAccessorRole {
-    /// An instance accessor on the owner (`Z.getXx()`), or a static one on the file facade for a
-    /// top-level property.
-    Member,
-    /// A static accessor on the declaring file's facade, taking the extension receiver first.
-    Extension,
-    /// A synthetic `access$…$p` on the owner, selected because the property (or its setter) is
-    /// private and the reference is built outside it.
-    AccessBridge,
 }
 
 impl FuncRef {

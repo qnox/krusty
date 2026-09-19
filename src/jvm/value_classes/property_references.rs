@@ -3,32 +3,66 @@
 //! A reference crosses the erased `KProperty` boundary: `get` hands back an `Object` and `set`
 //! takes one, while the accessor it calls is realized over the carrier. Both ends of that are JVM
 //! realization, decided here once the target is already selected — no declaration lookup, no
-//! overload resolution, and nothing rebuilt from the property's spelling.
+//! overload resolution, and nothing rebuilt from the property's spelling. Every fact this pass
+//! needs about the selected accessor was recorded where the selection happened, in
+//! [`PropertyReferenceRealization`]; this pass reads them and writes back the ones it changes.
 
 use super::*;
 
-/// Realize every synthesized property reference against the value classes around it.
+use crate::jvm::property_references::{
+    PropertyAccessorRole, PropertyReferenceRealization, PropertyReferenceRealizations,
+};
+
 /// Whether the property this reference names is realized over its value class's carrier.
 ///
 /// Derived from the reference's own recorded declaration facts and the same `erase` rule the
 /// declaration side applies, so the two sides agree without either publishing a list of names: a
 /// name-keyed join cannot see a sibling file's declaration, and matches an unrelated same-spelled
 /// one in this file.
-fn facade_storage_is_carrier_erased(reference: &crate::ir::PropRef, under: &Under) -> bool {
-    reference.facade_storage && erase(&reference.prop_ty, under) != reference.prop_ty
+fn facade_storage_is_carrier_erased(
+    reference: &crate::ir::PropRef,
+    realization: &PropertyReferenceRealization,
+    under: &Under,
+) -> bool {
+    realization.facade_storage && erase(&reference.prop_ty, under) != reference.prop_ty
+}
+
+/// Whether the selected getter physically hands back something OTHER than `value_class`'s carrier.
+///
+/// A specialized generic property (`Pair<UInt, _>::first`) has semantic type `UInt`, but its
+/// selected declaration still exposes `getFirst(): Object`. That object is already the boxed value
+/// and the declaration is not value-class-mangled, so no realization applies to it. The answer
+/// comes from the physical return the selection RECORDED; reading it back out of a rendered
+/// descriptor would make a rendering the authority over a declaration.
+fn getter_bypasses_the_carrier(
+    realization: &PropertyReferenceRealization,
+    value_class: TypeName,
+    under: &Under,
+) -> bool {
+    let Some(physical) = realization.physical_getter_ret else {
+        return false;
+    };
+    under
+        .get(&value_class)
+        .map(|underlying| erase(underlying, under))
+        .is_some_and(|carrier| desc(&physical) != desc(&carrier))
 }
 
 pub(super) fn realize(
     ir: &mut IrFile,
     callable_under: &Under,
-    vc_properties: &HashMap<TypeName, String>,
+    realizations: &mut PropertyReferenceRealizations,
 ) -> bool {
     // Property references cross the erased `KProperty` Object boundary. A value-class property accessor
     // itself uses the mangled name and carrier descriptor, but `get` must box that carrier and `set` must
     // unbox the incoming value-class object. Record that JVM realization on the already-selected target;
     // no declaration lookup or overload resolution happens here.
     for class in &mut ir.classes {
+        let owner = class.fq_name;
         let Some(reference) = class.prop_ref.as_mut() else {
+            continue;
+        };
+        let Some(realization) = realizations.get_mut(owner) else {
             continue;
         };
         // A reference follows the DECLARATION it calls. A COMPANION-associated property is also
@@ -37,11 +71,11 @@ pub(super) fn realize(
         // reference's own recorded facts say which shape this is, rather than this pass deciding a
         // second time or looking the declaration up by spelling.
         let top_level = reference.static_dispatch;
-        if top_level && !reference.facade_storage {
+        if top_level && !realization.facade_storage {
             continue;
         }
         let carrier_erased =
-            !top_level || facade_storage_is_carrier_erased(reference, callable_under);
+            !top_level || facade_storage_is_carrier_erased(reference, realization, callable_under);
         let Some(value_class) = reference
             .prop_ty
             .non_null()
@@ -50,24 +84,7 @@ pub(super) fn realize(
         else {
             continue;
         };
-        // A specialized generic property (`Pair<UInt, _>::first`) has semantic type `UInt`, but its
-        // selected declaration still exposes `getFirst(): Object`. That object is already the boxed
-        // value and the declaration is not value-class-mangled. Only a descriptor returning this
-        // value class's actual carrier denotes a concrete value-class property accessor.
-        if !top_level
-            && reference
-                .getter_descriptor
-                .as_ref()
-                .is_some_and(|descriptor| {
-                    let physical_ret = descriptor.rsplit_once(')').map(|(_, ret)| ret);
-                    let carrier = callable_under
-                        .get(&value_class)
-                        .map(|underlying| desc(&erase(underlying, &callable_under)));
-                    physical_ret
-                        .zip(carrier.as_deref())
-                        .is_some_and(|(ret, carrier)| ret != carrier)
-                })
-        {
+        if !top_level && getter_bypasses_the_carrier(realization, value_class, callable_under) {
             continue;
         }
         if !carrier_erased {
@@ -76,17 +93,17 @@ pub(super) fn realize(
             // only the SETTER's name does, because its value-class PARAMETER mangles whether or not
             // the field behind it holds the carrier. Tying the two together left the reference
             // naming an unmangled setter the facade does not declare.
-            let declared_setter = reference.declared_setter_name.clone();
-            if let (Some(setter), Some(declared_setter)) =
-                (reference.setter_name.as_mut(), declared_setter)
-            {
+            if let (Some(setter), Some(declared_setter)) = (
+                reference.setter_name.as_mut(),
+                realization.declared_setter_name.as_deref(),
+            ) {
                 // `is_file_class` exempts a value-class RESULT from the hash, never a value-class
                 // PARAMETER, and the declaration side names this setter with the same `false`.
                 *setter = vc_mangle(
-                    &declared_setter,
+                    declared_setter,
                     std::slice::from_ref(&reference.prop_ty),
                     &Ty::Unit,
-                    &callable_under,
+                    callable_under,
                     false,
                     false,
                 );
@@ -99,10 +116,10 @@ pub(super) fn realize(
         // not. Its SETTER still mangles — a value-class PARAMETER always does — which is why the
         // two accessors of the same property do not agree on it.
         reference.getter_name = vc_mangle(
-            &reference.declared_getter_name.clone(),
+            &realization.declared_getter_name,
             &[],
             &reference.prop_ty,
-            &callable_under,
+            callable_under,
             top_level,
             false,
         );
@@ -113,19 +130,32 @@ pub(super) fn realize(
         // underlying type is in hand.
         let carrier = callable_under
             .get(&value_class)
-            .map(|underlying| desc(&erase(underlying, &callable_under)));
-        match (reference.getter_descriptor.as_mut(), carrier.as_deref()) {
-            (Some(descriptor), _) => *descriptor = erase_descriptor(descriptor, &callable_under),
-            (None, Some(carrier)) => reference.getter_descriptor = Some(format!("(){carrier}")),
+            .map(|underlying| erase(underlying, callable_under));
+        // Whatever this arm decides the accessor physically returns is recorded beside the
+        // descriptor it writes, so the receiver pass below reads a fact rather than parsing one
+        // back out of the rendering this pass just produced.
+        match (reference.getter_descriptor.as_mut(), carrier) {
+            (Some(descriptor), _) => {
+                *descriptor = erase_descriptor(descriptor, callable_under);
+                realization.physical_getter_ret = realization
+                    .physical_getter_ret
+                    .map(|physical| erase(&physical, callable_under));
+            }
+            (None, Some(carrier)) => {
+                reference.getter_descriptor = Some(format!("(){}", desc(&carrier)));
+                realization.physical_getter_ret = Some(carrier);
+            }
             (None, None) => {}
         }
-        let declared_setter = reference.declared_setter_name.clone();
-        if let (true, Some(declared_setter)) = (reference.setter_name.is_some(), declared_setter) {
+        if let (true, Some(declared_setter)) = (
+            reference.setter_name.is_some(),
+            realization.declared_setter_name.as_deref(),
+        ) {
             reference.setter_name = Some(vc_mangle(
-                &declared_setter,
+                declared_setter,
                 std::slice::from_ref(&reference.prop_ty),
                 &Ty::Unit,
-                &callable_under,
+                callable_under,
                 top_level,
                 false,
             ));
@@ -133,13 +163,13 @@ pub(super) fn realize(
         match (
             reference.setter_descriptor.as_mut(),
             reference.setter_name.is_some(),
-            carrier.as_deref(),
+            carrier,
         ) {
             (Some(descriptor), _, _) => {
-                *descriptor = erase_descriptor(descriptor, &callable_under);
+                *descriptor = erase_descriptor(descriptor, callable_under);
             }
             (None, true, Some(carrier)) => {
-                reference.setter_descriptor = Some(format!("({carrier})V"));
+                reference.setter_descriptor = Some(format!("({})V", desc(&carrier)));
             }
             (None, _, _) => {}
         }
@@ -151,24 +181,25 @@ pub(super) fn realize(
     // reference's `get(Object)` therefore unboxes its argument before the call, exactly as
     // kotlinc's does. Without this the reference named an instance accessor that is not declared
     // anywhere, and the program failed at its first `get` with a `NoSuchMethodError`.
-    // Method identities of every value-class owner, by final (already mangled) name: the loop below
-    // borrows `ir.classes` mutably and still has to name the exact accessor a bridge belongs to.
-    let mut value_class_methods: std::collections::HashMap<(TypeName, String), u32> =
-        std::collections::HashMap::new();
-    for class in ir
-        .classes
-        .iter()
-        .filter(|c| callable_under.contains_key(&c.fq_name))
-    {
-        for &fid in &class.methods {
-            if let Some(function) = ir.functions.get(fid as usize) {
-                value_class_methods.insert((class.fq_name, function.name.clone()), fid);
-            }
-        }
-    }
-    let mut access_bridges: Vec<u32> = Vec::new();
+    //
+    // The spellings of the accessors an `access$…` bridge forwards to, read up front by the
+    // IDENTITY the selection recorded: the loop below borrows `ir.classes` mutably and still has
+    // to name the exact method each bridge belongs to.
+    let bridged_accessor_names: std::collections::HashMap<crate::ir::FunId, String> = realizations
+        .accessor_functions()
+        .filter_map(|function| {
+            ir.functions
+                .get(function as usize)
+                .map(|declaration| (function, declaration.name.clone()))
+        })
+        .collect();
+    let mut access_bridges: Vec<crate::ir::FunId> = Vec::new();
     for class in &mut ir.classes {
+        let owner = class.fq_name;
         let Some(reference) = class.prop_ref.as_mut() else {
+            continue;
+        };
+        let Some(realization) = realizations.get_mut(owner) else {
             continue;
         };
         if reference.static_dispatch {
@@ -183,16 +214,15 @@ pub(super) fn realize(
         // A value class's own UNDERLYING property is the exception: reading it IS the unbox, and
         // its accessor stays an ordinary instance getter on the box (`Z.getX()I`, which is also
         // the signature the reference reports) rather than a static realization over the carrier.
-        // Such a reference needs no rewrite at all.
-        if vc_properties
-            .get(&receiver)
-            .is_some_and(|underlying| *underlying == reference.prop_name)
-        {
+        // Such a reference needs no rewrite at all. The selection recorded that the property is
+        // the class's storage; a value class's underlying property has no spelling to recognize it
+        // by, and the sole-field position that does identify it belongs to the declaration.
+        if realization.declares_value_class_storage {
             continue;
         }
         let Some(carrier) = callable_under
             .get(&receiver)
-            .map(|underlying| erase(underlying, &callable_under))
+            .map(|underlying| erase(underlying, callable_under))
         else {
             continue;
         };
@@ -200,18 +230,18 @@ pub(super) fn realize(
         // hash; a MEMBER accessor names none and takes the structural `-impl` suffix, with the
         // carrier prepended after mangling — the same two rules the declaration side applies.
         //
-        // The role is what the reference RECORDED, never what `ext_facade` looks like: that field is
+        // The role is what the selection RECORDED, never what `ext_facade` looks like: that field is
         // `Some` for an extension AND for a private member reached through an `access$…` bridge, so
         // reading it as "this is an extension" rebuilt `getXx-<hash>(I)I` for a member whose
         // declaration is `getXx-impl(I)I`, and the program failed at its first `get` with a
         // `NoSuchMethodError`.
-        let extension = match reference.accessor_role {
-            crate::ir::PropertyAccessorRole::Extension => true,
-            crate::ir::PropertyAccessorRole::Member => false,
+        let extension = match realization.accessor_role {
+            PropertyAccessorRole::Extension => true,
+            PropertyAccessorRole::Member => false,
             // A private member's accessor is realized statically over the carrier exactly like any
             // other member of the value class; krusty publishes it directly rather than behind a
             // bridge, so the member rule is the one that names the declaration.
-            crate::ir::PropertyAccessorRole::AccessBridge => false,
+            PropertyAccessorRole::AccessBridge => false,
         };
         let boxed_receiver = Ty::obj_name(receiver);
         let declared_params: &[Ty] = if extension {
@@ -222,37 +252,36 @@ pub(super) fn realize(
         // The base name is the one the DECLARATION carries, which selection already resolved —
         // `@get:JvmName("readY")` is `readY` there whatever the property is spelled. Rebuilding it
         // from `prop_name` discards that answer and names a method the class does not declare.
-        let declared_getter = reference.declared_getter_name.clone();
+        let declared_getter = realization.declared_getter_name.clone();
         let mut getter = vc_mangle(
             &declared_getter,
             declared_params,
             &reference.prop_ty,
-            &callable_under,
+            callable_under,
             extension,
             false,
         );
         if !extension && getter == declared_getter {
             getter.push_str("-impl");
         }
-        let physical_ret = reference
-            .getter_descriptor
-            .as_deref()
-            .and_then(|descriptor| descriptor.rsplit_once(')').map(|(_, ret)| ret.to_string()))
-            .unwrap_or_else(|| desc(&erase(&reference.prop_ty, &callable_under)));
+        let physical_ret = realization
+            .physical_getter_ret
+            .map(|physical| desc(&physical))
+            .unwrap_or_else(|| desc(&erase(&reference.prop_ty, callable_under)));
         reference.getter_name = getter;
         reference.getter_descriptor = Some(format!("({}){physical_ret}", desc(&carrier)));
-        let declared_setter = reference.declared_setter_name.clone();
-        if let (Some(setter), Some(declared_setter)) =
-            (reference.setter_name.as_mut(), declared_setter)
-        {
+        if let (Some(setter), Some(declared_setter)) = (
+            reference.setter_name.as_mut(),
+            realization.declared_setter_name.as_deref(),
+        ) {
             let value = reference.prop_ty;
             let mut params = declared_params.to_vec();
             params.push(value);
             let mut mangled = vc_mangle(
-                &declared_setter,
+                declared_setter,
                 &params,
                 &Ty::Unit,
-                &callable_under,
+                callable_under,
                 extension,
                 false,
             );
@@ -263,23 +292,36 @@ pub(super) fn realize(
             reference.setter_descriptor = Some(format!(
                 "({}{})V",
                 desc(&carrier),
-                desc(&erase(&value, &callable_under))
+                desc(&erase(&value, callable_under))
             ));
         }
         // A PRIVATE member keeps its accessor private, as kotlinc does, and the reference reaches
         // it through the synthetic bridge beside it: `access$getXx-impl(I)I`, not the declaration.
-        // The name is the DECLARATION's mangled one with the prefix — the bridge exists for this
-        // exact accessor — so the reference still names a method the class really has, which is
-        // what publishing the accessor instead only appeared to achieve.
-        if reference.accessor_role == crate::ir::PropertyAccessorRole::AccessBridge {
-            for name in
-                std::iter::once(&mut reference.getter_name).chain(reference.setter_name.as_mut())
-            {
-                // The bridge exists for one exact accessor, and that accessor is the method this
-                // realization just named. Prefixing `access$` anyway when no such method is there
-                // produced a reference to something nothing declares — the very failure this pass
-                // exists to remove — so a miss refuses the file instead.
-                let Some(target) = value_class_methods.get(&(receiver, name.clone())) else {
+        // The bridge exists for one exact accessor — the function the selection recorded — and is
+        // named after it, so the reference names a method the class really has instead of a
+        // spelling something is hoped to answer to.
+        if realization.accessor_role == PropertyAccessorRole::AccessBridge {
+            // A read-only reference simply has no setter half; the selection recorded each
+            // accessor's function beside the name the reference carries for it.
+            let accessors = [
+                (
+                    Some(&mut reference.getter_name),
+                    realization.getter_function,
+                ),
+                (reference.setter_name.as_mut(), realization.setter_function),
+            ];
+            for (name, function) in accessors {
+                let Some(name) = name else {
+                    continue;
+                };
+                // A bridge that has no recorded target would leave the reference naming something
+                // nothing declares — the very failure this pass exists to remove — so a miss
+                // refuses the file instead of a plain `access$` prefix being put in front of it.
+                let Some(target) = function.and_then(|function| {
+                    bridged_accessor_names
+                        .get(&function)
+                        .map(|target| (function, target))
+                }) else {
                     crate::trace_compiler!(
                         "value_classes",
                         "no access bridge target for {}.{name}",
@@ -287,8 +329,8 @@ pub(super) fn realize(
                     );
                     return false;
                 };
-                access_bridges.push(*target);
-                name.insert_str(0, "access$");
+                access_bridges.push(target.0);
+                *name = format!("access${}", target.1);
             }
         }
         // A member's accessor is static on the value class itself; an extension's already routes
@@ -307,17 +349,30 @@ mod tests {
 
     /// A reference whose target is a member of `Vault`, a value class over `Int`, named by an
     /// accessor the declaration does NOT spell `get<Property>`.
-    fn reference_to(declared_getter: &str) -> (IrFile, Under) {
+    ///
+    /// The accessor is a real function of the file, so the realization can name it by identity —
+    /// which is what an access bridge is required to do.
+    fn reference_to(
+        declared_getter: &str,
+    ) -> (IrFile, Under, PropertyReferenceRealizations, TypeName) {
         let vault = crate::types::type_name("Vault");
         let mut ir = IrFile::default();
+        let accessor = ir.functions.len() as crate::ir::FunId;
+        ir.functions.push(crate::ir::IrFunction {
+            name: format!("{declared_getter}-impl"),
+            params: vec![Ty::Int],
+            ret: Ty::Int,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
         let mut holder = crate::ir::IrClass::synthetic(crate::types::type_name("Ref$0"));
+        let reference = holder.fq_name;
         holder.prop_ref = Some(crate::ir::PropRef {
             owner_internal: Some(vault),
             call_owner_internal: Some(vault),
             prop_name: "tally".to_string(),
-            declared_getter_name: declared_getter.to_string(),
-            declared_setter_name: None,
-            facade_storage: false,
             getter_name: declared_getter.to_string(),
             getter_descriptor: None,
             setter_name: None,
@@ -330,11 +385,24 @@ mod tests {
             static_dispatch: false,
             mutable: false,
             ext_facade: None,
-            accessor_role: crate::ir::PropertyAccessorRole::Member,
         });
         ir.add_class(holder);
+        let mut realizations = PropertyReferenceRealizations::default();
+        realizations.record(
+            reference,
+            PropertyReferenceRealization {
+                declared_getter_name: declared_getter.to_string(),
+                declared_setter_name: None,
+                facade_storage: false,
+                accessor_role: PropertyAccessorRole::Member,
+                getter_function: Some(accessor),
+                setter_function: None,
+                physical_getter_ret: None,
+                declares_value_class_storage: false,
+            },
+        );
         let under = Under::from_iter([(vault, Ty::Int)]);
-        (ir, under)
+        (ir, under, realizations, reference)
     }
 
     /// The realization mangles the accessor name the DECLARATION carries, never one rebuilt from
@@ -346,8 +414,8 @@ mod tests {
     /// unrelated to each other, so only reading the recorded one can produce this answer.
     #[test]
     fn the_realization_mangles_the_recorded_accessor_name_not_the_property_spelling() {
-        let (mut ir, under) = reference_to("readTally");
-        assert!(realize(&mut ir, &under, &HashMap::new()));
+        let (mut ir, under, mut realizations, _) = reference_to("readTally");
+        assert!(realize(&mut ir, &under, &mut realizations));
         let reference = ir.classes[0].prop_ref.as_ref().expect("the reference");
         assert_eq!(
             reference.getter_name, "readTally-impl",
@@ -355,8 +423,8 @@ mod tests {
         );
 
         // The contrast, to show the assertion above is not satisfied by the spelling by accident.
-        let (mut ir, under) = reference_to("getTally");
-        assert!(realize(&mut ir, &under, &HashMap::new()));
+        let (mut ir, under, mut realizations, _) = reference_to("getTally");
+        assert!(realize(&mut ir, &under, &mut realizations));
         assert_eq!(
             ir.classes[0]
                 .prop_ref
@@ -367,20 +435,44 @@ mod tests {
         );
     }
 
-    /// An access bridge is reached through the method the realization just named. When the value
-    /// class declares no such method the reference would name something nothing declares, which is
-    /// the exact failure this pass exists to remove — so the file is refused instead of a plain
-    /// `access$` prefix being put in front of a name that links to nothing.
+    /// An access bridge is named after the exact accessor the SELECTION recorded, not after a name
+    /// this pass rebuilt: the bridge exists for that one declaration.
+    #[test]
+    fn an_access_bridge_is_named_after_the_accessor_the_selection_recorded() {
+        let (mut ir, under, mut realizations, reference) = reference_to("readTally");
+        realizations
+            .get_mut(reference)
+            .expect("the realization")
+            .accessor_role = PropertyAccessorRole::AccessBridge;
+        assert!(realize(&mut ir, &under, &mut realizations));
+        assert_eq!(
+            ir.classes[0]
+                .prop_ref
+                .as_ref()
+                .expect("the reference")
+                .getter_name,
+            "access$readTally-impl",
+        );
+        assert_eq!(
+            ir.function_reference_access_bridges
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![0],
+            "the bridge is planned for the recorded accessor itself",
+        );
+    }
+
+    /// An access bridge with no recorded accessor refuses the file. The reference would otherwise
+    /// name something nothing declares, which is the exact failure this pass exists to remove.
     #[test]
     fn a_missing_access_bridge_target_refuses_the_file() {
-        let (mut ir, under) = reference_to("readTally");
-        ir.classes[0]
-            .prop_ref
-            .as_mut()
-            .expect("the reference")
-            .accessor_role = crate::ir::PropertyAccessorRole::AccessBridge;
+        let (mut ir, under, mut realizations, reference) = reference_to("readTally");
+        let realization = realizations.get_mut(reference).expect("the realization");
+        realization.accessor_role = PropertyAccessorRole::AccessBridge;
+        realization.getter_function = None;
         assert!(
-            !realize(&mut ir, &under, &HashMap::new()),
+            !realize(&mut ir, &under, &mut realizations),
             "no declaration to bridge to, so the realization refuses",
         );
     }

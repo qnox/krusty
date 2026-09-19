@@ -34,6 +34,9 @@ pub(crate) struct BackendPassFacts {
     continuation_metadata: crate::jvm::suspend::ContinuationMetadataMap,
     default_call_operands: crate::jvm::default_call_operands::DefaultCallOperands,
     bridge_return_adaptations: crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
+    /// What the property-reference pass selected for each synthesized reference class. The
+    /// value-class pass consumes and extends it; nothing recovers these answers from a spelling.
+    property_reference_realizations: crate::jvm::property_references::PropertyReferenceRealizations,
 }
 
 /// THE post-lowering, pre-emit JVM pass pipeline — the single definition every consumer (the real
@@ -152,6 +155,7 @@ fn run_backend_passes_after_plugins(
         module_value_classes,
         module_readable_value_classes,
         &mut facts.bridge_return_adaptations,
+        &mut facts.property_reference_realizations,
     ) {
         return Err(SkipReason::ValueClasses);
     }
@@ -657,6 +661,7 @@ impl JvmBackend {
         &self,
         file: crate::backend::CheckedIrFile<'_>,
         property_realizations: crate::jvm::property_realizations::PropertyRealizations,
+        property_reference_realizations: crate::jvm::property_references::PropertyReferenceRealizations,
         default_call_operands: crate::jvm::default_call_operands::DefaultCallOperands,
         state: &mut JvmState,
         diags: &mut DiagSink,
@@ -673,6 +678,7 @@ impl JvmBackend {
         let facade_name = file_class_name(stem, ir.package.as_deref());
         let mut pass_facts = BackendPassFacts {
             default_call_operands,
+            property_reference_realizations,
             ..BackendPassFacts::default()
         };
         if let Err(reason) = run_backend_passes(
@@ -859,17 +865,23 @@ impl Backend for JvmBackend {
             );
             return Vec::new();
         }
-        if let Err(target) =
-            crate::jvm::property_references::realize(&mut file.ir, file.stems, &self.cp, &facade)
-        {
-            diags.error(
-                crate::diag::Span::new(0, 0),
-                format!(
-                    "internal error: missing JVM property-reference realization for {target:?}"
-                ),
-            );
-            return Vec::new();
-        }
+        let property_reference_realizations = match crate::jvm::property_references::realize(
+            &mut file.ir,
+            file.stems,
+            &self.cp,
+            &facade,
+        ) {
+            Ok(realizations) => realizations,
+            Err(target) => {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    format!(
+                        "internal error: missing JVM property-reference realization for {target:?}"
+                    ),
+                );
+                return Vec::new();
+            }
+        };
         // A checked annotation constructor names the semantic annotation declaration. The JVM
         // realizes it as a generated concrete implementation before ordinary dependency
         // constructors are assigned physical descriptors/default stubs.
@@ -911,6 +923,7 @@ impl Backend for JvmBackend {
         self.emit_streamed_ir(
             file,
             property_realizations,
+            property_reference_realizations,
             default_call_operands,
             state,
             diags,
