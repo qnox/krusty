@@ -6148,6 +6148,57 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/suspend_super_call_refusal_e2e.rs`, which asserts the complete ordered ledger with
   positions for the direct, parameterized, typed, labeled-enclosing, sibling-file and dependency
   spellings, plus both negative controls.
+
+- **A bridge method unboxes its RETURN value, and that adapter is not the ordinary unbox cast.** A
+  bridge exists because a supertype's erased signature differs from the override's, and `emit_bridges`
+  adapts both ends: it boxes a primitive argument, `checkcast`s a reference one, converts numeric
+  widths, and boxes a primitive RESULT for a reference-returning supertype. The INVERSE of that last
+  one was absent. When the delegated override hands back the erased generic REFERENCE
+  (`getSize()Ljava/lang/Object;` for `var size: T`) while the supertype the bridge serves declares the
+  PRIMITIVE (`interface C { var size: Int }`), the bridge pushed the reference and emitted `ireturn` —
+  `VerifyError: Bad type on operand stack … Type 'java/lang/Object' is not assignable to integer`, an
+  unverifiable artifact emitted with no diagnostic. (The setter direction was already right: an
+  argument box was there from the start.) Measured from the reference compiler, the adapter is NOT
+  `unbox_prim`'s: a NUMERIC goes through `java/lang/Number` — `checkcast java/lang/Number;
+  Number.intValue()I`, and likewise `byteValue`/`shortValue`/`longValue`/`floatValue`/`doubleValue` —
+  never through `java/lang/Integer`; `Boolean` and `Char` go through `java/lang/Boolean` and
+  `java/lang/Character`; and the `checkcast` is OMITTED when the override's static return type already
+  IS that owner (a `T : Number` base returns `()Ljava/lang/Number;` and kotlinc casts nothing, while a
+  `T : Comparable<T>` bound keeps the cast). A bridge whose supertype declares a VALUE CLASS in its
+  unboxed form takes the carrier out of that class's own `unbox-impl` (`checkcast IC;
+  IC.unbox-impl()I`) — the class identity is unknowable from the bridge at emission time, because the
+  value-class pass rewrites `erased_ret` to the carrier in the same step, so the JVM pass records it
+  in `bridge_return_adaptations` — a backend-owned physical realization plan passed directly to
+  bridge emission and keyed by the owning class and bridge ordinal. No classifier identity for a JVM
+  boxing decision sits on common `Bridge` or `IrFile`. That holds for a
+  REFERENCE carrier too (`checkcast Text; Text.unbox-impl()Ljava/lang/String;`): keying the adapter
+  on the carrier alone sent a reference carrier down the ordinary `Object`-to-`String` narrowing,
+  which never unboxed and handed the caller a `Text` where a `String` was declared. Nor may the two
+  JVM types decide WHETHER to unbox: an `Any`-CARRIER value class (`@JvmInline value class
+  Ref(val x: Any)`) has `Object` on both sides of the boundary, so a `concrete != erased` guard
+  found them equal, emitted nothing and handed the caller the boxed `Ref` where the declaration says
+  the carrier. The PLAN decides; the types only say what to write. And a NULLABLE value class whose
+  carrier itself carries null (`Text?` over a non-null `String`) stays unboxed, so the delegated
+  generic override may legally return `null` — `unbox-impl` is an instance call, and reaching it
+  with null throws where the declaration says the bridge returns null. kotlinc branches around it
+  (`checkcast Text; dup; ifnull → pop; aconst_null`, else `unbox-impl`) and so does krusty; the
+  regression asserts both the instruction ledger and that the interface call really answers null.
+  A BUILT-IN unsigned value class stays out of the global expression-rewrite map, but the dedicated
+  callable-boundary value-class map retains its wrapper identity because boxed `kotlin.UInt` is not
+  a `java.lang.Number`. That map therefore owns both its `unbox-impl` adapter and mangled bridge
+  identity (`foo-pVg5ArA()I` for `UInt`). Tests exercise every unsigned bridge through its interface,
+  in addition to comparing the instruction ledger.
+  Test: `tests/bridge_return_unbox_e2e.rs`, an instruction ledger against the reference compiler for
+  every signed primitive, both bounds, both value-class carriers and all four unsigned forms, plus
+  runtime interface dispatch.
+
+- **A `var` whose type is a BOUNDED type parameter emits an invalid `LineNumberTable` (open).**
+  `open class P<T : Number> { var c: T? = null }` emits `setC` with a single line entry at
+  `pc == code_length`, which the JVM rejects with `ClassFormatError: Invalid pc in LineNumberTable`.
+  An UNBOUNDED `T` puts the same entry at pc 0, so the bound is what moves it. Found while fixture-
+  reducing the bridge-return unbox above (whose test therefore holds its slot as `Any?`); it accounts
+  for the corpus's `ClassFormatError:Invalid pc in LineNumberTable` bucket and is not fixed here.
+
 - **A `try` and a `return` own their own `LineNumberTable` entries.** Four rules, each measured
   against the reference compiler and each previously absent, so a debugger stepping through a
   guarded region saw the finalizer's line where the source says otherwise:

@@ -3,6 +3,7 @@
 mod annotation_constructions;
 mod array_representation;
 pub mod backend;
+mod bridge_return_adaptations;
 pub mod bridges;
 pub mod classfile;
 pub mod classpath;
