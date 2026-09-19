@@ -37,6 +37,8 @@ use serialize_body::SerializeBody;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+mod child_serializer_cache;
+use child_serializer_cache::{add_child_serializer_cache, PendingChildSerializerCache};
 mod annotations;
 mod signatures;
 
@@ -768,14 +770,6 @@ fn wrap_nullable_serializer(ir: &mut IrFile, base: ExprId) -> ExprId {
     })
 }
 
-/// The element-serializer expression for a property of (`@Serializable`/builtin) type `ty`, used by a
-/// CONTAINING class's `childSerializers`/`serialize`/`deserialize`:
-/// - a GENERIC `@Serializable` class `Foo<A…>` → `Foo.serializer(<serializer for A>…)` (invokestatic the
-///   generated generic accessor, recursively building each type-argument's serializer);
-/// - a non-generic nested `@Serializable` class → its `Foo$serializer.INSTANCE` singleton;
-/// - a directly-supported builtin (`String`/primitive/…) → its `…Serializer.INSTANCE`.
-///
-/// Returns `None` for a type with no derivable serializer.
 /// The `BuiltinSerializersKt` factory name + type-argument count for a standard collection type, or `None`.
 /// `List`/`Set`/`Collection`/`Iterable` → 1-arg `ListSerializer`/`SetSerializer`; `Map` → 2-arg `MapSerializer`.
 fn collection_serializer_builder(classifier: TypeName) -> Option<(&'static str, usize)> {
@@ -1533,6 +1527,7 @@ impl IrPlugin for SerializationPlugin {
     fn generate_declarations(&self, ir: &mut IrFile, ctx: &PluginContext) {
         // A host can be reused for another IR file; generated `FunId`s belong only to this arena.
         self.clear_write_self_methods();
+        let mut pending_caches: Vec<PendingChildSerializerCache> = Vec::new();
         for class_id in ctx.classes_with(type_name(SERIALIZABLE_FQ)) {
             let class_fq = ir.classes[class_id as usize].fq_name();
             // `@Serializable(with = X::class)`: no generated `$serializer` — `serializer()` returns an
@@ -2075,83 +2070,18 @@ impl IrPlugin for SerializationPlugin {
                 );
             }
 
-            // `$childSerializers` cache — a `private static final Lazy[]` + the public synthetic
-            // `access$get$childSerializers$cp()` accessor kotlinc emits when a prop's serializer is
-            // ALLOCATED rather than a singleton: a collection (`ArrayListSerializer(…)`) or an ENUM
-            // (`EnumSerializer(…)`). A primitive/`String` (singleton `INSTANCE`) or a nested `@Serializable`
-            // CLASS (singleton `$$serializer.INSTANCE`) is NOT cached. Each slot is `LazyKt.lazyOf(…)`, else null.
-            let enum_internals: std::collections::HashSet<TypeName> = ir
-                .classes
-                .iter()
-                .filter(|c| !c.enum_entries.is_empty())
-                .map(crate::ir::IrClass::fq_name_id)
-                .collect();
-            let needs_cache = |ty: &Ty| -> bool {
-                ty.kotlin_class_internal().is_some_and(|classifier| {
-                    collection_serializer_builder(classifier).is_some()
-                        || enum_internals.contains(&classifier)
-                })
-            };
-            if plain_data_class && foo_fields.iter().any(|(_, ty)| needs_cache(ty)) {
-                let cached_serializer = kserializer_of(class_ty("kotlin/Any"));
-                let lazy_serializer = Ty::obj_args("kotlin/Lazy", &[cached_serializer]);
-                let lazy_arr_ty = Ty::obj_args("kotlin/Array", &[Ty::nullable(lazy_serializer)]);
-                let elems: Vec<ExprId> = foo_fields
-                    .iter()
-                    .map(|(_, ty)| {
-                        if needs_cache(ty) {
-                            if let Some(es) = element_serializer_expr(ir, ctx, ty) {
-                                return ir.add_expr(IrExpr::Call {
-                                    callee: Callee::Static {
-                                        owner: type_name("kotlin/LazyKt"),
-                                        name: "lazyOf".to_string(),
-                                        descriptor: "(Ljava/lang/Object;)Lkotlin/Lazy;".to_string(),
-                                        inline: InlineKind::None,
-                                    },
-                                    dispatch_receiver: None,
-                                    args: vec![es],
-                                });
-                            }
-                        }
-                        ir.add_expr(IrExpr::Const(IrConst::Null))
-                    })
-                    .collect();
-                let arr = ir.add_expr(IrExpr::Vararg {
-                    array_type: lazy_arr_ty,
-                    spreads: vec![false; elems.len()],
-                    elements: elems,
-                });
-                ir.statics.push(crate::ir::IrStatic {
-                    name: "$childSerializers".to_string(),
-                    ty: lazy_arr_ty,
-                    init: arr,
-                    is_var: false,
-                    is_const: false,
-                    owner: Some(type_name(&class_fq)),
-                    visibility: crate::types::Visibility::Private,
-                    custom_accessor: true,
-                    line: 0,
-                    source_order: u32::MAX,
-                });
-                let read =
-                    ir.external_static_field(&class_fq, "$childSerializers", "[Lkotlin/Lazy;");
-                let ret = ir.add_expr(IrExpr::Return(Some(read)));
-                let body = ir.add_expr(IrExpr::Block {
-                    stmts: vec![ret],
-                    value: None,
-                });
-                let acc = ir.add_fun(IrFunction {
-                    name: "access$get$childSerializers$cp".to_string(),
-                    params: vec![],
-                    ret: lazy_arr_ty,
-                    body: Some(body),
-                    is_static: true,
-                    dispatch_receiver: None,
-                    param_checks: Vec::new(),
-                });
-                ir.synthetic_methods.insert(acc);
-                ir.classes[class_id as usize].methods.push(acc);
+            // The `$childSerializers` cache is built in a SECOND pass — see
+            // `add_child_serializer_cache`, which explains why it cannot be built here.
+            if plain_data_class {
+                pending_caches.push((
+                    class_id,
+                    ir.classes[class_id as usize].fq_name_id(),
+                    foo_fields.clone(),
+                ));
             }
+        }
+        for (class_id, serialized, foo_fields) in pending_caches {
+            add_child_serializer_cache(ir, ctx, class_id, serialized, &foo_fields);
         }
     }
 
