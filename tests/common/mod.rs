@@ -266,11 +266,6 @@ fn parse_source_set_named(
     if diags.has_errors() {
         return None;
     }
-    if sources.iter().any(|source| {
-        krusty::features::LangFeatures::from_source(source).has("MultiPlatformProjects")
-    }) {
-        krusty::frontend::strip_matched_expects(&mut files);
-    }
     Some(files)
 }
 

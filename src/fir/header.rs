@@ -24,7 +24,7 @@ mod actualization;
 
 pub use actualization::{
     actualization, actualized_declaration_pairs, matched_expect_declarations, Actualization,
-    ActualizedDeclarationPair,
+    ActualizationTypeBindings, ActualizedDeclarationPair,
 };
 
 pub use super::declaration_stub::*;

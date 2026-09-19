@@ -4534,11 +4534,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `actual` is passed over in silence: a member whose resolved record cannot be reached reports an
   internal error at its own name rather than disappearing.
 
-  **Which classifier a written path names is the FILE's scope, not its spelling.** Actualization
-  runs before signatures resolve, so the identity available is the one each file's package and
-  import list establish over the classifiers the module declares — and that list is the scope the
-  parser already published, carrying every explicit import, every import ALIAS and every WILDCARD
-  import. `import plib.model.Tally` against `plib.model.Tally` written out is one classifier;
+  **Which classifier a written path names is the FILE's ordinary resolver scope, not its
+  spelling.** Actualization runs before full signature solving because it decides which compact
+  declaration subtree survives. Before it does, resolution binds every classifier type it may
+  compare through the same module + provider scope tower used by ordinary signatures: own package,
+  explicit imports and aliases, wildcard imports, Kotlin defaults and platform defaults.
+  Actualization consumes only the resulting `(source, header type) -> TypeName` table; it cannot
+  inspect imports, query a provider, render a name, or intern an unresolved spelling. `import
+  plib.model.Tally` against `plib.model.Tally` written out is one classifier;
   `import plib.model.Tally as Ledger` puts that classifier under the name `Ledger`; `import
   plib.left.Tally` against `import plib.right.Tally` are two. A simple name more than one
   import CLAIMS is AMBIGUOUS — two wildcard imports that could each supply it, or two explicit
@@ -4546,16 +4549,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and pairs with nothing. Answering with the first match, or with whichever import came last,
   would pair two declarations that name different classifiers. What is not a choice is spared:
   one classifier imported twice, or one package wildcard-imported twice, still names that
-  classifier, which is why the wildcard scan counts DISTINCT classifiers rather than
-  occurrences. Every answer is an interned `TypeName`, so a comparison is an
-  identity equality and a spelling is only ever an input to interning. Two limits are stated
-  rather than hidden: a header phase cannot ask a PROVIDER what a path names, so a path nothing
-  the module declares resolves to its own written form — which both sides of a comparison reach
-  the same way, `Int` against `Int` being one classifier however the module spells it — and two
-  different dependency classifiers written identically would pair here, with signature checking
-  rejecting them afterwards, where a provider view exists. Tests:
+  classifier, which is why the wildcard scan counts DISTINCT classifiers rather than occurrences.
+  Every answer is an interned `TypeName`, so a comparison is identity equality and a spelling is
+  lookup input exactly once. An unresolved or ambiguous type has no binding and cannot match even
+  another unresolved spelling. Dependency wildcard candidates participate through their provider,
+  so two dependency classifiers named alike do not collapse to one bare name. Tests:
   `fir::header::actualization::tests` for each import form, the two ambiguous pairs and the
-  repetitions they spare, and
+  repetitions they spare, `resolve::actualization_names::tests` for dependency-provider wildcard
+  identity, and
   `no_expect_for_actual_e2e::a_star_imported_classifier_of_another_package_does_not_pair`,
   `::an_import_alias_names_the_classifier_it_renames`,
   `::a_star_import_supplies_the_classifier_it_brings_into_scope`,

@@ -1404,9 +1404,9 @@ pub struct File {
     /// Kotlin script statements in source order.
     pub script_body: Option<ExprId>,
     /// Top-level declarations carrying the `expect` modifier (multiplatform headers), each paired
-    /// with the span of the KEYWORD that introduced it. A matched `actual` in the same compiled
-    /// source set replaces them (see `strip_matched_expects`); an unmatched `expect` stays and
-    /// fails checking like any body-less declaration.
+    /// with the span of the KEYWORD that introduced it. Stable compact-header actualization
+    /// excludes a matched declaration subtree before signature collection; an unmatched `expect`
+    /// is rejected by frontend validation.
     ///
     /// The keyword travels with the declaration because every diagnostic about an `expect` points
     /// at it. Recovering it afterwards means searching the file's modifiers for the nearest one

@@ -1255,8 +1255,8 @@ mod tests {
         Some(Rc::new(Classpath::new(paths)))
     }
 
-    /// An all-`expect` common FILE legitimately emits ZERO classes after `strip_matched_expects`
-    /// (kotlinc's JVM-MPP model) — the block set must still compile, mirroring the gate's
+    /// An all-`expect` common FILE legitimately emits ZERO classes after stable header
+    /// actualization (kotlinc's JVM-MPP model) — the block set must still compile, mirroring the gate's
     /// per-file-empty acceptance. Regression pin: the survey used to misreport this as
     /// `emit: emit_all bailed`, its top skip-bucket (~68 corpus files).
     #[test]

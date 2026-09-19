@@ -28,7 +28,11 @@ use crate::types::{
 };
 use scope::{ContextReceiver, ContextValue, FlowExclusion, NarrowPath, Ns, ScopeKind};
 
+mod actualization_names;
 mod annotation_applications;
+pub(crate) use actualization_names::actualization_type_bindings;
+#[cfg(test)]
+pub(crate) use actualization_names::resolve_actualization_classifier_for_test;
 mod call_result_constraint;
 mod callable_reference_selection;
 mod capture_analysis;

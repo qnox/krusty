@@ -1,19 +1,21 @@
 //! Which `expect` headers this module's `actual` declarations answer for.
 //!
-//! The match is made from compact Pass-1 facts alone — it decides which declarations survive into
-//! signature collection, so it runs before any of them are resolved. What it compares is still an
-//! IDENTITY rather than a spelling: a classifier is the one each file's package and imports name,
-//! and a type parameter is matched by position.
+//! The match decides which declarations survive into signature collection, so it consumes compact
+//! Pass-1 syntax plus classifier identities bound beforehand by the ordinary resolver. It never
+//! interprets a spelling itself: classifiers compare as qualified identities and type parameters by
+//! position.
 
 use super::*;
 
-/// Match top-level multiplatform headers using only compact Pass-1 facts. The returned stable ids
-/// identify expect declarations shadowed by a same-package, same-shape non-expect declaration or
-/// type alias. No parser declaration id participates in the match.
+/// Match top-level multiplatform headers using compact Pass-1 facts and resolver-published
+/// classifier identities. The returned stable ids identify expect declarations shadowed by a
+/// same-package, same-shape non-expect declaration or type alias. No parser declaration id
+/// participates in the match.
 pub fn matched_expect_declarations(
     headers: &StreamedHeaderModule,
+    bindings: &ActualizationTypeBindings,
 ) -> std::collections::HashSet<DeclarationId> {
-    actualized_declaration_pairs(headers)
+    actualized_declaration_pairs(headers, bindings)
         .into_iter()
         .filter_map(|pair| {
             headers
@@ -57,215 +59,64 @@ pub struct Actualization {
     pub incompatible: std::collections::HashSet<DeclarationId>,
 }
 
+/// Classifier identities already bound by the ordinary resolver for compact actualization syntax.
+///
+/// Actualization consumes these identities; it does not interpret packages, imports, default
+/// imports, dependency providers, or unresolved spellings itself. An absent entry is unresolved or
+/// ambiguous and therefore cannot participate in a declaration match.
+#[derive(Default)]
+pub struct ActualizationTypeBindings {
+    by_type: std::collections::HashMap<(SourceFileId, HeaderTypeId), crate::types::TypeName>,
+    by_declaration: std::collections::HashMap<DeclarationId, crate::types::TypeName>,
+}
+
+impl ActualizationTypeBindings {
+    pub(crate) fn bind_type(
+        &mut self,
+        source: SourceFileId,
+        syntax: HeaderTypeId,
+        classifier: crate::types::TypeName,
+    ) {
+        self.by_type.insert((source, syntax), classifier);
+    }
+
+    pub(crate) fn bind_declaration(
+        &mut self,
+        declaration: DeclarationId,
+        classifier: crate::types::TypeName,
+    ) {
+        self.by_declaration.insert(declaration, classifier);
+    }
+
+    fn type_classifier(
+        &self,
+        source: SourceFileId,
+        syntax: HeaderTypeId,
+    ) -> Option<crate::types::TypeName> {
+        self.by_type.get(&(source, syntax)).copied()
+    }
+
+    fn declaration_classifier(&self, declaration: DeclarationId) -> Option<crate::types::TypeName> {
+        self.by_declaration.get(&declaration).copied()
+    }
+}
+
 /// [`Actualization::pairs`] alone, for callers that need no more.
 pub fn actualized_declaration_pairs(
     headers: &StreamedHeaderModule,
+    bindings: &ActualizationTypeBindings,
 ) -> Vec<ActualizedDeclarationPair> {
-    actualization(headers).pairs
+    actualization(headers, bindings).pairs
 }
 
-/// Classifier identity for compact headers.
-///
-/// Actualization runs before signatures resolve, so the identity available is the one each
-/// file's package and import list establish over the classifiers the MODULE declares. That
-/// list is the file scope the parser already published — `headers.scopes`, carrying the
-/// package, every explicit import, every import ALIAS and every WILDCARD import — rather than
-/// a second one rebuilt from the types a file happens to mention, which saw neither an alias
-/// nor a wildcard and so read `import plib.model.Tally as Ledger` as naming `Ledger`.
-///
-/// The answer is a [`TypeName`]: the interned classifier identity the rest of the compiler
-/// compares by, so a comparison is an id equality. A spelling is only ever an input to
-/// interning here, never the thing compared.
-///
-/// Two limits are stated rather than hidden:
-///
-/// - A header phase cannot ask a PROVIDER what a path names — a dependency's classifiers are
-///   not inventoried at this point. A path nothing in the module declares therefore resolves
-///   to its own written form, which both sides of a comparison reach the same way (`Int`
-///   against `Int` is one classifier however the module spells it). Two DIFFERENT dependency
-///   classifiers written identically would pair here; signature checking rejects the pair
-///   afterwards, which is where a provider view exists.
-/// - A simple name more than one wildcard import could supply is AMBIGUOUS. The file has not
-///   said which classifier it means, so it names none: `resolve` answers `None` and nothing
-///   pairs on it. Answering with the first match would pair two declarations that name
-///   different classifiers.
-struct ClassifierScopes {
-    /// Every classifier and type alias this module declares, by qualified identity.
-    declared: std::collections::HashSet<crate::types::TypeName>,
-    files: std::collections::HashMap<u32, FileScope>,
-}
-
-/// One file's resolution scope, as the parser recorded it.
-struct FileScope {
-    /// The package the file declares; `None` is the default package.
-    package: Option<crate::types::TypeName>,
-    /// The classifier an explicit import brings into scope, keyed by the simple name it is
-    /// written as — the import's ALIAS where it wrote one, and the last segment of its path
-    /// otherwise. `None` where more than one import claims that name: the file has then said
-    /// nothing about which classifier it means, exactly as two wildcards say nothing.
-    explicit: std::collections::HashMap<String, Option<String>>,
-    /// Every wildcard import's package path, `/`-joined, in source order.
-    wildcards: Vec<String>,
-}
-
-/// The qualified identity of a `/`-joined path under an optional package.
-///
-/// Every identity in this module is built through this one function, so a classifier
-/// interned as a module declaration and the same classifier reached through an import or a
-/// wildcard are the same `TypeName` rather than two that merely render alike.
-fn qualified(package: Option<crate::types::TypeName>, path: &str) -> crate::types::TypeName {
-    match package {
-        Some(package) => crate::types::type_name(&format!("{}/{path}", package.render())),
-        None => crate::types::type_name(path),
-    }
-}
-
-impl ClassifierScopes {
-    fn of(headers: &StreamedHeaderModule) -> Self {
-        let mut declared = std::collections::HashSet::new();
-        for stub in &headers.stubs {
-            if !matches!(
-                stub.kind,
-                DeclarationKind::Classifier | DeclarationKind::TypeAlias
-            ) {
-                continue;
-            }
-            let Some(spelling) = stub
-                .lookup_name
-                .and_then(|name| headers.lookup_names.get(name))
-            else {
-                continue;
-            };
-            // A hoisted nested classifier publishes `Outer$Inner`; a use site writes
-            // `Outer.Inner`. Both name one classifier, and the interner is told so.
-            declared.insert(qualified(
-                headers
-                    .sources
-                    .get(stub.source)
-                    .map(|source| source.package)
-                    .filter(|package| !package.render().is_empty()),
-                &spelling.replace('$', "/"),
-            ));
-        }
-        let mut files = std::collections::HashMap::new();
-        for (index, inventoried) in headers.inventoried.iter().enumerate() {
-            if !inventoried {
-                continue;
-            }
-            let source = SourceFileId::from_raw(index as u32);
-            let package = headers
-                .sources
-                .get(source)
-                .map(|entry| entry.package)
-                .filter(|package| !package.render().is_empty());
-            let mut explicit = std::collections::HashMap::new();
-            let mut wildcards = Vec::new();
-            if let Some(scope) = headers.scopes.file(source) {
-                for import in headers.scopes.imports(scope.imports) {
-                    let segments = headers
-                        .scopes
-                        .path(import.path)
-                        .iter()
-                        .filter_map(|segment| headers.lookup_names.get(*segment))
-                        .collect::<Vec<_>>();
-                    if segments.is_empty() {
-                        continue;
-                    }
-                    if import.wildcard {
-                        wildcards.push(segments.join("/"));
-                        continue;
-                    }
-                    // The name the import brings into scope is what the file will WRITE: the
-                    // alias when it renamed the import, and the path's last segment otherwise.
-                    let written = import
-                        .alias
-                        .and_then(|alias| headers.lookup_names.get(alias))
-                        .unwrap_or_else(|| segments[segments.len() - 1]);
-                    let path = segments.join("/");
-                    match explicit.entry(written.to_string()) {
-                        std::collections::hash_map::Entry::Vacant(slot) => {
-                            slot.insert(Some(path));
-                        }
-                        std::collections::hash_map::Entry::Occupied(mut slot) => {
-                            // A second import under one name is a conflict unless both name the
-                            // same classifier, which is a repetition rather than a choice.
-                            if slot.get().as_deref() != Some(path.as_str()) {
-                                slot.insert(None);
-                            }
-                        }
-                    }
-                }
-            }
-            files.insert(
-                index as u32,
-                FileScope {
-                    package,
-                    explicit,
-                    wildcards,
-                },
-            );
-        }
-        Self { declared, files }
-    }
-
-    /// The classifier a written path names, as seen from `source`, or `None` where the file
-    /// has not said which classifier it means.
-    fn resolve(&self, source: SourceFileId, segments: &[&str]) -> Option<crate::types::TypeName> {
-        let written = segments.join("/");
-        let Some(scope) = self.files.get(&source.raw()) else {
-            return Some(qualified(None, &written));
-        };
-        // An explicit import — aliased or not — names the classifier its path ends at, and
-        // anything written under it hangs off that.
-        if let Some(first) = segments.first() {
-            if let Some(imported) = scope.explicit.get(*first) {
-                // Two imports claiming one name leave the file naming no classifier under it.
-                let imported = imported.as_ref()?;
-                let rest = segments[1..].join("/");
-                return Some(qualified(
-                    None,
-                    &if rest.is_empty() {
-                        imported.clone()
-                    } else {
-                        format!("{imported}/{rest}")
-                    },
-                ));
-            }
-        }
-        // The file's own package, then a fully-qualified spelling — both only when the module
-        // declares such a classifier, since neither reading may invent one.
-        let in_package = qualified(scope.package, &written);
-        if self.declared.contains(&in_package) {
-            return Some(in_package);
-        }
-        let as_written = qualified(None, &written);
-        if self.declared.contains(&as_written) {
-            return Some(as_written);
-        }
-        // A wildcard import. More than one DISTINCT classifier that could supply this name is
-        // ambiguous; one package imported twice is a repetition, not a choice.
-        let mut supplied: Vec<crate::types::TypeName> = Vec::new();
-        for package in &scope.wildcards {
-            let candidate = qualified(None, &format!("{package}/{written}"));
-            if self.declared.contains(&candidate) && !supplied.contains(&candidate) {
-                supplied.push(candidate);
-            }
-        }
-        match supplied.as_slice() {
-            [] => {}
-            [single] => return Some(*single),
-            _ => return None,
-        }
-        // Nothing the module declares or this file imports claims the path, so the path is its
-        // own canonical form — reached identically from either side of a comparison.
-        Some(as_written)
-    }
-}
-
-/// Match actualized declaration subtrees using compact Pass-1 headers only. This is also the
-/// authority for expect-owned default expressions: callers publish their presence on `actual`, but
-/// retain `expect` as the stable provider identity for Pass-2 checking.
-pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
+/// Match actualized declaration subtrees from compact Pass-1 headers and already-bound classifier
+/// identities. This is also the authority for expect-owned default expressions: callers publish
+/// their presence on `actual`, but retain `expect` as the stable provider identity for Pass-2
+/// checking.
+pub fn actualization(
+    headers: &StreamedHeaderModule,
+    bindings: &ActualizationTypeBindings,
+) -> Actualization {
     type Key = (String, u8, String, bool, usize);
     /// One `expect` classifier actualized by a `typealias`: the classifier's QUALIFIED identity,
     /// the alias's target type, and the file the target is written in — which is the scope that
@@ -276,7 +127,7 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
     /// against.
     #[derive(Clone, Copy)]
     struct MatchScope<'a> {
-        scopes: &'a ClassifierScopes,
+        bindings: &'a ActualizationTypeBindings,
         expect: SourceFileId,
         candidate: SourceFileId,
     }
@@ -305,6 +156,7 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
         actualized_aliases: &[ActualizedAlias],
         scope: MatchScope<'_>,
     ) -> bool {
+        let expect_id = expect;
         let candidate_id = candidate;
         let (Some(expect), Some(candidate)) =
             (headers.syntax.ty(expect), headers.syntax.ty(candidate_id))
@@ -346,18 +198,14 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
                                 .is_some_and(|(_, parameter)| parameter == candidate)
                         }
                         _ => {
-                            let segments = |path: &[LookupNameId]| {
-                                path.iter()
-                                    .filter_map(|segment| headers.lookup_names.get(*segment))
-                                    .collect::<Vec<_>>()
-                            };
-                            // A path either side is ambiguous about names no classifier, so it
-                            // matches nothing — not even another ambiguous one.
+                            // Resolution bound each syntax node once through the ordinary scope
+                            // tower. An unresolved or ambiguous node has no identity and cannot
+                            // match, even when the other side has the same spelling.
                             match (
-                                scope.scopes.resolve(scope.expect, &segments(expect_path)),
+                                scope.bindings.type_classifier(scope.expect, expect_id),
                                 scope
-                                    .scopes
-                                    .resolve(scope.candidate, &segments(candidate_path)),
+                                    .bindings
+                                    .type_classifier(scope.candidate, candidate_id),
                             ) {
                                 (Some(expect), Some(candidate)) => expect == candidate,
                                 _ => false,
@@ -449,18 +297,8 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
         // side. Which classifier the expect side named is its resolved identity, not its simple
         // name: two `Carried`s in different packages are two classifiers, and only one of them
         // may have been actualized.
-        if let HeaderTypeKind::Classifier { detail, .. } = expect.kind {
-            if let Some(detail) = headers.syntax.classifier_type(detail) {
-                let written = headers
-                    .syntax
-                    .type_path(detail.path)
-                    .iter()
-                    .filter_map(|segment| headers.lookup_names.get(*segment))
-                    .collect::<Vec<_>>();
-                // An ambiguous path names no classifier, so it follows no alias either.
-                let Some(identity) = scope.scopes.resolve(scope.expect, &written) else {
-                    return false;
-                };
+        if matches!(expect.kind, HeaderTypeKind::Classifier { .. }) {
+            if let Some(identity) = scope.bindings.type_classifier(scope.expect, expect_id) {
                 let mut aliases = actualized_aliases
                     .iter()
                     .filter(|(name, _, _)| *name == identity);
@@ -484,7 +322,7 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
         expect: DeclarationId,
         candidate: DeclarationId,
         actualized_aliases: &[ActualizedAlias],
-        scopes: &ClassifierScopes,
+        bindings: &ActualizationTypeBindings,
     ) -> bool {
         let (Some(expect_source), Some(candidate_source)) = (
             headers
@@ -499,7 +337,7 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
             return false;
         };
         let scope = MatchScope {
-            scopes,
+            bindings,
             expect: expect_source,
             candidate: candidate_source,
         };
@@ -586,7 +424,7 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
         expect: DeclarationId,
         candidate: DeclarationId,
         actualized_aliases: &[ActualizedAlias],
-        scopes: &ClassifierScopes,
+        bindings: &ActualizationTypeBindings,
     ) -> bool {
         let (Some(expect_source), Some(candidate_source)) = (
             headers
@@ -601,7 +439,7 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
             return false;
         };
         let scope = MatchScope {
-            scopes,
+            bindings,
             expect: expect_source,
             candidate: candidate_source,
         };
@@ -760,7 +598,7 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
         expect: DeclarationId,
         candidate: DeclarationId,
         actualized_aliases: &[ActualizedAlias],
-        scopes: &ClassifierScopes,
+        bindings: &ActualizationTypeBindings,
     ) -> bool {
         let (
             Some(HeaderDeclaration {
@@ -799,7 +637,7 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
             return false;
         };
         let scope = MatchScope {
-            scopes,
+            bindings,
             expect: expect_source,
             candidate: candidate_source,
         };
@@ -838,7 +676,7 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
         expect: &DeclarationStub,
         candidates: &[DeclarationId],
         actualized_aliases: &[ActualizedAlias],
-        scopes: &ClassifierScopes,
+        bindings: &ActualizationTypeBindings,
     ) -> Option<DeclarationId> {
         let matching = candidates
             .iter()
@@ -849,21 +687,21 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
                     expect.id,
                     *candidate,
                     actualized_aliases,
-                    scopes,
+                    bindings,
                 ),
                 DeclarationKind::Constructor => constructor_parameter_shapes_match(
                     headers,
                     expect.id,
                     *candidate,
                     actualized_aliases,
-                    scopes,
+                    bindings,
                 ),
                 DeclarationKind::Property => property_input_shapes_match(
                     headers,
                     expect.id,
                     *candidate,
                     actualized_aliases,
-                    scopes,
+                    bindings,
                 ),
                 DeclarationKind::Classifier
                 | DeclarationKind::TypeAlias
@@ -938,11 +776,10 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
             actuals.entry(key).or_default().push(stub.id);
         }
     }
-    let scopes = ClassifierScopes::of(headers);
     let mut incompatible = std::collections::HashSet::new();
     let mut select_top_level = |stub: &DeclarationStub, aliases: &[ActualizedAlias]| {
         let candidates = actuals.get(&key(headers, stub)?)?;
-        let actual = select_actual(headers, stub, candidates, aliases, &scopes);
+        let actual = select_actual(headers, stub, candidates, aliases, bindings);
         if actual.is_none() {
             incompatible.insert(stub.id);
         }
@@ -962,19 +799,9 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
     let actualized_aliases = pairs
         .iter()
         .filter_map(|pair| {
-            let expect = headers.stubs.iter().find(|stub| stub.id == pair.expect)?;
-            let spelling = headers.lookup_names.get(expect.lookup_name?)?;
             // The classifier the alias answers for, by identity: `Carried` in `plib` and `Carried`
             // in another package are two classifiers, and only one of them has been actualized.
-            // Built the same way a declared classifier's identity is, so the two intern alike.
-            let name = qualified(
-                headers
-                    .sources
-                    .get(expect.source)
-                    .map(|source| source.package)
-                    .filter(|package| !package.render().is_empty()),
-                &spelling.replace('$', "/"),
-            );
+            let name = bindings.declaration_classifier(pair.expect)?;
             let HeaderDeclarationKind::TypeAlias { target, .. } =
                 headers.syntax.declaration(pair.actual)?.kind
             else {
@@ -1002,15 +829,15 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
         /// The classifier the receiver names, after following an actualized alias to whatever it
         /// now stands for.
         Classifier(crate::types::TypeName),
-        /// A receiver that names no classifier — a function type. Its rendered spelling is the
-        /// whole of what a coarse key can say; `select_actual` compares the type itself.
-        Structural(String),
+        /// A receiver that names no classifier — a function type. The coarse key records only the
+        /// semantic category; `select_actual` compares its complete type shape.
+        Structural,
     }
 
     fn child_key(
         headers: &StreamedHeaderModule,
         stub: &DeclarationStub,
-        scopes: &ClassifierScopes,
+        bindings: &ActualizationTypeBindings,
         actualized_aliases: &[ActualizedAlias],
     ) -> Option<(DeclarationKind, String, ReceiverKey, usize)> {
         let name = stub
@@ -1026,51 +853,22 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
         // `None` means the file has not said which classifier the receiver is, so the member
         // cannot be keyed at all and pairs with nothing.
         let receiver_identity = |receiver: Option<HeaderTypeId>| -> Option<ReceiverKey> {
-            let Some(ty) = receiver.and_then(|ty| headers.syntax.ty(ty)) else {
+            let Some(receiver) = receiver else {
                 return Some(ReceiverKey::Absent);
             };
-            let HeaderTypeKind::Classifier { detail, .. } = ty.kind else {
-                // A function-type receiver names no classifier; its rendered spelling is the whole
-                // of what the coarse key can say about it, and `select_actual` compares the type
-                // itself afterwards.
-                return Some(ReceiverKey::Structural(
-                    receiver
-                        .and_then(|ty| headers.syntax.transient_type_ref(ty, &headers.lookup_names))
-                        .map(|ty| ty.name)
-                        .unwrap_or_default(),
-                ));
+            let Some(ty) = headers.syntax.ty(receiver) else {
+                return None;
             };
-            let Some(detail) = headers.syntax.classifier_type(detail) else {
-                return Some(ReceiverKey::Absent);
+            if !matches!(ty.kind, HeaderTypeKind::Classifier { .. }) {
+                return Some(ReceiverKey::Structural);
             };
-            let written = headers
-                .syntax
-                .type_path(detail.path)
-                .iter()
-                .filter_map(|segment| headers.lookup_names.get(*segment))
-                .collect::<Vec<_>>();
-            let identity = scopes.resolve(stub.source, &written)?;
+            let identity = bindings.type_classifier(stub.source, receiver)?;
             for (name, target, source) in actualized_aliases {
                 if *name != identity {
                     continue;
                 }
-                let Some(target) = headers.syntax.ty(*target) else {
-                    continue;
-                };
-                let HeaderTypeKind::Classifier { detail, .. } = target.kind else {
-                    continue;
-                };
-                let Some(detail) = headers.syntax.classifier_type(detail) else {
-                    continue;
-                };
-                let written = headers
-                    .syntax
-                    .type_path(detail.path)
-                    .iter()
-                    .filter_map(|segment| headers.lookup_names.get(*segment))
-                    .collect::<Vec<_>>();
-                return scopes
-                    .resolve(*source, &written)
+                return bindings
+                    .type_classifier(*source, *target)
                     .map(ReceiverKey::Classifier);
             }
             Some(ReceiverKey::Classifier(identity))
@@ -1119,12 +917,12 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
                 .anchor(stub.id)
                 .is_some_and(|anchor| anchor.owner == Some(pair.actual))
         }) {
-            if let Some(key) = child_key(headers, child, &scopes, &actualized_aliases) {
+            if let Some(key) = child_key(headers, child, bindings, &actualized_aliases) {
                 actual_children.entry(key).or_default().push(child.id);
             }
         }
         for child in expect_children {
-            let Some(key) = child_key(headers, child, &scopes, &actualized_aliases) else {
+            let Some(key) = child_key(headers, child, bindings, &actualized_aliases) else {
                 continue;
             };
             let Some(candidates) = actual_children.get(&key) else {
@@ -1137,7 +935,7 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
             // tie leaves BOTH members unpaired, which reads downstream as two members that
             // actualized nothing.
             let Some(actual) =
-                select_actual(headers, child, candidates, &actualized_aliases, &scopes)
+                select_actual(headers, child, candidates, &actualized_aliases, bindings)
             else {
                 continue;
             };
@@ -1181,9 +979,8 @@ mod tests {
     use crate::diag::DiagSink;
     use crate::source::SourceInput;
 
-    /// Build the compact inventory for a set of `(stem, text)` sources, and the scope resolver
-    /// over it.
-    fn scopes(sources: &[(&str, &str)]) -> (StreamedHeaderModule, ClassifierScopes) {
+    /// Build the compact inventory for a set of `(stem, text)` sources.
+    fn headers(sources: &[(&str, &str)]) -> StreamedHeaderModule {
         let inputs = sources
             .iter()
             .map(|(stem, text)| SourceInput::kotlin(text).with_file_stem(stem))
@@ -1196,9 +993,19 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
-        let headers = super::super::inventory_parsed_source_headers(&inputs, &files);
-        let scopes = ClassifierScopes::of(&headers);
-        (headers, scopes)
+        super::super::inventory_parsed_source_headers(&inputs, &files)
+    }
+
+    fn resolve(
+        headers: &StreamedHeaderModule,
+        source: SourceFileId,
+        segments: &[&str],
+    ) -> Option<crate::types::TypeName> {
+        crate::resolve::resolve_actualization_classifier_for_test(
+            headers,
+            source,
+            &segments.join("."),
+        )
     }
 
     /// The scope a file writes a classifier in decides which classifier it is, and every form the
@@ -1206,7 +1013,7 @@ mod tests {
     /// fully-qualified spelling, and a wildcard import.
     #[test]
     fn every_import_form_names_the_classifier_it_brings_into_scope() {
-        let (_, scopes) = scopes(&[
+        let headers = headers(&[
             ("Model", "package plib.model\n\nclass Tally\n"),
             ("Own", "package plib\n\nclass Ledger\n"),
             (
@@ -1231,27 +1038,27 @@ mod tests {
         let wildcard = SourceFileId::from_raw(3);
         let tally = crate::types::type_name("plib/model/Tally");
         assert_eq!(
-            scopes.resolve(uses, &["Tally"]),
+            resolve(&headers, uses, &["Tally"]),
             Some(tally),
             "an explicit import names the classifier its path ends at"
         );
         assert_eq!(
-            scopes.resolve(uses, &["Renamed"]),
+            resolve(&headers, uses, &["Renamed"]),
             Some(tally),
             "an alias renames the classifier, not its identity"
         );
         assert_eq!(
-            scopes.resolve(uses, &["plib", "model", "Tally"]),
+            resolve(&headers, uses, &["plib", "model", "Tally"]),
             Some(tally),
             "a fully-qualified spelling names the same classifier"
         );
         assert_eq!(
-            scopes.resolve(uses, &["Ledger"]),
+            resolve(&headers, uses, &["Ledger"]),
             Some(crate::types::type_name("plib/Ledger")),
             "the file's own package supplies what it declares"
         );
         assert_eq!(
-            scopes.resolve(wildcard, &["Tally"]),
+            resolve(&headers, wildcard, &["Tally"]),
             Some(tally),
             "a wildcard import supplies the classifier it brings into scope"
         );
@@ -1262,7 +1069,7 @@ mod tests {
     /// first match would pair declarations that name DIFFERENT classifiers.
     #[test]
     fn a_simple_name_two_wildcards_could_supply_names_no_classifier() {
-        let (_, scopes) = scopes(&[
+        let headers = headers(&[
             ("Left", "package plib.left\n\nclass Tally\n"),
             ("Right", "package plib.right\n\nclass Tally\n"),
             (
@@ -1284,12 +1091,12 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            scopes.resolve(SourceFileId::from_raw(2), &["Tally"]),
+            resolve(&headers, SourceFileId::from_raw(2), &["Tally"]),
             None,
             "two wildcards could each supply it, so the file has named no classifier"
         );
         assert_eq!(
-            scopes.resolve(SourceFileId::from_raw(3), &["Tally"]),
+            resolve(&headers, SourceFileId::from_raw(3), &["Tally"]),
             Some(crate::types::type_name("plib/left/Tally")),
             "one wildcard says exactly which, so it resolves"
         );
@@ -1300,7 +1107,7 @@ mod tests {
     /// rather than a choice, and so is wildcard-importing one package twice.
     #[test]
     fn a_name_two_imports_claim_names_no_classifier_and_a_repeat_is_not_a_choice() {
-        let (_, scopes) = scopes(&[
+        let headers = headers(&[
             ("Left", "package plib.left\n\nclass Tally\n"),
             ("Right", "package plib.right\n\nclass Tally\n"),
             (
@@ -1333,31 +1140,31 @@ mod tests {
         ]);
         let left = crate::types::type_name("plib/left/Tally");
         assert_eq!(
-            scopes.resolve(SourceFileId::from_raw(2), &["Tally"]),
+            resolve(&headers, SourceFileId::from_raw(2), &["Tally"]),
             None,
             "two imports claim the name, so the file has named no classifier"
         );
         assert_eq!(
-            scopes.resolve(SourceFileId::from_raw(3), &["Tally"]),
+            resolve(&headers, SourceFileId::from_raw(3), &["Tally"]),
             Some(left),
             "the same import written twice still names one classifier"
         );
         assert_eq!(
-            scopes.resolve(SourceFileId::from_raw(4), &["Tally"]),
+            resolve(&headers, SourceFileId::from_raw(4), &["Tally"]),
             Some(left),
             "and so does the same wildcard written twice"
         );
     }
 
-    /// A path nothing the module declares or the file imports claims keeps its own written form.
-    /// That is a canonical answer both sides of a comparison reach identically — `Int` against
-    /// `Int` is one classifier however the module spells it — not a fallback to the text.
+    /// Default imports bind through the ordinary provider-backed scope rather than by preserving
+    /// an unresolved spelling.
     #[test]
-    fn an_unclaimed_path_is_its_own_canonical_form() {
-        let (_, scopes) = scopes(&[("Plain", "package plib\n\nfun takes(value: Int) {}\n")]);
+    fn a_default_import_binds_to_its_qualified_identity() {
+        let headers = headers(&[("Plain", "package plib\n\nfun takes(value: Int) {}\n")]);
         assert_eq!(
-            scopes.resolve(SourceFileId::from_raw(0), &["Int"]),
-            Some(crate::types::type_name("Int")),
+            resolve(&headers, SourceFileId::from_raw(0), &["Int"]),
+            Some(crate::types::type_name("kotlin/Int")),
+            "the common default import binds Int to its qualified builtin identity",
         );
     }
 }

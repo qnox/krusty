@@ -218,113 +218,6 @@ impl StreamedPassState {
     }
 }
 
-/// Multiplatform `expect`/`actual` resolution over ONE compiled source set (kotlinc's JVM MPP
-/// model: a platform module and its `dependsOn` chain compile as one set): drop every top-level
-/// `expect` declaration for which some file supplies a matching non-`expect` counterpart — same
-/// kind + name, and for callables the same arity and extension-receiver name. The `actual`
-/// modifier itself is inert; an UNMATCHED `expect` stays in the tree and fails checking exactly
-/// like any body-less declaration (skip, never mis-grade). Callers gate this on the
-/// `MultiPlatformProjects` language feature, mirroring kotlinc.
-/// The package-qualified expect/actual match key: `(package, kind, name, ext-receiver, arity)`.
-type ExpectKey = (String, u8, String, String, usize);
-
-pub(super) fn expect_key(file: &File, id: crate::ast::DeclId) -> ExpectKey {
-    let pkg = file.package.clone().unwrap_or_default();
-    let (kind, name, recv, arity) = match file.decl(id) {
-        crate::ast::Decl::Fun(function) => (
-            0,
-            function.name.clone(),
-            function
-                .receiver
-                .as_ref()
-                .map(|receiver| receiver.name.clone())
-                .unwrap_or_default(),
-            function.params.len(),
-        ),
-        crate::ast::Decl::Class(class) => (1, class.name.clone(), String::new(), 0),
-        crate::ast::Decl::Property(property) => (
-            2,
-            property.name.clone(),
-            property
-                .receiver
-                .as_ref()
-                .map(|receiver| receiver.name.clone())
-                .unwrap_or_default(),
-            0,
-        ),
-    };
-    (pkg, kind, name, recv, arity)
-}
-
-pub fn strip_matched_expects(files: &mut [File]) {
-    // The match key is PACKAGE-qualified (expect/actual couple by FqName) but deliberately omits
-    // the RETURN/property type and the receiver's TYPE ARGUMENTS (`List<String>.foo` keys as
-    // `List`) — an `actual` routinely INFERS it (`actual fun greet() = "O"`), so a
-    // type component would wrongly leave such pairs unmatched. kotlinc validates actual/expect
-    // compatibility upstream; krusty trusts that and lets an incompatible pair fail checking on
-    // its own terms downstream.
-    // Actualization stage A: every NON-expect top-level declaration's key across the whole set. An
-    // `actual typealias S = String` also actualizes an `expect class S` — typealiases live in
-    // `File.type_aliases`, so add each alias NAME as a class-kind actual.
-    let mut actuals: std::collections::HashSet<ExpectKey> = std::collections::HashSet::new();
-    for file in files.iter() {
-        for &d in &file.decls {
-            if !file
-                .expect_decls
-                .iter()
-                .any(|expect| expect.declaration == d)
-            {
-                actuals.insert(expect_key(file, d));
-            }
-        }
-        for (alias, _) in &file.type_aliases {
-            actuals.insert((
-                file.package.clone().unwrap_or_default(),
-                1,
-                alias.clone(),
-                String::new(),
-                0,
-            ));
-        }
-    }
-    let matched = files
-        .iter()
-        .enumerate()
-        .flat_map(|(file_index, file)| {
-            file.expect_decls.iter().copied().filter_map({
-                let actuals = &actuals;
-                move |expect| {
-                    actuals
-                        .contains(&expect_key(file, expect.declaration))
-                        .then_some((file_index as u32, expect.declaration))
-                }
-            })
-        })
-        .collect::<std::collections::HashSet<_>>();
-    strip_selected_expects(files, &matched);
-}
-
-fn strip_selected_expects(
-    files: &mut [File],
-    matched: &std::collections::HashSet<(u32, crate::ast::DeclId)>,
-) {
-    // Actualization removes only declarations selected by compact stable-header matching. Defaults
-    // are checked from the still-live expect syntax and stored as target-owned FIR in Pass 1.
-    for (file_index, file) in files.iter_mut().enumerate() {
-        let expects = std::mem::take(&mut file.expect_decls);
-        let drop: Vec<crate::ast::DeclId> = expects
-            .iter()
-            .filter(|expect| matched.contains(&(file_index as u32, expect.declaration)))
-            .map(|expect| expect.declaration)
-            .collect();
-        file.decls.retain(|d| !drop.contains(d));
-        file.expect_decls = expects
-            .into_iter()
-            .filter(|expect| !drop.contains(&expect.declaration))
-            .collect();
-    }
-}
-
 /// Publish expect-owned default presence on surviving actual headers and return the stable
 /// provider→target work. Matched expect syntax remains in the active Pass-1 parser stream only
 /// until those defaults become checked FIR; compact-header exclusion keeps it out of signatures.
@@ -343,12 +236,23 @@ struct ActualizedHeaders {
 
 fn actualize_headers_and_collect_inherited_defaults(
     headers: &mut crate::fir::StreamedHeaderModule,
+    actualization: crate::fir::Actualization,
 ) -> ActualizedHeaders {
     let crate::fir::Actualization {
         pairs,
         unmarked,
         incompatible,
-    } = crate::fir::actualization(headers);
+    } = actualization;
+    let matched = pairs
+        .iter()
+        .filter_map(|pair| {
+            headers
+                .declarations
+                .anchor(pair.expect)
+                .is_some_and(|anchor| anchor.owner.is_none())
+                .then_some(pair.expect)
+        })
+        .collect();
     // The declarations that actualized something, which is the authority on whether an `actual`
     // found its `expect`: this matcher compares resolved type SHAPES and follows an
     // `actual typealias`, so it pairs `expect val S.tag: S` with `actual val String.tag: String`
@@ -394,7 +298,7 @@ fn actualize_headers_and_collect_inherited_defaults(
     // provider declaration long enough to become checked target-owned FIR. Removing the parser
     // declaration here forced later code to recover it by `(file, TextRange)`.
     ActualizedHeaders {
-        matched: crate::fir::matched_expect_declarations(headers),
+        matched,
         targets: actualized_targets,
         defaults: work,
         unmarked,
@@ -1109,13 +1013,16 @@ where
         actualized_targets,
         incompatible_expects,
     ) = if multiplatform {
+        let bindings =
+            crate::resolve::actualization_type_bindings(&pass1_headers, platform.as_ref());
+        let actualization = crate::fir::actualization(&pass1_headers, &bindings);
         let ActualizedHeaders {
             matched,
             targets: actualized_targets,
             defaults,
             unmarked,
             incompatible,
-        } = actualize_headers_and_collect_inherited_defaults(&mut pass1_headers);
+        } = actualize_headers_and_collect_inherited_defaults(&mut pass1_headers, actualization);
         // Reported here, while every file's syntax is still live: the diagnostic points at the
         // declaration's NAME, and the compact inventory anchors only its whole range.
         no_expect_for_actual::report_unmarked_implementations(
