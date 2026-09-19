@@ -423,3 +423,94 @@ fn a_loop_transfer_finalizer_copy_leaves_the_protected_region() {
         "run exception table"
     );
 }
+
+/// A typed catch guards the try BODY and not the copies of the finalizer that a transfer out of it
+/// inlines inside `[start, end)`.
+///
+/// The catch used to be bound over one broad interval, so a copy of the `finally` sat physically
+/// inside the range that guards the body. An exception of the caught type thrown by that copy —
+/// after the finally had already run for that exit — entered the catch and ran it on a path Kotlin
+/// had already left. The `finally` catch-all was excluded from its own copies by a segmented
+/// region; the typed catches take the body half of that same region now.
+///
+/// Compared against kotlinc rather than pinned, so the segmentation stays tied to the reference
+/// compiler, and a `while` loop rather than `for (i in a..b)` for the reason the neighbouring case
+/// gives.
+#[test]
+fn a_typed_catch_does_not_guard_the_finalizer_copies_inside_its_body() {
+    let src = "class Guarded {\n\
+               \x20   fun step() {}\n\
+               \x20   fun run(n: Int): Int {\n\
+               \x20       var seen = 0\n\
+               \x20       var i = 0\n\
+               \x20       while (i < n) {\n\
+               \x20           i += 1\n\
+               \x20           try {\n\
+               \x20               seen += i\n\
+               \x20               continue\n\
+               \x20           } catch (e: IllegalStateException) {\n\
+               \x20               seen = -1\n\
+               \x20           } finally {\n\
+               \x20               step()\n\
+               \x20           }\n\
+               \x20       }\n\
+               \x20       return seen\n\
+               \x20   }\n\
+               }\n";
+    let (reference, krusty) = disassemble_both("TypedCatchRegion", src, "Guarded");
+    let table = |text: &str| numeric_rows(text, "int run(int)", "Exception table:");
+    let want = table(&reference);
+    assert!(
+        want.len() > 1,
+        "kotlinc splits the guarded range around the inlined copy: {want:?}"
+    );
+    assert_eq!(table(&krusty), want, "run exception table");
+}
+
+/// The same rule, observed by RUNNING it: a finalizer copy that throws the caught type on the
+/// transfer path must not re-enter the catch beside it.
+///
+/// `Tessitura` is repository-owned, so the throw cannot reach the handler through a stdlib or
+/// intrinsic path rather than the ordinary one this is about. With the broad range, the copy of
+/// `finally` inlined for the `return` threw inside the interval guarding the body, the catch ran,
+/// and `box()` answered `CAUGHT`.
+#[test]
+fn a_finalizer_copy_that_throws_the_caught_type_does_not_re_enter_the_catch() {
+    let src = "class Tessitura {\n\
+               \x20   var armed = false\n\
+               \x20   fun cleanup() { if (armed) throw IllegalStateException(\"from the finally\") }\n\
+               }\n\
+               \n\
+               fun attempt(tessitura: Tessitura): String {\n\
+               \x20   try {\n\
+               \x20       tessitura.armed = true\n\
+               \x20       return \"RETURNED\"\n\
+               \x20   } catch (e: IllegalStateException) {\n\
+               \x20       return \"CAUGHT\"\n\
+               \x20   } finally {\n\
+               \x20       tessitura.cleanup()\n\
+               \x20   }\n\
+               }\n\
+               \n\
+               fun box(): String {\n\
+               \x20   return try {\n\
+               \x20       attempt(Tessitura())\n\
+               \x20   } catch (e: IllegalStateException) {\n\
+               \x20       \"PROPAGATED\"\n\
+               \x20   }\n\
+               }\n";
+    let jdk = common::jdk_modules();
+    // Fails CLOSED: a missing JVM runner is a broken harness, not a passing contract.
+    let out = common::compile_and_run_box(
+        src,
+        "FinalizerCopyThrows",
+        &[common::stdlib_jar()],
+        Some(jdk.as_path()),
+    )
+    .expect("a JVM runner is required to observe which handler the finalizer's throw reaches");
+    assert_eq!(
+        out.trim(),
+        "PROPAGATED",
+        "the finalizer's throw leaves the try it belongs to instead of entering its own catch"
+    );
+}

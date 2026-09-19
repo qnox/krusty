@@ -84,6 +84,22 @@ impl Emitter<'_> {
         }
     }
 
+    /// The segments `finalizer`'s region has accumulated so far, closed at the current offset and
+    /// left in place.
+    ///
+    /// [`Self::take_finally_region`] removes the region, which the `finally` catch-all does once it
+    /// is complete. A typed catch needs the same segmentation over the part built so far — the try
+    /// body — while the region goes on collecting the catch bodies.
+    fn finally_segments_so_far(
+        &mut self,
+        finalizer: u32,
+        code: &mut CodeBuilder,
+    ) -> Vec<(Label, Label)> {
+        self.close_finally_segment(finalizer, code);
+        let index = self.finally_region(finalizer);
+        self.finally_regions[index].segments.clone()
+    }
+
     /// The segments of `finalizer`'s region, closed at the current offset.
     fn take_finally_region(
         &mut self,
@@ -153,6 +169,19 @@ impl Emitter<'_> {
             self.close_finally_segment(finalizer, code);
         }
         self.bind(end, code);
+        // A typed catch guards the try BODY, and the body alone. A `return`/`break`/`continue` out
+        // of the body inlines a copy of the finalizer AT that point, physically inside
+        // `[start, end)`; an exception of the caught type thrown by such a copy would enter the
+        // catch even though the finally has already run for that exit, and the catch would run on
+        // a path Kotlin has already left. The `finally` catch-all is excluded from its own copies
+        // by the segmented region below for the same reason — these are that region's BODY
+        // segments, taken here, before the catch bodies extend it.
+        let body_ranges = match finally {
+            Some(finalizer) => self.finally_segments_so_far(finalizer, code),
+            // With no finalizer there is no inlined copy to step over: a transfer out of the body
+            // jumps straight away and the body is one interval.
+            None => vec![(start, end)],
+        };
         let mut after_reachable = false;
         if !body_diverges {
             if let Some(f) = finally {
@@ -185,7 +214,7 @@ impl Emitter<'_> {
             // A handler is entered over the exception edge, not by a branch — and a diverging `try`
             // body leaves the stream dead exactly here, so binding must revive on the range it guards
             // rather than on an incoming branch.
-            code.bind_handler(handler, &[(start, end)]);
+            code.bind_handler(handler, &body_ranges);
             let exc_internal = crate::jvm::names::classfile_internal_name(&c.exc_internal.render());
             let exc_ci = self.cw.class_ref(&exc_internal);
             // Handler entry: the exception is the sole stack value; locals are the pre-`try` state.
@@ -194,14 +223,18 @@ impl Emitter<'_> {
             let cslot = self.next_slot;
             self.next_slot += 1;
             self.slots.insert(c.var, (cslot, exc_ty));
+            // The `finally` guards this catch from its ENTRY, the store of the caught exception
+            // included — kotlinc protects the handler's own entry the same way it protects the
+            // catch-all's, and a throw between the edge and the body is still a throw out of the
+            // `try` the finalizer belongs to.
+            if let Some(finalizer) = finally {
+                self.open_finally_segment(finalizer, code);
+            }
             store(exc_ty, cslot, code);
             let local_start =
                 (code.bytes.len() <= u16::MAX as usize).then_some(code.bytes.len() as u16);
             let cbody_start = code.new_label();
             self.bind(cbody_start, code);
-            if let Some(finalizer) = finally {
-                self.open_finally_segment(finalizer, code);
-            }
             let cbody_diverges = if is_stmt {
                 self.discarding_diverges(c.body)
             } else {
@@ -256,7 +289,9 @@ impl Emitter<'_> {
                     after_reachable = true;
                 }
             }
-            code.add_exception(start, end, handler, exc_ci);
+            for &(rs, re) in &body_ranges {
+                code.add_exception(rs, re, handler, exc_ci);
+            }
         }
 
         // `finally` catch-all: any exception not handled above (in the body or a catch body) runs the
