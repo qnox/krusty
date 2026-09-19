@@ -6089,8 +6089,7 @@ fn emit_class(
                 _ => None,
             })
             .flatten();
-        // A reference-typed static carries kotlinc's nullability annotation (private hoisted
-        // fields included).
+        // Reference-typed statics, including private hoisted fields, carry nullability annotations.
         let ann = (desc.starts_with('L') || desc.starts_with('[')).then(|| {
             if s.ty.is_nullable() {
                 "Lorg/jetbrains/annotations/Nullable;"
@@ -6098,11 +6097,6 @@ fn emit_class(
                 "Lorg/jetbrains/annotations/NotNull;"
             }
         });
-        // A CLASS-owned static records its generic `Signature` under the same rule a facade static
-        // and an instance field already follow: the Kotlin type has type arguments that erasure
-        // loses. This path wrote through the one field writer that takes no signature at all, so a
-        // parameterized static declared only its erasure — `[Lkotlin/Lazy;` where kotlinc also says
-        // `[Lkotlin/Lazy<Lkotlinx/serialization/KSerializer<Ljava/lang/Object;>;>;`.
         let signature = property_jvm_signatures(&signature_formatter, &s.ty, None).field;
         cw.add_field_late_sig(acc, &s.name, &desc, signature.as_deref(), cv, ann);
         // A `@JvmField` field carries the property's FIELD-targeted annotations (`JvmField` itself
