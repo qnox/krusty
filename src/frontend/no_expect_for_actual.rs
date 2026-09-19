@@ -49,9 +49,18 @@ use resolved::{Resolved, ResolvedDeclarations};
 pub(super) struct UnmatchedActual {
     file: u32,
     name: Span,
-    /// The declaration's own source range, which is the coordinate the compact header inventory
-    /// anchors its stable identity on. It is how an `actual typealias` is identified — an alias
-    /// has no resolved signature to carry an identity for it.
+    /// The declaration's stable identity, taken at the same moment its name and its syntactic
+    /// half are: the inventory's positional record of what it interned each parsed declaration
+    /// as, for a file declaration, and the inventory's own exact anchor for an `actual typealias`,
+    /// which rides a list of its own.
+    ///
+    /// Identity and coordinate travel together from here on. Recovering the identity later from
+    /// `(file, range)` made a range an identity, and a range is not one: a constructor property
+    /// and its class share one, and a map keyed by range can only answer with whichever of them
+    /// it met first.
+    declaration: Option<crate::fir::DeclarationId>,
+    /// The declaration's own source range, used only to restore source ORDER across the two lists
+    /// a file keeps its `actual`s in.
     anchor: Span,
     target: Target,
 }
@@ -101,8 +110,13 @@ enum Target {
 /// coincidence is an error about the implementation, and treating it as a valid one instead let a
 /// declaration that never claimed anything inherit the `expect`'s defaults in silence.
 ///
-/// Reported while every file's syntax is still live, because the name is the coordinate and the
-/// compact inventory anchors only the declaration's whole range.
+/// Reported while every file's syntax is still live, because the diagnostic points at the
+/// declaration's NAME and the compact inventory records its whole range.
+///
+/// The declaration each identity came from is found through the inventory's own positional record
+/// of what it interned — an identity-keyed lookup in both directions. Searching the files for a
+/// declaration whose range matched would make a range an identity, and a class and its
+/// constructor property share one.
 pub(super) fn report_unmarked_implementations(
     unmarked: &[crate::fir::DeclarationId],
     files: &[File],
@@ -112,29 +126,41 @@ pub(super) fn report_unmarked_implementations(
     if unmarked.is_empty() {
         return;
     }
-    let mut names = std::collections::HashMap::new();
-    for (index, file) in files.iter().enumerate() {
-        for &declaration in &file.decls {
-            let (name, span) = match file.decl(declaration) {
-                Decl::Fun(function) => (function.name_span, function.span),
-                Decl::Property(property) => (property.name_span, property.span),
-                Decl::Class(class) => (class.name_span, class.span),
-            };
-            names.insert((index as u32, span.lo, span.hi), name);
-        }
-        for alias in &file.type_alias_decls {
-            names.insert(
-                (index as u32, alias.span.lo, alias.span.hi),
-                alias.name_span,
-            );
-        }
-    }
+    let slots = (0..files.len())
+        .map(|index| {
+            headers.source_declaration_slots(crate::fir::SourceFileId::from_raw(index as u32))
+        })
+        .collect::<Vec<_>>();
     for &declaration in unmarked {
         let Some(anchor) = headers.declarations.anchor(declaration) else {
             continue;
         };
         let file = anchor.source.raw();
-        let Some(&name) = names.get(&(file, anchor.range.lo, anchor.range.hi)) else {
+        let Some(source) = files.get(file as usize) else {
+            continue;
+        };
+        // A file declaration answers through the positional record; a type ALIAS rides a list of
+        // its own, and the inventory interns it at its position in that list.
+        let name = slots
+            .get(file as usize)
+            .and_then(|slots| slots.get(&declaration))
+            .and_then(|slot| source.decls.get(*slot))
+            .map(|parsed| match source.decl(*parsed) {
+                Decl::Fun(function) => function.name_span,
+                Decl::Property(property) => property.name_span,
+                Decl::Class(class) => class.name_span,
+            })
+            .or_else(|| {
+                (anchor.kind == crate::fir::DeclarationKind::TypeAlias)
+                    .then(|| {
+                        source
+                            .type_alias_decls
+                            .get(anchor.sibling as usize)
+                            .map(|alias| alias.name_span)
+                    })
+                    .flatten()
+            });
+        let Some(name) = name else {
             continue;
         };
         diags.set_file(file);
@@ -145,10 +171,25 @@ pub(super) fn report_unmarked_implementations(
     }
 }
 
-pub(super) fn collect(files: &[File]) -> Vec<UnmatchedActual> {
+pub(super) fn collect(
+    files: &[File],
+    headers: &crate::fir::StreamedHeaderModule,
+) -> Vec<UnmatchedActual> {
     let mut unmatched = Vec::new();
     for (index, file) in files.iter().enumerate() {
         let file_start = unmatched.len();
+        let source = crate::fir::SourceFileId::from_raw(index as u32);
+        // Positional with the parser's own declaration array, which is how the inventory recorded
+        // what it interned each one as. Reading it here pairs every `actual` with its identity at
+        // the moment its syntax is copied, rather than leaving the identity to be looked up by a
+        // coordinate later.
+        let identities = headers.source_declarations(source);
+        let slots = file
+            .decls
+            .iter()
+            .enumerate()
+            .map(|(slot, declaration)| (*declaration, slot))
+            .collect::<std::collections::HashMap<_, _>>();
         // Which hoisted classifier is a `companion object` is an edge its OWNER records; the
         // companion itself is an ordinary singleton declaration. The reference compiler renders
         // the word, so the edge is read back here rather than guessed from the name `Companion`,
@@ -200,13 +241,26 @@ pub(super) fn collect(files: &[File]) -> Vec<UnmatchedActual> {
                         // and the reference compiler renders the declaration's own simple name.
                         name: simple_name(&class.name).to_string(),
                         shape: ClassifierShape::of(class, companions.contains(&declaration)),
-                        members: actual_members(class, simple_name(&class.name)),
+                        members: actual_members(
+                            class,
+                            simple_name(&class.name),
+                            source,
+                            slots
+                                .get(&declaration)
+                                .and_then(|slot| identities.get(*slot))
+                                .copied(),
+                            headers,
+                        ),
                     },
                 ),
             };
             unmatched.push(UnmatchedActual {
                 file: index as u32,
                 name,
+                declaration: slots
+                    .get(&declaration)
+                    .and_then(|slot| identities.get(*slot))
+                    .copied(),
                 anchor,
                 target,
             });
@@ -218,6 +272,17 @@ pub(super) fn collect(files: &[File]) -> Vec<UnmatchedActual> {
             unmatched.push(UnmatchedActual {
                 file: index as u32,
                 name: declaration.name_span,
+                // A file's type aliases ride a list of their own, so the inventory's positional
+                // record of `File::decls` does not cover them. The inventory's own anchor does,
+                // exactly: an alias is interned under its file, its range, no owner, the type
+                // alias kind, and its position in that list.
+                declaration: headers.declaration_at(crate::fir::DeclarationAnchor {
+                    source,
+                    range: declaration.span,
+                    owner: None,
+                    kind: crate::fir::DeclarationKind::TypeAlias,
+                    sibling: alias as u32,
+                }),
                 anchor: declaration.span,
                 target: Target::TypeAlias {
                     name: declaration.name.clone(),
@@ -256,7 +321,6 @@ pub(super) fn report(
     // never searches the inventory for a declaration either. Both are indexed by the one identity
     // a declaration has.
     let declarations = ResolvedDeclarations::publish(symbols, headers);
-    let identities = headers.declaration_identities();
     for actual in unmatched {
         // Every diagnostic this iteration writes belongs to this declaration's file, members
         // included. Setting it only before the owner's own error left a member's inheriting
@@ -269,10 +333,15 @@ pub(super) fn report(
         // Nothing is passed over in silence: an `actual` this check cannot answer for reports an
         // internal error at its own name, so a declaration the source wrote never disappears
         // because a lookup returned nothing.
-        let stable = actual.stable(&identities);
+        let stable = actual.declaration;
         match stable
             .ok_or("has no stable declaration identity")
             .and_then(|stable| {
+                if declarations.is_conflicted(stable) {
+                    // Two published records claimed one identity. Rendering either of them is
+                    // rendering whichever arrived second, which is not an answer.
+                    return Err("resolves to more than one published record");
+                }
                 if actualized.contains(&stable) {
                     Ok(None)
                 } else {
@@ -295,33 +364,8 @@ pub(super) fn report(
         // owner's diagnostic — an unmatched member under a MATCHED owner is reported here just
         // the same, and so is every member of an owner whose own rendering could not be produced.
         if let Target::Classifier { members, .. } = &actual.target {
-            report_members(
-                members,
-                actualized,
-                &declarations,
-                &identities,
-                actual.file,
-                stable,
-                diags,
-            );
+            report_members(members, actualized, &declarations, stable, diags);
         }
-    }
-}
-
-impl UnmatchedActual {
-    /// The stable identity the compact header inventory anchors on this declaration's own source
-    /// range, within this declaration's own file.
-    ///
-    /// This is the ONLY identity this check uses, for every kind of declaration. Actualization's
-    /// pairing — keyed by the same identities — is then the only answer to whether the declaration
-    /// actualized anything. A package-qualified name/arity key was consulted as a second answer
-    /// and had to go: it differs on a receiver's spelling exactly where actualization follows an
-    /// `actual typealias`, so it reported pairs that had matched.
-    fn stable(
-        &self,
-        identities: &crate::fir::DeclarationIdentities,
-    ) -> Option<crate::fir::DeclarationId> {
-        identities.get(self.file, self.anchor)
     }
 }
 

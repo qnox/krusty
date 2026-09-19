@@ -1035,13 +1035,16 @@ where
     // answered here, while every file's syntax is still live and before Pass-1 compaction. The
     // diagnostic itself names the declaration as the reference compiler's renderer does, so it is
     // reported once resolution has published the types it renders.
+    assert!(checked_count <= inferred_count && inferred_count <= files.len());
+    let mut pass1_headers = pass1_builder.finish();
+    // Answered here, while every file's syntax is still live and the compact inventory that
+    // interned it is already built: each `actual` is paired with its stable identity at the moment
+    // its syntax is copied, so identity and coordinate travel together from this point on.
     let unmatched_actuals = if multiplatform {
-        no_expect_for_actual::collect(&files)
+        no_expect_for_actual::collect(&files, &pass1_headers)
     } else {
         Vec::new()
     };
-    assert!(checked_count <= inferred_count && inferred_count <= files.len());
-    let mut pass1_headers = pass1_builder.finish();
     let source_classifiers = pass1_headers.source_classifier_names();
     let platform_sources = sources
         .iter()

@@ -18,11 +18,15 @@ use crate::types::{Ty, Visibility};
 pub(super) struct Member {
     name: Span,
     text: String,
-    /// The declaration's own source range, which is what the compact header inventory anchors its
-    /// identity on. A member's resolved signature is selected by THAT identity, never by spelling
-    /// and arity: two overloads that tie on arity are one declaration each, and a key that cannot
-    /// tell them apart leaves both unrendered.
-    anchor: Span,
+    /// The member's stable identity, taken where its syntax is read: the inventory's own exact
+    /// anchor — this file, the member's range, its owning classifier, its declaration kind, and
+    /// its position in the list the classifier keeps it in.
+    ///
+    /// A member's resolved signature is selected by THAT identity, never by spelling and arity:
+    /// two overloads that tie on arity are one declaration each, and a key that cannot tell them
+    /// apart leaves both unrendered. The whole anchor is asked for rather than the range alone,
+    /// because a range is not an identity — a constructor property and its class share one.
+    declaration: Option<crate::fir::DeclarationId>,
     /// The modality slot. A member's is not always `final`: an `override` of an `open` member
     /// renders `open`, and an interface member renders `abstract` or `open` depending on whether
     /// it has a body — both measured.
@@ -65,17 +69,36 @@ struct ConstructorParameter {
 /// before any of the next — which is not the order the source wrote them in, and not the order
 /// either compiler reports them in. The positions are restored here rather than left to the
 /// diagnostic sink's own ordering, so this function's order is the order it claims.
-pub(super) fn actual_members(class: &crate::ast::ClassDecl, owner: &str) -> Vec<Member> {
+pub(super) fn actual_members(
+    class: &crate::ast::ClassDecl,
+    owner: &str,
+    source: crate::fir::SourceFileId,
+    class_declaration: Option<crate::fir::DeclarationId>,
+    headers: &crate::fir::StreamedHeaderModule,
+) -> Vec<Member> {
     let interface = class.kind == crate::ast::ClassKind::Interface || class.is_fun_interface;
+    // The inventory interns a member under its owner, its range, its kind and its position in the
+    // list the classifier keeps it in. Every one of those is in hand here, so the identity is
+    // asked for exactly rather than searched for by coordinate.
+    let identity = |range: Span, kind: crate::fir::DeclarationKind, sibling: usize| {
+        let owner = class_declaration?;
+        headers.declaration_at(crate::fir::DeclarationAnchor {
+            source,
+            range,
+            owner: Some(owner),
+            kind,
+            sibling: u32::try_from(sibling).ok()?,
+        })
+    };
     let mut members = Vec::new();
-    for function in &class.methods {
+    for (index, function) in class.methods.iter().enumerate() {
         if !function.is_actual() {
             continue;
         }
         members.push(Member {
             name: function.name_span,
             text: function.name.clone(),
-            anchor: function.span,
+            declaration: identity(function.span, crate::fir::DeclarationKind::Function, index),
             modality: member_modality(
                 function.is_abstract(),
                 function.is_open(),
@@ -94,14 +117,14 @@ pub(super) fn actual_members(class: &crate::ast::ClassDecl, owner: &str) -> Vec<
             },
         });
     }
-    for property in &class.props {
+    for (index, property) in class.props.iter().enumerate() {
         if !property.is_actual {
             continue;
         }
         members.push(Member {
             name: property.span,
             text: property.name.clone(),
-            anchor: property.span,
+            declaration: identity(property.span, crate::fir::DeclarationKind::Property, index),
             // A constructor property has no accessor body to write, and `abstract` is not legal on
             // one; only `open`/`override` move it off Kotlin's default.
             modality: member_modality(false, property.is_open, interface, true),
@@ -113,14 +136,14 @@ pub(super) fn actual_members(class: &crate::ast::ClassDecl, owner: &str) -> Vec<
             },
         });
     }
-    for property in &class.body_props {
+    for (index, property) in class.body_props.iter().enumerate() {
         if !property.is_actual {
             continue;
         }
         members.push(Member {
             name: property.name_span,
             text: property.name.clone(),
-            anchor: property.span,
+            declaration: identity(property.span, crate::fir::DeclarationKind::Property, index),
             modality: member_modality(
                 property.is_abstract,
                 property.is_open,
@@ -133,7 +156,7 @@ pub(super) fn actual_members(class: &crate::ast::ClassDecl, owner: &str) -> Vec<
             },
         });
     }
-    for constructor in &class.secondary_ctors {
+    for (index, constructor) in class.secondary_ctors.iter().enumerate() {
         if !constructor.is_actual {
             continue;
         }
@@ -142,7 +165,13 @@ pub(super) fn actual_members(class: &crate::ast::ClassDecl, owner: &str) -> Vec<
             // declaration — from its first modifier through its delegation or body.
             name: constructor.declaration_span,
             text: "constructor".to_string(),
-            anchor: constructor.span,
+            // A classifier's primary constructor takes sibling zero, so a secondary one is
+            // interned at its position PLUS ONE — the same offset the inventory applies.
+            declaration: identity(
+                constructor.span,
+                crate::fir::DeclarationKind::Constructor,
+                index + 1,
+            ),
             // A constructor is never `open`, `abstract` or `override`; its rendering has no
             // modality slot at all, and this one is unread.
             modality: "final",
@@ -193,8 +222,6 @@ pub(super) fn report_members(
     members: &[Member],
     actualized: &std::collections::HashSet<crate::fir::DeclarationId>,
     declarations: &ResolvedDeclarations<'_>,
-    identities: &crate::fir::DeclarationIdentities,
-    file: u32,
     owner: Option<crate::fir::DeclarationId>,
     diags: &mut DiagSink,
 ) {
@@ -211,13 +238,7 @@ pub(super) fn report_members(
         return;
     };
     for member in members {
-        match render_member(
-            member,
-            identities.get(file, member.anchor),
-            actualized,
-            class,
-            declarations,
-        ) {
+        match render_member(member, member.declaration, actualized, class, declarations) {
             Ok(Rendered::Actualized) => {}
             Ok(Rendered::Unmatched(rendered)) => diags.error(
                 member.name,
