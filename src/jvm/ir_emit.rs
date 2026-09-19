@@ -945,7 +945,7 @@ fn data_copy_fn_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
 /// bound to erase — `Array<List<*>>` is `[Ljava/util/List;` but nothing in the proto says so. A bare
 /// `List<*>` erases to its own classifier and stays derivable, so only the array form needs the
 /// explicit `JvmMethodSignature` (measured on kotlinc 2.4.10).
-fn array_of_star_projection(ty: crate::types::Ty) -> bool {
+pub(super) fn array_of_star_projection(ty: crate::types::Ty) -> bool {
     ty.array_elem().is_some_and(|element| {
         matches!(element.non_null(), crate::types::Ty::StarProjection(_))
             || element
