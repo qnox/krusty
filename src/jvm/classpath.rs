@@ -999,9 +999,10 @@ fn global_entry_class_bytes_cache(key: &EntryKey) -> ClassBytesCache {
 
 /// Process-global cache of parsed `.kotlin_builtins` fragments, one [`EntryCache`] slot per entry.
 /// The inner mutex serializes the ONE cold read for a package across compiler workers; its outer
-/// `None` means "not initialized/retry after a failed read", while `Some(None)` records that this
-/// entry PERMANENTLY has no fragment for the package.
-type BuiltinsValue = Option<std::sync::Arc<BuiltinsFile>>;
+/// `None` means "not initialized/retry after a transient read failure". The inner result retains an
+/// immutable decode failure exactly, while `Ok(None)` records that this entry has no fragment.
+type BuiltinsValue =
+    Result<Option<std::sync::Arc<BuiltinsFile>>, std::sync::Arc<BuiltinsLoadError>>;
 type BuiltinsSlot = std::sync::Arc<std::sync::Mutex<Option<BuiltinsValue>>>;
 type BuiltinsMap = HashMap<TypeName, BuiltinsSlot>;
 type BuiltinsCache = std::sync::Arc<std::sync::RwLock<BuiltinsMap>>;
@@ -1019,7 +1020,55 @@ fn global_entry_builtins_cache(key: &EntryKey) -> BuiltinsCache {
 enum EntryReadResult {
     Data(Vec<u8>),
     Absent,
-    Failed,
+    Failed(String),
+}
+
+#[derive(Debug)]
+pub(super) enum BuiltinsLoadError {
+    Read {
+        entry: PathBuf,
+        resource: String,
+        detail: String,
+    },
+    Decode {
+        entry: PathBuf,
+        resource: String,
+        source: super::metadata::PackageFragmentDecodeError,
+    },
+}
+
+impl std::fmt::Display for BuiltinsLoadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read {
+                entry,
+                resource,
+                detail,
+            } => write!(
+                formatter,
+                "cannot read {resource} from {}: {detail}",
+                entry.display()
+            ),
+            Self::Decode {
+                entry,
+                resource,
+                source,
+            } => write!(
+                formatter,
+                "cannot decode {resource} from {}: {source}",
+                entry.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BuiltinsLoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Decode { source, .. } => Some(source),
+            Self::Read { .. } => None,
+        }
+    }
 }
 
 /// One resolved extension-function candidate: the owner class (internal name), the JVM method
@@ -2934,18 +2983,22 @@ impl Classpath {
     /// A parsed `.kotlin_builtins` fragment by package id (class internal-name id → supertypes+members),
     /// read once and cached. The single builtins entry point — both the collection hierarchy and a
     /// type's member API derive from it.
-    fn builtins_file_for_package(&self, package: TypeName) -> std::sync::Arc<BuiltinsFile> {
+    fn try_builtins_file_for_package(
+        &self,
+        package: TypeName,
+    ) -> Result<std::sync::Arc<BuiltinsFile>, std::sync::Arc<BuiltinsLoadError>> {
         let tree = self.package_tree();
         let catalog_complete = tree.incomplete_entries.is_empty();
         if catalog_complete {
             if let Some(m) = self.builtins.borrow().get(&package) {
-                return m.clone();
+                return Ok(m.clone());
             }
         }
         let path = Self::builtins_path_for_package(package);
-        let mut indices = tree
+        let declared_indices = tree
             .node_for_name(package)
             .map_or_else(Vec::new, |node| node.builtins_jars.clone());
+        let mut indices = declared_indices.clone();
         indices.extend(tree.incomplete_entries.iter().copied());
         indices.sort_unstable();
         indices.dedup();
@@ -2954,6 +3007,7 @@ impl Classpath {
             let Some(entry) = self.entries.get(i) else {
                 continue;
             };
+            let declared = declared_indices.contains(&i);
             // Per-entry global cache first: the parse of one entry's fragment is independent of the
             // classpath composition, so per-test classpath sets share it (see
             // [`global_entry_builtins_cache`]). The classpath-order walk still decides WHICH entry's
@@ -2982,21 +3036,51 @@ impl Classpath {
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                             EntryReadResult::Absent
                         }
-                        Err(_) => EntryReadResult::Failed,
+                        Err(error) => EntryReadResult::Failed(error.to_string()),
                     },
                     Entry::Jar(jar) => self.jar_entry_read(jar, &path),
                     // `.kotlin_builtins` fragments never live in the JDK jimage.
                     Entry::Jimage(_) | Entry::CtSym { .. } => EntryReadResult::Absent,
                 };
                 match read {
-                    EntryReadResult::Data(bytes) => (
-                        Some(std::sync::Arc::new(BuiltinsFile::from_package(
-                            super::metadata::parse_builtins(&bytes),
-                        ))),
-                        true,
+                    EntryReadResult::Data(bytes) => match super::metadata::parse_builtins(&bytes) {
+                        Ok(package) => (
+                            Ok(Some(std::sync::Arc::new(BuiltinsFile::from_package(
+                                package,
+                            )))),
+                            true,
+                        ),
+                        Err(error) => (
+                            Err(std::sync::Arc::new(BuiltinsLoadError::Decode {
+                                entry: entry.path().to_path_buf(),
+                                resource: path.clone(),
+                                source: error,
+                            })),
+                            true,
+                        ),
+                    },
+                    EntryReadResult::Absent if declared => (
+                        Err(std::sync::Arc::new(BuiltinsLoadError::Read {
+                            entry: entry.path().to_path_buf(),
+                            resource: path.clone(),
+                            detail: "selected builtins resource is absent".to_string(),
+                        })),
+                        false,
                     ),
-                    EntryReadResult::Absent => (None, true),
-                    EntryReadResult::Failed => (None, false),
+                    EntryReadResult::Absent => (Ok(None), true),
+                    EntryReadResult::Failed(error) if declared => (
+                        Err(std::sync::Arc::new(BuiltinsLoadError::Read {
+                            entry: entry.path().to_path_buf(),
+                            resource: path.clone(),
+                            detail: error,
+                        })),
+                        false,
+                    ),
+                    // An entry whose catalog could not be read is probed because it *might* own
+                    // this package. Failure to perform that speculative probe is already reported
+                    // by the classpath-entry diagnostic; it is not evidence that this particular
+                    // builtins resource was selected and then became unreadable.
+                    EntryReadResult::Failed(_) => (Ok(None), false),
                 }
             };
             let parsed = match global_slot {
@@ -3017,9 +3101,12 @@ impl Classpath {
                 }
                 None => read_and_parse().0,
             };
-            if let Some(file) = parsed {
-                found = Some(file);
-                break;
+            match parsed? {
+                Some(file) => {
+                    found = Some(file);
+                    break;
+                }
+                None => continue,
             }
         }
         let rc = found.unwrap_or_else(|| {
@@ -3030,7 +3117,28 @@ impl Classpath {
         if catalog_complete {
             self.builtins.borrow_mut().insert(package, rc.clone());
         }
-        rc
+        Ok(rc)
+    }
+
+    fn builtins_file_for_package(&self, package: TypeName) -> std::sync::Arc<BuiltinsFile> {
+        self.try_builtins_file_for_package(package)
+            .unwrap_or_else(|error| panic!("validated Kotlin builtins became unreadable: {error}"))
+    }
+
+    pub(super) fn validate_builtins(&self) -> Result<(), std::sync::Arc<BuiltinsLoadError>> {
+        let tree = self.package_tree();
+        let mut packages = tree
+            .packages
+            .iter()
+            .filter(|(_, node)| !node.builtins_jars.is_empty())
+            .map(|(&package, _)| crate::types::type_name_from(&tree.names, package))
+            .collect::<Vec<_>>();
+        packages.sort_by(|left, right| left.path_cmp(*right));
+        drop(tree);
+        for package in packages {
+            self.try_builtins_file_for_package(package)?;
+        }
+        Ok(())
     }
 
     pub(super) fn builtin_package_functions(
@@ -3940,7 +4048,7 @@ impl Classpath {
     fn jar_entry(&self, jar: &Path, name: &str) -> Option<Vec<u8>> {
         match self.jar_entry_read(jar, name) {
             EntryReadResult::Data(bytes) => Some(bytes),
-            EntryReadResult::Absent | EntryReadResult::Failed => None,
+            EntryReadResult::Absent | EntryReadResult::Failed(_) => None,
         }
     }
 
@@ -3949,25 +4057,27 @@ impl Classpath {
     fn jar_entry_read(&self, jar: &Path, name: &str) -> EntryReadResult {
         let mut archives = self.archives.borrow_mut();
         if !archives.contains_key(jar) {
-            let Ok(file) = File::open(jar) else {
-                return EntryReadResult::Failed;
+            let file = match File::open(jar) {
+                Ok(file) => file,
+                Err(error) => return EntryReadResult::Failed(error.to_string()),
             };
-            let Ok(archive) = zip::ZipArchive::new(file) else {
-                return EntryReadResult::Failed;
+            let archive = match zip::ZipArchive::new(file) {
+                Ok(archive) => archive,
+                Err(error) => return EntryReadResult::Failed(error.to_string()),
             };
             archives.insert(jar.to_path_buf(), archive);
         }
         let Some(archive) = archives.get_mut(jar) else {
-            return EntryReadResult::Failed;
+            return EntryReadResult::Failed("archive cache rejected the opened jar".to_string());
         };
         let mut entry = match archive.by_name(name) {
             Ok(entry) => entry,
             Err(zip::result::ZipError::FileNotFound) => return EntryReadResult::Absent,
-            Err(_) => return EntryReadResult::Failed,
+            Err(error) => return EntryReadResult::Failed(error.to_string()),
         };
         let mut buf = Vec::with_capacity(entry.size() as usize);
-        if entry.read_to_end(&mut buf).is_err() {
-            return EntryReadResult::Failed;
+        if let Err(error) = entry.read_to_end(&mut buf) {
+            return EntryReadResult::Failed(error.to_string());
         }
         EntryReadResult::Data(buf)
     }
@@ -7680,13 +7790,14 @@ mod fq_tests {
             .entry(pkg)
             .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(None)))
             .clone();
-        *slot.lock().unwrap() = Some(Some(file.clone()));
+        *slot.lock().unwrap() = Some(Ok(Some(file.clone())));
         let hit = global_entry_builtins_cache(&b.cache_key[1])
             .read()
             .unwrap()
             .get(&pkg)
             .cloned()
             .and_then(|slot| slot.lock().unwrap().clone())
+            .and_then(Result::ok)
             .flatten()
             .expect("builtins fragment shared across classpath sets");
         assert!(std::sync::Arc::ptr_eq(&hit, &file));
@@ -7694,6 +7805,56 @@ mod fq_tests {
         assert!(b.entry_body_caches[0].is_none());
         assert!(b.entry_class_bytes_caches[0].is_none());
         assert!(b.entry_builtins_caches[0].is_none());
+    }
+
+    #[test]
+    fn selected_corrupt_builtins_fail_platform_initialization_exactly() {
+        let directory = test_temp_dir("corrupt-builtins");
+        let package = directory.join("broken");
+        std::fs::create_dir(&package).expect("create builtins package");
+        let fragment = package.join("broken.kotlin_builtins");
+        std::fs::write(&fragment, [0, 0, 0, 0, 0x0a]).expect("write corrupt builtins");
+
+        let result =
+            crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(Classpath::new(vec![
+                directory.clone(),
+            ])));
+        assert_eq!(
+            result.map(|_| ()),
+            Err(crate::libraries::PlatformInitializationError {
+                message: format!(
+                    "cannot load Kotlin builtins dependency: cannot decode broken/broken.kotlin_builtins from {}: truncated package-fragment string table length at byte 1",
+                    directory.display()
+                ),
+            })
+        );
+
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn selected_unreadable_builtins_fail_platform_initialization_exactly() {
+        let directory = test_temp_dir("unreadable-builtins");
+        let package = directory.join("broken");
+        std::fs::create_dir(&package).expect("create builtins package");
+        let fragment = package.join("broken.kotlin_builtins");
+        std::fs::write(&fragment, [0, 0, 0, 0]).expect("write indexed builtins");
+        let classpath = std::rc::Rc::new(Classpath::new(vec![directory.clone()]));
+        let _ = classpath.package_tree();
+        std::fs::remove_file(&fragment).expect("make indexed builtins unreadable");
+
+        let result = crate::jvm::jvm_libraries::JvmLibraries::new(classpath);
+        assert_eq!(
+            result.map(|_| ()),
+            Err(crate::libraries::PlatformInitializationError {
+                message: format!(
+                    "cannot load Kotlin builtins dependency: cannot read broken/broken.kotlin_builtins from {}: selected builtins resource is absent",
+                    directory.display()
+                ),
+            })
+        );
+
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]
