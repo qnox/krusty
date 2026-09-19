@@ -2730,7 +2730,11 @@ fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_, '_>, cw: &mut ClassWriter)
     // member methods (whose bodies intern their own constants in between) — so `emit_class` reserves
     // each name at its emission site instead.
     if synthesizes_data_class_members(c) {
-        let simple = fq_name.rsplit('/').next().unwrap_or(fq_name);
+        // The class's SIMPLE name, which a data class's `toString` renders: `Inner(id=…)`, not
+        // `Holder$Inner(id=…)`. Splitting on the package separator alone left a nested class
+        // carrying its outer prefix into the rendered string — a wrong value, not just wrong
+        // bytes. The lowering that builds the same recipe splits on both separators.
+        let simple = fq_name.rsplit(['/', '$']).next().unwrap_or(fq_name);
         // The synthesized members cover the PRIMARY-CONSTRUCTOR properties only; a body property has a
         // backing field in `c.fields` but no `componentN` and no `copy` parameter (see
         // `build_class_metadata`, which takes the same prefix).
