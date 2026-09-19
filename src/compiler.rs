@@ -786,6 +786,26 @@ impl crate::fir::CheckedBodySink for DiscardCheckedBodies {
     }
 }
 
+/// The first error the front end has already reported, as the census entry that names it.
+fn reported_frontend_error(diags: &DiagSink) -> Option<FrontendFailure> {
+    let diagnostic = diags
+        .diags
+        .iter()
+        .find(|diagnostic| diagnostic.severity == crate::diag::Severity::Error)?;
+    let internal = diagnostic.msg.starts_with("internal error:");
+    Some(FrontendFailure {
+        stage: if internal {
+            FrontendStage::Signatures
+        } else {
+            FrontendStage::Check
+        },
+        source: diagnostic.file,
+        span: Some(diagnostic.span),
+        kind: if internal { "Internal" } else { "Rejected" }.to_string(),
+        detail: diagnostic.msg.clone(),
+    })
+}
+
 /// Stream a source set through the production two-pass front end and report every frontend refusal,
 /// with no backend attached.
 ///
@@ -808,12 +828,7 @@ pub fn check_frontend_only(
     // finalization also fails whenever an ordinary diagnostic made a signature unsolvable, so
     // reporting the missing streamed index first would file every rejected source under the
     // signature solver and hide the real cause.
-    let first_error = diags
-        .diags
-        .iter()
-        .find(|diagnostic| diagnostic.severity == crate::diag::Severity::Error)
-        .map(|diagnostic| (diagnostic.file, diagnostic.span, diagnostic.msg.clone()));
-    if first_error.is_some() {
+    if reported_frontend_error(diags).is_some() {
         // A failed stable signature cannot enter checked FIR, but it also must not prevent the
         // normal second source pass from finding independent body diagnostics. Consume the compact
         // partial module exactly as emission does, and discard every reparsed unit immediately;
@@ -821,27 +836,10 @@ pub fn check_frontend_only(
         if let Some(streamed) = streamed {
             recover_pass_two_diagnostics(&reparse_sources, &mut symbols, streamed.module, diags);
         }
-        let (source, span, message) = diags
-            .diags
-            .iter()
-            .find(|diagnostic| diagnostic.severity == crate::diag::Severity::Error)
-            .map(|diagnostic| (diagnostic.file, diagnostic.span, diagnostic.msg.clone()))
-            .expect("the preexisting frontend error remains after diagnostic recovery");
-        census.failures.push(FrontendFailure {
-            stage: if message.starts_with("internal error:") {
-                FrontendStage::Signatures
-            } else {
-                FrontendStage::Check
-            },
-            source,
-            span: Some(span),
-            kind: if message.starts_with("internal error:") {
-                "Internal".to_string()
-            } else {
-                "Rejected".to_string()
-            },
-            detail: message,
-        });
+        census.failures.push(
+            reported_frontend_error(diags)
+                .expect("the preexisting frontend error remains after diagnostic recovery"),
+        );
         return census;
     }
     let Some(streamed) = streamed else {
@@ -860,13 +858,24 @@ pub fn check_frontend_only(
         diagnostic_recovery,
     } = streamed;
     if diagnostic_recovery {
-        census.failures.push(FrontendFailure {
+        // Finalization refused a signature without having reported anything yet. The explanation is
+        // the declaration's own body diagnostic, which the second source pass is what produces —
+        // an untyped delegated property whose delegate supplies no `getValue` has nothing to infer
+        // its type FROM, and only the check of that `by` expression can name the missing
+        // convention. Run the same recovery the emitting pipeline runs before judging the module:
+        // returning here instead discarded that diagnostic and every independent one in the file,
+        // reporting a valid refusal as an unexplained signature failure.
+        recover_pass_two_diagnostics(&reparse_sources, &mut symbols, module, diags);
+        // Still nothing: the refusal genuinely has no source diagnostic behind it. That is a
+        // conformance failure in its own right and stays one — recovery must not become a way for
+        // an unexplained signature refusal to pass as a clean run.
+        census.failures.push(reported_frontend_error(diags).unwrap_or(FrontendFailure {
             stage: FrontendStage::Signatures,
             source: 0,
             span: None,
             kind: "MissingSignatureDiagnostic".to_string(),
             detail: "signature recovery module had no reported source diagnostic".to_string(),
-        });
+        }));
         return census;
     }
     let (mut index, mut inline_bodies, mut default_arguments, mut source_map) = module.into_parts();

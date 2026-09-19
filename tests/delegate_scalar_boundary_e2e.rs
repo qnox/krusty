@@ -863,14 +863,19 @@ fn a_delegate_with_no_convention_names_every_method_it_lacks() {
     );
 }
 
-/// The one shape whose ledger krusty does NOT reproduce, asserted so the divergence stays exactly
-/// this size. A delegated property with NO declared type has nothing to infer its type from once
-/// `getValue` is missing, and krusty's signature phase then fails to finalize the module without
-/// naming a cause — which skips the body check that would have reported it, for the whole file.
-/// That silent skip is a pre-existing gap in signature finalization, not in this diagnostic: a
-/// LOCAL delegated property, whose type is inferred by the checker itself, reports normally.
+/// A delegated property with NO declared type and no `getValue` on its delegate: the one shape
+/// whose type has nothing to be inferred FROM once the convention is missing, so its signature
+/// cannot finalize at all.
+///
+/// The declaration is still named, and the file's independent diagnostics still come out. Both
+/// complete ordered ledgers are asserted, so the ONE entry krusty does not reproduce is pinned by
+/// measurement rather than described: kotlinc cascades a second `setValue` refusal whose value slot
+/// renders the failed inference itself (`??? (Unresolved name: getValue)`). krusty suppresses every
+/// delegate-convention message whose operand types are already errors, because repeating a failure
+/// under a second heading is what that suppression exists to prevent.
 #[test]
-fn an_untyped_delegated_property_is_a_known_silent_gap() {
+fn an_untyped_delegated_property_names_its_missing_convention_and_the_rest_of_the_file() {
+    let dir = common::scratch_dir().expect("scratch dir");
     let untyped = "class Plain\n\
                    \n\
                    var untyped by Plain()\n\
@@ -879,10 +884,27 @@ fn an_untyped_delegated_property_is_a_known_silent_gap() {
                    \x20   val mismatched: Int = \"not an Int\"\n\
                    \x20   println(mismatched)\n\
                    }\n";
+    let missing_getvalue = "3:13: error: type \'Plain\' has no method \'getValue(Nothing?, \
+                            KMutableProperty0<*>)\', so it cannot serve as a delegate."
+        .to_string();
+    let unrelated_mismatch =
+        "6:25: error: initializer type mismatch: expected \'Int\', actual \'String\'.".to_string();
+    assert_eq!(
+        kotlinc_error_ledger(untyped, "Untyped.kt", &dir.join("Untyped-ref")),
+        vec![
+            missing_getvalue.clone(),
+            "3:13: error: type \'Plain\' has no method \'setValue(Nothing?, KMutableProperty0<*>, \
+             ??? (Unresolved name: getValue))\', so it cannot serve as a delegate for var \
+             (read-write property)."
+                .to_string(),
+            unrelated_mismatch.clone(),
+        ],
+        "kotlinc\'s complete ordered ledger"
+    );
     assert_eq!(
         common::front_end_diagnostics_located(untyped, &[common::stdlib_jar()], None),
-        Vec::<String>::new(),
-        "the gap swallows the file\'s other diagnostics too, which is how it is recognised"
+        vec![missing_getvalue, unrelated_mismatch],
+        "krusty\'s complete ordered ledger: the same entries without kotlinc\'s cascaded setValue"
     );
 
     // The same delegate, the same missing convention, declared as a local: reported exactly.
@@ -893,12 +915,8 @@ fn an_untyped_delegated_property_is_a_known_silent_gap() {
                  \x20   println(untyped)\n\
                  }\n";
     assert_eq!(
+        kotlinc_error_ledger(local, "UntypedLocal.kt", &dir.join("UntypedLocal-ref")),
         common::front_end_diagnostics_located(local, &[common::stdlib_jar()], None),
-        vec![
-            "4:17: error: type \'Plain\' has no method \'getValue(Nothing?, KProperty0<*>)\', so \
-             it cannot serve as a delegate."
-                .to_string(),
-        ],
-        "a local delegated property reports the missing convention with no declared type"
+        "a local delegated property, whose type the checker infers itself, matches entry for entry"
     );
 }
