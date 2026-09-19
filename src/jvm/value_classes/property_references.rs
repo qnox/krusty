@@ -93,36 +93,41 @@ pub(super) fn realize(
             // only the SETTER's name does, because its value-class PARAMETER mangles whether or not
             // the field behind it holds the carrier. Tying the two together left the reference
             // naming an unmangled setter the facade does not declare.
-            if let (Some(setter), Some(declared_setter)) = (
-                reference.setter_name.as_mut(),
-                realization.declared_setter_name.as_deref(),
-            ) {
-                // `is_file_class` exempts a value-class RESULT from the hash, never a value-class
-                // PARAMETER, and the declaration side names this setter with the same `false`.
-                *setter = vc_mangle(
-                    declared_setter,
-                    std::slice::from_ref(&reference.prop_ty),
-                    &Ty::Unit,
-                    callable_under,
-                    false,
-                    false,
-                );
+            if !realization.accessor_names_are_physical {
+                if let (Some(setter), Some(declared_setter)) = (
+                    reference.setter_name.as_mut(),
+                    realization.declared_setter_name.as_deref(),
+                ) {
+                    // `is_file_class` exempts a value-class RESULT from the hash, never a
+                    // value-class PARAMETER, and the declaration side names this setter with the
+                    // same `false`.
+                    *setter = vc_mangle(
+                        declared_setter,
+                        std::slice::from_ref(&reference.prop_ty),
+                        &Ty::Unit,
+                        callable_under,
+                        false,
+                        false,
+                    );
+                }
             }
             continue;
         }
-        reference.boxed_value_class = Some(value_class);
+        realization.boxed_value_class = Some(value_class);
         // A TOP-LEVEL property is realized on the file facade, where kotlinc suppresses RETURN
         // mangling: `getTopLevel()I` keeps its plain name while a member's `getZ-a_XrcN0()I` does
         // not. Its SETTER still mangles — a value-class PARAMETER always does — which is why the
         // two accessors of the same property do not agree on it.
-        reference.getter_name = vc_mangle(
-            &realization.declared_getter_name,
-            &[],
-            &reference.prop_ty,
-            callable_under,
-            top_level,
-            false,
-        );
+        if !realization.accessor_names_are_physical {
+            reference.getter_name = vc_mangle(
+                &realization.declared_getter_name,
+                &[],
+                &reference.prop_ty,
+                callable_under,
+                top_level,
+                false,
+            );
+        }
         // The accessor exchanges the value class's erased CARRIER, never the boxed object. A
         // member or top-level property has no written descriptor, so the one the emitter would
         // synthesize from the property's semantic type (`()LZ;`) names a method that does not
@@ -147,18 +152,20 @@ pub(super) fn realize(
             }
             (None, None) => {}
         }
-        if let (true, Some(declared_setter)) = (
-            reference.setter_name.is_some(),
-            realization.declared_setter_name.as_deref(),
-        ) {
-            reference.setter_name = Some(vc_mangle(
-                declared_setter,
-                std::slice::from_ref(&reference.prop_ty),
-                &Ty::Unit,
-                callable_under,
-                top_level,
-                false,
-            ));
+        if !realization.accessor_names_are_physical {
+            if let (true, Some(declared_setter)) = (
+                reference.setter_name.is_some(),
+                realization.declared_setter_name.as_deref(),
+            ) {
+                reference.setter_name = Some(vc_mangle(
+                    declared_setter,
+                    std::slice::from_ref(&reference.prop_ty),
+                    &Ty::Unit,
+                    callable_under,
+                    top_level,
+                    false,
+                ));
+            }
         }
         match (
             reference.setter_descriptor.as_mut(),
@@ -253,16 +260,19 @@ pub(super) fn realize(
         // `@get:JvmName("readY")` is `readY` there whatever the property is spelled. Rebuilding it
         // from `prop_name` discards that answer and names a method the class does not declare.
         let declared_getter = realization.declared_getter_name.clone();
-        let mut getter = vc_mangle(
-            &declared_getter,
-            declared_params,
-            &reference.prop_ty,
-            callable_under,
-            extension,
-            false,
-        );
-        if !extension && getter == declared_getter {
-            getter.push_str("-impl");
+        let mut getter = declared_getter.clone();
+        if !realization.accessor_names_are_physical {
+            getter = vc_mangle(
+                &declared_getter,
+                declared_params,
+                &reference.prop_ty,
+                callable_under,
+                extension,
+                false,
+            );
+            if !extension && getter == declared_getter {
+                getter.push_str("-impl");
+            }
         }
         let physical_ret = realization
             .physical_getter_ret
@@ -277,16 +287,19 @@ pub(super) fn realize(
             let value = reference.prop_ty;
             let mut params = declared_params.to_vec();
             params.push(value);
-            let mut mangled = vc_mangle(
-                declared_setter,
-                &params,
-                &Ty::Unit,
-                callable_under,
-                extension,
-                false,
-            );
-            if !extension && mangled == declared_setter {
-                mangled.push_str("-impl");
+            let mut mangled = declared_setter.to_string();
+            if !realization.accessor_names_are_physical {
+                mangled = vc_mangle(
+                    declared_setter,
+                    &params,
+                    &Ty::Unit,
+                    callable_under,
+                    extension,
+                    false,
+                );
+                if !extension && mangled == declared_setter {
+                    mangled.push_str("-impl");
+                }
             }
             *setter = mangled;
             reference.setter_descriptor = Some(format!(
@@ -337,7 +350,7 @@ pub(super) fn realize(
         // through its facade. Neither changes `ext_facade`, which the reference's reflection owner
         // and its top-level flag are read from — a member of a value class is still a MEMBER
         // reference (`ldc Z.class`, flags 0), and only the physical call shape changes.
-        reference.unboxed_receiver_value_class = Some(receiver);
+        realization.unboxed_receiver_value_class = Some(receiver);
     }
     ir.function_reference_access_bridges.extend(access_bridges);
     true
@@ -377,8 +390,6 @@ mod tests {
             getter_descriptor: None,
             setter_name: None,
             setter_descriptor: None,
-            boxed_value_class: None,
-            unboxed_receiver_value_class: None,
             owner_is_interface: false,
             prop_ty: Ty::Int,
             bound: false,
@@ -399,6 +410,9 @@ mod tests {
                 setter_function: None,
                 physical_getter_ret: None,
                 declares_value_class_storage: false,
+                accessor_names_are_physical: false,
+                boxed_value_class: None,
+                unboxed_receiver_value_class: None,
             },
         );
         let under = Under::from_iter([(vault, Ty::Int)]);

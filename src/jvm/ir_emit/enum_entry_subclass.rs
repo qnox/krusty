@@ -4,6 +4,8 @@
 //! the enum's, plus the entry's overriding methods. It has no fields of its own — the overrides
 //! read the enum's through the inherited `this`.
 
+use super::bridge_emission::emit_bridges;
+use super::constructor_defaults::emit_ctor_default_stub_with_prefix;
 use super::*;
 
 /// Emit a synthesized enum-entry subclass (`Enum$ENTRY extends Enum`) for an entry with a body: a
@@ -81,6 +83,7 @@ pub(super) fn emit_enum_entry_subclass(
             0,
             &user_jvm,
             defaults,
+            None,
             false,
             0x1000,
             &mut cw,
@@ -135,6 +138,6 @@ pub(super) fn emit_enum_entry_subclass(
     // Entry-body override edges are checked and frozen in Pass 1 like ordinary class overrides.
     // Their anonymous subclass still needs the JVM descriptor adapters derived from those edges
     // (for example `apply(Object)` forwarding to `apply(String)`).
-    emit_bridges(ir, c, &mut cw);
+    emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
     cw.finish()
 }

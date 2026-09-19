@@ -37,6 +37,7 @@ mod interface_compatibility;
 mod member_schedule;
 mod operand_stack;
 mod property_access;
+mod property_reference_values;
 mod return_emission;
 mod try_emission;
 use try_emission::FinallyRegion;
@@ -47,6 +48,7 @@ mod when;
 use super::method_parameters::OwnerConstructorPrefix;
 use inline_body_emission::collect_body_var_types;
 use member_schedule::{source_ordered_members, SourceOrderedMember};
+use property_reference_values::{box_property_reference_value, value_class_boundary_conversion};
 use secondary_constructor::SecondaryConstructorEmitter;
 
 struct InlineStaticTarget<'a> {
@@ -286,6 +288,10 @@ pub(super) struct EmitEnv<'a> {
     /// JVM-only realizations for already-resolved current-module property operations. Kept beside
     /// the emitter rather than on common IR so a backend field/accessor choice cannot leak into FIR.
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
+    /// JVM carrier and accessor realization selected for each synthesized property-reference
+    /// class. Common IR deliberately carries none of these representation facts.
+    property_reference_realizations:
+        &'a crate::jvm::property_references::PropertyReferenceRealizations,
     /// Per-call JVM placeholder/mask/marker plans produced during default-call realization.
     default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
     /// File-wide `InnerClasses` candidates prepared once from stable classifier identities.
@@ -3812,6 +3818,8 @@ pub(crate) struct CheckedEmitFacts<'a> {
     pub(crate) metadata: EmitMetadata<'a>,
     pub(crate) signature_symbols: &'a dyn BackendClassifierSource,
     pub(crate) property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
+    pub(crate) property_reference_realizations:
+        &'a crate::jvm::property_references::PropertyReferenceRealizations,
     pub(crate) default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
 }
 
@@ -3833,6 +3841,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         lambda_modes: opts.lambda_modes,
         java_parameters: opts.java_parameters,
         property_realizations: facts.property_realizations,
+        property_reference_realizations: facts.property_reference_realizations,
         default_call_operands: facts.default_call_operands,
         inner_classes: crate::jvm::inner_classes::InnerClasses::new(ir),
     };
@@ -7088,72 +7097,6 @@ fn property_setter_target(pr: &crate::ir::PropRef, ext: bool) -> (String, String
     (name, descriptor)
 }
 
-/// Convert a value class at the erased `KProperty` boundary, letting `null` pass through.
-///
-/// A NULLABLE value class crosses that boundary as either its box or `null`, and kotlinc's
-/// reference guards the conversion on exactly that. An unconditional `box-impl`/`unbox-impl`
-/// dereferences the null instead — `set(null)` on a `var x: Label?` died with a
-/// `NullPointerException` inside `Label.unbox-impl`.
-fn value_class_boundary_conversion(
-    cw: &mut ClassWriter,
-    code: &mut CodeBuilder,
-    nullable: bool,
-    locals: Vec<VerifType>,
-    boxed: VerifType,
-    result: Ty,
-    convert: impl FnOnce(&mut ClassWriter, &mut CodeBuilder),
-) {
-    if !nullable {
-        convert(cw, code);
-        return;
-    }
-    let null_case = code.new_label();
-    let done = code.new_label();
-    code.dup();
-    // At the branch target the DUPLICATE is still on the stack — the value as it arrived, not the
-    // one the conversion would have produced.
-    code.add_frame_if_new(null_case, locals.clone(), vec![boxed]);
-    code.ifnull(null_case);
-    convert(cw, code);
-    let converted = verif_for_jvm_free(cw, result);
-    code.add_frame_if_new(done, locals, vec![converted]);
-    code.goto(done);
-    code.bind(null_case);
-    code.pop();
-    code.aconst_null();
-    code.bind(done);
-}
-
-fn box_property_reference_value(
-    cw: &mut ClassWriter,
-    code: &mut CodeBuilder,
-    property: &crate::ir::PropRef,
-    physical: Ty,
-    locals: Vec<VerifType>,
-) {
-    if let Some(value_class) = property.boxed_value_class {
-        let owner = value_class.render();
-        let descriptor = format!("({})L{owner};", type_descriptor(ir_ty_to_jvm(&physical)));
-        let method = cw.methodref(&owner, "box-impl", &descriptor);
-        let carrier = verif_for_jvm_free(cw, ir_ty_to_jvm(&physical));
-        value_class_boundary_conversion(
-            cw,
-            code,
-            property.prop_ty.is_nullable(),
-            locals,
-            carrier,
-            Ty::obj_name(value_class),
-            |_, code| code.invokestatic(method, slot_words(ir_ty_to_jvm(&physical)) as i32, 1),
-        );
-    } else if physical.is_jvm_scalar() {
-        box_prim_free(
-            cw,
-            code,
-            semantic_scalar_adapter(property.prop_ty, physical),
-        );
-    }
-}
-
 struct PropertyCallTarget<'a> {
     owner: &'a str,
     facade: Option<&'a str>,
@@ -7179,10 +7122,17 @@ struct PropertyReferenceTarget {
     signature: String,
     getter_field: Option<crate::jvm::inline::PropertyAccess>,
     setter_field: Option<crate::jvm::inline::PropertyAccess>,
+    boxed_value_class: Option<TypeName>,
+    unboxed_receiver_value_class: Option<TypeName>,
 }
 
 impl PropertyReferenceTarget {
-    fn new(property: &crate::ir::PropRef, facade: &str, bodies: &dyn MethodBodies) -> Self {
+    fn new(
+        property: &crate::ir::PropRef,
+        realization: &crate::jvm::property_references::PropertyReferenceRealization,
+        facade: &str,
+        bodies: &dyn MethodBodies,
+    ) -> Self {
         let semantic_owner = property.owner().expect("property reference owner");
         let array_owner = crate::jvm::names::array_class_descriptor(&semantic_owner);
         let owner = array_owner.clone().unwrap_or_else(|| {
@@ -7218,6 +7168,8 @@ impl PropertyReferenceTarget {
             getter_ret: ir_ty_to_jvm(&getter_ret),
             getter_field,
             setter_field,
+            boxed_value_class: realization.boxed_value_class,
+            unboxed_receiver_value_class: realization.unboxed_receiver_value_class,
         }
     }
 
@@ -7230,8 +7182,8 @@ impl PropertyReferenceTarget {
             descriptor: &self.getter_descriptor,
             params: &self.getter_params,
             owner_is_interface: property.owner_is_interface,
-            boxed_value_class: property.boxed_value_class,
-            unboxed_receiver_value_class: property.unboxed_receiver_value_class,
+            boxed_value_class: self.boxed_value_class,
+            unboxed_receiver_value_class: self.unboxed_receiver_value_class,
             field_access: self.getter_field.as_ref(),
         }
     }
@@ -7251,8 +7203,8 @@ impl PropertyReferenceTarget {
             descriptor,
             params,
             owner_is_interface: property.owner_is_interface,
-            boxed_value_class: property.boxed_value_class,
-            unboxed_receiver_value_class: property.unboxed_receiver_value_class,
+            boxed_value_class: self.boxed_value_class,
+            unboxed_receiver_value_class: self.unboxed_receiver_value_class,
             field_access: self.setter_field.as_ref(),
         }
     }
@@ -7454,8 +7406,12 @@ fn emit_prop_ref_class(
     opts: &EmitOptions,
 ) -> Vec<u8> {
     let pr = c.prop_ref.as_ref().unwrap();
+    let realization = env
+        .property_reference_realizations
+        .get(c.fq_name_id())
+        .expect("a synthesized property reference must retain its JVM realization");
     if pr.static_dispatch {
-        return emit_toplevel_prop_ref_class(c, pr, facade, opts);
+        return emit_toplevel_prop_ref_class(c, pr, realization, facade, opts);
     }
     if pr.bound {
         return emit_bound_prop_ref_class(c, pr, facade, env, opts);
@@ -7466,7 +7422,7 @@ fn emit_prop_ref_class(
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER (package-private)
     add_singleton_instance_field(&mut cw, &fq);
 
-    let target = PropertyReferenceTarget::new(pr, facade, env.bodies);
+    let target = PropertyReferenceTarget::new(pr, realization, facade, env.bodies);
     emit_property_reference_constructor(&mut cw, &superclass, pr, &target, false);
 
     let mut get = CodeBuilder::new(2);
@@ -7478,7 +7434,14 @@ fn emit_prop_ref_class(
         VerifType::ObjectName(fq.clone()),
         VerifType::ObjectName("java/lang/Object".to_string()),
     ];
-    box_property_reference_value(&mut cw, &mut get, pr, target.getter_ret, get_locals);
+    box_property_reference_value(
+        &mut cw,
+        &mut get,
+        pr,
+        realization.boxed_value_class,
+        target.getter_ret,
+        get_locals,
+    );
     get.areturn();
     finish_code::<0x0001>(
         &mut cw,
@@ -7527,7 +7490,11 @@ fn emit_bound_prop_ref_class(
     let mut cw = new_writer(&fq, &superclass, opts);
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER
 
-    let target = PropertyReferenceTarget::new(pr, facade, env.bodies);
+    let realization = env
+        .property_reference_realizations
+        .get(c.fq_name_id())
+        .expect("a synthesized property reference must retain its JVM realization");
+    let target = PropertyReferenceTarget::new(pr, realization, facade, env.bodies);
     emit_property_reference_constructor(&mut cw, &superclass, pr, &target, true);
 
     // `get()Object`: for a member ref `((Owner) this.receiver).getName()`; for an extension ref
@@ -7540,7 +7507,14 @@ fn emit_bound_prop_ref_class(
         .getter(pr)
         .emit_get(&mut cw, &mut get, target.getter_ret);
     let get_locals = vec![VerifType::ObjectName(fq.clone())];
-    box_property_reference_value(&mut cw, &mut get, pr, target.getter_ret, get_locals);
+    box_property_reference_value(
+        &mut cw,
+        &mut get,
+        pr,
+        realization.boxed_value_class,
+        target.getter_ret,
+        get_locals,
+    );
     get.areturn();
     finish_code::<0x0001>(&mut cw, "get", "()Ljava/lang/Object;", &mut get, 1);
 
@@ -7571,6 +7545,7 @@ fn emit_bound_prop_ref_class(
 fn emit_toplevel_prop_ref_class(
     c: &crate::ir::IrClass,
     pr: &crate::ir::PropRef,
+    realization: &crate::jvm::property_references::PropertyReferenceRealization,
     facade: &str,
     opts: &EmitOptions,
 ) -> Vec<u8> {
@@ -7592,7 +7567,7 @@ fn emit_toplevel_prop_ref_class(
     // class's CARRIER, which is what the reference realization recorded on this exact target. The
     // boxed convention this path used to keep named `getTopLevel()LZ;` where the declaration is
     // `getTopLevel()I`.
-    let carrier = pr.boxed_value_class.is_some();
+    let carrier = realization.boxed_value_class.is_some();
     let getter_desc = match (&pr.getter_descriptor, carrier) {
         (Some(descriptor), true) => descriptor.clone(),
         _ => format!("(){prop_desc}"),
@@ -7625,7 +7600,14 @@ fn emit_toplevel_prop_ref_class(
     get.invokestatic(gref, 0, slot_words(getter_jvm) as i32);
     if carrier {
         let get_locals = vec![VerifType::ObjectName(fq.clone())];
-        box_property_reference_value(&mut cw, &mut get, pr, getter_jvm, get_locals);
+        box_property_reference_value(
+            &mut cw,
+            &mut get,
+            pr,
+            realization.boxed_value_class,
+            getter_jvm,
+            get_locals,
+        );
     } else if prop_jvm.is_jvm_scalar() {
         box_prim_free(
             &mut cw,
@@ -7662,7 +7644,7 @@ fn emit_toplevel_prop_ref_class(
         if carrier {
             // The argument arrives as the BOXED value class through the erased `set(Object)`; the
             // accessor takes the carrier.
-            if let Some(value_class) = pr.boxed_value_class {
+            if let Some(value_class) = realization.boxed_value_class {
                 let owner = value_class.render();
                 let cref = cw.class_ref(&owner);
                 set.checkcast(cref);
@@ -19959,6 +19941,8 @@ mod fail_soft_tests {
         let continuations = crate::jvm::suspend::ContinuationMetadataMap::default();
         let property_realizations =
             crate::jvm::property_realizations::PropertyRealizations::default();
+        let property_reference_realizations =
+            crate::jvm::property_references::PropertyReferenceRealizations::default();
         let default_call_operands =
             crate::jvm::default_call_operands::DefaultCallOperands::default();
         let bridge_returns =
@@ -19975,6 +19959,7 @@ mod fail_soft_tests {
                 },
                 signature_symbols: &NoClassifiers,
                 property_realizations: &property_realizations,
+                property_reference_realizations: &property_reference_realizations,
                 default_call_operands: &default_call_operands,
             },
             &EmitOptions::default(),

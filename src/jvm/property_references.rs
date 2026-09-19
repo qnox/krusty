@@ -123,16 +123,32 @@ pub(super) fn realize(
             None
         };
         let (property, realization) = match target {
-            FirPropertyReferenceTarget::Module(target) => module_property(
-                ir.referenced_module_properties
+            FirPropertyReferenceTarget::Module(target) => {
+                // Only lowering-generated delegate metadata uses this unspecialized form. It has
+                // no provider-selected callable candidate, so the JVM boundary materializes its
+                // default accessor convention once. Source-written references always take the
+                // `SpecializedModule` arm below and carry the selected declaration spellings.
+                let declaration = ir
+                    .referenced_module_properties
                     .get(&target)
-                    .ok_or(PropertyReferenceRealizationTarget::Module(target))?,
-                stems,
-                target,
-                mutable,
-                declared_accessors(ir, target),
-            )?,
-            FirPropertyReferenceTarget::SpecializedModule { property, .. } => module_property(
+                    .ok_or(PropertyReferenceRealizationTarget::Module(target))?;
+                let getter = super::module_calls::property_getter_name(declaration);
+                let setter = mutable.then(|| crate::names::property_setter_name(&declaration.name));
+                module_property(
+                    declaration,
+                    stems,
+                    target,
+                    mutable,
+                    declared_accessors(ir, target),
+                    (&getter, setter.as_deref()),
+                )?
+            }
+            FirPropertyReferenceTarget::SpecializedModule {
+                property,
+                getter_name,
+                setter_name,
+                ..
+            } => module_property(
                 ir.referenced_module_properties
                     .get(&property)
                     .ok_or(PropertyReferenceRealizationTarget::Module(property))?,
@@ -140,6 +156,7 @@ pub(super) fn realize(
                 property,
                 mutable,
                 declared_accessors(ir, property),
+                (getter_name.as_ref(), setter_name.as_deref()),
             )?,
             FirPropertyReferenceTarget::Classifier {
                 owner,
@@ -318,8 +335,6 @@ fn classifier_property(
             getter_descriptor: None,
             setter_name: None,
             setter_descriptor: None,
-            boxed_value_class: None,
-            unboxed_receiver_value_class: None,
             owner_is_interface: false,
             prop_ty: property_type,
             bound: false,
@@ -338,6 +353,9 @@ fn classifier_property(
             setter_function: None,
             physical_getter_ret: None,
             declares_value_class_storage: false,
+            accessor_names_are_physical: false,
+            boxed_value_class: None,
+            unboxed_receiver_value_class: None,
         },
     )
 }
@@ -353,7 +371,8 @@ fn external_property(
     // The name a `KProperty` answers with is the PROPERTY's, and only the provider has it: it
     // decoded it from the declaration's metadata, where an accessor's own name is a physical call
     // target that may be renamed or value-class-mangled.
-    let name = declared_property_name(classpath, getter)?;
+    let property_declaration = declared_property(classpath, getter)?;
+    let name = property_declaration.name.clone();
     let getter = external_accessor(classpath, getter, false)?;
     let setter = setter
         .map(|setter| external_accessor(classpath, setter, true))
@@ -404,14 +423,10 @@ fn external_property(
             return Err(failure);
         }
     };
-    // Whether this dependency property IS its owner's value-class storage. The underlying property
-    // of a value class is named by that class's own `@Metadata`, which is the only place the fact
-    // is published; it is read here, at the boundary that selected the accessor, rather than
-    // re-derived later from the reference's spelling.
-    let declares_value_class_storage = classpath
-        .value_class_declaration(callable.owner)
-        .and_then(|declaration| declaration.property)
-        .is_some_and(|underlying| underlying == name);
+    // The provider decoded this declaration edge from the metadata's stable string-table
+    // identities and attached it to the exact external property selected by FIR. Do not compare
+    // either the source spelling or the accessor spelling here.
+    let declares_value_class_storage = property_declaration.declares_value_class_storage;
     Ok((
         PropRef {
             owner_internal: Some(owner),
@@ -429,8 +444,6 @@ fn external_property(
                     callable_descriptor(&setter.callable)
                 }
             }),
-            boxed_value_class: None,
-            unboxed_receiver_value_class: None,
             owner_is_interface: callable.owner_is_interface,
             prop_ty: property_type,
             bound: false,
@@ -458,21 +471,23 @@ fn external_property(
             setter_function: None,
             physical_getter_ret: Some(callable.physical_ret),
             declares_value_class_storage,
+            accessor_names_are_physical: true,
+            boxed_value_class: None,
+            unboxed_receiver_value_class: None,
         },
     ))
 }
 
 /// The Kotlin name of the property an accessor target belongs to, as its declaration published it.
-fn declared_property_name(
+fn declared_property(
     classpath: &Classpath,
     target: &FirPropertyTarget,
-) -> Result<String, PropertyReferenceRealizationTarget> {
+) -> Result<super::classpath::ExternalPropertyRealization, PropertyReferenceRealizationTarget> {
     let FirPropertyTarget::External { property, .. } = target else {
         return Err(PropertyReferenceRealizationTarget::Invalid);
     };
     classpath
         .external_property(*property)
-        .map(|realization| realization.name)
         .ok_or(PropertyReferenceRealizationTarget::Invalid)
 }
 
@@ -517,12 +532,19 @@ fn module_property(
     target: PropertyId,
     reference_mutable: bool,
     declared: DeclaredAccessors,
+    selected_accessor_names: (&str, Option<&str>),
 ) -> Result<(PropRef, PropertyReferenceRealization), PropertyReferenceRealizationTarget> {
     let failure = PropertyReferenceRealizationTarget::Module(target);
     if !property.context_parameters.is_empty() || reference_mutable && !property.mutable {
         return Err(failure);
     }
     let name = &property.name;
+    let declared_getter_name = selected_accessor_names.0.to_owned();
+    let declared_setter_name = if reference_mutable {
+        Some(selected_accessor_names.1.ok_or(failure)?.to_owned())
+    } else {
+        None
+    };
     let declaration_facade =
         super::module_calls::facade_for(property.source, stems).ok_or(failure)?;
     let enclosing = property.owner;
@@ -574,21 +596,26 @@ fn module_property(
             call_owner_internal: Some(enclosing.unwrap_or(declaration_facade)),
             prop_name: name.to_string(),
             getter_name: if access_bridge {
-                format!("access${}$p", crate::names::property_getter_name(name))
+                format!("access${declared_getter_name}$p")
             } else {
-                super::module_calls::property_getter_name(property)
+                declared_getter_name.clone()
             },
             getter_descriptor: getter_descriptor.clone(),
             setter_name: reference_mutable.then(|| {
                 if access_bridge {
-                    format!("access${}$p", crate::names::property_setter_name(name))
+                    format!(
+                        "access${}$p",
+                        declared_setter_name
+                            .as_deref()
+                            .expect("mutable reference setter")
+                    )
                 } else {
-                    crate::names::property_setter_name(name)
+                    declared_setter_name
+                        .clone()
+                        .expect("mutable reference setter")
                 }
             }),
             setter_descriptor,
-            boxed_value_class: None,
-            unboxed_receiver_value_class: None,
             owner_is_interface: super::module_calls::owner_is_jvm_interface(property),
             prop_ty: property.ty,
             bound: false,
@@ -597,9 +624,8 @@ fn module_property(
             ext_facade,
         },
         PropertyReferenceRealization {
-            declared_getter_name: super::module_calls::property_getter_name(property),
-            declared_setter_name: reference_mutable
-                .then(|| crate::names::property_setter_name(name)),
+            declared_getter_name,
+            declared_setter_name,
             // The facade's own storage: no owner, no extension receiver, no companion association,
             // and no accessor the source wrote. Every one of those is a fact of THIS declaration,
             // so the answer travels with the reference instead of being looked up in the declaring
@@ -628,6 +654,9 @@ fn module_property(
             // descriptor of its own for one, and the synthesized ones above are built from it.
             physical_getter_ret: getter_descriptor.is_some().then_some(property.ty),
             declares_value_class_storage: declared.value_class_storage,
+            accessor_names_are_physical: false,
+            boxed_value_class: None,
+            unboxed_receiver_value_class: None,
         },
     ))
 }

@@ -767,6 +767,8 @@ fn specialized_generic_extension_property_reference_publishes_final_accessor_sha
         receiver,
         extension_receiver,
         property_type,
+        getter_name,
+        setter_name,
     } = target
     else {
         panic!("source property reference must carry its selected specialized callable view")
@@ -776,6 +778,34 @@ fn specialized_generic_extension_property_reference_publishes_final_accessor_sha
     assert_eq!(*receiver, Some(int));
     assert!(*extension_receiver);
     assert_eq!(*property_type, int);
+    assert_eq!(getter_name.as_ref(), "getItem");
+    assert_eq!(setter_name, &None);
+}
+
+#[test]
+fn value_class_member_property_reference_publishes_its_accessor_spelling() {
+    let (body, _) = checked_function_body_with_platform(
+        "@JvmInline value class Vessel(val payload: Int) { val signal: Int get() = payload + 1 }\n\
+         fun reference(): (Vessel) -> Int = Vessel::signal\n",
+        "reference",
+        jvm_semantics(),
+    );
+    let expression = body
+        .expr(root_expression(&body))
+        .expect("value-class member property reference");
+    let FirExprKind::PropertyReference { target, .. } = &expression.kind else {
+        panic!("value-class member must remain a checked property reference")
+    };
+    let FirPropertyReferenceTarget::SpecializedModule {
+        getter_name,
+        setter_name,
+        ..
+    } = target
+    else {
+        panic!("source member must retain its selected module declaration")
+    };
+    assert_eq!(getter_name.as_ref(), "getSignal");
+    assert_eq!(setter_name, &None);
 }
 
 #[test]

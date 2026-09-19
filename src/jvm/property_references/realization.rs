@@ -81,6 +81,16 @@ pub(crate) struct PropertyReferenceRealization {
     /// own storage position — the class's sole field — or, for a dependency, from the underlying
     /// property its `@Metadata` publishes.
     pub declares_value_class_storage: bool,
+    /// The accessor spellings are already the final JVM names published by a dependency provider.
+    /// Source declarations carry pre-realization names and let the value-class pass materialize
+    /// their suffix/hash; a physical name must never be mangled a second time.
+    pub accessor_names_are_physical: bool,
+    /// The selected accessor exchanges this value class's erased carrier, while the erased
+    /// `KProperty` surface exchanges its boxed object through `Object`.
+    pub boxed_value_class: Option<TypeName>,
+    /// The reference receiver is this value class's boxed object while the selected static
+    /// accessor consumes its erased carrier.
+    pub unboxed_receiver_value_class: Option<TypeName>,
 }
 
 /// Every property reference this file synthesized, by the reference class's internal name.
@@ -107,6 +117,10 @@ impl PropertyReferenceRealizations {
         reference: TypeName,
     ) -> Option<&mut PropertyReferenceRealization> {
         self.by_reference.get_mut(&reference)
+    }
+
+    pub(crate) fn get(&self, reference: TypeName) -> Option<&PropertyReferenceRealization> {
+        self.by_reference.get(&reference)
     }
 
     /// Every module accessor any reference selected. A reader borrowing `ir.classes` mutably uses

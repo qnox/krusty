@@ -147,6 +147,29 @@ fn a_reference_to_a_value_classs_underlying_property_resolves() {
     );
 }
 
+/// A real dependency provider publishes both sides of the declaration contract: the exact
+/// value-class-mangled accessor selected from metadata and the identity of the value class's
+/// underlying property. Neither may be reconstructed from the consumer's `signal`/`payload`
+/// spelling.
+#[test]
+fn dependency_value_class_property_references_follow_provider_declarations() {
+    let library = "package fixture\n\
+                   @JvmInline\n\
+                   value class Vessel(val payload: Int) {\n\
+                   \x20   val signal: Int get() = payload + 1\n\
+                   }\n";
+    let consumer = "import fixture.Vessel\n\
+                    fun box(): String {\n\
+                    \x20   val value = Vessel(41)\n\
+                    \x20   if ((Vessel::signal).get(value) != 42) return \"FAIL renamed\"\n\
+                    \x20   if ((Vessel::payload).get(value) != 41) return \"FAIL underlying\"\n\
+                    \x20   return \"OK\"\n\
+                    }\n";
+    let output = common::expect_box_run_against_kotlinc(library, consumer)
+        .expect("reference compiler and JVM toolchain are required for dependency realization");
+    assert_eq!(output, "OK");
+}
+
 /// A property whose TYPE is a value class: its accessor exchanges the CARRIER (`C.getZ-a_XrcN0()I`,
 /// `C.setZ-IQRRRT4(I)V`), which the synthesized descriptor has to say — it used to claim `()LZ;`.
 #[test]

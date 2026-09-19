@@ -763,6 +763,7 @@ impl JvmBackend {
                 metadata: emit_metadata,
                 signature_symbols,
                 property_realizations: &property_realizations,
+                property_reference_realizations: &pass_facts.property_reference_realizations,
                 default_call_operands: &pass_facts.default_call_operands,
             },
             &emit_opts,
