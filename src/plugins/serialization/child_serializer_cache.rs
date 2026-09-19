@@ -31,6 +31,61 @@ pub(super) fn lazy_cache_ty() -> Ty {
     Ty::obj_args("kotlin/Array", &[lazy_cache_element_ty()])
 }
 
+/// The statement a reader puts at the top of its body: load the serialized class's
+/// `$childSerializers` into `local`, through the accessor the PLAN names.
+///
+/// `ClassStatic` keeps that accessor's semantic identity — its name and JVM descriptor are formed
+/// at the JVM boundary from the declaration itself, so neither can drift from what the plan
+/// published. The local is DECLARED rather than merely assigned: its type is what tells the backend
+/// an element load off it is an `aaload`, and a bare `SetValue` carries no declaration to read.
+pub(super) fn load_cache_statement(
+    ir: &mut IrFile,
+    plan: &ChildSerializerCachePlan,
+    local: u32,
+    serialized: TypeName,
+) -> ExprId {
+    let read = ir.add_expr(IrExpr::Call {
+        callee: Callee::ClassStatic {
+            owner: serialized,
+            function: plan.accessor,
+        },
+        dispatch_receiver: None,
+        args: vec![],
+    });
+    ir.add_expr(IrExpr::Variable {
+        index: local,
+        ty: lazy_cache_ty(),
+        init: Some(read),
+        named: false,
+    })
+}
+
+/// Element `k`'s serializer taken OUT of the cache, or `None` when it has no slot in this plan.
+///
+/// The cache holds a property's serializer without its own nullability: a `List<T>?` caches the
+/// list serializer and wraps `.nullable` at each use, which is also where the `Object` the `Lazy`
+/// yields is narrowed. The arity is checked against the caller's own element count by
+/// [`ChildSerializerCachePlan::caches`].
+pub(super) fn cached_element(
+    ir: &mut IrFile,
+    plan: Option<&ChildSerializerCachePlan>,
+    cache_local: Option<u32>,
+    k: usize,
+    elements: usize,
+    ty: &Ty,
+) -> Option<ExprId> {
+    let local = cache_local?;
+    if !plan?.caches(k, elements) {
+        return None;
+    }
+    let cached = read_cached_slot(ir, local, k);
+    Some(if super::is_nullable(ty) {
+        super::wrap_nullable_serializer(ir, cached)
+    } else {
+        cached
+    })
+}
+
 /// Read element `k` out of a `Lazy[]` cache already loaded into `cache_local` — `cache[k].value`.
 ///
 /// All three readers (`childSerializers`, `deserialize`, `write$Self`) want exactly this, and the
@@ -142,7 +197,7 @@ pub(super) fn add_child_serializer_cache(
     let cached: Vec<bool> = foo_fields
         .iter()
         .map(|(name, ty)| {
-            if property_is_contextual(ctx, ir, class_id, name)
+            if super::property_is_contextual(ctx, ir, class_id, name)
                 || field_serializer_of(ctx, ir, class_id, name).is_some()
             {
                 return false;
@@ -170,7 +225,7 @@ pub(super) fn add_child_serializer_cache(
                 elems.push(ir.add_expr(IrExpr::Const(IrConst::Null)));
                 continue;
             }
-            let Some(es) = element_serializer_expr(ir, ctx, ty) else {
+            let Some(es) = super::element_serializer_expr(ir, ctx, ty) else {
                 // A property classified as NEEDING a cached serializer whose serializer cannot be
                 // built is an invalid intermediate state, not a shape to recover from. Dropping
                 // the cache and letting every use build its own is a second lowering for the same
@@ -266,7 +321,7 @@ mod tests {
     use crate::plugins::{synthetic_class, PluginContext};
     use crate::types::Ty;
 
-    use super::super::class_ty;
+    use super::class_ty;
 
     fn holder(element: Ty) -> (IrFile, crate::ir::ClassId, Vec<(String, Ty)>) {
         let mut ir = IrFile::default();
@@ -353,5 +408,124 @@ mod tests {
                 .any(|&m| ir.functions[m as usize].name == "access$get$childSerializers$cp"),
             "and the accessor the `$serializer` reads it through"
         );
+    }
+}
+
+/// The generated `childSerializers()` body: the per-element `KSerializer[]` the runtime reads a
+/// class's element serializers out of.
+///
+/// It lives beside the cache because that is what it now consumes — each cached element is READ
+/// from the `Lazy[]` slot the cache pass published rather than rebuilt here, and the method opens
+/// by loading that array. The arms for everything else (contextual, type-parameter, an explicitly
+/// named serializer, a derived one) are unchanged; they are here so the whole decision of what an
+/// element's serializer IS sits in one module instead of straddling the plugin facade.
+pub(super) struct ChildSerializersBody<'a> {
+    pub(super) function: u32,
+    /// The `$serializer` class index — the owner of a type-parameter serializer field.
+    pub(super) serializer_class: u32,
+    pub(super) serialized_class: ClassId,
+    /// The class the PROPERTIES are declared on, for the per-property annotation questions.
+    pub(super) declaring_class: ClassId,
+    pub(super) fields: &'a [(String, Ty)],
+    /// Element types as the SERIALIZER sees them, which is not always the field's own type.
+    pub(super) serializer_field_types: &'a [Ty],
+    pub(super) type_parameter_serializer_fields: &'a [Option<u32>],
+    /// The serialized class's cache plan, or `None` when it has no cache.
+    pub(super) plan: Option<ChildSerializerCachePlan>,
+}
+
+impl ChildSerializersBody<'_> {
+    pub(super) fn generate(self, ir: &mut IrFile, ctx: &PluginContext) {
+        let Self {
+            function,
+            serializer_class,
+            serialized_class,
+            declaring_class,
+            fields,
+            serializer_field_types,
+            type_parameter_serializer_fields,
+            plan,
+        } = self;
+        // Return the per-field element-serializer array (arity == field count): one
+        // `KSerializer` singleton per property. A nested `@Serializable` field uses the
+        // krusty-generated `<T>$serializer.INSTANCE`; a directly-supported field uses the
+        // builtin `…Serializer.INSTANCE`. An unsupported field type contributes `null`
+        // (placeholder) so the array arity still matches the descriptor's element count.
+        // The serialized class's cache PLAN, as the pass that built it published
+        // it: which elements have a slot, and the accessor to reach them through.
+        // kotlinc reads `$childSerializers` once at the top of the method and takes
+        // each cached element out of it, rather than rebuilding the serializer the
+        // cache already holds. The local is the first free one after the receiver,
+        // and the result array lands above it.
+        let serialized = ir.classes[serialized_class as usize].fq_name_id();
+
+        let cache_local = plan.as_ref().map(|_| {
+            u32::try_from(ir.functions[function as usize].params.len())
+                .expect("too many childSerializers parameters")
+                + 1
+        });
+        let elements: Vec<ExprId> = serializer_field_types
+            .iter()
+            .enumerate()
+            .map(|(i, _ty)| {
+                if let Some(cached) = cached_element(
+                    ir,
+                    plan.as_ref(),
+                    cache_local,
+                    i,
+                    serializer_field_types.len(),
+                    &serializer_field_types[i],
+                ) {
+                    cached
+                } else if let Some(inst) = super::contextual_serializer_for(
+                    ir,
+                    property_is_contextual(ctx, ir, declaring_class, &fields[i].0),
+                    &serializer_field_types[i],
+                ) {
+                    // `@Contextual` / file-level `@UseContextualSerialization` property.
+                    inst
+                } else if let Some(fidx) = type_parameter_serializer_fields[i] {
+                    // Type-parameter element: `this.typeSerialK` (the ctor-supplied serializer).
+                    let this = ir.add_expr(IrExpr::GetValue(0));
+                    ir.add_expr(IrExpr::GetField {
+                        receiver: this,
+                        class: serializer_class,
+                        index: fidx,
+                    })
+                } else if let Some(internal) =
+                    field_serializer_of(ctx, ir, declaring_class, &fields[i].0)
+                {
+                    // Explicit per-property serializer: `new X()` (or `X.INSTANCE`),
+                    // wrapped `.nullable` for a nullable property.
+                    let base = super::build_field_serializer_instance(ir, internal);
+                    if super::is_nullable(&serializer_field_types[i]) {
+                        super::wrap_nullable_serializer(ir, base)
+                    } else {
+                        base
+                    }
+                } else if let Some(e) =
+                    super::element_serializer_expr(ir, ctx, &serializer_field_types[i])
+                {
+                    // Nested @Serializable (generic `Foo<A>` → `Foo.serializer(A_ser)`,
+                    // or non-generic `Foo$serializer.INSTANCE`) | builtin `…Serializer`.
+                    e
+                } else {
+                    ir.add_expr(IrExpr::Const(IrConst::Null))
+                }
+            })
+            .collect();
+        let arr = ir.add_expr(IrExpr::Vararg {
+            array_type: Ty::obj_args("kotlin/Array", &[class_ty(super::KSERIALIZER_FQ)]),
+            spreads: vec![false; elements.len()],
+            elements,
+        });
+        let ret = ir.add_expr(IrExpr::Return(Some(arr)));
+        let mut stmts = Vec::with_capacity(2);
+        if let (Some(local), Some(plan)) = (cache_local, plan.as_ref()) {
+            stmts.push(load_cache_statement(ir, plan, local, serialized));
+        }
+        stmts.push(ret);
+        let body = ir.add_expr(IrExpr::Block { stmts, value: None });
+        ir.functions[function as usize].body = Some(body);
     }
 }
