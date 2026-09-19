@@ -407,3 +407,152 @@ fun box(): String {\n\
 }\n";
     assert_eq!(run(SRC), "OK");
 }
+
+/// A LOCAL `tailrec fun` gets the loop transform too.
+///
+/// The rewrite is driven from the declaration lowering in `sink.rs`, and a local function reaches
+/// the IR by another path that never ran it — so `tailrec fun` inside a function kept its self-call
+/// and overflowed the stack at the depth the modifier exists to make safe. kotlinc runs all of
+/// these flat, and so does krusty now, for every shape a local declaration can have.
+///
+/// Every expectation is kotlinc's, taken by compiling and running the same `box()` under it —
+/// including this one, which used to run only krusty and so could have pinned a wrong answer.
+#[test]
+fn a_local_tailrec_runs_flat() {
+    const SRC: &str = "fun counted(): Int {\n\
+    tailrec fun go(n: Int, acc: Int): Int = if (n == 0) acc else go(n - 1, acc + 1)\n\
+    return go(1000000, 0)\n\
+}\n\
+fun unitReturning(): Int {\n\
+    val hits = intArrayOf(0)\n\
+    tailrec fun go(n: Int, seen: Int): Int = if (n == 0) seen else go(n - 1, seen + 1)\n\
+    hits[0] = go(1000000, 0)\n\
+    return hits[0]\n\
+}\n\
+fun box(): String {\n\
+    if (counted() != 1000000) return \"fail counted: \" + counted()\n\
+    if (unitReturning() != 1000000) return \"fail unit: \" + unitReturning()\n\
+    return \"OK\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "LocalTailrec");
+}
+
+/// A local `tailrec` declared inside a CLASS member. Lifting attaches it to the lexical class as a
+/// private static, so its self-call is a `ClassStatic` rather than a `Local` — the same declaration
+/// reached through the owner it was lifted onto. Recognizing only `Local` left this valid shape
+/// recursing until `StackOverflowError` at exactly the depth the modifier exists to make safe.
+#[test]
+fn a_class_member_local_tailrec_runs_flat() {
+    const SRC: &str = "class Ledger(val step: Int) {\n\
+    fun counted(): Int {\n\
+        tailrec fun go(n: Int, acc: Int): Int = if (n == 0) acc else go(n - 1, acc + 1)\n\
+        return go(1000000, 0)\n\
+    }\n\
+    fun captured(): Int {\n\
+        val by = step\n\
+        tailrec fun go(n: Int, acc: Int): Int = if (n == 0) acc else go(n - 1, acc + by)\n\
+        return go(1000000, 0)\n\
+    }\n\
+    companion object {\n\
+        fun inCompanion(): Int {\n\
+            tailrec fun go(n: Int, acc: Int): Int = if (n == 0) acc else go(n - 1, acc + 1)\n\
+            return go(1000000, 0)\n\
+        }\n\
+    }\n\
+}\n\
+fun box(): String {\n\
+    val ledger = Ledger(2)\n\
+    if (ledger.counted() != 1000000) return \"fail counted: \" + ledger.counted()\n\
+    if (ledger.captured() != 2000000) return \"fail captured: \" + ledger.captured()\n\
+    if (Ledger.inCompanion() != 1000000) return \"fail companion: \" + Ledger.inCompanion()\n\
+    return \"OK\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "ClassMemberLocalTailrec");
+}
+
+/// A local `tailrec` that CAPTURES, at the depth the modifier exists for.
+///
+/// A capture is an implementation detail of lifting, not a Kotlin reason to revoke the
+/// constant-stack contract: the IR parameter list leads with the captured values, and the loop must
+/// leave those slots exactly as they are while reassigning every logical parameter after them. A
+/// frame that counted the whole list would write a capture; one that counted the declaration alone
+/// declined the rewrite and overflowed here. Both a READ-ONLY capture and a MUTATED one are
+/// covered, because the second is the one a wrong slot write would corrupt silently.
+#[test]
+fn a_capturing_local_tailrec_runs_flat() {
+    const SRC: &str = "fun mutated(): Int {\n\
+    var seen = 0\n\
+    tailrec fun go(n: Int) { if (n > 0) { seen = seen + 1; go(n - 1) } }\n\
+    go(1000000)\n\
+    return seen\n\
+}\n\
+fun readOnly(): Int {\n\
+    val step = 2\n\
+    tailrec fun go(n: Int, acc: Int): Int = if (n == 0) acc else go(n - 1, acc + step)\n\
+    return go(1000000, 0)\n\
+}\n\
+fun both(): Int {\n\
+    val step = 3\n\
+    var calls = 0\n\
+    tailrec fun go(n: Int, acc: Int): Int {\n\
+        calls = calls + 1\n\
+        return if (n == 0) acc else go(n - 1, acc + step)\n\
+    }\n\
+    val total = go(1000000, 0)\n\
+    return if (calls == 1000001) total else -1\n\
+}\n\
+fun box(): String {\n\
+    if (mutated() != 1000000) return \"fail mutated: \" + mutated()\n\
+    if (readOnly() != 2000000) return \"fail readOnly: \" + readOnly()\n\
+    if (both() != 3000000) return \"fail both: \" + both()\n\
+    return \"OK\"\n\
+}\n";
+    let reference = common::kotlinc_box_result(SRC);
+    let krusty = run(SRC);
+    assert_eq!(krusty, reference, "krusty and kotlinc disagree");
+    assert_eq!(krusty, "OK");
+}
+
+/// A CONTEXTUAL local `tailrec`: its context parameters are logical parameters the recursive call
+/// carries, and the loop has to rebind them like any other.
+///
+/// Subtracting them from the frame's count made `is_self_call` compare the call's whole argument
+/// list against a smaller number, so the rewrite declined in silence and the function overflowed.
+/// The result is context-sensitive on purpose — dropping or misplacing the implicit argument gives
+/// a different number, not just a deeper stack.
+#[test]
+fn a_contextual_local_tailrec_runs_flat() {
+    const SRC: &str = "// LANGUAGE: +ContextParameters\n\
+class Step(val value: Int)\n\
+\n\
+context(step: Step)\n\
+fun run(): String {\n\
+    context(current: Step)\n\
+    tailrec fun go(n: Int, acc: Int): Int =\n\
+        if (n == 0) acc + current.value else go(n - 1, acc + 1)\n\
+    return if (go(1000000, 0) == 1000007) \"OK\" else \"FAIL \" + go(1000000, 0)\n\
+}\n\
+\n\
+fun box(): String = with(Step(7)) { run() }\n";
+    let reference = common::kotlinc_box_result(SRC);
+    let krusty = run(SRC);
+    assert_eq!(krusty, reference, "krusty and kotlinc disagree");
+    assert_eq!(krusty, "OK");
+}
+
+/// A local EXTENSION `tailrec`: the receiver is an ordinary parameter at its own position in the
+/// IR list, so the loop carries it like any other — reassigned from the recursive call's own
+/// receiver operand, not left at its entry value.
+#[test]
+fn an_extension_local_tailrec_runs_flat() {
+    const SRC: &str = "fun test(): Int {\n\
+    tailrec fun Int.go(acc: Int): Int =\n\
+        if (this == 0) acc else (this - 1).go(acc + 1)\n\
+    return 1000000.go(7)\n\
+}\n\
+fun box(): String = if (test() == 1000007) \"OK\" else \"FAIL \" + test()\n";
+    let reference = common::kotlinc_box_result(SRC);
+    let krusty = run(SRC);
+    assert_eq!(krusty, reference, "krusty and kotlinc disagree");
+    assert_eq!(krusty, "OK");
+}
