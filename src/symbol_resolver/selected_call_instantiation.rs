@@ -27,7 +27,7 @@ impl<'a> SymbolResolver<'a> {
         type_args: &[Ty],
         callables: &Callables,
         expected_result: Option<Ty>,
-    ) -> CandidateSelection<(FunctionInfo, Vec<Ty>, Ty, Ty)> {
+    ) -> ReceiverFunctionSelection {
         let selected = match select_receiver_overload_from_functions_tracking(
             self.lib,
             receiver,
@@ -41,9 +41,11 @@ impl<'a> SymbolResolver<'a> {
             callables.functions(),
             IndexedConvention::Ordinary,
         ) {
-            CandidateSelection::Selected(selected) => selected,
-            CandidateSelection::None => return CandidateSelection::None,
-            CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
+            CandidateSelectionWithTies::Selected(selected) => selected,
+            CandidateSelectionWithTies::None => return ReceiverFunctionSelection::None,
+            CandidateSelectionWithTies::Ambiguous(candidates) => {
+                return ReceiverFunctionSelection::Ambiguous(candidates)
+            }
         };
         let binding_receiver = selected
             .semantic_receiver()
@@ -184,6 +186,6 @@ impl<'a> SymbolResolver<'a> {
             };
             merge_specialized_return(provider, inferred)
         };
-        CandidateSelection::Selected((selected, params, ret, applied_receiver))
+        ReceiverFunctionSelection::Selected((selected, params, ret, applied_receiver))
     }
 }

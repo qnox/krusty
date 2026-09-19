@@ -468,6 +468,8 @@ mod deferred_val_init_e2e;
 mod definitely_non_null_type_e2e;
 #[path = "delegate_by_lazy_e2e.rs"]
 mod delegate_by_lazy_e2e;
+#[path = "delegate_scalar_boundary_e2e.rs"]
+mod delegate_scalar_boundary_e2e;
 #[path = "delegated_local_prop_e2e.rs"]
 mod delegated_local_prop_e2e;
 #[path = "delegated_member_prop_e2e.rs"]
