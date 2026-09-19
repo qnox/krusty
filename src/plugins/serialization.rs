@@ -2314,6 +2314,8 @@ impl IrPlugin for SerializationPlugin {
                             fields: &fields,
                             nested_serializers: &nested,
                             type_parameter_serializer_fields: &tp_field,
+                            cache: self
+                                .child_serializer_cache(ir.classes[foo_id as usize].fq_name_id()),
                         }
                         .generate(ir, ctx);
                     }
@@ -2352,10 +2354,7 @@ impl IrPlugin for SerializationPlugin {
                                     let slot = ir.add_expr(IrExpr::Call {
                                         callee: Callee::Intrinsic {
                                             operation: crate::ir::IrIntrinsic::ArrayGet,
-                                            ret: Ty::obj_args(
-                                                "kotlin/Lazy",
-                                                &[kserializer_of(class_ty("kotlin/Any"))],
-                                            ),
+                                            ret: child_serializer_cache::lazy_cache_element_ty(),
                                         },
                                         dispatch_receiver: Some(cache),
                                         args: vec![index],
