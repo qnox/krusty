@@ -11237,6 +11237,18 @@ fn emit_method_inner_with_holder(
             store(Ty::Int, slot, &mut code);
             (slot, code.bytes.len() as u16)
         });
+    // An emitted inline TEMPLATE opens its body on the function's own body line, which kotlinc
+    // records even when the body's first instruction belongs to a later line: a template's body is
+    // what a call site expands, so both positions are kept. `mark_line_retained` is what lets the
+    // body's own first mark join this one at the same offset instead of replacing it; where the two
+    // agree — the ordinary case — it deduplicates and nothing is added.
+    if inline_marker.is_some() {
+        if let Some(&line) = ir.fn_decl_lines.get(&fid) {
+            if line != 0 {
+                code.mark_line_retained(line);
+            }
+        }
+    }
     e.emit(body, &mut code);
     // The implicit `return` for a `Unit` function is dead code when the body already diverges
     // (`fun foo() { throw … }`): an unreachable `return` after `athrow` has no stack-map frame and
@@ -14258,6 +14270,7 @@ impl<'a> Emitter<'a> {
             };
             if let Some(access) = access {
                 return self.emit_realized_property_read(
+                    operation.expression,
                     operation.receiver,
                     access,
                     operation.ty,
@@ -14298,6 +14311,7 @@ impl<'a> Emitter<'a> {
             .and_then(|accessor| self.bodies.external_property_access(*accessor))
         {
             return self.emit_realized_property_read(
+                operation.expression,
                 operation.receiver,
                 access,
                 operation.ty,
@@ -14313,6 +14327,7 @@ impl<'a> Emitter<'a> {
             operation.interface,
         ) {
             return self.emit_realized_property_read(
+                operation.expression,
                 operation.receiver,
                 access,
                 operation.ty,
@@ -14326,6 +14341,7 @@ impl<'a> Emitter<'a> {
             .property_read_access(operation.owner, operation.name)
         {
             return self.emit_realized_property_read(
+                operation.expression,
                 operation.receiver,
                 access,
                 operation.ty,
@@ -14356,7 +14372,13 @@ impl<'a> Emitter<'a> {
             // For classpath owners the body reader remains authoritative.
             is_interface: operation.interface || self.bodies.owner_is_interface(operation.owner),
         };
-        self.emit_realized_property_read(operation.receiver, access, operation.ty, code)
+        self.emit_realized_property_read(
+            operation.expression,
+            operation.receiver,
+            access,
+            operation.ty,
+            code,
+        )
     }
 
     /// Realize `IrExpr::PropertyWrite` — the write analogue of [`Self::emit_property_read`], and the same
@@ -14534,6 +14556,10 @@ impl<'a> Emitter<'a> {
                 } else {
                     self.cw.methodref(&owner, &name, &descriptor)
                 };
+                // The write through an ACCESSOR is a dispatch, so the assignment's own line returns
+                // here, after the value expression has marked its. A write realized as a FIELD is
+                // not one and marks nothing.
+                self.mark_dispatch_line(operation.expression, code);
                 if is_static {
                     code.invokestatic(m, words, 0);
                 } else if is_interface {
@@ -14557,6 +14583,7 @@ impl<'a> Emitter<'a> {
                     })
                     .unwrap_or(2);
                 let m = self.cw.methodref(&owner, &name, &descriptor);
+                self.mark_dispatch_line(operation.expression, code);
                 code.invokestatic(m, words, 0);
             }
         }
@@ -14991,6 +15018,7 @@ impl<'a> Emitter<'a> {
     /// the property read's Kotlin type.
     fn emit_realized_property_read(
         &mut self,
+        operation: crate::ir::ExprId,
         receiver: Option<crate::ir::ExprId>,
         access: crate::jvm::inline::PropertyAccess,
         ty: &Ty,
@@ -15078,6 +15106,11 @@ impl<'a> Emitter<'a> {
                 } else {
                     self.cw.methodref(&owner, &name, &descriptor)
                 };
+                // A read through an ACCESSOR is a dispatch, so the read's own line returns here,
+                // after the receiver chain has marked its. A read realized as a FIELD is not one,
+                // and deliberately marks nothing — the receiver's line stays in effect through the
+                // `getfield`, exactly as kotlinc records it.
+                self.mark_dispatch_line(operation, code);
                 if is_static {
                     code.invokestatic(m, 0, words);
                 } else if is_interface {
@@ -15098,6 +15131,7 @@ impl<'a> Emitter<'a> {
                 // The receiver is already on the stack as the bridge's sole argument.
                 let words = descriptor_ret_words(&descriptor);
                 let m = self.cw.methodref(&owner, &name, &descriptor);
+                self.mark_dispatch_line(operation, code);
                 code.invokestatic(m, 1, words);
                 if words == 0 {
                     return;
@@ -15540,6 +15574,12 @@ impl<'a> Emitter<'a> {
                     code.new_obj(ci);
                     code.dup();
                     let mut supplied = temps.iter().zip(args.iter());
+                    // A defaulted construction takes the same rule as a defaulted call: the
+                    // operands its `$default` ABI invents — a placeholder for an omitted argument,
+                    // and the trailing marker/mask/marker group — belong to the CONSTRUCTION, so
+                    // its own line goes back into effect at the start of each such run rather than
+                    // only at the `invokespecial` after all of them.
+                    let mut inside_run = false;
                     for (parameter, physical) in physical_params
                         .iter()
                         .copied()
@@ -15551,6 +15591,7 @@ impl<'a> Emitter<'a> {
                                 &u32::try_from(parameter - *default_prefix_count as usize)
                                     .expect("too many constructor parameters"),
                             );
+                        self.mark_synthesized_run_start(e, omitted, &mut inside_run, code);
                         if omitted {
                             push_zero(physical, code, self.cw);
                         } else {
@@ -15572,6 +15613,9 @@ impl<'a> Emitter<'a> {
                     for &(_, _, lease) in &temps {
                         self.release_temporary(lease);
                     }
+                    if use_accessor || !default_parameters.is_empty() {
+                        self.mark_synthesized_run_start(e, true, &mut inside_run, code);
+                    }
                     if use_accessor {
                         code.aconst_null();
                     }
@@ -15589,6 +15633,7 @@ impl<'a> Emitter<'a> {
                     code.new_obj(ci);
                     code.dup();
                     let mut supplied = args.iter().copied();
+                    let mut inside_run = false;
                     for (parameter, physical) in physical_params
                         .iter()
                         .copied()
@@ -15600,6 +15645,7 @@ impl<'a> Emitter<'a> {
                                 &u32::try_from(parameter - *default_prefix_count as usize)
                                     .expect("too many constructor parameters"),
                             );
+                        self.mark_synthesized_run_start(e, omitted, &mut inside_run, code);
                         if omitted {
                             push_zero(physical, code, self.cw);
                         } else {
@@ -15622,6 +15668,9 @@ impl<'a> Emitter<'a> {
                                 code,
                             );
                         }
+                    }
+                    if use_accessor || !default_parameters.is_empty() {
+                        self.mark_synthesized_run_start(e, true, &mut inside_run, code);
                     }
                     if use_accessor {
                         code.aconst_null();
@@ -15982,6 +16031,11 @@ impl<'a> Emitter<'a> {
                         code.invokestatic(method, slot_words(ty) as i32, 1);
                     }
                     crate::ir::IrIntrinsic::EnumValueOf { classifier } => {
+                        // `enumValueOf<E>` is the stdlib's reified INLINE template, so what follows
+                        // is an expansion of it rather than a call on this line. kotlinc marks the
+                        // call site here and lets the argument's own line join it at the same
+                        // offset; the `Enum.valueOf` this ends with belongs to the expansion.
+                        self.mark_inline_call_site_line(e, code);
                         match classifier.non_null() {
                             Ty::TyParam(identity, _) => {
                                 // Kotlin's public inline template keeps the reified classifier as
@@ -16037,6 +16091,11 @@ impl<'a> Emitter<'a> {
                             ),
                         };
                         let method = self.cw.methodref(owner, "compare", descriptor);
+                        // This intrinsic's lowering IS a call, so it takes the dispatch rule: the
+                        // source call's line returns at the `invokestatic`, after the operands have
+                        // marked theirs. Intrinsics lowered to an instruction instead — an array
+                        // read, an arithmetic op — deliberately do not.
+                        self.mark_dispatch_line(e, code);
                         code.invokestatic(method, (slot_words(*operand) * 2) as i32, 1);
                     }
                     crate::ir::IrIntrinsic::CoroutineContext => {
@@ -16993,12 +17052,28 @@ impl<'a> Emitter<'a> {
                     }
                 }
             }
-            IrExpr::EnumValueOf { classifier, arg } => {
+            IrExpr::EnumValueOf {
+                classifier,
+                arg,
+                declaration,
+            } => {
                 let fq = classifier.render();
+                if *declaration == crate::ir::EnumValueOfDeclaration::StandardLibraryTopLevel {
+                    self.mark_inline_call_site_line(e, code);
+                }
                 self.emit_value(*arg, code);
                 let m = self
                     .cw
                     .methodref(&fq, "valueOf", &format!("(Ljava/lang/String;)L{fq};"));
+                // Both declarations reach the same `E.valueOf`, and they take opposite line
+                // rules: the classifier's own MEMBER is an ordinary dispatch, so the call's line
+                // returns at the invoke; the standard library's top-level `enumValueOf<E>` is
+                // INLINE, so what follows is its expansion and kotlinc marks the call site
+                // instead. That is why the selected declaration is recorded rather than inferred.
+                match declaration {
+                    crate::ir::EnumValueOfDeclaration::Member => self.mark_dispatch_line(e, code),
+                    crate::ir::EnumValueOfDeclaration::StandardLibraryTopLevel => {}
+                }
                 code.invokestatic(m, 1, 1);
             }
             IrExpr::When { branches } => self.emit_when(e, branches, code),
@@ -17545,6 +17620,9 @@ impl<'a> Emitter<'a> {
                     "invoke",
                     &jvm_function_invoke_descriptor(n as u8),
                 );
+                // A function VALUE's invocation is a dispatch like any other: after the operands
+                // have each marked their own line, the call's own line returns at the `invoke`.
+                self.mark_dispatch_line(e, code);
                 code.invokeinterface(m, if high_arity { 1 } else { n as i32 }, 1);
                 // The interface returns `Object`; cast/unbox to the function's declared return type.
                 // Select a scalar adapter from that semantic return before `ir_ty_to_jvm` reduces an
@@ -19054,7 +19132,7 @@ impl<'a> Emitter<'a> {
             IrExpr::Continue { label } => (label, false),
             _ => return None,
         };
-        let (cont, end, depth) = self.loop_transfer_target(label);
+        let (cont, end, depth) = self.loop_transfer_target(label)?;
         if self.return_finalizers.len() > depth {
             return None;
         }

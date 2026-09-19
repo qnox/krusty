@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 
+mod debug_lines;
+pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};
+
 use crate::diag::Span;
 use crate::kt_string::KtString;
 use crate::types::{Ty, TypeName};
@@ -266,9 +269,17 @@ pub enum FirIntrinsic {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FirClassifierCallable {
     EnumValues,
+    /// The classifier's own implicit `valueOf` member — `E.valueOf(name)`.
     EnumValueOf,
-    ArrayConstructor { element: ResolvedTy },
-    SamConstructor { conversion: Box<FirSamConversion> },
+    /// The standard library's top-level `enumValueOf<E>(name)`. It resolves to the same lookup as
+    /// the member, but it is a different — and `inline` — declaration, so the two stay apart.
+    TopLevelEnumValueOf,
+    ArrayConstructor {
+        element: ResolvedTy,
+    },
+    SamConstructor {
+        conversion: Box<FirSamConversion>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1881,14 +1892,6 @@ pub struct FirStatement {
     pub kind: FirStatementKind,
 }
 
-/// Line-only source metadata carried through consuming FIR lowering. These values are output facts,
-/// not source locators: they cannot be used to recover text or reparse a body.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct FirExpressionDebugLines {
-    pub source: u32,
-    pub end: u32,
-}
-
 /// One checked body unit. Its arenas are body-local and are moved as a single value into lowering;
 /// parser ids and unresolved types cannot be represented here.
 #[derive(Clone, Debug, PartialEq)]
@@ -1921,7 +1924,7 @@ pub struct FirBody {
     /// Physical source-line count for debug output; it carries no source lookup capability.
     source_line_count: u32,
     expression_debug_lines: Vec<FirExpressionDebugLines>,
-    statement_debug_lines: Vec<u32>,
+    statement_debug_lines: Vec<FirStatementDebugLines>,
     context_receiver_types: Vec<ResolvedTy>,
     context_value_count: u32,
     parameters: Vec<FirValueParameter>,
@@ -2157,93 +2160,6 @@ impl FirBody {
 
     pub fn debug_value_name(&self, value: LocalValueId) -> Option<&str> {
         self.debug_value_names.get(&value).map(Box::as_ref)
-    }
-
-    pub fn expression_debug_lines(&self, expression: FirExprId) -> FirExpressionDebugLines {
-        self.expression_debug_lines
-            .get(expression.raw() as usize)
-            .copied()
-            .unwrap_or_default()
-    }
-
-    pub fn statement_debug_line(&self, statement: FirStatementId) -> u32 {
-        self.statement_debug_lines
-            .get(statement.raw() as usize)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    pub const fn source_line_count(&self) -> u32 {
-        self.source_line_count
-    }
-
-    pub(crate) fn attach_debug_lines(
-        &mut self,
-        source: SourceFileId,
-        source_line_count: u32,
-        origins: &OriginStore,
-        expression_lines: &HashMap<Span, FirExpressionDebugLines>,
-        statement_lines: &HashMap<Span, u32>,
-    ) {
-        self.source_line_count = source_line_count;
-        let source_span = |origin| {
-            let mut current = origin;
-            loop {
-                match origins.get(current)? {
-                    Origin::Source { file, span } => return (file == source).then_some(span),
-                    Origin::Synthetic { cause, .. } => current = cause,
-                }
-            }
-        };
-        self.expression_debug_lines = self
-            .expressions
-            .iter()
-            .map(|expression| {
-                source_span(expression.origin)
-                    .and_then(|span| expression_lines.get(&span).copied())
-                    .unwrap_or_default()
-            })
-            .collect();
-        self.statement_debug_lines = self
-            .statements
-            .iter()
-            .map(|statement| {
-                source_span(statement.origin)
-                    .and_then(|span| statement_lines.get(&span).copied())
-                    .unwrap_or(0)
-            })
-            .collect();
-        for statement in &mut self.statements {
-            if let FirStatementKind::LocalFunction { body, .. } = &mut statement.kind {
-                body.attach_debug_lines(
-                    source,
-                    source_line_count,
-                    origins,
-                    expression_lines,
-                    statement_lines,
-                );
-            }
-        }
-        for expression in &mut self.expressions {
-            if let FirExprKind::Lambda { body, .. } = &mut expression.kind {
-                body.attach_debug_lines(
-                    source,
-                    source_line_count,
-                    origins,
-                    expression_lines,
-                    statement_lines,
-                );
-            }
-        }
-        for body in &mut self.inline_nested_declaration_bodies {
-            body.attach_debug_lines(
-                source,
-                source_line_count,
-                origins,
-                expression_lines,
-                statement_lines,
-            );
-        }
     }
 
     pub fn set_context_receiver_types(&mut self, receivers: Vec<ResolvedTy>) {
@@ -2688,7 +2604,8 @@ impl FirBody {
     pub fn add_statement(&mut self, statement: FirStatement) -> FirStatementId {
         let id = FirStatementId::from_raw(next_id(self.statements.len(), "FIR statements"));
         self.statements.push(statement);
-        self.statement_debug_lines.push(0);
+        self.statement_debug_lines
+            .push(FirStatementDebugLines::default());
         id
     }
 
@@ -2879,7 +2796,7 @@ impl FirBody {
                 .map(|name| std::mem::size_of::<LocalValueId>() + name.len())
                 .sum::<usize>()
             + self.expression_debug_lines.len() * std::mem::size_of::<FirExpressionDebugLines>()
-            + self.statement_debug_lines.len() * std::mem::size_of::<u32>()
+            + self.statement_debug_lines.len() * std::mem::size_of::<FirStatementDebugLines>()
             + self.default_values.len() * std::mem::size_of::<FirDefaultValue>()
             + self.context_receiver_types.len() * std::mem::size_of::<ResolvedTy>()
             + self.captures.len() * std::mem::size_of::<FirCapture>()

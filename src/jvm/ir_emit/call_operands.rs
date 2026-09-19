@@ -142,7 +142,9 @@ impl Emitter<'_> {
         self.emit_operands_adapted(Some((call, &origins)), ops, code, |_, _, _| {});
     }
 
-    /// Put `call`'s line in effect if `operand` opens a run of synthesized operands.
+    /// Put `call`'s line in effect if the operand at `position` opens a run of operands the CALL
+    /// synthesized. The plan comes from the backend pass that realized them; nothing here decides
+    /// from an operand's shape whether it was written or invented.
     pub(super) fn mark_synthesized_operand_run(
         &mut self,
         call: Option<(
@@ -159,8 +161,21 @@ impl Emitter<'_> {
         let synthesized = origins.get(operand_index).is_some_and(|origin| {
             *origin == crate::jvm::default_call_operands::DefaultOperandOrigin::Synthesized
         });
+        self.mark_synthesized_run_start(call, synthesized, inside_run, code);
+    }
+
+    /// The same rule for a call whose synthesized operands emission realizes itself — a defaulted
+    /// CONSTRUCTOR, whose placeholders, mask words and marker are pushed directly rather than
+    /// entered into the operand vector as expressions.
+    pub(super) fn mark_synthesized_run_start(
+        &mut self,
+        call: u32,
+        synthesized: bool,
+        inside_run: &mut bool,
+        code: &mut CodeBuilder,
+    ) {
         if synthesized && !*inside_run {
-            debug_lines::mark_expression_start(self.ir, call, code);
+            self.mark_dispatch_line(call, code);
         }
         *inside_run = synthesized;
     }

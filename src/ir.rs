@@ -33,9 +33,11 @@ pub enum IrNodeOrigin {
 
 mod bottom_values;
 mod bridges;
+mod constants;
 pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
 pub use bridges::{Bridge, BridgeKind};
+pub use constants::IrConst;
 
 /// A compiler-supplied operation selected from a real semantic declaration. This is an operation
 /// identity, not a library name: backends implement it without recovering signature facts from text.
@@ -300,39 +302,6 @@ impl Callee {
             _ => None,
         }
     }
-}
-
-/// A compile-time constant (`IrConst` in Kotlin IR).
-#[derive(Clone, Debug, PartialEq)]
-pub enum IrConst {
-    Boolean(bool),
-    Byte(i8),
-    Short(i16),
-    Int(i32),
-    Long(i64),
-    Float(f32),
-    Double(f64),
-    /// A Kotlin `Char` — one UTF-16 code UNIT, not a code point. Lone surrogates (D800..DFFF) are
-    /// legal `Char` values (`Char.MIN_HIGH_SURROGATE`), so this cannot be a Rust `char`: converting
-    /// through `char::from_u32` rejects them and silently folds them to NUL.
-    Char(u16),
-    /// A Kotlin `String` — a sequence of UTF-16 code units. Same reason as `Char`: `"\uD800"` and
-    /// `"😀"` have no Rust `String` spelling one code unit at a time.
-    String(crate::kt_string::KtString),
-    /// An unsigned constant, as the VALUE it stands for: `200u` is 200 here, never the byte -56
-    /// that a JVM carries a `UByte` in.
-    ///
-    /// These exist because the unsigned type is the constant's checked IDENTITY and a backend
-    /// cannot choose a representation for what it cannot see. Folding them into `Int` lost that:
-    /// `value_ty` then answers `Int` from the constant's shape, and every backend inherited
-    /// whatever width the number happened to carry. Which primitive holds the value is a
-    /// representation decision, and representation belongs to backends. Matching widths do not
-    /// make `UInt` semantically identical to `Int`, or `ULong` to `Long`.
-    UByte(u8),
-    UShort(u16),
-    UInt(u32),
-    ULong(u64),
-    Null,
 }
 
 /// One checker-selected argument after source-order evaluation has been preserved. Parameter
@@ -695,26 +664,6 @@ pub struct IrCallableReference {
     pub adaptation: Option<Box<crate::fir::FirReferenceAdaptation>>,
 }
 
-impl IrConst {
-    pub fn zero_for_value_type(ty: Ty) -> IrConst {
-        match ty.canonical_semantic() {
-            Ty::Boolean => IrConst::Boolean(false),
-            Ty::Byte => IrConst::Byte(0),
-            Ty::UByte => IrConst::UByte(0),
-            Ty::Short => IrConst::Short(0),
-            Ty::UShort => IrConst::UShort(0),
-            Ty::Int => IrConst::Int(0),
-            Ty::UInt => IrConst::UInt(0),
-            Ty::Long => IrConst::Long(0),
-            Ty::ULong => IrConst::ULong(0),
-            Ty::Float => IrConst::Float(0.0),
-            Ty::Double => IrConst::Double(0.0),
-            Ty::Char => IrConst::Char(0),
-            _ => IrConst::Null,
-        }
-    }
-}
-
 /// Checked semantic shape of an annotation constructor call. The common IR retains the annotation
 /// interface and lexical scope; a backend chooses the concrete runtime implementation and name.
 #[derive(Clone, Debug)]
@@ -725,6 +674,16 @@ pub struct IrAnnotationConstruction {
     pub defaults: Vec<Option<ExprId>>,
     /// Lexical classifier containing this call. `None` means a top-level/file-facade scope.
     pub enclosing_class: Option<TypeName>,
+}
+
+/// Which declaration a checked enum `valueOf` operation selected. Both name the same lookup by
+/// entry name; they are different declarations, and only one of them is `inline`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EnumValueOfDeclaration {
+    /// The classifier's own implicit member — `E.valueOf(name)`.
+    Member,
+    /// The standard library's top-level `enumValueOf<E>(name)`, whose body expands at the call.
+    StandardLibraryTopLevel,
 }
 
 /// An IR expression node (a subset of Kotlin IR's `IrExpression` hierarchy). Operands reference
@@ -1013,6 +972,11 @@ pub enum IrExpr {
     EnumValueOf {
         classifier: TypeName,
         arg: ExprId,
+        /// Which of the two declarations that spell this lookup the checker selected. They are not
+        /// interchangeable: one is the classifier's own member, the other the standard library's
+        /// INLINE top-level function, and a consumer that records source positions attributes an
+        /// inline expansion to its call site rather than to a dispatch.
+        declaration: EnumValueOfDeclaration,
     },
     EnumEntries {
         classifier: TypeName,
