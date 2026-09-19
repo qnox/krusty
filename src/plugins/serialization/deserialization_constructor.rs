@@ -355,6 +355,8 @@ pub(super) fn add_deserialization_constructor(
     ir.classes[class_id as usize]
         .secondary_ctors
         .push(IrSecondaryCtor {
+            // Generated: its debug identity is `generated_debug`, not a source line.
+            lines: crate::ir::IrSecondaryCtorLines::default(),
             annotations: DeclarationAnnotations::default(),
             source_order: u32::MAX,
             prefix_params: Vec::new(),

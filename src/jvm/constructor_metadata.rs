@@ -130,6 +130,7 @@ mod tests {
         IrSecondaryCtor {
             annotations: DeclarationAnnotations::default(),
             source_order: u32::MAX,
+            lines: crate::ir::IrSecondaryCtorLines::default(),
             prefix_params: vec![Ty::Boolean],
             params: vec![Ty::Int, Ty::obj("kotlin/String")],
             named_params: vec![

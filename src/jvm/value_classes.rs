@@ -2191,6 +2191,7 @@ pub(crate) fn lower_value_classes(
             let target_params = match &mut sc.delegate {
                 crate::ir::CtorDelegateTarget::This { target_params, .. }
                 | crate::ir::CtorDelegateTarget::Super { target_params, .. } => target_params,
+                crate::ir::CtorDelegateTarget::ImplicitEnumBase => continue,
             };
             for parameter in target_params {
                 *parameter = erase(parameter, &under);

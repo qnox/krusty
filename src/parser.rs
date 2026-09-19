@@ -10,6 +10,7 @@ use crate::token::{decode_char_literal_content, Token, TokenKind};
 use crate::types::Visibility;
 use std::collections::HashMap;
 
+mod constructors;
 mod debug_lines;
 mod declaration_bodies;
 mod declaration_modifiers;
@@ -3059,53 +3060,7 @@ impl<'a> Parser<'a> {
                         init_order.push(ClassInit::Block(self.parse_block_expr(false)));
                     }
                     TokenKind::Ident if self.keyword_text("constructor") => {
-                        let annotations = self.take_pending_annotations();
-                        let annotation_args = self.take_pending_annotation_args();
-                        let ctor_span = self.tok().span;
-                        self.bump(); // 'constructor'
-                        let params = self.parse_param_list();
-                        let mut delegation = CtorDelegation::None;
-                        if self.eat(TokenKind::Colon) {
-                            self.skip_newlines();
-                            let target = if self.at(TokenKind::Ident) {
-                                let target = self.text().to_string();
-                                self.bump();
-                                target
-                            } else {
-                                String::new()
-                            };
-                            let (args, names) = self.parse_call_arguments_with_names();
-                            let call = CtorDelegationCall {
-                                args,
-                                names,
-                                trailing_lambda: false,
-                            };
-                            delegation = match target.as_str() {
-                                "this" => CtorDelegation::This(call),
-                                "super" => CtorDelegation::Super(call),
-                                _ => {
-                                    self.diags.error(
-                                        ctor_span,
-                                        "expected 'this' or 'super' in constructor delegation",
-                                    );
-                                    CtorDelegation::None
-                                }
-                            };
-                        }
-                        self.skip_newlines();
-                        let body = self
-                            .at(TokenKind::LBrace)
-                            .then(|| self.parse_block_expr(false));
-                        let ctor_span =
-                            Span::new(ctor_span.lo, self.t[self.i.saturating_sub(1)].span.hi);
-                        secondary_ctors.push(SecondaryCtor {
-                            annotations,
-                            annotation_args,
-                            params,
-                            delegation,
-                            body,
-                            span: ctor_span,
-                        });
+                        secondary_ctors.push(self.parse_secondary_constructor(&emods));
                     }
                     TokenKind::Ident if self.at_companion_declaration() => {
                         if self.at_companion_object_declaration() {
@@ -4036,55 +3991,7 @@ impl<'a> Parser<'a> {
                         let _ = self.parse_nested_type_decl();
                     }
                     TokenKind::Ident if self.keyword_text("constructor") => {
-                        let annotations = self.take_pending_annotations();
-                        let annotation_args = self.take_pending_annotation_args();
-                        let ctor_span = self.tok().span;
-                        self.bump(); // 'constructor'
-                        let params = self.parse_param_list();
-                        let mut delegation = CtorDelegation::None;
-                        if self.eat(TokenKind::Colon) {
-                            self.skip_newlines();
-                            let target = if self.at(TokenKind::Ident) {
-                                let t = self.text().to_string();
-                                self.bump();
-                                t
-                            } else {
-                                String::new()
-                            };
-                            let (args, names) = self.parse_call_arguments_with_names();
-                            let delegation_call = crate::ast::CtorDelegationCall {
-                                args,
-                                names,
-                                trailing_lambda: false,
-                            };
-                            delegation = match target.as_str() {
-                                "this" => CtorDelegation::This(delegation_call),
-                                "super" => CtorDelegation::Super(delegation_call),
-                                _ => {
-                                    self.diags.error(
-                                        ctor_span,
-                                        "expected 'this' or 'super' in constructor delegation",
-                                    );
-                                    CtorDelegation::None
-                                }
-                            };
-                        }
-                        self.skip_newlines();
-                        let body = if self.at(TokenKind::LBrace) {
-                            Some(self.parse_block_expr(false))
-                        } else {
-                            None
-                        };
-                        let ctor_span =
-                            Span::new(ctor_span.lo, self.t[self.i.saturating_sub(1)].span.hi);
-                        secondary_ctors.push(SecondaryCtor {
-                            annotations,
-                            annotation_args,
-                            params,
-                            delegation,
-                            body,
-                            span: ctor_span,
-                        });
+                        secondary_ctors.push(self.parse_secondary_constructor(&mods));
                     }
                     TokenKind::Ident if self.keyword_text("typealias") => {
                         type_aliases.push(self.parse_type_alias_syntax());

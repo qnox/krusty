@@ -1993,6 +1993,7 @@ fn merge_class_initialization(
                     matches!(
                         constructor.delegate,
                         crate::ir::CtorDelegateTarget::Super { .. }
+                            | crate::ir::CtorDelegateTarget::ImplicitEnumBase
                     )
                     .then_some((ordinal, constructor.body))
                 })

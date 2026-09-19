@@ -4385,13 +4385,44 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   business. Being conservative costs only a missed rewrite, and a missed rewrite is the program that
   was compiled before.
 
-  A CONTEXT PARAMETER is still left recursing: it takes slots between the receiver and the
-  parameters, and nothing here tests that layout.
+  **A LOCAL function's frame is a physical capture prefix and then its logical parameters.** The
+  rewrite is driven from declaration lowering, and a local function reaches the IR by another path
+  that never ran it, so every `tailrec fun` inside a function kept its self-call and overflowed at
+  the depth the modifier exists to make safe. Lifting gives a local its captures as LEADING
+  parameters, and every call to it — the recursive one included — passes them; `BodySlots::
+  first_parameter` already points past them. Everything after that point is a logical parameter in
+  declaration order: the context parameters, an extension receiver where there is one, then the
+  declared value parameters. The loop reassigns exactly those and leaves the capture slots alone,
+  which is sound because a self-call's capture arguments re-read the frame's own capture
+  parameters — checked, not assumed, so a call whose prefix is anything else stays an ordinary
+  call.
+
+  Counting either end of the list alone is what left whole source forms recursive, each a normal
+  Kotlin program that kotlinc runs flat: taking the IR list's length writes a capture slot, and
+  taking the declaration's parameters minus its context values makes the self-call test compare the
+  call's whole argument list against a smaller number, so a CONTEXTUAL local declined in silence —
+  and a local EXTENSION, whose receiver the IR carries as an ordinary parameter at its own
+  position, was miscounted the same way. A capture is an implementation detail of lifting, not a
+  Kotlin reason to revoke the constant-stack contract. A physical list SHORTER than that prefix is
+  an invalid checked shape rather than a frame with no logical parameters, so it fails closed
+  (`FirLoweringFailure::MalformedLocalFrame`): saturating there would hand the loop a frame that
+  reassigns nothing, which is the same silent decline in a different disguise.
+
+  **A local declared inside a class MEMBER is lifted onto that class**, as a private static, so its
+  self-call is a `Callee::ClassStatic` rather than a `Callee::Local` — the same declaration reached
+  through the owner it was lifted onto. The self-call test recognized only `Local`, so this shape,
+  which is ordinary Kotlin and which kotlinc runs flat, recursed until `StackOverflowError`. The
+  callee IDENTITY answers it; the owner's spelling is not consulted. Test:
+  `a_class_member_local_tailrec_runs_flat` — a plain member's local, one that captures a property,
+  and one in a companion, each a million deep and each compared against the reference compiler.
   Tests: `tests/tailrec_e2e.rs` (`a_member_tailrec_runs_flat`, `an_extension_tailrec_runs_flat`,
-  `a_member_call_on_another_instance_still_recurses`, and
-  `member_and_extension_tailrec_agree_with_kotlinc`, which asks the reference compiler the same
-  questions — a `StackOverflowError` on one side and an answer on the other is the divergence it
-  reports).
+  `a_member_call_on_another_instance_still_recurses`, `a_local_tailrec_runs_flat`,
+  `a_class_member_local_tailrec_runs_flat`,
+  `a_capturing_local_tailrec_runs_flat` — read-only, mutated, and both at once —
+  `a_contextual_local_tailrec_runs_flat`, `an_extension_local_tailrec_runs_flat`, each a million
+  deep and each asking the reference compiler the same question, and
+  `member_and_extension_tailrec_agree_with_kotlinc` — a `StackOverflowError` on one side and an
+  answer on the other is the divergence they report).
 
 - **A `return` is a tail position wherever it stands.** `tailrec` rewrites a tail self-call into a
   loop step, and the tail positions of a function are not only its last expression: nothing of the
@@ -6950,6 +6981,90 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   private `(String, I)` one (byte-identity test pins this). Value classes with secondary
   constructors keep declining (static `constructor-impl` overloads unmodeled). Test:
   `tests/classpath_ctor_receiver_lambda_e2e.rs` (krusty-built dependency by default).
+
+- **An enum EMITS its secondary constructors, with the synthetic prefix forwarded.** The enum
+  writer is a separate path from the ordinary class writer and emitted none of them, so
+  `enum class My(val s: String) { ENTRY; constructor(): this("OK") }` produced a class whose
+  `ENTRY` called an `<init>` declared nowhere — `NoSuchMethodError: My: method
+  'void <init>(java.lang.String, int)' not found`, an artifact that could not link, emitted without
+  a diagnostic. Three facts, each measured against the reference compiler:
+  - Every constructor of a Kotlin enum carries the synthetic `(String name, int ordinal)` ahead of
+    what the declaration wrote. Those slots are forwarded verbatim to a `this(…)` delegation and
+    spliced into the target's descriptor, and they are NOT value parameters, so the body's value
+    ids still start at the first declared one — the same split the primary already made, now
+    shared through `SecondaryConstructorEmitter`'s `owner_prefix`. The emitted body is
+    byte-identical to kotlinc's (`aload_0; aload_1; iload_2; ldc "OK"; invokespecial
+    <init>:(Ljava/lang/String;ILjava/lang/String;)V`).
+  - An enum's constructors are PRIVATE, secondary ones included. Emitting one public would expose
+    a way to construct an enum instance the source never granted.
+  - The prefix is part of the constructor's PHYSICAL PARAMETER DESCRIPTION, not a detail of the
+    descriptor. `method_parameters::OwnerConstructorPrefix` carries the types and the reflected
+    identities together, so `-java-parameters` describes an enum secondary as kotlinc does —
+    `$enum$name` and `$enum$ordinal`, both `ACC_SYNTHETIC`, then the source parameters — and the
+    default stub carries it too: `constructor(k: Int = 5)` on `enum class My(val s: String, val n:
+    Int)` is `(Ljava/lang/String;IIILkotlin/jvm/internal/DefaultConstructorMarker;)V`, the owner
+    prefix, the declared parameters, the mask, the marker. Adding the prefix at the emitter's call
+    site alone left `method_parameters::secondary_constructor` asserting on an arity two short and
+    the stub emitting an overload every entry that omits an argument calls and no declaration
+    provides.
+  - A secondary constructor records its SOURCE shape in a generic `Signature` whenever that differs
+    from its descriptor — kotlinc's own rule for the attribute. It is formatted from the SEMANTIC
+    parameter types, never by concatenating descriptors or retrying formatter failure with erased
+    JVM types: a `Signature` exists precisely to say what a descriptor cannot, so the fixture-owned
+    `constructor(values: Envelope<String>)` signs `(LEnvelope<Ljava/lang/String;>;)V`, not
+    `(LEnvelope;)V`. An owner prefix makes the descriptor differ by itself (`()V` for an enum's
+    `constructor()`), so every enum secondary carries one; without it reflection reports the ABI
+    prefix as if the source had declared it, and two constructors differing only by the prefix
+    become indistinguishable.
+  - The synthetic default overload takes the CONSTRUCTOR's own access, not a fixed
+    `PUBLIC|SYNTHETIC`. An enum's constructors are private, and kotlinc marks their overload
+    `ACC_SYNTHETIC` alone (`0x1000`); publishing it public would grant a way to build the class
+    that the declaration does not.
+  - The declared access is the CONSTRUCTOR's own visibility. A `private constructor` is
+    `ACC_PRIVATE`, a `protected` one `ACC_PROTECTED`; a secondary constructor's modifiers used to be
+    dropped by the parser outright, which published every one of them as `public`. Sealed, value-
+    class-parametered and enum constructors stay private regardless, for the reasons above.
+  - A secondary constructor's `LineNumberTable` is built from lines its own DECLARATION owns, each
+    recorded where the syntax was live and carried to the constructor on
+    `IrSecondaryCtor::lines`: the `constructor` keyword, each parameter's default expression, the
+    `this`/`super` keyword, and the declaration's closing line. They are four different source facts
+    and can be four different lines, so none may stand in for another — the stub used to take "the
+    declaration" from the first default expression, then the delegation, then the PRIMARY's
+    class/field/closing-paren provenance, which attributed the secondary's code to another
+    declaration entirely. kotlinc enters the synthetic overload on the `constructor` keyword, fills
+    each masked parameter on that parameter's default, returns to the keyword for the branch, and
+    delegates on the declaration's closing line; krusty's table is identical, pinned by a multiline
+    ledger in `tests/enum_secondary_constructor_e2e.rs` whose three facts are on three lines.
+  - Still open: a NON-private secondary constructor's own single entry sits at pc 0 where kotlinc
+    puts it at pc 6. kotlinc enters such a constructor through an `Intrinsics.checkNotNullParameter`
+    guard per non-null reference parameter; krusty emits those only for PRIMARY constructor
+    parameters. The line is the same on both sides — only the prologue it follows differs — and the
+    synthetic overload, which has no such prologue, matches exactly. Pinned to that exact size by
+    `a_non_private_secondary_constructor_differs_only_by_its_missing_null_check`.
+  - Still open: the declared constructor's table is one entry even when its delegation spans lines,
+    where kotlinc marks each argument's own line and returns to the delegation's. That is
+    expression-line provenance for a constructor body, the same boundary as an ordinary call's
+    dispatch line, not a declaration fact.
+  - An enum declaring ONLY secondary constructors has no primary to emit: every entry names one of
+    the secondaries, and registering the synthesized primary anyway collided with a no-argument
+    secondary — both are `(String, int)V` — failing to load with `ClassFormatError: Duplicate
+    method name "<init>"`. Its bytes are still built so the constant pool interns in kotlinc's
+    order.
+  - A body-only enum secondary has an `ImplicitEnumBase` delegation in common IR. It is not dropped
+    merely because the source wrote no `this(…)` call: the JVM backend supplies `java/lang/Enum` and
+    forwards the backend-owned name/ordinal prefix, while property/init initialization runs in this
+    direct-base constructor before its body. Those physical prefix slots remain typed across frames
+    recorded by branchy delegation arguments.
+  - A bodied entry is a separate subclass. Krusty does not emit nestmate attributes yet, so an enum
+    secondary selected by such an entry uses the same package-private synthetic accessibility
+    bridge as a selected primary constructor; leaving the source constructor physically private
+    makes the subclass fail with `IllegalAccessError`.
+
+  Still failing, recorded rather than guessed at: an enum with ZERO entries loses every synthesized
+  member because the JVM IR carries no `is_enum` flag — enum-ness is read as
+  `!enum_entries.is_empty()` (`emptyEnumValuesValueOf.kt`). Test:
+  `tests/enum_secondary_constructor_e2e.rs` and the enum fixture in
+  `tests/java_parameters_attribute_e2e.rs`.
 
 - **Primary-ctor varargs and non-derivable member descriptors survive into class `@Metadata`.** A
   `vararg` primary-constructor parameter records `ValueParameter.vararg_element_type` (f4) — without

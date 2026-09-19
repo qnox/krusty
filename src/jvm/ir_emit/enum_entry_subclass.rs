@@ -73,7 +73,7 @@ pub(super) fn emit_enum_entry_subclass(
         .class_ctor_defaults(&superclass)
         .filter(|defaults| defaults.iter().any(Option::is_some))
     {
-        emit_ctor_default_stub_with_prefix(
+        constructor_defaults::emit_ctor_default_stub_with_prefix(
             ir,
             &fq_name,
             facade,
@@ -81,6 +81,7 @@ pub(super) fn emit_enum_entry_subclass(
             0,
             &user_jvm,
             defaults,
+            None,
             false,
             0x1000,
             &mut cw,

@@ -33,10 +33,13 @@ pub enum IrNodeOrigin {
 
 mod bottom_values;
 mod bridges;
+mod constructors;
 mod references;
 pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
 pub use bridges::{Bridge, BridgeKind};
+pub(crate) use constructors::IrSecondaryConstructorRole;
+pub use constructors::{IrJvmValueClassSecondaryCtor, IrSecondaryCtor, IrSecondaryCtorLines};
 pub use references::{FuncRef, PropRef, PropertyAccessorRole};
 
 /// A compiler-supplied operation selected from a real semantic declaration. This is an operation
@@ -2080,75 +2083,6 @@ impl IrClass {
     }
 }
 
-/// A secondary constructor: `<init>(params)` runs `delegate_prelude`, loads `delegate_args`, calls the
-/// delegate target, then runs `body`. `this` is value 0 and parameters are values `1..=params.len()`.
-#[derive(Clone, Debug)]
-pub struct IrSecondaryCtor {
-    /// User annotations declared on this constructor, split by JVM retention — the constructor
-    /// analogue of [`IrFile::function_annotations`] (a secondary constructor is not an
-    /// [`IrFunction`], so it carries them directly).
-    pub annotations: DeclarationAnnotations,
-    /// Stable source byte offset of a declared constructor. Generated constructors use
-    /// `u32::MAX`; their producer records any later placement rule by exact identity.
-    pub source_order: u32,
-    /// Compiler-supplied leading parameters shared by every constructor of the class. These occupy
-    /// body value slots before `params`, but are absent from Kotlin source metadata and default masks.
-    pub prefix_params: Vec<Ty>,
-    pub params: Vec<Ty>,
-    /// SOURCE parameter names paired with SEMANTIC (checker-resolved) types — what the class
-    /// `@Metadata` `Constructor` record describes (`params` above are the erased IR realization,
-    /// which loses fun-type shapes and generic arguments). This is metadata payload, not a
-    /// publication sentinel: [`Self::metadata_visibility`] alone decides whether a record exists.
-    pub named_params: Vec<(String, Ty)>,
-    /// Publish this constructor in Kotlin metadata with the recorded semantic visibility. `None`
-    /// means the constructor is a target/compiler realization with no Kotlin declaration record,
-    /// independently of its parameter names, arity, descriptor, or [`Self::synthetic`] flag.
-    pub metadata_visibility: Option<crate::types::Visibility>,
-    /// Debug representation for a compiler-generated constructor. Source constructors derive their
-    /// own tables from source declarations and leave this as `None`.
-    pub generated_debug: IrGeneratedDeclarationDebug,
-    /// Index into `named_params` of a `vararg` parameter, for the `Constructor` metadata record.
-    pub vararg_index: Option<usize>,
-    pub defaults: Vec<Option<ExprId>>,
-    /// Source-ordered temp declarations for delegation arguments.
-    pub delegate_prelude: Vec<ExprId>,
-    pub delegate_args: Vec<ExprId>,
-    /// Semantic target-parameter ordinals omitted at this delegation site. A backend derives its
-    /// own default-constructor ABI (for example JVM masks and marker) from these checked ordinals.
-    pub default_parameters: Vec<u32>,
-    pub body: Option<ExprId>,
-    /// Which `<init>` this constructor delegates to, and whether it runs the class init body.
-    pub delegate: CtorDelegateTarget,
-    /// kotlinc marks this ctor `ACC_SYNTHETIC` (0x1000) — e.g. a `@Serializable` deserialization ctor.
-    pub synthetic: bool,
-    /// A DECLARED parameter was value-class-typed (recorded by the value-class pass before erasure):
-    /// the ctor gets kotlinc's PRIVATE + public synthetic `(…, DefaultConstructorMarker)` ABI, and
-    /// its metadata record names the marker form.
-    pub vc_params: bool,
-}
-
-/// A compiler-generated secondary constructor's semantic role. Producers record this exact class
-/// and ordinal edge once; later plugin/backend phases must not recover the constructor from
-/// `synthetic`, its parameter arity, descriptor, or generated spelling.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum IrSecondaryConstructorRole {
-    SerializationDeserialization,
-}
-
-/// Semantic declaration metadata retained when the JVM value-class pass replaces a secondary
-/// constructor with a static `constructor-impl` realization. The backend owns the physical handle;
-/// Kotlin metadata must still describe the original source parameters/defaults and link them to that
-/// exact handle for downstream frontend resolution.
-#[derive(Clone, Debug)]
-pub struct IrJvmValueClassSecondaryCtor {
-    pub params: Vec<(String, Ty)>,
-    pub param_defaults: Vec<bool>,
-    pub vararg_index: Option<usize>,
-    pub annotations: DeclarationAnnotations,
-    pub metadata_visibility: crate::types::Visibility,
-    pub descriptor: String,
-}
-
 /// The delegation target of a secondary constructor.
 #[derive(Clone, Debug)]
 pub enum CtorDelegateTarget {
@@ -2165,6 +2099,10 @@ pub enum CtorDelegateTarget {
         target_params: Vec<Ty>,
         default_masks: Vec<i32>,
     },
+    /// An enum secondary constructor with no written `this(…)` delegation. Kotlin implicitly
+    /// initializes the language enum base with the compiler-supplied entry name and ordinal; a
+    /// target backend chooses that base and its physical constructor prefix.
+    ImplicitEnumBase,
 }
 
 /// A top-level (module) property: a static field on the file facade, initialized in `<clinit>`.
@@ -2681,6 +2619,11 @@ pub struct IrFile {
     /// 1-based source line of a class's primary-ctor closing `)` — kotlinc maps the ctor
     /// `$default` overload's `return` to it. Absent = single-line/unknown (the one-entry table).
     pub ctor_close_lines: std::collections::HashMap<TypeName, u32>,
+    /// The declaration-owned source lines of each SECONDARY constructor, by its stable declaration.
+    /// The declaration metadata handoff records them while the parser unit is live; lowering copies
+    /// them onto the constructor it builds, which happens after that unit's syntax is gone.
+    pub secondary_ctor_lines:
+        std::collections::HashMap<crate::fir::DeclarationId, IrSecondaryCtorLines>,
     /// Function ids of `internal` members — `@Metadata` `Function.flags` visibility 0 (the JVM
     /// method stays public; only metadata carries the module boundary). `private_methods` keeps
     /// its own set because privacy ALSO changes dispatch (`invokespecial`).
