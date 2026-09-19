@@ -1,0 +1,281 @@
+//! The `$childSerializers` cache: deciding which properties need one, and building it.
+//!
+//! A `@Serializable` class whose property has an ALLOCATED element serializer — a collection, an
+//! enum — caches those serializers in a `Lazy[]` static so each is built once rather than at every
+//! use. Which properties that covers, the static that holds them, and the accessor a `$serializer`
+//! reaches it through are one responsibility, and it lives here rather than in the plugin's
+//! top-level module.
+//!
+//! The pass runs SECOND, after every class's `$serializer` has been generated. A slot's element
+//! serializer may be a sibling class's `$serializer` singleton, and the classes are generated in an
+//! order that is not the source one. No single ordering could fix that — two `@Serializable`
+//! classes may hold collections of each other — so the cache cannot be built while the loop that
+//! creates those classes is still running.
+use super::{
+    class_ty, collection_serializer_builder, element_serializer_expr, field_serializer_of,
+    kserializer_of, property_is_contextual, type_name, Callee, ClassId, ExprId, InlineKind,
+    IrConst, IrExpr, IrFile, IrFunction, PluginContext, Ty, TypeName,
+};
+
+/// One class awaiting its `$childSerializers` cache: its id, its INTERNED qualified name, and the
+/// serialized properties in element order — everything [`add_child_serializer_cache`] needs on the
+/// second pass.
+///
+/// The name is carried as the interned `TypeName` identity rather than a rendered `String`: a
+/// round trip through text would re-intern it, and the only place a class name legitimately
+/// becomes characters is the classfile writer.
+pub(super) type PendingChildSerializerCache = (ClassId, TypeName, Vec<(String, Ty)>);
+
+/// The `$childSerializers` cache for one `@Serializable` class, built once every OTHER class's
+/// `$serializer` exists.
+///
+/// It must run in a second pass. A slot's element serializer may be a sibling class's
+/// `$serializer` singleton, and the classes are generated in an order that is not the source
+/// one — so building the cache inside the generation loop asked for a `$serializer` that did
+/// not exist yet and silently stored `null` in its place. No single ordering could fix it:
+/// two `@Serializable` classes may hold collections of each other.
+pub(super) fn add_child_serializer_cache(
+    ir: &mut IrFile,
+    ctx: &PluginContext,
+    class_id: ClassId,
+    serialized: TypeName,
+    foo_fields: &[(String, Ty)],
+) {
+    // `$childSerializers` cache — a `private static final Lazy[]` + the public synthetic
+    // `access$get$childSerializers$cp()` accessor kotlinc emits when a prop's serializer is
+    // ALLOCATED rather than a singleton: a collection (`ArrayListSerializer(…)`) or an ENUM
+    // (`EnumSerializer(…)`). A primitive/`String` (singleton `INSTANCE`) or a nested `@Serializable`
+    // CLASS (singleton `$$serializer.INSTANCE`) is NOT cached. Each slot is `LazyKt.lazyOf(…)`, else null.
+    let enum_internals: std::collections::HashSet<TypeName> = ir
+        .classes
+        .iter()
+        .filter(|c| !c.enum_entries.is_empty())
+        .map(crate::ir::IrClass::fq_name_id)
+        .collect();
+    // Which properties need a cached serializer, decided ONCE, before anything is built.
+    //
+    // A property needs one when its serializer must be ALLOCATED rather than read as a singleton —
+    // a collection, an enum. A property that NAMES its serializer answers `false` whatever its
+    // type: an explicit `@Serializable(with = X::class)` or a contextual element is built from the
+    // DECLARATION, so there is nothing about the type to defer and the cache has no slot for it.
+    //
+    // Classifying one of those as cacheable asks the type for a serializer it cannot supply, which
+    // now REFUSES the file rather than quietly dropping the cache. The classification has to be
+    // right, not merely recoverable — and computing it up front is also what lets the build loop
+    // below take `ir` mutably.
+    let cached: Vec<bool> = foo_fields
+        .iter()
+        .map(|(name, ty)| {
+            if property_is_contextual(ctx, ir, class_id, name)
+                || field_serializer_of(ctx, ir, class_id, name).is_some()
+            {
+                return false;
+            }
+            ty.kotlin_class_internal().is_some_and(|classifier| {
+                collection_serializer_builder(classifier).is_some()
+                    || enum_internals.contains(&classifier)
+            })
+        })
+        .collect();
+
+    if !cached.iter().any(|slot| *slot) {
+        return;
+    }
+    {
+        let cached_serializer = kserializer_of(class_ty("kotlin/Any"));
+        let lazy_serializer = Ty::obj_args("kotlin/Lazy", &[cached_serializer]);
+        let lazy_arr_ty = Ty::obj_args("kotlin/Array", &[Ty::nullable(lazy_serializer)]);
+        // A slot is `null` ONLY where the property needs no cache — its serializer is a singleton
+        // read at each use. A property that DOES need one and whose serializer cannot be
+        // constructed gets no cache at all: a `null` in a slot a reader will dereference is the
+        // defect this pass exists to remove, and the element-serializer question has already been
+        // answered as well as it ever will be by the time the second pass runs.
+        //
+        // Declining leaves the class exactly as it was before any cache existed — every use builds
+        // its serializer inline — rather than refusing the file over a shape that compiled and ran
+        // correctly before.
+        let mut elems: Vec<ExprId> = Vec::with_capacity(foo_fields.len());
+        for (index, (name, ty)) in foo_fields.iter().enumerate() {
+            if !cached[index] {
+                elems.push(ir.add_expr(IrExpr::Const(IrConst::Null)));
+                continue;
+            }
+            let Some(es) = element_serializer_expr(ir, ctx, ty) else {
+                // A property classified as NEEDING a cached serializer whose serializer cannot be
+                // built is an invalid intermediate state, not a shape to recover from. Dropping
+                // the cache and letting every use build its own is a second lowering for the same
+                // declaration, which is exactly what must not decide compilation.
+                //
+                // The plugin publishes an unsupported residual instead, so `jvm_can_emit` declines
+                // the file with the standard diagnostic rather than emitting a class whose cache
+                // silently disagrees with the classification that produced it.
+                let unsupported = ir.add_expr(IrExpr::PluginPlaceholder {
+                    plugin: "serialization",
+                    kind: "child-serializer-cache",
+                    exprs: Vec::new(),
+                    data: vec![serialized, type_name(name)],
+                });
+                ir.statics.push(crate::ir::IrStatic {
+                    name: "$childSerializers".to_string(),
+                    ty: lazy_arr_ty,
+                    init: unsupported,
+                    is_var: false,
+                    is_const: false,
+                    owner: Some(serialized),
+                    visibility: crate::types::Visibility::Private,
+                    custom_accessor: true,
+                    line: 0,
+                    source_order: u32::MAX,
+                });
+                return;
+            };
+            elems.push(ir.add_expr(IrExpr::Call {
+                callee: Callee::Static {
+                    owner: type_name("kotlin/LazyKt"),
+                    name: "lazyOf".to_string(),
+                    descriptor: "(Ljava/lang/Object;)Lkotlin/Lazy;".to_string(),
+                    inline: InlineKind::None,
+                },
+                dispatch_receiver: None,
+                args: vec![es],
+            }));
+        }
+        let arr = ir.add_expr(IrExpr::Vararg {
+            array_type: lazy_arr_ty,
+            spreads: vec![false; elems.len()],
+            elements: elems,
+        });
+        ir.statics.push(crate::ir::IrStatic {
+            name: "$childSerializers".to_string(),
+            ty: lazy_arr_ty,
+            init: arr,
+            is_var: false,
+            is_const: false,
+            owner: Some(serialized),
+            visibility: crate::types::Visibility::Private,
+            custom_accessor: true,
+            line: 0,
+            source_order: u32::MAX,
+        });
+        // Built from the interned identity directly; `external_static_field` would take the
+        // rendered spelling and intern it again.
+        let read = ir.add_expr(IrExpr::ExternalStaticField {
+            owner: serialized,
+            name: "$childSerializers".to_string(),
+            descriptor: "[Lkotlin/Lazy;".to_string(),
+        });
+        let ret = ir.add_expr(IrExpr::Return(Some(read)));
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![ret],
+            value: None,
+        });
+        let acc = ir.add_fun(IrFunction {
+            name: "access$get$childSerializers$cp".to_string(),
+            params: vec![],
+            ret: lazy_arr_ty,
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        ir.synthetic_methods.insert(acc);
+        ir.classes[class_id as usize].methods.push(acc);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::add_child_serializer_cache;
+    use crate::ir::{IrExpr, IrFile};
+    use crate::plugins::{synthetic_class, PluginContext};
+    use crate::types::Ty;
+
+    use super::super::class_ty;
+
+    fn holder(element: Ty) -> (IrFile, crate::ir::ClassId, Vec<(String, Ty)>) {
+        let mut ir = IrFile::default();
+        let mut holder = synthetic_class("demo/Holder");
+        holder.fields = vec![crate::ir::IrField::new("tags".to_string(), element)];
+        holder.ctor_param_count = 1;
+        let class_id = ir.add_class(holder);
+        (ir, class_id, vec![("tags".to_string(), element)])
+    }
+
+    /// A cached slot whose serializer cannot be constructed REFUSES the file.
+    ///
+    /// `List<demo/Unknown>` needs a cache — it is a collection — and `Unknown` has no `$serializer`
+    /// in the arena, so no element serializer can be built for it. Dropping the cache and letting
+    /// every use build its own would be a second lowering deciding the compilation, so the plugin
+    /// publishes an unsupported residual and `jvm_can_emit` declines instead.
+    ///
+    /// Driven directly rather than through a source fixture: reproducing this needs a shape the
+    /// REFERENCE compiler accepts and krusty cannot derive, which is a moving target, while the
+    /// invariant is not.
+    #[test]
+    fn an_underivable_cached_slot_refuses_the_file() {
+        let element = Ty::obj_args("kotlin/collections/List", &[class_ty("demo/Unknown")]);
+        let (mut ir, class_id, fields) = holder(element);
+        let serialized = ir.classes[class_id as usize].fq_name_id();
+
+        add_child_serializer_cache(
+            &mut ir,
+            &PluginContext::default(),
+            class_id,
+            serialized,
+            &fields,
+        );
+
+        let cache = ir
+            .statics
+            .iter()
+            .find(|s| s.name == "$childSerializers")
+            .expect("the refusal is published as the cache's own initializer");
+        assert!(
+            matches!(
+                ir.expr(cache.init),
+                IrExpr::PluginPlaceholder {
+                    plugin: "serialization",
+                    ..
+                }
+            ),
+            "an underivable required slot publishes an unsupported residual, not a null"
+        );
+        assert!(
+            !crate::jvm::ir_emit::jvm_can_emit(&ir),
+            "and that residual must make the file undecidable rather than emit a broken cache"
+        );
+    }
+
+    /// The companion case: every cached slot derives, so the cache is built and the file emits.
+    #[test]
+    fn a_derivable_cached_slot_builds_the_cache() {
+        let element = Ty::obj_args("kotlin/collections/List", &[Ty::String]);
+        let (mut ir, class_id, fields) = holder(element);
+        let serialized = ir.classes[class_id as usize].fq_name_id();
+
+        add_child_serializer_cache(
+            &mut ir,
+            &PluginContext::default(),
+            class_id,
+            serialized,
+            &fields,
+        );
+
+        let cache = ir
+            .statics
+            .iter()
+            .find(|s| s.name == "$childSerializers")
+            .expect("a `List<String>` element serializer derives, so the cache is built");
+        assert!(
+            !matches!(ir.expr(cache.init), IrExpr::PluginPlaceholder { .. }),
+            "a derivable slot publishes a real initializer"
+        );
+        assert!(
+            ir.classes[class_id as usize]
+                .methods
+                .iter()
+                .any(|&m| ir.functions[m as usize].name == "access$get$childSerializers$cp"),
+            "and the accessor the `$serializer` reads it through"
+        );
+    }
+}
