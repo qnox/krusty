@@ -3222,6 +3222,119 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   primitive result or checkcasts a narrower reference result at the accessor boundary. Tests:
   `lambda_result_inference_e2e`, `delegated_prop_e2e`.
 
+- **A delegated property crosses the scalar/reference boundary at FOUR places, and each was
+  emitting unverifiable bytecode.** Found by bucketing the box corpus, not by reading the code; box
+  total 6333 → 6344.
+  - The DELEGATE reaches the operator's receiver slot. A delegate is stored at its own type, so
+    `val s: String by impl` (an `Int`) pushed a raw `int` where `operator fun Any?.getValue(…)`
+    declares `Object` — `Type integer … is not assignable to 'java/lang/Object'`. It is boxed
+    against the DECLARED slot, not unconditionally: `operator fun Int.getValue(…)` keeps its
+    receiver unboxed, and boxing every scalar delegate would break that.
+  - The RESULT reaches the accessor's own return. The accessor returns the PROPERTY's type while
+    the operator returns the DECLARATION's, so `val age: Int by map` returned the `Object` that
+    `Map<K, out V>.getValue` leaves on the stack from `getAge()I`. The coercion goes on the
+    accessor body, which is the boundary the accessor owns and where the emitter reads the value's
+    own physical type — so a matching type costs nothing, a reference result gets its cast, and a
+    scalar one its unbox. It is skipped where the delegated call already coerced to that same
+    type, so the non-external arms keep their single coercion node
+    (`fir_lower::tests::generic_member_delegate_result_keeps_its_erased_call_boundary` asserts
+    exactly one). Putting it on the delegated CALL instead (coercing the external target's
+    declared result to the selected one) fixed the reference case and not the scalar one, because
+    a stdlib `getValue` is spliced rather than called.
+  - The DELEGATE EXPRESSION reaches `provideDelegate`'s receiver slot, which is the same boundary
+    one phase earlier: `val byInt by 42` pushed a raw `int` into
+    `provideDelegate(Object, Object, KProperty)`. The adaptation fact comes from the CHECKED
+    delegate call — `FirDelegateCall` now carries the call's own `receiver` and the selected
+    callable's `declared_receiver` — because the caller had nothing to compare against for a
+    `provideDelegate`, which is what left this hole after the accessor receiver was fixed (box
+    `delegatedProperty/provideDelegate/genericProvideDelegateOnNumberLiteral.kt`).
+  - The WRITTEN VALUE reaches the operator's declared parameter: `var x: Long by …` handed a raw
+    `long` to `setValue(Object, Object, Object)`. Arguments are adapted against the slots the
+    callable DECLARES, tail-aligned with its parameter list (a callable's own value parameters
+    follow any context parameters), so a `setValue(…, newValue: Long)` keeps the value unboxed and
+    an extension operator on a scalar owner gets its `thisRef` boxed for the same reason. Only the
+    CROSS-FILE shape was broken — a same-file operator is a method of the file's own IR and the
+    write reached it already adapted (box
+    `delegatedProperty/genericSetValueViaSyntheticAccessor.kt`, whose operator is `protected` and
+    inherited; that case now advances past the `VerifyError` to the separate
+    super-constructor-argument boxing gap below).
+
+  The slots each value reaches come from the CHECKED PLAN, not from a signature read back in
+  lowering. `FirDelegateCall` publishes the operator's applied value parameters and the slots the
+  declaration spells for the same call, in the same order and always the same length. The declared
+  side is UN-ERASED — `setValue(…, newValue: T)` reads `T`, not `Object` — because what a `T` slot
+  costs a value is a target's answer and differs between targets; lowering states only that two
+  semantic types differ. The type of the `KProperty` operand is published the same way, so
+  resolution's applicability classifier and the value lowering builds are one answer. A plan
+  whose lengths disagree is a broken contract between two phases and fails as
+  `InvalidDelegatedCallShape`; it never lets an argument through unadapted, which is how a raw
+  `long` reached an `Object` slot in the first place. There is no prefix for lowering to find the
+  end of: a CONTEXT-PREFIXED convention operator is not a delegate convention at all, because the
+  operator is called from a generated accessor with no scope to fill an implicit context from.
+  kotlinc rejects such a declaration outright ("context parameters on delegation operators are
+  unsupported") and then reports the property as having no applicable `getValue`; krusty emits the
+  same declaration diagnostic, from the SAME rule that excludes the candidate during selection, so
+  the two answers cannot drift apart, and on the same `context(…)` clause kotlinc anchors it on.
+
+  A property whose delegate supplies no convention is reported by the FRONT END, never as a checked-
+  FIR failure: that is an ordinary source mistake, and an internal error is not a diagnostic. The
+  report is anchored on the `by` keyword, which is what kotlinc anchors it on, and it is made once
+  per convention the property needs — a `var` is told about `getValue` AND `setValue`, even though
+  the first already failed. kotlinc has two shapes for it and krusty reproduces both: with no
+  function of that name in reach, `type 'Plain' has no method 'getValue(Holder,
+  KMutableProperty1<*, *>)', so it cannot serve as a delegate.` (and `… for var (read-write
+  property).` for `setValue`); with functions of that name that are none of them applicable,
+  `property delegate must have a '…' method. None of the following functions is applicable:` and
+  the candidates, each rendered with its context prefix, its parameter names and its result. The
+  candidate list is every function of that name the delegate's scope offers, whatever excluded it —
+  an inapplicable overload, a missing `operator` modifier and a context prefix alike, because each
+  is a thing the author plausibly meant to be the convention. The second slot of the demanded
+  signature is the property reference the accessors would pass: `KProperty`/`KMutableProperty` by
+  mutability, numbered by receiver count (none, member or extension, member extension), and
+  star-projected UNLESS exactly one candidate is to blame, which is when kotlinc names the
+  receivers and the property type outright. `thisRef` follows the same shape, printing `Nothing?`
+  where the accessor passes null. One recorded divergence, and it is not this diagnostic's: a
+  MEMBER or TOP-LEVEL delegated property with no declared type has nothing left to infer its type
+  from once `getValue` is missing, and signature finalization then fails to produce a module
+  without naming a cause — which skips the body check for the WHOLE file, so that file reports
+  nothing at all. A LOCAL delegated property, whose type the checker infers itself, reports
+  normally with no declared type. The gap is in signature finalization failing silently, and the
+  test pins its exact size so it cannot quietly widen.
+
+  All four are stated the SAME way, and it is a SEMANTIC statement: lowering compares the two
+  checked types and, where they differ, records one `ImplicitCoercion` to the one the other side
+  declares. What that costs — a box, an unbox, a widening, a `checkcast`, a value class's own
+  `box-impl`/`unbox-impl`, or no instruction — is read off the PHYSICAL types by the backend when
+  it emits the coercion. Asking `Ty::is_jvm_scalar()` in lowering instead would put a
+  representation choice in the wrong phase and still leave the backend to re-derive it; it also
+  gets the cases wrong that are references without being scalars, which is every nullable carrier
+  (`var x: Int? by …` must pass through untouched) and every value class (`var id: Id by …` must
+  cross through `Id.box-impl`, not `Integer.valueOf`). Both are pinned against kotlinc.
+
+  The accessor's own return coercion is likewise stated once, by the CALLER, which knows whether
+  the value in hand is a source-written body (already the property's type) or the checked result of
+  a delegate operator (the declaration's). Reading it back off the generated node's shape guessed
+  wrong in both directions — a missing coercion does not verify, a duplicated one wraps a coercion
+  in a coercion.
+
+  Still open next door, and NOT part of this boundary: a generic SUPER-CONSTRUCTOR argument
+  (`class C : PVar<Long>(42L)` calls `PVar.<init>(Object)` with a raw `long`, so the class links to
+  a `<init>(long)` that does not exist — a `NoSuchMethodError`, not a `VerifyError`).
+
+  Recorded gaps the same ledgers make visible, all outside this boundary and none affecting the
+  adaptation instructions: a `var`'s delegate `KProperty` is a `PropertyReference*Impl` where
+  kotlinc uses `MutablePropertyReference*Impl`; a member-extension delegate's reference names the
+  EXTENSION receiver's class where kotlinc names the owner; the reference's signature string omits
+  a value class accessor's mangled name and carries the boxed return (`getId()LId;` where kotlinc
+  writes `getId-eEFUqEU()I`); and a non-null reference setter parameter is not
+  `checkNotNullParameter`-checked.
+
+  Tests: `tests/delegate_scalar_boundary_e2e.rs` (thirteen cases — top-level, member,
+  member-extension, `provideDelegate`, cross-file and classpath operators, nullable carriers and
+  both value-class carrier kinds; each either RUN or pinned instruction-for-instruction against
+  kotlinc), `fir_lower::tests::a_delegated_accessor_result_crosses_exactly_one_coercion`.
+  The lowering lives in `src/fir_lower/delegated_properties.rs`.
+
 - **String-template interpolation allows line breaks around the expression.** `"${" NL* expression
   NL* "}"` per the Kotlin grammar — a multiline lambda inside `${…}` (common in raw strings) parses.
   Plain line breaks only; an explicit `;` still terminates the expression. Test:

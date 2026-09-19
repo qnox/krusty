@@ -5682,7 +5682,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         } else {
             self.delegate_this_ref(declaration)
         };
-        let arguments = [this_ref, Ty::obj("kotlin/reflect/KProperty")];
+        // The classifier is resolved through the same source that answers applicability, so this
+        // probe and the checked selection agree on which declaration `KProperty` is.
+        let arguments = [
+            this_ref,
+            crate::resolve::delegated_properties::delegate_property_reference_type(),
+        ];
         let provided = self.with_resolver(scope, |resolver| {
             Some(super::super::select_delegate_operator(
                 resolver,

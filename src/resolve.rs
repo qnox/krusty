@@ -41,7 +41,8 @@ mod conditional_branch;
 mod constant_evaluation;
 mod context_capture;
 mod context_sensitive_resolution;
-mod delegated_properties;
+pub(crate) mod delegated_properties;
+pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod dependency_platform;
 mod finalized_projection;
 mod generic_call_bindings;
@@ -94,7 +95,9 @@ use constant_evaluation::{
 };
 pub(crate) use context_capture::{selected_context_values, SelectedContextSources};
 use context_sensitive_resolution::{expected_nested_classifier, parameterized_class_literal_type};
-use delegated_properties::{select_delegate_operator, select_delegate_operator_return};
+use delegated_properties::{
+    select_delegate_operator, select_delegate_operator_return, DelegateConventionSite,
+};
 pub(crate) use dependency_platform::DependencyPlatform;
 pub(crate) use finalized_projection::{
     project_finalized_signatures, publish_stable_declaration_metadata,
@@ -13470,8 +13473,10 @@ fn delegated_getvalue_ret_for_signature(
     let resolver = crate::symbol_resolver::SymbolResolver::new_import_scoped_with_module(
         libraries, &module, &scope,
     );
-    let kproperty = Ty::obj("kotlin/reflect/KProperty");
-    let convention_args = [this_ref, kproperty];
+    let convention_args = [
+        this_ref,
+        crate::resolve::delegated_properties::delegate_property_reference_type(),
+    ];
     // `provideDelegate` read from the TABLE, whose return may still be the marker — its body is an
     // expression nothing has typed yet. The caller has already resolved that step and passes the
     // stored type in, so an undetermined answer here is not an answer: it would make the delegate
@@ -18157,6 +18162,11 @@ pub struct TypeInfo {
     /// Selected `provideDelegate` conventions. Lowering stores the selected call's semantic result
     /// type and consumes this exact target to emit the initialization call.
     pub delegate_provide_targets: HashMap<ExprId, DelegateGetValueTarget>,
+    /// The `KProperty` classifier the ordinary symbol source answered with when a delegated
+    /// property's conventions were selected against it. Recorded once, here, so the checked plan
+    /// and every value built from it carry the resolution actually used rather than each phase
+    /// spelling the name again.
+    pub delegate_property_reference_type: Option<Ty>,
     /// For a call to a function with CONTEXT PARAMETERS (`context(a: A) fun f()`) where the context
     /// arguments are supplied IMPLICITLY, the checker-selected source for each leading context
     /// parameter. Keyed by the call `ExprId`; lowering consumes this identity without repeating scope
@@ -18829,86 +18839,6 @@ pub struct ResolvedTopLevelCall {
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
 }
 
-#[derive(Clone, Debug)]
-pub enum DelegateGetValueTarget {
-    Member {
-        applied_receiver: Ty,
-        declared_receiver: Ty,
-        declared_ret: Ty,
-        stable_declaration: Option<crate::fir::DeclarationId>,
-        external_identity: Option<crate::fir::ExternalCallableId>,
-        external_default_provider: Option<crate::fir::ExternalCallableId>,
-        owner: TypeName,
-        name: String,
-        params: Vec<Ty>,
-        ret: Ty,
-        physical_params: Vec<Ty>,
-        physical_ret: Ty,
-        descriptor: String,
-        interface: bool,
-    },
-    Extension {
-        callable: Box<crate::libraries::LibraryCallable>,
-        stable_declaration: Option<crate::fir::DeclarationId>,
-    },
-    MemberExtension {
-        stable_declaration: Option<crate::fir::DeclarationId>,
-        external_identity: Option<crate::fir::ExternalCallableId>,
-        external_default_provider: Option<crate::fir::ExternalCallableId>,
-        owner: TypeName,
-        name: String,
-        extension_receiver: Ty,
-        dispatch_receiver: ImplicitReceiverSelection,
-        context_count: usize,
-        params: Vec<Ty>,
-        ret: Ty,
-        physical_params: Vec<Ty>,
-        physical_ret: Ty,
-        inline: InlineKind,
-        inline_body_plan: Option<Box<crate::libraries::InlineBodyPlan>>,
-        suspend: bool,
-        declared_ret: Option<Ty>,
-        interface: bool,
-    },
-}
-
-impl DelegateGetValueTarget {
-    pub fn ret(&self) -> Ty {
-        match self {
-            Self::Member { ret, .. } => *ret,
-            Self::Extension { callable, .. } => callable.ret,
-            Self::MemberExtension { ret, .. } => *ret,
-        }
-    }
-
-    fn applied_receiver(&self) -> Option<Ty> {
-        match self {
-            Self::Member {
-                applied_receiver, ..
-            } => Some(*applied_receiver),
-            Self::Extension { callable, .. } => callable.source_receiver,
-            Self::MemberExtension {
-                extension_receiver, ..
-            } => Some(*extension_receiver),
-        }
-    }
-
-    fn receiver_constrained_by_result(&self, expected: Ty) -> Option<Ty> {
-        let Self::Member {
-            declared_receiver,
-            declared_ret,
-            ..
-        } = self
-        else {
-            return None;
-        };
-        let mut bindings = crate::symbol_resolver::GSigBinds::new();
-        crate::symbol_resolver::unify_inferred_ty(*declared_ret, expected, &mut bindings);
-        (!bindings.is_empty())
-            .then(|| crate::symbol_resolver::ty_subst_keep_unbound(*declared_receiver, &bindings))
-    }
-}
-
 impl TypeInfo {
     pub fn resolved_type_ref(&self, reference: &TypeRef) -> Option<TypeName> {
         self.resolved_type(reference)?
@@ -19255,6 +19185,10 @@ impl TypeInfo {
     }
     pub fn delegate_provide(&self, delegate: ExprId) -> Option<&DelegateGetValueTarget> {
         self.delegate_provide_targets.get(&delegate)
+    }
+    /// The resolved `KProperty` classifier; `None` when this file checked no delegated property.
+    pub fn delegate_property_reference_type(&self) -> Option<Ty> {
+        self.delegate_property_reference_type
     }
 }
 
@@ -32097,7 +32031,15 @@ impl<'a> Checker<'a> {
                 name,
                 ty,
                 delegate,
-            } => self.stmt_local_delegate(scope, s, is_var, name, ty, delegate),
+                by_span,
+            } => self.stmt_local_delegate(
+                scope,
+                s,
+                name,
+                ty,
+                delegate,
+                DelegateConventionSite::local(by_span, is_var),
+            ),
             Stmt::LocalLateinit { name, ty } => {
                 if self.declared_in_current_scope(scope, &name) {
                     self.diags.error(
@@ -32625,10 +32567,10 @@ impl<'a> Checker<'a> {
         &mut self,
         scope: &CheckerScope<'_>,
         s: StmtId,
-        is_var: bool,
         name: String,
         ty: Option<TypeRef>,
         delegate: ExprId,
+        site: DelegateConventionSite,
     ) {
         if self.declared_in_current_scope(scope, &name) {
             self.diags.error(
@@ -32647,17 +32589,23 @@ impl<'a> Checker<'a> {
             }
             t
         });
-        let (dt, delegate_ret) =
-            self.check_delegate_getvalue(scope, delegate, Ty::Null, Ty::Null, explicit_property_ty);
+        let (dt, delegate_ret) = self.check_delegate_getvalue(
+            scope,
+            delegate,
+            Ty::Null,
+            Ty::Null,
+            explicit_property_ty,
+            site,
+        );
         let prop_ty = match explicit_property_ty {
             Some(t) => t,
             None => delegate_ret.unwrap_or(Ty::Error),
         };
-        if is_var {
-            self.record_delegate_setvalue(scope, delegate, dt, Ty::Null, prop_ty);
+        if site.is_var {
+            self.record_delegate_setvalue(scope, delegate, dt, Ty::Null, prop_ty, site);
         }
         self.local_decl_types.insert(s, prop_ty);
-        self.declare(scope, &name, prop_ty, is_var);
+        self.declare(scope, &name, prop_ty, site.is_var);
         let storage_ty = self
             .delegate_provide_targets
             .get(&delegate)
@@ -44797,6 +44745,13 @@ pub(crate) fn member_extension_function_with(
             ),
             inline_body_plan: shape.function.inline_body_plan.clone(),
             suspend: shape.function.signature.is_suspend(),
+            declared_params: shape
+                .function
+                .signature
+                .generic_sig
+                .as_ref()
+                .map(|signature| signature.params.clone())
+                .unwrap_or_else(|| shape.function.signature.params.clone()),
             declared_ret: shape.function.declared_ret,
             owner: shape.owner,
             physical_name: shape.function.physical_name.clone(),
@@ -45131,6 +45086,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         delegate_getvalue_targets: HashMap::new(),
         delegate_setvalue_targets: HashMap::new(),
         delegate_provide_targets: HashMap::new(),
+        delegate_property_reference_type: None,
         super_ctor_params: HashMap::new(),
         context_args: HashMap::new(),
         fn_reassigned: std::collections::HashSet::new(),
@@ -46905,6 +46861,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         delegate_getvalue_targets,
         delegate_setvalue_targets,
         delegate_provide_targets,
+        delegate_property_reference_type,
         context_args,
         super_ctor_params,
         discovered_anonymous_captures,
@@ -47239,6 +47196,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         delegate_getvalue_targets,
         delegate_setvalue_targets,
         delegate_provide_targets,
+        delegate_property_reference_type,
         context_args,
     };
     if !capture_discovery {
@@ -47713,6 +47671,10 @@ pub(crate) struct MemberExtensionFunctionCandidate {
     inline: InlineKind,
     inline_body_plan: Option<Box<crate::libraries::InlineBodyPlan>>,
     suspend: bool,
+    /// The value parameters as the DECLARATION spells them, un-erased and before this call's
+    /// substitution. A non-generic declaration has no separate shape, so its ordinary parameter
+    /// list is that spelling.
+    declared_params: Vec<Ty>,
     declared_ret: Option<Ty>,
     owner: TypeName,
     physical_name: String,
@@ -48266,6 +48228,8 @@ struct Checker<'a> {
     delegate_getvalue_targets: HashMap<ExprId, DelegateGetValueTarget>,
     delegate_setvalue_targets: HashMap<ExprId, DelegateGetValueTarget>,
     delegate_provide_targets: HashMap<ExprId, DelegateGetValueTarget>,
+    /// See [`TypeInfo::delegate_property_reference_type`].
+    delegate_property_reference_type: Option<Ty>,
     /// Implicit context arguments per call (see [`TypeInfo::context_args`]).
     context_args: HashMap<ExprId, Vec<ResolvedContextArgument>>,
     /// Names reassigned anywhere in the function body currently being checked (including inside its
@@ -63891,6 +63855,25 @@ impl<'a> Checker<'a> {
     }
 
     fn check_operator_declaration(&mut self, function: &FunDecl, ret: Ty) {
+        // A delegated-property convention is called from a GENERATED accessor, which has no scope
+        // to fill an implicit context from. The declaration is rejected here, so the property that
+        // uses it reports no applicable convention rather than reaching a call whose argument list
+        // cannot be mapped onto the declaration's slots.
+        if function.is_operator()
+            && crate::resolve::delegated_properties::DELEGATE_CONVENTION_NAMES
+                .contains(&function.name.as_str())
+            && !crate::resolve::delegated_properties::is_usable_delegate_convention(
+                true,
+                function.context_count,
+            )
+        {
+            self.diags.error(
+                function
+                    .context_span
+                    .expect("a function with context parameters must retain its clause span"),
+                "context parameters on delegation operators are unsupported.".to_string(),
+            );
+        }
         if function.is_operator()
             && function.name == "hasNext"
             && !matches!(ret.canonical_semantic(), Ty::Boolean | Ty::Error)
@@ -65179,15 +65162,17 @@ impl<'a> Checker<'a> {
         // (and its sub-expressions') types are recorded for the lowering of `x$delegate`.
         if let Some(de) = p.delegate.filter(|_| check_ordinary_property_body) {
             let this_ref = recv_ty.unwrap_or(Ty::Null);
+            let site = DelegateConventionSite::of(p, None, recv_ty);
             let (dt, _) = self.check_delegate_getvalue(
                 scope,
                 de,
                 Ty::Null,
                 this_ref,
                 Some(resolved_property_ty),
+                site,
             );
             if p.is_var {
-                self.record_delegate_setvalue(scope, de, dt, this_ref, resolved_property_ty);
+                self.record_delegate_setvalue(scope, de, dt, this_ref, resolved_property_ty, site);
             }
         }
         if let Some(init) = p.init.filter(|_| check_ordinary_property_body) {
@@ -68623,12 +68608,15 @@ impl<'a> Checker<'a> {
                             .declared_ty()
                             .map(|declared| self.check_declaration_type(scope, declared))
                             .filter(|ty| !ty.mentions_error() && !ty.mentions_pending());
+                        let site =
+                            DelegateConventionSite::of(bp, Some(owner_ref), extension_receiver);
                         let (dt, delegate_ret) = self.check_delegate_getvalue(
                             &initializer_scope,
                             de,
                             owner_ref,
                             this_ref,
                             expected_property,
+                            site,
                         );
                         if expected_property.is_none() {
                             body_inferred_property_type = delegate_ret
@@ -68650,6 +68638,7 @@ impl<'a> Checker<'a> {
                                 dt,
                                 this_ref,
                                 property_ty,
+                                site,
                             );
                         }
                     }
