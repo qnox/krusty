@@ -169,14 +169,9 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         effective_classpath,
         opts.friend_paths.clone(),
     ));
-    let platform = Box::new(JvmLibraries::new(cp.clone()));
-    // The distribution's common-expectation klib is optional, so an absent one says nothing. One
-    // that IS there and cannot be read is a different thing entirely: without this the compile just
-    // behaves as though the library declared no expectations, and the `expect` annotations it
-    // carries surface as unresolved references with nothing pointing at the klib.
-    if let Some(problem) = platform.common_expectation_problem() {
-        eprintln!("warning: cannot read the common expectation library: {problem}");
-    }
+    // Construction is fallible: a corrupt selected dependency remains a terminal frontend
+    // diagnostic and never becomes a queryable provider with an empty symbol index.
+    let platform = JvmLibraries::new(cp.clone());
     let source_inputs = opts
         .sources
         .iter()

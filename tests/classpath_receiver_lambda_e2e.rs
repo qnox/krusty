@@ -207,7 +207,8 @@ fn classpath_member_receiver_lambda_with_defaulted_prefix_compiles_and_runs() {
     assert_eq!(bind_call_sig.lambda_receiver_params, [false, true]);
     let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
         krusty::jvm::classpath::Classpath::new(vec![libout.clone()]),
-    ));
+    ))
+    .expect("JVM provider initialization");
     let resolved_ui = platform
         .classifier(krusty::types::type_name("lib/Ui"))
         .expect("resolved Ui library type");

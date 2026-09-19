@@ -403,7 +403,10 @@ fn compile_in_process_report(
     jdk_modules: Option<&std::path::Path>,
 ) -> InProcessCompileReport {
     let cp = cached_classpath(cp_jars, jdk_modules);
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
+            .expect("JVM provider initialization"),
+    );
     let backend = krusty::jvm::JvmBackend::new(cp);
     let report = emit_in_process(src, stem, platform, &backend);
     let classes = report
@@ -470,7 +473,10 @@ pub fn compile_in_process_metadata_cp_module_target(
     let _pg = ProfGuard::new("krusty");
     let mut diags = DiagSink::new();
     let cp = std::rc::Rc::new(Classpath::new(cp_jars.to_vec()));
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
+            .expect("JVM provider initialization"),
+    );
     let inputs = [SourceInput::kotlin(src).with_file_stem(stem)];
     let stems = [stem.to_string()];
     let features = krusty::features::LangFeatures::from_source(src);
@@ -680,7 +686,9 @@ fn front_end_diagnostics_files_with_classpath<F>(
 where
     F: FnOnce(&[krusty::ast::File], &mut krusty::frontend::FrontendSymbols),
 {
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),
+    );
     let inputs = sources
         .iter()
         .map(|source| krusty::frontend::SourceInput::kotlin(source))
@@ -1880,7 +1888,10 @@ fn krusty_lib_out(sources: &[(&str, &str)]) -> Result<Option<PathBuf>, String> {
         .collect::<Vec<_>>();
     let jdk = krusty::toolchain::jdk_modules();
     let cp = cached_classpath(&[stdlib_jar()], jdk.as_deref());
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
+            .expect("JVM provider initialization"),
+    );
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
         platform,
@@ -2365,7 +2376,9 @@ pub fn inspect_checker_with_classpath<T>(
         main, &toks, &mut diags, &features,
     )];
     let cp = std::rc::Rc::new(Classpath::new(classpath));
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),
+    );
     let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
     let info = check_file(&files[0], &mut syms, &mut diags);
     let inspected = inspect(&files[0], &info, &syms);

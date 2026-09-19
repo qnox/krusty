@@ -170,7 +170,7 @@ fn frontend_census_error(
             .iter()
             .map(|(stem, content)| krusty::source::SourceInput::java(content).with_file_stem(stem)),
     );
-    let platform = Box::new(JvmLibraries::new(cp.clone()));
+    let platform = JvmLibraries::new(cp.clone());
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
         platform,
@@ -243,7 +243,7 @@ fn common_lowering_error(
         .collect::<Vec<_>>();
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
-        Box::new(JvmLibraries::new(cp.clone())),
+        JvmLibraries::new(cp.clone()),
         features,
         &mut diagnostics,
     );
@@ -298,7 +298,7 @@ fn emit_frontend_dependency(
         .chain(java_blocks)
         .map(|(stem, _)| stem.clone())
         .collect::<Vec<_>>();
-    let platform = Box::new(JvmLibraries::new(cp.clone()));
+    let platform = JvmLibraries::new(cp.clone());
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs,
         platform,
@@ -1320,7 +1320,7 @@ mod tests {
         )];
         let features =
             krusty::features::LangFeatures::from_source("// LANGUAGE: +MultiPlatformProjects");
-        let libraries = JvmLibraries::new(cp.clone());
+        let libraries = JvmLibraries::new(cp.clone()).expect("JVM provider initialization");
         assert!(
             krusty::libraries::SemanticPlatform::is_optional_expectation(
                 &libraries,
@@ -1347,7 +1347,7 @@ mod tests {
             "@JvmInline value class Token(val value: String)".to_string(),
         )];
         let features = krusty::features::LangFeatures::from_source("");
-        let libraries = JvmLibraries::new(cp.clone());
+        let libraries = JvmLibraries::new(cp.clone()).expect("JVM provider initialization");
         assert!(
             !krusty::libraries::SemanticPlatform::is_optional_expectation(
                 &libraries,

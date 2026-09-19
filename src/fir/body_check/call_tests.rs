@@ -2300,9 +2300,12 @@ fn java_static_classifier_call_keeps_external_identity_without_a_receiver() {
     };
     let mut classpath = crate::toolchain::classpath_jars_for("");
     classpath.push(jdk);
-    let platform = Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-        std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
-    ));
+    let platform = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(classpath),
+        ))
+        .expect("JVM provider initialization"),
+    );
     let (body, _) = checked_function_body_with_platform(
         "fun load(): Any = Class.forName(\"java.lang.String\")\n",
         "load",

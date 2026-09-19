@@ -621,12 +621,14 @@ fn adapted_generic_extension_reference_consumes_published_substitution() {
 
 #[test]
 fn size_only_primitive_array_constructor_reference_lowers_mechanically() {
-    let platform: Box<dyn crate::libraries::SemanticPlatform> =
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-                crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
+    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+                "// WITH_STDLIB",
             )),
-        ));
+        ))
+        .expect("JVM provider initialization"),
+    );
     let ir = lower_single_source_with_platform(
         "private fun <T> upcast(value: T): T = value\n\
          fun use() { upcast<(Int) -> ByteArray>(::ByteArray)(10) }\n",
@@ -646,12 +648,14 @@ fn size_only_primitive_array_constructor_reference_lowers_mechanically() {
 
 #[test]
 fn inline_array_initializer_is_spliced_before_common_ir_escapes() {
-    let platform: Box<dyn crate::libraries::SemanticPlatform> =
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-                crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
+    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+                "// WITH_STDLIB",
             )),
-        ));
+        ))
+        .expect("JVM provider initialization"),
+    );
     let ir = lower_single_source_with_platform(
         "fun objectArray() { Array<String>(2) { i -> if (i == 1) return; i.toString() } }\n\
          fun primitiveArray() { IntArray(2) { i -> if (i == 1) return; i } }\n",
@@ -683,10 +687,12 @@ fn suspending_collection_map_is_structural_before_common_ir_escapes() {
         crate::toolchain::jdk_modules()
             .expect("suspending collection-map lowering test requires the repository JDK modules"),
     );
-    let platform: Box<dyn crate::libraries::SemanticPlatform> =
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
-        ));
+    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(classpath),
+        ))
+        .expect("JVM provider initialization"),
+    );
     let ir = lower_single_source_with_platform(
         "suspend fun render(value: Int): Int = value + 1\n\
          suspend fun collect(values: List<Int>): List<Int> =\n\
@@ -827,9 +833,12 @@ fn suspend_inline_call_keeps_source_extent_and_semantic_inline_region() {
     let ir = lower_single_source_with_platform(
         source,
         "SuspendInlineRegion",
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
-        )),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+                crate::jvm::classpath::Classpath::new(classpath),
+            ))
+            .expect("JVM provider initialization"),
+        ),
     );
 
     assert_eq!(
@@ -875,12 +884,14 @@ fn block_trailing_expression_keeps_its_checked_statement_line() {
 
 #[test]
 fn companion_extension_references_lower_as_receiverless_static_values() {
-    let platform: Box<dyn crate::libraries::SemanticPlatform> =
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-                crate::toolchain::classpath_jars_for("// WITH_REFLECT"),
+    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+                "// WITH_REFLECT",
             )),
-        ));
+        ))
+        .expect("JVM provider initialization"),
+    );
     let ir = lower_single_source_with_platform(
         "class C\n\
          companion fun C.function(): String = \"OK\"\n\
@@ -1276,12 +1287,14 @@ fn unbound_inner_constructor_reference_maps_outer_and_vararg_parameters() {
 
 #[test]
 fn reflective_unbound_inner_constructor_reference_keeps_structural_identity() {
-    let platform: Box<dyn crate::libraries::SemanticPlatform> =
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-                crate::toolchain::classpath_jars_for("// WITH_REFLECT"),
+    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+                "// WITH_REFLECT",
             )),
-        ));
+        ))
+        .expect("JVM provider initialization"),
+    );
     let ir = lower_single_source_with_platform(
         r#"
             import kotlin.reflect.KFunction1

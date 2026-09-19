@@ -198,7 +198,8 @@ fn builtins_decode_type_parameters_and_arguments() {
 fn builtin_generic_member_binds_receiver_argument_without_jdk() {
     let jar = common::stdlib_jar();
     // Only the stdlib jar: no JDK, so `java/util/List` is absent and the builtins fallback is taken.
-    let libs = JvmLibraries::new(Rc::new(Classpath::new(vec![jar])));
+    let libs =
+        JvmLibraries::new(Rc::new(Classpath::new(vec![jar]))).expect("JVM provider initialization");
     let scope = [type_name("kotlin/collections")];
     let resolver = SymbolResolver::new_scoped(&libs, &scope);
     let call = resolver
@@ -331,7 +332,8 @@ fn kotlin_collection_subtyping() {
 #[test]
 fn plus_assign_receiver_is_mutable() {
     let jar = common::stdlib_jar();
-    let libs = JvmLibraries::new(Rc::new(Classpath::new(vec![jar])));
+    let libs =
+        JvmLibraries::new(Rc::new(Classpath::new(vec![jar]))).expect("JVM provider initialization");
     let scope = [type_name("kotlin/collections")];
     let resolver = SymbolResolver::new_scoped(&libs, &scope);
     let mutable = resolver

@@ -213,7 +213,9 @@ pub fn front_end_diagnostics_inputs(
     jdk_modules: Option<&std::path::Path>,
 ) -> Vec<String> {
     let cp = common::cached_classpath(cp_jars, jdk_modules);
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),
+    );
     let mut diagnostics = krusty::diag::DiagSink::new();
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         inputs,

@@ -34676,6 +34676,13 @@ mod tests {
     use crate::lexer::lex;
     use crate::parser::{parse, parse_script_with_features, parse_with_features};
 
+    fn initialized_jvm_libraries(
+        classpath: std::rc::Rc<crate::jvm::classpath::Classpath>,
+    ) -> crate::jvm::jvm_libraries::JvmLibraries {
+        crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+            .expect("JVM provider initialization")
+    }
+
     #[test]
     fn package_only_qualified_classifier_failure_reports_the_missing_tail() {
         let result = walk_qualifier_namespace_facets(
@@ -35831,7 +35838,7 @@ fun rejected(owner: Owner) { owner.hidden() }
             })
             .expect("generic function declaration");
         let files = vec![file];
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+        let platform = initialized_jvm_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(Vec::new()),
         ));
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
@@ -35891,9 +35898,8 @@ fun rejected(owner: Owner) { owner.hidden() }
             })
             .expect("generic extension declaration");
         let files = vec![file];
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::toolchain::stdlib_classpath(),
-        ));
+        let platform =
+            initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
         let info = check_file(&files[0], &mut symbols, &mut diagnostics);
 
@@ -36413,9 +36419,8 @@ fun use() {
             })
             .expect("type check expression");
         let files = vec![file];
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::toolchain::stdlib_classpath(),
-        ));
+        let platform =
+            initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
         let info = check_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
@@ -38857,7 +38862,7 @@ fun box(): String {
         if let Some(jdk) = crate::toolchain::jdk_modules() {
             classpath.push(jdk);
         }
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+        let platform = initialized_jvm_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(classpath),
         ));
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
@@ -38916,7 +38921,7 @@ fun box(): String {
         if let Some(jdk) = crate::toolchain::jdk_modules() {
             classpath.push(jdk);
         }
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+        let platform = initialized_jvm_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(classpath),
         ));
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
@@ -38947,7 +38952,7 @@ fun box(): String {
         if let Some(jdk) = crate::toolchain::jdk_modules() {
             classpath.push(jdk);
         }
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+        let platform = initialized_jvm_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(classpath),
         ));
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
@@ -39204,11 +39209,8 @@ fun box(): String {
         );
         let files = vec![file];
         let cp = std::rc::Rc::new(crate::toolchain::stdlib_classpath());
-        let mut syms = collect_signatures_with_cp(
-            &files,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(cp)),
-            &mut d,
-        );
+        let mut syms =
+            collect_signatures_with_cp(&files, Box::new(initialized_jvm_libraries(cp)), &mut d);
         let string = syms
             .libraries
             .classifier(type_name("kotlin/String"))
@@ -39293,9 +39295,8 @@ fun box(): String {
             .collect::<Vec<_>>();
         assert_eq!(reads.len(), 2);
         let files = vec![file];
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::toolchain::stdlib_classpath(),
-        ));
+        let platform =
+            initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
         let info = check_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
@@ -39368,9 +39369,8 @@ fun box(): String {
             &mut diagnostics,
         );
         let files = vec![file];
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::toolchain::stdlib_classpath(),
-        ));
+        let platform =
+            initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
         let info = check_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
@@ -41159,7 +41159,7 @@ fun box(): String {
         if let Some(jdk) = crate::toolchain::jdk_modules() {
             classpath.push(jdk);
         }
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+        let platform = initialized_jvm_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(classpath),
         ));
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
@@ -43610,7 +43610,7 @@ fun use(counter: Counter) {
         let mut classpath_entries = crate::toolchain::classpath_jars_for("");
         classpath_entries.push(jdk_modules);
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath_entries));
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(classpath);
+        let platform = initialized_jvm_libraries(classpath);
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
         let info = check_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
@@ -43658,7 +43658,7 @@ fun use(counter: Counter) {
         );
         let files = vec![file];
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(vec![stdlib]));
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(classpath);
+        let platform = initialized_jvm_libraries(classpath);
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
         {
             let module = crate::module_symbols::ModuleSymbols::new(&symbols);

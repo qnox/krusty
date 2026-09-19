@@ -8,12 +8,11 @@ mod inline_body_plan;
 mod inline_capability;
 mod mapped_builtin_member_status;
 
+use super::mapped_builtin_declarations::MappedBuiltinMember;
 use generic_signatures::{
     concrete_generic_ret, mark_receiver_fun_params, parse_class_gsig, parse_field_gsig,
     suspend_return_from_gsig,
 };
-
-use super::mapped_builtin_declarations::MappedBuiltinMember;
 use inline_capability::{metadata_inline, property_accessor_inline};
 use mapped_builtin_member_status::mapped_builtin_member_status;
 
@@ -1198,26 +1197,21 @@ impl JvmLibraries {
         }
     }
 
-    /// Why the distribution's common-expectation klib could not be ingested, when one was found
-    /// and failed. `None` covers both "no klib configured" and "ingested fine": an ABSENT optional
-    /// library is not a problem, and the two were indistinguishable while ingestion answered with
-    /// an empty index either way.
-    pub fn common_expectation_problem(&self) -> Option<String> {
-        self.common_expectations
-            .ingestion_failure()
-            .map(str::to_string)
-    }
-
-    pub fn new(cp: std::rc::Rc<Classpath>) -> JvmLibraries {
+    pub fn new(
+        cp: std::rc::Rc<Classpath>,
+    ) -> Result<JvmLibraries, crate::libraries::PlatformInitializationError> {
         let common_expectations =
-            super::common_metadata::CommonExpectationIndex::load(cp.common_expectation_klib());
-        JvmLibraries {
+            super::common_metadata::CommonExpectationIndex::load(cp.common_expectation_klib())
+                .map_err(|error| crate::libraries::PlatformInitializationError {
+                    message: format!("cannot load Kotlin common-expectation dependency: {error}"),
+                })?;
+        Ok(JvmLibraries {
             cp,
             source_headers: Default::default(),
             common_expectations,
             builtins_customizer: JvmBuiltInsCustomizer,
             building_types: Default::default(),
-        }
+        })
     }
 
     fn library_const(value: &ConstVal) -> LibConst {
@@ -4505,7 +4499,9 @@ impl JvmLibraries {
                     std::sync::Arc::new(classifier)
                 })
         }
-        .or_else(|| self.common_expectations.classifier(internal_name));
+        .or_else(|| {
+            self.common_expectations.classifier(internal_name)
+        });
         self.cp
             .cache_library_type_name(internal_name, built.clone());
         built
@@ -6399,6 +6395,10 @@ mod tests {
     use crate::types::type_name;
     use crate::types::{Ty, Visibility};
 
+    fn initialized_libraries(classpath: std::rc::Rc<super::Classpath>) -> super::JvmLibraries {
+        super::JvmLibraries::new(classpath).expect("JVM provider initialization")
+    }
+
     #[test]
     fn java_index_conventions_are_normalized_as_operator_capabilities() {
         assert!(java_method_has_operator_convention("get", 1));
@@ -6414,7 +6414,7 @@ mod tests {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
         ));
         let applied = |name| Ty::obj_args(name, &[Ty::Int, Ty::String]);
@@ -6444,7 +6444,7 @@ mod tests {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
         ));
         let extension = Ty::fun_with_shape(vec![Ty::Int], Ty::String, 0, true, false);
@@ -6463,7 +6463,7 @@ mod tests {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
         ));
         let classifier = libraries
@@ -6483,7 +6483,7 @@ mod tests {
         ) else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib, jdk]),
         ));
         let classifier = libraries
@@ -6511,7 +6511,7 @@ mod tests {
         ) else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib, jdk]),
         ));
         let classifier = libraries
@@ -6548,7 +6548,7 @@ mod tests {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
         ));
         let actual = Ty::obj_args("kotlin/collections/MutableList", &[Ty::String]);
@@ -6572,7 +6572,7 @@ mod tests {
         ) else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib, jdk]),
         ));
         let classifier = libraries
@@ -6592,7 +6592,7 @@ mod tests {
         let Some(jdk) = crate::toolchain::jdk_modules() else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![jdk]),
         ));
         let classifier = libraries
@@ -6647,7 +6647,7 @@ mod tests {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
         ));
         let classifier = libraries
@@ -6705,7 +6705,7 @@ mod tests {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
         ));
         let companion = type_name("kotlin/Int$Companion");
@@ -6724,7 +6724,7 @@ mod tests {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
         ));
         let symbols = libraries.symbols(
@@ -6769,7 +6769,7 @@ mod tests {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
         ));
         let symbols =
@@ -6872,7 +6872,7 @@ mod tests {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
         ));
         let symbols = libraries.symbols(
@@ -6950,7 +6950,7 @@ mod tests {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
         ));
         let symbols = libraries.symbols(SymbolNamespace::Package(type_name("kotlin")), "Array");
@@ -7016,7 +7016,7 @@ mod tests {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
         ));
         let symbols = libraries.symbols(
@@ -7051,7 +7051,7 @@ mod tests {
         ) else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib, jdk]),
         ));
         let property = crate::symbol_resolver::SymbolResolver::new(&libraries)
@@ -7072,7 +7072,7 @@ mod tests {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
         ));
         let symbols = libraries.symbols(SymbolNamespace::Package(type_name("kotlin")), "Boolean");
@@ -7099,7 +7099,7 @@ mod tests {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
         ));
         let symbols = libraries.symbols(SymbolNamespace::Package(type_name("kotlin")), "Cloneable");
@@ -7123,7 +7123,7 @@ mod tests {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
         ));
         let metadata = libraries
@@ -7233,7 +7233,7 @@ mod tests {
         .expect("member stubs");
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
         classpath.set_stub_overlay(stubs);
-        let libraries = super::JvmLibraries::new(classpath);
+        let libraries = initialized_libraries(classpath);
 
         assert!(crate::symbol_resolver::declared_member_callables(
             &libraries,
@@ -7282,7 +7282,7 @@ mod tests {
         .expect("field-hiding stubs");
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
         classpath.set_stub_overlay(stubs);
-        let libraries = super::JvmLibraries::new(classpath);
+        let libraries = initialized_libraries(classpath);
         let resolver = crate::symbol_resolver::SymbolResolver::new(&libraries);
 
         assert_eq!(
@@ -7318,7 +7318,7 @@ mod tests {
         .expect("protected associated-property stub");
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
         classpath.set_stub_overlay(stubs);
-        let libraries = super::JvmLibraries::new(classpath);
+        let libraries = initialized_libraries(classpath);
 
         let property = libraries
             .classifier_associated_property(type_name("sample/Base"), "value")
@@ -7349,7 +7349,7 @@ mod tests {
         .expect("generic field stubs");
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(Vec::new()));
         classpath.set_stub_overlay(stubs);
-        let libraries = super::JvmLibraries::new(classpath);
+        let libraries = initialized_libraries(classpath);
         let shape = libraries
             .classifier_record(type_name("sample/Holder"))
             .expect("generic holder shape");
@@ -7387,9 +7387,9 @@ mod tests {
 
     #[test]
     fn source_names_normalize_raw_collections_without_collapsing_mutability() {
-        let libs = super::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(Vec::new()),
-        ));
+        let libs = initialized_libraries(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+            Vec::new(),
+        )));
 
         assert_eq!(
             libs.canonical_source_type_name(type_name("java/util/List")),
@@ -7609,7 +7609,7 @@ mod tests {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
         ));
         let unit = libraries.semanticize_jvm_generic_sig(
@@ -7630,7 +7630,7 @@ mod tests {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
         ));
         let signature = libraries.semanticize_jvm_generic_sig(
@@ -7707,7 +7707,7 @@ mod tests {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
         ));
         let raw = parse_concrete_field_gsig(
@@ -7767,7 +7767,7 @@ mod tests {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             return;
         };
-        let libraries = super::JvmLibraries::new(std::rc::Rc::new(
+        let libraries = initialized_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
         ));
         let valid = parse_concrete_field_gsig(
