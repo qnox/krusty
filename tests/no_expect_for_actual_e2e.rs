@@ -16,8 +16,6 @@ use common::Reported;
 
 /// The sentence this check emits. It is never used to SELECT report lines — the ledgers below are
 /// complete — only to state that a fixture the check must stay silent about produced none.
-const SENTENCE: &str = "has no corresponding expected declaration";
-
 /// The files one differential compiles, and the extra reference-compiler arguments a split source
 /// set needs.
 struct Args<'a> {
@@ -1078,6 +1076,133 @@ fn identical_simple_names_from_different_packages_do_not_match() {
             "package plib\n\
              \n\
              import plib.right.Tally\n\
+             \n\
+             actual fun takes(value: Tally): Int = 1\n",
+        )],
+    );
+    assert!(
+        !reference.is_empty(),
+        "the reference compiler must refuse the pair"
+    );
+    assert_eq!(
+        krusty, reference,
+        "krusty's complete ledger must be the reference compiler's"
+    );
+}
+
+/// An import ALIAS renames a classifier; it does not rename the classifier's identity.
+///
+/// The scope this matcher resolves in is the one the parser published, aliases included, so
+/// `import plib.model.Tally as Ledger` puts `plib.model.Tally` under the name `Ledger` and the two
+/// sides pair. Reading the last segment of the import path as the name it brings into scope — a
+/// second scope rebuilt from the types a file mentions could do nothing else — left `Ledger`
+/// unresolved and paired it with nothing.
+#[test]
+fn an_import_alias_names_the_classifier_it_renames() {
+    let (reference, krusty) = both_split(
+        "ImportAlias",
+        &[
+            ("ImportAliasModel.kt", "package plib.model\n\nclass Tally\n"),
+            (
+                "ImportAliasCommon.kt",
+                "package plib\n\
+                 \n\
+                 import plib.model.Tally\n\
+                 \n\
+                 expect fun takes(value: Tally): Int\n",
+            ),
+        ],
+        &[(
+            "ImportAliasPlatform.kt",
+            "package plib\n\
+             \n\
+             import plib.model.Tally as Ledger\n\
+             \n\
+             actual fun takes(value: Ledger): Int = 1\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert_eq!(
+        reference
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        Vec::<String>::new(),
+        "one classifier under two names is one classifier, so the pair matches in silence"
+    );
+}
+
+/// A WILDCARD import supplies a classifier the file names without qualifying it.
+#[test]
+fn a_star_import_supplies_the_classifier_it_brings_into_scope() {
+    let (reference, krusty) = both_split(
+        "StarImport",
+        &[
+            ("StarImportModel.kt", "package plib.model\n\nclass Tally\n"),
+            (
+                "StarImportCommon.kt",
+                "package plib\n\
+                 \n\
+                 import plib.model.Tally\n\
+                 \n\
+                 expect fun takes(value: Tally): Int\n",
+            ),
+        ],
+        &[(
+            "StarImportPlatform.kt",
+            "package plib\n\
+             \n\
+             import plib.model.*\n\
+             \n\
+             actual fun takes(value: Tally): Int = 1\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert_eq!(
+        reference
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        Vec::<String>::new(),
+        "the wildcard says which classifier `Tally` is, so the pair matches"
+    );
+}
+
+/// A wildcard import brings in ANOTHER package's classifier of the same simple name, and the pair
+/// must not match.
+///
+/// This is the wildcard half of the spelling question. A matcher that resolves nothing sees
+/// `Tally` against `Tally` and pairs two declarations that name different classifiers; one that
+/// reads only explicit imports sees the common file's `plib.left.Tally` against a bare `Tally` on
+/// the platform side and pairs them just as wrongly. Only reading the WILDCARD says the platform
+/// declaration means `plib.right.Tally`.
+#[test]
+fn a_star_imported_classifier_of_another_package_does_not_pair() {
+    let (reference, krusty) = both_split(
+        "StarImportClash",
+        &[
+            (
+                "StarImportClashLeft.kt",
+                "package plib.left\n\nclass Tally\n",
+            ),
+            (
+                "StarImportClashRight.kt",
+                "package plib.right\n\nclass Tally\n",
+            ),
+            (
+                "StarImportClashCommon.kt",
+                "package plib\n\
+                 \n\
+                 import plib.left.Tally\n\
+                 \n\
+                 expect fun takes(value: Tally): Int\n",
+            ),
+        ],
+        &[(
+            "StarImportClashPlatform.kt",
+            "package plib\n\
+             \n\
+             import plib.right.*\n\
              \n\
              actual fun takes(value: Tally): Int = 1\n",
         )],

@@ -4498,9 +4498,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   an `actual typealias`, so consulting it as a second answer reported pairs that had matched. An
   `actual typealias` publishes a type EXPANSION rather than a callable or classifier signature, so
   nothing resolved carries its identity; it is found in the compact header inventory by the
-  declaration's own source range — the same coordinate every member is found by. A declaration this
-  check can find no stable identity for reports an internal error at its own name rather than
-  falling back to a key. A declaration with CONTEXT PARAMETERS renders them before the visibility
+  inventory's own EXACT anchor — this file, the alias's range, no owner, the type-alias kind, and
+  its position in the list a file keeps aliases in. A range alone is not an identity, because a
+  constructor property and the class declaring it share one and so do a property and its accessor,
+  so identity and coordinate are taken together where the declaration's syntax is read (a file
+  declaration through the inventory's positional record of what it interned each parsed
+  declaration as, a member through the same exact anchor under its owner) and travel together
+  afterwards. A declaration this check can find no stable identity for reports an internal error
+  at its own name rather than falling back to a key. A declaration with CONTEXT PARAMETERS renders them before the visibility
   slot (`context(tally: Tally) public final actual val slotted: Int`), with the names the
   declaration wrote and the types resolution published; such a property used to be passed over
   entirely.
@@ -4528,6 +4533,47 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `actual` on the parameter and renders like any other `val`/`var` member. Nothing that wrote
   `actual` is passed over in silence: a member whose resolved record cannot be reached reports an
   internal error at its own name rather than disappearing.
+
+  **Which classifier a written path names is the FILE's scope, not its spelling.** Actualization
+  runs before signatures resolve, so the identity available is the one each file's package and
+  import list establish over the classifiers the module declares — and that list is the scope the
+  parser already published, carrying every explicit import, every import ALIAS and every WILDCARD
+  import. `import plib.model.Tally` against `plib.model.Tally` written out is one classifier;
+  `import plib.model.Tally as Ledger` puts that classifier under the name `Ledger`; `import
+  plib.left.Tally` against `import plib.right.Tally` are two. A simple name more than one wildcard
+  import could supply is AMBIGUOUS: the file has not said which classifier it means, so it names
+  none and pairs with nothing — answering with the first match would pair two declarations that
+  name different classifiers. Every answer is an interned `TypeName`, so a comparison is an
+  identity equality and a spelling is only ever an input to interning. Two limits are stated
+  rather than hidden: a header phase cannot ask a PROVIDER what a path names, so a path nothing
+  the module declares resolves to its own written form — which both sides of a comparison reach
+  the same way, `Int` against `Int` being one classifier however the module spells it — and two
+  different dependency classifiers written identically would pair here, with signature checking
+  rejecting them afterwards, where a provider view exists. Tests:
+  `fir::header::actualization::tests` for each import form and the ambiguous pair, and
+  `no_expect_for_actual_e2e::a_star_imported_classifier_of_another_package_does_not_pair`,
+  `::an_import_alias_names_the_classifier_it_renames`,
+  `::a_star_import_supplies_the_classifier_it_brings_into_scope`,
+  `::identical_simple_names_from_different_packages_do_not_match`.
+
+  **The target a diagnostic names is the PLATFORM's name for itself.** `expected <name> has no
+  actual declaration in module <m> for JVM` had `JVM` as a constant in the common frontend, which
+  would still say `for JVM` under another backend. `SemanticPlatform::diagnostic_target_name` is
+  the provider's answer, beside `external_property_diagnostic_label`; a provider that takes no
+  part in source-set diagnostics answers `None`, and the check reports an internal error rather
+  than inventing a name. Test:
+  `mpp_requires_the_feature_e2e::an_unmatched_expect_names_the_module_it_looked_in` and
+  `no_expect_for_actual_e2e::the_check_needs_the_multiplatform_feature`, which runs the reference
+  compiler without `-Xmulti-platform` too and compares complete ledgers.
+
+  **What a declaration resolved to is published by RESOLUTION, once.**
+  `resolve::declaration_index` walks each published table one time and enters each record under
+  the identity it already carries; every reader does lookups. A reader that rescanned `funs`,
+  `ext_funs`, `source_props`, `ext_props` and four more tables per classifier depended on how many
+  tables a declaration may appear in and on which order to try them. Two records claiming one
+  identity is a contract failure recorded as a conflict, not a last-writer-wins `insert`: the
+  check reports an internal error at the declaration rather than rendering whichever arrived
+  second.
 
   **An implementation is a declaration that WROTE `actual`.** A declaration sharing an `expect`'s
   package, kind, name, receiver and arity is the implementation that header was written for, and

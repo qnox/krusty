@@ -64,6 +64,185 @@ pub fn actualized_declaration_pairs(
     actualization(headers).pairs
 }
 
+/// Classifier identity for compact headers.
+///
+/// Actualization runs before signatures resolve, so the identity available is the one each
+/// file's package and import list establish over the classifiers the MODULE declares. That
+/// list is the file scope the parser already published — `headers.scopes`, carrying the
+/// package, every explicit import, every import ALIAS and every WILDCARD import — rather than
+/// a second one rebuilt from the types a file happens to mention, which saw neither an alias
+/// nor a wildcard and so read `import plib.model.Tally as Ledger` as naming `Ledger`.
+///
+/// The answer is a [`TypeName`]: the interned classifier identity the rest of the compiler
+/// compares by, so a comparison is an id equality. A spelling is only ever an input to
+/// interning here, never the thing compared.
+///
+/// Two limits are stated rather than hidden:
+///
+/// - A header phase cannot ask a PROVIDER what a path names — a dependency's classifiers are
+///   not inventoried at this point. A path nothing in the module declares therefore resolves
+///   to its own written form, which both sides of a comparison reach the same way (`Int`
+///   against `Int` is one classifier however the module spells it). Two DIFFERENT dependency
+///   classifiers written identically would pair here; signature checking rejects the pair
+///   afterwards, which is where a provider view exists.
+/// - A simple name more than one wildcard import could supply is AMBIGUOUS. The file has not
+///   said which classifier it means, so it names none: `resolve` answers `None` and nothing
+///   pairs on it. Answering with the first match would pair two declarations that name
+///   different classifiers.
+struct ClassifierScopes {
+    /// Every classifier and type alias this module declares, by qualified identity.
+    declared: std::collections::HashSet<crate::types::TypeName>,
+    files: std::collections::HashMap<u32, FileScope>,
+}
+
+/// One file's resolution scope, as the parser recorded it.
+struct FileScope {
+    /// The package the file declares; `None` is the default package.
+    package: Option<crate::types::TypeName>,
+    /// The classifier an explicit import brings into scope, keyed by the simple name it is
+    /// written as — the import's ALIAS where it wrote one, and the last segment of its path
+    /// otherwise.
+    explicit: std::collections::HashMap<String, String>,
+    /// Every wildcard import's package path, `/`-joined, in source order.
+    wildcards: Vec<String>,
+}
+
+/// The qualified identity of a `/`-joined path under an optional package.
+///
+/// Every identity in this module is built through this one function, so a classifier
+/// interned as a module declaration and the same classifier reached through an import or a
+/// wildcard are the same `TypeName` rather than two that merely render alike.
+fn qualified(package: Option<crate::types::TypeName>, path: &str) -> crate::types::TypeName {
+    match package {
+        Some(package) => crate::types::type_name(&format!("{}/{path}", package.render())),
+        None => crate::types::type_name(path),
+    }
+}
+
+impl ClassifierScopes {
+    fn of(headers: &StreamedHeaderModule) -> Self {
+        let mut declared = std::collections::HashSet::new();
+        for stub in &headers.stubs {
+            if !matches!(
+                stub.kind,
+                DeclarationKind::Classifier | DeclarationKind::TypeAlias
+            ) {
+                continue;
+            }
+            let Some(spelling) = stub
+                .lookup_name
+                .and_then(|name| headers.lookup_names.get(name))
+            else {
+                continue;
+            };
+            // A hoisted nested classifier publishes `Outer$Inner`; a use site writes
+            // `Outer.Inner`. Both name one classifier, and the interner is told so.
+            declared.insert(qualified(
+                headers
+                    .sources
+                    .get(stub.source)
+                    .map(|source| source.package)
+                    .filter(|package| !package.render().is_empty()),
+                &spelling.replace('$', "/"),
+            ));
+        }
+        let mut files = std::collections::HashMap::new();
+        for (index, inventoried) in headers.inventoried.iter().enumerate() {
+            if !inventoried {
+                continue;
+            }
+            let source = SourceFileId::from_raw(index as u32);
+            let package = headers
+                .sources
+                .get(source)
+                .map(|entry| entry.package)
+                .filter(|package| !package.render().is_empty());
+            let mut explicit = std::collections::HashMap::new();
+            let mut wildcards = Vec::new();
+            if let Some(scope) = headers.scopes.file(source) {
+                for import in headers.scopes.imports(scope.imports) {
+                    let segments = headers
+                        .scopes
+                        .path(import.path)
+                        .iter()
+                        .filter_map(|segment| headers.lookup_names.get(*segment))
+                        .collect::<Vec<_>>();
+                    if segments.is_empty() {
+                        continue;
+                    }
+                    if import.wildcard {
+                        wildcards.push(segments.join("/"));
+                        continue;
+                    }
+                    // The name the import brings into scope is what the file will WRITE: the
+                    // alias when it renamed the import, and the path's last segment otherwise.
+                    let written = import
+                        .alias
+                        .and_then(|alias| headers.lookup_names.get(alias))
+                        .unwrap_or_else(|| segments[segments.len() - 1]);
+                    explicit.insert(written.to_string(), segments.join("/"));
+                }
+            }
+            files.insert(
+                index as u32,
+                FileScope {
+                    package,
+                    explicit,
+                    wildcards,
+                },
+            );
+        }
+        Self { declared, files }
+    }
+
+    /// The classifier a written path names, as seen from `source`, or `None` where the file
+    /// has not said which classifier it means.
+    fn resolve(&self, source: SourceFileId, segments: &[&str]) -> Option<crate::types::TypeName> {
+        let written = segments.join("/");
+        let Some(scope) = self.files.get(&source.raw()) else {
+            return Some(qualified(None, &written));
+        };
+        // An explicit import — aliased or not — names the classifier its path ends at, and
+        // anything written under it hangs off that.
+        if let Some(first) = segments.first() {
+            if let Some(imported) = scope.explicit.get(*first) {
+                let rest = segments[1..].join("/");
+                return Some(qualified(
+                    None,
+                    &if rest.is_empty() {
+                        imported.clone()
+                    } else {
+                        format!("{imported}/{rest}")
+                    },
+                ));
+            }
+        }
+        // The file's own package, then a fully-qualified spelling — both only when the module
+        // declares such a classifier, since neither reading may invent one.
+        let in_package = qualified(scope.package, &written);
+        if self.declared.contains(&in_package) {
+            return Some(in_package);
+        }
+        let as_written = qualified(None, &written);
+        if self.declared.contains(&as_written) {
+            return Some(as_written);
+        }
+        // A wildcard import. More than one that could supply this name is ambiguous.
+        let mut supplied = scope.wildcards.iter().filter_map(|package| {
+            let candidate = qualified(None, &format!("{package}/{written}"));
+            self.declared.contains(&candidate).then_some(candidate)
+        });
+        match (supplied.next(), supplied.next()) {
+            (Some(_), Some(_)) => return None,
+            (Some(single), None) => return Some(single),
+            (None, _) => {}
+        }
+        // Nothing the module declares or this file imports claims the path, so the path is its
+        // own canonical form — reached identically from either side of a comparison.
+        Some(as_written)
+    }
+}
+
 /// Match actualized declaration subtrees using compact Pass-1 headers only. This is also the
 /// authority for expect-owned default expressions: callers publish their presence on `actual`, but
 /// retain `expect` as the stable provider identity for Pass-2 checking.
@@ -72,121 +251,7 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
     /// One `expect` classifier actualized by a `typealias`: the classifier's QUALIFIED identity,
     /// the alias's target type, and the file the target is written in — which is the scope that
     /// target's own spelling resolves in.
-    type ActualizedAlias = (String, HeaderTypeId, SourceFileId);
-
-    /// Classifier identity for compact headers.
-    ///
-    /// Actualization runs before signatures are resolved, so the only identity available is the one
-    /// the module's own declarations and each file's imports establish. It is still an IDENTITY
-    /// rather than a spelling: `plib.model.Tally` written out and `Tally` under
-    /// `import plib.model.Tally` are the same classifier, and `Tally` imported from `plib.left` and
-    /// from `plib.right` are two.
-    struct ClassifierScopes {
-        /// Qualified names of every classifier and type alias this module declares.
-        declared: std::collections::HashSet<String>,
-        /// Per source file: the package it declares, and the explicit imports it wrote, keyed by
-        /// the simple name each brings into scope.
-        files: std::collections::HashMap<u32, (String, std::collections::HashMap<String, String>)>,
-    }
-
-    impl ClassifierScopes {
-        fn of(headers: &StreamedHeaderModule) -> Self {
-            let mut declared = std::collections::HashSet::new();
-            for stub in &headers.stubs {
-                if !matches!(
-                    stub.kind,
-                    DeclarationKind::Classifier | DeclarationKind::TypeAlias
-                ) {
-                    continue;
-                }
-                let Some(spelling) = stub
-                    .lookup_name
-                    .and_then(|name| headers.lookup_names.get(name))
-                else {
-                    continue;
-                };
-                let package = headers
-                    .sources
-                    .get(stub.source)
-                    .map(|source| source.package.render().replace('/', "."))
-                    .unwrap_or_default();
-                let spelling = spelling.replace('$', ".");
-                declared.insert(if package.is_empty() {
-                    spelling
-                } else {
-                    format!("{package}.{spelling}")
-                });
-            }
-            let mut files = std::collections::HashMap::new();
-            for (index, inventoried) in headers.inventoried.iter().enumerate() {
-                if !inventoried {
-                    continue;
-                }
-                let source = SourceFileId::from_raw(index as u32);
-                let package = headers
-                    .sources
-                    .get(source)
-                    .map(|entry| entry.package.render().replace('/', "."))
-                    .unwrap_or_default();
-                let mut imports = std::collections::HashMap::new();
-                for root in headers.detached_type_roots(source) {
-                    let Some(ty) = headers.syntax.ty(root) else {
-                        continue;
-                    };
-                    if !ty.flags.is_import() {
-                        continue;
-                    }
-                    let HeaderTypeKind::Classifier { detail, .. } = ty.kind else {
-                        continue;
-                    };
-                    let Some(detail) = headers.syntax.classifier_type(detail) else {
-                        continue;
-                    };
-                    let segments = headers
-                        .syntax
-                        .type_path(detail.path)
-                        .iter()
-                        .filter_map(|segment| headers.lookup_names.get(*segment))
-                        .collect::<Vec<_>>();
-                    let Some(last) = segments.last() else {
-                        continue;
-                    };
-                    imports.insert((*last).to_string(), segments.join("."));
-                }
-                files.insert(index as u32, (package, imports));
-            }
-            Self { declared, files }
-        }
-
-        /// The classifier a written path names, as seen from `source`.
-        ///
-        /// A path nothing in the module or the file's imports claims keeps its own spelling: that
-        /// is a canonical form both sides of a comparison reach the same way, not a fallback to
-        /// the text — `Int` against `Int` is one classifier however the module spells it.
-        fn resolve(&self, source: SourceFileId, segments: &[&str]) -> String {
-            let written = segments.join(".");
-            let Some((package, imports)) = self.files.get(&source.raw()) else {
-                return written;
-            };
-            if let Some(first) = segments.first() {
-                if let Some(qualified) = imports.get(*first) {
-                    let rest = segments[1..].join(".");
-                    return if rest.is_empty() {
-                        qualified.clone()
-                    } else {
-                        format!("{qualified}.{rest}")
-                    };
-                }
-            }
-            if !package.is_empty() {
-                let qualified = format!("{package}.{written}");
-                if self.declared.contains(&qualified) {
-                    return qualified;
-                }
-            }
-            written
-        }
-    }
+    type ActualizedAlias = (crate::types::TypeName, HeaderTypeId, SourceFileId);
 
     /// The two files one comparison reads its spellings in, and the module scope both resolve
     /// against.
@@ -267,10 +332,17 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
                                     .filter_map(|segment| headers.lookup_names.get(*segment))
                                     .collect::<Vec<_>>()
                             };
-                            scope.scopes.resolve(scope.expect, &segments(expect_path))
-                                == scope
+                            // A path either side is ambiguous about names no classifier, so it
+                            // matches nothing — not even another ambiguous one.
+                            match (
+                                scope.scopes.resolve(scope.expect, &segments(expect_path)),
+                                scope
                                     .scopes
-                                    .resolve(scope.candidate, &segments(candidate_path))
+                                    .resolve(scope.candidate, &segments(candidate_path)),
+                            ) {
+                                (Some(expect), Some(candidate)) => expect == candidate,
+                                _ => false,
+                            }
                         }
                     };
                     path_matches
@@ -366,7 +438,10 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
                     .iter()
                     .filter_map(|segment| headers.lookup_names.get(*segment))
                     .collect::<Vec<_>>();
-                let identity = scope.scopes.resolve(scope.expect, &written);
+                // An ambiguous path names no classifier, so it follows no alias either.
+                let Some(identity) = scope.scopes.resolve(scope.expect, &written) else {
+                    return false;
+                };
                 let mut aliases = actualized_aliases
                     .iter()
                     .filter(|(name, _, _)| *name == identity);
@@ -872,16 +947,15 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
             let spelling = headers.lookup_names.get(expect.lookup_name?)?;
             // The classifier the alias answers for, by identity: `Carried` in `plib` and `Carried`
             // in another package are two classifiers, and only one of them has been actualized.
-            let package = headers
-                .sources
-                .get(expect.source)
-                .map(|source| source.package.render().replace('/', "."))
-                .unwrap_or_default();
-            let name = if package.is_empty() {
-                spelling.replace('$', ".")
-            } else {
-                format!("{package}.{}", spelling.replace('$', "."))
-            };
+            // Built the same way a declared classifier's identity is, so the two intern alike.
+            let name = qualified(
+                headers
+                    .sources
+                    .get(expect.source)
+                    .map(|source| source.package)
+                    .filter(|package| !package.render().is_empty()),
+                &spelling.replace('$', "/"),
+            );
             let HeaderDeclarationKind::TypeAlias { target, .. } =
                 headers.syntax.declaration(pair.actual)?.kind
             else {
@@ -901,12 +975,25 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
             .filter_map(|stub| select_top_level(stub, &actualized_aliases)),
     );
 
+    /// What a member extension's RECEIVER contributes to the coarse child key.
+    #[derive(Clone, Debug, Eq, Hash, PartialEq)]
+    enum ReceiverKey {
+        /// The member declares no receiver.
+        Absent,
+        /// The classifier the receiver names, after following an actualized alias to whatever it
+        /// now stands for.
+        Classifier(crate::types::TypeName),
+        /// A receiver that names no classifier — a function type. Its rendered spelling is the
+        /// whole of what a coarse key can say; `select_actual` compares the type itself.
+        Structural(String),
+    }
+
     fn child_key(
         headers: &StreamedHeaderModule,
         stub: &DeclarationStub,
         scopes: &ClassifierScopes,
         actualized_aliases: &[ActualizedAlias],
-    ) -> Option<(DeclarationKind, String, String, usize)> {
+    ) -> Option<(DeclarationKind, String, ReceiverKey, usize)> {
         let name = stub
             .lookup_name
             .and_then(|name| headers.lookup_names.get(name))
@@ -917,21 +1004,25 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
         // `expect class` actualized by a `typealias` is written as the alias's target on the
         // platform side — so the key is the identity, after following an actualized alias to the
         // classifier it now stands for.
-        let receiver_identity = |receiver: Option<HeaderTypeId>| {
+        // `None` means the file has not said which classifier the receiver is, so the member
+        // cannot be keyed at all and pairs with nothing.
+        let receiver_identity = |receiver: Option<HeaderTypeId>| -> Option<ReceiverKey> {
             let Some(ty) = receiver.and_then(|ty| headers.syntax.ty(ty)) else {
-                return String::new();
+                return Some(ReceiverKey::Absent);
             };
             let HeaderTypeKind::Classifier { detail, .. } = ty.kind else {
                 // A function-type receiver names no classifier; its rendered spelling is the whole
                 // of what the coarse key can say about it, and `select_actual` compares the type
                 // itself afterwards.
-                return receiver
-                    .and_then(|ty| headers.syntax.transient_type_ref(ty, &headers.lookup_names))
-                    .map(|ty| ty.name)
-                    .unwrap_or_default();
+                return Some(ReceiverKey::Structural(
+                    receiver
+                        .and_then(|ty| headers.syntax.transient_type_ref(ty, &headers.lookup_names))
+                        .map(|ty| ty.name)
+                        .unwrap_or_default(),
+                ));
             };
             let Some(detail) = headers.syntax.classifier_type(detail) else {
-                return String::new();
+                return Some(ReceiverKey::Absent);
             };
             let written = headers
                 .syntax
@@ -939,7 +1030,7 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
                 .iter()
                 .filter_map(|segment| headers.lookup_names.get(*segment))
                 .collect::<Vec<_>>();
-            let identity = scopes.resolve(stub.source, &written);
+            let identity = scopes.resolve(stub.source, &written)?;
             for (name, target, source) in actualized_aliases {
                 if *name != identity {
                     continue;
@@ -959,9 +1050,11 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
                     .iter()
                     .filter_map(|segment| headers.lookup_names.get(*segment))
                     .collect::<Vec<_>>();
-                return scopes.resolve(*source, &written);
+                return scopes
+                    .resolve(*source, &written)
+                    .map(ReceiverKey::Classifier);
             }
-            identity
+            Some(ReceiverKey::Classifier(identity))
         };
         let declaration = headers.syntax.declaration(stub.id);
         let (receiver, arity) = match declaration.map(|value| value.kind) {
@@ -970,18 +1063,19 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
                 parameters,
                 ..
             }) => (
-                receiver_identity(receiver),
+                receiver_identity(receiver)?,
                 headers.syntax.parameters(parameters).len(),
             ),
-            Some(HeaderDeclarationKind::Constructor { parameters, .. }) => {
-                (String::new(), headers.syntax.parameters(parameters).len())
-            }
+            Some(HeaderDeclarationKind::Constructor { parameters, .. }) => (
+                ReceiverKey::Absent,
+                headers.syntax.parameters(parameters).len(),
+            ),
             Some(HeaderDeclarationKind::Property { receiver, .. }) => {
-                (receiver_identity(receiver), 0)
+                (receiver_identity(receiver)?, 0)
             }
             Some(HeaderDeclarationKind::Classifier { .. })
             | Some(HeaderDeclarationKind::TypeAlias { .. })
-            | None => (String::new(), 0),
+            | None => (ReceiverKey::Absent, 0),
         };
         Some((stub.kind, name, receiver, arity))
     }
@@ -997,7 +1091,7 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
                 .is_some_and(|anchor| anchor.owner == Some(pair.expect))
         });
         let mut actual_children = std::collections::HashMap::<
-            (DeclarationKind, String, String, usize),
+            (DeclarationKind, String, ReceiverKey, usize),
             Vec<DeclarationId>,
         >::new();
         for child in headers.stubs.iter().filter(|stub| {
@@ -1059,5 +1153,138 @@ pub fn actualization(headers: &StreamedHeaderModule) -> Actualization {
         pairs,
         unmarked,
         incompatible,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diag::DiagSink;
+    use crate::source::SourceInput;
+
+    /// Build the compact inventory for a set of `(stem, text)` sources, and the scope resolver
+    /// over it.
+    fn scopes(sources: &[(&str, &str)]) -> (StreamedHeaderModule, ClassifierScopes) {
+        let inputs = sources
+            .iter()
+            .map(|(stem, text)| SourceInput::kotlin(text).with_file_stem(stem))
+            .collect::<Vec<_>>();
+        let mut diagnostics = DiagSink::new();
+        let files = sources
+            .iter()
+            .map(|(_, text)| {
+                crate::frontend::parse_source_with_detected_features(text, &mut diagnostics)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+        let headers = super::super::inventory_parsed_source_headers(&inputs, &files);
+        let scopes = ClassifierScopes::of(&headers);
+        (headers, scopes)
+    }
+
+    /// The scope a file writes a classifier in decides which classifier it is, and every form the
+    /// parser records is read: an explicit import, an import ALIAS, the file's own package, a
+    /// fully-qualified spelling, and a wildcard import.
+    #[test]
+    fn every_import_form_names_the_classifier_it_brings_into_scope() {
+        let (_, scopes) = scopes(&[
+            ("Model", "package plib.model\n\nclass Tally\n"),
+            ("Own", "package plib\n\nclass Ledger\n"),
+            (
+                "Uses",
+                "package plib\n\
+                 \n\
+                 import plib.model.Tally\n\
+                 import plib.model.Tally as Renamed\n\
+                 \n\
+                 fun explicit(value: Tally) {}\n",
+            ),
+            (
+                "Wildcard",
+                "package plib\n\
+                 \n\
+                 import plib.model.*\n\
+                 \n\
+                 fun starred(value: Tally) {}\n",
+            ),
+        ]);
+        let uses = SourceFileId::from_raw(2);
+        let wildcard = SourceFileId::from_raw(3);
+        let tally = crate::types::type_name("plib/model/Tally");
+        assert_eq!(
+            scopes.resolve(uses, &["Tally"]),
+            Some(tally),
+            "an explicit import names the classifier its path ends at"
+        );
+        assert_eq!(
+            scopes.resolve(uses, &["Renamed"]),
+            Some(tally),
+            "an alias renames the classifier, not its identity"
+        );
+        assert_eq!(
+            scopes.resolve(uses, &["plib", "model", "Tally"]),
+            Some(tally),
+            "a fully-qualified spelling names the same classifier"
+        );
+        assert_eq!(
+            scopes.resolve(uses, &["Ledger"]),
+            Some(crate::types::type_name("plib/Ledger")),
+            "the file's own package supplies what it declares"
+        );
+        assert_eq!(
+            scopes.resolve(wildcard, &["Tally"]),
+            Some(tally),
+            "a wildcard import supplies the classifier it brings into scope"
+        );
+    }
+
+    /// TWO wildcard imports that could each supply one simple name say nothing about which
+    /// classifier is meant, so the path names none and pairs with nothing. Answering with the
+    /// first match would pair declarations that name DIFFERENT classifiers.
+    #[test]
+    fn a_simple_name_two_wildcards_could_supply_names_no_classifier() {
+        let (_, scopes) = scopes(&[
+            ("Left", "package plib.left\n\nclass Tally\n"),
+            ("Right", "package plib.right\n\nclass Tally\n"),
+            (
+                "Both",
+                "package plib\n\
+                 \n\
+                 import plib.left.*\n\
+                 import plib.right.*\n\
+                 \n\
+                 fun takes(value: Tally) {}\n",
+            ),
+            (
+                "One",
+                "package plib\n\
+                 \n\
+                 import plib.left.*\n\
+                 \n\
+                 fun takes(value: Tally) {}\n",
+            ),
+        ]);
+        assert_eq!(
+            scopes.resolve(SourceFileId::from_raw(2), &["Tally"]),
+            None,
+            "two wildcards could each supply it, so the file has named no classifier"
+        );
+        assert_eq!(
+            scopes.resolve(SourceFileId::from_raw(3), &["Tally"]),
+            Some(crate::types::type_name("plib/left/Tally")),
+            "one wildcard says exactly which, so it resolves"
+        );
+    }
+
+    /// A path nothing the module declares or the file imports claims keeps its own written form.
+    /// That is a canonical answer both sides of a comparison reach identically — `Int` against
+    /// `Int` is one classifier however the module spells it — not a fallback to the text.
+    #[test]
+    fn an_unclaimed_path_is_its_own_canonical_form() {
+        let (_, scopes) = scopes(&[("Plain", "package plib\n\nfun takes(value: Int) {}\n")]);
+        assert_eq!(
+            scopes.resolve(SourceFileId::from_raw(0), &["Int"]),
+            Some(crate::types::type_name("Int")),
+        );
     }
 }
