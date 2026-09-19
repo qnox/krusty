@@ -52,7 +52,13 @@ pub(super) fn functions(ir: &IrFile, publication: &IrGeneratedMemberPublication)
             );
             let declared_descriptor =
                 crate::jvm::names::method_descriptor(&crate::jvm::ir_emit::jvm_tys(params), ret);
-            if physical_descriptor != declared_descriptor {
+            if physical_descriptor != declared_descriptor
+                || super::ir_emit::array_of_star_projection(ret)
+                || params
+                    .iter()
+                    .copied()
+                    .any(super::ir_emit::array_of_star_projection)
+            {
                 result.jvm_sig = Some(physical_descriptor);
             }
             if function.name != metadata.source_name {
@@ -192,5 +198,41 @@ mod tests {
             Some("(JLjava/lang/String;Lkotlin/Unit;)V")
         );
         assert!(metadata[0].annotations.is_empty());
+    }
+
+    #[test]
+    fn generated_array_of_star_metadata_keeps_its_physical_descriptor() {
+        let mut ir = IrFile::default();
+        let element = Ty::obj_args(
+            "fixtures/Coffer",
+            &[Ty::star_projection(Ty::nullable(Ty::obj("fixtures/Token")))],
+        );
+        let array = Ty::obj_args("kotlin/Array", &[element]);
+        let function = ir.add_fun(IrFunction {
+            name: "release".to_string(),
+            params: Vec::new(),
+            ret: array,
+            body: None,
+            is_static: false,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let publication = IrGeneratedMemberPublication {
+            metadata_scope: IrGeneratedFunctionMetadataScope::Exclusive,
+            functions: vec![IrGeneratedFunctionPublication {
+                function,
+                parameter_names: Vec::new(),
+                metadata: Some(IrGeneratedFunctionMetadata {
+                    source_name: "release".to_string(),
+                    visibility: Visibility::Public,
+                }),
+                debug: IrGeneratedDeclarationDebug::declaration_line(1),
+            }],
+        };
+
+        let metadata = functions(&ir, &publication);
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].ret, array);
+        assert_eq!(metadata[0].jvm_sig.as_deref(), Some("()[Lfixtures/Coffer;"));
     }
 }
