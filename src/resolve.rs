@@ -13473,9 +13473,11 @@ fn delegated_getvalue_ret_for_signature(
     let resolver = crate::symbol_resolver::SymbolResolver::new_import_scoped_with_module(
         libraries, &module, &scope,
     );
+    // Without `kotlin.reflect.KProperty` no convention can apply, so this probe answers `None` for
+    // the same reason a missing `getValue` does, rather than assuming the classifier exists.
     let convention_args = [
         this_ref,
-        crate::resolve::delegated_properties::delegate_property_reference_type(),
+        crate::resolve::delegated_properties::delegate_property_reference_type(&resolver)?,
     ];
     // `provideDelegate` read from the TABLE, whose return may still be the marker — its body is an
     // expression nothing has typed yet. The caller has already resolved that step and passes the

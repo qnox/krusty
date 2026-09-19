@@ -5683,11 +5683,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             self.delegate_this_ref(declaration)
         };
         // The classifier is resolved through the same source that answers applicability, so this
-        // probe and the checked selection agree on which declaration `KProperty` is.
-        let arguments = [
-            this_ref,
-            crate::resolve::delegated_properties::delegate_property_reference_type(),
-        ];
+        // probe and the checked selection agree on which declaration `KProperty` is — and a
+        // dependency set that declares none answers `None` here, exactly as a missing convention
+        // does.
+        let property_reference = self.with_resolver(scope, |resolver| {
+            crate::resolve::delegated_properties::delegate_property_reference_type(resolver)
+        })?;
+        let arguments = [this_ref, property_reference];
         let provided = self.with_resolver(scope, |resolver| {
             Some(super::super::select_delegate_operator(
                 resolver,

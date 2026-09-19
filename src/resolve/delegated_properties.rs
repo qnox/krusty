@@ -231,20 +231,27 @@ pub(crate) fn is_usable_delegate_convention(is_operator: bool, context_count: us
     is_operator && context_count == 0
 }
 
-/// The `KProperty` classifier every delegated-property convention receives its second argument as.
+/// The `KProperty` classifier every delegated-property convention receives its second argument as,
+/// RESOLVED through the symbol source that answers applicability.
 ///
 /// ONE definition. It is the classifier applicability is decided against, the type of the value
 /// lowering builds, and the type published on the checked plan — three places that must agree, and
-/// did not while each spelled the name for itself.
+/// did not while each spelled the name for itself. Interning the spelling gives a stable
+/// [`TypeName`]; it does not mean the configured dependency set declares the classifier, so the
+/// declaration is asked for here rather than assumed.
 ///
-/// The identity is the interned [`TypeName`], the same thing every other classifier reference in
-/// the compiler carries; the string is the interning key and travels no further. Gating this on
-/// `resolver.classifier(...)` answering was tried and reverted: a dependency set without
-/// `kotlin.reflect.KProperty` would then fail as an internal checked-FIR error instead of the
-/// ordinary "no applicable `getValue`" diagnostic, which is the wrong report and is already the
-/// convention selection's job.
-pub(crate) fn delegate_property_reference_type() -> Ty {
-    Ty::obj_name(crate::types::type_name("kotlin/reflect/KProperty"))
+/// `None` when it does not. That is deliberately NOT an internal error: without
+/// `kotlin.reflect.KProperty` no `getValue`/`setValue` declaration can apply to the delegate, so
+/// the property takes the ordinary "no applicable convention" diagnostic — the same report a
+/// missing operator gives — instead of a checked-FIR failure naming a classifier the source never
+/// wrote.
+pub(crate) fn delegate_property_reference_type(
+    resolver: &crate::symbol_resolver::SymbolResolver,
+) -> Option<Ty> {
+    let classifier = crate::types::type_name("kotlin/reflect/KProperty");
+    resolver
+        .classifier(classifier)
+        .map(|_| Ty::obj_name(classifier))
 }
 
 /// Select one delegated-property convention from the normalized member/extension family. Operator
@@ -492,9 +499,21 @@ impl Checker<'_> {
             "fir",
             "resolve delegate convention delegate={delegate:?} receiver={delegate_ty:?} provide_ref={provide_ref:?} this_ref={this_ref:?}",
         );
-        let kproperty = delegate_property_reference_type();
         // Record the classifier the source answered with, so the checked plan and every value built
-        // from it carry this exact resolution instead of re-spelling the name downstream.
+        // from it carry this exact resolution instead of re-spelling the name downstream. When the
+        // configured dependency set does not declare it, no convention can apply, and the property
+        // takes the ordinary "no applicable `getValue`" report rather than an internal failure.
+        let Some(kproperty) = delegate_property_reference_type(&self.resolver()) else {
+            self.report_delegate_convention_failure(
+                site,
+                delegate_ty,
+                "getValue",
+                this_ref,
+                expected_property,
+                None,
+            );
+            return DelegateGetValueAttempt::Complete(None);
+        };
         self.delegate_property_reference_type = Some(kproperty);
         let provide_target = self.select_delegate_operator(
             scope,
@@ -666,7 +685,17 @@ impl Checker<'_> {
             "fir",
             "resolve delegate setValue delegate={delegate:?} receiver={delegate_ty:?} this_ref={this_ref:?} property={property_ty:?}",
         );
-        let kproperty = delegate_property_reference_type();
+        let Some(kproperty) = delegate_property_reference_type(&self.resolver()) else {
+            self.report_delegate_convention_failure(
+                site,
+                delegate_ty,
+                "setValue",
+                this_ref,
+                Some(property_ty),
+                Some(property_ty),
+            );
+            return None;
+        };
         let stored_ty = self
             .delegate_provide_targets
             .get(&delegate)
