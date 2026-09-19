@@ -589,6 +589,12 @@ pub struct Param {
     pub is_vararg: bool,
     /// Exact span of the `vararg` modifier. Present exactly when [`Self::is_vararg`] is true.
     pub vararg_span: Option<Span>,
+    /// `true` when the parameter wrote `noinline`. Such an argument is MATERIALIZED — a real
+    /// closure with a local of its own — where an ordinary inline function parameter is spliced at
+    /// each use and owns no local. It is a MODIFIER, not a type shape: a `noinline` parameter is
+    /// function-typed exactly like the spliced one beside it. `crossinline` is not this: it only
+    /// forbids a non-local return, and such a parameter is still spliced.
+    pub is_materialized_lambda: bool,
     /// Default value (`fun f(x: Int = 5)`). Filled in at the call site for omitted arguments. A
     /// default may reference parameters declared before it, matching Kotlin's left-to-right scope.
     pub default: Option<ExprId>,

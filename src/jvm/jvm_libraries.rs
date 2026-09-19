@@ -1200,6 +1200,10 @@ impl JvmLibraries {
     pub fn new(
         cp: std::rc::Rc<Classpath>,
     ) -> Result<JvmLibraries, crate::libraries::PlatformInitializationError> {
+        cp.validate_builtins()
+            .map_err(|error| crate::libraries::PlatformInitializationError {
+                message: format!("cannot load Kotlin builtins dependency: {error}"),
+            })?;
         let common_expectations =
             super::common_metadata::CommonExpectationIndex::load(cp.common_expectation_klib())
                 .map_err(|error| crate::libraries::PlatformInitializationError {

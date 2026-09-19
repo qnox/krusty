@@ -37,7 +37,11 @@ pub(super) fn render(
             let escaped = source?.replace('$', "_u24");
             let mut rendered = match role {
                 IrInlineLocalRole::Value => escaped,
-                IrInlineLocalRole::DispatchReceiver => format!("$this${escaped}"),
+                // kotlinc spells the expanded callable's own `this` `this_`, and the receiver it
+                // extends `$this$<callable>` — the source name is the callable's in the second case
+                // and unused in the first.
+                IrInlineLocalRole::DispatchReceiver => "this_".to_string(),
+                IrInlineLocalRole::ExtensionReceiver => format!("$this${escaped}"),
             };
             for _ in 0..depth {
                 rendered.push_str("$iv");
@@ -89,14 +93,27 @@ mod tests {
     }
 
     #[test]
-    fn inline_dispatch_receiver_uses_the_jvm_receiver_convention() {
+    fn inline_extension_receiver_uses_the_jvm_receiver_convention() {
         let mut ir = IrFile::default();
         let declaration = local(&mut ir, "map");
         ir.set_debug_local_provenance(
             declaration,
-            IrDebugLocalProvenance::inline_value(IrInlineLocalRole::DispatchReceiver, 1),
+            IrDebugLocalProvenance::inline_value(IrInlineLocalRole::ExtensionReceiver, 1),
         );
         assert_eq!(name(&ir, declaration).as_deref(), Some("$this$map$iv"));
+    }
+
+    /// The callable's OWN `this` is a different value from the receiver it extends, and kotlinc
+    /// spells it differently. A member inline extension binds both, so one spelling cannot serve.
+    #[test]
+    fn inline_dispatch_receiver_is_spelled_as_the_callables_own_this() {
+        let mut ir = IrFile::default();
+        let declaration = local(&mut ir, "send");
+        ir.set_debug_local_provenance(
+            declaration,
+            IrDebugLocalProvenance::inline_value(IrInlineLocalRole::DispatchReceiver, 1),
+        );
+        assert_eq!(name(&ir, declaration).as_deref(), Some("this_$iv"));
     }
 
     #[test]

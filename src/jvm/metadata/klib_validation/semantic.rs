@@ -350,21 +350,21 @@ impl SemanticTables<'_> {
                 "cyclic or excessively nested type in {context}"
             )));
         }
-        let node = metadata::parse_type_node(body)
+        let node = parse_type_node(body)
             .ok_or_else(|| semantic_error(format!("invalid semantic type in {context}")))?;
         let flexible_upper = self.validate_type_edges(body, type_parameters, depth, context)?;
         let mut arguments = Vec::with_capacity(node.arguments.len());
         for argument in node.arguments {
             let argument = match argument {
-                metadata::ParsedTypeArgument::Inline(body, projection) => {
+                ParsedTypeArgument::Inline(body, projection) => {
                     let ty = self.ty(body, type_parameters, depth + 1, context)?;
                     metadata::project_builtin_ty(projection, ty)
                 }
-                metadata::ParsedTypeArgument::Table(id, projection) => {
+                ParsedTypeArgument::Table(id, projection) => {
                     let ty = self.ty_by_id(id, type_parameters, depth + 1, context)?;
                     metadata::project_builtin_ty(projection, ty)
                 }
-                metadata::ParsedTypeArgument::Star => {
+                ParsedTypeArgument::Star => {
                     metadata::BuiltinTy::OutProjection(Box::new(metadata::BuiltinTy::Class {
                         internal: "kotlin/Any".to_string(),
                         args: Vec::new(),
@@ -422,7 +422,7 @@ impl SemanticTables<'_> {
             .types
             .get(id)
             .ok_or_else(|| semantic_error(format!("{context} references absent type {id}")))?;
-        let definitely_non_null = metadata::parse_type_node(body)
+        let definitely_non_null = parse_type_node(body)
             .ok_or_else(|| semantic_error(format!("invalid semantic type in {context}")))?
             .definitely_non_null;
         let ty = self.ty(body, type_parameters, depth, context)?;
