@@ -39,6 +39,8 @@ pub(super) struct SerializeBody<'a> {
     pub(super) type_parameter_serializer_fields: &'a [Option<u32>],
     pub(super) write_self: Option<u32>,
     pub(super) write_self_name: String,
+    /// The serialized class's `$childSerializers` plan, or `None` when it has no cache.
+    pub(super) cache: Option<super::child_serializer_cache::ChildSerializerCachePlan>,
 }
 
 impl SerializeBody<'_> {
@@ -53,6 +55,7 @@ impl SerializeBody<'_> {
             type_parameter_serializer_fields: tp_field,
             write_self,
             write_self_name,
+            cache: cache_plan,
         } = self;
         let ser_idx = serializer_class as usize;
         let class_id = foo_id;
@@ -93,6 +96,32 @@ impl SerializeBody<'_> {
         let encoder_slot = if delegate { 1 } else { 3 };
         let mut bail = false;
         let mut stmts: Vec<ExprId> = Vec::new();
+        // `write$Self` is a static member of the serialized class, so it reaches
+        // `$childSerializers` with a plain `getstatic` rather than through the `access$…$cp`
+        // bridge the `$serializer` needs. The local is the first free one after its three
+        // parameters. The inlined generic shape lives on the `$serializer` and has no such reach,
+        // so it keeps building its element serializers.
+        // The plan, as the pass that built the cache published it: which properties have a slot and
+        // which static holds them. Not a search of `ir.statics` for the field's spelling, and not a
+        // second answer to which properties are cached.
+        let plan = delegate.then_some(cache_plan).flatten();
+        let cache_local = 3u32;
+        // The element serializer for property `i`: the cache slot when the class caches it, else
+        // built here. The PLAN decides, so this can never read a slot the serialized class did not
+        // write.
+        let element_serializer = |ir: &mut IrFile, ctx: &PluginContext, i: usize, ty: &Ty| {
+            if plan
+                .as_ref()
+                .is_some_and(|plan| plan.caches(i, fields.len()))
+            {
+                return Some(super::child_serializer_cache::read_cached_slot(
+                    ir,
+                    cache_local,
+                    i,
+                ));
+            }
+            element_serializer_expr(ir, ctx, ty)
+        };
         // `write$Self` is a STATIC MEMBER of the serialized class, so it reads the
         // property's private backing FIELD directly — which is what kotlinc emits.
         // (The old inlined shape lived on the `$serializer`, which cannot, and had to
@@ -204,7 +233,7 @@ impl SerializeBody<'_> {
                 // Element(desc, i, <element serializer>, value.getX()) — `$serializer.INSTANCE`
                 // / `Foo.serializer(A_ser)` / `ListSerializer(…)`. The nullable variant shares
                 // the SAME descriptor (writes JSON null) — a method-name swap.
-                let Some(inst) = element_serializer_expr(ir, ctx, ty) else {
+                let Some(inst) = element_serializer(ir, ctx, i, ty) else {
                     bail = true;
                     break;
                 };
@@ -225,7 +254,7 @@ impl SerializeBody<'_> {
             } else if is_nullable(ty) {
                 // Any derivable nullable element — builtin, interface-polymorphic, sealed, or
                 // nested — uses the nullable serializable call so the encoder can write JSON null.
-                if let Some(inst) = element_serializer_expr(ir, ctx, ty) {
+                if let Some(inst) = element_serializer(ir, ctx, i, ty) {
                     stmts.push(ir.add_expr(IrExpr::Call {
                         callee: virtual_iface(
                             "kotlinx/serialization/encoding/CompositeEncoder",
@@ -249,7 +278,7 @@ impl SerializeBody<'_> {
                     dispatch_receiver: Some(c),
                     args: vec![d, idx, v],
                 }));
-            } else if let Some(inst) = element_serializer_expr(ir, ctx, ty) {
+            } else if let Some(inst) = element_serializer(ir, ctx, i, ty) {
                 // A non-null reference element with a builtin/derivable serializer (e.g.
                 // `Uuid`) — encodeSerializableElement(desc, i, <Elem>Serializer, value.getX()).
                 stmts.push(ir.add_expr(IrExpr::Call {
@@ -326,6 +355,18 @@ impl SerializeBody<'_> {
             });
             ir.functions[fid as usize].body = Some(body);
         } else if let Some(write_self) = delegated_write_self {
+            if let Some(plan) = plan.as_ref() {
+                // `write$Self` is a static member of the class that OWNS the cache, so it reads the
+                // static directly. The plan names which one.
+                let read = ir.add_expr(IrExpr::GetStatic(plan.static_index));
+                let declaration = ir.add_expr(IrExpr::Variable {
+                    index: cache_local,
+                    ty: super::child_serializer_cache::lazy_cache_ty(),
+                    init: Some(read),
+                    named: false,
+                });
+                stmts.insert(0, declaration);
+            }
             let ws_ret = ir.add_expr(IrExpr::Return(None));
             stmts.push(ws_ret);
             let ws_body = ir.add_expr(IrExpr::Block { stmts, value: None });
@@ -478,6 +519,9 @@ mod tests {
             type_parameter_serializer_fields: &[None],
             write_self: Some(write_self),
             write_self_name: "write$Self".to_owned(),
+            // This fixture's property has no derivable serializer at all, so its class has no
+            // cache to plan.
+            cache: None,
         }
         .generate(&mut ir, &PluginContext::default());
 

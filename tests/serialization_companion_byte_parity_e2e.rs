@@ -2120,6 +2120,9 @@ fn an_element_typed_by_a_serializable_enum_uses_its_accessor() {
         eprintln!("skipping: reference kotlinc or javap unavailable");
         return;
     };
+    // kotlinc's contract, spelled out so a change in the reference is visible here rather than
+    // silently agreed with: the enum's serializer is ALLOCATED, so it is cached and the element is
+    // taken out of the cache; the `String` element's singleton is not.
     let want = method_instructions(&built.reference, "childSerializers()");
     assert_eq!(
         want,
@@ -2147,23 +2150,8 @@ fn an_element_typed_by_a_serializable_enum_uses_its_accessor() {
     );
     assert_eq!(
         method_instructions(&built.krusty, "childSerializers()"),
-        vec![
-            "0: iconst_2",
-            "1: anewarray # // class kotlinx/serialization/KSerializer",
-            "4: astore_1",
-            "5: aload_1",
-            "6: iconst_0",
-            "7: getstatic # // Field Action$Type.Companion:LAction$Type$Companion;",
-            "10: invokevirtual # // Method Action$Type$Companion.serializer:()Lkotlinx/serialization/KSerializer;",
-            "13: aastore",
-            "14: aload_1",
-            "15: iconst_1",
-            "16: getstatic # // Field kotlinx/serialization/internal/StringSerializer.INSTANCE:Lkotlinx/serialization/internal/StringSerializer;",
-            "19: aastore",
-            "20: aload_1",
-            "21: areturn",
-        ],
-        "krusty enum element serializer contract"
+        want,
+        "krusty reads the enum element out of the same cache"
     );
 }
 
@@ -2223,23 +2211,9 @@ fn a_contextual_element_inside_a_collection_is_derivable() {
     );
     assert_eq!(
         method_instructions(&built.krusty, "childSerializers()"),
-        vec![
-            "0: iconst_1",
-            "1: anewarray # // class kotlinx/serialization/KSerializer",
-            "4: astore_1",
-            "5: aload_1",
-            "6: iconst_0",
-            "7: new # // class kotlinx/serialization/ContextualSerializer",
-            "10: dup",
-            "11: ldc # // class Flexible$FlexibleMap",
-            "13: invokestatic # // Method kotlin/jvm/internal/Reflection.getOrCreateKotlinClass:(Ljava/lang/Class;)Lkotlin/reflect/KClass;",
-            "16: invokespecial # // Method kotlinx/serialization/ContextualSerializer.\"<init>\":(Lkotlin/reflect/KClass;)V",
-            "19: invokestatic # // Method kotlinx/serialization/builtins/BuiltinSerializersKt.ListSerializer:(Lkotlinx/serialization/KSerializer;)Lkotlinx/serialization/KSerializer;",
-            "22: aastore",
-            "23: aload_1",
-            "24: areturn",
-        ],
-        "krusty contextual collection element contract"
+        want,
+        "krusty reads the contextual collection element out of the same cache, and wraps the \
+         property's own nullability at the use site exactly where kotlinc does"
     );
 }
 
@@ -3178,5 +3152,135 @@ fn deserialize_opens_kotlincs_locals_and_switches_on_the_index() {
         dispatch(&built.krusty),
         want_dispatch,
         "element-index dispatch"
+    );
+}
+
+/// The fixture for the composed-element differentials below: TWO cached elements, so a reader that
+/// confuses one slot for another is visible, beside a primitive element that gets no slot at all.
+///
+/// Every composed element here is non-nullable on purpose. A nullable one additionally exercises
+/// the narrowing of the serializer operand, which is a separate concern with its own coverage; a
+/// fixture mixing the two would fail for a reason that has nothing to do with the cache.
+const COMPOSED_ELEMENTS_SRC: &str = "import kotlinx.serialization.Serializable\n\
+     @Serializable\n\
+     data class Item(val id: Int)\n\
+     @Serializable\n\
+     data class Holder(val count: Int, val items: List<Item>, val tags: List<String>)\n";
+
+/// `childSerializers()` was the only method the cache work pinned, and it is the one method where a
+/// wrong cache is harmless — it rebuilds the array either way. The two methods that CONSUME the
+/// cache are `deserialize`, which reads a slot per element, and the serialized class's `write$Self`,
+/// which reads the static directly. Compare both against kotlinc instruction for instruction.
+#[test]
+fn a_composed_class_deserializes_exactly_as_kotlinc() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let Some(built) = compare_with_kotlinc_plugin(
+        "ComposedElementsDeserialize",
+        COMPOSED_ELEMENTS_SRC,
+        "Holder$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = method_instructions(&built.reference, "deserialize(");
+    assert!(
+        !want.is_empty(),
+        "the reference disassembly has no deserialize body"
+    );
+    assert_eq!(
+        method_instructions(&built.krusty, "deserialize("),
+        want,
+        "Holder$$serializer.deserialize"
+    );
+}
+
+#[test]
+fn a_composed_class_writes_its_elements_exactly_as_kotlinc() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let Some(built) = compare_with_kotlinc_plugin(
+        "ComposedElementsWriteSelf",
+        COMPOSED_ELEMENTS_SRC,
+        "Holder",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = method_instructions(&built.reference, "write$Self$main(");
+    assert!(
+        !want.is_empty(),
+        "the reference disassembly has no write$Self$main body"
+    );
+    assert_eq!(
+        method_instructions(&built.krusty, "write$Self$main("),
+        want,
+        "Holder.write$Self$main"
+    );
+}
+
+/// `decodeSerializableElement`'s last argument is the PREVIOUS value: a merging serializer is handed
+/// what it is merging into. krusty passed a literal `null` there, which is unobservable from any
+/// program a user can write — only the serializers kotlinx declares internally merge — so it is
+/// pinned here as its own repository-owned expectation rather than left to a round trip.
+///
+/// The expectation is the operand shape, not kotlinc's whole body: for each of the two composed
+/// elements the value pushed before the call is the element's OWN local, and never `aconst_null`.
+#[test]
+fn a_composed_element_decodes_with_its_own_previous_value() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let Some(built) = compare_with_kotlinc_plugin(
+        "ComposedElementsPreviousValue",
+        COMPOSED_ELEMENTS_SRC,
+        "Holder$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let previous_values = |disassembly: &str| -> Vec<String> {
+        let body = method_instructions(disassembly, "deserialize(");
+        body.iter()
+            .enumerate()
+            .filter(|(_, line)| line.contains("decodeSerializableElement:"))
+            .map(|(at, _)| {
+                body[at - 1]
+                    .split_once(": ")
+                    .map(|(_, op)| op.to_string())
+                    .unwrap_or_default()
+            })
+            .collect()
+    };
+    let got = previous_values(&built.krusty);
+    assert!(
+        !got.is_empty(),
+        "the fixture no longer decodes any composed element"
+    );
+    assert!(
+        got.iter().all(|op| op.starts_with("aload")),
+        "every composed element must be decoded over its own previous value: {got:?}"
+    );
+    assert_eq!(
+        got,
+        previous_values(&built.reference),
+        "previous-value operands disagree with kotlinc"
     );
 }

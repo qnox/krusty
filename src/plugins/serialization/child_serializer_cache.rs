@@ -17,6 +17,82 @@ use super::{
     IrConst, IrExpr, IrFile, IrFunction, PluginContext, Ty, TypeName,
 };
 
+/// One slot of the `Lazy[]` cache: a `Lazy<KSerializer<Any>>`, nullable because a property whose
+/// serializer is a singleton contributes no entry.
+pub(super) fn lazy_cache_element_ty() -> Ty {
+    Ty::nullable(Ty::obj_args(
+        "kotlin/Lazy",
+        &[kserializer_of(class_ty("kotlin/Any"))],
+    ))
+}
+
+/// The `Lazy[]` cache's own type.
+pub(super) fn lazy_cache_ty() -> Ty {
+    Ty::obj_args("kotlin/Array", &[lazy_cache_element_ty()])
+}
+
+/// Read element `k` out of a `Lazy[]` cache already loaded into `cache_local` — `cache[k].value`.
+///
+/// All three readers (`childSerializers`, `deserialize`, `write$Self`) want exactly this, and the
+/// shape is a property of how this module STORES the cache, so it is derived here once instead of
+/// each reader repeating `kotlin/Lazy`'s member spelling. The value arrives as `Object`, which the
+/// use site narrows to what it takes.
+pub(super) fn read_cached_slot(ir: &mut IrFile, cache_local: u32, k: usize) -> ExprId {
+    let cache = ir.add_expr(IrExpr::GetValue(cache_local));
+    let index = ir.add_expr(IrExpr::Const(IrConst::Int(k as i32)));
+    let slot = ir.add_expr(IrExpr::Call {
+        callee: Callee::Intrinsic {
+            operation: crate::ir::IrIntrinsic::ArrayGet,
+            ret: lazy_cache_element_ty(),
+        },
+        dispatch_receiver: Some(cache),
+        args: vec![index],
+    });
+    ir.add_expr(IrExpr::Call {
+        callee: super::virtual_iface("kotlin/Lazy", "getValue", "()Ljava/lang/Object;"),
+        dispatch_receiver: Some(slot),
+        args: vec![],
+    })
+}
+
+/// What one class's `$childSerializers` cache IS, published by the pass that builds it.
+///
+/// Every reader — the `$serializer`'s `childSerializers` and `deserialize`, and the serialized
+/// class's `write$Self` — takes its facts from here. None of them searches `ir.statics` for the
+/// field's spelling, re-derives the owner from text, or re-answers which properties are cached:
+/// a slot a reader believes in that the builder did not write is a null it dereferences, and the
+/// only way to keep the two from drifting is for there to be one answer.
+#[derive(Clone)]
+pub(super) struct ChildSerializerCachePlan {
+    /// The `$childSerializers` static's index in `IrFile::statics` — what `write$Self` reads
+    /// directly, being a static member of the class that owns it.
+    pub(super) static_index: u32,
+    /// The `access$get$childSerializers$cp()` accessor a `$serializer` reaches the cache through,
+    /// as a function id rather than a name to look up.
+    pub(super) accessor: u32,
+    /// Which serialized properties, in element order, the cache holds a slot for.
+    pub(super) cached: Vec<bool>,
+}
+
+impl ChildSerializerCachePlan {
+    /// Whether element `k` is cached, checked against the caller's own element count.
+    ///
+    /// The plan is published with exactly one entry per serialized element, so a length that
+    /// disagrees is an invalid intermediate state rather than an "uncached" answer. Reading it as
+    /// one would re-enter the legacy inline derivation for elements the serialized class DID give
+    /// a slot, leaving a `$childSerializers` array that nothing reads and two derivations of the
+    /// same element serializer in one class.
+    pub(super) fn caches(&self, k: usize, elements: usize) -> bool {
+        assert_eq!(
+            self.cached.len(),
+            elements,
+            "the child-serializer cache plan holds {} entries for {elements} elements",
+            self.cached.len(),
+        );
+        self.cached[k]
+    }
+}
+
 /// One class awaiting its `$childSerializers` cache: its id, its INTERNED qualified name, and the
 /// serialized properties in element order — everything [`add_child_serializer_cache`] needs on the
 /// second pass.
@@ -40,7 +116,7 @@ pub(super) fn add_child_serializer_cache(
     class_id: ClassId,
     serialized: TypeName,
     foo_fields: &[(String, Ty)],
-) {
+) -> Option<ChildSerializerCachePlan> {
     // `$childSerializers` cache — a `private static final Lazy[]` + the public synthetic
     // `access$get$childSerializers$cp()` accessor kotlinc emits when a prop's serializer is
     // ALLOCATED rather than a singleton: a collection (`ArrayListSerializer(…)`) or an ENUM
@@ -79,12 +155,10 @@ pub(super) fn add_child_serializer_cache(
         .collect();
 
     if !cached.iter().any(|slot| *slot) {
-        return;
+        return None;
     }
     {
-        let cached_serializer = kserializer_of(class_ty("kotlin/Any"));
-        let lazy_serializer = Ty::obj_args("kotlin/Lazy", &[cached_serializer]);
-        let lazy_arr_ty = Ty::obj_args("kotlin/Array", &[Ty::nullable(lazy_serializer)]);
+        let lazy_arr_ty = lazy_cache_ty();
         // A slot is `null` ONLY where the property needs no cache — its serializer is a singleton
         // read at each use. A property that DOES need one and whose serializer cannot be
         // constructed publishes an unsupported residual: a `null` in a slot a reader will
@@ -123,7 +197,7 @@ pub(super) fn add_child_serializer_cache(
                     line: 0,
                     source_order: u32::MAX,
                 });
-                return;
+                return None;
             };
             elems.push(ir.add_expr(IrExpr::Call {
                 callee: Callee::Static {
@@ -141,6 +215,7 @@ pub(super) fn add_child_serializer_cache(
             spreads: vec![false; elems.len()],
             elements: elems,
         });
+        let static_index = u32::try_from(ir.statics.len()).expect("too many statics");
         ir.statics.push(crate::ir::IrStatic {
             name: "$childSerializers".to_string(),
             ty: lazy_arr_ty,
@@ -176,6 +251,11 @@ pub(super) fn add_child_serializer_cache(
         });
         ir.synthetic_methods.insert(acc);
         ir.classes[class_id as usize].methods.push(acc);
+        Some(ChildSerializerCachePlan {
+            static_index,
+            accessor: acc,
+            cached,
+        })
     }
 }
 
