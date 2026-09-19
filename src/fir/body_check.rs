@@ -414,7 +414,19 @@ fn check_body_unit_with_parameters_and_defaults(
         .iter()
         .copied()
         .enumerate()
-        .map(|(raw, span)| (span, file.stmt_lines.get(raw).copied().unwrap_or(0)))
+        .map(|(raw, span)| {
+            (
+                span,
+                crate::fir::body::FirStatementDebugLines {
+                    source: file.stmt_lines.get(raw).copied().unwrap_or(0),
+                    target: file
+                        .assignment_target_lines
+                        .get(&(raw as u32))
+                        .copied()
+                        .unwrap_or(0),
+                },
+            )
+        })
         .collect::<HashMap<_, _>>();
     checker.body.attach_debug_lines(
         source,

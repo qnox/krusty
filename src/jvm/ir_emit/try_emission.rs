@@ -345,26 +345,27 @@ impl Emitter<'_> {
         }
     }
 
-    /// Map a checked common-IR loop-target identity to its physical continue/break labels and the
-    /// active-finalizer depth at loop entry. This does not resolve source spelling: FIR checking did
-    /// that once, and lowering replaced it with the generated identity stored on both the loop and
-    /// transfer. `None` is reserved for backend-generated innermost-loop transfers.
-    pub(super) fn loop_transfer_target(&self, label: &Option<String>) -> (Label, Label, usize) {
-        // A labelled transfer names a loop the checker resolved; reinterpreting an unknown label as
-        // the innermost loop would silently jump somewhere else, so the invariant is asserted.
+    /// The loop a `break`/`continue` leaves: its continue target, its exit target, and the
+    /// finalizer depth at its entry.
+    ///
+    /// A LABELED transfer names the loop the checker bound it to, and only that loop answers. There
+    /// is deliberately no fallback to the innermost loop: a label the emitter's loop stack does not
+    /// carry means the transfer and its loop disagree about which loop this is, and jumping to the
+    /// innermost one would emit a program that branches somewhere the source never wrote. `None`
+    /// instead, so the caller fails the file closed.
+    pub(super) fn loop_transfer_target(
+        &self,
+        label: &Option<String>,
+    ) -> Option<(Label, Label, usize)> {
         let entry = match label {
             Some(l) => self
                 .loop_stack
                 .iter()
                 .rev()
-                .find(|(_, _, sl, _)| sl.as_deref() == Some(l.as_str()))
-                .unwrap_or_else(|| {
-                    panic!("break/continue names the loop `{l}@`, which is not in scope here")
-                }),
-            None => self.loop_stack.last().expect("break/continue outside loop"),
+                .find(|(_, _, sl, _)| sl.as_deref() == Some(l.as_str())),
+            None => self.loop_stack.last(),
         };
-        let (cont, end, _, depth) = entry;
-        (*cont, *end, *depth)
+        entry.map(|(cont, end, _, depth)| (*cont, *end, *depth))
     }
 
     /// Leave the loop `label` names, running every `finally` between here and it first.
@@ -379,7 +380,14 @@ impl Emitter<'_> {
         brk: bool,
         code: &mut CodeBuilder,
     ) {
-        let (cont, end, depth) = self.loop_transfer_target(label);
+        let Some((cont, end, depth)) = self.loop_transfer_target(label) else {
+            self.run.set_emit_error(format!(
+                "{} names a loop that is not open here: {}",
+                if brk { "break" } else { "continue" },
+                label.as_deref().unwrap_or("<unlabeled>"),
+            ));
+            return;
+        };
         let target = if brk { end } else { cont };
         if self.return_finalizers.len() > depth {
             // kotlinc closes the protected region on a transfer that leaves a `try` with a `nop`,
@@ -393,5 +401,58 @@ impl Emitter<'_> {
             code.goto(target);
         }
         self.reopen_finally_segments(code);
+    }
+}
+
+/// The loop-transfer contract's own refusal.
+///
+/// A `break`/`continue` whose label names no open loop needs malformed IR — the checker binds every
+/// labeled transfer to a loop that encloses it — so this builds the IR directly. Before, the lookup
+/// fell back to the innermost loop, which turned a disagreement between a transfer and its loop into
+/// a jump the source never wrote.
+#[cfg(test)]
+mod tests {
+    use crate::ir::{IrConst, IrExpr, IrFile, IrFunction};
+    use crate::jvm::ir_emit::fail_soft_tests::emit_for_test;
+    use crate::jvm::ir_emit::EmitRun;
+    use crate::types::Ty;
+
+    #[test]
+    fn a_break_naming_a_loop_that_is_not_open_is_refused_not_redirected() {
+        let mut ir = IrFile::default();
+        let condition = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+        let escape = ir.add_expr(IrExpr::Break {
+            label: Some("elsewhere".into()),
+        });
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![escape],
+            value: None,
+        });
+        let loop_expression = ir.add_expr(IrExpr::While {
+            cond: condition,
+            body,
+            update: None,
+            post_test: false,
+            label: Some("here".into()),
+        });
+        ir.add_fun(IrFunction {
+            name: "box".into(),
+            params: vec![],
+            ret: Ty::Unit,
+            body: Some(loop_expression),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![],
+        });
+
+        let run = EmitRun::default();
+        assert!(
+            emit_for_test(&ir, "Facade", &run).is_none(),
+            "a refused transfer must not produce a class file"
+        );
+        assert_eq!(
+            run.emit_error().as_deref(),
+            Some("break names a loop that is not open here: elsewhere"),
+        );
     }
 }
