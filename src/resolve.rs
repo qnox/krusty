@@ -55,6 +55,7 @@ mod local_capture_dependencies;
 mod local_class_scope;
 mod local_method_dependencies;
 mod loop_flow;
+mod member_extension_selection;
 mod operator_calls;
 mod overload_diagnostics;
 mod override_plans;
@@ -112,6 +113,9 @@ use local_class_scope::{
     local_class_enclosing_tparams, local_class_sibling_names, EnclosingTypeParameterDeclaration,
 };
 use loop_flow::collect_all_reassigned;
+pub(crate) use member_extension_selection::{
+    MemberExtensionFunctionSelection, MemberExtensionSelection,
+};
 pub(crate) use override_plans::publish_override_plans;
 use postponed_diagnostics::PostponedDiagnostics;
 use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
@@ -32597,14 +32601,14 @@ impl<'a> Checker<'a> {
             Ty::Null,
             Ty::Null,
             explicit_property_ty,
-            site,
+            site.clone(),
         );
         let prop_ty = match explicit_property_ty {
             Some(t) => t,
             None => delegate_ret.unwrap_or(Ty::Error),
         };
         if site.is_var {
-            self.record_delegate_setvalue(scope, delegate, dt, Ty::Null, prop_ty, site);
+            self.record_delegate_setvalue(scope, delegate, dt, Ty::Null, prop_ty, site.clone());
         }
         self.local_decl_types.insert(s, prop_ty);
         self.declare(scope, &name, prop_ty, site.is_var);
@@ -44673,8 +44677,7 @@ impl<'a> Checker<'a> {
     }
 }
 
-/// Select one member-extension function for a call. Every lookup it needs is passed in, so signature
-/// solving in Pass 1 calls it with a symbol source and a receiver list instead of a `Checker`.
+/// Select one member-extension function using caller-owned source, receivers, and call probes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn member_extension_function_with(
     source: &dyn SymbolSource,
@@ -44687,7 +44690,7 @@ pub(crate) fn member_extension_function_with(
     score_candidate: &dyn Fn(&[Ty], &CallSig, ArgSlots<'_>) -> Option<CallCandidateScore>,
     call: MemberExtensionFunctionCall<'_>,
     selection: MemberExtensionSelection,
-) -> Result<Option<MemberExtensionFunctionCandidate>, ()> {
+) -> MemberExtensionFunctionSelection {
     let MemberExtensionFunctionCall {
         extension_receiver,
         result_constraint,
@@ -44698,9 +44701,13 @@ pub(crate) fn member_extension_function_with(
         explicit_type_args,
         trailing_lambda,
     } = call;
-    let mut candidates = Vec::new();
+    let (mut candidates, mut excluded) = (Vec::new(), Vec::new());
     let full_arg_tys = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
     for shape in member_extension_function_shapes_in(source, receivers, extension_receiver, name) {
+        if member_extension_selection::exclude_delegate_convention(&shape, selection, &mut excluded)
+        {
+            continue;
+        }
         let Some(instantiated) = instantiate_member_extension_with(
             explicit_context_arguments,
             select_context_arguments,
@@ -44734,9 +44741,11 @@ pub(crate) fn member_extension_function_with(
             visible_params: instantiated.visible_params,
             physical_params: shape.function.physical_params.clone(),
             context_args: instantiated.context_sources,
+            context_count: shape.function.signature.context_count,
             ret: instantiated.ret,
             physical_ret: shape.function.signature.ret,
             call_sig: instantiated.call_sig,
+            diagnostic_param_names: shape.function.signature.call_sig().param_names,
             physical_vararg_index: instantiated.physical_vararg_index,
             argument_parameters: instantiated.argument_parameters,
             visibility: shape.function.signature.visibility,
@@ -44759,13 +44768,11 @@ pub(crate) fn member_extension_function_with(
             physical_name: shape.function.physical_name.clone(),
         });
     }
-    if selection == MemberExtensionSelection::Operators {
-        candidates.retain(|candidate| candidate.is_operator);
-    }
+    member_extension_selection::retain_selected(&mut candidates, selection);
     let mut maximal =
         maximal_member_extensions(oracle, &candidates, |candidate| candidate.priority);
     if maximal.is_empty() {
-        return Ok(None);
+        return MemberExtensionFunctionSelection::None(excluded);
     }
     let best = maximal
         .iter()
@@ -44774,8 +44781,13 @@ pub(crate) fn member_extension_function_with(
         .unwrap_or_default();
     maximal.retain(|index| candidates[*index].score == best);
     match maximal.as_slice() {
-        [index] => Ok(Some(candidates[*index].clone())),
-        _ => Err(()),
+        [index] => MemberExtensionFunctionSelection::Selected(candidates[*index].clone()),
+        _ => MemberExtensionFunctionSelection::Ambiguous(
+            maximal
+                .into_iter()
+                .map(|index| candidates[index].clone())
+                .collect(),
+        ),
     }
 }
 
@@ -47657,15 +47669,16 @@ pub(crate) struct MemberExtensionFunctionCandidate {
     score: (usize, std::cmp::Reverse<usize>, bool),
     physical_receiver: Ty,
     extension_receiver: Ty,
-    /// Full semantic parameter list: leading contexts followed by value parameters.
+    /// Full semantic parameters (contexts first) and the source-visible subset.
     params: Vec<Ty>,
-    /// Source-visible parameters after implicit contexts have been removed.
     visible_params: Vec<Ty>,
     physical_params: Vec<Ty>,
     context_args: Vec<Option<ResolvedContextArgument>>,
+    context_count: usize,
     ret: Ty,
     physical_ret: Ty,
     call_sig: crate::libraries::CallSig,
+    diagnostic_param_names: Vec<String>,
     physical_vararg_index: Option<usize>,
     argument_parameters: Vec<(usize, usize)>,
     visibility: Visibility,
@@ -47673,9 +47686,7 @@ pub(crate) struct MemberExtensionFunctionCandidate {
     inline: InlineKind,
     inline_body_plan: Option<Box<crate::libraries::InlineBodyPlan>>,
     suspend: bool,
-    /// The value parameters as the DECLARATION spells them, un-erased and before this call's
-    /// substitution. A non-generic declaration has no separate shape, so its ordinary parameter
-    /// list is that spelling.
+    /// Un-erased declaration parameters before call substitution; ordinary when non-generic.
     declared_params: Vec<Ty>,
     declared_ret: Option<Ty>,
     owner: TypeName,
@@ -47774,12 +47785,6 @@ pub(crate) struct MemberExtensionFunctionCall<'a> {
     arg_names: Option<&'a [Option<String>]>,
     explicit_type_args: &'a [Ty],
     trailing_lambda: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MemberExtensionSelection {
-    All,
-    Operators,
 }
 
 #[derive(Clone, Copy)]
@@ -65171,7 +65176,7 @@ impl<'a> Checker<'a> {
                 Ty::Null,
                 this_ref,
                 Some(resolved_property_ty),
-                site,
+                site.clone(),
             );
             if p.is_var {
                 self.record_delegate_setvalue(scope, de, dt, this_ref, resolved_property_ty, site);
@@ -68610,15 +68615,16 @@ impl<'a> Checker<'a> {
                             .declared_ty()
                             .map(|declared| self.check_declaration_type(scope, declared))
                             .filter(|ty| !ty.mentions_error() && !ty.mentions_pending());
-                        let site =
+                        let mut site =
                             DelegateConventionSite::of(bp, Some(owner_ref), extension_receiver);
+                        site.dispatch_source_name = Some(class_declaration_label(&cl.name).into());
                         let (dt, delegate_ret) = self.check_delegate_getvalue(
                             &initializer_scope,
                             de,
                             owner_ref,
                             this_ref,
                             expected_property,
-                            site,
+                            site.clone(),
                         );
                         if expected_property.is_none() {
                             body_inferred_property_type = delegate_ret
@@ -85695,5 +85701,6 @@ impl<'a> Checker<'a> {
             call,
             selection,
         )
+        .into_checker_result()
     }
 }

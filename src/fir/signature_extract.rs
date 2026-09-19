@@ -287,6 +287,51 @@ impl SignatureConstraintExtractor {
                     | crate::ast::Decl::Property(_) => None,
                 })
                 .min_by_key(|(length, _, _)| *length);
+            let delegate_site = (stub.signature_inference
+                == Some(super::InferredSignatureKind::DelegatedProperty))
+            .then(|| {
+                let property = source_property(file, stub.range)
+                    .expect("an inferred delegated signature belongs to a property");
+                let by_origin = origin(
+                    property
+                        .delegate_by_span
+                        .expect("an inferred delegated property retains its `by` keyword"),
+                );
+                let dispatch_source_name = enclosing_classifier.map(|(_, _, classifier)| {
+                    self.graph.intern_name(
+                        classifier
+                            .name
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or(&classifier.name),
+                    )
+                });
+                let dispatch = enclosing_classifier.map(|(_, _, classifier)| {
+                    let declaration = self
+                        .source_classifiers
+                        .get(&classifier.span)
+                        .copied()
+                        .expect("a member delegate retains its stable classifier owner");
+                    self.graph
+                        .add_expr(SigExpr::ClassifierType { declaration, scope })
+                });
+                let kind = dispatch.map_or(
+                    super::SignatureDelegateSiteKind::TopLevel {
+                        extension: property.receiver.is_some(),
+                    },
+                    |dispatch| super::SignatureDelegateSiteKind::Member {
+                        dispatch,
+                        extension: property.receiver.is_some(),
+                    },
+                );
+                super::SignatureDelegateSite {
+                    diagnostic_owner: stub.id,
+                    kind,
+                    mutable: property.is_var,
+                    dispatch_source_name,
+                    by_origin,
+                }
+            });
             if let Some(function) = function {
                 if let Some((_, _, classifier)) = enclosing_classifier {
                     if let Some(declaration) =
@@ -338,20 +383,11 @@ impl SignatureConstraintExtractor {
                     result = if stub.signature_inference
                         == Some(super::InferredSignatureKind::DelegatedProperty)
                     {
-                        // A delegate refusal is reported where kotlinc reports it, on the `by`
-                        // keyword rather than on the delegate expression the constraint is built
-                        // from. The parser already retains that span for the checker's own
-                        // convention diagnostics.
-                        let origin = source_property(file, stub.range)
-                            .and_then(|property| property.delegate_by_span)
-                            .map(&mut origin)
-                            .unwrap_or(constraint_origin);
                         self.graph.add_expr(SigExpr::Delegate {
-                            declaration: stub.id,
                             delegate: result,
                             scope,
-                            origin,
-                            local: false,
+                            site: delegate_site
+                                .expect("an inferred delegated property retains its site"),
                         })
                     } else {
                         result
@@ -756,6 +792,25 @@ impl SignatureConstraintExtractor {
                     file.expr_span(expression)
                         .expect("a local inferred property expression has a source span"),
                 );
+                let delegate_site = (stub.signature_inference
+                    == Some(super::InferredSignatureKind::DelegatedProperty))
+                .then(|| super::SignatureDelegateSite {
+                    diagnostic_owner: stub.id,
+                    kind: super::SignatureDelegateSiteKind::Member {
+                        dispatch: receiver,
+                        extension: property.receiver.is_some(),
+                    },
+                    mutable: property.is_var,
+                    dispatch_source_name: Some(
+                        self.graph
+                            .intern_name(class.name.rsplit('.').next().unwrap_or(&class.name)),
+                    ),
+                    by_origin: origin(
+                        property
+                            .delegate_by_span
+                            .expect("an inferred delegated property retains its `by` keyword"),
+                    ),
+                });
                 let mut result = self.expression(file, expression, member_scope, origin)?;
                 result = self.graph.add_expr(SigExpr::ScopedReceiver {
                     receiver,
@@ -770,11 +825,10 @@ impl SignatureConstraintExtractor {
                 if stub.signature_inference == Some(super::InferredSignatureKind::DelegatedProperty)
                 {
                     result = self.graph.add_expr(SigExpr::Delegate {
-                        declaration: stub.id,
                         delegate: result,
                         scope: member_scope,
-                        origin: constraint_origin,
-                        local: true,
+                        site: delegate_site
+                            .expect("an inferred delegated property retains its site"),
                     });
                 }
                 self.graph
@@ -2189,7 +2243,11 @@ impl SignatureConstraintExtractor {
                             self.narrow_contract_arguments(file, *expression, effect);
                         }
                         Stmt::LocalDelegate {
-                            name, ty, delegate, ..
+                            is_var,
+                            name,
+                            ty,
+                            delegate,
+                            by_span,
                         } => {
                             let value = match ty {
                                 Some(ty) => self.compact_type(ty, scope, origin),
@@ -2197,15 +2255,21 @@ impl SignatureConstraintExtractor {
                                     let delegate =
                                         self.consumed_expression(file, *delegate, scope, origin)?;
                                     self.graph.add_expr(SigExpr::Delegate {
-                                        declaration: self
-                                            .graph
-                                            .scope(scope)
-                                            .expect("a local delegate must retain its owner scope")
-                                            .owner,
                                         delegate,
                                         scope,
-                                        origin: origin(file.stmt_spans[statement.0 as usize]),
-                                        local: true,
+                                        site: super::SignatureDelegateSite {
+                                            diagnostic_owner: self
+                                                .graph
+                                                .scope(scope)
+                                                .expect(
+                                                    "a local delegate must retain its owner scope",
+                                                )
+                                                .owner,
+                                            kind: super::SignatureDelegateSiteKind::StatementLocal,
+                                            mutable: *is_var,
+                                            dispatch_source_name: None,
+                                            by_origin: origin(*by_span),
+                                        },
                                     })
                                 }
                             };

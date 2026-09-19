@@ -243,11 +243,9 @@ pub enum SigExpr {
         result: SigExprId,
     },
     Delegate {
-        declaration: DeclarationId,
         delegate: SigExprId,
         scope: SignatureScopeId,
-        origin: OriginId,
-        local: bool,
+        site: SignatureDelegateSite,
     },
     Join {
         operands: OperandRange,
@@ -1131,11 +1129,9 @@ pub trait SignatureSemantics {
 
     fn select_delegate(
         &self,
-        declaration: DeclarationId,
         scope: SignatureScope,
-        origin: OriginId,
         delegate: ResolvedTy,
-        local: bool,
+        site: ResolvedSignatureDelegateSite,
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
@@ -1174,7 +1170,9 @@ pub trait SignatureSemantics {
     fn missing_signature_diagnostic(&self, declaration: DeclarationId) -> DiagnosticId;
 }
 
+mod delegate_site;
 mod evaluate;
+pub use delegate_site::*;
 pub use evaluate::*;
 /// Demand-driven signature solving session. It owns the complete temporary graph, ensuring the
 /// graph is destroyed when `finalize` consumes the solver and before the resolved index is returned.

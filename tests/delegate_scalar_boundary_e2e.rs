@@ -788,6 +788,88 @@ fn a_context_prefixed_operator_is_rejected_on_its_declaration() {
     );
 }
 
+/// A member-extension convention is subject to the same generated-accessor rule as a convention
+/// declared on the delegate itself. Selection must retain the raw declaration even when its
+/// context cannot be instantiated from the lexical receiver tower, so the refusal still lists it.
+#[test]
+fn an_unsatisfied_context_member_extension_is_still_a_delegate_candidate() {
+    let source = "class MissingContext\n\
+                  class Cell\n\
+                  \n\
+                  class Holder {\n\
+                  \x20   context(missing: MissingContext)\n\
+                  \x20   operator fun Cell.getValue(thisRef: Holder, prop: Any?): Long = 1\n\
+                  \x20   val inferred by Cell()\n\
+                  }\n\
+                  \n\
+                  fun unrelated() {\n\
+                  \x20   val mismatched: Int = \"not an Int\"\n\
+                  }\n";
+    let expected = vec![
+        "5:5: error: context parameters on delegation operators are unsupported.".to_string(),
+        "7:18: error: property delegate must have a 'getValue(Holder, KProperty1<Holder, Long>)' method. None of the following functions is applicable:\ncontext(missing: MissingContext) fun Cell.getValue(thisRef: Holder, prop: Any?): Long"
+            .to_string(),
+        "11:25: error: initializer type mismatch: expected 'Int', actual 'String'.".to_string(),
+    ];
+    let dir = common::scratch_dir().expect("scratch dir");
+    assert_eq!(
+        kotlinc_error_ledger(
+            source,
+            "ContextMemberExtensionDelegate.kt",
+            &dir.join("ContextMemberExtensionDelegate-ref"),
+        ),
+        expected,
+        "kotlinc's complete ordered ledger",
+    );
+    assert_eq!(
+        common::front_end_diagnostics_located(source, &[common::stdlib_jar()], None),
+        expected,
+        "krusty's complete ordered ledger",
+    );
+}
+
+/// An unusable member extension is diagnostic inventory, not a terminal lookup rung. Both
+/// signature inference and checked-body selection must continue to the valid ordinary extension;
+/// the inferred `Long` return makes that choice observable without weakening the exact ledger.
+#[test]
+fn an_invalid_member_extension_does_not_displace_a_valid_ordinary_extension() {
+    let source = "class MissingContext\n\
+                  class Cell\n\
+                  \n\
+                  operator fun Cell.getValue(thisRef: Holder, prop: Any?): Long = 1\n\
+                  \n\
+                  class Holder {\n\
+                  \x20   context(missing: MissingContext)\n\
+                  \x20   operator fun Cell.getValue(thisRef: Holder, prop: Any?): String = \"wrong\"\n\
+                  \x20   val inferred by Cell()\n\
+                  }\n\
+                  \n\
+                  fun use(): Long = Holder().inferred\n\
+                  \n\
+                  fun unrelated() {\n\
+                  \x20   val mismatched: Int = \"not an Int\"\n\
+                  }\n";
+    let expected = vec![
+        "7:5: error: context parameters on delegation operators are unsupported.".to_string(),
+        "15:25: error: initializer type mismatch: expected 'Int', actual 'String'.".to_string(),
+    ];
+    let dir = common::scratch_dir().expect("scratch dir");
+    assert_eq!(
+        kotlinc_error_ledger(
+            source,
+            "InvalidMemberExtensionValidOrdinaryDelegate.kt",
+            &dir.join("InvalidMemberExtensionValidOrdinaryDelegate-ref"),
+        ),
+        expected,
+        "kotlinc's complete ordered ledger",
+    );
+    assert_eq!(
+        common::front_end_diagnostics_located(source, &[common::stdlib_jar()], None),
+        expected,
+        "krusty's complete ordered ledger",
+    );
+}
+
 /// A delegate that supplies NO convention at all — the ordinary mistake of writing `by` in front of
 /// a type that was never a delegate. kotlinc names the method it looked for, and it names it once
 /// per convention the property needs, so a `var` is told about both `getValue` and `setValue`.
@@ -912,11 +994,389 @@ fn an_untyped_delegated_property_names_its_missing_convention_and_the_rest_of_th
                  \n\
                  fun local() {\n\
                  \x20   val untyped by Plain()\n\
-                 \x20   println(untyped)\n\
                  }\n";
+    let local_expected = vec![
+        "4:17: error: type 'Plain' has no method 'getValue(Nothing?, KProperty0<*>)', so it cannot serve as a delegate."
+            .to_string(),
+    ];
     assert_eq!(
         kotlinc_error_ledger(local, "UntypedLocal.kt", &dir.join("UntypedLocal-ref")),
+        local_expected,
+        "kotlinc's complete ordered local ledger",
+    );
+    assert_eq!(
         common::front_end_diagnostics_located(local, &[common::stdlib_jar()], None),
-        "a local delegated property, whose type the checker infers itself, matches entry for entry"
+        local_expected,
+        "krusty's complete ordered local ledger",
+    );
+}
+
+/// A statement-local delegate can participate in an enclosing inferred signature. Its compact
+/// Pass-1 node owns the local site's mutability and exact `by` origin; the enclosing function is
+/// only the diagnostic owner and must never be mistaken for the delegated declaration.
+#[test]
+fn an_inferred_statement_local_delegate_reports_from_its_pass_one_site() {
+    let source = "class Plain\n\
+                  \n\
+                  fun inferred() = ({\n\
+                  \x20   val local by Plain()\n\
+                  \x20   local\n\
+                  })()\n\
+                  \n\
+                  fun unrelated() {\n\
+                  \x20   val mismatched: Int = \"not an Int\"\n\
+                  }\n";
+    let expected = vec![
+        "4:15: error: type 'Plain' has no method 'getValue(Nothing?, KProperty0<*>)', so it cannot serve as a delegate."
+            .to_string(),
+        "9:25: error: initializer type mismatch: expected 'Int', actual 'String'.".to_string(),
+    ];
+    let dir = common::scratch_dir().expect("scratch dir");
+    assert_eq!(
+        kotlinc_error_ledger(source, "PassOneLocal.kt", &dir.join("PassOneLocal-ref")),
+        expected,
+        "kotlinc's complete ordered ledger",
+    );
+    assert_eq!(
+        common::front_end_diagnostics_located(source, &[common::stdlib_jar()], None),
+        expected,
+        "krusty's complete ordered ledger",
+    );
+}
+
+/// A member of a local classifier is still a MEMBER convention site. Treating every declaration
+/// reached through a local body as statement-local passes `null`; the real dispatch instance must
+/// instead appear both as `thisRef` and in `KProperty1`.
+#[test]
+fn an_inferred_local_class_member_delegate_keeps_its_dispatch_site() {
+    let source = "class DispatchProbe {\n\
+                  \x20   operator fun getValue(owner: Nothing?, property: Any?): Int = 1\n\
+                  }\n\
+                  \n\
+                  fun inferred() = ({\n\
+                  \x20   class LocalOwner {\n\
+                  \x20       val member by DispatchProbe()\n\
+                  \x20   }\n\
+                  \x20   LocalOwner().member\n\
+                  })()\n";
+    let expected = vec![
+        "7:20: error: property delegate must have a 'getValue(LocalOwner, KProperty1<LocalOwner, Int>)' method. None of the following functions is applicable:\nfun getValue(owner: Nothing?, property: Any?): Int"
+            .to_string(),
+    ];
+    let dir = common::scratch_dir().expect("scratch dir");
+    assert_eq!(
+        kotlinc_error_ledger(
+            source,
+            "LocalClassDispatch.kt",
+            &dir.join("LocalClassDispatch-ref"),
+        ),
+        expected,
+        "kotlinc's complete ordered ledger",
+    );
+    assert_eq!(
+        common::front_end_diagnostics_located(source, &[common::stdlib_jar()], None),
+        expected,
+        "krusty's complete ordered ledger",
+    );
+}
+
+/// A top-level extension passes null to `provideDelegate`, selecting the broken result below, while
+/// its getter receives the extension `String`. Reusing that `String` for provide would select the
+/// good result and incorrectly erase the missing-getValue refusal.
+#[test]
+fn an_inferred_top_level_extension_uses_distinct_delegate_first_arguments() {
+    let source = "class GoodTopLevelDelegate {\n\
+                  \x20   operator fun getValue(owner: String, property: Any?): Int = 1\n\
+                  }\n\
+                  class BrokenTopLevelDelegate\n\
+                  \n\
+                  class TopLevelExtensionFactory {\n\
+                  \x20   operator fun provideDelegate(owner: Nothing?, property: Any?): BrokenTopLevelDelegate = BrokenTopLevelDelegate()\n\
+                  \x20   operator fun provideDelegate(owner: String, property: Any?): GoodTopLevelDelegate = GoodTopLevelDelegate()\n\
+                  }\n\
+                  \n\
+                  val String.inferred by TopLevelExtensionFactory()\n\
+                  \n\
+                  fun unrelated() {\n\
+                  \x20   val mismatched: Int = \"not an Int\"\n\
+                  }\n";
+    let expected = vec![
+        "11:21: error: type 'BrokenTopLevelDelegate' has no method 'getValue(String, KProperty1<*, *>)', so it cannot serve as a delegate."
+            .to_string(),
+        "14:25: error: initializer type mismatch: expected 'Int', actual 'String'.".to_string(),
+    ];
+    let dir = common::scratch_dir().expect("scratch dir");
+    assert_eq!(
+        kotlinc_error_ledger(
+            source,
+            "TopLevelExtensionDelegateReceivers.kt",
+            &dir.join("TopLevelExtensionDelegateReceivers-ref"),
+        ),
+        expected,
+        "kotlinc's complete ordered ledger",
+    );
+    assert_eq!(
+        common::front_end_diagnostics_located(source, &[common::stdlib_jar()], None),
+        expected,
+        "krusty's complete ordered ledger",
+    );
+}
+
+/// A member extension passes its dispatch owner to `provideDelegate`, selecting the broken result,
+/// and its extension value to `getValue`. Reusing the `String` for provide would select the good
+/// result and incorrectly erase the missing-getValue refusal.
+#[test]
+fn an_inferred_member_extension_uses_distinct_delegate_first_arguments() {
+    let source = "class GoodMemberExtensionDelegate {\n\
+                  \x20   operator fun getValue(owner: String, property: Any?): Int = 1\n\
+                  }\n\
+                  class BrokenMemberExtensionDelegate\n\
+                  \n\
+                  class MemberExtensionFactory {\n\
+                  \x20   operator fun provideDelegate(owner: MemberOwner, property: Any?): BrokenMemberExtensionDelegate = BrokenMemberExtensionDelegate()\n\
+                  \x20   operator fun provideDelegate(owner: String, property: Any?): GoodMemberExtensionDelegate = GoodMemberExtensionDelegate()\n\
+                  }\n\
+                  \n\
+                  class MemberOwner {\n\
+                  \x20   val String.inferred by MemberExtensionFactory()\n\
+                  }\n\
+                  \n\
+                  fun unrelated() {\n\
+                  \x20   val mismatched: Int = \"not an Int\"\n\
+                  }\n";
+    let expected = vec![
+        "12:25: error: type 'BrokenMemberExtensionDelegate' has no method 'getValue(String, KProperty2<*, *, *>)', so it cannot serve as a delegate."
+            .to_string(),
+        "16:25: error: initializer type mismatch: expected 'Int', actual 'String'.".to_string(),
+    ];
+    let dir = common::scratch_dir().expect("scratch dir");
+    assert_eq!(
+        kotlinc_error_ledger(
+            source,
+            "MemberExtensionDelegateReceivers.kt",
+            &dir.join("MemberExtensionDelegateReceivers-ref"),
+        ),
+        expected,
+        "kotlinc's complete ordered ledger",
+    );
+    assert_eq!(
+        common::front_end_diagnostics_located(source, &[common::stdlib_jar()], None),
+        expected,
+        "krusty's complete ordered ledger",
+    );
+}
+
+/// These mandatory `getValue` member extensions are visible only through the property's implicit
+/// dispatch receiver. Their equally applicable first arguments force a real Kotlin ambiguity,
+/// which must retain both declarations for the shared convention diagnostic.
+#[test]
+fn an_inferred_delegate_reports_ambiguous_member_extension_get_value() {
+    let source = "class MemberExtensionDelegate {\n\
+                  }\n\
+                  interface LeftOwner\n\
+                  interface RightOwner\n\
+                  \n\
+                  class ExtensionScope : LeftOwner, RightOwner {\n\
+                  \x20   operator fun MemberExtensionDelegate.getValue(owner: LeftOwner, property: Any?): Int = 1\n\
+                  \x20   operator fun MemberExtensionDelegate.getValue(owner: RightOwner, property: Any?): Int = 2\n\
+                  \x20   val inferred by MemberExtensionDelegate()\n\
+                  }\n\
+                  \n\
+                  fun unrelated() {\n\
+                  \x20   val mismatched: Int = \"not an Int\"\n\
+                  }\n";
+    let expected = vec![
+        "9:18: error: overload resolution ambiguity on method 'getValue(ExtensionScope, KProperty1<*, *>)':\nfun MemberExtensionDelegate.getValue(owner: LeftOwner, property: Any?): Int\nfun MemberExtensionDelegate.getValue(owner: RightOwner, property: Any?): Int"
+            .to_string(),
+        "13:25: error: initializer type mismatch: expected 'Int', actual 'String'.".to_string(),
+    ];
+    let dir = common::scratch_dir().expect("scratch dir");
+    assert_eq!(
+        kotlinc_error_ledger(
+            source,
+            "AmbiguousMemberExtensionGetValue.kt",
+            &dir.join("AmbiguousMemberExtensionGetValue-ref"),
+        ),
+        expected,
+        "kotlinc's complete ordered ledger",
+    );
+    assert_eq!(
+        common::front_end_diagnostics_located(source, &[common::stdlib_jar()], None),
+        expected,
+        "krusty's complete ordered ledger",
+    );
+}
+
+/// Ambiguous mandatory `getValue` selection is a source refusal owned by the `by` operation, and
+/// an unrelated body error proves the rest of the file is still checked after signature recovery.
+#[test]
+fn ambiguous_get_value_reports_before_unrelated_body_errors() {
+    let source = "class AmbiguousFactory {\n\
+                  \x20   operator fun getValue(owner: String?, property: Any?): Int = 1\n\
+                  \x20   operator fun getValue(owner: Int?, property: Any?): Int = 2\n\
+                  \x20   context(irrelevantContext: String)\n\
+                  \x20   fun getValue(owner: Any?, property: Any?, irrelevant: Int): String = \"ignored\"\n\
+                  }\n\
+                  \n\
+                  val ambiguous by AmbiguousFactory()\n\
+                  \n\
+                  fun unrelated() {\n\
+                  \x20   val mismatched: Int = \"not an Int\"\n\
+                  }\n";
+    let expected = vec![
+        "8:15: error: overload resolution ambiguity on method 'getValue(Nothing?, KProperty0<*>)':\nfun getValue(owner: String?, property: Any?): Int\nfun getValue(owner: Int?, property: Any?): Int"
+            .to_string(),
+        "11:25: error: initializer type mismatch: expected 'Int', actual 'String'.".to_string(),
+    ];
+    let dir = common::scratch_dir().expect("scratch dir");
+    assert_eq!(
+        kotlinc_error_ledger(
+            source,
+            "AmbiguousGetValue.kt",
+            &dir.join("AmbiguousGetValue-ref"),
+        ),
+        expected,
+        "kotlinc's complete ordered ledger",
+    );
+    assert_eq!(
+        common::front_end_diagnostics_located(source, &[common::stdlib_jar()], None),
+        expected,
+        "krusty's complete ordered ledger",
+    );
+}
+
+/// `provideDelegate` is optional: a genuinely ambiguous provide family is treated as absence, and
+/// the mandatory `getValue` on the original delegate still determines the inferred property type.
+#[test]
+fn ambiguous_optional_provide_delegate_falls_through_to_get_value() {
+    let source = "class OptionalFactory {\n\
+                  \x20   operator fun provideDelegate(owner: String?, property: Any?): OptionalFactory = this\n\
+                  \x20   operator fun provideDelegate(owner: Int?, property: Any?): OptionalFactory = this\n\
+                  \x20   operator fun getValue(owner: Any?, property: Any?): Long = 1\n\
+                  }\n\
+                  \n\
+                  val accepted by OptionalFactory()\n\
+                  fun use(): Long = accepted\n\
+                  \n\
+                  fun unrelated() {\n\
+                  \x20   val mismatched: Int = \"not an Int\"\n\
+                  }\n";
+    let expected = vec![
+        "11:25: error: initializer type mismatch: expected 'Int', actual 'String'.".to_string(),
+    ];
+    let dir = common::scratch_dir().expect("scratch dir");
+    assert_eq!(
+        kotlinc_error_ledger(
+            source,
+            "AmbiguousOptionalProvide.kt",
+            &dir.join("AmbiguousOptionalProvide-ref"),
+        ),
+        expected,
+        "kotlinc's complete ordered ledger",
+    );
+    assert_eq!(
+        common::front_end_diagnostics_located(source, &[common::stdlib_jar()], None),
+        expected,
+        "krusty's complete ordered ledger",
+    );
+}
+
+/// An explicit property never enters delegate signature inference, so the same genuine ambiguity
+/// is owned by the ordinary Pass-2 selector and must use the complete candidate diagnostic.
+#[test]
+fn an_explicit_property_reports_ambiguous_get_value() {
+    let source = "class ExplicitFactory {\n\
+                  \x20   operator fun getValue(owner: String?, property: Any?): Int = 1\n\
+                  \x20   operator fun getValue(owner: Int?, property: Any?): Int = 2\n\
+                  }\n\
+                  \n\
+                  val explicit: Int by ExplicitFactory()\n";
+    let expected = vec![
+        "6:19: error: overload resolution ambiguity on method 'getValue(Nothing?, KProperty0<*>)':\nfun getValue(owner: String?, property: Any?): Int\nfun getValue(owner: Int?, property: Any?): Int"
+            .to_string(),
+    ];
+    let dir = common::scratch_dir().expect("scratch dir");
+    assert_eq!(
+        kotlinc_error_ledger(
+            source,
+            "ExplicitAmbiguousGetValue.kt",
+            &dir.join("ExplicitAmbiguousGetValue-ref"),
+        ),
+        expected,
+        "kotlinc's complete ordered ledger",
+    );
+    assert_eq!(
+        common::front_end_diagnostics_located(source, &[common::stdlib_jar()], None),
+        expected,
+        "krusty's complete ordered ledger",
+    );
+}
+
+/// Rendering the one inapplicable candidate needs its inferred return type. The diagnostic path
+/// demands that declaration once and propagates its result; it never retries another origin.
+#[test]
+fn an_inferred_candidate_result_is_demanded_for_the_delegate_ledger() {
+    let source = "class DeferredResult {\n\
+                  \x20   operator fun getValue(owner: Any, property: Any?) = 1\n\
+                  }\n\
+                  \n\
+                  val inferred by DeferredResult()\n";
+    let expected = vec![
+        "5:14: error: property delegate must have a 'getValue(Nothing?, KProperty0<Int>)' method. None of the following functions is applicable:\nfun getValue(owner: Any, property: Any?): Int"
+            .to_string(),
+    ];
+    let dir = common::scratch_dir().expect("scratch dir");
+    assert_eq!(
+        kotlinc_error_ledger(
+            source,
+            "DemandedDelegateResult.kt",
+            &dir.join("DemandedDelegateResult-ref"),
+        ),
+        expected,
+        "kotlinc's complete ordered ledger",
+    );
+    assert_eq!(
+        common::front_end_diagnostics_located(source, &[common::stdlib_jar()], None),
+        expected,
+        "krusty's complete ordered ledger",
+    );
+}
+
+/// A local classifier's self type includes the type parameters and values captured from its
+/// enclosing inferred function. The delegate site carries that evaluated self type directly.
+#[test]
+fn a_capturing_local_class_delegate_keeps_its_applied_self_type() {
+    let source = "class DispatchProbe<Owner> {\n\
+                  \x20   operator fun getValue(owner: Owner, property: Any?): Int = 1\n\
+                  }\n\
+                  \n\
+                  fun <Captured> inferred(value: Captured) = ({\n\
+                  \x20   class LocalOwner<Own>(val own: Own) {\n\
+                  \x20       val retained: Captured = value\n\
+                  \x20       val member by DispatchProbe<LocalOwner<Own>>()\n\
+                  \x20   }\n\
+                  \x20   LocalOwner(value).member\n\
+                  })()\n\
+                  \n\
+                  fun unrelated() {\n\
+                  \x20   val mismatched: Int = \"not an Int\"\n\
+                  }\n";
+    let expected = vec![
+        "14:25: error: initializer type mismatch: expected 'Int', actual 'String'.".to_string(),
+    ];
+    let dir = common::scratch_dir().expect("scratch dir");
+    assert_eq!(
+        kotlinc_error_ledger(
+            source,
+            "CapturedLocalDelegate.kt",
+            &dir.join("CapturedLocalDelegate-ref"),
+        ),
+        expected,
+        "kotlinc's complete ordered ledger",
+    );
+    assert_eq!(
+        common::front_end_diagnostics_located(source, &[common::stdlib_jar()], None),
+        expected,
+        "krusty's complete ordered ledger",
     );
 }

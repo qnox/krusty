@@ -2570,7 +2570,7 @@ impl ProductionSignatureSemantics<'_> {
             );
             return self.apply_demanded_function(receiver, selected, &signature, arguments);
         }
-        crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure())
+        crate::fir::ResolvedTy::new(result).map_err(|_| panic!("unresolved convention result"))
     }
 
     fn constructor_result(

@@ -11,7 +11,27 @@ enum DelegateGetValueAttempt {
     RetryWithReceiver(Ty),
 }
 
-#[derive(Clone, Copy)]
+enum DelegateOperatorSelection {
+    Selected(DelegateGetValueTarget),
+    None,
+    Failure(DelegateOperatorFailure),
+}
+
+enum OrdinaryDelegateSelection {
+    None,
+    Selected(crate::libraries::FunctionInfo, Ty, Ty),
+    Ambiguous(Vec<crate::libraries::FunctionInfo>),
+}
+
+enum DelegateOperatorFailure {
+    AmbiguousOrdinary(Vec<crate::libraries::FunctionInfo>),
+    ExcludedMemberExtensions(
+        Vec<super::member_extension_selection::MemberExtensionConventionDiagnosticCandidate>,
+    ),
+    AmbiguousMemberExtensions(Vec<MemberExtensionFunctionCandidate>),
+}
+
+#[derive(Clone)]
 struct DelegateGetValueSelection {
     provide_ref: Ty,
     this_ref: Ty,
@@ -22,11 +42,12 @@ struct DelegateGetValueSelection {
 /// What kotlinc's delegate-convention diagnostics name beyond the types already in hand: where the
 /// `by` keyword sits, which receivers the property has, and whether it is a `var`. The receivers are
 /// listed dispatch first — the order `KProperty2<D, E, V>` spells them.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct DelegateConventionSite {
     pub(crate) by_span: Span,
     pub(crate) dispatch_receiver: Option<Ty>,
     pub(crate) extension_receiver: Option<Ty>,
+    pub(crate) dispatch_source_name: Option<Box<str>>,
     pub(crate) is_var: bool,
 }
 
@@ -43,6 +64,7 @@ impl DelegateConventionSite {
                 .expect("a delegated property was parsed from its `by` keyword"),
             dispatch_receiver,
             extension_receiver,
+            dispatch_source_name: None,
             is_var: property.is_var,
         }
     }
@@ -54,18 +76,19 @@ impl DelegateConventionSite {
             by_span,
             dispatch_receiver: None,
             extension_receiver: None,
+            dispatch_source_name: None,
             is_var,
         }
     }
 
-    fn receivers(self) -> Vec<Ty> {
+    fn receivers(&self) -> Vec<Ty> {
         self.dispatch_receiver
             .into_iter()
             .chain(self.extension_receiver)
             .collect()
     }
 
-    fn flavour(self) -> String {
+    fn flavour(&self) -> String {
         format!(
             "{}{}",
             if self.is_var {
@@ -80,26 +103,37 @@ impl DelegateConventionSite {
     /// `KMutableProperty1<*, *>` — every argument star-projected. This is the spelling kotlinc uses
     /// whenever it has no single candidate to blame: the property reference it would have passed was
     /// never built, so its arguments are unknown here too.
-    fn star_projected_reference(self) -> String {
+    fn star_projected_reference(&self) -> String {
         let arguments = vec!["*"; self.receivers().len() + 1].join(", ");
         format!("{}<{arguments}>", self.flavour())
     }
 
     /// `KMutableProperty1<Holder, Long>` — the reference the accessors would really pass: this
     /// property's receivers, then its type.
-    fn applied_reference(self, property: Ty) -> String {
-        let arguments = self
-            .receivers()
-            .into_iter()
-            .chain(std::iter::once(property))
-            .map(delegate_diagnostic_ty)
-            .collect::<Vec<_>>()
-            .join(", ");
+    fn applied_reference(&self, property: Ty) -> String {
+        let mut arguments = Vec::new();
+        if let Some(dispatch) = self.dispatch_receiver {
+            arguments.push(self.diagnostic_ty(dispatch));
+        }
+        if let Some(extension) = self.extension_receiver {
+            arguments.push(delegate_diagnostic_ty(extension));
+        }
+        arguments.push(delegate_diagnostic_ty(property));
+        let arguments = arguments.join(", ");
         format!("{}<{arguments}>", self.flavour())
+    }
+
+    fn diagnostic_ty(&self, ty: Ty) -> String {
+        if self.dispatch_receiver == Some(ty) {
+            if let Some(name) = &self.dispatch_source_name {
+                return name.to_string();
+            }
+        }
+        delegate_diagnostic_ty(ty)
     }
 }
 
-/// Why no convention was selected, in the two shapes kotlinc reports.
+/// Why no convention was selected, in the three shapes kotlinc reports.
 enum DelegateConventionFailure {
     /// Nothing of that name is visible on the delegate at all.
     Missing,
@@ -107,6 +141,23 @@ enum DelegateConventionFailure {
     /// them, in the order the delegate's scope offers them, and — when exactly one is to blame —
     /// the result type kotlinc then reports the property as having.
     NoneApplicable(Vec<String>, Option<Ty>),
+    /// More than one convention is applicable and none is more specific.
+    Ambiguous(Vec<String>),
+}
+
+/// One convention candidate in the shared diagnostic vocabulary. Member-extension lookup reaches
+/// declarations through an implicit dispatch receiver, so those candidates are not present in
+/// `receiver_callables(delegate, name)` and must cross that lookup boundary explicitly.
+#[derive(Clone)]
+pub(crate) struct DelegateConventionDiagnosticCandidate {
+    rendered: String,
+    result: Ty,
+}
+
+pub(crate) enum DelegateConventionSelection {
+    None,
+    Selected(crate::libraries::FunctionInfo, Ty),
+    Ambiguous(Vec<crate::libraries::FunctionInfo>),
 }
 
 /// Render a type the way a delegate diagnostic names it. The literal null type prints as `Nothing?`,
@@ -118,6 +169,49 @@ fn delegate_diagnostic_ty(ty: Ty) -> String {
     ty.source_name()
 }
 
+pub(crate) fn delegate_convention_diagnostic_candidate(
+    name: &str,
+    extension_receiver: Option<Ty>,
+    context_parameters: &[Ty],
+    value_parameters: &[Ty],
+    parameter_names: &[String],
+    result: Ty,
+) -> DelegateConventionDiagnosticCandidate {
+    let render_parameters = |parameters: &[Ty], offset: usize| {
+        parameters
+            .iter()
+            .enumerate()
+            .map(|(index, parameter)| {
+                let ordinal = offset + index;
+                let parameter_name = match parameter_names.get(ordinal) {
+                    Some(name) => name.clone(),
+                    None => format!("p{ordinal}"),
+                };
+                format!("{parameter_name}: {}", delegate_diagnostic_ty(*parameter))
+            })
+            .collect::<Vec<_>>()
+    };
+    let context = render_parameters(context_parameters, 0);
+    let value = render_parameters(value_parameters, context_parameters.len());
+    let context = if context.is_empty() {
+        String::new()
+    } else {
+        format!("context({}) ", context.join(", "))
+    };
+    let callable_name = match extension_receiver {
+        Some(receiver) => format!("{}.{}", delegate_diagnostic_ty(receiver), name),
+        None => name.to_string(),
+    };
+    DelegateConventionDiagnosticCandidate {
+        rendered: format!(
+            "{context}fun {callable_name}({}): {}",
+            value.join(", "),
+            delegate_diagnostic_ty(result),
+        ),
+        result,
+    }
+}
+
 pub(super) fn select_delegate_operator_return(
     resolver: &crate::symbol_resolver::SymbolResolver,
     receiver: Ty,
@@ -125,9 +219,8 @@ pub(super) fn select_delegate_operator_return(
     args: &[Ty],
 ) -> Option<Ty> {
     match select_delegate_operator(resolver, receiver, name, args) {
-        crate::symbol_resolver::CandidateSelection::Selected((_, ret)) => Some(ret),
-        crate::symbol_resolver::CandidateSelection::None
-        | crate::symbol_resolver::CandidateSelection::Ambiguous => None,
+        DelegateConventionSelection::Selected(_, ret) => Some(ret),
+        DelegateConventionSelection::None | DelegateConventionSelection::Ambiguous(_) => None,
     }
 }
 
@@ -263,7 +356,7 @@ pub(super) fn select_delegate_operator(
     receiver: Ty,
     name: &str,
     args: &[Ty],
-) -> crate::symbol_resolver::CandidateSelection<(crate::libraries::FunctionInfo, Ty)> {
+) -> DelegateConventionSelection {
     let callables = resolver.receiver_callables(receiver, name);
     crate::trace_compiler!(
         "resolve",
@@ -302,7 +395,7 @@ pub(super) fn select_delegate_operator(
         .copied()
         .map(CallArgKind::Typed)
         .collect::<Vec<_>>();
-    match resolver.select_receiver_function_with_params_tracking(
+    match resolver.select_receiver_function_with_applied_receiver_tracking(
         receiver,
         name,
         &args,
@@ -310,14 +403,14 @@ pub(super) fn select_delegate_operator(
         &callables,
         None,
     ) {
-        crate::symbol_resolver::CandidateSelection::Selected((selected, _, ret)) => {
-            crate::symbol_resolver::CandidateSelection::Selected((selected, ret))
+        crate::symbol_resolver::ReceiverFunctionSelection::Selected((selected, _, ret, _)) => {
+            DelegateConventionSelection::Selected(selected, ret)
         }
-        crate::symbol_resolver::CandidateSelection::None => {
-            crate::symbol_resolver::CandidateSelection::None
+        crate::symbol_resolver::ReceiverFunctionSelection::None => {
+            DelegateConventionSelection::None
         }
-        crate::symbol_resolver::CandidateSelection::Ambiguous => {
-            crate::symbol_resolver::CandidateSelection::Ambiguous
+        crate::symbol_resolver::ReceiverFunctionSelection::Ambiguous(candidates) => {
+            DelegateConventionSelection::Ambiguous(candidates)
         }
     }
 }
@@ -328,58 +421,236 @@ pub(super) fn select_delegate_operator(
 /// excluded it from selection — kotlinc lists an inapplicable overload, a missing `operator`
 /// modifier and a context-prefixed declaration alike, because each one is a thing the author
 /// plausibly meant to be the convention.
-fn delegate_convention_failure(
+fn delegate_convention_candidates(
     resolver: &crate::symbol_resolver::SymbolResolver,
     delegate_ty: Ty,
     name: &str,
-    candidate_result: &mut dyn FnMut(&crate::libraries::FunctionInfo) -> Ty,
-) -> Option<DelegateConventionFailure> {
+    candidate_result: &mut dyn FnMut(
+        &crate::libraries::FunctionInfo,
+    ) -> Result<Ty, crate::fir::DiagnosticId>,
+) -> Result<Vec<DelegateConventionDiagnosticCandidate>, crate::fir::DiagnosticId> {
     let callables = resolver.receiver_callables(delegate_ty, name);
-    let functions = callables.functions();
-    let candidates = functions
+    delegate_convention_candidates_from_functions(callables.functions(), name, candidate_result)
+}
+
+fn delegate_convention_candidates_from_functions(
+    functions: &[crate::libraries::FunctionInfo],
+    name: &str,
+    candidate_result: &mut dyn FnMut(
+        &crate::libraries::FunctionInfo,
+    ) -> Result<Ty, crate::fir::DiagnosticId>,
+) -> Result<Vec<DelegateConventionDiagnosticCandidate>, crate::fir::DiagnosticId> {
+    functions
         .iter()
         .map(|candidate| {
-            let parameters = candidate
-                .callable
-                .params
-                .iter()
-                .enumerate()
-                .map(|(index, parameter)| {
-                    let parameter_name = candidate
-                        .call_sig
-                        .param_names
-                        .get(index)
-                        .cloned()
-                        .unwrap_or_else(|| format!("p{index}"));
-                    format!("{parameter_name}: {}", delegate_diagnostic_ty(*parameter))
-                })
-                .collect::<Vec<_>>();
+            let parameters = candidate.callable.params.as_slice();
             let (context, value) = parameters.split_at(
                 // A provider states its context count independently of its parameter list; a
                 // disagreement must render a shorter prefix, never index past the list.
                 candidate.context_count.min(parameters.len()),
             );
-            let context = if context.is_empty() {
-                String::new()
-            } else {
-                format!("context({}) ", context.join(", "))
-            };
-            format!(
-                "{context}fun {name}({}): {}",
-                value.join(", "),
-                delegate_diagnostic_ty(candidate_result(candidate)),
-            )
+            let result = candidate_result(candidate)?;
+            Ok(delegate_convention_diagnostic_candidate(
+                name,
+                candidate.is_extension().then(|| {
+                    candidate
+                        .semantic_receiver()
+                        .expect("an extension convention candidate retains its receiver")
+                }),
+                context,
+                value,
+                &candidate.call_sig.param_names,
+                result,
+            ))
         })
-        .collect::<Vec<_>>();
-    Some(if candidates.is_empty() {
+        .collect::<Result<Vec<_>, crate::fir::DiagnosticId>>()
+}
+
+fn delegate_convention_failure(
+    resolver: &crate::symbol_resolver::SymbolResolver,
+    delegate_ty: Ty,
+    name: &str,
+    candidate_result: &mut dyn FnMut(
+        &crate::libraries::FunctionInfo,
+    ) -> Result<Ty, crate::fir::DiagnosticId>,
+) -> Result<DelegateConventionFailure, crate::fir::DiagnosticId> {
+    let candidates = delegate_convention_candidates(resolver, delegate_ty, name, candidate_result)?;
+    Ok(if candidates.is_empty() {
         DelegateConventionFailure::Missing
     } else {
-        let sole_result = match functions {
-            [only] => Some(candidate_result(only)),
+        let sole_result = match candidates.as_slice() {
+            [candidate] => Some(candidate.result),
             _ => None,
         };
-        DelegateConventionFailure::NoneApplicable(candidates, sole_result)
+        DelegateConventionFailure::NoneApplicable(
+            candidates
+                .into_iter()
+                .map(|candidate| candidate.rendered)
+                .collect(),
+            sole_result,
+        )
     })
+}
+
+fn delegate_convention_candidates_failure(
+    candidates: &[DelegateConventionDiagnosticCandidate],
+) -> DelegateConventionFailure {
+    let sole_result = match candidates {
+        [candidate] => Some(candidate.result),
+        _ => None,
+    };
+    DelegateConventionFailure::NoneApplicable(
+        candidates
+            .iter()
+            .map(|candidate| candidate.rendered.clone())
+            .collect(),
+        sole_result,
+    )
+}
+
+fn delegate_convention_candidates_ambiguity(
+    candidates: &[DelegateConventionDiagnosticCandidate],
+) -> DelegateConventionFailure {
+    DelegateConventionFailure::Ambiguous(
+        candidates
+            .iter()
+            .map(|candidate| candidate.rendered.clone())
+            .collect(),
+    )
+}
+
+fn render_delegate_convention_failure(
+    site: DelegateConventionSite,
+    delegate_ty: Ty,
+    name: &str,
+    this_ref: Ty,
+    property: Option<Ty>,
+    value: Option<Ty>,
+    failure: DelegateConventionFailure,
+) -> Option<String> {
+    if delegate_ty.mentions_error()
+        || delegate_ty.mentions_pending()
+        || this_ref.mentions_error()
+        || value.is_some_and(|value| value.mentions_error() || value.mentions_pending())
+    {
+        return None;
+    }
+    // kotlinc names the property reference exactly when one candidate is to blame; with several
+    // it falls back to star projections, and with none it never built the reference at all.
+    let blamed = match &failure {
+        DelegateConventionFailure::NoneApplicable(candidates, _) => candidates.len() == 1,
+        DelegateConventionFailure::Missing | DelegateConventionFailure::Ambiguous(_) => false,
+    };
+    // With no declared type of its own, the property's type is the one candidate's result — which
+    // is what kotlinc then names in the reference it demands.
+    let sole_result = match &failure {
+        DelegateConventionFailure::NoneApplicable(_, result) => *result,
+        DelegateConventionFailure::Missing | DelegateConventionFailure::Ambiguous(_) => None,
+    };
+    let applied_reference = property
+        .filter(|property| !property.mentions_error() && !property.mentions_pending())
+        .or(sole_result)
+        .filter(|property| blamed && !property.mentions_error() && !property.mentions_pending())
+        .map(|property| site.applied_reference(property));
+    let reference = match applied_reference {
+        Some(reference) => reference,
+        None => site.star_projected_reference(),
+    };
+    let mut signature = vec![site.diagnostic_ty(this_ref), reference];
+    signature.extend(value.map(delegate_diagnostic_ty));
+    let signature = format!("{name}({})", signature.join(", "));
+    Some(match failure {
+        DelegateConventionFailure::Missing => format!(
+            "type '{}' has no method '{signature}', so it cannot serve as a delegate{}.",
+            delegate_diagnostic_ty(delegate_ty),
+            if value.is_some() {
+                " for var (read-write property)"
+            } else {
+                ""
+            },
+        ),
+        DelegateConventionFailure::NoneApplicable(candidates, _) => format!(
+            "property delegate must have a '{signature}' method. None of the following \
+             functions is applicable:\n{}",
+            candidates.join("\n"),
+        ),
+        DelegateConventionFailure::Ambiguous(candidates) => format!(
+            "overload resolution ambiguity on method '{signature}':\n{}",
+            candidates.join("\n"),
+        ),
+    })
+}
+
+pub(crate) fn delegate_convention_message_with_candidates(
+    site: DelegateConventionSite,
+    delegate_ty: Ty,
+    name: &str,
+    this_ref: Ty,
+    property: Option<Ty>,
+    value: Option<Ty>,
+    candidates: &[DelegateConventionDiagnosticCandidate],
+) -> Option<String> {
+    render_delegate_convention_failure(
+        site,
+        delegate_ty,
+        name,
+        this_ref,
+        property,
+        value,
+        delegate_convention_candidates_failure(candidates),
+    )
+}
+
+pub(crate) fn delegate_convention_ambiguity_message_with_candidates(
+    site: DelegateConventionSite,
+    delegate_ty: Ty,
+    name: &str,
+    this_ref: Ty,
+    property: Option<Ty>,
+    value: Option<Ty>,
+    candidates: &[DelegateConventionDiagnosticCandidate],
+) -> Option<String> {
+    render_delegate_convention_failure(
+        site,
+        delegate_ty,
+        name,
+        this_ref,
+        property,
+        value,
+        delegate_convention_candidates_ambiguity(candidates),
+    )
+}
+
+pub(crate) fn delegate_convention_ambiguity_message_with_functions(
+    site: DelegateConventionSite,
+    delegate_ty: Ty,
+    name: &str,
+    this_ref: Ty,
+    property: Option<Ty>,
+    value: Option<Ty>,
+    candidates: &[crate::libraries::FunctionInfo],
+    candidate_result: &mut dyn FnMut(
+        &crate::libraries::FunctionInfo,
+    ) -> Result<Ty, crate::fir::DiagnosticId>,
+) -> Result<Option<String>, crate::fir::DiagnosticId> {
+    if delegate_ty.mentions_error()
+        || delegate_ty.mentions_pending()
+        || this_ref.mentions_error()
+        || value.is_some_and(|value| value.mentions_error() || value.mentions_pending())
+    {
+        return Ok(None);
+    }
+    let candidates =
+        delegate_convention_candidates_from_functions(candidates, name, candidate_result)?;
+    Ok(delegate_convention_ambiguity_message_with_candidates(
+        site,
+        delegate_ty,
+        name,
+        this_ref,
+        property,
+        value,
+        &candidates,
+    ))
 }
 
 /// The exact wording kotlinc gives a convention the delegate does not supply, or `None` when the
@@ -400,55 +671,29 @@ pub(crate) fn delegate_convention_message(
     this_ref: Ty,
     property: Option<Ty>,
     value: Option<Ty>,
-    candidate_result: &mut dyn FnMut(&crate::libraries::FunctionInfo) -> Ty,
-) -> Option<String> {
-    // A delegate whose own type failed to check has already been reported; naming it here would
-    // only repeat that failure under a second heading.
+    candidate_result: &mut dyn FnMut(
+        &crate::libraries::FunctionInfo,
+    ) -> Result<Ty, crate::fir::DiagnosticId>,
+) -> Result<Option<String>, crate::fir::DiagnosticId> {
+    // Do not demand or render candidates when the convention's own operand facts already failed.
+    // Their source diagnostics are authoritative and this convention message would only cascade.
     if delegate_ty.mentions_error()
         || delegate_ty.mentions_pending()
         || this_ref.mentions_error()
         || value.is_some_and(|value| value.mentions_error() || value.mentions_pending())
     {
-        return None;
+        return Ok(None);
     }
     let failure = delegate_convention_failure(resolver, delegate_ty, name, candidate_result)?;
-    // kotlinc names the property reference exactly when one candidate is to blame; with several
-    // it falls back to star projections, and with none it never built the reference at all.
-    let blamed = match &failure {
-        DelegateConventionFailure::NoneApplicable(candidates, _) => candidates.len() == 1,
-        DelegateConventionFailure::Missing => false,
-    };
-    // With no declared type of its own, the property's type is the one candidate's result — which
-    // is what kotlinc then names in the reference it demands.
-    let sole_result = match &failure {
-        DelegateConventionFailure::NoneApplicable(_, result) => *result,
-        DelegateConventionFailure::Missing => None,
-    };
-    let reference = property
-        .filter(|property| !property.mentions_error() && !property.mentions_pending())
-        .or(sole_result)
-        .filter(|property| blamed && !property.mentions_error() && !property.mentions_pending())
-        .map(|property| site.applied_reference(property))
-        .unwrap_or_else(|| site.star_projected_reference());
-    let mut signature = vec![delegate_diagnostic_ty(this_ref), reference];
-    signature.extend(value.map(delegate_diagnostic_ty));
-    let signature = format!("{name}({})", signature.join(", "));
-    Some(match failure {
-        DelegateConventionFailure::Missing => format!(
-            "type '{}' has no method '{signature}', so it cannot serve as a delegate{}.",
-            delegate_diagnostic_ty(delegate_ty),
-            if value.is_some() {
-                " for var (read-write property)"
-            } else {
-                ""
-            },
-        ),
-        DelegateConventionFailure::NoneApplicable(candidates, _) => format!(
-            "property delegate must have a '{signature}' method. None of the following \
-             functions is applicable:\n{}",
-            candidates.join("\n"),
-        ),
-    })
+    Ok(render_delegate_convention_failure(
+        site,
+        delegate_ty,
+        name,
+        this_ref,
+        property,
+        value,
+        failure,
+    ))
 }
 
 impl Checker<'_> {
@@ -464,19 +709,198 @@ impl Checker<'_> {
     ) {
         // The checker renders a candidate from the type its own declaration already carries; the
         // signature phase, where one may still be undetermined, resolves it first.
-        let Some(message) = delegate_convention_message(
+        let message = match delegate_convention_message(
             &self.resolver(),
-            site,
+            site.clone(),
             delegate_ty,
             name,
             this_ref,
             property,
             value,
-            &mut |candidate| candidate.callable.ret,
-        ) else {
+            &mut |candidate| Ok(candidate.callable.ret),
+        ) {
+            Ok(message) => message,
+            Err(_) => {
+                panic!("a checked delegate convention candidate must have a finalized result")
+            }
+        };
+        let Some(message) = message else {
             return;
         };
         self.diags.error(site.by_span, message);
+    }
+
+    fn report_delegate_convention_ambiguity(
+        &mut self,
+        site: DelegateConventionSite,
+        delegate_ty: Ty,
+        name: &str,
+        this_ref: Ty,
+        property: Option<Ty>,
+        value: Option<Ty>,
+        candidates: &[crate::libraries::FunctionInfo],
+    ) {
+        let message = match delegate_convention_ambiguity_message_with_functions(
+            site.clone(),
+            delegate_ty,
+            name,
+            this_ref,
+            property,
+            value,
+            candidates,
+            &mut |candidate| Ok(candidate.callable.ret),
+        ) {
+            Ok(message) => message,
+            Err(_) => panic!("a checked ambiguous convention candidate has a finalized result"),
+        };
+        if let Some(message) = message {
+            self.diags.error(site.by_span, message);
+        }
+    }
+
+    fn report_member_extension_delegate_convention_ambiguity(
+        &mut self,
+        site: DelegateConventionSite,
+        delegate_ty: Ty,
+        name: &str,
+        this_ref: Ty,
+        property: Option<Ty>,
+        value: Option<Ty>,
+        candidates: &[MemberExtensionFunctionCandidate],
+    ) {
+        let candidates = candidates
+            .iter()
+            .map(|candidate| {
+                let result = if candidate.ret.mentions_pending() {
+                    let declaration = candidate.stable_declaration.expect(
+                        "an undetermined member-extension delegate candidate retains its declaration",
+                    );
+                    self.resolved_index
+                        .and_then(|index| index.signature(declaration))
+                        .map(|signature| signature.result.get())
+                        .expect(
+                            "a checked member-extension delegate candidate has a finalized result",
+                        )
+                } else {
+                    candidate.ret
+                };
+                let context_count = candidate.context_count.min(candidate.params.len());
+                let (context, parameters) = candidate.params.split_at(context_count);
+                delegate_convention_diagnostic_candidate(
+                    name,
+                    Some(candidate.extension_receiver),
+                    context,
+                    parameters,
+                    &candidate.diagnostic_param_names,
+                    result,
+                )
+            })
+            .collect::<Vec<_>>();
+        let message = delegate_convention_ambiguity_message_with_candidates(
+            site.clone(),
+            delegate_ty,
+            name,
+            this_ref,
+            property,
+            value,
+            &candidates,
+        )
+        .expect("ambiguous member-extension delegate candidates must produce a diagnostic");
+        self.diags.error(site.by_span, message);
+    }
+
+    fn report_excluded_member_extension_delegate_convention_failure(
+        &mut self,
+        site: DelegateConventionSite,
+        delegate_ty: Ty,
+        name: &str,
+        this_ref: Ty,
+        property: Option<Ty>,
+        value: Option<Ty>,
+        candidates: &[super::member_extension_selection::MemberExtensionConventionDiagnosticCandidate],
+    ) {
+        let candidates = candidates
+            .iter()
+            .map(|candidate| {
+                let result = if candidate.ret.mentions_pending() {
+                    let declaration = candidate.stable_declaration.expect(
+                        "an undetermined excluded delegate candidate retains its declaration",
+                    );
+                    self.resolved_index
+                        .and_then(|index| index.signature(declaration))
+                        .map(|signature| signature.result.get())
+                        .expect("an excluded delegate candidate has a finalized result")
+                } else {
+                    candidate.ret
+                };
+                let context_count = candidate.context_count.min(candidate.params.len());
+                let (context, parameters) = candidate.params.split_at(context_count);
+                delegate_convention_diagnostic_candidate(
+                    name,
+                    Some(candidate.extension_receiver),
+                    context,
+                    parameters,
+                    &candidate.parameter_names,
+                    result,
+                )
+            })
+            .collect::<Vec<_>>();
+        let message = delegate_convention_message_with_candidates(
+            site.clone(),
+            delegate_ty,
+            name,
+            this_ref,
+            property,
+            value,
+            &candidates,
+        )
+        .expect("excluded member-extension delegate candidates must produce a diagnostic");
+        self.diags.error(site.by_span, message);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn report_delegate_operator_failure(
+        &mut self,
+        site: DelegateConventionSite,
+        delegate_ty: Ty,
+        name: &str,
+        this_ref: Ty,
+        property: Option<Ty>,
+        value: Option<Ty>,
+        failure: DelegateOperatorFailure,
+    ) {
+        match failure {
+            DelegateOperatorFailure::AmbiguousOrdinary(candidates) => self
+                .report_delegate_convention_ambiguity(
+                    site,
+                    delegate_ty,
+                    name,
+                    this_ref,
+                    property,
+                    value,
+                    &candidates,
+                ),
+            DelegateOperatorFailure::ExcludedMemberExtensions(candidates) => self
+                .report_excluded_member_extension_delegate_convention_failure(
+                    site,
+                    delegate_ty,
+                    name,
+                    this_ref,
+                    property,
+                    value,
+                    &candidates,
+                ),
+            DelegateOperatorFailure::AmbiguousMemberExtensions(candidates) => self
+                .report_member_extension_delegate_convention_ambiguity(
+                    site,
+                    delegate_ty,
+                    name,
+                    this_ref,
+                    property,
+                    value,
+                    &candidates,
+                ),
+        }
     }
 
     /// Check a delegate expression and select its convention as one contextual operation.
@@ -516,7 +940,7 @@ impl Checker<'_> {
                 delegate,
                 delegate_ty,
                 receiver_expectation,
-                selection,
+                selection.clone(),
             ) {
                 DelegateGetValueAttempt::Complete(result) => {
                     return (delegate_ty, result);
@@ -562,35 +986,65 @@ impl Checker<'_> {
             return DelegateGetValueAttempt::Complete(None);
         };
         self.delegate_property_reference_type = Some(kproperty);
-        let provide_target = self.select_delegate_operator(
+        let provide_target = match self.select_delegate_operator(
             scope,
             delegate,
             delegate_ty,
             "provideDelegate",
             &[provide_ref, kproperty],
             None,
-        );
-        let stored_ty = provide_target
-            .as_ref()
-            .map(DelegateGetValueTarget::ret)
-            .unwrap_or(delegate_ty);
-        let Some(target) = self.select_delegate_operator(
+        ) {
+            DelegateOperatorSelection::Selected(target) => Some(target),
+            DelegateOperatorSelection::None => None,
+            DelegateOperatorSelection::Failure(failure) => {
+                self.report_delegate_operator_failure(
+                    site,
+                    delegate_ty,
+                    "provideDelegate",
+                    provide_ref,
+                    expected_property,
+                    None,
+                    failure,
+                );
+                return DelegateGetValueAttempt::Complete(None);
+            }
+        };
+        let stored_ty = match &provide_target {
+            Some(target) => target.ret(),
+            None => delegate_ty,
+        };
+        let target = match self.select_delegate_operator(
             scope,
             delegate,
             stored_ty,
             "getValue",
             &[this_ref, kproperty],
             expected_property,
-        ) else {
-            self.report_delegate_convention_failure(
-                site,
-                stored_ty,
-                "getValue",
-                this_ref,
-                expected_property,
-                None,
-            );
-            return DelegateGetValueAttempt::Complete(None);
+        ) {
+            DelegateOperatorSelection::Selected(target) => target,
+            DelegateOperatorSelection::None => {
+                self.report_delegate_convention_failure(
+                    site,
+                    stored_ty,
+                    "getValue",
+                    this_ref,
+                    expected_property,
+                    None,
+                );
+                return DelegateGetValueAttempt::Complete(None);
+            }
+            DelegateOperatorSelection::Failure(failure) => {
+                self.report_delegate_operator_failure(
+                    site,
+                    stored_ty,
+                    "getValue",
+                    this_ref,
+                    expected_property,
+                    None,
+                    failure,
+                );
+                return DelegateGetValueAttempt::Complete(None);
+            }
         };
         if let Some(applied_receiver) = target.applied_receiver().filter(|receiver| {
             if *receiver == delegate_ty
@@ -743,28 +1197,42 @@ impl Checker<'_> {
             );
             return None;
         };
-        let stored_ty = self
-            .delegate_provide_targets
-            .get(&delegate)
-            .map(DelegateGetValueTarget::ret)
-            .unwrap_or(delegate_ty);
-        let Some(target) = self.select_delegate_operator(
+        let stored_ty = match self.delegate_provide_targets.get(&delegate) {
+            Some(target) => target.ret(),
+            None => delegate_ty,
+        };
+        let target = match self.select_delegate_operator(
             scope,
             delegate,
             stored_ty,
             "setValue",
             &[this_ref, kproperty, property_ty],
             None,
-        ) else {
-            self.report_delegate_convention_failure(
-                site,
-                stored_ty,
-                "setValue",
-                this_ref,
-                Some(property_ty),
-                Some(property_ty),
-            );
-            return None;
+        ) {
+            DelegateOperatorSelection::Selected(target) => target,
+            DelegateOperatorSelection::None => {
+                self.report_delegate_convention_failure(
+                    site,
+                    stored_ty,
+                    "setValue",
+                    this_ref,
+                    Some(property_ty),
+                    Some(property_ty),
+                );
+                return None;
+            }
+            DelegateOperatorSelection::Failure(failure) => {
+                self.report_delegate_operator_failure(
+                    site,
+                    stored_ty,
+                    "setValue",
+                    this_ref,
+                    Some(property_ty),
+                    Some(property_ty),
+                    failure,
+                );
+                return None;
+            }
         };
         crate::trace_compiler!("fir", "selected delegate setValue target={target:?}");
         self.delegate_setvalue_targets.insert(delegate, target);
@@ -779,8 +1247,9 @@ impl Checker<'_> {
         name: &str,
         args: &[Ty],
         expected_result: Option<Ty>,
-    ) -> Option<DelegateGetValueTarget> {
+    ) -> DelegateOperatorSelection {
         let resolver = self.resolver();
+        let optional = name == DELEGATE_CONVENTION_NAMES[2];
         let callables = resolver.receiver_callables(delegate_ty, name);
         let call_args = args
             .iter()
@@ -812,131 +1281,201 @@ impl Checker<'_> {
                 &callables,
                 None,
             ) {
-                crate::symbol_resolver::CandidateSelection::Selected((
+                crate::symbol_resolver::ReceiverFunctionSelection::Selected((
                     selected,
                     _,
                     ret,
                     applied_receiver,
-                )) => Some((selected, ret, applied_receiver)),
-                crate::symbol_resolver::CandidateSelection::None
-                | crate::symbol_resolver::CandidateSelection::Ambiguous => None,
+                )) => OrdinaryDelegateSelection::Selected(selected, ret, applied_receiver),
+                crate::symbol_resolver::ReceiverFunctionSelection::None => {
+                    OrdinaryDelegateSelection::None
+                }
+                crate::symbol_resolver::ReceiverFunctionSelection::Ambiguous(candidates) => {
+                    OrdinaryDelegateSelection::Ambiguous(candidates)
+                }
             }
         };
-        let selected = if let Some(selected) = select_kind(crate::libraries::FnKind::Member) {
-            selected
-        } else {
-            let syntax = vec![delegate; args.len()];
-            let member_extension = member_extension_function_with(
-                &self.fed_source(),
-                self,
-                &self.implicit_receivers(scope),
-                self.file.explicit_context_arguments,
-                &|parameters| self.select_context_arguments_with_types(scope, parameters),
-                &|_| false,
-                &|_, _, _| None,
-                &|params, call_sig, slots| {
-                    let mapped = call_argument_parameter_indices(
-                        slots.args.len(),
-                        params.len(),
-                        slots.arg_names,
-                        slots.trailing_lambda,
-                        call_sig,
-                    )?;
-                    let mut score = 0;
-                    for (source, parameter) in mapped.into_iter().enumerate() {
-                        let expected = *params.get(parameter)?;
-                        let actual = *args.get(source)?;
-                        if !call_sig.parameter_admits(parameter, expected, actual) {
-                            return None;
-                        }
-                        score += self.member_argument_score(expected, actual)?;
-                    }
-                    Some(CallCandidateScore {
-                        rank: (score, std::cmp::Reverse(0), !call_sig.vararg),
-                        sam_signatures: vec![None; slots.args.len()],
-                    })
-                },
-                MemberExtensionFunctionCall {
-                    extension_receiver: delegate_ty,
-                    result_constraint: CallResultConstraint::direct(expected_result),
-                    name,
-                    args: &syntax,
-                    arg_tys: args,
-                    arg_names: None,
-                    explicit_type_args: &[],
-                    trailing_lambda: false,
-                },
-                MemberExtensionSelection::Operators,
-            )
-            .ok()
-            .flatten();
-            if let Some(selected) = member_extension {
-                if !self.member_accessible(selected.visibility, selected.owner) {
-                    return None;
-                }
-                let interface = resolver
-                    .classifier(selected.owner)
-                    .is_some_and(|shape| shape.is_interface());
-                // The DECLARED value parameters, un-erased: the current-module declaration's own
-                // signature where there is one, otherwise the callable's generic signature. Never
-                // `physical_params`, which is already a target's erasure of this.
-                let declared_params = selected
-                    .stable_declaration
-                    .and_then(|declaration| self.stable_member_declared_shape(declaration))
-                    .map(|(_, parameters, _)| parameters)
-                    .unwrap_or_else(|| selected.declared_params.clone());
-                return Some(DelegateGetValueTarget::MemberExtension {
-                    stable_declaration: selected.stable_declaration,
-                    external_identity: selected.external_identity,
-                    external_default_provider: selected.external_default_provider,
-                    owner: selected.owner,
-                    name: selected.physical_name,
-                    extension_receiver: selected.extension_receiver,
-                    dispatch_receiver: self.implicit_receiver_selection(selected.dispatch_receiver),
-                    context_count: selected.context_args.len(),
-                    params: selected.params,
-                    ret: selected.ret,
-                    physical_params: selected.physical_params,
-                    physical_ret: selected.physical_ret,
-                    inline: selected.inline,
-                    inline_body_plan: selected.inline_body_plan,
-                    suspend: selected.suspend,
-                    declared_params,
-                    declared_ret: selected.declared_ret,
-                    interface,
-                });
+        let selected = match select_kind(crate::libraries::FnKind::Member) {
+            OrdinaryDelegateSelection::Selected(selected, ret, applied_receiver) => {
+                (selected, ret, applied_receiver)
             }
-            select_kind(crate::libraries::FnKind::Extension)?
+            OrdinaryDelegateSelection::Ambiguous(candidates) => {
+                return if optional {
+                    DelegateOperatorSelection::None
+                } else {
+                    DelegateOperatorSelection::Failure(DelegateOperatorFailure::AmbiguousOrdinary(
+                        candidates,
+                    ))
+                };
+            }
+            OrdinaryDelegateSelection::None => {
+                let syntax = vec![delegate; args.len()];
+                let member_extension = member_extension_function_with(
+                    &self.fed_source(),
+                    self,
+                    &self.implicit_receivers(scope),
+                    self.file.explicit_context_arguments,
+                    &|parameters| self.select_context_arguments_with_types(scope, parameters),
+                    &|_| false,
+                    &|_, _, _| None,
+                    &|params, call_sig, slots| {
+                        let mapped = call_argument_parameter_indices(
+                            slots.args.len(),
+                            params.len(),
+                            slots.arg_names,
+                            slots.trailing_lambda,
+                            call_sig,
+                        )?;
+                        let mut score = 0;
+                        for (source, parameter) in mapped.into_iter().enumerate() {
+                            let expected = *params.get(parameter)?;
+                            let actual = *args.get(source)?;
+                            if !call_sig.parameter_admits(parameter, expected, actual) {
+                                return None;
+                            }
+                            score += self.member_argument_score(expected, actual)?;
+                        }
+                        Some(CallCandidateScore {
+                            rank: (score, std::cmp::Reverse(0), !call_sig.vararg),
+                            sam_signatures: vec![None; slots.args.len()],
+                        })
+                    },
+                    MemberExtensionFunctionCall {
+                        extension_receiver: delegate_ty,
+                        result_constraint: CallResultConstraint::direct(expected_result),
+                        name,
+                        args: &syntax,
+                        arg_tys: args,
+                        arg_names: None,
+                        explicit_type_args: &[],
+                        trailing_lambda: false,
+                    },
+                    MemberExtensionSelection::DelegateConventions,
+                );
+                let (member_extension, excluded) = match member_extension {
+                    MemberExtensionFunctionSelection::Selected(selected) => {
+                        (Some(selected), Vec::new())
+                    }
+                    MemberExtensionFunctionSelection::None(candidates) => (None, candidates),
+                    MemberExtensionFunctionSelection::Ambiguous(candidates) => {
+                        return if optional {
+                            DelegateOperatorSelection::None
+                        } else {
+                            DelegateOperatorSelection::Failure(
+                                DelegateOperatorFailure::AmbiguousMemberExtensions(candidates),
+                            )
+                        };
+                    }
+                };
+                if let Some(selected) = member_extension {
+                    if !self.member_accessible(selected.visibility, selected.owner) {
+                        return DelegateOperatorSelection::None;
+                    }
+                    let interface = resolver
+                        .classifier(selected.owner)
+                        .is_some_and(|shape| shape.is_interface());
+                    // The DECLARED value parameters, un-erased: the current-module declaration's own
+                    // signature where there is one, otherwise the callable's generic signature. Never
+                    // `physical_params`, which is already a target's erasure of this.
+                    let declared_params = match selected.stable_declaration {
+                        Some(declaration) => self
+                            .stable_callable_declared_shape(declaration)
+                            .map(|(_, parameters, _)| parameters)
+                            .expect("a selected source delegate convention must retain its shape"),
+                        None => selected.declared_params.clone(),
+                    };
+                    return DelegateOperatorSelection::Selected(
+                        DelegateGetValueTarget::MemberExtension {
+                            stable_declaration: selected.stable_declaration,
+                            external_identity: selected.external_identity,
+                            external_default_provider: selected.external_default_provider,
+                            owner: selected.owner,
+                            name: selected.physical_name,
+                            extension_receiver: selected.extension_receiver,
+                            dispatch_receiver: self
+                                .implicit_receiver_selection(selected.dispatch_receiver),
+                            context_count: selected.context_count,
+                            params: selected.params,
+                            ret: selected.ret,
+                            physical_params: selected.physical_params,
+                            physical_ret: selected.physical_ret,
+                            inline: selected.inline,
+                            inline_body_plan: selected.inline_body_plan,
+                            suspend: selected.suspend,
+                            declared_params,
+                            declared_ret: selected.declared_ret,
+                            interface,
+                        },
+                    );
+                }
+                match select_kind(crate::libraries::FnKind::Extension) {
+                    OrdinaryDelegateSelection::Selected(selected, ret, applied_receiver) => {
+                        (selected, ret, applied_receiver)
+                    }
+                    OrdinaryDelegateSelection::None => {
+                        return if optional || excluded.is_empty() {
+                            DelegateOperatorSelection::None
+                        } else {
+                            DelegateOperatorSelection::Failure(
+                                DelegateOperatorFailure::ExcludedMemberExtensions(excluded),
+                            )
+                        };
+                    }
+                    OrdinaryDelegateSelection::Ambiguous(candidates) => {
+                        return if optional {
+                            DelegateOperatorSelection::None
+                        } else {
+                            DelegateOperatorSelection::Failure(
+                                DelegateOperatorFailure::AmbiguousOrdinary(candidates),
+                            )
+                        };
+                    }
+                }
+            }
         };
         let (selected, ret, applied_receiver) = selected;
-        let (declared_receiver, declared_params, declared_ret) = selected
-            .stable_declaration
-            .and_then(|declaration| self.stable_member_declared_shape(declaration))
-            .unwrap_or_else(|| {
+        let (declared_receiver, declared_params, declared_ret) = match selected.stable_declaration {
+            Some(declaration) => self
+                .stable_callable_declared_shape(declaration)
+                .expect("a selected source delegate convention must retain its shape"),
+            None => {
+                let receiver = match selected.semantic_receiver() {
+                    Some(receiver) => receiver,
+                    None => delegate_ty,
+                };
                 (
-                    selected.semantic_receiver().unwrap_or(delegate_ty),
+                    receiver,
                     selected.semantic_signature().params.clone(),
                     selected.semantic_signature().ret,
                 )
-            });
+            }
+        };
         if selected.is_extension() {
             let stable_declaration = selected.stable_declaration;
-            return resolver
+            return match resolver
                 .build_extension_callable(name, delegate_ty, args, &[], &selected)
                 .map(Box::new)
                 .map(|callable| DelegateGetValueTarget::Extension {
                     callable,
                     stable_declaration,
-                });
+                }) {
+                Some(target) => DelegateOperatorSelection::Selected(target),
+                None => DelegateOperatorSelection::None,
+            };
         }
-        let internal = delegate_ty.obj_internal()?;
+        let Some(internal) = delegate_ty.obj_internal() else {
+            return DelegateOperatorSelection::None;
+        };
         let resolved = resolver.materialize_member_function(delegate_ty, &call_args, &[], selected);
-        let owner = resolved.member.owner.unwrap_or(internal);
+        let owner = match resolved.member.owner {
+            Some(owner) => owner,
+            None => internal,
+        };
         let interface = resolved.member.is_interface()
             || resolver
                 .classifier(owner)
                 .is_some_and(|classifier| classifier.is_interface());
-        Some(DelegateGetValueTarget::Member {
+        DelegateOperatorSelection::Selected(DelegateGetValueTarget::Member {
             applied_receiver,
             declared_receiver,
             declared_params,
@@ -945,11 +1484,10 @@ impl Checker<'_> {
             external_identity: resolved.member.external_identity,
             external_default_provider: resolved.member.external_default_provider,
             owner,
-            name: resolved
-                .member
-                .physical_name
-                .clone()
-                .unwrap_or_else(|| resolved.member.name.clone()),
+            name: match &resolved.member.physical_name {
+                Some(name) => name.clone(),
+                None => resolved.member.name.clone(),
+            },
             params: resolved.member.params,
             ret,
             physical_params: resolved.physical_params,
@@ -959,35 +1497,40 @@ impl Checker<'_> {
         })
     }
 
-    /// The DECLARED shape of a current-module convention: its receiver, its value parameters and
-    /// its result, all as the declaration spells them — a type parameter stays a type parameter.
+    /// The DECLARED shape of a current-module convention: its extension receiver or dispatch
+    /// owner, value parameters, and result, all as declared — type parameters stay type parameters.
     ///
     /// This is deliberately not `physical_params`/`physical_ret`, which are the ABI slots after
     /// erasure. A consumer that needs to know a value crosses into a `T` slot must be told `T`;
     /// what `T` costs physically is the target's answer, and a different target gives a different
     /// one.
-    fn stable_member_declared_shape(
+    fn stable_callable_declared_shape(
         &self,
         declaration: crate::fir::DeclarationId,
     ) -> Option<(Ty, Vec<Ty>, Ty)> {
         let index = self.resolved_index?;
-        let owner = index.declaration_anchor(declaration)?.owner?;
-        let classifier = index.classifier_header(owner)?.classifier;
-        let arguments = index
-            .classifier_type_arguments(owner)?
-            .iter()
-            .map(|parameter| {
-                let header = index.type_parameter_header(*parameter)?;
-                let name = index.type_parameter_semantic_name(*parameter)?;
-                let bound = header
-                    .bounds
-                    .first()
-                    .map(|bound| bound.ty.get())
-                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                Some(Ty::ty_param(name, bound))
-            })
-            .collect::<Option<Vec<_>>>()?;
-        let receiver = Ty::obj_args_name(classifier, &arguments);
+        let callable = index.callable_for_declaration(declaration)?;
+        let receiver = match callable.shape.extension_receiver {
+            Some(receiver) => receiver.get(),
+            None => {
+                let owner = index.declaration_anchor(declaration)?.owner?;
+                let classifier = index.classifier_header(owner)?.classifier;
+                let arguments = index
+                    .classifier_type_arguments(owner)?
+                    .iter()
+                    .map(|parameter| {
+                        let header = index.type_parameter_header(*parameter)?;
+                        let name = index.type_parameter_semantic_name(*parameter)?;
+                        let bound = match header.bounds.first() {
+                            Some(bound) => bound.ty.get(),
+                            None => Ty::nullable(Ty::obj("kotlin/Any")),
+                        };
+                        Some(Ty::ty_param(name, bound))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Ty::obj_args_name(classifier, &arguments)
+            }
+        };
         let signature = index.signature(declaration)?;
         let parameters = signature
             .parameters

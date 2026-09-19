@@ -3293,13 +3293,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   mutability, numbered by receiver count (none, member or extension, member extension), and
   star-projected UNLESS exactly one candidate is to blame, which is when kotlinc names the
   receivers and the property type outright. `thisRef` follows the same shape, printing `Nothing?`
-  where the accessor passes null. One recorded divergence, and it is not this diagnostic's: a
-  MEMBER or TOP-LEVEL delegated property with no declared type has nothing left to infer its type
-  from once `getValue` is missing, and signature finalization then fails to produce a module
-  without naming a cause — which skips the body check for the WHOLE file, so that file reports
-  nothing at all. A LOCAL delegated property, whose type the checker infers itself, reports
-  normally with no declared type. The gap is in signature finalization failing silently, and the
-  test pins its exact size so it cannot quietly widen.
+  where the accessor passes null. For an inferred property this same convention report belongs to
+  signature finalization: the compact delegate site retains its declaration kind, mutability,
+  receivers and exact `by` origin, so a failed convention carries a source diagnostic into recovery
+  and cannot suppress independent body errors in the rest of the file.
 
   All four are stated the SAME way, and it is a SEMANTIC statement: lowering compares the two
   checked types and, where they differ, records one `ImplicitCoercion` to the one the other side
@@ -3329,7 +3326,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   writes `getId-eEFUqEU()I`); and a non-null reference setter parameter is not
   `checkNotNullParameter`-checked.
 
-  Tests: `tests/delegate_scalar_boundary_e2e.rs` (thirteen cases — top-level, member,
+  Tests: `tests/delegate_scalar_boundary_e2e.rs` (cases covering top-level, member,
   member-extension, `provideDelegate`, cross-file and classpath operators, nullable carriers and
   both value-class carrier kinds; each either RUN or pinned instruction-for-instruction against
   kotlinc), `fir_lower::tests::a_delegated_accessor_result_crosses_exactly_one_coercion`.
