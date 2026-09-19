@@ -63,7 +63,11 @@ impl ElementDecode<'_> {
         ) {
             // Contextual element: f_k = (T) c.decode[Nullable]SerializableElement(
             // desc, k, ContextualSerializer(<type>::class), null).
-            let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
+            // `decodeSerializableElement` merges into the value decoded so far, so the element's
+            // own local is what it receives — a literal `null` discards whatever a merging
+            // serializer would have built on. The local is still `top` on the first pass, which is
+            // exactly the state kotlinc reads it in.
+            let prev = ir.add_expr(IrExpr::GetValue(self.field_locals[k]));
             let method = if is_nullable(&ty) {
                 "decodeNullableSerializableElement"
             } else {
@@ -92,7 +96,11 @@ impl ElementDecode<'_> {
                 class: self.serializer_class,
                 index: fidx,
             });
-            let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
+            // `decodeSerializableElement` merges into the value decoded so far, so the element's
+            // own local is what it receives — a literal `null` discards whatever a merging
+            // serializer would have built on. The local is still `top` on the first pass, which is
+            // exactly the state kotlinc reads it in.
+            let prev = ir.add_expr(IrExpr::GetValue(self.field_locals[k]));
             let method = if is_nullable(&ty) {
                 "decodeNullableSerializableElement"
             } else {
@@ -122,7 +130,11 @@ impl ElementDecode<'_> {
                 .cached_slot(ir, k)
                 .or_else(|| element_serializer_expr(ir, ctx, &ty))
                 .unwrap_or_else(|| ir.add_expr(IrExpr::Const(IrConst::Null)));
-            let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
+            // `decodeSerializableElement` merges into the value decoded so far, so the element's
+            // own local is what it receives — a literal `null` discards whatever a merging
+            // serializer would have built on. The local is still `top` on the first pass, which is
+            // exactly the state kotlinc reads it in.
+            let prev = ir.add_expr(IrExpr::GetValue(self.field_locals[k]));
             let method = if is_nullable(&ty) {
                 "decodeNullableSerializableElement"
             } else {
