@@ -533,12 +533,16 @@ fn a_loop_transfer_finalizer_copy_leaves_the_protected_region() {
 /// had already left. The `finally` catch-all was excluded from its own copies by a segmented
 /// region; the typed catches take the body half of that same region now.
 ///
-/// Compared against kotlinc rather than pinned, so the segmentation stays tied to the reference
-/// compiler, and a `while` loop rather than `for (i in a..b)` for the reason the neighbouring case
-/// gives.
+/// kotlinc's complete table is spelled out and krusty's complete table compared against it. An
+/// assertion that only counts the reference's rows cannot say WHERE either compiler split, so a
+/// segmentation that moved — or one that split around the wrong instruction — would still satisfy
+/// it. `LoomFault` is repository-owned, so the caught type is not a JDK class whose identity some
+/// intrinsic or stdlib path could supply; a `while` loop rather than `for (i in a..b)` for the
+/// reason the neighbouring case gives.
 #[test]
 fn a_typed_catch_does_not_guard_the_finalizer_copies_inside_its_body() {
-    let src = "class Guarded {\n\
+    let src = "class LoomFault : RuntimeException()\n\
+               class Guarded {\n\
                \x20   fun step() {}\n\
                \x20   fun run(n: Int): Int {\n\
                \x20       var seen = 0\n\
@@ -548,7 +552,7 @@ fn a_typed_catch_does_not_guard_the_finalizer_copies_inside_its_body() {
                \x20           try {\n\
                \x20               seen += i\n\
                \x20               continue\n\
-               \x20           } catch (e: IllegalStateException) {\n\
+               \x20           } catch (e: LoomFault) {\n\
                \x20               seen = -1\n\
                \x20           } finally {\n\
                \x20               step()\n\
@@ -560,32 +564,44 @@ fn a_typed_catch_does_not_guard_the_finalizer_copies_inside_its_body() {
     let (reference, krusty) = disassemble_both("TypedCatchRegion", src, "Guarded");
     let table = |text: &str| numeric_rows(text, "int run(int)", "Exception table:");
     let want = table(&reference);
-    assert!(
-        want.len() > 1,
-        "kotlinc splits the guarded range around the inlined copy: {want:?}"
+    assert_eq!(
+        want,
+        vec![
+            "12    18    25   Class LoomFault".to_string(),
+            "12    18    36   any".to_string(),
+            "25    29    36   any".to_string(),
+            "36    38    36   any".to_string(),
+        ],
+        "kotlinc's complete exception table: the typed catch and the catch-all both end at 18, \
+         where the `continue`'s copy of the finalizer begins, and the catch-all picks the body \
+         back up only over the handler itself",
     );
-    assert_eq!(table(&krusty), want, "run exception table");
+    assert_eq!(table(&krusty), want, "krusty's complete exception table");
 }
 
 /// The same rule, observed by RUNNING it: a finalizer copy that throws the caught type on the
 /// transfer path must not re-enter the catch beside it.
 ///
-/// `Tessitura` is repository-owned, so the throw cannot reach the handler through a stdlib or
-/// intrinsic path rather than the ordinary one this is about. With the broad range, the copy of
-/// `finally` inlined for the `return` threw inside the interval guarding the body, the catch ran,
-/// and `box()` answered `CAUGHT`.
+/// Both the container and the EXCEPTION are repository-owned. Exception identity and routing are
+/// the behaviour under test, so a JDK `IllegalStateException` left the answer resting on a type
+/// the compiler, the stdlib and the JDK all have their own paths for: `VelariumFault` is declared
+/// in the fixture, thrown by the fixture and caught by the fixture, and nothing outside it can
+/// supply or intercept it. With the broad range, the copy of `finally` inlined for the `return`
+/// threw inside the interval guarding the body, the catch ran, and `box()` answered `CAUGHT`.
 #[test]
 fn a_finalizer_copy_that_throws_the_caught_type_does_not_re_enter_the_catch() {
-    let src = "class Tessitura {\n\
+    let src = "class VelariumFault(message: String) : RuntimeException(message)\n\
+               \n\
+               class Tessitura {\n\
                \x20   var armed = false\n\
-               \x20   fun cleanup() { if (armed) throw IllegalStateException(\"from the finally\") }\n\
+               \x20   fun cleanup() { if (armed) throw VelariumFault(\"from the finally\") }\n\
                }\n\
                \n\
                fun attempt(tessitura: Tessitura): String {\n\
                \x20   try {\n\
                \x20       tessitura.armed = true\n\
                \x20       return \"RETURNED\"\n\
-               \x20   } catch (e: IllegalStateException) {\n\
+               \x20   } catch (e: VelariumFault) {\n\
                \x20       return \"CAUGHT\"\n\
                \x20   } finally {\n\
                \x20       tessitura.cleanup()\n\
@@ -595,7 +611,7 @@ fn a_finalizer_copy_that_throws_the_caught_type_does_not_re_enter_the_catch() {
                fun box(): String {\n\
                \x20   return try {\n\
                \x20       attempt(Tessitura())\n\
-               \x20   } catch (e: IllegalStateException) {\n\
+               \x20   } catch (e: VelariumFault) {\n\
                \x20       \"PROPAGATED\"\n\
                \x20   }\n\
                }\n";
@@ -657,10 +673,11 @@ fn a_catch_parameter_is_named_where_it_is_declared() {
 /// were a constant suffix, or no suffix, would fail on one of the two.
 ///
 /// Byte equality is not attainable and the reason is stated rather than worked around: krusty emits
-/// no inline-depth markers (`$i$f`, `$i$a`) and no entries for an expansion's own copied locals, so
-/// it writes two rows where kotlinc writes five and seven. That is a whole missing table, it is not
-/// what this change is about, and pinning both projections is what makes closing it visible here.
-/// The offsets are left out for the same reason — they differ because the row counts do.
+/// no inline-depth markers (`$i$f`, `$i$a`), so it writes three rows where kotlinc writes five and
+/// four where it writes seven — every row kotlinc has for a real local is there, at the same slot,
+/// and only the markers between them are missing. That is a separate gap from this change, and
+/// pinning both projections is what makes closing it visible here. The offsets are left out for
+/// the same reason — they differ because the row counts do.
 #[test]
 fn an_inlined_catch_parameter_is_named_at_its_expansion_depth() {
     let src = "inline fun guarded(tag: String, block: () -> String): String {\n\
@@ -692,7 +709,8 @@ fn an_inlined_catch_parameter_is_named_at_its_expansion_depth() {
     assert_eq!(
         table(&krusty, "java.lang.String once("),
         [
-            "2 e$iv Ljava/lang/IllegalStateException;",
+            "3 e$iv Ljava/lang/IllegalStateException;",
+            "1 tag$iv Ljava/lang/String;",
             "0 tag Ljava/lang/String;",
         ],
         "krusty's complete table for one expansion: the catch parameter carries its frame"
@@ -713,7 +731,9 @@ fn an_inlined_catch_parameter_is_named_at_its_expansion_depth() {
     assert_eq!(
         table(&krusty, "java.lang.String nested("),
         [
-            "2 e$iv$iv Ljava/lang/IllegalStateException;",
+            "4 e$iv$iv Ljava/lang/IllegalStateException;",
+            "2 tag$iv$iv Ljava/lang/String;",
+            "1 tag$iv Ljava/lang/String;",
             "0 tag Ljava/lang/String;",
         ],
         "krusty's complete table for two: one frame per expansion, not a constant suffix"
