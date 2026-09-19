@@ -153,6 +153,48 @@ fn an_inline_expansions_parameters_and_receiver_are_named_spills() {
     );
 }
 
+/// A `noinline` parameter is function-TYPED exactly like the spliced parameter beside it, and is
+/// the one function-typed parameter of an inline function that owns a local: its argument is a real
+/// closure, not a body expanded at each use. Nothing in the type says which is which, so a decision
+/// made from the shape alone hands the `noinline` parameter the caller's slot and it loses its own
+/// name, identity and lifetime.
+///
+/// Both forms take the SAME argument here — one local `handed`, passed to a `noinline` parameter
+/// and to an ordinary one — so the two expansions differ in nothing but the declared role.
+#[test]
+fn a_noinline_parameter_keeps_its_own_local_where_a_spliced_one_has_none() {
+    let src = "suspend fun step(v: String): String = v\n\
+               \n\
+               suspend inline fun inner(noinline stored: () -> String): String {\n\
+               \x20   val got = step(\"a\")\n\
+               \x20   return stored() + got\n\
+               }\n\
+               \n\
+               suspend inline fun spliced(run: () -> String): String {\n\
+               \x20   val got = step(\"b\")\n\
+               \x20   return run() + got\n\
+               }\n\
+               \n\
+               suspend fun call(tag: String): String {\n\
+               \x20   val handed: () -> String = { tag }\n\
+               \x20   return inner(handed) + spliced(handed)\n\
+               }\n";
+    let (states, slots, names) =
+        debug_metadata_arrays(src, "NoinlineRole", "NoinlineRoleKt$call$1");
+    assert_eq!(
+        names,
+        ["tag", "handed", "stored$iv", "tag", "handed"],
+        "`stored` is a local of the first expansion because the parameter wrote `noinline`; \
+         `run` is spliced and owns none, though both were handed the same `handed`"
+    );
+    assert_eq!(slots, ["L$0", "L$1", "L$2", "L$0", "L$1"]);
+    assert_eq!(
+        states,
+        ["0", "0", "0", "1", "1"],
+        "and the extra local belongs to the first suspension, which is the one inside `inner`"
+    );
+}
+
 /// More than one value parameter, so the lookup is positional rather than trivially the only one.
 #[test]
 fn a_spliced_lambda_names_each_of_its_value_parameters() {

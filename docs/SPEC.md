@@ -6488,6 +6488,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   - A spliced lambda's own VALUE parameters are locals of the splice and keep their source names;
     its CAPTURES are not — they are the enclosing locals, already named where they were declared.
 
+  - WHICH function-typed parameters splice is a MODIFIER, not a type shape. `noinline` marks the
+    one function-typed parameter whose argument is a real closure: it owns a local, a name and a
+    lifetime of its own, exactly like a value parameter, and forwarding it into a second expansion
+    copies it rather than handing on the caller's slot. `crossinline` is NOT this — it only forbids
+    a non-local return from the lambda, and the reference compiler still inlines the body — so a
+    `crossinline` parameter owns no local either. Both are function-typed exactly like the spliced
+    parameter beside them, so the role is carried from the declaration that wrote it: the parser
+    records it on the value parameter, the compact header publishes it, and the expansion reads the
+    callee's published parameter rather than inspecting the argument's type. A parameter whose role
+    was never published declines the expansion instead of guessing, because either guess silently
+    erases something — the parameter's identity, or the splice.
+    (`a_noinline_parameter_keeps_its_own_local_where_a_spliced_one_has_none`.)
+
   Nothing is recovered from a name here: the role and the coordinate are recorded where the
   expansion is built, and the `$this$`/`$iv` spellings exist only at the JVM boundary. Tests:
   `an_inline_expansions_parameters_and_receiver_are_named_spills`,
@@ -6495,8 +6508,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_context_parameter_does_not_displace_the_inline_receiver`,
   `a_spliced_lambdas_value_parameters_keep_their_names`,
   `a_spliced_lambda_names_each_of_its_value_parameters`,
-  `a_lambda_declared_inside_an_inline_function_gains_its_frame`, and the naming unit tests in
-  `jvm::debug_local_names`.
+  `a_lambda_declared_inside_an_inline_function_gains_its_frame`,
+  `a_noinline_parameter_keeps_its_own_local_where_a_spliced_one_has_none`, and the naming unit tests
+  in `jvm::debug_local_names`.
 
 - **A suspend fn carries NO `checkNotNullParameter` on its value parameters.** kotlinc's state-machine
   RE-ENTRY call (`foo(null, continuation)`) passes null for every value parameter — the real values live

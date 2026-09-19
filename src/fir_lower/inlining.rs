@@ -21,6 +21,60 @@ use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty};
 
 use super::BodyLowering;
 
+/// What one physical operand position of an inline expansion fills.
+enum InlineOperandRole {
+    /// A receiver. It declares no value parameter, and kotlinc gives it a local of its own
+    /// (`$this$…`) exactly as it does for an ordinary value.
+    Receiver,
+    /// A declared value parameter that wrote `noinline`: its argument is a real closure with its
+    /// own local, name and lifetime.
+    Materialized,
+    /// A declared value parameter the callee expands at each of its uses. It owns no local, so an
+    /// argument that is already a local keeps the caller's slot.
+    Spliced,
+    /// A declared value parameter whose role the index never published. Neither answer above can
+    /// be assumed from what is left: the expansion declines.
+    Unpublished,
+}
+
+/// One physical operand position of an inline expansion: the local it would materialize, and what
+/// the callee says that position is.
+struct InlineOperand {
+    name: String,
+    local_role: IrInlineLocalRole,
+    role: InlineOperandRole,
+}
+
+/// What the expansion will do with one operand, decided before anything is allocated.
+enum InlineOperandPlan {
+    /// The checker recorded an inline lambda for this parameter. Every reference to it inside the
+    /// body is replaced by that lambda's own tree, so the parameter takes no slot at all.
+    Splice,
+    /// Keep the caller's slot: the parameter is one the callee expands at each of its uses, so it
+    /// owns no local of its own and an argument that is already a local needs no copy.
+    Reuse(u32),
+    /// Copy the argument into a local belonging to this expansion.
+    Copy,
+}
+
+impl InlineOperand {
+    fn receiver(name: String, local_role: IrInlineLocalRole) -> Self {
+        Self {
+            name,
+            local_role,
+            role: InlineOperandRole::Receiver,
+        }
+    }
+
+    fn is_unpublished(&self) -> bool {
+        matches!(self.role, InlineOperandRole::Unpublished)
+    }
+
+    fn is_spliced(&self) -> bool {
+        matches!(self.role, InlineOperandRole::Spliced)
+    }
+}
+
 impl BodyLowering<'_> {
     pub(super) fn inline_same_file_call(
         &mut self,
@@ -62,7 +116,7 @@ impl BodyLowering<'_> {
             .collect::<Vec<_>>();
         // Preserve the source name and semantic role/depth of every local this expansion
         // materializes. Target-specific decoration is deferred until debug-info emission.
-        let mut parameter_names = Vec::new();
+        let mut parameter_names: Vec<InlineOperand> = Vec::new();
         if self
             .ir
             .functions
@@ -70,7 +124,7 @@ impl BodyLowering<'_> {
             .dispatch_receiver
             .is_some()
         {
-            parameter_names.push((
+            parameter_names.push(InlineOperand::receiver(
                 self.ir.functions[function as usize].name.clone(),
                 IrInlineLocalRole::DispatchReceiver,
             ));
@@ -91,69 +145,117 @@ impl BodyLowering<'_> {
                     .unwrap_or(0)
             });
         if let Some(names) = self.ir.param_names(function) {
-            parameter_names.extend(names.iter().enumerate().map(|(position, name)| {
+            // The extension receiver is a physical parameter the lowerer inserted, so it consumes a
+            // position without consuming a declared ordinal. Everything after it shifts back by one.
+            let mut ordinal = 0;
+            for (position, name) in names.iter().enumerate() {
                 if extension_receiver_position == Some(position) {
-                    (
+                    parameter_names.push(InlineOperand::receiver(
                         self.ir.functions[function as usize].name.clone(),
                         IrInlineLocalRole::ExtensionReceiver,
-                    )
-                } else {
-                    (name.clone(), IrInlineLocalRole::Value)
+                    ));
+                    continue;
                 }
-            }));
+                parameter_names.push(InlineOperand {
+                    name: name.clone(),
+                    local_role: IrInlineLocalRole::Value,
+                    // `noinline` is the callee's own statement that this argument is a real
+                    // closure rather than a body spliced at each use.
+                    role: match self
+                        .index
+                        .callable_parameter(target, ordinal)
+                        .map(|parameter| parameter.flags().materializes_its_lambda())
+                    {
+                        Some(true) => InlineOperandRole::Materialized,
+                        Some(false) => InlineOperandRole::Spliced,
+                        None => InlineOperandRole::Unpublished,
+                    },
+                });
+                ordinal += 1;
+            }
         }
-        let mut operand_declarations = Vec::new();
-        let operand_slots = operands
+        // Decide every operand BEFORE anything is allocated. A declined expansion must leave the
+        // arena exactly as it found it: a copy made for a parameter the expansion then refuses is
+        // an orphan node, and a temporary allocated for it shifts every local index after it.
+        //
+        // An argument that is already a local read still becomes a local OF THE EXPANSION: kotlinc
+        // copies it so the inline parameter has its own identity, name and lifetime. Reusing the
+        // caller's slot silently erased the parameter.
+        //
+        // A SPLICED function-typed argument is the exception, and keeps the caller's slot: such a
+        // parameter is expanded at each of its call sites rather than stored, so it has no local of
+        // its own to name. Copying one both invents a local kotlinc has no counterpart for and
+        // hides the lambda from the splicer — a forwarded `p` (`inline fun block(p: () -> Unit) =
+        // blockImpl(p)`) then materialized a `Function0` whose implementation method was never
+        // emitted.
+        //
+        // The function TYPE alone does not say which is which. A `noinline` parameter is
+        // function-typed exactly like the spliced one beside it and is a real closure with its own
+        // local, name and lifetime, so the callee's declared role decides and the type only rules
+        // out the parameters that cannot splice at all.
+        //
+        // A parameter with no name or no published role to align against is a broken contract
+        // between this expansion and the callable's published header, not a shape to fall back on:
+        // either answer silently erases something — the parameter's identity, or the splice.
+        let mut plans = Vec::with_capacity(operands.len());
+        for (index, ((operand, lambda), ty)) in operands
             .iter()
             .zip(inline_lambdas)
-            .zip(operand_types)
+            .zip(&operand_types)
             .enumerate()
-            .map(
-                |(index, ((operand, lambda), ty))| match (self.ir.expr(*operand), lambda) {
-                    // An argument that is already a local read still becomes a local OF THE
-                    // EXPANSION: kotlinc copies it so the inline parameter has its own identity,
-                    // name and lifetime. Reusing the caller's slot silently erased the parameter.
-                    //
-                    // A FUNCTION-typed argument is the exception, and keeps the caller's slot: an
-                    // inline function parameter is SPLICED at each of its call sites rather than
-                    // stored, so it has no local of its own to name. Copying one both invents a
-                    // local kotlinc has no counterpart for and hides the lambda from the splicer —
-                    // a forwarded `p` (`inline fun block(p: () -> Unit) = blockImpl(p)`) then
-                    // materialized a `Function0` whose implementation method was never emitted.
-                    // A parameter with no name to align against is a broken contract between this
-                    // expansion and the callable's published header, not a shape to fall back on:
-                    // reusing the caller's slot there erases the parameter's identity silently.
-                    // Decline the expansion before anything is mutated instead.
-                    (IrExpr::GetValue(_), None) if parameter_names.get(index).is_none() => {
-                        return None
+        {
+            plans.push(match (self.ir.expr(*operand), lambda) {
+                (IrExpr::GetValue(_), None)
+                    if matches!(ty.non_null(), crate::types::Ty::Fun(_))
+                        && parameter_names
+                            .get(index)
+                            .is_some_and(InlineOperand::is_unpublished) =>
+                {
+                    return None
+                }
+                (IrExpr::GetValue(_), None) if parameter_names.get(index).is_none() => return None,
+                (IrExpr::GetValue(slot), None)
+                    if matches!(ty.non_null(), crate::types::Ty::Fun(_))
+                        && parameter_names
+                            .get(index)
+                            .is_some_and(InlineOperand::is_spliced) =>
+                {
+                    InlineOperandPlan::Reuse(*slot)
+                }
+                (_, None) => InlineOperandPlan::Copy,
+                (_, Some(_)) => InlineOperandPlan::Splice,
+            });
+        }
+        let mut operand_declarations = Vec::new();
+        let operand_slots = plans
+            .into_iter()
+            .zip(operands.iter())
+            .zip(&operand_types)
+            .enumerate()
+            .map(|(index, ((plan, operand), ty))| match plan {
+                InlineOperandPlan::Splice => None,
+                InlineOperandPlan::Reuse(slot) => Some(slot),
+                InlineOperandPlan::Copy => {
+                    let slot = self.allocate_temporary();
+                    let declaration = self.ir.add_expr(IrExpr::Variable {
+                        index: slot,
+                        ty: stored_value_ty(*ty),
+                        init: Some(*operand),
+                        named: true,
+                    });
+                    if let Some(parameter) = parameter_names.get(index) {
+                        self.ir
+                            .value_names
+                            .insert(declaration, parameter.name.clone());
+                        self.ir.set_debug_local_provenance(
+                            declaration,
+                            IrDebugLocalProvenance::inline_value(parameter.local_role, 1),
+                        );
                     }
-                    (IrExpr::GetValue(slot), None)
-                        if matches!(ty.non_null(), crate::types::Ty::Fun(_)) =>
-                    {
-                        Some(*slot)
-                    }
-                    (IrExpr::Lambda { .. }, Some(_)) => return None,
-                    (_, None) => {
-                        let slot = self.allocate_temporary();
-                        let declaration = self.ir.add_expr(IrExpr::Variable {
-                            index: slot,
-                            ty: stored_value_ty(ty),
-                            init: Some(*operand),
-                            named: true,
-                        });
-                        if let Some((name, role)) = parameter_names.get(index) {
-                            self.ir.value_names.insert(declaration, name.clone());
-                            self.ir.set_debug_local_provenance(
-                                declaration,
-                                IrDebugLocalProvenance::inline_value(*role, 1),
-                            );
-                        }
-                        operand_declarations.push(declaration);
-                        Some(slot)
-                    }
-                    _ => return None,
-                },
-            )
+                    operand_declarations.push(declaration);
+                    Some(slot)
+                }
+            })
             .collect::<Vec<_>>();
         crate::trace_compiler!(
             "lower",
@@ -554,6 +656,9 @@ fn rebase_index(
     local_base: u32,
 ) -> Option<()> {
     *index = if *index < parameter_count {
+        // A parameter with no slot is one an inline lambda supplies. Every reference to it was
+        // replaced by that lambda before rebasing, so reaching one here is a reference the
+        // replacement did not see and the expansion cannot be completed.
         operands.get(*index as usize).copied().flatten()?
     } else {
         local_base.checked_add(*index - parameter_count)?
