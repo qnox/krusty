@@ -11,6 +11,7 @@ use crate::libraries::{EmptySymbolSource, SemanticPlatform};
 
 mod header_validation;
 mod inline_preparation;
+mod no_expect_for_actual;
 mod retained_syntax;
 pub use crate::resolve::ClassFlags as FrontendClassFlags;
 pub(crate) use crate::resolve::ClassSig as FrontendClassSig;
@@ -227,7 +228,7 @@ impl StreamedPassState {
 /// The package-qualified expect/actual match key: `(package, kind, name, ext-receiver, arity)`.
 type ExpectKey = (String, u8, String, String, usize);
 
-fn expect_key(file: &File, id: crate::ast::DeclId) -> ExpectKey {
+pub(super) fn expect_key(file: &File, id: crate::ast::DeclId) -> ExpectKey {
     let pkg = file.package.clone().unwrap_or_default();
     let (kind, name, recv, arity) = match file.decl(id) {
         crate::ast::Decl::Fun(function) => (
@@ -268,7 +269,11 @@ pub fn strip_matched_expects(files: &mut [File]) {
     let mut actuals: std::collections::HashSet<ExpectKey> = std::collections::HashSet::new();
     for file in files.iter() {
         for &d in &file.decls {
-            if !file.expect_decls.contains(&d) {
+            if !file
+                .expect_decls
+                .iter()
+                .any(|expect| expect.declaration == d)
+            {
                 actuals.insert(expect_key(file, d));
             }
         }
@@ -288,10 +293,10 @@ pub fn strip_matched_expects(files: &mut [File]) {
         .flat_map(|(file_index, file)| {
             file.expect_decls.iter().copied().filter_map({
                 let actuals = &actuals;
-                move |declaration| {
+                move |expect| {
                     actuals
-                        .contains(&expect_key(file, declaration))
-                        .then_some((file_index as u32, declaration))
+                        .contains(&expect_key(file, expect.declaration))
+                        .then_some((file_index as u32, expect.declaration))
                 }
             })
         })
@@ -309,24 +314,47 @@ fn strip_selected_expects(
         let expects = std::mem::take(&mut file.expect_decls);
         let drop: Vec<crate::ast::DeclId> = expects
             .iter()
-            .filter(|&&declaration| matched.contains(&(file_index as u32, declaration)))
-            .copied()
+            .filter(|expect| matched.contains(&(file_index as u32, expect.declaration)))
+            .map(|expect| expect.declaration)
             .collect();
         file.decls.retain(|d| !drop.contains(d));
-        file.expect_decls = expects.into_iter().filter(|d| !drop.contains(d)).collect();
+        file.expect_decls = expects
+            .into_iter()
+            .filter(|expect| !drop.contains(&expect.declaration))
+            .collect();
     }
 }
 
 /// Publish expect-owned default presence on surviving actual headers and return the stable
 /// provider→target work. Matched expect syntax remains in the active Pass-1 parser stream only
 /// until those defaults become checked FIR; compact-header exclusion keeps it out of signatures.
+struct ActualizedHeaders {
+    /// Top-level `expect` declarations an `actual` replaced. Their subtrees are excluded.
+    matched: std::collections::HashSet<crate::fir::DeclarationId>,
+    /// The `actual` declarations that actualized something.
+    targets: std::collections::HashSet<crate::fir::DeclarationId>,
+    /// Expect-owned defaults, as stable provider→target work.
+    defaults: Vec<crate::fir::DefaultArgumentProvider>,
+    /// Implementations that did not write `actual`.
+    unmarked: Vec<crate::fir::DeclarationId>,
+    /// `expect` declarations an implementation was written for and none matched.
+    incompatible: std::collections::HashSet<crate::fir::DeclarationId>,
+}
+
 fn actualize_headers_and_collect_inherited_defaults(
     headers: &mut crate::fir::StreamedHeaderModule,
-) -> (
-    std::collections::HashSet<crate::fir::DeclarationId>,
-    Vec<crate::fir::DefaultArgumentProvider>,
-) {
-    let inherited_defaults = crate::fir::actualized_declaration_pairs(headers)
+) -> ActualizedHeaders {
+    let crate::fir::Actualization {
+        pairs,
+        unmarked,
+        incompatible,
+    } = crate::fir::actualization(headers);
+    // The declarations that actualized something, which is the authority on whether an `actual`
+    // found its `expect`: this matcher compares resolved type SHAPES and follows an
+    // `actual typealias`, so it pairs `expect val S.tag: S` with `actual val String.tag: String`
+    // where a name-and-arity key cannot.
+    let actualized_targets = pairs.iter().map(|pair| pair.actual).collect();
+    let inherited_defaults = pairs
         .into_iter()
         .filter_map(|pair| {
             let source_parameters = match headers.syntax.declaration(pair.expect)?.kind {
@@ -365,17 +393,36 @@ fn actualize_headers_and_collect_inherited_defaults(
     // already authoritative for signature collection, while inherited defaults still need their
     // provider declaration long enough to become checked target-owned FIR. Removing the parser
     // declaration here forced later code to recover it by `(file, TextRange)`.
-    (crate::fir::matched_expect_declarations(headers), work)
+    ActualizedHeaders {
+        matched: crate::fir::matched_expect_declarations(headers),
+        targets: actualized_targets,
+        defaults: work,
+        unmarked,
+        incompatible,
+    }
 }
+
+/// The compilation target a diagnostic names. krusty compiles for the JVM; when a second target
+/// ships, this belongs to the platform provider rather than to the frontend.
+const DIAGNOSTIC_PLATFORM: &str = "JVM";
 
 /// Reject every top-level expect subtree for which compact actualization found no platform root.
 /// This is a source-set semantic check, not a consequence of whether a particular expect spelling
 /// happens to have an executable body. Reporting it before exclusion also prevents body checking
 /// or a backend from accidentally treating a body-less expect function as an abstract declaration.
+///
+/// `silent` suppresses the DIAGNOSTIC only, never the source rejection: once any `expect`
+/// declaration carries a body the reference compiler never reaches actualization, so it says
+/// nothing about a missing `actual` anywhere in the compilation — but the sources still must not
+/// reach a backend that would read a body-less header as abstract.
+#[allow(clippy::too_many_arguments)]
 fn report_unmatched_expect_roots(
     headers: &crate::fir::StreamedHeaderModule,
     matched: &std::collections::HashSet<crate::fir::DeclarationId>,
+    incompatible: &std::collections::HashSet<crate::fir::DeclarationId>,
     symbols: &FrontendSymbols,
+    module_name: &str,
+    silent: bool,
     rejected_sources: &mut [bool],
     diags: &mut DiagSink,
 ) {
@@ -386,20 +433,46 @@ fn report_unmatched_expect_roots(
                 .anchor(stub.id)
                 .is_some_and(|anchor| anchor.owner.is_none())
             && !matched.contains(&stub.id)
+            // An implementation WAS written for this header and its input shapes disagree. The
+            // reference compiler reports that on the implementation and says nothing here; naming
+            // the header as unactualized as well reports one mismatch twice, from the side that
+            // did not get it wrong.
+            && !incompatible.contains(&stub.id)
             && !symbols.is_source_optional_expectation(stub.id)
     }) {
         let source = stub.source.raw() as usize;
         if let Some(rejected) = rejected_sources.get_mut(source) {
             *rejected = true;
         }
+        if silent {
+            continue;
+        }
         diags.set_file(stub.source.raw());
         let name = stub
             .lookup_name
             .and_then(|name| headers.lookup_names.get(name))
             .unwrap_or("<anonymous>");
+        // The reference compiler points at the `expect` KEYWORD, not at the declaration it
+        // precedes. The header module recorded that keyword beside the flag that makes this stub an
+        // expect at all, so there is nothing to search for and nothing to substitute: a stub
+        // flagged `EXPECT` without one is a broken header product, and saying so is the only honest
+        // answer — relocating the message to the declaration hides which position is wrong.
+        let Some(&range) = headers.expect_keywords.get(&stub.id) else {
+            diags.error(
+                stub.range,
+                format!(
+                    "internal error: expect declaration {name} reached actualization with no \
+                     recorded `expect` keyword"
+                ),
+            );
+            continue;
+        };
         diags.error(
-            stub.range,
-            format!("expected declaration '{name}' has no actual declaration in this module"),
+            range,
+            format!(
+                "expected {name} has no actual declaration in module <{module_name}> for \
+                 {DIAGNOSTIC_PLATFORM}"
+            ),
         );
     }
 }
@@ -628,6 +701,7 @@ pub fn analyze_source_set_with_features(
         sources.len(),
         platform.into(),
         project_features,
+        DEFAULT_MODULE_NAME,
         |_, _| {},
         diags,
         false,
@@ -681,6 +755,7 @@ pub fn analyze_source_set_prefix_with_features(
         inferred_count,
         platform.into(),
         project_features,
+        DEFAULT_MODULE_NAME,
         |_, _| {},
         diags,
         false,
@@ -703,6 +778,7 @@ pub fn analyze_source_set_prefix_with_features_trimmed(
         inferred_count,
         platform.into(),
         project_features,
+        DEFAULT_MODULE_NAME,
         |_, _| {},
         diags,
         true,
@@ -736,6 +812,34 @@ where
 /// frontend semantic state. Target layout is realized only after checked common IR exists; file
 /// containers, physical names, and descriptors therefore cannot influence Pass-1 signature
 /// solving or Pass-2 body checking.
+/// kotlinc's default `-module-name`, and what a diagnostic naming the module says when the caller
+/// states none.
+pub const DEFAULT_MODULE_NAME: &str = "main";
+
+/// [`analyze_source_set_streaming_with_features`] for a caller that knows its `-module-name`. The
+/// name reaches only diagnostics that spell it, never resolution.
+pub fn analyze_source_set_streaming_with_module(
+    sources: &[SourceInput<'_>],
+    platform: Box<dyn SemanticPlatform>,
+    project_features: &LangFeatures,
+    module_name: &str,
+    diags: &mut DiagSink,
+) -> StreamingSourceSetAnalysis {
+    analyze_source_set_impl(
+        sources,
+        sources.len(),
+        sources.len(),
+        platform,
+        project_features,
+        module_name,
+        |_, _| {},
+        diags,
+        false,
+        false,
+    )
+    .into()
+}
+
 pub fn analyze_source_set_streaming_with_features(
     sources: &[SourceInput<'_>],
     platform: impl Into<PlatformProvider>,
@@ -748,6 +852,7 @@ pub fn analyze_source_set_streaming_with_features(
         sources.len(),
         platform.into(),
         project_features,
+        DEFAULT_MODULE_NAME,
         |_, _| {},
         diags,
         false,
@@ -774,6 +879,7 @@ where
         inferred_count,
         platform,
         project_features,
+        DEFAULT_MODULE_NAME,
         prepare_symbols,
         diags,
         false,
@@ -788,6 +894,7 @@ fn analyze_source_set_impl<F>(
     inferred_count: usize,
     platform: PlatformProvider,
     project_features: &LangFeatures,
+    module_name: &str,
     prepare_symbols: F,
     diags: &mut DiagSink,
     trim_support_bodies: bool,
@@ -799,6 +906,10 @@ where
     let diagnostics_start = diags.diags.len();
     let mut files = Vec::with_capacity(sources.len());
     let mut parse_errors = Vec::with_capacity(sources.len());
+    // Set when any file writes an `expect` declaration with an implementation. The reference
+    // compiler stops before actualization once one exists, so the unmatched-expect report below is
+    // skipped for the WHOLE compilation rather than per file.
+    let mut expect_bodies_rejected = false;
     let mut reparse_sources = Vec::with_capacity(sources.len());
     let mut pass1_builder = crate::fir::HeaderInventoryBuilder::default();
     let mut signature_constraints = crate::fir::SignatureConstraintExtractor::default();
@@ -836,6 +947,31 @@ where
                 name_anonymous_classes(&mut file, &format!("{stem}Kt"));
             }
             header_validation::validate(&file, diags);
+            // `expect`/`actual` outside a multiplatform project is an ERROR, not a no-op. Accepting
+            // it emitted an artifact that could not link: a call to an unmatched `expect fun` was
+            // written as an `invokestatic` of a method the facade does not declare, so the program
+            // failed at its first call rather than at compile time. Reported once per modifier, at
+            // the modifier, in the reference compiler's own words.
+            if !multiplatform {
+                // The wording does not vary with which modifier was written — an `actual` reports
+                // the same sentence, naming both — and a member `actual` is reported too, at its
+                // own column. Both measured against the reference compiler rather than assumed.
+                for (_, span) in &file.multiplatform_modifiers {
+                    diags.error(
+                        *span,
+                        "'expect' and 'actual' declarations can be used only in multiplatform \
+                         projects. Learn more about Kotlin Multiplatform: \
+                         https://kotl.in/multiplatform-setup",
+                    );
+                }
+            }
+            // An `expect` declaration that carries an implementation is an error on its own, with
+            // or without the feature — the reference compiler reports both sentences for a file
+            // that has neither, in this order. Once any such body exists it stops before
+            // actualization, so a body error suppresses the unmatched-expect report for the whole
+            // compilation, not just for this file (measured with two files: a body error in one
+            // silenced a clean unmatched `expect` in the other).
+            expect_bodies_rejected |= header_validation::validate_expect_bodies(&file, diags);
         }
         let parse_error = source.kind != SourceKind::Java
             && diags.diags[diagnostics_before..]
@@ -887,6 +1023,15 @@ where
         files.push(file);
     }
 
+    // Which `actual` declarations actualize nothing is a question about the SOURCE SET, so it is
+    // answered here, while every file's syntax is still live and before Pass-1 compaction. The
+    // diagnostic itself names the declaration as the reference compiler's renderer does, so it is
+    // reported once resolution has published the types it renders.
+    let unmatched_actuals = if multiplatform {
+        no_expect_for_actual::collect(&files)
+    } else {
+        Vec::new()
+    };
     assert!(checked_count <= inferred_count && inferred_count <= files.len());
     let mut pass1_headers = pass1_builder.finish();
     let source_classifiers = pass1_headers.source_classifier_names();
@@ -947,9 +1092,27 @@ where
         diags.set_file(error.source as u32);
         diags.error(Span::new(0, 0), error.message);
     }
-    let (mut signature_default_work_items, matched_expect_declarations) = if multiplatform {
-        let (matched, defaults) =
-            actualize_headers_and_collect_inherited_defaults(&mut pass1_headers);
+    let (
+        mut signature_default_work_items,
+        matched_expect_declarations,
+        actualized_targets,
+        incompatible_expects,
+    ) = if multiplatform {
+        let ActualizedHeaders {
+            matched,
+            targets: actualized_targets,
+            defaults,
+            unmarked,
+            incompatible,
+        } = actualize_headers_and_collect_inherited_defaults(&mut pass1_headers);
+        // Reported here, while every file's syntax is still live: the diagnostic points at the
+        // declaration's NAME, and the compact inventory anchors only its whole range.
+        no_expect_for_actual::report_unmarked_implementations(
+            &unmarked,
+            &files,
+            &pass1_headers,
+            diags,
+        );
         pass1_headers.exclude_declaration_subtrees(&matched);
         // Explicit expect→actual default mappings remain valid after exclusion because their
         // provider anchors and bounded syntax live through the rest of Pass 1. Enumerate ordinary
@@ -971,10 +1134,17 @@ where
                 }
             }
         }
-        (signature_default_work_items, matched)
+        (
+            signature_default_work_items,
+            matched,
+            actualized_targets,
+            incompatible,
+        )
     } else {
         (
             signature_default_work(&pass1_headers, &[]),
+            std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
             std::collections::HashSet::new(),
         )
     };
@@ -1011,7 +1181,10 @@ where
         report_unmatched_expect_roots(
             &pass1_headers,
             &matched_expect_declarations,
+            &incompatible_expects,
             &symbols,
+            module_name,
+            expect_bodies_rejected,
             &mut parse_errors,
             diags,
         );
@@ -1075,6 +1248,20 @@ where
         pass1_headers.publish_declaration_inventory(&mut index);
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
         crate::resolve::finalize_streamed_top_level_conflicts(&pass1_headers, &mut symbols, diags);
+        // An `actual` that actualizes nothing is named by the reference compiler's declaration
+        // renderer over its RESOLVED signature, so it is reported only once finalization has
+        // published one: an inferred return (`actual fun f() = 1`) is `<not determined>` before
+        // this point. The declarations themselves were selected while every file's syntax was
+        // still live.
+        if !expect_bodies_rejected {
+            no_expect_for_actual::report(
+                &unmatched_actuals,
+                &actualized_targets,
+                &symbols,
+                &pass1_headers,
+                diags,
+            );
+        }
         // A `const val` initializer is a stable declaration dependency. Check each such bounded
         // fragment now, while Pass 1 still owns its AST and exact operator selections can be
         // consumed; retain only the folded payload before the signature graph and arenas die.

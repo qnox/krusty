@@ -14,6 +14,28 @@ use crate::features::LangFeatures;
 use crate::source::{SourceInput, SourceKind};
 use crate::types::Visibility;
 
+mod nested_classifiers;
+use nested_classifiers::nested_classifier_owners;
+
+mod actualization;
+
+/// The inventory's declaration identities, keyed by the source range each was anchored on.
+pub struct DeclarationIdentities {
+    by_range: std::collections::HashMap<(u32, TextRange), DeclarationId>,
+}
+
+impl DeclarationIdentities {
+    /// The declaration the inventory anchored on this range, if it inventoried one.
+    pub fn get(&self, source: u32, range: TextRange) -> Option<DeclarationId> {
+        self.by_range.get(&(source, range)).copied()
+    }
+}
+
+pub use actualization::{
+    actualization, actualized_declaration_pairs, matched_expect_declarations, Actualization,
+    ActualizedDeclarationPair,
+};
+
 pub use super::declaration_stub::*;
 pub use super::identities::*;
 pub use super::lookup_scope::*;
@@ -345,188 +367,6 @@ fn local_executable_owner(
     }
 }
 
-fn nested_classifier_owners(
-    file: &File,
-    source: SourceFileId,
-    ids: &mut DeclarationIds,
-) -> std::collections::HashMap<DeclId, DeclarationId> {
-    let mut owners = std::collections::HashMap::new();
-    let mut local_declarations = file
-        .local_class_decls
-        .values()
-        .copied()
-        .chain(file.local_class_nested.values().flatten().copied())
-        .collect::<Vec<_>>();
-    local_declarations.sort_unstable_by_key(|declaration| match file.decl(*declaration) {
-        Decl::Class(class) => (
-            usize::MAX - (class.span.hi - class.span.lo) as usize,
-            class.span.lo,
-        ),
-        Decl::Fun(_) | Decl::Property(_) => (usize::MAX, u32::MAX),
-    });
-    local_declarations.dedup();
-    let mut stable_local = std::collections::HashMap::new();
-    for declaration in local_declarations.iter().copied() {
-        let Decl::Class(class) = file.decl(declaration) else {
-            continue;
-        };
-        // An anonymous classifier belongs to the executable declaration that contains its
-        // construction, even when another local classifier also contains its source range. Use the
-        // already-interned classifier identity so the member-function owner is canonical rather
-        // than an anchor-only duplicate.
-        let executable_owner =
-            local_executable_owner(file, source, ids, declaration, &stable_local);
-        let classifier_owner = local_declarations
-            .iter()
-            .copied()
-            .filter(|candidate| *candidate != declaration)
-            .filter_map(|candidate| match file.decl(candidate) {
-                Decl::Class(candidate_class)
-                    if candidate_class.span.lo <= class.span.lo
-                        && class.span.hi <= candidate_class.span.hi =>
-                {
-                    Some((candidate_class.span.hi - candidate_class.span.lo, candidate))
-                }
-                Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
-            })
-            .min_by_key(|(length, _)| *length)
-            .and_then(|(_, owner)| stable_local.get(&owner).copied());
-        // A classifier declared as a member of a local classifier is parser-hoisted into
-        // `file.decls`, but its semantic owner remains that classifier. Statement-local and
-        // anonymous classifiers instead belong to the executable declaration that introduces
-        // them, even when their source range is nested inside a classifier declaration.
-        let nested_local_member = file
-            .local_class_nested
-            .values()
-            .flatten()
-            .any(|nested| *nested == declaration);
-        let owner = if nested_local_member {
-            classifier_owner.or(executable_owner)
-        } else {
-            executable_owner.or(classifier_owner)
-        };
-        let sibling = file
-            .decls
-            .iter()
-            .position(|candidate| *candidate == declaration)
-            .and_then(|position| u32::try_from(position).ok())
-            .expect("a hoisted local classifier must be a file declaration");
-        let id = ids.intern(DeclarationAnchor {
-            source,
-            range: class.span,
-            owner,
-            kind: DeclarationKind::Classifier,
-            sibling,
-        });
-        stable_local.insert(declaration, id);
-        if let Some(owner) = owner {
-            owners.insert(declaration, owner);
-        }
-    }
-
-    // Parser-hoisted member classifiers are also separate `file.decls` entries. Recover their
-    // lexical ownership structurally from source containment, including companions, before either
-    // compact-header walk interns an anchor. Local classifiers are handled above: their root belongs
-    // to an executable body rather than becoming a member of the surrounding source class.
-    let companions = companion_declarations(file);
-    let mut declarations = file
-        .decls
-        .iter()
-        .copied()
-        .filter(|declaration| !file.is_local_declaration(*declaration))
-        .filter(|declaration| matches!(file.decl(*declaration), Decl::Class(_)))
-        .collect::<Vec<_>>();
-    declarations.sort_by_key(|declaration| match file.decl(*declaration) {
-        Decl::Class(class) => (
-            usize::MAX - (class.span.hi - class.span.lo) as usize,
-            class.span.lo,
-        ),
-        Decl::Fun(_) | Decl::Property(_) => unreachable!("filtered to classifiers"),
-    });
-    let mut stable = std::collections::HashMap::new();
-    for declaration in declarations.iter().copied() {
-        let Decl::Class(class) = file.decl(declaration) else {
-            unreachable!("filtered to classifiers")
-        };
-        // An enum-entry body is a real semantic ownership boundary even though the parser does not
-        // materialize its anonymous subclass as a `Decl::Class`. Consume the parser's transient
-        // structural edge and immediately replace it with stable classifier/entry identities.
-        let enum_entry_owner = file
-            .enum_entry_nested_classifier_owners
-            .get(&declaration)
-            .and_then(|entry_range| {
-                declarations.iter().copied().find_map(|candidate| {
-                    let parent = stable.get(&candidate).copied()?;
-                    let Decl::Class(candidate_class) = file.decl(candidate) else {
-                        return None;
-                    };
-                    let (index, entry) = candidate_class
-                        .enum_entries
-                        .iter()
-                        .enumerate()
-                        .find(|(_, entry)| entry.span == *entry_range)?;
-                    Some(ids.intern(DeclarationAnchor {
-                        source,
-                        range: entry.span,
-                        owner: Some(parent),
-                        kind: DeclarationKind::EnumEntry,
-                        sibling: u32::try_from(index).expect("too many enum entries"),
-                    }))
-                })
-            });
-        let classifier_owner = declarations
-            .iter()
-            .copied()
-            .filter(|candidate| *candidate != declaration)
-            .filter_map(|candidate| match file.decl(candidate) {
-                Decl::Class(candidate_class)
-                    if candidate_class.span.lo < class.span.lo
-                        && class.span.hi < candidate_class.span.hi =>
-                {
-                    Some((candidate_class.span.hi - candidate_class.span.lo, candidate))
-                }
-                Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
-            })
-            .min_by_key(|(length, _)| *length)
-            .and_then(|(_, owner)| stable.get(&owner).copied());
-        // An anonymous classifier declared inside an executable belongs to that FUNCTION body,
-        // even when source-span containment also places it inside the surrounding source class.
-        // The executable edge is what lets Pass 1 identify anonymous declarations owned by an
-        // inline body; choosing the wider class would falsely turn them into ordinary members.
-        let anonymous_owner = file
-            .is_anonymous_object_class(declaration)
-            .then(|| local_executable_owner(file, source, ids, declaration, &stable))
-            .flatten();
-        let owner = enum_entry_owner.or(anonymous_owner).or(classifier_owner);
-        let sibling = if companions.contains(&declaration) {
-            0
-        } else {
-            file.decls
-                .iter()
-                .position(|candidate| *candidate == declaration)
-                .and_then(|position| u32::try_from(position).ok())
-                .expect("a hoisted classifier must be a file declaration")
-        };
-        let id = ids.intern(DeclarationAnchor {
-            source,
-            range: class.span,
-            owner,
-            kind: DeclarationKind::Classifier,
-            sibling,
-        });
-        stable.insert(declaration, id);
-        if let Some(owner) = owner {
-            owners.insert(declaration, owner);
-        }
-    }
-    stable.extend(stable_local);
-    for declaration in file.anonymous_object_classes.values().copied() {
-        if let Some(owner) = local_executable_owner(file, source, ids, declaration, &stable) {
-            owners.entry(declaration).or_insert(owner);
-        }
-    }
-    owners
-}
 pub use super::source_map::*;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1428,6 +1268,9 @@ struct ExtractedFileStubs {
     stubs: Vec<DeclarationStub>,
     /// Stable identity parallel to every entry of the transient parser's `File::decls` array.
     source_declarations: Vec<DeclarationId>,
+    /// The `expect` keyword each header declaration of this file was introduced by, recorded while
+    /// the parser unit is live because nothing afterwards can answer it.
+    expect_keywords: Vec<(DeclarationId, TextRange)>,
 }
 
 /// Extract syntax-independent declaration/body locations from one transient file AST. The returned
@@ -2093,6 +1936,7 @@ fn extract_file_stub_inventory(
     let mut stubs = Vec::new();
     let mut source_declarations = vec![None; file.decls.len()];
     let mut declaration_blocks = Vec::new();
+    let mut expect_keywords = Vec::new();
     for (index, declaration) in file.decls.iter().enumerate() {
         if companion_declarations.contains(declaration) {
             continue;
@@ -2149,8 +1993,21 @@ fn extract_file_stub_inventory(
                 .flags
                 .with(DeclarationFlags::ANONYMOUS_OBJECT, true);
         }
-        if file.expect_decls.contains(declaration) {
+        if let Some(expect) = file
+            .expect_decls
+            .iter()
+            .find(|expect| expect.declaration == *declaration)
+        {
             stubs[first_stub].flags = stubs[first_stub].flags.with(DeclarationFlags::EXPECT, true);
+            expect_keywords.push((stubs[first_stub].id, expect.keyword));
+        }
+        // The mirror of the `expect` keyword: the parser records which declaration WROTE `actual`,
+        // including a classifier hoisted out of a body, which carries the modifier only when it
+        // wrote one itself. Nothing later can recover it — the keyword is gone by then, and the
+        // shape a declaration happens to have says nothing about whether it claimed to implement
+        // anything.
+        if file.actual_decls.contains(declaration) {
+            stubs[first_stub].flags = stubs[first_stub].flags.with(DeclarationFlags::ACTUAL, true);
         }
         declaration_blocks.push((*declaration, first_stub..stubs.len()));
     }
@@ -2227,7 +2084,12 @@ fn extract_file_stub_inventory(
                 .get(&alias.name)
                 .copied()
                 .unwrap_or(Visibility::Public),
-            flags: DeclarationFlags::default(),
+            // `actual typealias S = String` is how an `expect class` is actualized, so the alias
+            // carries the same flag every other implementation does.
+            flags: DeclarationFlags::default().with(
+                DeclarationFlags::ACTUAL,
+                file.actual_type_aliases.contains(&index),
+            ),
         });
     }
     if let Some(script) = file.script_body {
@@ -2283,6 +2145,7 @@ fn extract_file_stub_inventory(
                 declaration.expect("every parser declaration has a stable header identity")
             })
             .collect(),
+        expect_keywords,
     }
 }
 
@@ -3050,6 +2913,14 @@ pub struct StreamedHeaderModule {
     stub_positions: std::collections::HashMap<DeclarationId, usize>,
     /// How many leading entries of `stubs` the position table covers.
     indexed_stubs: usize,
+    /// The `expect` KEYWORD each header declaration was introduced by.
+    ///
+    /// Every diagnostic about an unactualized header points there, and the keyword is knowable only
+    /// while the parser unit is live. Recorded here beside the `EXPECT` flag it belongs to rather
+    /// than recovered afterwards by searching a file's modifiers for the nearest one preceding the
+    /// declaration — a search with no answer for a synthesized declaration and a wrong one whenever
+    /// two headers share a line. One entry per `expect` declaration.
+    pub expect_keywords: std::collections::HashMap<DeclarationId, TextRange>,
     /// Complete parser declaration-stream order before semantic exclusions. These are stable
     /// header identities, not source offsets or parser arena ids.
     pub(super) inventory: Vec<DeclarationId>,
@@ -3312,6 +3183,30 @@ impl StreamedHeaderModule {
         declaration: DeclarationId,
     ) -> &[HeaderVisibilitySuppressionApplication] {
         self.visibility_suppressions.declaration(declaration)
+    }
+
+    /// The stable identity the inventory anchored on each declaration's own source range.
+    ///
+    /// A declaration's identity IS its anchor here: the inventory interns every declaration under
+    /// `(source, range, owner, kind, sibling)` while the parser unit is live. A consumer that
+    /// holds a parser declaration therefore has the coordinate half of that key and nothing else,
+    /// and this publishes the map once instead of leaving each reader to walk the inventory
+    /// comparing ranges — which is a search whose cost and whose answer both depend on how many
+    /// declarations the module has.
+    ///
+    /// Entries are in inventory order and the first wins, which is the declaration a walk of the
+    /// stubs would have found.
+    pub fn declaration_identities(&self) -> DeclarationIdentities {
+        let mut by_range = std::collections::HashMap::with_capacity(self.stubs.len());
+        for stub in &self.stubs {
+            let Some(anchor) = self.declarations.anchor(stub.id) else {
+                continue;
+            };
+            by_range
+                .entry((anchor.source.raw(), anchor.range))
+                .or_insert(stub.id);
+        }
+        DeclarationIdentities { by_range }
     }
 
     pub(crate) fn detached_type_roots(
@@ -3725,6 +3620,7 @@ pub struct HeaderInventoryBuilder {
     visibility_suppressions: HeaderVisibilitySuppressionArena,
     stubs: Vec<DeclarationStub>,
     inventory: Vec<DeclarationId>,
+    expect_keywords: std::collections::HashMap<DeclarationId, TextRange>,
     source_declarations: Vec<Vec<DeclarationId>>,
     local_classifier_lexical_roots: std::collections::HashMap<DeclarationId, DeclarationId>,
     inventoried: Vec<bool>,
@@ -3792,6 +3688,7 @@ impl HeaderInventoryBuilder {
         let mut stubs = extracted.stubs;
         order_file_stubs(&mut stubs, &self.declarations);
         self.source_declarations[source.raw() as usize] = extracted.source_declarations;
+        self.expect_keywords.extend(extracted.expect_keywords);
         self.visibility_suppressions.add_file(source, file, &stubs);
         let primary_stub = |declaration: DeclId| {
             let (kind, range) = match file.decl(declaration) {
@@ -3905,6 +3802,7 @@ impl HeaderInventoryBuilder {
             annotation_policies: self.annotation_policies,
             visibility_suppressions: self.visibility_suppressions,
             stubs: self.stubs,
+            expect_keywords: self.expect_keywords,
             inventory: self.inventory,
             source_declarations: self.source_declarations,
             local_classifier_lexical_roots: self.local_classifier_lexical_roots,
@@ -3933,588 +3831,4 @@ pub fn inventory_parsed_source_headers(
         builder.add_source(index, source, file);
     }
     builder.finish()
-}
-
-/// Match top-level multiplatform headers using only compact Pass-1 facts. The returned stable ids
-/// identify expect declarations shadowed by a same-package, same-shape non-expect declaration or
-/// type alias. No parser declaration id participates in the match.
-pub fn matched_expect_declarations(
-    headers: &StreamedHeaderModule,
-) -> std::collections::HashSet<DeclarationId> {
-    actualized_declaration_pairs(headers)
-        .into_iter()
-        .filter_map(|pair| {
-            headers
-                .declarations
-                .anchor(pair.expect)
-                .is_some_and(|anchor| anchor.owner.is_none())
-                .then_some(pair.expect)
-        })
-        .collect()
-}
-
-/// One stable expect declaration and the actual declaration that replaces it. Descendant pairs are
-/// included: an `expect class A { class B { fun f(...) } }` actualizes `A`, `A.B`, and `f` as one
-/// semantic subtree even though only `A` carries the source `expect` modifier.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ActualizedDeclarationPair {
-    pub expect: DeclarationId,
-    pub actual: DeclarationId,
-}
-
-/// Match actualized declaration subtrees using compact Pass-1 headers only. This is also the
-/// authority for expect-owned default expressions: callers publish their presence on `actual`, but
-/// retain `expect` as the stable provider identity for Pass-2 checking.
-pub fn actualized_declaration_pairs(
-    headers: &StreamedHeaderModule,
-) -> Vec<ActualizedDeclarationPair> {
-    type Key = (String, u8, String, bool, usize);
-    type ActualizedAlias = (String, HeaderTypeId);
-
-    fn type_flags_match(left: HeaderTypeFlags, right: HeaderTypeFlags) -> bool {
-        left.nullable() == right.nullable()
-            && left.definitely_non_null() == right.definitely_non_null()
-            && left.function_receiver() == right.function_receiver()
-            && left.suspend_function() == right.suspend_function()
-            && left.in_projection() == right.in_projection()
-            && left.out_projection() == right.out_projection()
-            && left.star_projection() == right.star_projection()
-    }
-
-    fn type_shape_matches(
-        headers: &StreamedHeaderModule,
-        expect: HeaderTypeId,
-        candidate: HeaderTypeId,
-        type_parameters: &[(LookupNameId, LookupNameId)],
-        actualized_aliases: &[ActualizedAlias],
-    ) -> bool {
-        let candidate_id = candidate;
-        let (Some(expect), Some(candidate)) =
-            (headers.syntax.ty(expect), headers.syntax.ty(candidate_id))
-        else {
-            return false;
-        };
-        let direct = type_flags_match(expect.flags, candidate.flags)
-            && match (expect.kind, candidate.kind) {
-                (
-                    HeaderTypeKind::Classifier {
-                        detail: expect_detail,
-                        abbreviated_argument: expect_abbreviated,
-                    },
-                    HeaderTypeKind::Classifier {
-                        detail: candidate_detail,
-                        abbreviated_argument: candidate_abbreviated,
-                    },
-                ) => {
-                    let (Some(expect_detail), Some(candidate_detail)) = (
-                        headers.syntax.classifier_type(expect_detail),
-                        headers.syntax.classifier_type(candidate_detail),
-                    ) else {
-                        return false;
-                    };
-                    let expect_path = headers.syntax.type_path(expect_detail.path);
-                    let candidate_path = headers.syntax.type_path(candidate_detail.path);
-                    let path_matches = match (expect_path, candidate_path) {
-                        ([expect], [candidate]) => type_parameters
-                            .iter()
-                            .find(|(parameter, _)| parameter == expect)
-                            .map_or_else(
-                                || {
-                                    headers.lookup_names.get(*expect)
-                                        == headers.lookup_names.get(*candidate)
-                                },
-                                |(_, parameter)| parameter == candidate,
-                            ),
-                        _ => {
-                            expect_path.len() == candidate_path.len()
-                                && expect_path.iter().zip(candidate_path).all(
-                                    |(expect, candidate)| {
-                                        headers.lookup_names.get(*expect)
-                                            == headers.lookup_names.get(*candidate)
-                                    },
-                                )
-                        }
-                    };
-                    path_matches
-                        && headers
-                            .syntax
-                            .type_operands(expect_detail.arguments)
-                            .iter()
-                            .zip(headers.syntax.type_operands(candidate_detail.arguments))
-                            .all(|(&expect, &candidate)| {
-                                type_shape_matches(
-                                    headers,
-                                    expect,
-                                    candidate,
-                                    type_parameters,
-                                    actualized_aliases,
-                                )
-                            })
-                        && headers.syntax.type_operands(expect_detail.arguments).len()
-                            == headers
-                                .syntax
-                                .type_operands(candidate_detail.arguments)
-                                .len()
-                        && match (expect_abbreviated, candidate_abbreviated) {
-                            (Some(expect), Some(candidate)) => type_shape_matches(
-                                headers,
-                                expect,
-                                candidate,
-                                type_parameters,
-                                actualized_aliases,
-                            ),
-                            (None, None) => true,
-                            (Some(_), None) | (None, Some(_)) => false,
-                        }
-                }
-                (
-                    HeaderTypeKind::Function {
-                        parameters: expect_parameters,
-                        result: expect_result,
-                        context_count: expect_context_count,
-                    },
-                    HeaderTypeKind::Function {
-                        parameters: candidate_parameters,
-                        result: candidate_result,
-                        context_count: candidate_context_count,
-                    },
-                ) => {
-                    let expect_parameters = headers.syntax.type_operands(expect_parameters);
-                    let candidate_parameters = headers.syntax.type_operands(candidate_parameters);
-                    expect_context_count == candidate_context_count
-                        && expect_parameters.len() == candidate_parameters.len()
-                        && expect_parameters.iter().zip(candidate_parameters).all(
-                            |(&expect, &candidate)| {
-                                type_shape_matches(
-                                    headers,
-                                    expect,
-                                    candidate,
-                                    type_parameters,
-                                    actualized_aliases,
-                                )
-                            },
-                        )
-                        && match (expect_result, candidate_result) {
-                            (Some(expect), Some(candidate)) => type_shape_matches(
-                                headers,
-                                expect,
-                                candidate,
-                                type_parameters,
-                                actualized_aliases,
-                            ),
-                            (None, None) => true,
-                            (Some(_), None) | (None, Some(_)) => false,
-                        }
-                }
-                (HeaderTypeKind::Classifier { .. }, HeaderTypeKind::Function { .. })
-                | (HeaderTypeKind::Function { .. }, HeaderTypeKind::Classifier { .. }) => false,
-            };
-        if direct {
-            return true;
-        }
-        if let HeaderTypeKind::Classifier { detail, .. } = expect.kind {
-            if let Some(detail) = headers.syntax.classifier_type(detail) {
-                let path = headers.syntax.type_path(detail.path);
-                if path.len() == 1 {
-                    let mut aliases = actualized_aliases.iter().filter(|(name, _)| {
-                        headers.lookup_names.get(path[0]) == Some(name.as_str())
-                    });
-                    if let (Some((_, target)), None) = (aliases.next(), aliases.next()) {
-                        return type_shape_matches(
-                            headers,
-                            *target,
-                            candidate_id,
-                            type_parameters,
-                            actualized_aliases,
-                        );
-                    }
-                }
-            }
-        }
-        false
-    }
-
-    fn callable_parameter_shapes_match(
-        headers: &StreamedHeaderModule,
-        expect: DeclarationId,
-        candidate: DeclarationId,
-        actualized_aliases: &[ActualizedAlias],
-    ) -> bool {
-        let (
-            Some(HeaderDeclaration {
-                kind:
-                    HeaderDeclarationKind::Callable {
-                        receiver: expect_receiver,
-                        parameters: expect_parameters,
-                        type_parameters: expect_type_parameters,
-                        context_count: expect_context_count,
-                        ..
-                    },
-                ..
-            }),
-            Some(HeaderDeclaration {
-                kind:
-                    HeaderDeclarationKind::Callable {
-                        receiver: candidate_receiver,
-                        parameters: candidate_parameters,
-                        type_parameters: candidate_type_parameters,
-                        context_count: candidate_context_count,
-                        ..
-                    },
-                ..
-            }),
-        ) = (
-            headers.syntax.declaration(expect),
-            headers.syntax.declaration(candidate),
-        )
-        else {
-            return false;
-        };
-        let expect_type_parameters = headers.syntax.type_parameters(expect_type_parameters);
-        let candidate_type_parameters = headers.syntax.type_parameters(candidate_type_parameters);
-        if expect_type_parameters.len() != candidate_type_parameters.len()
-            || expect_context_count != candidate_context_count
-        {
-            return false;
-        }
-        let type_parameters = expect_type_parameters
-            .iter()
-            .zip(candidate_type_parameters)
-            .map(|(expect, candidate)| (expect.name, candidate.name))
-            .collect::<Vec<_>>();
-        let receiver_matches = match (expect_receiver, candidate_receiver) {
-            (Some(expect), Some(candidate)) => type_shape_matches(
-                headers,
-                expect,
-                candidate,
-                &type_parameters,
-                actualized_aliases,
-            ),
-            (None, None) => true,
-            (Some(_), None) | (None, Some(_)) => false,
-        };
-        let expect_parameters = headers.syntax.parameters(expect_parameters);
-        let candidate_parameters = headers.syntax.parameters(candidate_parameters);
-        receiver_matches
-            && expect_parameters.len() == candidate_parameters.len()
-            && expect_parameters
-                .iter()
-                .zip(candidate_parameters)
-                .all(|(expect, candidate)| {
-                    expect.flags.is_vararg() == candidate.flags.is_vararg()
-                        && type_shape_matches(
-                            headers,
-                            expect.ty,
-                            candidate.ty,
-                            &type_parameters,
-                            actualized_aliases,
-                        )
-                })
-    }
-
-    fn property_input_shapes_match(
-        headers: &StreamedHeaderModule,
-        expect: DeclarationId,
-        candidate: DeclarationId,
-        actualized_aliases: &[ActualizedAlias],
-    ) -> bool {
-        let (
-            Some(HeaderDeclaration {
-                kind:
-                    HeaderDeclarationKind::Property {
-                        receiver: expect_receiver,
-                        context_parameters: expect_context,
-                        type_parameters: expect_type_parameters,
-                        mutable: expect_mutable,
-                        ..
-                    },
-                ..
-            }),
-            Some(HeaderDeclaration {
-                kind:
-                    HeaderDeclarationKind::Property {
-                        receiver: candidate_receiver,
-                        context_parameters: candidate_context,
-                        type_parameters: candidate_type_parameters,
-                        mutable: candidate_mutable,
-                        ..
-                    },
-                ..
-            }),
-        ) = (
-            headers.syntax.declaration(expect),
-            headers.syntax.declaration(candidate),
-        )
-        else {
-            return false;
-        };
-        if expect_mutable && !candidate_mutable {
-            return false;
-        }
-        let expect_type_parameters = headers.syntax.type_parameters(expect_type_parameters);
-        let candidate_type_parameters = headers.syntax.type_parameters(candidate_type_parameters);
-        if expect_type_parameters.len() != candidate_type_parameters.len() {
-            return false;
-        }
-        let type_parameters = expect_type_parameters
-            .iter()
-            .zip(candidate_type_parameters)
-            .map(|(expect, candidate)| (expect.name, candidate.name))
-            .collect::<Vec<_>>();
-        let receiver_matches = match (expect_receiver, candidate_receiver) {
-            (Some(expect), Some(candidate)) => type_shape_matches(
-                headers,
-                expect,
-                candidate,
-                &type_parameters,
-                actualized_aliases,
-            ),
-            (None, None) => true,
-            (Some(_), None) | (None, Some(_)) => false,
-        };
-        let expect_context = headers.syntax.parameters(expect_context);
-        let candidate_context = headers.syntax.parameters(candidate_context);
-        receiver_matches
-            && expect_context.len() == candidate_context.len()
-            && expect_context
-                .iter()
-                .zip(candidate_context)
-                .all(|(expect, candidate)| {
-                    type_shape_matches(
-                        headers,
-                        expect.ty,
-                        candidate.ty,
-                        &type_parameters,
-                        actualized_aliases,
-                    )
-                })
-    }
-
-    fn select_actual(
-        headers: &StreamedHeaderModule,
-        expect: &DeclarationStub,
-        candidates: &[DeclarationId],
-        actualized_aliases: &[ActualizedAlias],
-    ) -> Option<DeclarationId> {
-        if matches!(
-            expect.kind,
-            DeclarationKind::Classifier | DeclarationKind::TypeAlias
-        ) && candidates.len() == 1
-        {
-            return candidates.first().copied();
-        }
-        let matching = candidates
-            .iter()
-            .copied()
-            .filter(|candidate| match expect.kind {
-                DeclarationKind::Function => callable_parameter_shapes_match(
-                    headers,
-                    expect.id,
-                    *candidate,
-                    actualized_aliases,
-                ),
-                DeclarationKind::Property => {
-                    property_input_shapes_match(headers, expect.id, *candidate, actualized_aliases)
-                }
-                DeclarationKind::Classifier
-                | DeclarationKind::TypeAlias
-                | DeclarationKind::Constructor
-                | DeclarationKind::Accessor
-                | DeclarationKind::Initializer
-                | DeclarationKind::EnumEntry
-                | DeclarationKind::Script => false,
-            })
-            .collect::<Vec<_>>();
-        (matching.len() == 1).then(|| matching[0])
-    }
-
-    fn path(headers: &StreamedHeaderModule, range: LookupNameRange, separator: &str) -> String {
-        headers
-            .scopes
-            .path(range)
-            .iter()
-            .filter_map(|name| headers.lookup_names.get(*name))
-            .collect::<Vec<_>>()
-            .join(separator)
-    }
-
-    fn key(headers: &StreamedHeaderModule, stub: &DeclarationStub) -> Option<Key> {
-        let anchor = headers.declarations.anchor(stub.id)?;
-        if anchor.owner.is_some() {
-            return None;
-        }
-        let scope = headers.scopes.file(stub.source)?;
-        let package = path(headers, scope.package, ".");
-        let name = headers.lookup_names.get(stub.lookup_name?)?.to_string();
-        let declaration = headers.syntax.declaration(stub.id);
-        let (kind, has_receiver, arity) = match (stub.kind, declaration.map(|value| value.kind)) {
-            (
-                DeclarationKind::Function,
-                Some(HeaderDeclarationKind::Callable {
-                    receiver,
-                    parameters,
-                    ..
-                }),
-            ) => (
-                0,
-                receiver.is_some(),
-                headers.syntax.parameters(parameters).len(),
-            ),
-            (DeclarationKind::Classifier, Some(HeaderDeclarationKind::Classifier { .. }))
-            | (DeclarationKind::TypeAlias, Some(HeaderDeclarationKind::TypeAlias { .. })) => {
-                (1, false, 0)
-            }
-            (DeclarationKind::Property, Some(HeaderDeclarationKind::Property { receiver, .. })) => {
-                (2, receiver.is_some(), 0)
-            }
-            (DeclarationKind::Constructor, _)
-            | (DeclarationKind::Accessor, _)
-            | (DeclarationKind::Initializer, _)
-            | (DeclarationKind::EnumEntry, _)
-            | (DeclarationKind::Script, _)
-            | (DeclarationKind::Function, _)
-            | (DeclarationKind::Property, _)
-            | (DeclarationKind::Classifier, _)
-            | (DeclarationKind::TypeAlias, _) => return None,
-        };
-        Some((package, kind, name, has_receiver, arity))
-    }
-
-    let mut actuals = std::collections::HashMap::<Key, Vec<DeclarationId>>::new();
-    for stub in headers
-        .stubs
-        .iter()
-        .filter(|stub| !stub.flags.has(DeclarationFlags::EXPECT))
-    {
-        if let Some(key) = key(headers, stub) {
-            actuals.entry(key).or_default().push(stub.id);
-        }
-    }
-    let mut pairs = headers
-        .stubs
-        .iter()
-        .filter(|stub| {
-            stub.flags.has(DeclarationFlags::EXPECT) && stub.kind == DeclarationKind::Classifier
-        })
-        .filter_map(|stub| {
-            let candidates = actuals.get(&key(headers, stub)?)?;
-            select_actual(headers, stub, candidates, &[]).map(|actual| ActualizedDeclarationPair {
-                expect: stub.id,
-                actual,
-            })
-        })
-        .collect::<Vec<_>>();
-    let actualized_aliases = pairs
-        .iter()
-        .filter_map(|pair| {
-            let expect = headers.stubs.iter().find(|stub| stub.id == pair.expect)?;
-            let name = headers.lookup_names.get(expect.lookup_name?)?.to_string();
-            let HeaderDeclarationKind::TypeAlias { target, .. } =
-                headers.syntax.declaration(pair.actual)?.kind
-            else {
-                return None;
-            };
-            Some((name, target))
-        })
-        .collect::<Vec<_>>();
-    pairs.extend(
-        headers
-            .stubs
-            .iter()
-            .filter(|stub| {
-                stub.flags.has(DeclarationFlags::EXPECT) && stub.kind != DeclarationKind::Classifier
-            })
-            .filter_map(|stub| {
-                let candidates = actuals.get(&key(headers, stub)?)?;
-                select_actual(headers, stub, candidates, &actualized_aliases).map(|actual| {
-                    ActualizedDeclarationPair {
-                        expect: stub.id,
-                        actual,
-                    }
-                })
-            }),
-    );
-
-    fn child_key(
-        headers: &StreamedHeaderModule,
-        stub: &DeclarationStub,
-    ) -> Option<(DeclarationKind, String, String, usize)> {
-        let name = stub
-            .lookup_name
-            .and_then(|name| headers.lookup_names.get(name))
-            .unwrap_or_default()
-            .to_string();
-        let declaration = headers.syntax.declaration(stub.id);
-        let (receiver, arity) = match declaration.map(|value| value.kind) {
-            Some(HeaderDeclarationKind::Callable {
-                receiver,
-                parameters,
-                ..
-            }) => (
-                receiver
-                    .and_then(|ty| headers.syntax.transient_type_ref(ty, &headers.lookup_names))
-                    .map(|ty| ty.name)
-                    .unwrap_or_default(),
-                headers.syntax.parameters(parameters).len(),
-            ),
-            Some(HeaderDeclarationKind::Constructor { parameters, .. }) => {
-                (String::new(), headers.syntax.parameters(parameters).len())
-            }
-            Some(HeaderDeclarationKind::Property { receiver, .. }) => (
-                receiver
-                    .and_then(|ty| headers.syntax.transient_type_ref(ty, &headers.lookup_names))
-                    .map(|ty| ty.name)
-                    .unwrap_or_default(),
-                0,
-            ),
-            Some(HeaderDeclarationKind::Classifier { .. })
-            | Some(HeaderDeclarationKind::TypeAlias { .. })
-            | None => (String::new(), 0),
-        };
-        Some((stub.kind, name, receiver, arity))
-    }
-
-    let mut next = 0;
-    while next < pairs.len() {
-        let pair = pairs[next];
-        next += 1;
-        let expect_children = headers.stubs.iter().filter(|stub| {
-            headers
-                .declarations
-                .anchor(stub.id)
-                .is_some_and(|anchor| anchor.owner == Some(pair.expect))
-        });
-        let mut actual_children = std::collections::HashMap::<
-            (DeclarationKind, String, String, usize),
-            Vec<DeclarationId>,
-        >::new();
-        for child in headers.stubs.iter().filter(|stub| {
-            headers
-                .declarations
-                .anchor(stub.id)
-                .is_some_and(|anchor| anchor.owner == Some(pair.actual))
-        }) {
-            if let Some(key) = child_key(headers, child) {
-                actual_children.entry(key).or_default().push(child.id);
-            }
-        }
-        for child in expect_children {
-            let Some(key) = child_key(headers, child) else {
-                continue;
-            };
-            let Some(candidates) = actual_children.get(&key) else {
-                continue;
-            };
-            if candidates.len() == 1 {
-                let pair = ActualizedDeclarationPair {
-                    expect: child.id,
-                    actual: candidates[0],
-                };
-                if !pairs.contains(&pair) {
-                    pairs.push(pair);
-                }
-            }
-        }
-    }
-    pairs
 }

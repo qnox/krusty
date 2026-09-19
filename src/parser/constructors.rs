@@ -13,6 +13,14 @@ impl Parser<'_> {
         let annotations = self.take_pending_annotations();
         let annotation_args = self.take_pending_annotation_args();
         let keyword = self.tok().span;
+        // The modifier tokens were consumed before this parser ran, so the declaration's own start
+        // is the earliest one of them; a constructor with no modifiers starts at its keyword.
+        let start = modifiers
+            .iter()
+            .filter_map(|modifier| declaration_modifiers::span(self, modifiers, modifier))
+            .map(|span| span.lo)
+            .min()
+            .unwrap_or(keyword.lo);
         self.bump(); // 'constructor'
         let params = self.parse_param_list();
         let mut delegation = CtorDelegation::None;
@@ -56,6 +64,8 @@ impl Parser<'_> {
             delegation,
             body,
             span: Span::new(keyword.lo, self.t[self.i.saturating_sub(1)].span.hi),
+            is_actual: modifiers.iter().any(|modifier| modifier == "actual"),
+            declaration_span: Span::new(start, self.t[self.i.saturating_sub(1)].span.hi),
             // The debug-line post-pass rewrites these to their lines, the way it rewrites every
             // other declaration's; the delegation carries its OFFSET until then.
             decl_line: 0,
