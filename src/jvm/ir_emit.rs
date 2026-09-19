@@ -12749,6 +12749,10 @@ struct Emitter<'a> {
     open_locals: Vec<(usize, u16, u16, String, String)>,
     /// Current block nesting depth; the function body is depth 1.
     block_depth: usize,
+    /// The source line of the statement currently being emitted, when it has one. An operand that
+    /// carries its own line leaves that line in effect; the instruction that CONSUMES the operand
+    /// belongs to the statement, and kotlinc marks it back to this line.
+    statement_line: Option<u32>,
     /// Whether this method records source-local debug entries.
     record_locals: bool,
     /// Slot 0 remains the verifier's special uninitialized receiver until the constructor delegates.
@@ -12829,6 +12833,7 @@ impl<'a> Emitter<'a> {
             pending_stack: Vec::new(),
             open_locals: Vec::new(),
             block_depth: 0,
+            statement_line: None,
             record_locals: false,
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,
@@ -19217,6 +19222,18 @@ impl<'a> Emitter<'a> {
             self.emit_operands(&[lhs, rhs], code);
             None
         };
+        // An operand that carried its OWN source line leaves that line in effect. The comparison
+        // belongs to the statement around it, so its instruction is marked back to the statement's
+        // line — the same "return to the statement's line" the `putfield` of a field store gets.
+        if self.statement_line.is_some()
+            && [lhs, rhs]
+                .iter()
+                .any(|operand| self.ir.expr_source_lines.contains_key(operand))
+        {
+            if let Some(line) = self.statement_line {
+                code.mark_line(line);
+            }
+        }
         if !int_cat {
             // `>`/`>=` use the `*l` float-compare variant, `<`/`<=` the `*g` — so NaN yields false
             // (kotlinc). Long has no NaN distinction but shares the three-way-result branch below.

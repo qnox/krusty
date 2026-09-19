@@ -20,6 +20,11 @@ impl Emitter<'_> {
         let last_statement = stmts.len().checked_sub(1);
         for (index, statement) in stmts.into_iter().enumerate() {
             debug_lines::mark_statement(self.ir, statement, code);
+            // A line stays in effect until another statement replaces it, exactly as the
+            // `LineNumberTable` reads: a statement without a line of its own does not clear it.
+            if let Some(line) = self.ir.expr_lines.get(&statement).copied() {
+                self.statement_line = Some(line);
+            }
             let base = code.stack_height();
             self.terminal_statement_target = (value.is_none() && Some(index) == last_statement)
                 .then_some(terminal_target)

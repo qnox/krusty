@@ -142,3 +142,10 @@ fn the_serialization_constructors_line_table_is_kotlincs() {
         "Opt2's deserialization constructor"
     );
 }
+
+// The whole class IS byte-identical to kotlinc's when built by the CLI — verified by hand on this
+// exact fixture. It is deliberately NOT asserted here: `compare_with_kotlinc_plugin` compiles
+// in-process, and that path records different `@Metadata` d1 function flags than the shipped
+// compiler for plugin-generated members, so a whole-class assertion through this harness would fail
+// for a reason that has nothing to do with the class. The two tests above pin the halves that were
+// actually wrong; the CLI keeps the whole.
