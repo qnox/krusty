@@ -14246,7 +14246,7 @@ impl<'a> Emitter<'a> {
                 class,
                 index,
                 value,
-            } => self.emit_set_field(receiver, class, index, value, code),
+            } => self.emit_set_field(e, receiver, class, index, value, code),
             IrExpr::SetStatic { index, value } => {
                 let s = &self.ir.statics[index as usize];
                 let jt = jvm_declared_ty(&s.ty);
