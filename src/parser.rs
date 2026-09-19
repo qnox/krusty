@@ -11,6 +11,7 @@ use crate::types::Visibility;
 use std::collections::HashMap;
 
 mod constructors;
+mod context_clause;
 mod debug_lines;
 mod declaration_bodies;
 mod declaration_modifiers;
@@ -939,6 +940,9 @@ struct Parser<'a> {
     /// obtaining its name, before parsing anything that could read another one. Kotlin diagnostics
     /// about a declaration as a whole point at its name rather than at its keyword.
     declaration_name_span: Span,
+    /// Span of the `context` keyword introducing the buffered clause. Diagnostics about the clause
+    /// itself are anchored here rather than on some later modifier, which is where kotlinc puts them.
+    pending_context_span: Option<Span>,
     is_script: bool,
     script_stmts: Vec<StmtId>,
     /// Current expression-recursion depth (see [`Parser::parse_bp`]). Bounded by
@@ -1052,6 +1056,7 @@ impl<'a> Parser<'a> {
             pending_annotation_args: Vec::new(),
             pending_context_params: Vec::new(),
             declaration_name_span: Span::new(0, 0),
+            pending_context_span: None,
             is_script,
             script_stmts: Vec::new(),
             expr_depth: 0,
@@ -2121,7 +2126,11 @@ impl<'a> Parser<'a> {
         // the delegate's `getValue`/`setValue` operators.
         let delegate_start = self.i;
         self.skip_plain_newlines();
+        let mut delegate_by_span = None;
         let delegate = if init.is_none() && self.at(TokenKind::Ident) && self.keyword_text("by") {
+            // The `by` keyword owns every diagnostic about the delegate as a delegate — kotlinc
+            // anchors "cannot serve as a delegate" here, not on the expression or the property.
+            delegate_by_span = Some(self.tok().span);
             self.bump(); // 'by'
             self.skip_newlines();
             Some(self.parse_expr())
@@ -2315,6 +2324,7 @@ impl<'a> Parser<'a> {
             is_const,
             is_abstract,
             delegate,
+            delegate_by_span,
             explicit_backing_field,
             init,
             span: Span::new(start.lo, end.hi),
@@ -3240,6 +3250,7 @@ impl<'a> Parser<'a> {
         // `pending_context_params`, become LEADING value parameters (kotlinc's ABI) — prepend them and
         // record how many so the call-site resolver fills them implicitly.
         let context_count = self.pending_context_params.len();
+        let context_span = self.pending_context_span.take();
         if context_count > 0 {
             let mut merged = std::mem::take(&mut self.pending_context_params);
             merged.append(&mut params);
@@ -3287,6 +3298,7 @@ impl<'a> Parser<'a> {
             signature_span: Span::new(start.lo, signature_end),
             override_span,
             operator_span,
+            context_span,
             tailrec_span,
             flags: function_flags(modifiers),
             visibility: visibility_of(modifiers),
@@ -3354,106 +3366,6 @@ impl<'a> Parser<'a> {
                 _ => None,
             };
         }
-    }
-
-    /// Whether the first entry in a `context(...)` clause has a top-level name/type separator.
-    /// Looking only at the first token misclassifies a named parameter preceded by `noinline`,
-    /// `crossinline`, `vararg`, or an annotation as a legacy unnamed context receiver.
-    fn context_clause_has_named_parameters(&self, open: usize) -> bool {
-        let mut parentheses = 0usize;
-        let mut brackets = 0usize;
-        let mut braces = 0usize;
-        for token in self.t.iter().skip(open + 1) {
-            match token.kind {
-                TokenKind::LParen => parentheses += 1,
-                TokenKind::RParen if parentheses != 0 => parentheses -= 1,
-                TokenKind::RParen if brackets == 0 && braces == 0 => return false,
-                TokenKind::LBracket => brackets += 1,
-                TokenKind::RBracket => brackets = brackets.saturating_sub(1),
-                TokenKind::LBrace => braces += 1,
-                TokenKind::RBrace => braces = braces.saturating_sub(1),
-                TokenKind::Colon if parentheses == 0 && brackets == 0 && braces == 0 => {
-                    return true;
-                }
-                TokenKind::Comma if parentheses == 0 && brackets == 0 && braces == 0 => {
-                    return false;
-                }
-                TokenKind::Eof => return false,
-                _ => {}
-            }
-        }
-        false
-    }
-
-    /// Buffer a `context(...)` clause for the following function or property.
-    fn maybe_parse_context_receivers(&mut self) -> Vec<String> {
-        if !(self.at(TokenKind::Ident)
-            && self.keyword_text("context")
-            && self
-                .t
-                .get(self.i + 1)
-                .is_some_and(|t| t.kind == TokenKind::LParen))
-        {
-            return Vec::new();
-        }
-        let context_span = self.tok().span;
-        self.bump(); // 'context'
-        let named_parameters = self.context_clause_has_named_parameters(self.i);
-        if named_parameters {
-            if !self.context_parameters {
-                self.diags.error(
-                    context_span,
-                    "the feature 'context parameters' is disabled".to_string(),
-                );
-            }
-            self.pending_context_params = self.parse_param_list();
-        } else {
-            if !self.context_receivers {
-                self.diags.error(
-                    context_span,
-                    "the feature 'context receivers' is disabled".to_string(),
-                );
-            }
-            self.pending_context_params = self.parse_context_receiver_list();
-        }
-        self.skip_newlines();
-        // Modifiers/annotations may follow the context prefix (`context(a: A) private fun …`);
-        // consume them so the declaration keyword is next, and RETURN them so the caller keeps the
-        // visibility/modality (annotations buffer as pending, read by the declaration parser).
-        if self.at(TokenKind::At) || self.at_modifier() {
-            let m = self.skip_decl_prefix();
-            self.skip_newlines();
-            m
-        } else {
-            Vec::new()
-        }
-    }
-
-    /// Parse legacy `context(A, B)` receivers into unnamed leading semantic parameters. Their
-    /// declaration context count retains receiver behavior; `_` prevents a value binding for a
-    /// receiver that has no source parameter name.
-    fn parse_context_receiver_list(&mut self) -> Vec<Param> {
-        let mut receivers = Vec::new();
-        self.expect(TokenKind::LParen, "'('");
-        self.skip_newlines();
-        while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-            receivers.push(Param {
-                name: "_".to_owned(),
-                ty: self.parse_type(),
-                is_vararg: false,
-                vararg_span: None,
-                default: None,
-                annotations: Vec::new(),
-                annotation_args: Vec::new(),
-            });
-            self.skip_newlines();
-            if !self.eat(TokenKind::Comma) {
-                break;
-            }
-            self.skip_newlines();
-        }
-        self.expect(TokenKind::RParen, "')'");
-        receivers
     }
 
     fn parse_param_list(&mut self) -> Vec<Param> {
@@ -6134,6 +6046,7 @@ impl<'a> Parser<'a> {
                 };
                 // `val/var x (: T)? by <delegate>` — a local delegated property.
                 if self.at(TokenKind::Ident) && self.keyword_text("by") {
+                    let by_span = self.tok().span;
                     self.bump(); // 'by'
                     self.skip_newlines();
                     let delegate = self.parse_expr();
@@ -6143,6 +6056,7 @@ impl<'a> Parser<'a> {
                             name,
                             ty,
                             delegate,
+                            by_span,
                         },
                         start,
                     );

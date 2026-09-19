@@ -1321,6 +1321,7 @@ impl<'a> SemanticClassifier<'a> {
                 name,
                 ty,
                 delegate,
+                ..
             } => {
                 let value_modifiers = variable_modifier(*is_var);
                 let definition = self.mark_named_in_span(
@@ -1330,10 +1331,9 @@ impl<'a> SemanticClassifier<'a> {
                     HighlightModifiers::DECLARATION | value_modifiers,
                     false,
                 );
-                let scope = self.enclosing_block_scope(span);
                 self.add_binding(
                     name,
-                    scope,
+                    self.enclosing_block_scope(span),
                     span.hi,
                     HighlightKind::Variable,
                     value_modifiers,

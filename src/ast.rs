@@ -13,6 +13,7 @@ use traversal::{any_class_decl_expr, any_fun_decl_expr, any_property_decl_expr};
 
 mod call_shape;
 mod constructors;
+mod type_refs;
 pub(crate) use call_shape::explicit_call_receiver;
 pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
 pub use constructors::{CtorDelegation, CtorDelegationCall, SecondaryCtor};
@@ -402,6 +403,10 @@ pub enum Stmt {
         name: String,
         ty: Option<TypeRef>,
         delegate: ExprId,
+        /// Span of the `by` keyword. A diagnostic about the delegate's suitability AS a delegate is
+        /// anchored here, which is where kotlinc puts it. It travels with the statement so a body
+        /// reached through another file (an inline splice) keeps its own anchor.
+        by_span: Span,
     },
     /// `val (a, b, …) = init` — destructuring; each entry binds `init.componentN()`.
     /// An entry named `_` is skipped (no binding, no `componentN` call), per Kotlin.
@@ -623,83 +628,6 @@ pub struct TypeRef {
     pub fun_context_count: u32,
 }
 
-impl TypeRef {
-    pub(crate) fn from_annotation(annotation: &AnnotationRef) -> Self {
-        Self {
-            name: annotation.name.clone(),
-            flags: TrFlags::default().with_annotation(true),
-            arg: None,
-            targs: Vec::new(),
-            span: annotation.span,
-            fun_params: Vec::new(),
-            fun_context_count: 0,
-        }
-    }
-
-    #[inline]
-    pub fn nullable(&self) -> bool {
-        self.flags.has(TrFlags::NULLABLE)
-    }
-    #[inline]
-    pub fn definitely_non_null(&self) -> bool {
-        self.flags.has(TrFlags::DEFINITELY_NON_NULL)
-    }
-    #[inline]
-    pub fn fun_has_receiver(&self) -> bool {
-        self.flags.has(TrFlags::FUN_HAS_RECEIVER)
-    }
-    #[inline]
-    pub fn fun_suspend(&self) -> bool {
-        self.flags.has(TrFlags::FUN_SUSPEND)
-    }
-    #[inline]
-    pub fn in_projection(&self) -> bool {
-        self.flags.has(TrFlags::IN_PROJECTION)
-    }
-    #[inline]
-    pub fn out_projection(&self) -> bool {
-        self.flags.has(TrFlags::OUT_PROJECTION)
-    }
-    #[inline]
-    pub fn is_import(&self) -> bool {
-        self.flags.has(TrFlags::IMPORT)
-    }
-    #[inline]
-    pub fn is_star_projection(&self) -> bool {
-        self.flags.has(TrFlags::STAR_PROJECTION)
-    }
-    #[inline]
-    pub fn is_annotation(&self) -> bool {
-        self.flags.has(TrFlags::ANNOTATION)
-    }
-    /// An underscore in a call-site type-argument list asks inference to solve this position.
-    /// It is neither an unresolved classifier nor a star projection; checked call data must replace
-    /// it with the inferred semantic argument.
-    #[inline]
-    pub fn is_inference_placeholder(&self) -> bool {
-        self.name == "_"
-            && self.arg.is_none()
-            && self.targs.is_empty()
-            && self.fun_params.is_empty()
-            && !self.is_star_projection()
-    }
-    #[inline]
-    pub fn set_nullable(&mut self, on: bool) {
-        self.flags = self.flags.with_nullable(on);
-    }
-    #[inline]
-    pub fn set_definitely_non_null(&mut self, on: bool) {
-        self.flags = self.flags.with_definitely_non_null(on);
-    }
-    #[inline]
-    pub fn set_projection(&mut self, in_projection: bool, out_projection: bool) {
-        self.flags = self
-            .flags
-            .with_in_projection(in_projection)
-            .with_out_projection(out_projection);
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct AnnotationRef {
     /// Source spelling used only as input to name resolution.
@@ -864,6 +792,9 @@ pub struct FunDecl {
     pub signature_span: Span,
     /// Exact span of the `override` modifier. Present exactly when [`Self::is_override`] is true.
     pub override_span: Option<Span>,
+    /// Span of the `context` keyword introducing a `context(…)` clause. Present exactly when
+    /// [`Self::context_count`] is non-zero; a diagnostic about the clause is anchored here.
+    pub context_span: Option<Span>,
     /// Exact span of the `operator` modifier. Present exactly when [`Self::is_operator`] is true.
     pub operator_span: Option<Span>,
     /// Source span of a `tailrec` modifier, for the diagnostic that rejects it on an open member.
@@ -1412,6 +1343,10 @@ pub struct PropDecl {
     /// `val x: T by <expr>` — a DELEGATED property. The expression is the delegate; reads route through
     /// `delegate.getValue(thisRef, property)` (and writes through `setValue`). `None` for a plain property.
     pub delegate: Option<ExprId>,
+    /// Span of the `by` keyword introducing [`Self::delegate`]. Present exactly when that is.
+    /// A diagnostic about the delegate's suitability AS a delegate is anchored here, which is where
+    /// kotlinc puts it.
+    pub delegate_by_span: Option<Span>,
     pub explicit_backing_field: Option<ExplicitBackingField>,
     pub span: Span,
     /// Exact span of the property's NAME, like [`FunDecl::name_span`].
