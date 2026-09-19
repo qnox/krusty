@@ -1,7 +1,7 @@
 use super::local_callables::BodyLocalCallableDeclarationId;
 use std::collections::HashMap;
 
-mod debug_lines;
+pub(crate) mod debug_lines;
 pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};
 
 use crate::diag::Span;

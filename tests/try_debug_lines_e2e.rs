@@ -355,18 +355,28 @@ fn a_finally_with_its_own_handler_types_the_parked_exception() {
 /// second, so a correct compiler appends `F` twice.
 #[test]
 fn a_loop_transfer_out_of_a_try_runs_its_finally() {
-    let src = "fun box(): String {\n\
-               \x20   val sb = StringBuilder()\n\
+    // The recorder is REPOSITORY-OWNED. `StringBuilder.append`/`toString` is a stdlib shape, and a
+    // finalizer that ran could be observed through an intrinsic or builtin path rather than through
+    // the ordinary call this test is about; `Velarium` cannot be reached any way but the one the
+    // source writes.
+    let src = "class Velarium {\n\
+               \x20   private var trail = \"\"\n\
+               \x20   fun record(mark: String) { trail = trail + mark }\n\
+               \x20   fun trace(): String = trail\n\
+               }\n\
+               \n\
+               fun box(): String {\n\
+               \x20   val velarium = Velarium()\n\
                \x20   for (i in 0..1) {\n\
                \x20       try {\n\
-               \x20           sb.append(\"T\")\n\
+               \x20           velarium.record(\"T\")\n\
                \x20           if (i == 0) continue\n\
                \x20           break\n\
                \x20       } finally {\n\
-               \x20           sb.append(\"F\")\n\
+               \x20           velarium.record(\"F\")\n\
                \x20       }\n\
                \x20   }\n\
-               \x20   return sb.toString()\n\
+               \x20   return velarium.trace()\n\
                }\n";
     let jdk = common::jdk_modules();
     // Fails CLOSED: a missing JVM runner is a broken harness, not a passing contract.

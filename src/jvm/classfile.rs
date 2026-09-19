@@ -3305,7 +3305,7 @@ pub struct CodeBuilder {
     /// A bytecode offset whose last recorded line mark must be KEPT when another mark lands on the
     /// same offset: the next one appends after it instead of replacing it. See
     /// [`CodeBuilder::mark_line_retained`].
-    retained_line_offset: Option<u16>,
+    retained_line_mark: Option<usize>,
     /// `(start_pc, length, slot, name, descriptor)` entries in scope-close order.
     local_entries: Vec<(u16, Option<u16>, u16, String, String)>,
     /// Whether the instruction stream is currently UNREACHABLE: an unconditional terminator
@@ -3353,7 +3353,7 @@ impl CodeBuilder {
             needs_stackmap: false,
             frames: Vec::new(),
             line_marks: Vec::new(),
-            retained_line_offset: None,
+            retained_line_mark: None,
             local_entries: Vec::new(),
             dead: false,
             dead_bound: Vec::new(),
