@@ -8,7 +8,6 @@
 //! String ids index the `d2` table.
 
 pub(super) mod klib_validation;
-mod type_annotations;
 
 use super::classfile::{
     ACC_ABSTRACT, ACC_ANNOTATION, ACC_ENUM, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED,
@@ -17,7 +16,7 @@ use super::classfile::{
 use super::classreader::ClassInfo;
 use super::names::method_descriptor;
 use crate::libraries::{CallSig, GenericSig, ParamList, TypeKind};
-use crate::metadata::decode::QName;
+use crate::metadata::decode::{parse_type_node, ParsedProjection, ParsedTypeArgument, Pb, QName};
 use crate::types::{intern, type_name, Ty, TypeName, Visibility};
 use std::collections::HashMap;
 
@@ -61,131 +60,12 @@ fn primary_erasure_bounds(formals: &[String], formal_bounds: &[Vec<Ty>]) -> Hash
     resolved
 }
 
-/// The carrier-independent wire shape of Kotlin metadata's `Type` message. Both an annotation's
-/// `@Metadata` payload and a `.kotlin_builtins` fragment use these same fields; only the way their
-/// numeric class/string ids and type-table references are resolved differs. Keeping the protobuf walk
-/// here prevents the two decoders from acquiring subtly different nullability, type-parameter,
-/// annotation, or argument handling as either carrier evolves.
-struct ParsedTypeNode<'a> {
-    class_id: Option<u64>,
-    type_parameter_id: Option<u64>,
-    type_parameter_name_id: Option<u64>,
-    type_alias_id: Option<u64>,
-    nullable: bool,
-    definitely_non_null: bool,
-    flexible_upper_bound: Option<&'a [u8]>,
-    flexible_upper_bound_id: Option<u64>,
-    arguments: Vec<ParsedTypeArgument<'a>>,
-    annotations: Vec<type_annotations::TypeAnnotation>,
-}
-
-#[derive(Clone, Copy)]
-enum ParsedProjection {
-    In,
-    Out,
-    Invariant,
-}
-
 fn project_ty(projection: ParsedProjection, ty: Ty) -> Ty {
     match projection {
         ParsedProjection::In => Ty::in_projection(ty),
         ParsedProjection::Out => Ty::out_projection(ty),
         ParsedProjection::Invariant => ty,
     }
-}
-
-/// A type argument is either an inline `Type`, an id into the carrier's `TypeTable`, or a star
-/// projection with no type. Projection is part of this carrier-independent wire shape: every semantic
-/// decoder must see the same `in`/`out`/invariant distinction.
-enum ParsedTypeArgument<'a> {
-    Inline(&'a [u8], ParsedProjection),
-    Table(u64, ParsedProjection),
-    Star,
-}
-
-fn parse_type_node(body: &[u8]) -> Option<ParsedTypeNode<'_>> {
-    let mut pb = Pb { b: body, i: 0 };
-    let mut node = ParsedTypeNode {
-        class_id: None,
-        type_parameter_id: None,
-        type_parameter_name_id: None,
-        type_alias_id: None,
-        nullable: false,
-        definitely_non_null: false,
-        flexible_upper_bound: None,
-        flexible_upper_bound_id: None,
-        arguments: Vec::new(),
-        annotations: Vec::new(),
-    };
-    while !pb.at_end() {
-        let tag = pb.varint()?;
-        match (tag >> 3, tag & 7) {
-            (1, 0) => node.definitely_non_null = pb.varint()? & 0x2 != 0,
-            (3, 0) => node.nullable = pb.varint()? != 0,
-            (5, 2) => {
-                let len = pb.varint()? as usize;
-                node.flexible_upper_bound = Some(pb.bytes(len)?);
-            }
-            (6, 0) => node.class_id = Some(pb.varint()?),
-            (7, 0) => node.type_parameter_id = Some(pb.varint()?),
-            (8, 0) => node.flexible_upper_bound_id = Some(pb.varint()?),
-            (9, 0) => node.type_parameter_name_id = Some(pb.varint()?),
-            (12, 0) => node.type_alias_id = Some(pb.varint()?),
-            (2, 2) => {
-                let n = pb.varint()? as usize;
-                let mut argument_pb = Pb {
-                    b: pb.bytes(n)?,
-                    i: 0,
-                };
-                let mut projection = ParsedProjection::Invariant;
-                let mut star = false;
-                let mut inline = None;
-                let mut table = None;
-                while !argument_pb.at_end() {
-                    let tag = argument_pb.varint()?;
-                    match (tag >> 3, tag & 7) {
-                        (1, 0) => {
-                            projection = match argument_pb.varint()? {
-                                0 => ParsedProjection::In,
-                                1 => ParsedProjection::Out,
-                                2 => ParsedProjection::Invariant,
-                                3 => {
-                                    star = true;
-                                    ParsedProjection::Invariant
-                                }
-                                _ => return None,
-                            }
-                        }
-                        (2, 2) => {
-                            let n = argument_pb.varint()? as usize;
-                            inline = Some(argument_pb.bytes(n)?);
-                        }
-                        (3, 0) => table = Some(argument_pb.varint()?),
-                        (_, wire) => argument_pb.skip(wire)?,
-                    }
-                }
-                if star {
-                    node.arguments.push(ParsedTypeArgument::Star);
-                } else {
-                    node.arguments.push(match (inline, table) {
-                        (Some(body), _) => ParsedTypeArgument::Inline(body, projection),
-                        (None, Some(id)) => ParsedTypeArgument::Table(id, projection),
-                        (None, None) => return None,
-                    });
-                }
-            }
-            (100, 2) => {
-                // `Type.annotation` is an extension carrying an `Annotation` message. Preserve its
-                // semantic arguments as well as its class id: context-function arity is carried by
-                // `ContextFunctionTypeParams.count` rather than by the function classifier.
-                let n = pb.varint()? as usize;
-                node.annotations
-                    .push(type_annotations::parse(pb.bytes(n)?)?);
-            }
-            (_, wire) => pb.skip(wire)?,
-        }
-    }
-    Some(node)
 }
 
 /// A `@Metadata` class name + decoded type args → a signature [`Ty`]: a `kotlin/FunctionN` becomes a
@@ -317,7 +197,7 @@ struct ParsedTypeParam {
 }
 
 fn parse_type_param(body: &[u8]) -> Option<ParsedTypeParam> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut id = None;
     let mut name = None;
     let mut upper_bound_bodies = Vec::new();
@@ -447,7 +327,7 @@ struct Rec {
 
 /// Read a packed (length-delimited) repeated `int32` field into a Vec of varints.
 fn packed_varints(body: &[u8]) -> Vec<u64> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut out = Vec::new();
     while !pb.at_end() {
         match pb.varint() {
@@ -460,7 +340,7 @@ fn packed_varints(body: &[u8]) -> Vec<u64> {
 
 /// Parse one `StringTableTypes.Record` → `(range, Rec)`.
 fn parse_record(body: &[u8]) -> Option<(u64, Rec)> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut range = 1u64;
     let mut rec = Rec::default();
     while !pb.at_end() {
@@ -496,7 +376,7 @@ fn parse_record(body: &[u8]) -> Option<(u64, Rec)> {
 /// Parse a `StringTableTypes` message body → the flattened record list (each record repeated `range`
 /// times, so the list index is the class-name id), matching kotlinc's `JvmNameResolverBase`.
 fn parse_string_table(body: &[u8]) -> Vec<Rec> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut records = Vec::new();
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
@@ -585,9 +465,9 @@ fn resolve_class_name(records: &[Rec], d2: &[String], id: usize) -> Option<Strin
 /// Split decoded `d1` bytes into `(StringTableTypes body, Package body)`: JVM `@Metadata` prepends a
 /// length-delimited `StringTableTypes` before the `Package` message.
 fn split_d1(bytes: &[u8]) -> (&[u8], &[u8]) {
-    let mut pb = Pb { b: bytes, i: 0 };
+    let mut pb = Pb::new(bytes);
     if let Some(len) = pb.varint() {
-        let start = pb.i;
+        let start = pb.position();
         if let Some(end) = start.checked_add(len as usize) {
             if end <= bytes.len() {
                 return (&bytes[start..end], &bytes[end..]);
@@ -595,59 +475,6 @@ fn split_d1(bytes: &[u8]) -> (&[u8], &[u8]) {
         }
     }
     (&[], bytes)
-}
-
-/// A protobuf wire-format cursor over a message body.
-struct Pb<'a> {
-    b: &'a [u8],
-    i: usize,
-}
-
-impl<'a> Pb<'a> {
-    fn varint(&mut self) -> Option<u64> {
-        let mut v = 0u64;
-        let mut shift = 0;
-        loop {
-            let byte = *self.b.get(self.i)?;
-            self.i += 1;
-            v |= ((byte & 0x7f) as u64) << shift;
-            if byte & 0x80 == 0 {
-                return Some(v);
-            }
-            shift += 7;
-            if shift >= 64 {
-                return None;
-            }
-        }
-    }
-    fn bytes(&mut self, n: usize) -> Option<&'a [u8]> {
-        let s = self.b.get(self.i..self.i.checked_add(n)?)?;
-        self.i += n;
-        Some(s)
-    }
-    fn at_end(&self) -> bool {
-        self.i >= self.b.len()
-    }
-    /// Skip a field's value given its wire type; `false` on a malformed/unsupported wire type.
-    fn skip(&mut self, wire: u64) -> Option<()> {
-        match wire {
-            0 => {
-                self.varint()?;
-            }
-            1 => {
-                self.bytes(8)?;
-            }
-            2 => {
-                let n = self.varint()? as usize;
-                self.bytes(n)?;
-            }
-            5 => {
-                self.bytes(4)?;
-            }
-            _ => return None,
-        }
-        Some(())
-    }
 }
 
 /// `IS_INLINE` is bit 10 of `Function.flags` (hasAnnotations·1 + Visibility·3 + Modality·2 +
@@ -667,7 +494,7 @@ struct ParsedJvmSignature {
 }
 
 fn parse_jvm_signature(body: &[u8]) -> Option<ParsedJvmSignature> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut name = None;
     let mut desc = None;
     while !pb.at_end() {
@@ -688,7 +515,7 @@ fn parse_jvm_signature(body: &[u8]) -> Option<ParsedJvmSignature> {
 /// identity (`mutableListOf`'s return `Type` → the id whose `d2` string is `kotlin/collections/MutableList`).
 /// `None` for a non-class type (a bare type parameter, etc.).
 fn parse_type_class_name(body: &[u8]) -> Option<u64> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut class_name = None;
     while !pb.at_end() {
         let tag = pb.varint()?;
@@ -804,7 +631,7 @@ struct ParsedFunction {
 }
 
 fn parse_value_parameter(body: &[u8]) -> Option<ParsedValueParam> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut name_id = None;
     let mut flags = 0u64;
     let mut type_body = None;
@@ -852,7 +679,7 @@ fn parse_value_parameter(body: &[u8]) -> Option<ParsedValueParam> {
 /// Parse one `Function` message. The return type is `Function.return_type = 3` and the extension
 /// receiver `Function.receiver_type = 5` (both inline `Type`s in package metadata).
 fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     // Kotlin `metadata.proto` declares `Function.flags = 9 [default = 6]` — a PUBLIC FINAL declaration
     // (visibility bits 1-3 = 3, modality/memberKind = 0). protobuf OMITS a field equal to its default, so
     // the common public-final function serializes NO flags field; initializing to 0 would then decode it
@@ -1026,7 +853,7 @@ fn decode_contract(
     tparams: &HashMap<u64, String>,
     type_table: Option<&[u8]>,
 ) -> Option<crate::contracts::Contract> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut effects = Vec::new();
     while !pb.at_end() {
         let tag = pb.varint()?;
@@ -1055,7 +882,7 @@ fn decode_effect(
     type_table: Option<&[u8]>,
 ) -> Option<crate::contracts::Effect> {
     use crate::contracts::{Effect, InvocationKind};
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut effect_type = 0u64;
     let mut args: Vec<Vec<u8>> = Vec::new();
     let mut conclusion: Option<Vec<u8>> = None;
@@ -1114,7 +941,7 @@ fn returns_constant(arg: Option<&Vec<u8>>) -> crate::contracts::ReturnsValue {
     let Some(body) = arg else {
         return ReturnsValue::Any;
     };
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut constant = None;
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
@@ -1137,7 +964,7 @@ fn returns_constant(arg: Option<&Vec<u8>>) -> crate::contracts::ReturnsValue {
 
 /// The `value_parameter_reference` of an `Expression` body, when present.
 fn expression_param_ref(body: &[u8]) -> Option<u64> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
@@ -1159,7 +986,7 @@ fn decode_expression(
     type_table: Option<&[u8]>,
 ) -> Option<crate::contracts::Condition> {
     use crate::contracts::{Condition, ConditionType};
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut flags = 0u64;
     let mut vpr = None;
     let mut constant = None;
@@ -1265,7 +1092,7 @@ fn decode_expression(
 /// field-12 body that isn't an `Annotation`) yields `None`, so the caller safely keeps the Kotlin name.
 fn annotation_jvm_name(bodies: &[Vec<u8>], records: &[Rec], d2: &[String]) -> Option<String> {
     for body in bodies {
-        let mut pb = Pb { b: body, i: 0 };
+        let mut pb = Pb::new(body);
         let mut id: Option<u64> = None;
         let mut string_arg: Option<u64> = None;
         while !pb.at_end() {
@@ -1276,14 +1103,14 @@ fn annotation_jvm_name(bodies: &[Vec<u8>], records: &[Rec], d2: &[String]) -> Op
                     // Annotation.argument → Argument { value = 2: Value { stringValue = 5 } }.
                     let n = pb.varint()? as usize;
                     let arg = pb.bytes(n)?;
-                    let mut ap = Pb { b: arg, i: 0 };
+                    let mut ap = Pb::new(arg);
                     while !ap.at_end() {
                         let at = ap.varint()?;
                         match (at >> 3, at & 7) {
                             (2, 2) => {
                                 let vn = ap.varint()? as usize;
                                 let vb = ap.bytes(vn)?;
-                                let mut vp = Pb { b: vb, i: 0 };
+                                let mut vp = Pb::new(vb);
                                 while !vp.at_end() {
                                     let vt = vp.varint()?;
                                     match (vt >> 3, vt & 7) {
@@ -1320,7 +1147,7 @@ fn annotation_names(
     bodies
         .iter()
         .filter_map(|body| {
-            let mut pb = Pb { b: body, i: 0 };
+            let mut pb = Pb::new(body);
             let mut id = None;
             while !pb.at_end() {
                 let tag = pb.varint()?;
@@ -1347,7 +1174,7 @@ struct ParsedTypeFacts {
 }
 
 fn parse_type_facts(body: &[u8]) -> ParsedTypeFacts {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut facts = ParsedTypeFacts::default();
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
@@ -2465,7 +2292,7 @@ fn decode_class_signature(ctx: &MetaCtx<'_>) -> (Vec<String>, Vec<Vec<Ty>>, Vec<
     let mut table = None;
     let mut inline_supertypes = Vec::new();
     let mut supertype_ids = Vec::new();
-    let mut pb = Pb { b: ctx.msg, i: 0 };
+    let mut pb = Pb::new(ctx.msg);
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -2686,7 +2513,7 @@ fn decode_metadata_type(
 /// this boundary helper so every individual class flag uses identical wire-format defaulting.
 fn class_flags(ctx: &MetaCtx<'_>) -> u64 {
     let mut flags = 6u64;
-    let mut pb = Pb { b: ctx.msg, i: 0 };
+    let mut pb = Pb::new(ctx.msg);
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -2722,7 +2549,7 @@ fn decode_functions(
     // functions, so pre-scan for it before the main decode loop (which decodes contracts inline).
     let mut type_table_body: Option<Vec<u8>> = None;
     {
-        let mut scan = Pb { b: ctx.msg, i: 0 };
+        let mut scan = Pb::new(ctx.msg);
         while !scan.at_end() {
             let Some(tag) = scan.varint() else { break };
             match (tag >> 3, tag & 7) {
@@ -2741,7 +2568,7 @@ fn decode_functions(
             }
         }
     }
-    let mut pb = Pb { b: ctx.msg, i: 0 };
+    let mut pb = Pb::new(ctx.msg);
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -3146,7 +2973,7 @@ fn decode_type_aliases(
     let mut out = Vec::new();
     let records = ctx.records;
     let d2 = ctx.d2;
-    let mut pb = Pb { b: ctx.msg, i: 0 };
+    let mut pb = Pb::new(ctx.msg);
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -3200,7 +3027,7 @@ pub struct MetaTypeAlias {
 /// four-parameter target, so a use site's arguments must be substituted into the template rather
 /// than pasted onto the target — the template is the only place that mapping exists.
 fn parse_type_alias(body: &[u8], records: &[Rec], d2: &[String]) -> Option<MetaTypeAlias> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut flags = 6u64;
     let mut name_id: Option<u64> = None;
     let mut expanded_class: Option<u64> = None;
@@ -3291,7 +3118,7 @@ fn parse_type_argument_spellings(
     d2: &[String],
 ) -> Vec<crate::spelling::Spelled> {
     let mut arguments = Vec::new();
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -3323,7 +3150,7 @@ fn parse_argument_spelling(
     records: &[Rec],
     d2: &[String],
 ) -> crate::spelling::Spelled {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -3357,17 +3184,14 @@ fn parse_type_alias_name(
     records: &[Rec],
     d2: &[String],
 ) -> Option<crate::types::TypeName> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
             (13, 2) => {
                 let len = pb.varint()? as usize;
                 let abbreviated = pb.bytes(len)?;
-                let mut inner = Pb {
-                    b: abbreviated,
-                    i: 0,
-                };
+                let mut inner = Pb::new(abbreviated);
                 while !inner.at_end() {
                     let tag = inner.varint()?;
                     match (tag >> 3, tag & 7) {
@@ -3393,7 +3217,7 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<MetaConstructor> {
     let records = ctx.records;
     let d2 = ctx.d2;
     let mut type_table = None;
-    let mut table_scan = Pb { b: ctx.msg, i: 0 };
+    let mut table_scan = Pb::new(ctx.msg);
     while !table_scan.at_end() {
         let Some(tag) = table_scan.varint() else {
             break;
@@ -3424,7 +3248,7 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<MetaConstructor> {
         d2,
         type_table.as_deref(),
     );
-    let mut pb = Pb { b: ctx.msg, i: 0 };
+    let mut pb = Pb::new(ctx.msg);
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -3434,7 +3258,7 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<MetaConstructor> {
                 let Some(cbody) = pb.bytes(len as usize) else {
                     break;
                 };
-                let mut cp = Pb { b: cbody, i: 0 };
+                let mut cp = Pb::new(cbody);
                 // Constructor.flags has protobuf default `6` (PUBLIC, no annotations), just like
                 // Function.flags. Kotlin omits that field for an ordinary public primary constructor.
                 let mut flags = 6u64;
@@ -3537,7 +3361,7 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<MetaConstructor> {
 fn companion_name(ctx: &MetaCtx) -> Option<String> {
     let records = ctx.records;
     let d2 = ctx.d2;
-    let mut pb = Pb { b: ctx.msg, i: 0 };
+    let mut pb = Pb::new(ctx.msg);
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -3578,7 +3402,7 @@ fn sealed_subclasses(ctx: &MetaCtx) -> Vec<String> {
             }
         }
     };
-    let mut pb = Pb { b: ctx.msg, i: 0 };
+    let mut pb = Pb::new(ctx.msg);
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -3592,7 +3416,7 @@ fn sealed_subclasses(ctx: &MetaCtx) -> Vec<String> {
             (16, 2) => {
                 if let Some(n) = pb.varint() {
                     if let Some(bytes) = pb.bytes(n as usize) {
-                        let mut ip = Pb { b: bytes, i: 0 };
+                        let mut ip = Pb::new(bytes);
                         while let Some(id) = ip.varint() {
                             push_id(id as usize, &mut out);
                         }
@@ -3615,7 +3439,7 @@ type JvmSig = Option<ParsedJvmSignature>;
 /// Parse a `JvmPropertySignature` extension body → the getter (field 3) and setter (field 4)
 /// `JvmMethodSignature`s. Either is `None` when absent.
 fn parse_jvm_property_signature(body: &[u8]) -> (JvmSig, JvmSig) {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut getter = None;
     let mut setter = None;
     while !pb.at_end() {
@@ -3663,7 +3487,7 @@ fn decode_properties(
     let d2 = ctx.d2;
     let mut type_table = None;
     let mut props: Vec<&[u8]> = Vec::new();
-    let mut pb = Pb { b: ctx.msg, i: 0 };
+    let mut pb = Pb::new(ctx.msg);
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -3704,7 +3528,7 @@ fn decode_properties(
     const LEGACY_IS_VAR: u64 = 1 << 6;
     const LEGACY_IS_CONST: u64 = 1 << 9;
     for prop in props {
-        let mut p = Pb { b: prop, i: 0 };
+        let mut p = Pb::new(prop);
         let mut name_id = None;
         let mut ret = None;
         let mut ret_nullable = false;
@@ -3979,7 +3803,7 @@ pub struct InlineClass {
 fn inline_class(ctx: &MetaCtx) -> Option<InlineClass> {
     let records = ctx.records;
     let d2 = ctx.d2;
-    let mut pb = Pb { b: ctx.msg, i: 0 };
+    let mut pb = Pb::new(ctx.msg);
     let mut is_value = false;
     let mut underlying_class = None;
     let mut underlying_nullable = None;
@@ -4041,7 +3865,7 @@ fn inline_class(ctx: &MetaCtx) -> Option<InlineClass> {
     // (inline `Type`) or `returnTypeId` = 9 (a TypeTable id; 7 is the RECEIVER type id).
     if is_value && underlying_class.is_none() {
         if let Some(pname) = &property_name {
-            let mut pb = Pb { b: ctx.msg, i: 0 };
+            let mut pb = Pb::new(ctx.msg);
             while !pb.at_end() {
                 let Some(tag) = pb.varint() else { break };
                 match (tag >> 3, tag & 7) {
@@ -4094,7 +3918,7 @@ type PropNameAndReturn<'a> = (u64, Option<&'a [u8]>, Option<u64>);
 /// A `Property` message's `name` (field 2, string id), inline `returnType` (field 3), and
 /// `returnTypeId` (field 9, a TypeTable index — field 7 is the RECEIVER type id, unlike `Function`).
 fn parse_property_name_and_return(body: &[u8]) -> Option<PropNameAndReturn<'_>> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut name = None;
     let mut rt: Option<&[u8]> = None;
     let mut rtid = None;
@@ -4117,7 +3941,7 @@ fn parse_property_name_and_return(body: &[u8]) -> Option<PropNameAndReturn<'_>> 
 /// `firstNullable` (field 2) marks it nullable: kotlinc stores a nullable variant of type N at
 /// `firstNullable + k` positions, flagging every entry at `index >= firstNullable` nullable.
 fn type_table_entry(body: &[u8], index: usize) -> Option<(&[u8], bool)> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut types: Vec<&[u8]> = Vec::new();
     let mut first_nullable: Option<u64> = None;
     while !pb.at_end() {
@@ -4138,7 +3962,7 @@ fn type_table_entry(body: &[u8], index: usize) -> Option<(&[u8], bool)> {
 
 /// A `Type` message's `class_name` (field 6) and `nullable` flag (field 3).
 fn parse_type_class_and_nullable(body: &[u8]) -> (Option<u64>, bool) {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut class_name = None;
     let mut nullable = false;
     while !pb.at_end() {
@@ -4398,7 +4222,7 @@ const TYPE_ALIAS_TYPE_PARAMETER_FIELD: u64 = 3;
 /// Collect a message's repeated `type_parameter` sub-message bodies. The field number differs by
 /// carrier — callers pass the schema-owned field for their declaration kind.
 fn type_param_bodies(body: &[u8], field: u64) -> Vec<&[u8]> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut out = Vec::new();
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
@@ -4508,10 +4332,7 @@ pub fn read_kotlin_module(bytes: &[u8]) -> Vec<(String, Vec<String>)> {
     if bytes.len() < 20 {
         return Vec::new();
     }
-    let mut pb = Pb {
-        b: &bytes[20..],
-        i: 0,
-    };
+    let mut pb = Pb::new(&bytes[20..]);
     // Two carriers matter: the `PackageParts` messages (field 1) and the module-level `jvm_package_name`
     // table (field 3) — the `@JvmPackageName` relocation targets that a `PackageParts` references by
     // index. Collect both, then parse each `PackageParts` against the table.
@@ -4555,7 +4376,7 @@ pub fn read_kotlin_module(bytes: &[u8]) -> Vec<(String, Vec<String>)> {
 /// `class_with_jvm_package_name_short_name = 5`, `class_with_jvm_package_name_package_id = 6` (packed
 /// indices into the module `jvm_package_name` table; a list shorter than field 5 repeats its last entry).
 fn parse_package_parts(body: &[u8], jvm_pkgs: &[String]) -> Option<(String, Vec<String>)> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut pkg: Option<String> = None;
     let mut parts: Vec<String> = Vec::new();
     let mut jvm_shorts: Vec<String> = Vec::new();
@@ -4577,10 +4398,7 @@ fn parse_package_parts(body: &[u8], jvm_pkgs: &[String]) -> Option<(String, Vec<
             }
             (6, 2) => {
                 let n = pb.varint()? as usize;
-                let mut packed = Pb {
-                    b: pb.bytes(n)?,
-                    i: 0,
-                };
+                let mut packed = Pb::new(pb.bytes(n)?);
                 while !packed.at_end() {
                     jvm_ids.push(packed.varint()? as usize);
                 }
