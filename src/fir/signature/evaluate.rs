@@ -1228,21 +1228,22 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                             diagnostic_owner: site.diagnostic_owner,
                             kind,
                             mutable: site.mutable,
-                            dispatch_diagnostic_name: site.dispatch_diagnostic_name.map(|name| {
-                                match name {
-                                    SignatureDelegateDispatchName::Source(name) => {
-                                        ResolvedDelegateDispatchName::Source(
-                                            graph
-                                                .name(name)
-                                                .expect("a delegate dispatch spelling belongs to its graph")
-                                                .into(),
-                                        )
-                                    }
-                                    SignatureDelegateDispatchName::Anonymous => {
-                                        ResolvedDelegateDispatchName::Anonymous
-                                    }
-                                }
-                            }),
+                            dispatch_diagnostic_name: if site.dispatch_diagnostic_name.is_none() {
+                                None
+                            } else if site.dispatch_diagnostic_name.is_anonymous() {
+                                Some(ResolvedDelegateDispatchName::Anonymous)
+                            } else {
+                                let name = site
+                                    .dispatch_diagnostic_name
+                                    .source_name()
+                                    .expect("a named delegate dispatch retains its graph identity");
+                                Some(ResolvedDelegateDispatchName::Source(
+                                    graph
+                                        .name(name)
+                                        .expect("a delegate dispatch spelling belongs to its graph")
+                                        .into(),
+                                ))
+                            },
                             by_origin: site.by_origin,
                         };
                         let scope = graph

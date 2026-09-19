@@ -11,15 +11,41 @@ pub struct SignatureDelegateSite {
     pub mutable: bool,
     /// Original declaration spelling used only at the diagnostic boundary. This is deliberately
     /// distinct from the resolved dispatch identity.
-    pub dispatch_diagnostic_name: Option<SignatureDelegateDispatchName>,
+    pub dispatch_diagnostic_name: SignatureDelegateDispatchName,
     /// Exact source origin of the `by` keyword.
     pub by_origin: OriginId,
 }
 
+/// Packed diagnostic-only dispatch spelling retained inside [`crate::fir::SigExpr`]. Two reserved
+/// values distinguish no dispatch receiver from an anonymous receiver; every other value is the
+/// graph-owned source-name identity. Keeping this four bytes preserves the signature node's fixed
+/// allocation-free size without collapsing the semantic roles back into type/name inference.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SignatureDelegateDispatchName {
-    Source(SigNameId),
-    Anonymous,
+pub struct SignatureDelegateDispatchName(u32);
+
+impl SignatureDelegateDispatchName {
+    pub const NONE: Self = Self(u32::MAX);
+    pub const ANONYMOUS: Self = Self(u32::MAX - 1);
+
+    pub fn source(name: SigNameId) -> Self {
+        assert!(
+            name.raw() < Self::ANONYMOUS.0,
+            "signature name identity overlaps a reserved delegate diagnostic role"
+        );
+        Self(name.raw())
+    }
+
+    pub const fn is_none(self) -> bool {
+        self.0 == Self::NONE.0
+    }
+
+    pub const fn is_anonymous(self) -> bool {
+        self.0 == Self::ANONYMOUS.0
+    }
+
+    pub fn source_name(self) -> Option<SigNameId> {
+        (!self.is_none() && !self.is_anonymous()).then_some(SigNameId::from_raw(self.0))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
