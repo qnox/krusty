@@ -332,6 +332,22 @@ pub(super) fn add_deserialization_constructor(
             index: index as u32,
             value: default,
         });
+        // kotlinc attributes the DEFAULT VALUE to the property's own declaration line and the store
+        // that follows it back to the class's start line, so stepping through the constructor lands
+        // on the property whose default is being applied. The value is a nested expression and the
+        // store is a statement, which is why the two go through different maps.
+        let property_line = ir
+            .prop_decl_lines
+            .get(&(owner, named_fields[index].0.clone()))
+            .copied()
+            .filter(|line| *line != 0);
+        if let Some(line) = property_line {
+            ir.expr_source_lines.insert(default, line);
+            let start_line = ir.classes[class_id as usize].decl_start_line;
+            if start_line != 0 {
+                ir.expr_lines.insert(store_default, start_line);
+            }
+        }
         let defaulted = ir.add_expr(IrExpr::Block {
             stmts: vec![store_default],
             value: None,
