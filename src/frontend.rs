@@ -402,10 +402,6 @@ fn actualize_headers_and_collect_inherited_defaults(
     }
 }
 
-/// The compilation target a diagnostic names. krusty compiles for the JVM; when a second target
-/// ships, this belongs to the platform provider rather than to the frontend.
-const DIAGNOSTIC_PLATFORM: &str = "JVM";
-
 /// Reject every top-level expect subtree for which compact actualization found no platform root.
 /// This is a source-set semantic check, not a consequence of whether a particular expect spelling
 /// happens to have an executable body. Reporting it before exclusion also prevents body checking
@@ -467,11 +463,23 @@ fn report_unmatched_expect_roots(
             );
             continue;
         };
+        // The target is the PLATFORM's name for itself. A constant here would still say `for JVM`
+        // under another backend, so a provider that does not name itself is a broken contract
+        // rather than an invitation to pick one.
+        let Some(target) = symbols.libraries.diagnostic_target_name() else {
+            diags.error(
+                range,
+                format!(
+                    "internal error: the semantic platform did not name itself, so \
+                     {name} cannot be reported as unactualized"
+                ),
+            );
+            continue;
+        };
         diags.error(
             range,
             format!(
-                "expected {name} has no actual declaration in module <{module_name}> for \
-                 {DIAGNOSTIC_PLATFORM}"
+                "expected {name} has no actual declaration in module <{module_name}> for {target}"
             ),
         );
     }

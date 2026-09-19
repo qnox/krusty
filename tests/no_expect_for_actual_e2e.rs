@@ -23,6 +23,10 @@ const SENTENCE: &str = "has no corresponding expected declaration";
 struct Args<'a> {
     sources: &'a [std::path::PathBuf],
     reference: &'a [&'a str],
+    /// Whether both compilers are told this is a multiplatform project. `false` is a differential
+    /// of its own: `expect`/`actual` outside one is rejected at the modifier by both compilers,
+    /// and this check must not pile a second sentence on top of that.
+    multiplatform: bool,
 }
 
 /// Run both compilers over the files already written into `dir` and return both complete ledgers.
@@ -33,7 +37,11 @@ fn both_reports(
 ) -> (Vec<Reported>, Vec<Reported>) {
     let reference_out = dir.join(format!("{stem}-reference"));
     std::fs::create_dir_all(&reference_out).expect("reference output directory");
-    let mut reference_args = vec!["-Xmulti-platform".to_string()];
+    let mut reference_args: Vec<String> = args
+        .multiplatform
+        .then(|| "-Xmulti-platform".to_string())
+        .into_iter()
+        .collect();
     reference_args.extend(
         args.reference
             .iter()
@@ -54,12 +62,12 @@ fn both_reports(
         common::kotlinc_compile(&reference_args).expect("reference kotlinc available");
 
     let out = std::process::Command::new(common::krusty_binary())
-        .args([
-            "-XXLanguage:+MultiPlatformProjects",
-            "-no-stdlib",
-            "-no-jdk",
-            "-cp",
-        ])
+        .args(
+            args.multiplatform
+                .then_some("-XXLanguage:+MultiPlatformProjects")
+                .into_iter()
+                .chain(["-no-stdlib", "-no-jdk", "-cp"]),
+        )
         .arg(common::stdlib_jar())
         .arg("-d")
         .arg(dir.join(format!("{stem}-krusty")))
@@ -91,6 +99,7 @@ fn both(source: &str, stem: &str) -> (Vec<Reported>, Vec<Reported>) {
         Args {
             sources: std::slice::from_ref(&file),
             reference: &[],
+            multiplatform: true,
         },
     )
 }
@@ -134,41 +143,43 @@ fn both_split(
         Args {
             sources: &sources,
             reference: &["-Xexpect-actual-classes", &common_sources],
+            multiplatform: true,
         },
     )
 }
 
-/// Assert that krusty's report is the reference compiler's, EXCEPT for errors named in
+/// Assert that krusty's report is the reference compiler's, EXCEPT for the entries named in
 /// `unimplemented` — diagnostics krusty does not implement at all, which have nothing to do with
 /// this check and which the fixture cannot avoid provoking.
 ///
-/// The list is asserted from both sides: every entry must actually appear in the reference report,
-/// so it cannot outlive the gap it names, and what is left over after removing them must be
-/// krusty's complete ledger. A fixture that can avoid the diagnostic does so instead of listing it.
+/// Each excused entry is a COMPLETE ledger line, `file:line:column: message`, matched by equality
+/// and removed once. A prefix would excuse whatever else the reference compiler happened to say
+/// at the same coordinate, and a `contains`/`any` pair would excuse an entry that had moved to a
+/// different declaration. The list is asserted from both sides: every entry must appear in the
+/// reference report exactly as many times as it is named, so it cannot outlive the gap it names,
+/// and what is left after removing them must be krusty's complete ledger. A fixture that can
+/// avoid the diagnostic does so instead of listing it.
 fn assert_identical_except(source: &str, stem: &str, unimplemented: &[&str]) {
     let (reference, krusty) = both(source, stem);
     assert!(
         !reference.is_empty(),
         "the fixture must make the reference compiler report something"
     );
-    for message in unimplemented {
-        assert!(
-            reference
-                .iter()
-                .any(|entry| entry.rendered.starts_with(message)),
-            "the reference compiler no longer reports `{message}`, so it must stop being excused"
-        );
+    let mut expected: Vec<String> = reference.iter().map(ToString::to_string).collect();
+    for excused in unimplemented {
+        let at = expected
+            .iter()
+            .position(|entry| entry == excused)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the reference compiler no longer reports `{excused}`, so it must stop being \
+                     excused; it reported {expected:#?}"
+                )
+            });
+        expected.remove(at);
     }
-    let expected = reference
-        .iter()
-        .filter(|entry| {
-            !unimplemented
-                .iter()
-                .any(|message| entry.rendered.starts_with(message))
-        })
-        .collect::<Vec<_>>();
     assert_eq!(
-        krusty.iter().collect::<Vec<_>>(),
+        krusty.iter().map(ToString::to_string).collect::<Vec<_>>(),
         expected,
         "krusty's complete ledger must be the reference compiler's, minus the named gaps"
     );
@@ -332,10 +343,11 @@ fn a_type_alias_is_rendered_as_the_reference_compiler_renders_it() {
         "Aliases",
         // A function type IS a classifier with declaration-site variance (`Function1<in P1,
         // out R>`), so no function-type alias can avoid these two, and the shape is worth
-        // keeping. Both are diagnostics krusty does not implement at all.
+        // keeping. Both are diagnostics krusty does not implement at all, and each is named by
+        // its complete ledger line so neither can quietly stand in for something else.
         &[
-            "aliased class cannot have type parameters with declaration-site variance.",
-            "type arguments on the right-hand side of actual type alias must be its type parameters",
+            "Aliases.kt:7:1: aliased class cannot have type parameters with declaration-site variance.",
+            "Aliases.kt:7:1: type arguments on the right-hand side of actual type alias must be its type parameters in the same order, e.g. 'actual typealias Foo<A, B> = Bar<A, B>'.",
         ],
     );
 }
@@ -392,106 +404,107 @@ fn a_matched_actual_is_silent() {
 /// was a real regression caught by the harness, not a hypothetical.
 #[test]
 fn an_actual_matched_through_an_alias_is_silent() {
-    let dir = common::scratch_dir().expect("scratch dir");
-    let common_file = dir.join("Common.kt");
-    let platform = dir.join("Platform.kt");
-    std::fs::write(
-        &common_file,
-        "package plib
-
-         expect class S
-         expect fun f(value: S): S
-         expect val S.tag: S
-",
-    )
-    .unwrap();
-    std::fs::write(
-        &platform,
-        "package plib
-
-         actual fun f(value: String): String = value
-         actual val String.tag: String get() = this
-         actual typealias S = String
-",
-    )
-    .unwrap();
-    let out = std::process::Command::new(common::krusty_binary())
-        .args([
-            "-XXLanguage:+MultiPlatformProjects",
-            "-no-stdlib",
-            "-no-jdk",
-            "-cp",
-        ])
-        .arg(common::stdlib_jar())
-        .arg("-d")
-        .arg(&dir)
-        .arg(&common_file)
-        .arg(&platform)
-        .output()
-        .expect("run krusty");
-    let mut report = String::from_utf8_lossy(&out.stdout).into_owned();
-    report.push_str(&String::from_utf8_lossy(&out.stderr));
-    assert!(
-        !report.contains(SENTENCE),
-        "an `actual` paired through an alias is silent:\n{report}"
+    // `stray` actualizes nothing, so the ledger this compares is NOT empty: the alias-matched
+    // declarations are shown to be silent by their ABSENCE from a complete report that names
+    // something else, rather than by a report that could be empty because nothing ran.
+    let (reference, krusty) = both_split(
+        "AliasMatched",
+        &[(
+            "AliasMatchedCommon.kt",
+            "package plib\n\
+             \n\
+             expect class S\n\
+             expect fun f(value: S): S\n\
+             expect val S.tag: S\n",
+        )],
+        &[(
+            "AliasMatchedPlatform.kt",
+            "package plib\n\
+             \n\
+             actual fun f(value: String): String = value\n\
+             actual val String.tag: String get() = this\n\
+             actual typealias S = String\n\
+             actual fun stray(): Int = 1\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert_eq!(
+        reference
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec![
+            "AliasMatchedPlatform.kt:6:12: 'public final actual fun stray(): Int' has no corresponding expected declaration"
+                .to_string(),
+        ],
+        "only the unmatched declaration is reported"
     );
 }
 
 /// An `actual` in a file whose `expect` lives in ANOTHER file of the same source set is matched:
 /// the question is about the source set, not about one file.
+///
+/// `stray` actualizes nothing, so the complete ledger this compares is not empty and `helper`'s
+/// silence is its absence from a report that names something else.
 #[test]
 fn the_expect_may_live_in_another_file() {
-    let dir = common::scratch_dir().expect("scratch dir");
-    let header = dir.join("Header.kt");
-    let platform = dir.join("Platform.kt");
-    std::fs::write(&header, "package plib\n\nexpect fun helper(): Int\n").unwrap();
-    std::fs::write(&platform, "package plib\n\nactual fun helper(): Int = 1\n").unwrap();
-    let out = std::process::Command::new(common::krusty_binary())
-        .args([
-            "-XXLanguage:+MultiPlatformProjects",
-            "-no-stdlib",
-            "-no-jdk",
-            "-cp",
-        ])
-        .arg(common::stdlib_jar())
-        .arg("-d")
-        .arg(&dir)
-        .arg(&header)
-        .arg(&platform)
-        .output()
-        .expect("run krusty");
-    let mut report = String::from_utf8_lossy(&out.stdout).into_owned();
-    report.push_str(&String::from_utf8_lossy(&out.stderr));
-    assert!(
-        !report.contains(SENTENCE),
-        "an `actual` matched across files is silent:\n{report}"
+    let (reference, krusty) = both_split(
+        "CrossFileMatch",
+        &[(
+            "CrossFileMatchCommon.kt",
+            "package plib\n\nexpect fun helper(): Int\n",
+        )],
+        &[(
+            "CrossFileMatchPlatform.kt",
+            "package plib\n\nactual fun helper(): Int = 1\n\nactual fun stray(): Int = 2\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert_eq!(
+        reference
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec![
+            "CrossFileMatchPlatform.kt:5:12: 'public final actual fun stray(): Int' has no corresponding expected declaration"
+                .to_string(),
+        ],
+        "only the unmatched declaration is reported"
     );
 }
 
 /// Without the multiplatform feature the modifier is rejected outright, and this check does not
 /// pile a second sentence on top of that one.
+///
+/// A differential like every other case here: the reference compiler is run without
+/// `-Xmulti-platform` too, so what it reports for the same source is the expectation, and the
+/// comparison is each compiler's COMPLETE ledger rather than a probe for one sentence's absence.
 #[test]
 fn the_check_needs_the_multiplatform_feature() {
     let dir = common::scratch_dir().expect("scratch dir");
-    let file = dir.join("Main.kt");
-    std::fs::write(&file, "package plib\n\nactual fun helper(): Int = 1\n").unwrap();
-    let out = std::process::Command::new(common::krusty_binary())
-        .args(["-no-stdlib", "-no-jdk", "-cp"])
-        .arg(common::stdlib_jar())
-        .arg("-d")
-        .arg(&dir)
-        .arg(&file)
-        .output()
-        .expect("run krusty");
-    let mut report = String::from_utf8_lossy(&out.stdout).into_owned();
-    report.push_str(&String::from_utf8_lossy(&out.stderr));
-    assert!(
-        report.contains("can be used only in multiplatform projects"),
-        "the feature gate still reports:\n{report}"
+    let file = dir.join("UngatedActual.kt");
+    std::fs::write(&file, "package plib\n\nactual fun helper(): Int = 1\n")
+        .expect("write the fixture");
+    let (reference, krusty) = both_reports(
+        &dir,
+        "UngatedActual",
+        Args {
+            sources: std::slice::from_ref(&file),
+            reference: &[],
+            multiplatform: false,
+        },
     );
-    assert!(
-        !report.contains(SENTENCE),
-        "and nothing else is added on top of it:\n{report}"
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert_eq!(
+        reference
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec![
+            "UngatedActual.kt:3:1: 'expect' and 'actual' declarations can be used only in multiplatform projects. Learn more about Kotlin Multiplatform: https://kotl.in/multiplatform-setup"
+                .to_string(),
+        ],
+        "the feature gate is the whole report: nothing is added on top of it"
     );
 }
 

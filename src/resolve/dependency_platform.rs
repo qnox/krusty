@@ -469,6 +469,12 @@ impl SemanticPlatform for DependencyPlatform {
             .external_property_diagnostic_label(property, name, ty)
     }
 
+    /// The target is the one underneath: this wrapper adds already-compiled sibling declarations
+    /// to a platform, it is not a platform of its own.
+    fn diagnostic_target_name(&self) -> Option<&str> {
+        self.platform.diagnostic_target_name()
+    }
+
     fn library_value_form(&self, ty: Ty) -> Ty {
         self.platform.library_value_form(ty)
     }

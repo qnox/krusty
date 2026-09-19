@@ -598,6 +598,18 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         None
     }
 
+    /// The name this platform answers to in a source-set diagnostic — the token the reference
+    /// compiler writes in `expected <name> has no actual declaration in module <m> for <target>`.
+    ///
+    /// A platform names ITSELF. The common frontend has no way to know which target it is
+    /// compiling for, and a constant there is one target's name written into code that is
+    /// supposed to be target-neutral: it would still say `for JVM` under a JS backend. `None`
+    /// means this provider takes no part in source-set diagnostics, and a check that needs the
+    /// name reports an internal error rather than inventing one.
+    fn diagnostic_target_name(&self) -> Option<&str> {
+        None
+    }
+
     /// Normalize a semantic type to the identity used when comparing source call arguments against
     /// compiled-library signatures. This is not an emit descriptor; it is a semantic compatibility key.
     /// Implementations that do not need library-name normalization return the type unchanged.

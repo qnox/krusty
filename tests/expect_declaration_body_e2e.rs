@@ -57,23 +57,37 @@ fn ledger(report: &str, sources: &[(&str, &str)]) -> Vec<String> {
         .flat_map(|(_, source)| source.lines())
         .map(str::trim_end)
         .collect();
-    report
-        .lines()
-        .filter_map(|line| {
-            let (path, rest) = line.split_once(':')?;
-            let name = path.rsplit('/').next()?;
-            if !sources.iter().any(|(source, _)| *source == name) {
-                return None;
-            }
-            let (line_no, rest) = rest.split_once(':')?;
-            let (column, message) = rest.split_once(": ")?;
-            line_no.parse::<u32>().ok()?;
-            column.parse::<u32>().ok()?;
-            Some(format!("{name}:{line_no}:{column}: {message}"))
-        })
-        .chain(std::iter::empty())
-        .filter(|entry| !echoes.contains(&entry.as_str()))
-        .collect()
+    let mut entries = Vec::new();
+    for line in report.lines() {
+        // A line that does not NAME one of this fixture's files is not a diagnostic header: it is
+        // the source echo, a caret run, or a continuation. Those are skipped structurally.
+        let Some((path, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let Some(name) = path
+            .rsplit('/')
+            .next()
+            .filter(|name| sources.iter().any(|(source, _)| source == name))
+        else {
+            continue;
+        };
+        // From here the line is a header for a file under test, so it MUST parse. Dropping one
+        // silently — which `filter_map` did — is how a complete-ledger comparison passes on a
+        // report it could not read: a diagnostic in an unexpected shape simply disappeared.
+        let entry = rest
+            .split_once(':')
+            .and_then(|(line_no, rest)| {
+                let (column, message) = rest.split_once(": ")?;
+                line_no.parse::<u32>().ok()?;
+                column.parse::<u32>().ok()?;
+                Some(format!("{name}:{line_no}:{column}: {message}"))
+            })
+            .unwrap_or_else(|| panic!("a diagnostic header for {name} could not be read: {line}"));
+        if !echoes.contains(&entry.as_str()) {
+            entries.push(entry);
+        }
+    }
+    entries
 }
 
 /// The reference compiler's ledger for the same sources, so every expectation below is measured
