@@ -112,6 +112,8 @@ fn a_callable_is_rendered_as_the_reference_compiler_renders_it() {
     assert_identical(
         "package plib\n\
          \n\
+         class Parcel<T>\n\
+         \n\
          actual fun simple(): Int = 1\n\
          actual fun inferred() = 1\n\
          actual fun unitRet() { }\n\
@@ -119,15 +121,35 @@ fn a_callable_is_rendered_as_the_reference_compiler_renders_it() {
          actual fun vararged(vararg xs: Int) { }\n\
          actual fun defaulted(a: Int = 1) { }\n\
          actual fun <T> generic(t: T): T = t\n\
-         actual fun <T : Comparable<T>> bounded(t: T): T = t\n\
-         actual fun Int.receiver(): Int = this\n\
+         actual fun <T : Parcel<T>> bounded(t: T): T = t\n\
+         actual fun Parcel<Int>.receiver(): Int = 1\n\
          actual fun functionParam(f: (Int) -> String): Int = 1\n\
          actual suspend fun susp(): Int = 1\n\
          actual inline fun inl(): Int = 1\n\
          internal actual fun internalFun(): Int = 1\n\
          private actual fun privateFun(): Int = 1\n\
-         actual fun manyParams(a: Int, b: String?, c: List<Int>, vararg rest: Long): Int = 1\n",
+         actual fun manyParams(a: Int, b: String?, c: Parcel<Int>, vararg rest: Long): Int = 1\n",
         "Callables",
+    );
+}
+
+/// The same renderings over STDLIB classifiers, as a named integration case.
+///
+/// The mechanism cases above deliberately use a fixture-owned `Parcel<T>`: a stdlib classifier can
+/// agree through builtin type handling rather than through the declaration renderer under test, so
+/// it proves parity for those declarations and not that the renderer is general. This is where
+/// that parity is measured, and it is not where a rendering rule is established.
+#[test]
+fn stdlib_shaped_declarations_render_the_same_way() {
+    assert_identical(
+        "package plib\n\
+         \n\
+         actual fun <T : Comparable<T>> bounded(t: T): T = t\n\
+         actual fun Int.receiver(): Int = this\n\
+         actual fun listParam(c: List<Int>): Int = 1\n\
+         actual val <T> List<T>.ext: Int get() = 1\n\
+         actual typealias GenericAlias<T> = List<T>\n",
+        "Stdlib",
     );
 }
 
@@ -158,10 +180,12 @@ fn a_property_is_rendered_as_the_reference_compiler_renders_it() {
     assert_identical(
         "package plib\n\
          \n\
+         class Parcel<T>\n\
+         \n\
          actual val prop: Int = 2\n\
          actual var mutable: String = \"\"\n\
          actual val lambdaProp: (Int) -> Unit = {}\n\
-         actual val <T> List<T>.ext: Int get() = 1\n\
+         actual val <T> Parcel<T>.ext: Int get() = 1\n\
          internal actual val internalProp: Int = 3\n\
          actual const val constant: Int = 4\n\
          actual lateinit var late: String\n",
@@ -186,7 +210,7 @@ fn a_classifier_is_rendered_as_the_reference_compiler_renders_it() {
          \n\
          actual class Cls\n\
          actual class Generic<T>\n\
-         actual class BoundedParams<T : Comparable<T>, U>\n\
+         actual class BoundedParams<T : Base, U>\n\
          actual object Obj\n\
          actual interface Iface\n\
          actual sealed interface SealedIface\n\
@@ -216,8 +240,10 @@ fn a_type_alias_is_rendered_as_the_reference_compiler_renders_it() {
     assert_identical(
         "package plib\n\
          \n\
+         class Parcel<T>\n\
+         \n\
          actual typealias Alias = String\n\
-         actual typealias GenericAlias<T> = List<T>\n\
+         actual typealias GenericAlias<T> = Parcel<T>\n\
          actual typealias FunAlias = (Int) -> String\n",
         "Aliases",
     );
