@@ -1066,11 +1066,44 @@ fn semantic_constructor(
     })
 }
 
+#[derive(Clone, Copy)]
+struct SemanticClassHeader {
+    flags: u64,
+    fq_name: u64,
+}
+
+fn semantic_class_header(body: &[u8]) -> Result<SemanticClassHeader, PackageFragmentDecodeError> {
+    let mut cursor = Cursor::new(body, 0);
+    let mut flags = 6;
+    let mut fq_name = None;
+    while cursor.offset < body.len() {
+        let (number, wire) = field(&mut cursor, "class declaration")?;
+        match (number, wire) {
+            (1, 0) => flags = cursor.varint("class flags")?,
+            (3, 0) => fq_name = Some(cursor.varint("class qualified-name id")?),
+            (_, wire) => cursor.skip(wire, "class declaration")?,
+        }
+    }
+    Ok(SemanticClassHeader {
+        flags,
+        fq_name: fq_name.ok_or_else(|| semantic_error("class has no qualified name"))?,
+    })
+}
+
 fn semantic_class(
     body: &[u8],
     strings: &[String],
     qnames: &[QName],
-) -> Result<(String, metadata::BuiltinClass), PackageFragmentDecodeError> {
+    header: SemanticClassHeader,
+    inherited_type_parameters: &std::collections::HashMap<u64, String>,
+) -> Result<
+    (
+        String,
+        metadata::BuiltinClass,
+        std::collections::HashMap<u64, String>,
+    ),
+    PackageFragmentDecodeError,
+> {
     validate_annotation_fields(body, &[25, 170], strings, qnames, "class declaration")?;
     let (types, first_nullable) = match type_table_bodies(body, "class declaration")? {
         Some(table) => (table.types, table.first_nullable),
@@ -1085,12 +1118,10 @@ fn semantic_class(
     let type_parameter_bodies = message_bodies(body, 5, "class declaration")?;
     let (type_params, type_parameters) = tables.type_parameters(
         &type_parameter_bodies,
-        &std::collections::HashMap::new(),
+        inherited_type_parameters,
         "class declaration",
     )?;
     let mut cursor = Cursor::new(body, 0);
-    let mut flags = 6;
-    let mut fq_name = None;
     let mut companion_name = None;
     let mut supertype_ids = Vec::new();
     let mut supertype_bodies = Vec::new();
@@ -1101,7 +1132,6 @@ fn semantic_class(
     while cursor.offset < body.len() {
         let (number, wire) = field(&mut cursor, "class declaration")?;
         match (number, wire) {
-            (1, 0) => flags = cursor.varint("class flags")?,
             (2, 0) => supertype_ids.push(cursor.varint("class supertype id")?),
             (2, 2) => {
                 let (packed, base) = cursor.length_delimited("class supertype ids")?;
@@ -1110,7 +1140,6 @@ fn semantic_class(
                     supertype_ids.push(packed.varint("class supertype id")?);
                 }
             }
-            (3, 0) => fq_name = Some(cursor.varint("class qualified-name id")?),
             (4, 0) => companion_name = Some(cursor.varint("companion name id")?),
             (7, 0) => {
                 let id = cursor.varint("nested-class name id")?;
@@ -1168,12 +1197,7 @@ fn semantic_class(
             (_, wire) => cursor.skip(wire, "class declaration")?,
         }
     }
-    let fq_name = semantic_qname(
-        strings,
-        qnames,
-        fq_name.ok_or_else(|| semantic_error("class has no qualified name"))?,
-        "class declaration",
-    )?;
+    let fq_name = semantic_qname(strings, qnames, header.fq_name, "class declaration")?;
     let companion_name = companion_name
         .map(|id| semantic_string(strings, id, "class companion"))
         .transpose()?;
@@ -1226,12 +1250,13 @@ fn semantic_class(
             companion_name,
             type_params,
             nullable_member_returns,
-            kind: metadata::builtin_class_kind(flags),
-            visibility: metadata::builtin_class_visibility(flags),
-            is_expect: flags & (1 << 12) != 0,
+            kind: metadata::builtin_class_kind(header.flags),
+            visibility: metadata::builtin_class_visibility(header.flags),
+            is_expect: header.flags & (1 << 12) != 0,
             is_nested,
-            access: metadata::builtin_class_access(flags),
+            access: metadata::builtin_class_access(header.flags),
         },
+        type_parameters,
     ))
 }
 
@@ -1279,8 +1304,77 @@ pub(super) fn parse(
             validate_type_alias(body, &tables, &std::collections::HashMap::new())?;
         }
     }
-    for body in classes {
-        let (name, class) = semantic_class(body, &strings, &qnames)?;
+    let class_headers = classes
+        .iter()
+        .map(|body| semantic_class_header(body))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut class_by_qname = std::collections::HashMap::new();
+    for (index, header) in class_headers.iter().enumerate() {
+        if class_by_qname.insert(header.fq_name, index).is_some() {
+            return Err(semantic_error(format!(
+                "duplicate class qualified-name id {}",
+                header.fq_name
+            )));
+        }
+    }
+    let mut decoded = (0..classes.len()).map(|_| None).collect::<Vec<
+        Option<(
+            String,
+            metadata::BuiltinClass,
+            std::collections::HashMap<u64, String>,
+        )>,
+    >>();
+    let mut remaining = classes.len();
+    while remaining != 0 {
+        let mut progressed = false;
+        for index in 0..classes.len() {
+            if decoded[index].is_some() {
+                continue;
+            }
+            let header = class_headers[index];
+            let inherited = if header.flags & (1 << 9) != 0 {
+                let qname_index = usize::try_from(header.fq_name)
+                    .map_err(|_| semantic_error("class qualified-name id exceeds host range"))?;
+                let parent = qnames
+                    .get(qname_index)
+                    .ok_or_else(|| {
+                        semantic_error(format!(
+                            "class declaration references absent qualified name {}",
+                            header.fq_name
+                        ))
+                    })?
+                    .parent;
+                let parent = usize::try_from(parent)
+                    .map_err(|_| semantic_error("inner class has no enclosing class identity"))?;
+                let parent_index = class_by_qname.get(&(parent as u64)).ok_or_else(|| {
+                    semantic_error("inner class enclosing declaration is absent from its fragment")
+                })?;
+                let Some((_, _, parent_scope)) = &decoded[*parent_index] else {
+                    continue;
+                };
+                parent_scope.clone()
+            } else {
+                std::collections::HashMap::new()
+            };
+            decoded[index] = Some(semantic_class(
+                classes[index],
+                &strings,
+                &qnames,
+                header,
+                &inherited,
+            )?);
+            remaining -= 1;
+            progressed = true;
+        }
+        if !progressed {
+            return Err(semantic_error(
+                "cyclic inner-class enclosing declaration chain",
+            ));
+        }
+    }
+    for decoded in decoded {
+        let (name, class, _) =
+            decoded.ok_or_else(|| semantic_error("class declaration was not decoded"))?;
         if result.classes.insert(name.clone(), class).is_some() {
             return Err(semantic_error(format!("duplicate class identity {name}")));
         }
@@ -1357,6 +1451,14 @@ mod tests {
         fragment
     }
 
+    fn fragment_with_classes(strings: &[&str], qnames: &[Vec<u8>], classes: &[Vec<u8>]) -> Vec<u8> {
+        let mut fragment = fragment(strings, qnames, &[]);
+        for class in classes {
+            bytes_field(&mut fragment, 4, class);
+        }
+        fragment
+    }
+
     fn kotlin_types(names: &[&'static str]) -> (Vec<&'static str>, Vec<Vec<u8>>) {
         let mut strings = vec!["f", "p", "kotlin"];
         let mut qnames = vec![qname(2, None, 1)];
@@ -1411,6 +1513,64 @@ mod tests {
         assert_eq!(package.functions.len(), 1);
         assert_eq!(package.functions[0].ret.internal(), Some("kotlin/String"));
         assert!(package.functions[0].ret.nullable());
+    }
+
+    #[test]
+    fn inner_class_supertype_resolves_the_enclosing_class_type_parameter() {
+        let strings = ["p", "Outer", "Inner", "T", "Base", "StaticNested"];
+        let qnames = [
+            qname(0, None, 1),
+            qname(1, Some(0), 0),
+            qname(2, Some(1), 0),
+            qname(4, Some(0), 0),
+            qname(5, Some(1), 0),
+        ];
+
+        let mut type_parameter = Vec::new();
+        int_field(&mut type_parameter, 1, 0);
+        int_field(&mut type_parameter, 2, 3);
+        let mut outer = Vec::new();
+        int_field(&mut outer, 3, 1);
+        bytes_field(&mut outer, 5, &type_parameter);
+
+        let mut parameter_type = Vec::new();
+        int_field(&mut parameter_type, 7, 0);
+        let mut argument = Vec::new();
+        int_field(&mut argument, 3, 0);
+        let mut base_of_parameter = Vec::new();
+        bytes_field(&mut base_of_parameter, 2, &argument);
+        int_field(&mut base_of_parameter, 6, 3);
+        let table = type_table(&[parameter_type, base_of_parameter], None);
+        let mut inner = Vec::new();
+        int_field(&mut inner, 1, 530);
+        int_field(&mut inner, 2, 1);
+        int_field(&mut inner, 3, 2);
+        bytes_field(&mut inner, 30, &table);
+
+        // KLIB fragments do not promise enclosing-before-nested declaration order. The inner class
+        // still resolves Type.type_parameter = 0 through its enclosing class's declaration scope.
+        let bytes = fragment_with_classes(&strings, &qnames, &[inner, outer.clone()]);
+        let package = parse_package_fragment_checked(&bytes).expect("valid inner-class type scope");
+        assert_eq!(package.classes["p/Outer"].type_params[0].name, "T");
+        assert!(package.classes["p/Outer.Inner"].type_params.is_empty());
+        assert_eq!(
+            package.classes["p/Outer.Inner"].supertype_tys[0].render(),
+            "p/Base<T>"
+        );
+
+        let mut static_nested = Vec::new();
+        int_field(&mut static_nested, 1, 2);
+        int_field(&mut static_nested, 2, 1);
+        int_field(&mut static_nested, 3, 4);
+        bytes_field(&mut static_nested, 30, &table);
+        let bytes = fragment_with_classes(&strings, &qnames, &[outer, static_nested]);
+        assert_eq!(
+            exact_error(&bytes),
+            (
+                0,
+                "class supertype references absent type parameter 0".to_string()
+            )
+        );
     }
 
     #[test]
