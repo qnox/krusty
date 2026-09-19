@@ -5456,13 +5456,12 @@ mod builtin_class_access_tests {
 #[cfg(test)]
 mod module_reader_tests {
     use super::{
-        decode_metadata_type, decode_properties, parse_function, parse_package_fragment,
-        parse_type_alias, parse_type_facts, primary_erasure_bounds, read_kotlin_module,
-        value_parameter_type, MetaCtx, ParsedValueParam,
+        decode_metadata_type, decode_properties, klib_validation, parse_function, parse_type_alias,
+        parse_type_facts, primary_erasure_bounds, read_kotlin_module, value_parameter_type,
+        BuiltinTy, MetaCtx, ParsedValueParam,
     };
-    use crate::libraries::TypeKind;
     use crate::metadata::module::build_kotlin_module;
-    use crate::types::{Ty, Visibility};
+    use crate::types::Ty;
     use std::collections::HashMap;
 
     /// The decoded contract of a stdlib function, or `None` when the stdlib jar is not

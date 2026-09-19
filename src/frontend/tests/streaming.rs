@@ -2106,7 +2106,7 @@ fn dependency_receiver_function_typealias_keeps_its_function_shape() {
         &inputs,
         1,
         1,
-        platform,
+        platform.into(),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,

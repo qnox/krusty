@@ -881,7 +881,7 @@ impl KlibManifest {
             valid_up_to: error.valid_up_to(),
         })?;
         let mut values = BTreeMap::new();
-        for logical in logical_lines(&text) {
+        for logical in logical_lines(text) {
             let Some((key, value)) = split_property(&logical)? else {
                 continue;
             };
@@ -1140,7 +1140,9 @@ mod tests {
     fn raw_zip(hex: &str) -> Vec<u8> {
         assert_eq!(hex.len() % 2, 0);
         hex.as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let digit = |byte: u8| match byte {
                     b'0'..=b'9' => byte - b'0',

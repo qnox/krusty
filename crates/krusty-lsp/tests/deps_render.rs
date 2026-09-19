@@ -624,12 +624,23 @@ fn a_ranked_dependency_class_becomes_a_file_with_a_range() {
 
     let candidates = index.candidates("AbstractList", 4);
     assert!(!candidates.is_empty());
-    let located = krusty_lsp::locate_dependencies(&cp, &cache, candidates, false);
-
-    let listed = located
+    let listed_index = candidates
         .iter()
-        .find(|found| found.candidate.internal == "kotlin/collections/AbstractList")
-        .expect("the ranked class must be locatable");
+        .position(|candidate| candidate.internal == "kotlin/collections/AbstractList")
+        .expect("the ranked class must be present");
+    let expected = candidates.clone();
+    let located = krusty_lsp::locate_dependencies(&cp, &cache, candidates, false)
+        .expect("the ranked classes must be locatable");
+    assert_eq!(
+        located
+            .iter()
+            .map(|found| &found.candidate)
+            .collect::<Vec<_>>(),
+        expected.iter().collect::<Vec<_>>(),
+        "every ranked candidate must be located once and in rank order"
+    );
+
+    let listed = &located[listed_index];
     // A client that will not open a URI without a range needs both, and the file has to be on disk
     // by the time the response leaves.
     assert!(

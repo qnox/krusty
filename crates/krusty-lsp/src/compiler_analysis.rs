@@ -14,6 +14,7 @@ use krusty::ast::{ClassDecl, Decl, File, FunBody, FunDecl, PropDecl, Stmt, TypeR
 use krusty::diag::{DiagSink, Diagnostic, DiagnosticKind, Severity};
 use krusty::features::LangFeatures;
 use krusty::frontend;
+#[cfg(test)]
 use krusty::libraries::SemanticPlatform;
 use krusty::source::SourceInput;
 use krusty::types::Ty;
