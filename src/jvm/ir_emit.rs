@@ -33,6 +33,7 @@ mod enum_entry_subclass;
 mod enum_metadata;
 mod field_write;
 mod function_debug;
+mod implicit_reference_coercion;
 mod inline_body_emission;
 mod interface_compatibility;
 mod member_schedule;
@@ -17311,15 +17312,14 @@ impl<'a> Emitter<'a> {
                             );
                         } else if at.is_jvm_scalar() && target.is_jvm_scalar() && at != target {
                             emit_num_conv(at, target, code);
-                        } else if at.is_reference()
-                            && target.is_reference()
-                            && type_descriptor(at) != type_descriptor(target)
-                        {
-                            let internal = crate::jvm::names::instanceof_internal_name(target);
-                            if internal != "java/lang/Object" {
-                                let class = self.cw.class_ref(&internal);
-                                code.checkcast(class);
-                            }
+                        } else {
+                            implicit_reference_coercion::emit(
+                                self.ir.expr(*arg),
+                                at,
+                                target,
+                                self.cw,
+                                code,
+                            );
                         }
                     }
                     IrTypeOp::SafeCast => {}
