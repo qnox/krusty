@@ -31,12 +31,18 @@ struct ElementDecode<'a> {
 }
 
 impl ElementDecode<'_> {
-    /// `cache[k].value` when element `k` is cached — the `Lazy` yields `Object`, which the decode
-    /// call's own parameter type narrows at the use site, exactly as kotlinc does.
+    /// `cache[k].value` when element `k` is cached — narrowed from the `Lazy`'s erased `Object` to
+    /// the decode call's `DeserializationStrategy` parameter, exactly as kotlinc does.
     fn cached_slot(&self, ir: &mut IrFile, k: usize) -> Option<ExprId> {
         let (local, plan) = self.cache?;
-        plan.caches(k, self.fields.len())
-            .then(|| super::child_serializer_cache::read_cached_slot(ir, local, k))
+        super::child_serializer_cache::cached_element(
+            ir,
+            Some(plan),
+            Some(local),
+            k,
+            self.fields.len(),
+            "kotlinx/serialization/DeserializationStrategy",
+        )
     }
 
     fn block(&self, ir: &mut IrFile, ctx: &PluginContext, k: usize) -> ExprId {

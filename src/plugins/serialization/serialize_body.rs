@@ -110,15 +110,15 @@ impl SerializeBody<'_> {
         // built here. The PLAN decides, so this can never read a slot the serialized class did not
         // write.
         let element_serializer = |ir: &mut IrFile, ctx: &PluginContext, i: usize, ty: &Ty| {
-            if plan
-                .as_ref()
-                .is_some_and(|plan| plan.caches(i, fields.len()))
-            {
-                return Some(super::child_serializer_cache::read_cached_slot(
-                    ir,
-                    cache_local,
-                    i,
-                ));
+            if let Some(cached) = super::child_serializer_cache::cached_element(
+                ir,
+                plan.as_ref(),
+                Some(cache_local),
+                i,
+                fields.len(),
+                "kotlinx/serialization/SerializationStrategy",
+            ) {
+                return Some(cached);
             }
             element_serializer_expr(ir, ctx, ty)
         };

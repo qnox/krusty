@@ -12,9 +12,9 @@
 //! classes may hold collections of each other — so the cache cannot be built while the loop that
 //! creates those classes is still running.
 use super::{
-    class_ty, collection_serializer_builder, element_serializer_expr, field_serializer_of,
-    kserializer_of, property_is_contextual, type_name, Callee, ClassId, ExprId, InlineKind,
-    IrConst, IrExpr, IrFile, IrFunction, PluginContext, Ty, TypeName,
+    class_ty, collection_serializer_builder, field_serializer_of, kserializer_of,
+    property_is_contextual, type_name, Callee, ClassId, ExprId, InlineKind, IrConst, IrExpr,
+    IrFile, IrFunction, IrTypeOp, PluginContext, Ty, TypeName,
 };
 
 /// One slot of the `Lazy[]` cache: a `Lazy<KSerializer<Any>>`, nullable because a property whose
@@ -60,30 +60,31 @@ pub(super) fn load_cache_statement(
     })
 }
 
-/// Element `k`'s serializer taken OUT of the cache, or `None` when it has no slot in this plan.
+/// Element `k`'s serializer taken OUT of the cache and narrowed to the interface its consumer
+/// accepts, or `None` when it has no slot in this plan.
 ///
-/// The cache holds a property's serializer without its own nullability: a `List<T>?` caches the
-/// list serializer and wraps `.nullable` at each use, which is also where the `Object` the `Lazy`
-/// yields is narrowed. The arity is checked against the caller's own element count by
-/// [`ChildSerializerCachePlan::caches`].
+/// The cache already holds the complete serializer, including nullable wrapping. `Lazy.getValue`
+/// erases it to `Object`, so the reader must restore the consumer's interface (`KSerializer`,
+/// `SerializationStrategy`, or `DeserializationStrategy`) at this boundary. The arity is checked
+/// against the caller's own element count by [`ChildSerializerCachePlan::caches`].
 pub(super) fn cached_element(
     ir: &mut IrFile,
     plan: Option<&ChildSerializerCachePlan>,
     cache_local: Option<u32>,
     k: usize,
     elements: usize,
-    ty: &Ty,
+    consumer_interface: &str,
 ) -> Option<ExprId> {
     let local = cache_local?;
     if !plan?.caches(k, elements) {
         return None;
     }
     let cached = read_cached_slot(ir, local, k);
-    Some(if super::is_nullable(ty) {
-        super::wrap_nullable_serializer(ir, cached)
-    } else {
-        cached
-    })
+    Some(ir.add_expr(IrExpr::TypeOp {
+        op: IrTypeOp::Cast,
+        arg: cached,
+        type_operand: class_ty(consumer_interface),
+    }))
 }
 
 /// Read element `k` out of a `Lazy[]` cache already loaded into `cache_local` — `cache[k].value`.
@@ -92,7 +93,7 @@ pub(super) fn cached_element(
 /// shape is a property of how this module STORES the cache, so it is derived here once instead of
 /// each reader repeating `kotlin/Lazy`'s member spelling. The value arrives as `Object`, which the
 /// use site narrows to what it takes.
-pub(super) fn read_cached_slot(ir: &mut IrFile, cache_local: u32, k: usize) -> ExprId {
+fn read_cached_slot(ir: &mut IrFile, cache_local: u32, k: usize) -> ExprId {
     let cache = ir.add_expr(IrExpr::GetValue(cache_local));
     let index = ir.add_expr(IrExpr::Const(IrConst::Int(k as i32)));
     let slot = ir.add_expr(IrExpr::Call {
@@ -474,7 +475,7 @@ impl ChildSerializersBody<'_> {
                     cache_local,
                     i,
                     serializer_field_types.len(),
-                    &serializer_field_types[i],
+                    super::KSERIALIZER_FQ,
                 ) {
                     cached
                 } else if let Some(inst) = super::contextual_serializer_for(

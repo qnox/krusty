@@ -224,6 +224,12 @@ const COMPOSED_ELEMENTS_SRC: &str = "import kotlinx.serialization.Serializable\n
      @Serializable\n\
      data class Holder(val count: Int, val items: List<Item>, val tags: List<String>)\n";
 
+const NULLABLE_COMPOSED_ELEMENT_SRC: &str = "import kotlinx.serialization.Serializable\n\
+     @Serializable\n\
+     data class Item(val id: Int)\n\
+     @Serializable\n\
+     data class NullableHolder(val items: List<Item>?)\n";
+
 /// `childSerializers()` was the only method the cache work pinned, and it is the one method where a
 /// wrong cache is harmless — it rebuilds the array either way. The two methods that CONSUME the
 /// cache are `deserialize`, which reads a slot per element, and the serialized class's `write$Self`,
@@ -285,6 +291,58 @@ fn a_composed_class_writes_its_elements_exactly_as_kotlinc() {
         method_instructions(&built.krusty, "write$Self$main("),
         want,
         "Holder.write$Self$main"
+    );
+}
+
+#[test]
+fn a_nullable_composed_class_deserializes_exactly_as_kotlinc() {
+    let (plugin, cp) = plugin_and_runtime()
+        .expect("the serialization plugin and runtime must be available to this regression");
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let built = compare_with_kotlinc_plugin(
+        "NullableComposedElementDeserialize",
+        NULLABLE_COMPOSED_ELEMENT_SRC,
+        "NullableHolder$$serializer",
+        &cp,
+        "25",
+        &extra,
+    )
+    .expect("the reference compiler and javap must be available to this regression");
+    let want = method_instructions(&built.reference, "deserialize(");
+    assert!(
+        !want.is_empty(),
+        "the reference disassembly has no deserialize body"
+    );
+    assert_eq!(
+        method_instructions(&built.krusty, "deserialize("),
+        want,
+        "NullableHolder$$serializer.deserialize"
+    );
+}
+
+#[test]
+fn a_nullable_composed_class_writes_its_elements_exactly_as_kotlinc() {
+    let (plugin, cp) = plugin_and_runtime()
+        .expect("the serialization plugin and runtime must be available to this regression");
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let built = compare_with_kotlinc_plugin(
+        "NullableComposedElementWriteSelf",
+        NULLABLE_COMPOSED_ELEMENT_SRC,
+        "NullableHolder",
+        &cp,
+        "25",
+        &extra,
+    )
+    .expect("the reference compiler and javap must be available to this regression");
+    let want = method_instructions(&built.reference, "write$Self$main(");
+    assert!(
+        !want.is_empty(),
+        "the reference disassembly has no write$Self$main body"
+    );
+    assert_eq!(
+        method_instructions(&built.krusty, "write$Self$main("),
+        want,
+        "NullableHolder.write$Self$main"
     );
 }
 
