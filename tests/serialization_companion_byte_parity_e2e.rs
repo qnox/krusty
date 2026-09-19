@@ -254,7 +254,7 @@ pub(super) fn plugin_and_runtime() -> Option<(PathBuf, Vec<PathBuf>)> {
 /// javap output reduced to what this test asserts: member signatures, flags, instructions, debug
 /// tables, and the `InnerClasses` table, with constant-pool indices erased because their numbering
 /// is an emission-order artifact.
-pub(super) fn structure(disassembly: &str) -> Vec<String> {
+fn structure(disassembly: &str) -> Vec<String> {
     let mut out = Vec::new();
     for raw in disassembly.lines() {
         let line = raw.trim_end();
@@ -3178,55 +3178,5 @@ fn deserialize_opens_kotlincs_locals_and_switches_on_the_index() {
         dispatch(&built.krusty),
         want_dispatch,
         "element-index dispatch"
-    );
-}
-
-/// INTEGRATION coverage for the class-owned static `Signature` rule: the plugin-generated
-/// `$childSerializers` is a class-owned static like any other, so it records one too.
-///
-/// The rule itself — and its genericity — is pinned on a repository-owned fixture that names
-/// nothing from the serialization surface, in `class_static_signature_e2e`. This case exists
-/// because it is the one the corpus showed, not because it defines the rule.
-///
-/// Asserted against the reference rather than spelled out, so the expectation cannot drift from
-/// what kotlinc writes.
-#[test]
-fn a_class_owned_static_records_its_parameterized_signature() {
-    let (plugin, cp) = plugin_and_runtime()
-        .expect("the serialization plugin and runtime must be available to this regression");
-    let source = "import kotlinx.serialization.Serializable\n\
-                  @Serializable\n\
-                  data class Twig(val id: Int)\n\
-                  @Serializable\n\
-                  data class Bough(val count: Int, val twigs: List<Twig>)\n";
-    let extra = vec![format!("-Xplugin={}", plugin.display())];
-    let built = compare_with_kotlinc_plugin("StaticSignature", source, "Bough", &cp, "25", &extra)
-        .expect("the reference compiler and javap must be available to this regression");
-    // The `Signature:` line javap prints for the named field, with its constant-pool index erased.
-    let field_signature = |text: &str, field: &str| {
-        text.lines()
-            .skip_while(|line| !line.contains(&format!(" {field};")))
-            .skip(1)
-            .take_while(|line| !line.trim().is_empty())
-            .find_map(|line| {
-                line.trim()
-                    .strip_prefix("Signature:")?
-                    .split("// ")
-                    .nth(1)
-                    .map(str::to_string)
-            })
-    };
-    let want = field_signature(&built.reference, "$childSerializers").unwrap_or_else(|| {
-        panic!(
-            "the reference must record the cache's parameterized signature:\n{}",
-            built.reference
-        )
-    });
-    let got = field_signature(&built.krusty, "$childSerializers");
-    assert_eq!(
-        got.as_deref(),
-        Some(want.as_str()),
-        "krusty must record the same field signature:\n{}",
-        built.krusty
     );
 }
