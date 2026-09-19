@@ -41,9 +41,8 @@ fn suspend_service_with_construction_default_compiles() {
         \x20 suspend fun count(f: Filters): Int\n\
         \x20 suspend fun rows(f: Filters, limit: Int, offset: Int): List<String>\n\
         }\n";
-    let Some(libout) = common::compile_lib("ctor_default_svc", lib) else {
-        return;
-    };
+    let libout = common::compile_lib("ctor_default_svc", lib)
+        .expect("ctor_default_svc: the required dependency compiler must be available");
     let cp: Vec<PathBuf> = vec![libout, sl];
     let main = "import lib.Filters\n\
         import lib.Page\n\
@@ -55,8 +54,9 @@ fn suspend_service_with_construction_default_compiles() {
         }\n\
         suspend fun caller(r: Repo): Page = list(r)\n\
         fun box(): String = \"OK\"\n";
-    assert!(
-        common::compile_in_process(main, "Main", &cp, Some(jdk.as_path())).is_some(),
-        "suspend service with a construction-valued default should lower"
+    assert_eq!(
+        common::backend_outcome_in_process(main, "Main", &cp, Some(jdk.as_path())),
+        Some(common::BackendOutcome::Emitted),
+        "suspend service with a construction-valued default should lower; the complete backend outcome is preserved"
     );
 }

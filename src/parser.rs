@@ -10,6 +10,7 @@ use crate::token::{decode_char_literal_content, Token, TokenKind};
 use crate::types::Visibility;
 use std::collections::HashMap;
 
+mod constructors;
 mod debug_lines;
 mod declaration_bodies;
 mod declaration_modifiers;
@@ -1358,6 +1359,11 @@ impl<'a> Parser<'a> {
             }
             // Consume leading annotations + declaration modifiers. `open`/`abstract` are applied to
             // the following class; the rest are ignored (krusty treats everything as public).
+            //
+            // Where this declaration's own multiplatform keywords begin. Every diagnostic about an
+            // `expect` points at the keyword, so it is captured here, while it is being consumed,
+            // rather than searched for afterwards among the file's modifiers.
+            let modifiers_before = self.file.multiplatform_modifiers.len();
             let mut mods = if self.at(TokenKind::At) || self.at_modifier() {
                 let m = self.skip_decl_prefix();
                 self.skip_newlines();
@@ -1394,7 +1400,17 @@ impl<'a> Parser<'a> {
             let is_sealed = mods.iter().any(|m| m == "sealed");
             // `expect` (multiplatform header): whatever declaration the arm below pushes is
             // recorded so expect/actual matching can drop it once an `actual` provides the body.
-            let is_expect = mods.iter().any(|m| m == "expect");
+            let expect_keyword = mods
+                .iter()
+                .any(|m| m == "expect")
+                .then(|| {
+                    self.file.multiplatform_modifiers[modifiers_before..]
+                        .iter()
+                        .find(|(modifier, _)| modifier == "expect")
+                        .map(|(_, span)| *span)
+                })
+                .flatten();
+            let is_expect = expect_keyword.is_some();
             // `actual` is otherwise inert, but an `actual` with no `expect` to actualize is an
             // error, so the declarations carrying it are recorded exactly as the expects are.
             let is_actual = mods.iter().any(|m| m == "actual");
@@ -1599,11 +1615,17 @@ impl<'a> Parser<'a> {
                     self.recover_to_decl_boundary();
                 }
             }
-            if is_expect {
+            if let Some(keyword) = expect_keyword {
                 let after = self.file.decls.len();
+                let declarations = self.file.decls[decls_before..after].to_vec();
                 self.file
                     .expect_decls
-                    .extend_from_slice(&self.file.decls[decls_before..after]);
+                    .extend(declarations.into_iter().map(|declaration| {
+                        crate::ast::ExpectDeclaration {
+                            declaration,
+                            keyword,
+                        }
+                    }));
             }
             if is_actual {
                 // Only the declaration that WROTE the modifier. A classifier arm also pushes the
@@ -1793,65 +1815,6 @@ impl<'a> Parser<'a> {
         let block = self.parse_block_expr(false);
         self.file.init_block_keywords.insert(block, keyword);
         block
-    }
-
-    /// Consume leading annotations (`@Foo`, `@file:Bar(...)`) and soft modifiers (`public`, `open`,
-    /// `inline`, `operator`, `suspend`, …) that precede a declaration. Modifiers that change the
-    /// declaration *kind* (`enum`, `annotation`, `data`, `object`, …) are left for their real
-    /// declaration productions rather than being mistaken for ordinary modifiers.
-    fn skip_decl_prefix(&mut self) -> Vec<String> {
-        let mut mods = Vec::new();
-        self.pending_annotations.clear();
-        self.pending_annotation_args.clear();
-        loop {
-            self.skip_newlines();
-            if self.at(TokenKind::At) {
-                let (name, args) = self.parse_annotation();
-                if let Some(name) = name {
-                    self.pending_annotations.push(name);
-                    self.pending_annotation_args.push(args);
-                }
-            } else if self.at_modifier()
-                && self.t.get(self.i + 1).map(|t| t.kind) != Some(TokenKind::Colon)
-            {
-                // A modifier soft keyword immediately followed by `:` is a NAME, not a modifier
-                // (`fun f(open: Int)`, `@Anno sealed: T`) — a real modifier is never followed by a colon.
-                let text = self.text().to_string();
-                // `expect` and `actual` are legal only in a multiplatform project, and kotlinc's
-                // diagnostic points at the MODIFIER, so its span is captured here where the keyword
-                // is in hand. Every call site records, members included, because a member `actual`
-                // is reported too. Deduped by span: the `companion fun` lookahead consumes a prefix
-                // and rewinds, and the ordinary path then re-consumes the same keyword.
-                if text == "expect" || text == "actual" {
-                    let span = self.tok().span;
-                    if !self
-                        .file
-                        .multiplatform_modifiers
-                        .iter()
-                        .any(|(_, seen)| *seen == span)
-                    {
-                        self.file.multiplatform_modifiers.push((text.clone(), span));
-                    }
-                }
-                mods.push(text);
-                self.bump();
-            } else {
-                break;
-            }
-        }
-        mods
-    }
-
-    /// Take the annotations captured by the preceding `skip_decl_prefix`, clearing the buffer.
-    /// `parse_class`/`parse_enum`/… call this FIRST so member-prefix parsing doesn't clobber them.
-    fn take_pending_annotations(&mut self) -> Vec<AnnotationRef> {
-        std::mem::take(&mut self.pending_annotations)
-    }
-
-    /// Take the per-annotation argument expressions captured by the preceding `skip_decl_prefix`
-    /// (parallel to [`take_pending_annotations`]), clearing the buffer.
-    fn take_pending_annotation_args(&mut self) -> Vec<Vec<ExprId>> {
-        std::mem::take(&mut self.pending_annotation_args)
     }
 
     /// Parse a nested type declaration (`class`/`object`/`interface`/`data|enum|annotation class`/
@@ -3142,53 +3105,7 @@ impl<'a> Parser<'a> {
                         init_order.push(ClassInit::Block(self.parse_init_block()));
                     }
                     TokenKind::Ident if self.keyword_text("constructor") => {
-                        let annotations = self.take_pending_annotations();
-                        let annotation_args = self.take_pending_annotation_args();
-                        let ctor_span = self.tok().span;
-                        self.bump(); // 'constructor'
-                        let params = self.parse_param_list();
-                        let mut delegation = CtorDelegation::None;
-                        if self.eat(TokenKind::Colon) {
-                            self.skip_newlines();
-                            let target = if self.at(TokenKind::Ident) {
-                                let target = self.text().to_string();
-                                self.bump();
-                                target
-                            } else {
-                                String::new()
-                            };
-                            let (args, names) = self.parse_call_arguments_with_names();
-                            let call = CtorDelegationCall {
-                                args,
-                                names,
-                                trailing_lambda: false,
-                            };
-                            delegation = match target.as_str() {
-                                "this" => CtorDelegation::This(call),
-                                "super" => CtorDelegation::Super(call),
-                                _ => {
-                                    self.diags.error(
-                                        ctor_span,
-                                        "expected 'this' or 'super' in constructor delegation",
-                                    );
-                                    CtorDelegation::None
-                                }
-                            };
-                        }
-                        self.skip_newlines();
-                        let body = self
-                            .at(TokenKind::LBrace)
-                            .then(|| self.parse_block_expr(false));
-                        let ctor_span =
-                            Span::new(ctor_span.lo, self.t[self.i.saturating_sub(1)].span.hi);
-                        secondary_ctors.push(SecondaryCtor {
-                            annotations,
-                            annotation_args,
-                            params,
-                            delegation,
-                            body,
-                            span: ctor_span,
-                        });
+                        secondary_ctors.push(self.parse_secondary_constructor(&emods));
                     }
                     TokenKind::Ident if self.at_companion_declaration() => {
                         if self.at_companion_object_declaration() {
@@ -4114,55 +4031,7 @@ impl<'a> Parser<'a> {
                         let _ = self.parse_nested_type_decl();
                     }
                     TokenKind::Ident if self.keyword_text("constructor") => {
-                        let annotations = self.take_pending_annotations();
-                        let annotation_args = self.take_pending_annotation_args();
-                        let ctor_span = self.tok().span;
-                        self.bump(); // 'constructor'
-                        let params = self.parse_param_list();
-                        let mut delegation = CtorDelegation::None;
-                        if self.eat(TokenKind::Colon) {
-                            self.skip_newlines();
-                            let target = if self.at(TokenKind::Ident) {
-                                let t = self.text().to_string();
-                                self.bump();
-                                t
-                            } else {
-                                String::new()
-                            };
-                            let (args, names) = self.parse_call_arguments_with_names();
-                            let delegation_call = crate::ast::CtorDelegationCall {
-                                args,
-                                names,
-                                trailing_lambda: false,
-                            };
-                            delegation = match target.as_str() {
-                                "this" => CtorDelegation::This(delegation_call),
-                                "super" => CtorDelegation::Super(delegation_call),
-                                _ => {
-                                    self.diags.error(
-                                        ctor_span,
-                                        "expected 'this' or 'super' in constructor delegation",
-                                    );
-                                    CtorDelegation::None
-                                }
-                            };
-                        }
-                        self.skip_newlines();
-                        let body = if self.at(TokenKind::LBrace) {
-                            Some(self.parse_block_expr(false))
-                        } else {
-                            None
-                        };
-                        let ctor_span =
-                            Span::new(ctor_span.lo, self.t[self.i.saturating_sub(1)].span.hi);
-                        secondary_ctors.push(SecondaryCtor {
-                            annotations,
-                            annotation_args,
-                            params,
-                            delegation,
-                            body,
-                            span: ctor_span,
-                        });
+                        secondary_ctors.push(self.parse_secondary_constructor(&mods));
                     }
                     TokenKind::Ident if self.keyword_text("typealias") => {
                         type_aliases.push(self.parse_type_alias_syntax());

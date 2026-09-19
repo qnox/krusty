@@ -84,7 +84,7 @@ pub(super) fn collect(files: &[File]) -> Vec<UnmatchedActual> {
         .flat_map(|file| {
             file.expect_decls
                 .iter()
-                .map(move |&declaration| super::expect_key(file, declaration))
+                .map(move |expect| super::expect_key(file, expect.declaration))
         })
         .collect::<std::collections::HashSet<_>>();
     let mut unmatched = Vec::new();

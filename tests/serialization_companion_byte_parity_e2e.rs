@@ -242,10 +242,12 @@ fn compare_files_with_kotlinc_plugin(
 }
 
 /// The serialization runtime the generated code links against, plus the plugin jar kotlinc needs in
-/// order to produce the reference at all. `None` when either is absent from the local caches.
+/// order to produce the reference at all. The runtime uses the repository's pinned dependency
+/// provisioner instead of depending on an unrelated Gradle build having populated its private
+/// cache first.
 pub(super) fn plugin_and_runtime() -> Option<(PathBuf, Vec<PathBuf>)> {
     let plugin = kotlinc_plugin_jar("kotlinx-serialization-compiler-plugin")?;
-    let core = gradle_module_jar("org.jetbrains.kotlinx", "kotlinx-serialization-core-jvm")?;
+    let core = krusty::toolchain::serialization_core_jar()?;
     Some((plugin, vec![core, common::stdlib_jar()]))
 }
 
@@ -2764,25 +2766,21 @@ fn a_serializable_class_publishes_the_exact_deserialization_constructor() {
 /// `typeParametersSerializers`, which kotlinc records only for a GENERIC serializer.
 #[test]
 fn a_generated_serializer_describes_the_members_kotlinc_describes() {
-    let Some((plugin, cp)) = plugin_and_runtime() else {
-        eprintln!("skipping: serialization plugin or runtime jar not available locally");
-        return;
-    };
+    let (plugin, cp) = plugin_and_runtime()
+        .expect("serialization plugin and runtime must be available under the test harness");
     let extra = vec![format!("-Xplugin={}", plugin.display())];
     let src = "import kotlinx.serialization.Serializable\n\
                @Serializable\n\
                data class Retention(val days: Int)\n";
-    let Some(built) = compare_with_kotlinc_plugin(
+    let built = compare_with_kotlinc_plugin(
         "SerializerMemberRecords",
         src,
         "Retention$$serializer",
         &cp,
         "25",
         &extra,
-    ) else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
+    )
+    .expect("reference kotlinc and javap must be available under the test harness");
     let want = metadata_d2(&built.reference_bytes);
     assert!(
         !want

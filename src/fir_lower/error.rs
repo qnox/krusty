@@ -79,5 +79,13 @@ pub enum FirLoweringFailure {
     MissingBodyResult {
         origin: OriginId,
     },
+    /// A lifted local function whose physical parameter list is SHORTER than the capture prefix
+    /// `BodySlots` reports. That is an invalid checked shape, not a function with no logical
+    /// parameters, so the tail-call frame refuses rather than counting zero of them.
+    MalformedLocalFrame {
+        function: crate::ir::FunId,
+        parameters: usize,
+        first_parameter: u32,
+    },
     ValueIdentityOverflow,
 }
