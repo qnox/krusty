@@ -1351,6 +1351,11 @@ impl<'a> Parser<'a> {
             }
             // Consume leading annotations + declaration modifiers. `open`/`abstract` are applied to
             // the following class; the rest are ignored (krusty treats everything as public).
+            //
+            // Where this declaration's own multiplatform keywords begin. Every diagnostic about an
+            // `expect` points at the keyword, so it is captured here, while it is being consumed,
+            // rather than searched for afterwards among the file's modifiers.
+            let modifiers_before = self.file.multiplatform_modifiers.len();
             let mut mods = if self.at(TokenKind::At) || self.at_modifier() {
                 let m = self.skip_decl_prefix();
                 self.skip_newlines();
@@ -1387,7 +1392,17 @@ impl<'a> Parser<'a> {
             let is_sealed = mods.iter().any(|m| m == "sealed");
             // `expect` (multiplatform header): whatever declaration the arm below pushes is
             // recorded so expect/actual matching can drop it once an `actual` provides the body.
-            let is_expect = mods.iter().any(|m| m == "expect");
+            let expect_keyword = mods
+                .iter()
+                .any(|m| m == "expect")
+                .then(|| {
+                    self.file.multiplatform_modifiers[modifiers_before..]
+                        .iter()
+                        .find(|(modifier, _)| modifier == "expect")
+                        .map(|(_, span)| *span)
+                })
+                .flatten();
+            let is_expect = expect_keyword.is_some();
             let decls_before = self.file.decls.len();
             match self.kind() {
                 TokenKind::Eof => break,
@@ -1584,11 +1599,17 @@ impl<'a> Parser<'a> {
                     self.recover_to_decl_boundary();
                 }
             }
-            if is_expect {
+            if let Some(keyword) = expect_keyword {
                 let after = self.file.decls.len();
+                let declarations = self.file.decls[decls_before..after].to_vec();
                 self.file
                     .expect_decls
-                    .extend_from_slice(&self.file.decls[decls_before..after]);
+                    .extend(declarations.into_iter().map(|declaration| {
+                        crate::ast::ExpectDeclaration {
+                            declaration,
+                            keyword,
+                        }
+                    }));
             }
             if self.file.decls.len() > decls_before {
                 sink(self);
