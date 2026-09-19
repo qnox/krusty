@@ -6089,8 +6089,7 @@ fn emit_class(
                 _ => None,
             })
             .flatten();
-        // A reference-typed static carries kotlinc's nullability annotation (private hoisted
-        // fields included).
+        // Reference-typed statics, including private hoisted fields, carry nullability annotations.
         let ann = (desc.starts_with('L') || desc.starts_with('[')).then(|| {
             if s.ty.is_nullable() {
                 "Lorg/jetbrains/annotations/Nullable;"
@@ -6098,7 +6097,8 @@ fn emit_class(
                 "Lorg/jetbrains/annotations/NotNull;"
             }
         });
-        cw.add_field_late(acc, &s.name, &desc, cv, ann);
+        let signature = property_jvm_signatures(&signature_formatter, &s.ty, None).field;
+        cw.add_field_late_sig(acc, &s.name, &desc, signature.as_deref(), cv, ann);
         // A `@JvmField` field carries the property's FIELD-targeted annotations (`JvmField` itself
         // among them) as `RuntimeInvisibleAnnotations`, BEFORE the nullability entry — kotlinc's
         // attribute order. The records live on the declaring COMPANION class.
