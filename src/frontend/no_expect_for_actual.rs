@@ -34,12 +34,14 @@
 //! and they live in [`members`].
 
 mod members;
+mod resolved;
 
-use crate::ast::{Decl, DeclId, File};
+use crate::ast::{Decl, File};
 use crate::diag::{DiagSink, Span};
 use crate::resolve::{Signature, SymbolTable};
 use crate::types::{Ty, Visibility};
 use members::{actual_members, report_members, Member};
+use resolved::{Resolved, ResolvedDeclarations};
 
 /// One top-level `actual` declaration that actualizes nothing: where its diagnostic is reported —
 /// the declaration's NAME, which is where the reference compiler points — plus the syntactic half
@@ -56,7 +58,6 @@ pub(super) struct UnmatchedActual {
 
 enum Target {
     Function {
-        declaration: DeclId,
         name: String,
         /// Context-parameter names in declaration order. They occupy the LEADING slots of the
         /// resolved parameter list, which is where their types come from; only the names are the
@@ -70,13 +71,11 @@ enum Target {
         modifiers: String,
     },
     Property {
-        declaration: DeclId,
         name: String,
         /// `const ` / `lateinit `, between `actual` and `val`/`var`.
         modifiers: String,
     },
     Classifier {
-        declaration: DeclId,
         name: String,
         /// The syntactic half of a classifier's rendering: its kind, modality, and the modifier
         /// words that sit between `actual` and the kind keyword.
@@ -119,7 +118,6 @@ pub(super) fn collect(files: &[File]) -> Vec<UnmatchedActual> {
                     function.name_span,
                     function.span,
                     Target::Function {
-                        declaration,
                         name: function.name.clone(),
                         context_parameters: function
                             .params
@@ -141,7 +139,6 @@ pub(super) fn collect(files: &[File]) -> Vec<UnmatchedActual> {
                     property.name_span,
                     property.span,
                     Target::Property {
-                        declaration,
                         name: property.name.clone(),
                         modifiers: property_modifiers(property),
                     },
@@ -150,7 +147,6 @@ pub(super) fn collect(files: &[File]) -> Vec<UnmatchedActual> {
                     class.name_span,
                     class.span,
                     Target::Classifier {
-                        declaration,
                         // A nested classifier is hoisted under its owner's path (`Holder.Inner`),
                         // and the reference compiler renders the declaration's own simple name.
                         name: simple_name(&class.name).to_string(),
@@ -193,46 +189,75 @@ pub(super) fn collect(files: &[File]) -> Vec<UnmatchedActual> {
     unmatched
 }
 
-impl UnmatchedActual {
-    /// Whether this `actual` actualized something after all.
-    ///
-    /// The authority is actualization's own pairing, keyed by STABLE DECLARATION IDENTITY, and it
-    /// is the only one: a name/arity key differs on a receiver spelling where actualization
-    /// follows an `actual typealias`, so consulting it as a second answer reported pairs that had
-    /// matched. A declaration with no stable identity to look up is a broken contract between this
-    /// check and signature finalization, reported as such rather than answered by a key.
-    fn actualized(
-        &self,
-        actualized: &std::collections::HashSet<crate::fir::DeclarationId>,
-        symbols: &SymbolTable,
-        headers: &crate::fir::StreamedHeaderModule,
-    ) -> Result<bool, &'static str> {
-        let stable = match &self.target {
-            Target::Function { declaration, .. } => {
-                function_signature(symbols, self.file, *declaration)
-                    .and_then(|signature| signature.stable_declaration)
-            }
-            Target::Property { declaration, .. } => {
-                property_stable_declaration(symbols, self.file, *declaration)
-            }
-            Target::Classifier { declaration, .. } => {
-                classifier_signature(symbols, self.file, *declaration)
-                    .and_then(|signature| signature.stable_declaration)
-            }
-            // An alias publishes a type EXPANSION rather than a callable or classifier signature,
-            // so nothing resolved carries its identity; the header inventory anchors it on the
-            // declaration's own source range, which is the same coordinate every member is found
-            // by.
-            Target::TypeAlias { .. } => self.stable_by_anchor(headers),
-        };
-        stable
-            .map(|stable| actualized.contains(&stable))
-            .ok_or("has no stable declaration identity to check against")
+/// Report every `actual` that actualized nothing.
+///
+/// `actualized` is the set of declarations actualization PAIRED with an `expect`, keyed by stable
+/// declaration identity — the only authority. That matcher compares resolved type shapes and
+/// follows an `actual typealias`, so it pairs `expect val S.tag: S` with
+/// `actual val String.tag: String` where a name/arity key differing on the receiver spelling
+/// cannot; consulting such a key as a second answer reported pairs that had matched.
+pub(super) fn report(
+    unmatched: &[UnmatchedActual],
+    actualized: &std::collections::HashSet<crate::fir::DeclarationId>,
+    symbols: &SymbolTable,
+    headers: &crate::fir::StreamedHeaderModule,
+    diags: &mut DiagSink,
+) {
+    // Published once, and only looked up below: this pass never walks a resolved table itself.
+    let declarations = ResolvedDeclarations::publish(symbols);
+    for actual in unmatched {
+        // Every diagnostic this iteration writes belongs to this declaration's file, members
+        // included. Setting it only before the owner's own error left a member's inheriting
+        // whichever file was active last, which in a single-file test is invisible and across files
+        // points the message at the wrong source.
+        diags.set_file(actual.file);
+        // The owner's own diagnostic is written BEFORE its members', which is the order the source
+        // declares them in — the declaration opens the body its members live in.
+        //
+        // Nothing is passed over in silence: an `actual` this check cannot answer for reports an
+        // internal error at its own name, so a declaration the source wrote never disappears
+        // because a lookup returned nothing.
+        let stable = actual.stable(headers);
+        match stable
+            .ok_or("has no stable declaration identity")
+            .and_then(|stable| {
+                if actualized.contains(&stable) {
+                    Ok(None)
+                } else {
+                    actual.render(stable, &declarations).map(Some)
+                }
+            }) {
+            Ok(None) => {}
+            Ok(Some(rendered)) => diags.error(
+                actual.name,
+                format!("'{rendered}' has no corresponding expected declaration"),
+            ),
+            Err(unreachable) => diags.error(
+                actual.name,
+                format!("internal error: this actual declaration {unreachable}"),
+            ),
+        }
+        // A member is a declaration of its own: it actualizes, or fails to, by its own identity.
+        // Actualization pairs a matched owner's members individually (see
+        // `fir::actualized_declaration_pairs`), so the owner's own outcome decides only the
+        // owner's diagnostic — an unmatched member under a MATCHED owner is reported here just
+        // the same, and so is every member of an owner whose own rendering could not be produced.
+        if let Target::Classifier { members, .. } = &actual.target {
+            report_members(members, actualized, &declarations, headers, stable, diags);
+        }
     }
+}
 
+impl UnmatchedActual {
     /// The stable identity the compact header inventory anchors on this declaration's own source
     /// range, within this declaration's own file.
-    fn stable_by_anchor(
+    ///
+    /// This is the ONLY identity this check uses, for every kind of declaration. Actualization's
+    /// pairing — keyed by the same identities — is then the only answer to whether the declaration
+    /// actualized anything. A package-qualified name/arity key was consulted as a second answer
+    /// and had to go: it differs on a receiver's spelling exactly where actualization follows an
+    /// `actual typealias`, so it reported pairs that had matched.
+    fn stable(
         &self,
         headers: &crate::fir::StreamedHeaderModule,
     ) -> Option<crate::fir::DeclarationId> {
@@ -251,113 +276,56 @@ impl UnmatchedActual {
     }
 }
 
-/// Report every `actual` that actualized nothing.
-///
-/// `actualized` is the set of declarations actualization PAIRED with an `expect`, and it — not the
-/// name/arity key — is the authority: that matcher compares resolved type shapes and follows an
-/// `actual typealias`, so it pairs `expect val S.tag: S` with `actual val String.tag: String`
-/// where the key cannot. The key's answer stands in only for a declaration that resolution gave
-/// no stable identity to look up.
-pub(super) fn report(
-    unmatched: &[UnmatchedActual],
-    actualized: &std::collections::HashSet<crate::fir::DeclarationId>,
-    symbols: &SymbolTable,
-    headers: &crate::fir::StreamedHeaderModule,
-    diags: &mut DiagSink,
-) {
-    for actual in unmatched {
-        // Every diagnostic this iteration writes belongs to this declaration's file, members
-        // included. Setting it only before the owner's own error left a member's inheriting
-        // whichever file was active last, which in a single-file test is invisible and across files
-        // points the message at the wrong source.
-        diags.set_file(actual.file);
-        // The owner's own diagnostic is written BEFORE its members', which is the order the source
-        // declares them in — the declaration opens the body its members live in.
-        //
-        // Nothing is passed over in silence: an `actual` this check cannot answer for reports an
-        // internal error at its own name, so a declaration the source wrote never disappears
-        // because a lookup returned nothing.
-        match actual
-            .actualized(actualized, symbols, headers)
-            .and_then(|matched| {
-                if matched {
-                    Ok(None)
-                } else {
-                    actual.render(symbols).map(Some)
-                }
-            }) {
-            Ok(None) => {}
-            Ok(Some(rendered)) => diags.error(
-                actual.name,
-                format!("'{rendered}' has no corresponding expected declaration"),
-            ),
-            Err(unreachable) => diags.error(
-                actual.name,
-                format!("internal error: this actual declaration {unreachable}"),
-            ),
-        }
-        // A member is a declaration of its own: it actualizes, or fails to, by its own identity.
-        // Actualization pairs a matched owner's members individually (see
-        // `fir::actualized_declaration_pairs`), so the owner's own outcome decides only the
-        // owner's diagnostic — an unmatched member under a MATCHED owner is reported here just
-        // the same, and so is every member of an owner whose own rendering could not be produced.
-        if let Target::Classifier {
-            declaration,
-            members,
-            ..
-        } = &actual.target
-        {
-            report_members(
-                members,
-                actualized,
-                symbols,
-                headers,
-                actual.file,
-                *declaration,
-                diags,
-            );
-        }
-    }
-}
-
 impl UnmatchedActual {
     /// This declaration as the reference compiler's declaration renderer names it, or what about
     /// it could not be reached.
-    fn render(&self, symbols: &SymbolTable) -> Result<String, &'static str> {
+    ///
+    /// Every resolved fact comes from the published contract, looked up by the declaration's own
+    /// identity. The syntactic half — kind, name, parameter names, modifier words — was copied out
+    /// of this declaration while its syntax was live and travels on [`Self::target`].
+    fn render(
+        &self,
+        stable: crate::fir::DeclarationId,
+        declarations: &ResolvedDeclarations<'_>,
+    ) -> Result<String, &'static str> {
         match &self.target {
             Target::Function {
-                declaration,
                 name,
                 context_parameters,
                 parameters,
                 type_parameters,
                 modifiers,
-            } => render_function(
-                symbols,
-                self.file,
-                *declaration,
-                name,
-                context_parameters,
-                parameters,
-                type_parameters,
-                modifiers,
-            ),
-            Target::Property {
-                declaration,
-                name,
-                modifiers,
-            } => render_property(symbols, self.file, *declaration, name, modifiers),
-            Target::Classifier {
-                declaration,
-                name,
-                shape,
-                ..
-            } => render_classifier(symbols, self.file, *declaration, name, shape),
+            } => {
+                let Some(Resolved::Function(signature)) = declarations.get(stable) else {
+                    return Err("has no resolved signature");
+                };
+                render_function(
+                    signature,
+                    name,
+                    context_parameters,
+                    parameters,
+                    type_parameters,
+                    modifiers,
+                )
+            }
+            Target::Property { name, modifiers } => match declarations.get(stable) {
+                Some(Resolved::Property(signature)) => render_property(signature, name, modifiers),
+                Some(Resolved::ExtensionProperty(signature)) => {
+                    render_extension_property(signature, name, modifiers)
+                }
+                _ => Err("has no resolved property signature"),
+            },
+            Target::Classifier { name, shape, .. } => {
+                let Some(signature) = declarations.classifier(stable) else {
+                    return Err("has no resolved signature");
+                };
+                render_classifier(signature, name, shape)
+            }
             Target::TypeAlias {
                 qualified,
                 name,
                 visibility,
-            } => render_type_alias(symbols, qualified, name, *visibility),
+            } => render_type_alias(declarations, qualified, name, *visibility),
         }
     }
 }
@@ -434,19 +402,14 @@ fn type_parameters(names: &[String], bound: &dyn Fn(usize) -> Option<Ty>) -> Str
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn render_function(
-    symbols: &SymbolTable,
-    file: u32,
-    declaration: DeclId,
+    signature: &Signature,
     name: &str,
     context_parameters: &[String],
     parameters: &[String],
     formals: &[String],
     modifiers: &str,
 ) -> Result<String, &'static str> {
-    let signature =
-        function_signature(symbols, file, declaration).ok_or("has no resolved signature")?;
     let context = context_prefix(
         context_parameters,
         signature
@@ -531,48 +494,6 @@ fn render_callable(
 
 /// The resolved signature of a top-level source function. A top-level EXTENSION function lives in
 /// its own receiver-keyed table rather than beside the ordinary overloads, so both are searched by
-/// the declaration that produced them.
-fn function_signature(symbols: &SymbolTable, file: u32, declaration: DeclId) -> Option<&Signature> {
-    let owns = |candidate: &&Signature| {
-        candidate.source_file == Some(file) && candidate.source_decl == Some(declaration)
-    };
-    symbols.funs.values().flatten().find(owns).or_else(|| {
-        symbols
-            .ext_funs
-            .values()
-            .flat_map(|receivers| receivers.values())
-            .flatten()
-            .find(owns)
-    })
-}
-
-/// The stable identity of a top-level source property, plain or extension.
-fn property_stable_declaration(
-    symbols: &SymbolTable,
-    file: u32,
-    declaration: DeclId,
-) -> Option<crate::fir::DeclarationId> {
-    if let Some(signature) = symbols.source_props.get(&(file, declaration.0)) {
-        return signature.stable_declaration;
-    }
-    symbols
-        .ext_props
-        .values()
-        .flatten()
-        .find(|candidate| candidate.source == (file, declaration.0))
-        .and_then(|signature| signature.stable_declaration)
-}
-
-fn classifier_signature(
-    symbols: &SymbolTable,
-    file: u32,
-    declaration: DeclId,
-) -> Option<&crate::resolve::ClassSig> {
-    symbols.classes.values().find(|candidate| {
-        candidate.source_file == file && candidate.source_decl == Some(declaration)
-    })
-}
-
 /// The DECLARED upper bound of a callable's type parameter, or `None` for Kotlin's implicit `Any?`
 /// (which the reference compiler leaves unwritten).
 fn declared_formal_bound(signature: &Signature, index: usize) -> Option<Ty> {
@@ -589,32 +510,29 @@ fn declared_bound(bound: Ty) -> Option<Ty> {
 }
 
 fn render_property(
-    symbols: &SymbolTable,
-    file: u32,
-    declaration: DeclId,
+    signature: &crate::resolve::SourcePropertySig,
     name: &str,
     modifiers: &str,
 ) -> Result<String, &'static str> {
-    if let Some(signature) = symbols.source_props.get(&(file, declaration.0)) {
-        if signature.ty.mentions_pending() {
-            return Err("has a type that did not resolve");
-        }
-        return Ok(format!(
-            "{}{} final actual {modifiers}{} {name}: {}",
-            context_prefix(&signature.context_param_names, &signature.context_params)?,
-            visibility(signature.visibility),
-            if signature.is_var { "var" } else { "val" },
-            signature.ty.source_name()
-        ));
+    if signature.ty.mentions_pending() {
+        return Err("has a type that did not resolve");
     }
-    // An extension property lives in its own receiver-keyed table, which is also the only place
-    // its receiver survives resolution.
-    let signature = symbols
-        .ext_props
-        .values()
-        .flatten()
-        .find(|candidate| candidate.source == (file, declaration.0))
-        .ok_or("has no resolved property signature")?;
+    Ok(format!(
+        "{}{} final actual {modifiers}{} {name}: {}",
+        context_prefix(&signature.context_param_names, &signature.context_params)?,
+        visibility(signature.visibility),
+        if signature.is_var { "var" } else { "val" },
+        signature.ty.source_name()
+    ))
+}
+
+/// An extension property lives in its own receiver-keyed table, which is also the only place its
+/// receiver survives resolution — and the receiver is what its rendering adds.
+fn render_extension_property(
+    signature: &crate::resolve::ExtPropSig,
+    name: &str,
+    modifiers: &str,
+) -> Result<String, &'static str> {
     if signature.ty.mentions_pending() || signature.receiver.mentions_pending() {
         return Err("has a type that did not resolve");
     }
@@ -747,14 +665,10 @@ impl ClassifierShape {
 }
 
 fn render_classifier(
-    symbols: &SymbolTable,
-    file: u32,
-    declaration: DeclId,
+    signature: &crate::resolve::ClassSig,
     name: &str,
     shape: &ClassifierShape,
 ) -> Result<String, &'static str> {
-    let signature =
-        classifier_signature(symbols, file, declaration).ok_or("has no resolved signature")?;
     // A classifier's type parameters are stored as SEMANTIC identities; their source spelling is
     // what the declaration wrote and what the reference compiler renders.
     let names = signature
@@ -816,14 +730,13 @@ fn render_classifier(
 }
 
 fn render_type_alias(
-    symbols: &SymbolTable,
+    declarations: &ResolvedDeclarations<'_>,
     qualified: &str,
     name: &str,
     declared: Visibility,
 ) -> Result<String, &'static str> {
-    let (formals, target) = symbols
-        .source_alias_expansions
-        .get(&crate::types::type_name(qualified))
+    let (formals, target) = declarations
+        .alias_expansion(qualified)
         .ok_or("has no resolved expansion")?;
     if target.mentions_pending() {
         return Err("expands to a type that did not resolve");
