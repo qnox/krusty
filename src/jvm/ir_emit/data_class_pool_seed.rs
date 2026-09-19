@@ -61,44 +61,60 @@ pub(super) fn seed_data_class_members(seed: DataClassPoolSeed<'_>, cw: &mut Clas
             data_class_hashcode_owner(ir, bodies, semantic_ty)
         })
         .collect();
-    let mut data_accessors = Vec::new();
+    let mut declared_members = Vec::new();
     for property in &c.properties {
-        if property.is_private {
-            continue;
+        if !property.is_private {
+            if let Some(field) = property
+                .backing_field
+                .and_then(|index| c.fields.get(index as usize))
+            {
+                let accessor_ty = declared_property_accessor_jvm(ir, property, field);
+                let accessor_desc = desc(accessor_ty);
+                let field_sig = field_sig_of(field);
+                let getter = property
+                    .getter_jvm_name
+                    .clone()
+                    .unwrap_or_else(|| crate::names::property_getter_name(&property.name));
+                declared_members.push(crate::jvm::classfile::DataDeclaredMemberSeed::Accessor(
+                    crate::jvm::classfile::DataAccessorInfo {
+                        name: getter,
+                        desc: format!("(){accessor_desc}"),
+                        setter_kind: 0,
+                        signature: field_sig.as_ref().map(|signature| format!("(){signature}")),
+                    },
+                ));
+                if property.is_var {
+                    let setter = property
+                        .setter_jvm_name
+                        .clone()
+                        .unwrap_or_else(|| crate::names::property_setter_name(&property.name));
+                    let guarded = accessor_ty.is_reference()
+                        && !property.ty.is_nullable()
+                        && is_nonnull_reference_field(ir, fq_name, &field.name, field.ty);
+                    declared_members.push(crate::jvm::classfile::DataDeclaredMemberSeed::Accessor(
+                        crate::jvm::classfile::DataAccessorInfo {
+                            name: setter,
+                            desc: format!("({accessor_desc})V"),
+                            setter_kind: if guarded { 2 } else { 1 },
+                            signature: field_sig.map(|signature| format!("({signature})V")),
+                        },
+                    ));
+                }
+            }
         }
-        let Some(field) = property
-            .backing_field
-            .and_then(|index| c.fields.get(index as usize))
-        else {
-            continue;
-        };
-        let accessor_ty = declared_property_accessor_jvm(ir, property, field);
-        let accessor_desc = desc(accessor_ty);
-        let field_sig = field_sig_of(field);
-        let getter = property
-            .getter_jvm_name
-            .clone()
-            .unwrap_or_else(|| crate::names::property_getter_name(&property.name));
-        data_accessors.push(crate::jvm::classfile::DataAccessorInfo {
-            name: getter,
-            desc: format!("(){accessor_desc}"),
-            setter_kind: 0,
-            signature: field_sig.as_ref().map(|signature| format!("(){signature}")),
-        });
-        if property.is_var {
-            let setter = property
-                .setter_jvm_name
-                .clone()
-                .unwrap_or_else(|| crate::names::property_setter_name(&property.name));
-            let guarded = accessor_ty.is_reference()
-                && !property.ty.is_nullable()
-                && is_nonnull_reference_field(ir, fq_name, &field.name, field.ty);
-            data_accessors.push(crate::jvm::classfile::DataAccessorInfo {
-                name: setter,
-                desc: format!("({accessor_desc})V"),
-                setter_kind: if guarded { 2 } else { 1 },
-                signature: field_sig.map(|signature| format!("({signature})V")),
-            });
+        if let Some(marker) = ir
+            .property_annotation_markers
+            .get(&(c.fq_name_id(), property.name.clone()))
+            .and_then(|marker| {
+                let annotations = ir.function_annotations.get(marker)?;
+                Some(crate::jvm::classfile::PropertyMarkerSeed {
+                    name: ir.functions[*marker as usize].name.clone(),
+                    annotations: annotations.clone(),
+                })
+            })
+        {
+            declared_members
+                .push(crate::jvm::classfile::DataDeclaredMemberSeed::PropertyMarker(marker));
         }
     }
     // `copy`'s generic Signature shares the ctor's parameter list, returning `self` instead of `void`.
@@ -111,7 +127,7 @@ pub(super) fn seed_data_class_members(seed: DataClassPoolSeed<'_>, cw: &mut Clas
         simple,
         &data_fields,
         &crate::jvm::classfile::DataMemberInfo {
-            accessors: &data_accessors,
+            declared_members: &declared_members,
             hashcode_owners: &hashcode_owners,
             copy_sig: copy_sig.as_deref(),
             copy_is_private: data_copy_fid(ir, c)
