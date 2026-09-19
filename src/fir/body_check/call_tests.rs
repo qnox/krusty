@@ -3,7 +3,7 @@ use super::test_support::{
     checked_function_body_with_platform, jvm_semantics, jvm_stdlib_semantics, root_expression,
 };
 use super::*;
-use crate::fir::FirInlineBodyPlan;
+use crate::fir::{FirExpressionDebugLines, FirInlineBodyPlan};
 
 #[test]
 fn legacy_context_receiver_supplies_an_unqualified_extension_call() {

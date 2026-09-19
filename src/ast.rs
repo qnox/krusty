@@ -11,10 +11,12 @@ pub(crate) use return_labels::ReturnLabelSpans;
 
 mod call_shape;
 mod constructors;
+mod operators;
 mod type_refs;
 pub(crate) use call_shape::explicit_call_receiver;
 pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
 pub use constructors::{CtorDelegation, CtorDelegationCall, SecondaryCtor};
+pub use operators::{BinOp, UnOp};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct ExprId(pub u32);
@@ -80,71 +82,6 @@ pub fn has_instance_backing_field(p: &PropDecl) -> bool {
 
 pub fn setter_param_or_value(param: Option<&String>) -> String {
     param.cloned().unwrap_or_else(|| "value".to_string())
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum BinOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Rem,
-    Eq,
-    Ne,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-    And,
-    Or,
-    RefEq,
-    RefNe, // === and !==
-}
-
-impl BinOp {
-    /// The Kotlin operator-function name an arithmetic operator desugars to (`a + b` → `a.plus(b)`),
-    /// or `None` for a non-arithmetic operator. The single source of truth shared by the checker and
-    /// the lowerer when resolving a user/library `operator fun`.
-    pub fn arith_operator_name(self) -> Option<&'static str> {
-        Some(match self {
-            BinOp::Add => "plus",
-            BinOp::Sub => "minus",
-            BinOp::Mul => "times",
-            BinOp::Div => "div",
-            BinOp::Rem => "rem",
-            _ => return None,
-        })
-    }
-
-    /// Inverse of [`arith_operator_name`](Self::arith_operator_name): the arithmetic operator a
-    /// Kotlin operator-function name (`plus`/`minus`/…) desugars from, or `None`.
-    pub fn from_arith_operator_name(name: &str) -> Option<BinOp> {
-        Some(match name {
-            "plus" => BinOp::Add,
-            "minus" => BinOp::Sub,
-            "times" => BinOp::Mul,
-            "div" => BinOp::Div,
-            "rem" => BinOp::Rem,
-            _ => return None,
-        })
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum UnOp {
-    Neg,
-    Not,
-    Plus,
-}
-
-impl UnOp {
-    pub fn operator_name(self) -> &'static str {
-        match self {
-            UnOp::Neg => "unaryMinus",
-            UnOp::Plus => "unaryPlus",
-            UnOp::Not => "not",
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -1449,6 +1386,11 @@ pub struct File {
     pub expr_end_lines: Vec<u32>,
     /// 1-based source line of each statement's start (parallel to `stmt_spans`; 0 = unknown).
     pub stmt_lines: Vec<u32>,
+    /// 1-based source line of an assignment statement's LVALUE, keyed by statement ID: the line
+    /// the member being written is named on, which is where the write's accessor dispatch belongs
+    /// when the assignment spans several lines. Parallel to `assignment_target_spans`, and absent
+    /// for every other statement form.
+    pub assignment_target_lines: std::collections::HashMap<u32, u32>,
     /// Name of each NAMED annotation argument, keyed by that argument's own `ExprId`
     /// (`@Deprecated("gone", level = HIDDEN)` → the `HIDDEN` expression maps to `"level"`).
     /// Sparse: a positional argument has no entry. Annotation elements have defaults and may be
@@ -1690,6 +1632,7 @@ impl File {
         self.expr_source_lines = Vec::new();
         self.expr_end_lines = Vec::new();
         self.stmt_lines = Vec::new();
+        self.assignment_target_lines = Default::default();
         self.value_operator_spans = Default::default();
         // Both return-label span tables are keyed by the arenas released here.
         self.return_label_spans.clear();

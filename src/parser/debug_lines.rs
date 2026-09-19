@@ -74,6 +74,15 @@ pub(super) fn attach(file: &mut File, src: &str) {
         .iter()
         .map(|&span| span_line_at(span, span.lo))
         .collect();
+    // An assignment's accessor line. A call anchors on its selector name; a WRITE anchors the same
+    // way, on the member it assigns, so `b\n    .value =\n    x` puts the setter dispatch on the
+    // `.value` line rather than on the receiver's.
+    file.assignment_target_lines = file
+        .assignment_target_spans
+        .iter()
+        .map(|(&statement, &span)| (statement, span_line_at(span, span.lo)))
+        .filter(|&(_, line)| line != 0)
+        .collect();
     // Snapshot each expression's start offset before the mutable walk of `decl_arena` (a disjoint
     // field, but only borrowck's field-splitting sees that — a helper can't).
     let expr_lo: Vec<u32> = file.expr_spans.iter().map(|s| s.lo).collect();

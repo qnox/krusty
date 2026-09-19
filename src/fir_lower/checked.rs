@@ -765,6 +765,14 @@ impl BodyLowering<'_> {
                         Ok(self.ir.add_expr(IrExpr::EnumValueOf {
                             classifier: *classifier,
                             arg: *argument,
+                            declaration: crate::ir::EnumValueOfDeclaration::Member,
+                        }))
+                    }
+                    (crate::fir::FirClassifierCallable::TopLevelEnumValueOf, [argument]) => {
+                        Ok(self.ir.add_expr(IrExpr::EnumValueOf {
+                            classifier: *classifier,
+                            arg: *argument,
+                            declaration: crate::ir::EnumValueOfDeclaration::StandardLibraryTopLevel,
                         }))
                     }
                     (crate::fir::FirClassifierCallable::ArrayConstructor { element }, [size]) => {

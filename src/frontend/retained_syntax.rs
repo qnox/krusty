@@ -953,6 +953,10 @@ pub(super) fn compact(file: &mut File) {
         .into_iter()
         .filter_map(|(old, span)| statements.get(&StmtId(old)).map(|new| (new.0, span)))
         .collect();
+    file.assignment_target_lines = std::mem::take(&mut file.assignment_target_lines)
+        .into_iter()
+        .filter_map(|(old, line)| statements.get(&StmtId(old)).map(|new| (new.0, line)))
+        .collect();
     file.statement_labels = std::mem::take(&mut file.statement_labels)
         .into_iter()
         .filter_map(|(old, label)| statements.get(&old).copied().map(|new| (new, label)))

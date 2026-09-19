@@ -1,5 +1,8 @@
-use super::super as metadata;
+// `use super::super as metadata;` is not valid Rust: `super` cannot be the final segment of a
+// renamed import, so the compiler looks for an ITEM named `super` in this module's parent. The
+// path is spelled out instead.
 use super::*;
+use crate::jvm::metadata;
 
 fn semantic_error(detail: impl Into<String>) -> PackageFragmentDecodeError {
     PackageFragmentDecodeError {

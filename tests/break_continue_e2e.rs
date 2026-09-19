@@ -20,3 +20,30 @@ return \"OK\"\n\
 }\n";
     common::expect_box_ok_with_stdlib(SRC, "D");
 }
+
+/// A LABELED transfer leaves the loop its label names, not the innermost one — including through a
+/// `finally`, which runs on the way out. Emission matches the recorded label and has no fallback to
+/// the innermost loop, so a wrong answer here is a wrong jump rather than a near miss.
+#[test]
+fn labeled_break_and_continue_leave_the_loop_they_name() {
+    const SRC: &str = "fun box(): String {\n\
+var outer = 0\n\
+var inner = 0\n\
+var finalizers = 0\n\
+loop@ for (a in 0 until 4) {\n\
+for (b in 0 until 4) {\n\
+try {\n\
+if (b == 1) continue@loop\n\
+if (a == 2) break@loop\n\
+inner += 1\n\
+} finally { finalizers += 1 }\n\
+}\n\
+outer += 1\n\
+}\n\
+if (outer != 0) return \"outer=\" + outer\n\
+if (inner != 2) return \"inner=\" + inner\n\
+if (finalizers != 5) return \"finalizers=\" + finalizers\n\
+return \"OK\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "LabeledTransfer");
+}

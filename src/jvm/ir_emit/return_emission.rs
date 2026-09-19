@@ -79,8 +79,19 @@ impl Emitter<'_> {
         }
         // Kotlin evaluates the return expression before `finally`. Spill that value so arbitrary
         // branchy finalizers run on an empty operand stack, then reload it only if none overrides.
-        let slot = self.next_slot;
-        self.next_slot += words;
+        // The enclosing `try` reserved this slot when it opened, so the finalizer copies it inlines
+        // declare their locals ABOVE it, as kotlinc's do. A `return` reached with no reservation —
+        // one the reservation scan could not see — still takes a slot of its own.
+        let slot = self
+            .pending_return_spills
+            .last()
+            .copied()
+            .flatten()
+            .unwrap_or_else(|| {
+                let allocated = self.next_slot;
+                self.next_slot += words;
+                allocated
+            });
         store(ret, slot, code);
         // The pending return value is initialized before every active `finally` and remains live
         // until the finalizer chain either completes or overrides the transfer. Any branch or

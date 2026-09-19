@@ -34,6 +34,7 @@ mod inline_body_emission;
 mod interface_compatibility;
 mod member_schedule;
 mod operand_stack;
+mod property_access;
 mod return_emission;
 mod try_emission;
 use try_emission::FinallyRegion;
@@ -11271,6 +11272,18 @@ fn emit_method_inner_with_holder(
             store(Ty::Int, slot, &mut code);
             (slot, code.bytes.len() as u16)
         });
+    // An emitted inline TEMPLATE opens its body on the function's own body line, which kotlinc
+    // records even when the body's first instruction belongs to a later line: a template's body is
+    // what a call site expands, so both positions are kept. `mark_line_retained` is what lets the
+    // body's own first mark join this one at the same offset instead of replacing it; where the two
+    // agree — the ordinary case — it deduplicates and nothing is added.
+    if inline_marker.is_some() {
+        if let Some(&line) = ir.fn_decl_lines.get(&fid) {
+            if line != 0 {
+                code.mark_line_retained(line);
+            }
+        }
+    }
     e.emit(body, &mut code);
     // The implicit `return` for a `Unit` function is dead code when the body already diverges
     // (`fun foo() { throw … }`): an unreachable `return` after `athrow` has no stack-map frame and
@@ -12887,6 +12900,13 @@ struct Emitter<'a> {
     /// The pool belongs to ONE emitter and starts empty by construction, so a slot returned by one
     /// method's handler can never be handed to another's: an emitter emits one body.
     free_exception_slots: Vec<u16>,
+    /// Return-value spill slots reserved by the active `try`s that have a `finally`, outermost
+    /// first. A `return` out of such a `try` evaluates its value BEFORE the finalizer runs and
+    /// parks it, and kotlinc reserves that slot with the `try` rather than at the `return` — ahead
+    /// of the parked-exception slot and of every local the inlined finalizer copies declare.
+    /// Allocating it at the `return` instead put the finalizer's own locals underneath it and moved
+    /// everything the `try` reserves one slot up.
+    pending_return_spills: Vec<Option<u16>>,
     /// Protected-region accumulators for the active `try`s that have a `finally`, outermost first.
     /// A copy of a try's own finalizer must not lie inside that try's own ranges, or an exception
     /// raised while the finalizer runs re-enters the same handler and runs it a second time.
@@ -12941,6 +12961,7 @@ impl<'a> Emitter<'a> {
             lambda_modes: env.lambda_modes,
             return_finalizers: Vec::new(),
             free_exception_slots: Vec::new(),
+            pending_return_spills: Vec::new(),
             finally_regions: Vec::new(),
             terminal_statement_target: None,
             generated_initializer: false,
@@ -14046,6 +14067,7 @@ impl<'a> Emitter<'a> {
             };
             if let Some(access) = access {
                 return self.emit_realized_property_read(
+                    operation.expression,
                     operation.receiver,
                     access,
                     operation.ty,
@@ -14086,6 +14108,7 @@ impl<'a> Emitter<'a> {
             .and_then(|accessor| self.bodies.external_property_access(*accessor))
         {
             return self.emit_realized_property_read(
+                operation.expression,
                 operation.receiver,
                 access,
                 operation.ty,
@@ -14101,6 +14124,7 @@ impl<'a> Emitter<'a> {
             operation.interface,
         ) {
             return self.emit_realized_property_read(
+                operation.expression,
                 operation.receiver,
                 access,
                 operation.ty,
@@ -14114,6 +14138,7 @@ impl<'a> Emitter<'a> {
             .property_read_access(operation.owner, operation.name)
         {
             return self.emit_realized_property_read(
+                operation.expression,
                 operation.receiver,
                 access,
                 operation.ty,
@@ -14144,7 +14169,13 @@ impl<'a> Emitter<'a> {
             // For classpath owners the body reader remains authoritative.
             is_interface: operation.interface || self.bodies.owner_is_interface(operation.owner),
         };
-        self.emit_realized_property_read(operation.receiver, access, operation.ty, code)
+        self.emit_realized_property_read(
+            operation.expression,
+            operation.receiver,
+            access,
+            operation.ty,
+            code,
+        )
     }
 
     /// Realize `IrExpr::PropertyWrite` — the write analogue of [`Self::emit_property_read`], and the same
@@ -14322,6 +14353,10 @@ impl<'a> Emitter<'a> {
                 } else {
                     self.cw.methodref(&owner, &name, &descriptor)
                 };
+                // The write through an ACCESSOR is a dispatch, so the assignment's own line returns
+                // here, after the value expression has marked its. A write realized as a FIELD is
+                // not one and marks nothing.
+                self.mark_dispatch_line(operation.expression, code);
                 if is_static {
                     code.invokestatic(m, words, 0);
                 } else if is_interface {
@@ -14345,6 +14380,7 @@ impl<'a> Emitter<'a> {
                     })
                     .unwrap_or(2);
                 let m = self.cw.methodref(&owner, &name, &descriptor);
+                self.mark_dispatch_line(operation.expression, code);
                 code.invokestatic(m, words, 0);
             }
         }
@@ -14774,163 +14810,6 @@ impl<'a> Emitter<'a> {
             if self.is_lateinit_field(owner, name))
     }
 
-    /// Emit one already-chosen realization of a property read: push the receiver (or drop it, when the
-    /// realization takes none), perform the field load or accessor call, and bridge the physical result to
-    /// the property read's Kotlin type.
-    fn emit_realized_property_read(
-        &mut self,
-        receiver: Option<crate::ir::ExprId>,
-        access: crate::jvm::inline::PropertyAccess,
-        ty: &Ty,
-        code: &mut CodeBuilder,
-    ) {
-        use crate::jvm::inline::PropertyAccess;
-        let exact_field = matches!(&access, PropertyAccess::Field { .. });
-        // Kotlin treats the expression to the left of a static `@JvmField` READ as a qualifier and
-        // does not evaluate it.  A write is observably different and still evaluates an explicit
-        // receiver before `putstatic`; that rule remains in `emit_property_write`.
-        let receiver_is_static_field_qualifier = matches!(
-            &access,
-            PropertyAccess::Field {
-                is_static: true,
-                ..
-            }
-        );
-        let access_owner = match &access {
-            PropertyAccess::Field { owner, .. }
-            | PropertyAccess::Accessor { owner, .. }
-            | PropertyAccess::AccessBridge { owner, .. } => owner.clone(),
-        };
-        let takes_receiver = accessor_takes_receiver(&access);
-        let receiver_ty = accessor_receiver_ty(&access, &access_owner);
-        if let Some(receiver) = receiver.filter(|_| !receiver_is_static_field_qualifier) {
-            self.emit_property_receiver(
-                receiver,
-                &access_owner,
-                takes_receiver,
-                &receiver_ty,
-                code,
-            );
-        } else if takes_receiver {
-            self.run.set_emit_error(format!(
-                "receiver-less property realization requires an instance receiver: {access_owner}"
-            ));
-            return;
-        }
-        let physical = match access {
-            PropertyAccess::Field {
-                owner,
-                name,
-                descriptor,
-                is_static,
-            } => {
-                let jt = ty_from_field_descriptor(&descriptor);
-                let lateinit = self.is_lateinit_field(&owner, &name);
-                let fref = self.cw.fieldref(&owner, &name, &descriptor);
-                if is_static {
-                    code.getstatic(fref, slot_words(jt) as i32);
-                } else {
-                    code.getfield(fref, slot_words(jt) as i32);
-                }
-                // A `lateinit var` read throws while the field is still null, wherever it is read from.
-                if lateinit {
-                    code.dup();
-                    let lbl = code.new_label();
-                    code.ifnonnull(lbl);
-                    code.push_string(&name, self.cw);
-                    let m = self.cw.methodref(
-                        "kotlin/jvm/internal/Intrinsics",
-                        "throwUninitializedPropertyAccessException",
-                        "(Ljava/lang/String;)V",
-                    );
-                    code.invokestatic(m, 1, 0);
-                    let st = self.verif_stack(jt);
-                    self.frame(lbl, st, code);
-                    self.bind(lbl, code);
-                }
-                jt
-            }
-            PropertyAccess::Accessor {
-                owner,
-                name,
-                descriptor,
-                is_static,
-                is_interface,
-            } => {
-                // A `void` accessor (a `Unit` property) leaves NOTHING on the stack — `descriptor_ret_words`
-                // is the authority on that, since `ty_from_descriptor_ret` maps `V` to a 1-word `Unit` for
-                // type flow. Nothing is left, so there is nothing to bridge.
-                let words = descriptor_ret_words(&descriptor);
-                let m = if is_interface {
-                    self.cw.interface_methodref(&owner, &name, &descriptor)
-                } else {
-                    self.cw.methodref(&owner, &name, &descriptor)
-                };
-                if is_static {
-                    code.invokestatic(m, 0, words);
-                } else if is_interface {
-                    code.invokeinterface(m, 0, words);
-                } else {
-                    code.invokevirtual(m, 0, words);
-                }
-                if words == 0 {
-                    return;
-                }
-                ty_from_descriptor_ret(&descriptor)
-            }
-            PropertyAccess::AccessBridge {
-                owner,
-                name,
-                descriptor,
-            } => {
-                // The receiver is already on the stack as the bridge's sole argument.
-                let words = descriptor_ret_words(&descriptor);
-                let m = self.cw.methodref(&owner, &name, &descriptor);
-                code.invokestatic(m, 1, words);
-                if words == 0 {
-                    return;
-                }
-                ty_from_descriptor_ret(&descriptor)
-            }
-        };
-        // The realization's result is the PHYSICAL one — erased to `Object` for a type parameter, a bare
-        // primitive for an `Int` property. The node's `ty` is the logical Kotlin type the read has at this
-        // site (`Int?` in a safe-call chain). Bridge the two exactly as any other physical result is
-        // bridged: box, unbox, or narrow.
-        let logical = ir_ty_to_jvm(&stored_value_ty(*ty));
-        let value_class = self.is_value_class_ty(ty);
-        if !value_class
-            && physical.is_jvm_scalar()
-            && !logical.is_jvm_scalar()
-            && logical.is_reference()
-        {
-            box_prim_free(self.cw, code, semantic_scalar_adapter(*ty, physical));
-        } else if !value_class && !physical.is_jvm_scalar() && logical.is_jvm_scalar() {
-            // `ty` is the substituted semantic result and `logical` its JVM carrier. Choosing the
-            // adapter from `logical` alone turns `UInt` into `Integer`; retain the semantic type until
-            // after the `Object` boundary has been bridged.
-            unbox_prim(self.cw, code, semantic_scalar_adapter(*ty, logical));
-        } else if exact_field
-            && physical.is_reference()
-            && logical.is_reference()
-            && type_descriptor(physical) != type_descriptor(logical)
-            && !value_class
-        {
-            // A generic Java field's descriptor erases to its formal bound (`CharSequence` for
-            // `T : CharSequence`), while this applied read may be `String`. Preserve the selected
-            // field descriptor for `getfield`, then narrow its result to the logical binding.
-            let internal = crate::jvm::names::instanceof_internal_name(logical);
-            if internal != "java/lang/Object" {
-                let class = self.cw.class_ref(&internal);
-                code.checkcast(class);
-            }
-        } else if !value_class {
-            // A value class has no runtime type of its own — its values ARE the erased underlying — so
-            // narrowing to one would `checkcast` to a class the value is not an instance of.
-            self.narrow_on_stack(physical, ty, code);
-        }
-    }
-
     /// Whether `ty` names a `@JvmInline value class`, whose values are represented as their underlying.
     fn is_value_class_ty(&self, ty: &Ty) -> bool {
         ty.non_null().obj_internal().is_some_and(|fq_name| {
@@ -15328,6 +15207,12 @@ impl<'a> Emitter<'a> {
                     code.new_obj(ci);
                     code.dup();
                     let mut supplied = temps.iter().zip(args.iter());
+                    // A defaulted construction takes the same rule as a defaulted call: the
+                    // operands its `$default` ABI invents — a placeholder for an omitted argument,
+                    // and the trailing marker/mask/marker group — belong to the CONSTRUCTION, so
+                    // its own line goes back into effect at the start of each such run rather than
+                    // only at the `invokespecial` after all of them.
+                    let mut inside_run = false;
                     for (parameter, physical) in physical_params
                         .iter()
                         .copied()
@@ -15339,6 +15224,7 @@ impl<'a> Emitter<'a> {
                                 &u32::try_from(parameter - *default_prefix_count as usize)
                                     .expect("too many constructor parameters"),
                             );
+                        self.mark_synthesized_run_start(e, omitted, &mut inside_run, code);
                         if omitted {
                             push_zero(physical, code, self.cw);
                         } else {
@@ -15360,6 +15246,9 @@ impl<'a> Emitter<'a> {
                     for &(_, _, lease) in &temps {
                         self.release_temporary(lease);
                     }
+                    if use_accessor || !default_parameters.is_empty() {
+                        self.mark_synthesized_run_start(e, true, &mut inside_run, code);
+                    }
                     if use_accessor {
                         code.aconst_null();
                     }
@@ -15377,6 +15266,7 @@ impl<'a> Emitter<'a> {
                     code.new_obj(ci);
                     code.dup();
                     let mut supplied = args.iter().copied();
+                    let mut inside_run = false;
                     for (parameter, physical) in physical_params
                         .iter()
                         .copied()
@@ -15388,6 +15278,7 @@ impl<'a> Emitter<'a> {
                                 &u32::try_from(parameter - *default_prefix_count as usize)
                                     .expect("too many constructor parameters"),
                             );
+                        self.mark_synthesized_run_start(e, omitted, &mut inside_run, code);
                         if omitted {
                             push_zero(physical, code, self.cw);
                         } else {
@@ -15410,6 +15301,9 @@ impl<'a> Emitter<'a> {
                                 code,
                             );
                         }
+                    }
+                    if use_accessor || !default_parameters.is_empty() {
+                        self.mark_synthesized_run_start(e, true, &mut inside_run, code);
                     }
                     if use_accessor {
                         code.aconst_null();
@@ -15770,6 +15664,11 @@ impl<'a> Emitter<'a> {
                         code.invokestatic(method, slot_words(ty) as i32, 1);
                     }
                     crate::ir::IrIntrinsic::EnumValueOf { classifier } => {
+                        // `enumValueOf<E>` is the stdlib's reified INLINE template, so what follows
+                        // is an expansion of it rather than a call on this line. kotlinc marks the
+                        // call site here and lets the argument's own line join it at the same
+                        // offset; the `Enum.valueOf` this ends with belongs to the expansion.
+                        self.mark_inline_call_site_line(e, code);
                         match classifier.non_null() {
                             Ty::TyParam(identity, _) => {
                                 // Kotlin's public inline template keeps the reified classifier as
@@ -15825,6 +15724,11 @@ impl<'a> Emitter<'a> {
                             ),
                         };
                         let method = self.cw.methodref(owner, "compare", descriptor);
+                        // This intrinsic's lowering IS a call, so it takes the dispatch rule: the
+                        // source call's line returns at the `invokestatic`, after the operands have
+                        // marked theirs. Intrinsics lowered to an instruction instead — an array
+                        // read, an arithmetic op — deliberately do not.
+                        self.mark_dispatch_line(e, code);
                         code.invokestatic(method, (slot_words(*operand) * 2) as i32, 1);
                     }
                     crate::ir::IrIntrinsic::CoroutineContext => {
@@ -16781,12 +16685,28 @@ impl<'a> Emitter<'a> {
                     }
                 }
             }
-            IrExpr::EnumValueOf { classifier, arg } => {
+            IrExpr::EnumValueOf {
+                classifier,
+                arg,
+                declaration,
+            } => {
                 let fq = classifier.render();
+                if *declaration == crate::ir::EnumValueOfDeclaration::StandardLibraryTopLevel {
+                    self.mark_inline_call_site_line(e, code);
+                }
                 self.emit_value(*arg, code);
                 let m = self
                     .cw
                     .methodref(&fq, "valueOf", &format!("(Ljava/lang/String;)L{fq};"));
+                // Both declarations reach the same `E.valueOf`, and they take opposite line
+                // rules: the classifier's own MEMBER is an ordinary dispatch, so the call's line
+                // returns at the invoke; the standard library's top-level `enumValueOf<E>` is
+                // INLINE, so what follows is its expansion and kotlinc marks the call site
+                // instead. That is why the selected declaration is recorded rather than inferred.
+                match declaration {
+                    crate::ir::EnumValueOfDeclaration::Member => self.mark_dispatch_line(e, code),
+                    crate::ir::EnumValueOfDeclaration::StandardLibraryTopLevel => {}
+                }
                 code.invokestatic(m, 1, 1);
             }
             IrExpr::When { branches } => self.emit_when(e, branches, code),
@@ -17333,6 +17253,9 @@ impl<'a> Emitter<'a> {
                     "invoke",
                     &jvm_function_invoke_descriptor(n as u8),
                 );
+                // A function VALUE's invocation is a dispatch like any other: after the operands
+                // have each marked their own line, the call's own line returns at the `invoke`.
+                self.mark_dispatch_line(e, code);
                 code.invokeinterface(m, if high_arity { 1 } else { n as i32 }, 1);
                 // The interface returns `Object`; cast/unbox to the function's declared return type.
                 // Select a scalar adapter from that semantic return before `ir_ty_to_jvm` reduces an
@@ -18842,7 +18765,7 @@ impl<'a> Emitter<'a> {
             IrExpr::Continue { label } => (label, false),
             _ => return None,
         };
-        let (cont, end, depth) = self.loop_transfer_target(label);
+        let (cont, end, depth) = self.loop_transfer_target(label)?;
         if self.return_finalizers.len() > depth {
             return None;
         }

@@ -8,6 +8,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod control_flow;
+mod line_numbers;
 mod method_parameters;
 
 pub const ACC_PUBLIC: u16 = 0x0001;
@@ -3301,6 +3302,10 @@ pub struct CodeBuilder {
     frames: Vec<(u32, Vec<VerifType>, Vec<VerifType>)>,
     /// `LineNumberTable` marks recorded during emission: `(start_pc, line)`. See [`Self::mark_line`].
     line_marks: Vec<(u16, u16)>,
+    /// A bytecode offset whose last recorded line mark must be KEPT when another mark lands on the
+    /// same offset: the next one appends after it instead of replacing it. See
+    /// [`CodeBuilder::mark_line_retained`].
+    retained_line_mark: Option<usize>,
     /// `(start_pc, length, slot, name, descriptor)` entries in scope-close order.
     local_entries: Vec<(u16, Option<u16>, u16, String, String)>,
     /// Whether the instruction stream is currently UNREACHABLE: an unconditional terminator
@@ -3348,6 +3353,7 @@ impl CodeBuilder {
             needs_stackmap: false,
             frames: Vec::new(),
             line_marks: Vec::new(),
+            retained_line_mark: None,
             local_entries: Vec::new(),
             dead: false,
             dead_bound: Vec::new(),
@@ -3385,30 +3391,6 @@ impl CodeBuilder {
 
     pub fn local_entries(&self) -> &[(u16, Option<u16>, u16, String, String)] {
         &self.local_entries
-    }
-
-    /// Record a `LineNumberTable` entry for `line` starting at the CURRENT pc. Deduped: a re-mark
-    /// of the line already in effect is dropped; a second mark at the same pc overwrites (the
-    /// statement that actually begins an instruction wins, matching kotlinc's per-statement entries).
-    pub fn mark_line(&mut self, line: u32) {
-        if self.dead {
-            return; // the statement it would mark is dropped dead code (see `dead`)
-        }
-        if self.bytes.len() > u16::MAX as usize {
-            return; // past the classfile pc range — an entry would silently wrap
-        }
-        let line = line.min(u16::MAX as u32) as u16;
-        let pc = self.bytes.len() as u16;
-        match self.line_marks.last_mut() {
-            Some((lpc, ll)) if *lpc == pc => *ll = line,
-            Some((_, ll)) if *ll == line => {}
-            _ => self.line_marks.push((pc, line)),
-        }
-    }
-
-    /// The recorded `LineNumberTable` marks (empty for a body emitted without line info).
-    pub fn line_marks(&self) -> &[(u16, u16)] {
-        &self.line_marks
     }
 
     /// Mark that this method creates a lambda object. Causes a StackMapTable to be emitted.
