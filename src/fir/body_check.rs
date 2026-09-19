@@ -92,16 +92,16 @@ use super::{
     FirConstant, FirConstructorCall, FirConstructorCaptureArgument, FirConstructorTarget,
     FirControlTarget, FirControlTargetKind, FirConversion, FirConversionKind, FirConvertedValue,
     FirDefaultValue, FirDelegateCall, FirDelegateDispatchReceiver, FirDestructureEntry, FirExpr,
-    FirExprId, FirExprKind, FirExpressionDebugLines, FirImplicitReceiverCapture,
-    FirIndexedAccessKind, FirInterfaceDelegateArgument, FirIntrinsic, FirJumpKind,
-    FirLocalCallableRef, FirLocalClassCapture, FirLocalClassCaptureSource, FirLoopHeader,
-    FirPlatformNarrowing, FirPluginOperand, FirPropertyDelegatePlan, FirPropertyReferenceTarget,
-    FirPropertyTarget, FirRangeOperation, FirReceiver, FirReferenceAdaptation, FirSamConversion,
-    FirStatement, FirStatementId, FirStatementKind, FirTypeOperation, FirTypeParameterRef,
-    FirTypeSubstitution, FirUnaryOperation, FirValueParameter, FirVarargElement, FirWhenBranch,
-    FirWhenCondition, InlineBodyStore, LocalBinding, LocalCallableId, LocalDelegateBinding,
-    LocalValueId, OriginId, OriginStore, PropertyId, ResolvedCallableHeader, ResolvedModuleIndex,
-    ResolvedTy, SourceFileId, SyntheticOriginKind, UnpublishableType,
+    FirExprId, FirExprKind, FirImplicitReceiverCapture, FirIndexedAccessKind,
+    FirInterfaceDelegateArgument, FirIntrinsic, FirJumpKind, FirLocalCallableRef,
+    FirLocalClassCapture, FirLocalClassCaptureSource, FirLoopHeader, FirPlatformNarrowing,
+    FirPluginOperand, FirPropertyDelegatePlan, FirPropertyReferenceTarget, FirPropertyTarget,
+    FirRangeOperation, FirReceiver, FirReferenceAdaptation, FirSamConversion, FirStatement,
+    FirStatementId, FirStatementKind, FirTypeOperation, FirTypeParameterRef, FirTypeSubstitution,
+    FirUnaryOperation, FirValueParameter, FirVarargElement, FirWhenBranch, FirWhenCondition,
+    InlineBodyStore, LocalBinding, LocalCallableId, LocalDelegateBinding, LocalValueId, OriginId,
+    OriginStore, PropertyId, ResolvedCallableHeader, ResolvedModuleIndex, ResolvedTy, SourceFileId,
+    SyntheticOriginKind, UnpublishableType,
 };
 
 /// The unoptimized expression dispatcher currently reserves about 98 KiB. Checking before the
@@ -394,28 +394,7 @@ fn check_body_unit_with_parameters_and_defaults(
     // Convert transient parser coordinates into line-only output facts before this bounded syntax
     // unit is released. Checked/default/inline FIR may carry the resulting numbers, but never a
     // file offset or AST identity.
-    let expression_lines = file
-        .expr_spans
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(raw, span)| {
-            (
-                span,
-                FirExpressionDebugLines {
-                    source: file.expr_source_lines.get(raw).copied().unwrap_or(0),
-                    end: file.expr_end_lines.get(raw).copied().unwrap_or(0),
-                },
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    let statement_lines = file
-        .stmt_spans
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(raw, span)| (span, file.stmt_lines.get(raw).copied().unwrap_or(0)))
-        .collect::<HashMap<_, _>>();
+    let (expression_lines, statement_lines) = crate::fir::body::debug_lines::of_file(file);
     checker.body.attach_debug_lines(
         source,
         file.source_line_count,

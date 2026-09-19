@@ -113,6 +113,44 @@ impl Emitter<'_> {
             self.next_slot += slot_words(rt);
             Some(s)
         };
+        // A `try` with a `finally` reserves its two slots HERE, before anything inside it is
+        // emitted, because that is where kotlinc reserves them: the return value a `return` out of
+        // the `try` parks while the finalizer runs, then the exception the catch-all parks while
+        // it runs. Every local an inlined copy of the finalizer declares sits above both.
+        //
+        // Reserving them where they are first USED put the first copy's locals underneath instead,
+        // which moved the parked exception one slot up and showed as an extra `top` in every frame
+        // recorded while the finalizer ran.
+        //
+        // Nested `try`s SHARE both, as kotlinc's do: only one return is ever in flight, and a
+        // `try` inside the body runs its handler strictly before the enclosing one is entered, so
+        // the enclosing slots are free for it. The parked-exception slot therefore stays in the
+        // reuse pool while the body is emitted and is taken back out before the handler, where it
+        // holds the exception across the whole inlined finalizer.
+        let return_words = slot_words(self.ret);
+        let return_spill = self
+            .pending_return_spills
+            .last()
+            .copied()
+            .flatten()
+            .or_else(|| {
+                (finally.is_some() && return_words > 0 && self.parks_a_returned_value(expression))
+                    .then(|| {
+                        let reserved = self.next_slot;
+                        self.next_slot += return_words;
+                        reserved
+                    })
+            });
+        self.pending_return_spills.push(return_spill);
+        let parked_slot = finally.is_some().then(|| {
+            let reserved = self.free_exception_slots.pop().unwrap_or_else(|| {
+                let fresh = self.next_slot;
+                self.next_slot += 1;
+                fresh
+            });
+            self.free_exception_slots.push(reserved);
+            reserved
+        });
         // A `finally` that diverges (`finally { throw }`) never falls through to `after`.
         let fin_diverges = finally.is_some_and(|f| self.discarding_diverges(f));
 
@@ -190,7 +228,11 @@ impl Emitter<'_> {
         // code (normal-path, per-catch, or its own) — otherwise an exception thrown inside an inlined
         // finally re-enters the handler and the finally runs twice. Collect each catch body's range
         // (`[cbody_start, cbody_end)`, ending before that catch's inlined finally).
-        for c in catches {
+        // A catch body is a scope of its own: the slot reserved for a `return` out of the TRY is
+        // live there — the caught exception now occupies the one beside it — so a `return` written
+        // in a catch takes a slot of its own, as kotlinc's does.
+        self.pending_return_spills.push(None);
+        for (ordinal, c) in catches.iter().enumerate() {
             let handler = code.new_label();
             // A handler is entered over the exception edge, not by a branch — and a diverging `try`
             // body leaves the stream dead exactly here, so binding must revive on the range it guards
@@ -201,17 +243,30 @@ impl Emitter<'_> {
             // Handler entry: the exception is the sole stack value; locals are the pre-`try` state.
             self.frame(handler, vec![VerifType::Object(exc_ci)], code);
             let exc_ty = Ty::obj(&exc_internal);
-            let cslot = self.next_slot;
-            self.next_slot += 1;
+            // A typed catch's parameter takes the slot the `finally` catch-all parks its own
+            // exception in, which is what kotlinc emits: the two are never live at once — a catch
+            // body runs because its type MATCHED, and the catch-all parks only while unwinding past
+            // it — and the parked value is dead the moment the handler rethrows. Giving the
+            // parameter a slot of its own instead pushed it above the reserved one and cost a wide
+            // `astore` at every catch.
+            let cslot = parked_slot.unwrap_or_else(|| {
+                let fresh = self.next_slot;
+                self.next_slot += 1;
+                fresh
+            });
             self.slots.insert(c.var, (cslot, exc_ty));
+            // The `finally` guards this catch from its ENTRY, the store of the caught exception
+            // included — kotlinc protects the handler's own entry the same way it protects the
+            // catch-all's, and a throw between the exception edge and the body is still a throw out
+            // of the `try` the finalizer belongs to.
+            if let Some(finalizer) = finally {
+                self.open_finally_segment(finalizer, code);
+            }
             store(exc_ty, cslot, code);
             let local_start =
                 (code.bytes.len() <= u16::MAX as usize).then_some(code.bytes.len() as u16);
             let cbody_start = code.new_label();
             self.bind(cbody_start, code);
-            if let Some(finalizer) = finally {
-                self.open_finally_segment(finalizer, code);
-            }
             let cbody_diverges = if is_stmt {
                 self.discarding_diverges(c.body)
             } else {
@@ -239,7 +294,18 @@ impl Emitter<'_> {
                 self.close_finally_segment(finalizer, code);
             }
             if self.record_locals {
-                if let (Some(name), Some(start_pc)) = (c.name.as_deref(), local_start) {
+                // The catch parameter is a local like any other: its source spelling and its
+                // inline provenance go through the same debug-name boundary, so an expansion's
+                // copy is named at the depth it sits at rather than under the bare spelling the
+                // source wrote once.
+                let rendered = c.binding.as_ref().and_then(|binding| {
+                    crate::jvm::debug_local_names::render(
+                        self.ir,
+                        Some(binding.name.as_str()),
+                        binding.provenance,
+                    )
+                });
+                if let (Some(name), Some(start_pc)) = (rendered.as_deref(), local_start) {
                     let end_pc = code.bytes.len().min(u16::MAX as usize) as u16;
                     code.add_local_entry(
                         start_pc,
@@ -263,7 +329,17 @@ impl Emitter<'_> {
                     if let Some(f) = finally {
                         debug_lines::mark_block_exit(self.ir, f, code);
                     }
-                    code.goto(after);
+                    // The LAST catch of a `try` with no `finally` is followed immediately by
+                    // `after`: nothing stands between them, so the jump would be to the next
+                    // instruction. kotlinc falls through there, and the three bytes shift every
+                    // offset after them — the exception table's and the line table's alike.
+                    // Every other catch has the next handler, or this catch's own copy of the
+                    // finalizer, in the way and still needs it.
+                    // Falling in leaves the stream live, so `after` is reached without a branch
+                    // and its frame is still recorded for the edges that do branch to it.
+                    if finally.is_some() || ordinal + 1 != catches.len() {
+                        code.goto(after);
+                    }
                     after_reachable = true;
                 }
             }
@@ -273,6 +349,7 @@ impl Emitter<'_> {
                 code.add_exception(range_start, range_end, handler, exc_ci);
             }
         }
+        self.pending_return_spills.pop();
 
         // `finally` catch-all: any exception not handled above (in the body or a catch body) runs the
         // `finally` then re-throws. It protects only the body + catch bodies (`fin_ranges`), NOT the
@@ -286,11 +363,12 @@ impl Emitter<'_> {
             let thr_ci = self.cw.class_ref("java/lang/Throwable");
             self.frame(fin_handler, vec![VerifType::Object(thr_ci)], code);
             let thr_ty = Ty::obj("java/lang/Throwable");
-            let tslot = self.free_exception_slots.pop().unwrap_or_else(|| {
-                let leased = self.next_slot;
-                self.next_slot += 1;
-                leased
-            });
+            let tslot = parked_slot.expect("a finalizer reserves its parked-exception slot");
+            // Live again from here: it holds the caught exception across the whole inlined
+            // finalizer, so a `try` inside that copy must not be handed the same slot.
+            if let Some(position) = self.free_exception_slots.iter().rposition(|&s| s == tslot) {
+                self.free_exception_slots.remove(position);
+            }
             // The handler's entry belongs to the finalizer copy it introduces, not to the `finally`
             // keyword — mark it before the store so both copies open on the same line.
             debug_lines::mark_block_entry(self.ir, f, code);
@@ -343,28 +421,55 @@ impl Emitter<'_> {
             // no frame (nothing reaches it) and leave no value (the `try` is `Nothing`-typed).
             self.bind(after, code);
         }
+        self.pending_return_spills.pop();
     }
 
-    /// Map a checked common-IR loop-target identity to its physical continue/break labels and the
-    /// active-finalizer depth at loop entry. This does not resolve source spelling: FIR checking did
-    /// that once, and lowering replaced it with the generated identity stored on both the loop and
-    /// transfer. `None` is reserved for backend-generated innermost-loop transfers.
-    pub(super) fn loop_transfer_target(&self, label: &Option<String>) -> (Label, Label, usize) {
-        // A labelled transfer names a loop the checker resolved; reinterpreting an unknown label as
-        // the innermost loop would silently jump somewhere else, so the invariant is asserted.
+    /// Whether a `return` anywhere inside this `try` parks its value while a finalizer runs.
+    ///
+    /// A lambda's body is a function of its own and its `return`s belong to it, so the walk stops
+    /// there; everything else this `try` owns is reached, including its catch and finally bodies —
+    /// a `return` written in either of those parks its value the same way.
+    fn parks_a_returned_value(&self, expression: crate::ir::ExprId) -> bool {
+        let mut pending = vec![expression];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            match self.ir.expr(node) {
+                crate::ir::IrExpr::Return(Some(_)) => return true,
+                crate::ir::IrExpr::Lambda { captures, .. } => {
+                    pending.extend(captures.iter().copied())
+                }
+                _ => crate::ir::for_each_child(&self.ir.exprs, node, &mut |child| {
+                    pending.push(child)
+                }),
+            }
+        }
+        false
+    }
+
+    /// The loop a `break`/`continue` leaves: its continue target, its exit target, and the
+    /// finalizer depth at its entry.
+    ///
+    /// A LABELED transfer names the loop the checker bound it to, and only that loop answers. There
+    /// is deliberately no fallback to the innermost loop: a label the emitter's loop stack does not
+    /// carry means the transfer and its loop disagree about which loop this is, and jumping to the
+    /// innermost one would emit a program that branches somewhere the source never wrote. `None`
+    /// instead, so the caller fails the file closed.
+    pub(super) fn loop_transfer_target(
+        &self,
+        label: &Option<String>,
+    ) -> Option<(Label, Label, usize)> {
         let entry = match label {
             Some(l) => self
                 .loop_stack
                 .iter()
                 .rev()
-                .find(|(_, _, sl, _)| sl.as_deref() == Some(l.as_str()))
-                .unwrap_or_else(|| {
-                    panic!("break/continue names the loop `{l}@`, which is not in scope here")
-                }),
-            None => self.loop_stack.last().expect("break/continue outside loop"),
+                .find(|(_, _, sl, _)| sl.as_deref() == Some(l.as_str())),
+            None => self.loop_stack.last(),
         };
-        let (cont, end, _, depth) = entry;
-        (*cont, *end, *depth)
+        entry.map(|(cont, end, _, depth)| (*cont, *end, *depth))
     }
 
     /// Leave the loop `label` names, running every `finally` between here and it first.
@@ -379,7 +484,14 @@ impl Emitter<'_> {
         brk: bool,
         code: &mut CodeBuilder,
     ) {
-        let (cont, end, depth) = self.loop_transfer_target(label);
+        let Some((cont, end, depth)) = self.loop_transfer_target(label) else {
+            self.run.set_emit_error(format!(
+                "{} names a loop that is not open here: {}",
+                if brk { "break" } else { "continue" },
+                label.as_deref().unwrap_or("<unlabeled>"),
+            ));
+            return;
+        };
         let target = if brk { end } else { cont };
         if self.return_finalizers.len() > depth {
             // kotlinc closes the protected region on a transfer that leaves a `try` with a `nop`,
@@ -393,5 +505,58 @@ impl Emitter<'_> {
             code.goto(target);
         }
         self.reopen_finally_segments(code);
+    }
+}
+
+/// The loop-transfer contract's own refusal.
+///
+/// A `break`/`continue` whose label names no open loop needs malformed IR — the checker binds every
+/// labeled transfer to a loop that encloses it — so this builds the IR directly. Before, the lookup
+/// fell back to the innermost loop, which turned a disagreement between a transfer and its loop into
+/// a jump the source never wrote.
+#[cfg(test)]
+mod tests {
+    use crate::ir::{IrConst, IrExpr, IrFile, IrFunction};
+    use crate::jvm::ir_emit::fail_soft_tests::emit_for_test;
+    use crate::jvm::ir_emit::EmitRun;
+    use crate::types::Ty;
+
+    #[test]
+    fn a_break_naming_a_loop_that_is_not_open_is_refused_not_redirected() {
+        let mut ir = IrFile::default();
+        let condition = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+        let escape = ir.add_expr(IrExpr::Break {
+            label: Some("elsewhere".into()),
+        });
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![escape],
+            value: None,
+        });
+        let loop_expression = ir.add_expr(IrExpr::While {
+            cond: condition,
+            body,
+            update: None,
+            post_test: false,
+            label: Some("here".into()),
+        });
+        ir.add_fun(IrFunction {
+            name: "box".into(),
+            params: vec![],
+            ret: Ty::Unit,
+            body: Some(loop_expression),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![],
+        });
+
+        let run = EmitRun::default();
+        assert!(
+            emit_for_test(&ir, "Facade", &run).is_none(),
+            "a refused transfer must not produce a class file"
+        );
+        assert_eq!(
+            run.emit_error().as_deref(),
+            Some("break names a loop that is not open here: elsewhere"),
+        );
     }
 }

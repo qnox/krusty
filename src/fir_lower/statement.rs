@@ -144,6 +144,17 @@ impl BodyLowering<'_> {
         if line != 0 {
             self.ir.expr_lines.insert(lowered, line);
         }
+        // An assignment's write dispatches where its lvalue is NAMED, not where the statement
+        // begins: `b\n    .value =\n    x` puts the setter call on the `.value` line, exactly as a
+        // multi-line call's dispatch returns to its selector's. Nothing else in the statement has a
+        // source line of its own, so this records one for the lowered write itself.
+        let target_line = self.body.statement_target_debug_line(statement_id);
+        if target_line != 0 {
+            self.ir
+                .expr_source_lines
+                .entry(lowered)
+                .or_insert(target_line);
+        }
         self.set_statement_state(statement_id, LoweringState::Lowered(lowered));
         Ok(lowered)
     }

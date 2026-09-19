@@ -1064,30 +1064,30 @@ pub fn java_home() -> String {
 
 /// Compile `BoxRunner.java` once into a stable cache dir keyed by the source hash; return its dir.
 fn setup_runner(java_home: &str) -> Option<PathBuf> {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for b in BOX_RUNNER_SRC.bytes() {
-        hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
-    }
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/box_runner_{hash:016x}"));
-    if dir.join("BoxRunner.class").is_file() {
-        return Some(dir);
-    }
-    std::fs::create_dir_all(&dir).ok()?;
-    let src_path = dir.join("BoxRunner.java");
-    std::fs::write(&src_path, BOX_RUNNER_SRC).ok()?;
-    let javac = format!("{java_home}/bin/javac");
-    if !Path::new(&javac).exists() {
-        return None;
-    }
-    let out = Command::new(&javac)
-        .args(["-source", "8", "-target", "8", "-d", dir.to_str().unwrap()])
-        .arg(&src_path)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(dir)
+    static SETUP: OnceLock<Option<PathBuf>> = OnceLock::new();
+    SETUP
+        .get_or_init(|| {
+            let mut hash: u64 = 0xcbf29ce484222325;
+            for b in BOX_RUNNER_SRC.bytes() {
+                hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
+            }
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("target/box_runner_{hash:016x}"));
+            if dir.join("BoxRunner.class").is_file() {
+                return Some(dir);
+            }
+            std::fs::create_dir_all(&dir).ok()?;
+            let src_path = dir.join("BoxRunner.java");
+            std::fs::write(&src_path, BOX_RUNNER_SRC).ok()?;
+            let javac = format!("{java_home}/bin/javac");
+            let out = Command::new(&javac)
+                .args(["-source", "8", "-target", "8", "-d", dir.to_str().unwrap()])
+                .arg(&src_path)
+                .output()
+                .ok()?;
+            out.status.success().then_some(dir)
+        })
+        .clone()
 }
 
 /// A persistent JVM subprocess that runs `box()` calls CONCURRENTLY. Requests are tagged with an id

@@ -1103,10 +1103,10 @@ impl BodyLowering<'_> {
                         )?;
                         Ok(IrCatch {
                             var: self.value_slot(catch.parameter),
-                            name: self
+                            binding: self
                                 .body
                                 .debug_value_name(catch.parameter)
-                                .map(str::to_owned),
+                                .map(|name| crate::ir::IrCatchBinding::source(name.to_owned())),
                             exc_internal,
                             body: self.expression(catch.body)?,
                         })

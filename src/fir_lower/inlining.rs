@@ -353,6 +353,16 @@ impl BodyLowering<'_> {
                     });
                 self.ir.set_debug_local_provenance(copy, provenance);
             }
+            // A `catch` binding is declared by its `IrCatch` rather than by a `Variable` node, so
+            // it carries the same two facts in the record that declares it and gains its frame
+            // here rather than through the tables above.
+            if let Some(IrExpr::Try { catches, .. }) = self.ir.exprs.get_mut(copy as usize) {
+                for catch in catches {
+                    if let Some(binding) = catch.binding.as_mut() {
+                        binding.nest_inline();
+                    }
+                }
+            }
             if protected.contains(&source) {
                 continue;
             }
