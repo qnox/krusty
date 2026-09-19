@@ -516,8 +516,10 @@ impl SemanticTables<'_> {
                     "duplicate required field in type parameter in {context}"
                 )));
             }
-            let parameter = metadata::parse_type_param(body).ok_or_else(|| {
-                semantic_error(format!("invalid semantic type parameter in {context}"))
+            let parameter = parse_type_param(body).map_err(|error| {
+                semantic_error(format!(
+                    "invalid semantic type parameter in {context}: {error:?}"
+                ))
             })?;
             let name = semantic_string(self.strings, parameter.name_id, context)?;
             if names.insert(parameter.id, name).is_some() {
@@ -568,7 +570,11 @@ impl SemanticTables<'_> {
             parameters.push(metadata::BuiltinTypeParam {
                 name,
                 bounds,
-                variance: parameter.variance,
+                variance: match parameter.variance {
+                    ParsedVariance::In => crate::types::TypeVariance::In,
+                    ParsedVariance::Out => crate::types::TypeVariance::Out,
+                    ParsedVariance::Invariant => crate::types::TypeVariance::Invariant,
+                },
                 only_input,
             });
         }
@@ -643,8 +649,9 @@ fn semantic_value_parameter(
     for value in message_bodies(body, 8, context)? {
         validate_annotation_value(value, tables.strings, tables.qnames)?;
     }
-    let parameter = metadata::parse_value_parameter(body)
-        .ok_or_else(|| semantic_error(format!("invalid value parameter in {context}")))?;
+    let parameter = parse_value_parameter(body).map_err(|error| {
+        semantic_error(format!("invalid value parameter in {context}: {error:?}"))
+    })?;
     let name = semantic_string(tables.strings, parameter.name_id, context)?;
     let ty = tables.type_ref(
         parameter.type_body.as_deref(),
@@ -671,7 +678,7 @@ fn semantic_value_parameter(
     Ok(SemanticValueParameter {
         ty,
         name,
-        has_default: parameter.has_default,
+        has_default: parameter.flags & (1 << 1) != 0,
         is_vararg: parameter.vararg_elem_body.is_some() || parameter.vararg_elem_id.is_some(),
     })
 }
@@ -691,8 +698,12 @@ fn semantic_function(
         tables.qnames,
         "function declaration",
     )?;
-    let function = metadata::parse_function(body)
-        .ok_or_else(|| semantic_error("invalid semantic function declaration"))?;
+    let function = metadata::parse_function(body).map_err(|error| match error {
+        metadata::MetadataDecodeError::InvalidVariance(variance) => semantic_error(format!(
+            "invalid type-parameter variance {variance} in function declaration"
+        )),
+        error => semantic_error(format!("invalid semantic function declaration: {error:?}")),
+    })?;
     let type_parameter_bodies = message_bodies(body, 4, "function declaration")?;
     if function.type_params.len() != type_parameter_bodies.len() {
         return Err(semantic_error(

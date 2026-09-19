@@ -30,7 +30,8 @@ fn class_info_kind(internal: &str, d1: Vec<u8>, d2: Vec<String>, kind: Option<i3
         interfaces: Vec::<String>::new().into(),
         fields: Vec::new(),
         methods: Vec::new(),
-        meta: decode_metadata(&d1_strings, &d2, kind, internal, None, &[]),
+        meta: decode_metadata(&d1_strings, &d2, kind, internal, None, &[])
+            .expect("round-trip metadata decodes"),
         signature: None,
         retention: None,
         annotations: Vec::new(),
@@ -137,7 +138,10 @@ fn secondary_constructor_default_flags_round_trip() {
             ..Default::default()
         },
     );
-    let constructors = class_constructors(&class_info("sample/Secondary", d1, d2)).to_vec();
+    // Constructors are a `Class`-schema field. Preserve the carrier kind the real `@Metadata`
+    // annotation supplies so the decoder does not reinterpret an unknown carrier as a class.
+    let constructors =
+        class_constructors(&class_info_kind("sample/Secondary", d1, d2, Some(1))).to_vec();
 
     assert_eq!(constructors.len(), 1);
     assert_eq!(constructors[0].params.names, ["required", "fallback"]);

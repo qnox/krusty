@@ -2553,7 +2553,8 @@ fn member_signature(disassembly: &str, member: &str) -> String {
 fn metadata_member_return(bytes: &[u8], owner: &str, member: &str) -> Ty {
     let (d1, d2) = common_core::raw_kotlin_metadata(bytes).expect("read Kotlin metadata");
     let d1 = vec![d1.into_iter().map(char::from).collect::<String>()];
-    let metadata = krusty::jvm::metadata::decode_metadata(&d1, &d2, Some(1), owner, None, &[]);
+    let metadata = krusty::jvm::metadata::decode_metadata(&d1, &d2, Some(1), owner, None, &[])
+        .expect("generated class metadata decodes");
     let matches = metadata
         .class_functions
         .iter()
@@ -2668,6 +2669,7 @@ fn metadata_constructors(bytes: &[u8], owner: &str) -> Vec<ConstructorMetadataSh
     let (d1, d2) = common_core::raw_kotlin_metadata(bytes).expect("read Kotlin metadata");
     let d1 = vec![d1.into_iter().map(char::from).collect::<String>()];
     krusty::jvm::metadata::decode_metadata(&d1, &d2, Some(1), owner, None, &[])
+        .expect("generated class metadata decodes")
         .constructors
         .iter()
         .map(|constructor| ConstructorMetadataShape {

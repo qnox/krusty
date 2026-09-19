@@ -5783,6 +5783,10 @@ impl JvmLibraries {
 }
 
 impl crate::libraries::SemanticPlatform for JvmLibraries {
+    fn validate_initialization(&self) -> Result<(), crate::libraries::PlatformInitializationError> {
+        self.cp.validate_lazy_class_loads()
+    }
+
     fn install_source_module_headers(
         &self,
         sources: &[crate::libraries::PlatformSourceHeaderInput<'_>],

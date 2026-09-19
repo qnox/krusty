@@ -417,6 +417,10 @@ impl SymbolSource for DependencyPlatform {
 }
 
 impl SemanticPlatform for DependencyPlatform {
+    fn validate_initialization(&self) -> Result<(), crate::libraries::PlatformInitializationError> {
+        self.platform.validate_initialization()
+    }
+
     fn function_type(&self, arity: usize) -> Option<Ty> {
         self.platform.function_type(arity)
     }
