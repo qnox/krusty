@@ -154,3 +154,21 @@ pub(super) fn span(parser: &Parser<'_>, modifiers: &[String], modifier: &str) ->
                 .unwrap_or_else(|| panic!("a {modifier} modifier must retain its source token"))
         })
 }
+
+/// Record a nested classifier that wrote `actual` as its own actualization target.
+///
+/// The enclosing declaration's `actual` does not cover it: the reference compiler reports every
+/// unmatched `actual` at its own name, a nested classifier's included. The top-level record keeps
+/// only the outermost declaration of a hoisted group, because a hoisted descendant carries the
+/// modifier only if it wrote one itself — which is knowable here, at the two sites that own the
+/// nested declaration's modifier list, and nowhere afterwards without pairing a keyword span with
+/// whichever declaration happens to follow it.
+pub(super) fn record_nested_actual(
+    file: &mut crate::ast::File,
+    modifiers: &[String],
+    nested: crate::ast::DeclId,
+) {
+    if modifiers.iter().any(|modifier| modifier == "actual") {
+        file.actual_decls.push(nested);
+    }
+}

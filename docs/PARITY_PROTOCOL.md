@@ -84,17 +84,19 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
     at **~151s**, so lower parallelism is not currently the fix. Any
     binary's non-zero exit fails the run and prints its captured log. A filter arg defers to plain
     `cargo test --profile gate` for focused runs.
-- **`NO_EXPECT_FOR_ACTUAL` — implemented for TOP-LEVEL declarations; members remain.** With `MultiPlatformProjects` on, an
+- **`NO_EXPECT_FOR_ACTUAL` — implemented.** With `MultiPlatformProjects` on, an
   `actual` with no matching `expect` is an error in kotlinc. krusty reports it for every top-level
-  declaration — callable, property, classifier and `typealias` — in the reference compiler's exact
-  rendering, verified by comparing the two compilers' reports on the same source rather than
-  against a transcription (`tests/no_expect_for_actual_e2e.rs`). A MEMBER `actual` is still
-  accepted: the reference compiler reports one at its own name, and
-  A MEMBER that wrote `actual` is reported when its OWNER classifier is itself unmatched; the
-  converse (a matched owner, an unmatched member) has no answer to consult, because actualization
-  pairs top-level declarations only and excludes a matched classifier's members as a subtree.
-  `four_member_shapes_are_not_reported_yet` pins the member shapes still missing. (Without the feature both modifiers are rejected outright — that one IS
-  implemented; see `tests/mpp_requires_the_feature_e2e.rs`.) The message is
+  declaration — callable, property, classifier and `typealias` — and for every MEMBER that wrote
+  the modifier, in the reference compiler's exact rendering, verified by comparing the two
+  compilers' reports on the same source rather than against a transcription
+  (`tests/no_expect_for_actual_e2e.rs`). A member answers for ITSELF: it is reported when it
+  actualizes nothing, whether or not its owner did, and stays silent when it fills an `expect`
+  member of a matched owner. The member forms covered are ordinary functions and properties,
+  member EXTENSION properties, primary-constructor properties, nested classifiers, a
+  `companion object` (anonymous or named) and its own members. Each is selected by its stable
+  declaration identity, so overloads that tie on name and arity render their own parameter types
+  instead of leaving both unrendered. (Without the feature both modifiers are rejected outright —
+  that one IS implemented; see `tests/mpp_requires_the_feature_e2e.rs`.) The message is
   `'<rendered declaration>' has no corresponding expected declaration`, reported at the declaration's
   NAME. The rendering is the substance: it is kotlinc's own declaration renderer over the RESOLVED
   signature, so which `actual` is unmatched is decided while every file's syntax is live, and the
@@ -158,11 +160,15 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
   | a member `actual override fun` of an `open` member | `public open actual override fun …` — an override renders `open` |
   | an interface member with a body / without one | `public open actual fun …` / `public abstract actual fun …` |
   | an UNMARKED member of an unmatched `actual` classifier | nothing: the diagnostic is about the modifier |
-  | `actual companion object` | `public final actual companion object Companion : Any`, at the `object` keyword — not implemented |
-  | a member `actual val Int.memberExt: Int` | `public final actual val Int.memberExt: Int` — not implemented |
-  | `actual annotation class Anno(actual val x: Int)` | the parameter property reports `public final actual val x: Int` — not implemented |
-  | a member `actual constructor(x: Int)` | `public actual constructor(x: Int): Owner` — no modality slot, the owner stands in for the return; not implemented |
-  | `actual class A { constructor(x: Int) { } }` | nothing: a secondary constructor is not reported |
+  | `actual companion object` | `public final actual companion object Companion : Any`, at the `object` keyword |
+  | `actual companion object Registry` | `… actual companion object Registry : Any`, at the written name |
+  | a nested `actual class Inner` / `actual object Solo` | `… actual class Inner : Any` / `… actual object Solo : Any` — the declaration's OWN simple name |
+  | a member `actual val Tally.memberExt: Int` | `public final actual val Tally.memberExt: Int`, at the NAME — the receiver binds to it but is not underlined |
+  | `actual annotation class Anno(actual val x: Int)` | the parameter property reports `public final actual val x: Int`, at the parameter's name |
+  | a member `actual constructor(x: Int)` | `public actual constructor(x: Int): Owner` — no modality slot, the owner stands in for the return, underlined from the first MODIFIER through the delegation |
+  | `actual class A { constructor(x: Int) { } }` | nothing: an UNMARKED secondary constructor wrote no modifier to answer for |
+  | `context(tally: Tally) actual val slotted: Int` | `context(tally: Tally) public final actual val slotted: Int` — the group precedes the VISIBILITY slot, and the names are the declaration's own while the types are resolved |
+  | a member under an owner that DID actualize | reported by its OWN outcome — `expect class H { fun kept(): Int }` against `actual class H { actual fun kept() = 1; actual fun extra() = 2 }` reports `extra` alone (measured with the header passed as `-Xcommon-sources`, since the reference compiler rejects a same-module pair before reaching the question) |
 
   Rendering from the AST is not sufficient: kotlinc renders the RESOLVED type, so an inferred return
   (`actual fun f() = 1` → `Int`) and an expanded typealias have no written form to copy. Nor is the

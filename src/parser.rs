@@ -2525,14 +2525,17 @@ impl<'a> Parser<'a> {
         let start = self.tok().span;
         self.bump(); // 'companion'
         let has_object_keyword = self.at(TokenKind::Ident) && self.keyword_text("object");
+        let object_keyword = has_object_keyword.then(|| self.tok().span);
         if has_object_keyword {
             self.bump(); // 'object'
         }
-        // `companion object Named` names itself; a bare `companion object` has only its keyword.
+        // `companion object Named` names itself; a bare `companion object` is named by its `object`
+        // keyword, which is where the reference compiler points every diagnostic about it. The
+        // `companion` keyword is a modifier on that declaration, not the declaration's own token.
         let name_span = if has_object_keyword && self.at(TokenKind::Ident) {
             self.tok().span
         } else {
-            start
+            object_keyword.unwrap_or(start)
         };
         let simple_name = if has_object_keyword && self.at(TokenKind::Ident) {
             self.bump().text(self.src).to_string()
@@ -2654,6 +2657,7 @@ impl<'a> Parser<'a> {
         };
         let id = self.file.add_decl(Decl::Class(declaration));
         self.file.decls.insert(nested_start, id);
+        declaration_modifiers::record_nested_actual(&mut self.file, modifiers, id);
         debug_assert!(self.lexical_type_parameters.names().is_empty());
         self.lexical_type_parameters = enclosing_type_parameters;
         id
@@ -2780,6 +2784,7 @@ impl<'a> Parser<'a> {
                     is_vararg,
                     is_var,
                     is_property,
+                    is_actual: epmods.iter().any(|modifier| modifier == "actual"),
                     is_override: epmods.iter().any(|modifier| modifier == "override"),
                     is_open: !epmods.iter().any(|modifier| modifier == "final")
                         && epmods
@@ -3459,6 +3464,7 @@ impl<'a> Parser<'a> {
         nested.name = format!("{outer}.{}", nested.name);
         let id = self.file.add_decl(Decl::Class(nested));
         self.file.decls.insert(start, id);
+        declaration_modifiers::record_nested_actual(&mut self.file, modifiers, id);
     }
 
     /// Parse and register any class-like declaration that this parser can represent as a hoisted
@@ -3711,6 +3717,7 @@ impl<'a> Parser<'a> {
                     is_vararg,
                     is_var,
                     is_property,
+                    is_actual: cpmods.iter().any(|modifier| modifier == "actual"),
                     is_override: cpmods.iter().any(|modifier| modifier == "override"),
                     is_open: !cpmods.iter().any(|modifier| modifier == "final")
                         && cpmods

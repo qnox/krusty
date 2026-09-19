@@ -15,7 +15,7 @@ use super::common;
 
 /// The measured shape of one report line, so the comparison is about the RENDERING and not about
 /// which absolute path each compiler happened to print.
-#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Debug, Eq, PartialEq)]
 struct Reported {
     line: u32,
     column: u32,
@@ -24,8 +24,13 @@ struct Reported {
 
 const SENTENCE: &str = "has no corresponding expected declaration";
 
+/// Every reported line, in the order the compiler printed it.
+///
+/// The sequence is NOT sorted. Diagnostic order is part of what this compares: both compilers
+/// report these in source order, and a sort would hide a regression that reordered them — which is
+/// exactly what happened while members were collected as all functions followed by all properties.
 fn reported(report: &str, stem: &str) -> Vec<Reported> {
-    let mut found = report
+    report
         .lines()
         .filter(|line| line.contains(SENTENCE))
         .filter_map(|line| {
@@ -45,9 +50,7 @@ fn reported(report: &str, stem: &str) -> Vec<Reported> {
                 rendered: message.trim_end().to_string(),
             })
         })
-        .collect::<Vec<_>>();
-    found.sort();
-    found
+        .collect::<Vec<_>>()
 }
 
 /// Compile `source` with the reference compiler and with krusty, and return both reports.
@@ -411,68 +414,342 @@ fn the_members_of_an_unmatched_actual_classifier_are_reported() {
     );
 }
 
-/// An unmarked member of an unmatched `actual` classifier stays silent: the diagnostic is about the
-/// modifier, not about the classifier's contents.
+/// Every member shape that is a place the member walk has to GO rather than a rendering it gets
+/// wrong: a member extension property, a nested `companion object` (anonymous and named), a member
+/// of that companion, a nested class and object, and a CONSTRUCTOR property.
+///
+/// The receivers and names are fixture-owned (`Tally`, `Holder`, `memberExt`, `companionFun`): a
+/// stdlib-shaped receiver such as `Int` risks the rendering passing through a builtin path rather
+/// than through the declaration renderer under test, and a stdlib-shaped callable name risks
+/// agreeing for a reason that has nothing to do with this check.
 #[test]
-fn an_unmarked_member_is_silent() {
-    let (reference, krusty) = both(
+fn every_nested_and_extension_member_shape_is_reported() {
+    assert_identical(
         "package plib\n\
          \n\
-         actual class Owner {\n\
-         \x20   fun plain(): Int = 1\n\
-         \x20   val plainProp: Int = 2\n\
-         }\n",
-        "Unmarked",
-    );
-    assert_eq!(
-        reference.len(),
-        1,
-        "only the classifier itself: {reference:?}"
-    );
-    assert_eq!(krusty, reference, "and krusty agrees");
-}
-
-/// Four member shapes the reference compiler reports and krusty does not yet. Pinned so each gap is
-/// visible and closing one is a test change, not a surprise.
-///
-/// A `companion object` and a nested classifier are hoisted out of their owner by the parser, so
-/// neither rides its owner's member lists; a member EXTENSION property and a
-/// primary-constructor property each live in a table this pass does not read. The measured
-/// renderings are recorded in `docs/PARITY_PROTOCOL.md`.
-#[test]
-fn four_member_shapes_are_not_reported_yet() {
-    let (reference, krusty) = both(
-        "package plib\n\
+         class Tally\n\
          \n\
          actual class Holder {\n\
-         \x20   actual val Int.memberExt: Int get() = 1\n\
+         \x20   actual val Tally.memberExt: Int get() = 1\n\
+         \x20   actual var Tally.settableExt: Int\n\
+         \x20       get() = 2\n\
+         \x20       set(value) {}\n\
+         \x20   actual class Nested\n\
+         \x20   actual object Solo\n\
          \x20   actual companion object {\n\
-         \x20       actual fun companionFun(): Int = 2\n\
+         \x20       actual fun companionFun(): Int = 3\n\
+         \x20       actual val companionSlot: Int = 4\n\
          \x20   }\n\
          }\n\
          \n\
+         actual class Named {\n\
+         \x20   actual companion object Registry {\n\
+         \x20       actual fun registered(): Int = 5\n\
+         \x20   }\n\
+         }\n\
+         \n\
+         actual class Carried(actual val kept: Int, actual var tally: Tally, plain: Int) {\n\
+         \x20   val derived: Int = plain\n\
+         }\n\
+         \n\
          actual annotation class Anno(actual val x: Int)\n",
-        "Remainder",
+        "NestedShapes",
     );
-    let rendered = |report: &[Reported]| {
-        report
+}
+
+/// A SECONDARY constructor and an enum-entry owner's member.
+///
+/// A constructor writes no name, so the reference compiler underlines the whole declaration — from
+/// its first modifier through its delegation — and renders no modality slot, with the declaring
+/// classifier standing in for the result type. Its `private` case is measured beside the default
+/// one because the visibility slot is the only one it has, and a `vararg` and a default parameter
+/// beside them because those are the two facts the resolved shape alone cannot tell.
+#[test]
+fn a_secondary_constructor_is_reported_at_its_whole_declaration() {
+    assert_identical(
+        "package plib\n\
+         \n\
+         class Tally\n\
+         \n\
+         actual class Owner {\n\
+         \x20   actual constructor(one: Tally)\n\
+         \x20   actual constructor(one: Tally, two: Int) : this(one)\n\
+         \x20   private actual constructor(vararg tallies: Tally, spare: Int = 1) : this(Tally())\n\
+         \x20   constructor(unmarked: Int) : this(Tally())\n\
+         }\n\
+         \n\
+         actual enum class Palette {\n\
+         \x20   RUBY;\n\
+         \x20   actual fun shade(): Int = 1\n\
+         }\n",
+        "Constructors",
+    );
+}
+
+/// Two member overloads that TIE on name and arity, differing only in their parameter types.
+///
+/// This is the shape a name/arity lookup cannot answer: it finds two candidates for one source
+/// declaration and can only guess or drop both. Each member is selected by its own stable
+/// declaration identity, so both render — with their own parameter types — and the comparison is
+/// the complete ordered sequence rather than a count.
+#[test]
+fn overloads_that_tie_on_name_and_arity_each_render_their_own_types() {
+    assert_identical(
+        "package plib\n\
+         \n\
+         class Tally\n\
+         class Ledger\n\
+         \n\
+         actual class Holder {\n\
+         \x20   actual fun absorb(one: Tally): Int = 1\n\
+         \x20   actual fun absorb(one: Ledger): Int = 2\n\
+         \x20   actual fun absorb(one: Tally, two: Ledger): Int = 3\n\
+         \x20   actual fun absorb(one: Ledger, two: Tally): Int = 4\n\
+         }\n",
+        "TiedOverloads",
+    );
+}
+
+/// An unmarked member of an unmatched `actual` classifier stays silent: the diagnostic is about the
+/// modifier, not about the classifier's contents.
+#[test]
+fn an_unmarked_member_is_silent_among_marked_ones() {
+    let (reference, krusty) = both(
+        "package plib\n\
+         \n\
+         actual class Owner(val plainParam: Int, actual val markedParam: Int) {\n\
+         \x20   fun plain(): Int = 1\n\
+         \x20   val plainProp: Int = 2\n\
+         \x20   class PlainNested\n\
+         \x20   companion object {\n\
+         \x20       fun plainCompanionFun(): Int = 3\n\
+         \x20   }\n\
+         }\n",
+        "UnmarkedAmong",
+    );
+    assert_eq!(
+        reference
             .iter()
-            .map(|entry| entry.rendered.clone())
+            .map(|entry| format!("{}:{}", entry.line, entry.column))
+            .collect::<Vec<_>>(),
+        ["3:14", "3:52"],
+        "only the classifier and the one marked constructor property: {reference:?}"
+    );
+    assert_eq!(krusty, reference, "and krusty agrees, in order");
+}
+
+/// The file a member diagnostic belongs to is the file that DECLARES it.
+///
+/// A single-file fixture cannot catch a member inheriting whichever file the previous phase left
+/// current, because there is only one file to inherit. Here the unmatched `actual` classifier is
+/// the FIRST of three compiled files, with another file's declarations reported after it, so a
+/// member that took the active file rather than its own would name the wrong source — and the
+/// comparison is each report's complete ordered sequence of file, line, column and message.
+#[test]
+fn a_member_names_its_own_file_when_several_are_compiled() {
+    let dir = common::scratch_dir().expect("scratch dir");
+    let first = dir.join("First.kt");
+    let middle = dir.join("Middle.kt");
+    let last = dir.join("Last.kt");
+    std::fs::write(
+        &first,
+        "package plib\n\
+         \n\
+         class Tally\n\
+         \n\
+         actual class Holder {\n\
+         \x20   actual fun held(): Int = 1\n\
+         \x20   actual val Tally.tallied: Int get() = 2\n\
+         }\n",
+    )
+    .expect("write the first file");
+    std::fs::write(&middle, "package plib\n\nfun ordinary(): Int = 3\n")
+        .expect("write the middle file");
+    std::fs::write(
+        &last,
+        "package plib\n\
+         \n\
+         actual class Trailing {\n\
+         \x20   actual fun trailed(): Int = 4\n\
+         }\n",
+    )
+    .expect("write the last file");
+
+    let reference_out = dir.join("multi-reference");
+    std::fs::create_dir_all(&reference_out).expect("reference output directory");
+    let (_, reference) = common::kotlinc_compile(&[
+        "-Xmulti-platform".to_string(),
+        "-d".to_string(),
+        reference_out.to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        common::stdlib_jar().to_string_lossy().into_owned(),
+        first.to_string_lossy().into_owned(),
+        middle.to_string_lossy().into_owned(),
+        last.to_string_lossy().into_owned(),
+    ])
+    .expect("reference kotlinc available");
+
+    let out = std::process::Command::new(common::krusty_binary())
+        .args([
+            "-XXLanguage:+MultiPlatformProjects",
+            "-no-stdlib",
+            "-no-jdk",
+            "-cp",
+        ])
+        .arg(common::stdlib_jar())
+        .arg("-d")
+        .arg(dir.join("multi-krusty"))
+        .arg(&first)
+        .arg(&middle)
+        .arg(&last)
+        .output()
+        .expect("run krusty");
+    let mut krusty = String::from_utf8_lossy(&out.stdout).into_owned();
+    krusty.push_str(&String::from_utf8_lossy(&out.stderr));
+
+    // Each report's own complete sequence, file included — the coordinate a single-file fixture
+    // cannot state.
+    let ledger = |report: &str| {
+        report
+            .lines()
+            .filter(|line| line.contains(SENTENCE))
+            .filter_map(|line| {
+                let (position, message) = line.split_once(": error: ")?;
+                let mut position = position.rsplit(':');
+                let column = position.next()?;
+                let number = position.next()?;
+                let path = std::path::Path::new(position.next()?);
+                let file = path.file_name()?.to_string_lossy().into_owned();
+                Some(format!("{file}:{number}:{column}: {}", message.trim_end()))
+            })
             .collect::<Vec<_>>()
     };
+    let reference = ledger(&reference);
     assert_eq!(
-        rendered(&reference).len(),
-        6,
-        "the reference compiler reports both classifiers, the companion, and three members: \
-         {reference:?}"
+        reference,
+        [
+            "First.kt:5:14: 'public final actual class Holder : Any' has no corresponding expected declaration",
+            "First.kt:6:16: 'public final actual fun held(): Int' has no corresponding expected declaration",
+            "First.kt:7:22: 'public final actual val Tally.tallied: Int' has no corresponding expected declaration",
+            "Last.kt:3:14: 'public final actual class Trailing : Any' has no corresponding expected declaration",
+            "Last.kt:4:16: 'public final actual fun trailed(): Int' has no corresponding expected declaration",
+        ],
+        "the reference compiler's whole ledger across the three files"
+    );
+    assert_eq!(ledger(&krusty), reference, "and krusty's is the same one");
+}
+
+/// A member that actualizes nothing under an owner that DID actualize.
+///
+/// The owner's outcome is not the member's: `kept` fills the `expect` member and is silent, while
+/// `extra` beside it fills nothing and is reported. This needs a real `expect`/`actual` split,
+/// because the reference compiler rejects an `expect` and its `actual` in the same module outright
+/// and never reaches the question — so the header goes through `-Xcommon-sources`, which is how
+/// kotlinc is told that one of the files it is compiling is the common fragment.
+#[test]
+fn a_member_that_actualizes_nothing_under_a_matched_owner_is_reported() {
+    let dir = common::scratch_dir().expect("scratch dir");
+    let header = dir.join("CommonHeader.kt");
+    let platform = dir.join("PlatformBody.kt");
+    std::fs::write(
+        &header,
+        "package plib\n\
+         \n\
+         expect class Holder {\n\
+         \x20   fun kept(): Int\n\
+         }\n",
+    )
+    .expect("write the common header");
+    std::fs::write(
+        &platform,
+        "package plib\n\
+         \n\
+         actual class Holder {\n\
+         \x20   actual fun kept(): Int = 1\n\
+         \x20   actual fun extra(): Int = 2\n\
+         \x20   actual val spare: Int = 3\n\
+         }\n",
+    )
+    .expect("write the platform body");
+
+    let reference_out = dir.join("split-reference");
+    std::fs::create_dir_all(&reference_out).expect("reference output directory");
+    let (_, reference) = common::kotlinc_compile(&[
+        "-Xmulti-platform".to_string(),
+        "-Xexpect-actual-classes".to_string(),
+        format!("-Xcommon-sources={}", header.to_string_lossy()),
+        "-d".to_string(),
+        reference_out.to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        common::stdlib_jar().to_string_lossy().into_owned(),
+        header.to_string_lossy().into_owned(),
+        platform.to_string_lossy().into_owned(),
+    ])
+    .expect("reference kotlinc available");
+
+    let out = std::process::Command::new(common::krusty_binary())
+        .args([
+            "-XXLanguage:+MultiPlatformProjects",
+            "-no-stdlib",
+            "-no-jdk",
+            "-cp",
+        ])
+        .arg(common::stdlib_jar())
+        .arg("-d")
+        .arg(dir.join("split-krusty"))
+        .arg(&header)
+        .arg(&platform)
+        .output()
+        .expect("run krusty");
+    let mut krusty = String::from_utf8_lossy(&out.stdout).into_owned();
+    krusty.push_str(&String::from_utf8_lossy(&out.stderr));
+
+    let reference = reported(&reference, "PlatformBody");
+    assert_eq!(
+        reference
+            .iter()
+            .map(|entry| format!("{}:{}: {}", entry.line, entry.column, entry.rendered))
+            .collect::<Vec<_>>(),
+        [
+            "5:16: 'public final actual fun extra(): Int' has no corresponding expected declaration",
+            "6:16: 'public final actual val spare: Int' has no corresponding expected declaration",
+        ],
+        "the owner and the member it does actualize are both silent; the other two are not"
     );
     assert_eq!(
-        rendered(&krusty).len(),
-        2,
-        "krusty reports the two top-level classifiers only: {krusty:?}"
+        reported(&krusty, "PlatformBody"),
+        reference,
+        "and krusty's whole report is the same one"
     );
-    assert_eq!(
-        krusty[0], reference[0],
-        "and what it does report is rendered identically"
+}
+
+/// A declaration with CONTEXT PARAMETERS renders them, ahead of everything else it says.
+///
+/// The names are the declaration's own and the types are the resolved ones, so this is the same
+/// hybrid every other rendering here is — and the group is printed before the visibility slot,
+/// which is the one position no other modifier occupies. A property with context parameters used
+/// to be passed over entirely rather than rendered.
+#[test]
+fn context_parameters_are_rendered_before_the_visibility() {
+    assert_identical(
+        "package plib\n\
+         \n\
+         class Tally\n\
+         class Ledger\n\
+         \n\
+         context(tally: Tally)\n\
+         actual val slotted: Int get() = 1\n\
+         \n\
+         context(tally: Tally, ledger: Ledger)\n\
+         actual var counted: Int\n\
+         \x20   get() = 2\n\
+         \x20   set(value) {}\n\
+         \n\
+         context(tally: Tally)\n\
+         actual fun folded(): Int = 3\n\
+         \n\
+         context(tally: Tally, ledger: Ledger)\n\
+         actual fun weighed(spare: Int): Int = spare\n",
+        "ContextParameters",
     );
 }

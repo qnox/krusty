@@ -1209,7 +1209,13 @@ where
         // this point. The declarations themselves were selected while every file's syntax was
         // still live.
         if !expect_bodies_rejected {
-            no_expect_for_actual::report(&unmatched_actuals, &actualized_targets, &symbols, diags);
+            no_expect_for_actual::report(
+                &unmatched_actuals,
+                &actualized_targets,
+                &symbols,
+                &pass1_headers,
+                diags,
+            );
         }
         // A `const val` initializer is a stable declaration dependency. Check each such bounded
         // fragment now, while Pass 1 still owns its AST and exact operator selections can be

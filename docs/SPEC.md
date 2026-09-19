@@ -4493,26 +4493,41 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   found by ACTUALIZATION ITSELF, not by a name/arity key: that matcher compares resolved type
   shapes and follows an `actual typealias`, so it pairs `expect val S.tag: S` with
   `actual val String.tag: String` where a key differing on the receiver spelling cannot (reporting
-  those was a real regression the harness caught). A name/arity key stands in only where
-  resolution gave a declaration no stable identity, and for an `actual typealias`, which
-  actualization records as a type expansion rather than as a paired declaration.
+  those was a real regression the harness caught). Actualization's pairing is the ONLY
+  authority: a name/arity key differs on the receiver spelling exactly where actualization follows
+  an `actual typealias`, so consulting it as a second answer reported pairs that had matched. An
+  `actual typealias` publishes a type EXPANSION rather than a callable or classifier signature, so
+  nothing resolved carries its identity; it is found in the compact header inventory by the
+  declaration's own source range — the same coordinate every member is found by. A declaration this
+  check can find no stable identity for reports an internal error at its own name rather than
+  falling back to a key. A declaration with CONTEXT PARAMETERS renders them before the visibility
+  slot (`context(tally: Tally) public final actual val slotted: Int`), with the names the
+  declaration wrote and the types resolution published; such a property used to be passed over
+  entirely.
 
-  A MEMBER that wrote `actual` is reported too, at its own name, when its OWNER classifier is
-  itself unmatched — a member of a classifier that actualized nothing cannot have actualized
-  anything. The converse (a matched owner with an unmatched member) stays silent, and that is a
-  property of actualization rather than a shortcut: its pairing is TOP-LEVEL only
-  (`actualized_declaration_pairs` declines any declaration that has an owner), and a matched
-  classifier's members are excluded as a SUBTREE rather than paired, so there is no member-level
-  answer to consult. A member's modality slot is the part that is not `final`: an `override` of an
-  `open` member renders `open`, and an interface member renders `abstract` without a body and
-  `open` with one. A member's resolved signature is found by NAME and arity within its owner's
-  `ClassSig`, not by an AST coordinate: a streamed member signature leaves
-  `Signature::source_member` unset, because that field records a SELECTED member handed to
-  lowering rather than where a declaration came from. Overloads that tie on arity are left
-  unrendered rather than guessed. Remaining by design: a `companion object` and a nested
-  classifier (the parser hoists both out of their owner, so neither rides its member lists), a
-  member extension property, a primary-constructor property, a secondary constructor, and an
-  enum-entry member — each pinned by `four_member_shapes_are_not_reported_yet`.
+  A MEMBER that wrote `actual` is reported at its own name by its OWN outcome, independently of
+  its owner's. Actualization pairs a matched classifier's members individually
+  (`actualized_declaration_pairs` walks each matched pair's children and pairs them by kind, name,
+  receiver and arity), so `expect class Holder { fun kept(): Int }` with
+  `actual class Holder { actual fun kept() = 1; actual fun extra() = 2 }` reports `extra` and
+  nothing else — the owner and `kept` both actualized something. Measuring this needs a real
+  source-set split, because the reference compiler rejects an `expect` and its `actual` in the same
+  module before reaching the question; the header is passed as `-Xcommon-sources`. A member's
+  modality slot is the part that is not `final`: an `override` of an `open` member renders `open`,
+  and an interface member renders `abstract` without a body and `open` with one. A member's
+  resolved record is selected by the STABLE DECLARATION IDENTITY the compact header inventory
+  anchors on its source range — never by name and arity, which cannot tell two overloads that tie
+  on arity apart and left both of a tied pair unrendered. A member EXTENSION property is a separate
+  declaration in a separate table (`ClassSig::member_ext_props`), consulted by the same identity,
+  and renders its receiver before the name while the diagnostic still points at the name. A nested
+  classifier and a `companion object` are hoisted out of their owner by the parser, so neither
+  rides a member list: each is recorded as an actualization target of its own where its modifier
+  list is read, renders its OWN simple name, and a companion renders the word `companion` before
+  `object` — an edge its owner records. An anonymous `companion object` is named by its `object`
+  keyword, which is where the reference compiler points. A primary-constructor property carries
+  `actual` on the parameter and renders like any other `val`/`var` member. Nothing that wrote
+  `actual` is passed over in silence: a member whose resolved record cannot be reached reports an
+  internal error at its own name rather than disappearing.
 
   Note the deliberate model
   difference this check makes visible: the reference compiler rejects an `expect` and its `actual`
