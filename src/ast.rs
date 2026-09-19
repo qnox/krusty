@@ -900,6 +900,15 @@ pub struct PropParam {
     /// 1-based source line of this parameter (0 = unknown). kotlinc's primary-constructor
     /// `LineNumberTable` maps each property parameter's field store to the parameter's own line.
     pub decl_line: u32,
+    /// 1-based source line where this parameter's DECLARATION starts, ANNOTATIONS INCLUDED
+    /// (0 = unknown). [`Self::decl_line`] is the `val`/`var` line; the two differ exactly when an
+    /// annotation sits on its own line above it.
+    ///
+    /// kotlinc maps the primary constructor's store of this property to THIS line, while the
+    /// property's own getter keeps [`Self::decl_line`] — measured against kotlinc 2.4.10, which
+    /// also leaves a BODY property's initializer store on its `val` line. So the two facts are both
+    /// needed and neither can stand in for the other.
+    pub decl_start_line: u32,
 }
 
 /// One entry of an `enum class` (`RED(0xFF0000) { override fun m() = … }`). Groups what were parallel
