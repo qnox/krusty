@@ -2,7 +2,8 @@
 
 mod klib;
 
+pub use klib::PackageFragmentDecodeError;
 pub(crate) use klib::{
     decode_package_fragment, field, parse_module_header, require_wire, strip_builtins_header,
-    Cursor, DecodedPackageFragment, PackageFragmentDecodeError, QName,
+    Cursor, DecodedPackageFragment, QName,
 };
