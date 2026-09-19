@@ -213,6 +213,73 @@ fn a_returning_finally_keeps_its_own_copy_out_of_its_region() {
     );
 }
 
+/// Typed catches obey the same protected-range boundary as the synthetic catch-all. A `return`
+/// inlines the finalizer inside the emitted body; if the typed handler still guarded one broad
+/// `[start, end)` range, an exception from that copy would enter the sibling catch and execute the
+/// finalizer a second time.
+#[test]
+fn a_typed_catch_does_not_guard_its_own_finalizer_copy() {
+    let src = "class AmberSignal : RuntimeException()\n\
+               class BrassMeter(var hits: Int = 0) {\n\
+               \x20   fun finish() { hits += 1; throw AmberSignal() }\n\
+               }\n\
+               class SegmentedGuard {\n\
+               \x20   fun run(meter: BrassMeter): Int {\n\
+               \x20       try {\n\
+               \x20           return 1\n\
+               \x20       } catch (caught: AmberSignal) {\n\
+               \x20           return 2\n\
+               \x20       } finally {\n\
+               \x20           meter.finish()\n\
+               \x20       }\n\
+               \x20   }\n\
+               }\n\
+               fun box(): String {\n\
+               \x20   val meter = BrassMeter()\n\
+               \x20   try {\n\
+               \x20       SegmentedGuard().run(meter)\n\
+               \x20       return \"FAIL: returned\"\n\
+               \x20   } catch (caught: AmberSignal) {\n\
+               \x20       return if (meter.hits == 1) \"OK\" else \"FAIL: repeated\"\n\
+               \x20   }\n\
+               }\n";
+
+    let jdk = common::jdk_modules();
+    let out = common::compile_and_run_box(
+        src,
+        "TypedCatchFinallyRuntime",
+        &[common::stdlib_jar()],
+        Some(jdk.as_path()),
+    )
+    .expect("TypedCatchFinallyRuntime: the required JVM runner must be available");
+    assert_eq!(out.trim(), "OK");
+
+    let (reference, krusty) = disassemble_both("TypedCatchFinallyTable", src, "SegmentedGuard");
+    let want = numeric_rows(&reference, "int run(BrassMeter)", "Exception table:");
+    assert_eq!(
+        want,
+        vec![
+            "6     9    15   Class AmberSignal".to_string(),
+            "6     9    26   any".to_string(),
+            "15    19    26   any".to_string(),
+            "26    27    26   any".to_string(),
+        ],
+        "kotlinc's complete exception table"
+    );
+    let got = numeric_rows(&krusty, "int run(BrassMeter)", "Exception table:");
+    assert_eq!(
+        got,
+        vec![
+            "6     9    15   Class AmberSignal".to_string(),
+            "6     9    26   any".to_string(),
+            "16    19    26   any".to_string(),
+            "26    28    26   any".to_string(),
+        ],
+        "krusty's complete exception table"
+    );
+    assert_eq!(got[0], want[0], "typed catch range");
+}
+
 /// The same rule where the body falls through instead of returning: the finalizer copy sits after
 /// the body, so the region simply ends before it — but the handler's own entry is still protected.
 #[test]

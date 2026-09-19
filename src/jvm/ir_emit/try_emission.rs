@@ -153,6 +153,16 @@ impl Emitter<'_> {
             self.close_finally_segment(finalizer, code);
         }
         self.bind(end, code);
+        // Typed catches guard only the try BODY. When a transfer out of the body has inlined this
+        // try's own finalizer, the body is split into segments around that copy just like the
+        // catch-all region below. Snapshot the body-only segments now: catch bodies are appended to
+        // the active finally region later, but must never be guarded by their sibling typed catches.
+        let typed_catch_ranges = if let Some(finalizer) = finally {
+            let index = self.finally_region(finalizer);
+            self.finally_regions[index].segments.clone()
+        } else {
+            vec![(start, end)]
+        };
         let mut after_reachable = false;
         if !body_diverges {
             if let Some(f) = finally {
@@ -185,7 +195,7 @@ impl Emitter<'_> {
             // A handler is entered over the exception edge, not by a branch — and a diverging `try`
             // body leaves the stream dead exactly here, so binding must revive on the range it guards
             // rather than on an incoming branch.
-            code.bind_handler(handler, &[(start, end)]);
+            code.bind_handler(handler, &typed_catch_ranges);
             let exc_internal = crate::jvm::names::classfile_internal_name(&c.exc_internal.render());
             let exc_ci = self.cw.class_ref(&exc_internal);
             // Handler entry: the exception is the sole stack value; locals are the pre-`try` state.
@@ -257,7 +267,11 @@ impl Emitter<'_> {
                     after_reachable = true;
                 }
             }
-            code.add_exception(start, end, handler, exc_ci);
+            // Preserve catch declaration priority: register every body segment for this catch
+            // before moving to the next typed catch.
+            for &(range_start, range_end) in &typed_catch_ranges {
+                code.add_exception(range_start, range_end, handler, exc_ci);
+            }
         }
 
         // `finally` catch-all: any exception not handled above (in the body or a catch body) runs the
