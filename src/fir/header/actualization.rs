@@ -101,8 +101,9 @@ struct FileScope {
     package: Option<crate::types::TypeName>,
     /// The classifier an explicit import brings into scope, keyed by the simple name it is
     /// written as — the import's ALIAS where it wrote one, and the last segment of its path
-    /// otherwise.
-    explicit: std::collections::HashMap<String, String>,
+    /// otherwise. `None` where more than one import claims that name: the file has then said
+    /// nothing about which classifier it means, exactly as two wildcards say nothing.
+    explicit: std::collections::HashMap<String, Option<String>>,
     /// Every wildcard import's package path, `/`-joined, in source order.
     wildcards: Vec<String>,
 }
@@ -180,7 +181,19 @@ impl ClassifierScopes {
                         .alias
                         .and_then(|alias| headers.lookup_names.get(alias))
                         .unwrap_or_else(|| segments[segments.len() - 1]);
-                    explicit.insert(written.to_string(), segments.join("/"));
+                    let path = segments.join("/");
+                    match explicit.entry(written.to_string()) {
+                        std::collections::hash_map::Entry::Vacant(slot) => {
+                            slot.insert(Some(path));
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut slot) => {
+                            // A second import under one name is a conflict unless both name the
+                            // same classifier, which is a repetition rather than a choice.
+                            if slot.get().as_deref() != Some(path.as_str()) {
+                                slot.insert(None);
+                            }
+                        }
+                    }
                 }
             }
             files.insert(
@@ -206,6 +219,8 @@ impl ClassifierScopes {
         // anything written under it hangs off that.
         if let Some(first) = segments.first() {
             if let Some(imported) = scope.explicit.get(*first) {
+                // Two imports claiming one name leave the file naming no classifier under it.
+                let imported = imported.as_ref()?;
                 let rest = segments[1..].join("/");
                 return Some(qualified(
                     None,
@@ -227,15 +242,19 @@ impl ClassifierScopes {
         if self.declared.contains(&as_written) {
             return Some(as_written);
         }
-        // A wildcard import. More than one that could supply this name is ambiguous.
-        let mut supplied = scope.wildcards.iter().filter_map(|package| {
+        // A wildcard import. More than one DISTINCT classifier that could supply this name is
+        // ambiguous; one package imported twice is a repetition, not a choice.
+        let mut supplied: Vec<crate::types::TypeName> = Vec::new();
+        for package in &scope.wildcards {
             let candidate = qualified(None, &format!("{package}/{written}"));
-            self.declared.contains(&candidate).then_some(candidate)
-        });
-        match (supplied.next(), supplied.next()) {
-            (Some(_), Some(_)) => return None,
-            (Some(single), None) => return Some(single),
-            (None, _) => {}
+            if self.declared.contains(&candidate) && !supplied.contains(&candidate) {
+                supplied.push(candidate);
+            }
+        }
+        match supplied.as_slice() {
+            [] => {}
+            [single] => return Some(*single),
+            _ => return None,
         }
         // Nothing the module declares or this file imports claims the path, so the path is its
         // own canonical form — reached identically from either side of a comparison.
@@ -1273,6 +1292,60 @@ mod tests {
             scopes.resolve(SourceFileId::from_raw(3), &["Tally"]),
             Some(crate::types::type_name("plib/left/Tally")),
             "one wildcard says exactly which, so it resolves"
+        );
+    }
+
+    /// Two EXPLICIT imports claiming one simple name say nothing about which classifier is meant
+    /// either — the same rule two wildcards take. Importing one classifier twice is a repetition
+    /// rather than a choice, and so is wildcard-importing one package twice.
+    #[test]
+    fn a_name_two_imports_claim_names_no_classifier_and_a_repeat_is_not_a_choice() {
+        let (_, scopes) = scopes(&[
+            ("Left", "package plib.left\n\nclass Tally\n"),
+            ("Right", "package plib.right\n\nclass Tally\n"),
+            (
+                "Conflicting",
+                "package plib\n\
+                 \n\
+                 import plib.left.Tally\n\
+                 import plib.right.Tally\n\
+                 \n\
+                 fun takes(value: Tally) {}\n",
+            ),
+            (
+                "Repeated",
+                "package plib\n\
+                 \n\
+                 import plib.left.Tally\n\
+                 import plib.left.Tally\n\
+                 \n\
+                 fun takes(value: Tally) {}\n",
+            ),
+            (
+                "RepeatedWildcard",
+                "package plib\n\
+                 \n\
+                 import plib.left.*\n\
+                 import plib.left.*\n\
+                 \n\
+                 fun takes(value: Tally) {}\n",
+            ),
+        ]);
+        let left = crate::types::type_name("plib/left/Tally");
+        assert_eq!(
+            scopes.resolve(SourceFileId::from_raw(2), &["Tally"]),
+            None,
+            "two imports claim the name, so the file has named no classifier"
+        );
+        assert_eq!(
+            scopes.resolve(SourceFileId::from_raw(3), &["Tally"]),
+            Some(left),
+            "the same import written twice still names one classifier"
+        );
+        assert_eq!(
+            scopes.resolve(SourceFileId::from_raw(4), &["Tally"]),
+            Some(left),
+            "and so does the same wildcard written twice"
         );
     }
 
