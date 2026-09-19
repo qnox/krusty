@@ -6397,6 +6397,33 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `fakeInlinerVariables.kt`-class `expectFailure(msg) { … }` calls — their remaining gap is the
   omitted fn-typed default's lowering.)
 
+- **A TAIL-ONLY inline expansion produces its value; it does not loop to carry one out.** An
+  expansion of a non-`Unit` inline function lowers to `var result = zero; loop@ while (true) { body;
+  break@loop }; result`, because a non-local `return` from the middle of the body has to carry a
+  value out past everything after it. When the only `return` IS the body's tail, none of that is
+  needed: the value is simply the body's, which is what kotlinc emits — it leaves it on the operand
+  stack. The loop form costs an unnamed local, and when the expansion crosses a suspension that
+  local takes a continuation field kotlinc has no counterpart for, so the spill arrays diverged.
+  - The shape is PROVED before anything changes, and proving it cannot change anything: the chain
+    of statement blocks from the expansion's root down to the rewritten return is collected from a
+    SHARED reference, and only then is the `Unit` placeholder allocated and the blocks rewritten.
+    Allocating first left an orphan `UnitInstance` in the arena whenever the answer turned out to
+    be no — the block shapes were restored, the allocation was not, and a refused optimization
+    still shifted every expression identity after it.
+  - A statement-bodied inline function wraps its body one level deeper, so the promotion descends,
+    and EVERY block on that path becomes value-producing; one left ending in a statement discards
+    the value.
+  - Refusal is the common case and must be total: a statement after the return, a refusal one level
+    down, and a block that already produces a value each keep the loop form with the arena
+    untouched.
+
+  Tests: `fir_lower::inlining::tail_promotion_tests` — seven, including
+  `a_refused_unit_return_allocates_nothing`, which compares the arena's LENGTH as well as its nodes
+  and is the one that fails if the allocation moves back ahead of the proof — and
+  `tests/inline_tail_expansion_shape_e2e.rs`, which reads the lowered IR: a sole tail return expands
+  with no exit loop, an early return keeps one, a non-tail `Unit` return keeps one, and a `Unit` tail
+  return is compiled and RUN to show its returned expression is evaluated exactly once.
+
 - **The inline expansion's argument slotting honors the trailing-lambda rule.** A syntactic
   trailing lambda binds the LAST parameter; omitted middles take their default expressions
   (substituted directly — an inline fn has no `$default` method). The positional fill previously put
