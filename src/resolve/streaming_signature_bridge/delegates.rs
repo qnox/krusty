@@ -47,42 +47,31 @@ impl ProductionSignatureSemantics<'_> {
             }
             Err(diagnostic) => return Err(diagnostic),
         };
+        let select_ordinary =
+            |receiver, name, arguments, kind| match self.with_resolver(scope, |resolver| {
+                Some(
+                    crate::resolve::delegated_properties::select_delegate_operator_kind(
+                        resolver, receiver, name, arguments, kind,
+                    ),
+                )
+            }) {
+                Ok(selection) => Ok(selection),
+                Err(diagnostic) if diagnostic.raw() == 0 => {
+                    panic!("a retained delegate signature scope must construct its resolver")
+                }
+                Err(diagnostic) => Err(diagnostic),
+            };
         let provide_arguments = [provide_ref, property_reference];
-        let provided = match self.with_resolver(scope, |resolver| {
-            Some(super::super::select_delegate_operator(
-                resolver,
-                delegate.get(),
-                "provideDelegate",
-                &provide_arguments,
-            ))
-        }) {
-            Ok(provided) => provided,
-            Err(diagnostic) if diagnostic.raw() == 0 => {
-                panic!("a retained delegate signature scope must construct its resolver")
-            }
-            Err(diagnostic) => return Err(diagnostic),
-        };
-        crate::trace_compiler!(
-            "signature",
-            "delegate provide receiver={:?} selection={:?}",
+        let provided = select_ordinary(
             delegate.get(),
-            match &provided {
-                crate::resolve::delegated_properties::DelegateConventionSelection::Selected(
-                    selected,
-                    result,
-                ) => Some((
-                    selected.semantic_receiver(),
-                    selected.semantic_params(),
-                    *result,
-                )),
-                crate::resolve::delegated_properties::DelegateConventionSelection::None
-                | crate::resolve::delegated_properties::DelegateConventionSelection::Ambiguous(_) =>
-                    None,
-            },
-        );
+            "provideDelegate",
+            &provide_arguments,
+            crate::libraries::FnKind::Member,
+        )?;
         let stored = match provided {
-            crate::resolve::delegated_properties::DelegateConventionSelection::None => {
+            crate::resolve::delegated_properties::DelegateConventionSelection::None(_) => {
                 let mut selected = None;
+                let mut ambiguous = false;
                 for dispatch in self.implicit_receivers(scope) {
                     match self.signature_member_extension_call(
                         scope,
@@ -105,13 +94,14 @@ impl ProductionSignatureSemantics<'_> {
                         }
                         super::lookups::SignatureMemberExtensionCallSelection::None(_) => continue,
                         super::lookups::SignatureMemberExtensionCallSelection::Ambiguous(_) => {
-                            selected = None;
+                            ambiguous = true;
                             break;
                         }
                     }
                 }
-                match selected {
-                    Some((_result, Some(declaration)))
+                match (selected, ambiguous) {
+                    (_, true) => delegate,
+                    (Some((_result, Some(declaration))), false)
                         if self
                             .headers
                             .stub(declaration)
@@ -123,10 +113,32 @@ impl ProductionSignatureSemantics<'_> {
                             demand(declaration).map(|signature| signature.result),
                         )?
                     }
-                    Some((result, _)) => {
+                    (Some((result, _)), false) => {
                         self.resolved_delegate_result(&site, "provideDelegate", result)
                     }
-                    None => delegate,
+                    (None, false) => match select_ordinary(
+                        delegate.get(),
+                        "provideDelegate",
+                        &provide_arguments,
+                        crate::libraries::FnKind::Extension,
+                    )? {
+                        crate::resolve::delegated_properties::DelegateConventionSelection::Selected(
+                            selected,
+                            result,
+                        ) => self.delegate_result_or_invariant(
+                            &site,
+                            "provideDelegate",
+                            self.selected_convention_result(
+                                delegate.get(),
+                                &selected,
+                                result,
+                                &provide_arguments,
+                                demand,
+                            ),
+                        )?,
+                        crate::resolve::delegated_properties::DelegateConventionSelection::None(_)
+                        | crate::resolve::delegated_properties::DelegateConventionSelection::Ambiguous(_) => delegate,
+                    },
                 }
             }
             crate::resolve::delegated_properties::DelegateConventionSelection::Ambiguous(_) => {
@@ -148,38 +160,12 @@ impl ProductionSignatureSemantics<'_> {
             )?,
         };
         let get_arguments = [this_ref, property_reference];
-        let selected = match self.with_resolver(scope, |resolver| {
-            Some(super::super::select_delegate_operator(
-                resolver,
-                stored.get(),
-                "getValue",
-                &get_arguments,
-            ))
-        }) {
-            Ok(selected) => selected,
-            Err(diagnostic) if diagnostic.raw() == 0 => {
-                panic!("a retained delegate signature scope must construct its resolver")
-            }
-            Err(diagnostic) => return Err(diagnostic),
-        };
-        crate::trace_compiler!(
-            "signature",
-            "delegate get receiver={:?} selection={:?}",
+        let selected = select_ordinary(
             stored.get(),
-            match &selected {
-                crate::resolve::delegated_properties::DelegateConventionSelection::Selected(
-                    selected,
-                    result,
-                ) => Some((
-                    selected.semantic_receiver(),
-                    selected.semantic_params(),
-                    *result,
-                )),
-                crate::resolve::delegated_properties::DelegateConventionSelection::None
-                | crate::resolve::delegated_properties::DelegateConventionSelection::Ambiguous(_) =>
-                    None,
-            },
-        );
+            "getValue",
+            &get_arguments,
+            crate::libraries::FnKind::Member,
+        )?;
         match selected {
             crate::resolve::delegated_properties::DelegateConventionSelection::Selected(
                 selected,
@@ -195,7 +181,7 @@ impl ProductionSignatureSemantics<'_> {
                     demand,
                 ),
             ),
-            crate::resolve::delegated_properties::DelegateConventionSelection::None => {
+            crate::resolve::delegated_properties::DelegateConventionSelection::None(members) => {
                 let mut excluded = Vec::new();
                 for dispatch in self.implicit_receivers(scope) {
                     let selection = self.signature_member_extension_call(
@@ -249,18 +235,58 @@ impl ProductionSignatureSemantics<'_> {
                     }
                     return Ok(self.resolved_delegate_result(&site, "getValue", result));
                 }
-                if !excluded.is_empty() {
-                    return Err(
-                        self.record_excluded_member_extension_delegate_convention_failure(
+                match select_ordinary(
+                    stored.get(),
+                    "getValue",
+                    &get_arguments,
+                    crate::libraries::FnKind::Extension,
+                )? {
+                    crate::resolve::delegated_properties::DelegateConventionSelection::Selected(
+                        selected,
+                        result,
+                    ) => {
+                        return self.delegate_result_or_invariant(
+                            &site,
+                            "getValue",
+                            self.selected_convention_result(
+                                stored.get(),
+                                &selected,
+                                result,
+                                &get_arguments,
+                                demand,
+                            ),
+                        )
+                    }
+                    crate::resolve::delegated_properties::DelegateConventionSelection::Ambiguous(
+                        candidates,
+                    ) => {
+                        return Err(self.record_delegate_convention_ambiguity(
                             scope,
                             site,
                             stored.get(),
                             "getValue",
                             this_ref,
-                            &excluded,
+                            &candidates,
                             demand,
-                        ),
-                    );
+                        ))
+                    }
+                    crate::resolve::delegated_properties::DelegateConventionSelection::None(
+                        extensions,
+                    ) => {
+                        if !members.is_empty() || !excluded.is_empty() || !extensions.is_empty() {
+                            return Err(self.record_inapplicable_delegate_convention_failure(
+                                scope,
+                                site,
+                                stored.get(),
+                                "getValue",
+                                this_ref,
+                                &members,
+                                &excluded,
+                                &extensions,
+                                demand,
+                            ));
+                        }
+                    }
                 }
                 // A property with NO declared type has nothing left to infer its type FROM once
                 // `getValue` is missing, so this refusal is where the source mistake is finally
@@ -453,14 +479,17 @@ impl ProductionSignatureSemantics<'_> {
         self.record_source_diagnostic_at(site.diagnostic_owner, source, by_span, message)
     }
 
-    fn record_excluded_member_extension_delegate_convention_failure(
+    #[allow(clippy::too_many_arguments)]
+    fn record_inapplicable_delegate_convention_failure(
         &self,
         scope: crate::fir::SignatureScope,
         site: crate::fir::ResolvedSignatureDelegateSite,
         delegate: Ty,
         name: &str,
         this_ref: Ty,
-        candidates: &[super::super::member_extension_selection::MemberExtensionConventionDiagnosticCandidate],
+        members: &[crate::libraries::FunctionInfo],
+        member_extensions: &[super::super::member_extension_selection::MemberExtensionConventionDiagnosticCandidate],
+        extensions: &[crate::libraries::FunctionInfo],
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
         )
@@ -472,7 +501,17 @@ impl ProductionSignatureSemantics<'_> {
             "a delegate convention site must belong to its retained signature scope",
         );
         let convention_site = self.delegate_convention_site(&site, by_span);
-        let candidates = match candidates
+        let candidates = if !members.is_empty() {
+            match crate::resolve::delegated_properties::delegate_convention_candidates_from_functions(
+                members,
+                name,
+                &mut |candidate| self.determined_candidate_result(candidate, demand),
+            ) {
+                Ok(candidates) => candidates,
+                Err(diagnostic) => return diagnostic,
+            }
+        } else if !member_extensions.is_empty() {
+            match member_extensions
             .iter()
             .map(|candidate| {
                 let result = if candidate.ret.mentions_pending() {
@@ -503,9 +542,19 @@ impl ProductionSignatureSemantics<'_> {
                 )
             })
             .collect::<Result<Vec<_>, crate::fir::DiagnosticId>>()
-        {
-            Ok(candidates) => candidates,
-            Err(diagnostic) => return diagnostic,
+            {
+                Ok(candidates) => candidates,
+                Err(diagnostic) => return diagnostic,
+            }
+        } else {
+            match crate::resolve::delegated_properties::delegate_convention_candidates_from_functions(
+                extensions,
+                name,
+                &mut |candidate| self.determined_candidate_result(candidate, demand),
+            ) {
+                Ok(candidates) => candidates,
+                Err(diagnostic) => return diagnostic,
+            }
         };
         let message =
             crate::resolve::delegated_properties::delegate_convention_message_with_candidates(
@@ -517,7 +566,7 @@ impl ProductionSignatureSemantics<'_> {
                 None,
                 &candidates,
             )
-            .expect("excluded member-extension delegate candidates must produce a diagnostic");
+            .expect("retained delegate candidates must produce a diagnostic");
         self.record_source_diagnostic_at(site.diagnostic_owner, source, by_span, message)
     }
 
@@ -574,7 +623,12 @@ impl ProductionSignatureSemantics<'_> {
             by_span,
             dispatch_receiver,
             extension_receiver,
-            dispatch_source_name: site.dispatch_source_name.clone(),
+            dispatch_diagnostic_name: site.dispatch_diagnostic_name.as_ref().map(|name| match name {
+                crate::fir::ResolvedDelegateDispatchName::Source(name) =>
+                    crate::resolve::delegated_properties::DelegateDispatchDiagnosticName::Source(name.clone()),
+                crate::fir::ResolvedDelegateDispatchName::Anonymous =>
+                    crate::resolve::delegated_properties::DelegateDispatchDiagnosticName::Anonymous,
+            }),
             is_var: site.mutable,
         }
     }

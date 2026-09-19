@@ -1228,11 +1228,20 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                             diagnostic_owner: site.diagnostic_owner,
                             kind,
                             mutable: site.mutable,
-                            dispatch_source_name: site.dispatch_source_name.map(|name| {
-                                graph
-                                    .name(name)
-                                    .expect("a delegate dispatch spelling belongs to its graph")
-                                    .into()
+                            dispatch_diagnostic_name: site.dispatch_diagnostic_name.map(|name| {
+                                match name {
+                                    SignatureDelegateDispatchName::Source(name) => {
+                                        ResolvedDelegateDispatchName::Source(
+                                            graph
+                                                .name(name)
+                                                .expect("a delegate dispatch spelling belongs to its graph")
+                                                .into(),
+                                        )
+                                    }
+                                    SignatureDelegateDispatchName::Anonymous => {
+                                        ResolvedDelegateDispatchName::Anonymous
+                                    }
+                                }
                             }),
                             by_origin: site.by_origin,
                         };

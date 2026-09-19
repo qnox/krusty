@@ -44726,6 +44726,11 @@ pub(crate) fn member_extension_function_with(
                 trailing_lambda,
             },
         ) else {
+            member_extension_selection::retain_inapplicable_delegate_convention(
+                &shape,
+                selection,
+                &mut excluded,
+            );
             continue;
         };
         candidates.push(MemberExtensionFunctionCandidate {
@@ -47691,40 +47696,6 @@ pub(crate) struct MemberExtensionFunctionCandidate {
     declared_ret: Option<Ty>,
     owner: TypeName,
     physical_name: String,
-}
-
-impl MemberExtensionFunctionCandidate {
-    fn resolved_call(
-        &self,
-        dispatch_receiver: ImplicitReceiverSelection,
-        extension_receiver: Ty,
-        interface: bool,
-    ) -> ResolvedCall {
-        ResolvedCall::MemberExtension {
-            stable_declaration: self.stable_declaration,
-            external_identity: self.external_identity,
-            external_default_provider: self.external_default_provider,
-            owner: self.owner,
-            dispatch_receiver,
-            extension_receiver,
-            physical_receiver: self.physical_receiver,
-            // Selection and diagnostics used the Kotlin source name. Only the finalized emit target
-            // receives this provider-owned spelling, so a mangled dependency method cannot leak back
-            // into a diagnostic or become a parallel lookup key.
-            name: self.physical_name.clone(),
-            params: self.params.clone(),
-            physical_params: self.physical_params.clone(),
-            context_args: self.context_args.clone(),
-            ret: self.ret,
-            physical_ret: self.physical_ret,
-            inline: self.inline,
-            inline_body_plan: self.inline_body_plan.clone(),
-            suspend: self.suspend,
-            declared_ret: self.declared_ret,
-            interface,
-            vararg_index: self.physical_vararg_index,
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -68617,7 +68588,13 @@ impl<'a> Checker<'a> {
                             .filter(|ty| !ty.mentions_error() && !ty.mentions_pending());
                         let mut site =
                             DelegateConventionSite::of(bp, Some(owner_ref), extension_receiver);
-                        site.dispatch_source_name = Some(class_declaration_label(&cl.name).into());
+                        site.dispatch_diagnostic_name = Some(if is_anonymous_object {
+                            delegated_properties::DelegateDispatchDiagnosticName::Anonymous
+                        } else {
+                            delegated_properties::DelegateDispatchDiagnosticName::Source(
+                                class_declaration_label(&cl.name).into(),
+                            )
+                        });
                         let (dt, delegate_ret) = self.check_delegate_getvalue(
                             &initializer_scope,
                             de,

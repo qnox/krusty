@@ -5335,7 +5335,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             selected,
                             result,
                         ) => Some((selected, result)),
-                        crate::resolve::delegated_properties::DelegateConventionSelection::None
+                        crate::resolve::delegated_properties::DelegateConventionSelection::None(_)
                         | crate::resolve::delegated_properties::DelegateConventionSelection::Ambiguous(_) => None,
                     },
                 )

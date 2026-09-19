@@ -18,16 +18,22 @@ enum DelegateOperatorSelection {
 }
 
 enum OrdinaryDelegateSelection {
-    None,
+    None(Vec<crate::libraries::FunctionInfo>),
     Selected(crate::libraries::FunctionInfo, Ty, Ty),
     Ambiguous(Vec<crate::libraries::FunctionInfo>),
 }
 
 enum DelegateOperatorFailure {
     AmbiguousOrdinary(Vec<crate::libraries::FunctionInfo>),
-    ExcludedMemberExtensions(
-        Vec<super::member_extension_selection::MemberExtensionConventionDiagnosticCandidate>,
-    ),
+    InapplicableCandidates {
+        // Keep the convention tower's semantic rungs separate. Selection may continue to a lower
+        // rung to find an applicable declaration, but on total failure Kotlin diagnoses only the
+        // earliest rung that contributed same-name candidates.
+        members: Vec<crate::libraries::FunctionInfo>,
+        member_extensions:
+            Vec<super::member_extension_selection::MemberExtensionConventionDiagnosticCandidate>,
+        extensions: Vec<crate::libraries::FunctionInfo>,
+    },
     AmbiguousMemberExtensions(Vec<MemberExtensionFunctionCandidate>),
 }
 
@@ -47,8 +53,14 @@ pub(crate) struct DelegateConventionSite {
     pub(crate) by_span: Span,
     pub(crate) dispatch_receiver: Option<Ty>,
     pub(crate) extension_receiver: Option<Ty>,
-    pub(crate) dispatch_source_name: Option<Box<str>>,
+    pub(crate) dispatch_diagnostic_name: Option<DelegateDispatchDiagnosticName>,
     pub(crate) is_var: bool,
+}
+
+#[derive(Clone)]
+pub(crate) enum DelegateDispatchDiagnosticName {
+    Source(Box<str>),
+    Anonymous,
 }
 
 impl DelegateConventionSite {
@@ -64,7 +76,7 @@ impl DelegateConventionSite {
                 .expect("a delegated property was parsed from its `by` keyword"),
             dispatch_receiver,
             extension_receiver,
-            dispatch_source_name: None,
+            dispatch_diagnostic_name: None,
             is_var: property.is_var,
         }
     }
@@ -76,7 +88,7 @@ impl DelegateConventionSite {
             by_span,
             dispatch_receiver: None,
             extension_receiver: None,
-            dispatch_source_name: None,
+            dispatch_diagnostic_name: None,
             is_var,
         }
     }
@@ -113,7 +125,7 @@ impl DelegateConventionSite {
     fn applied_reference(&self, property: Ty) -> String {
         let mut arguments = Vec::new();
         if let Some(dispatch) = self.dispatch_receiver {
-            arguments.push(self.diagnostic_ty(dispatch));
+            arguments.push(self.property_reference_dispatch_ty(dispatch));
         }
         if let Some(extension) = self.extension_receiver {
             arguments.push(delegate_diagnostic_ty(extension));
@@ -123,10 +135,31 @@ impl DelegateConventionSite {
         format!("{}<{arguments}>", self.flavour())
     }
 
-    fn diagnostic_ty(&self, ty: Ty) -> String {
-        if self.dispatch_receiver == Some(ty) {
-            if let Some(name) = &self.dispatch_source_name {
-                return name.to_string();
+    /// The anonymous dispatch receiver has a source spelling for the convention's `thisRef`, but
+    /// no denotable classifier type for the `KProperty1` argument. Kotlin therefore renders that
+    /// type argument as a star projection while still naming the first argument `<anonymous>`.
+    fn property_reference_dispatch_ty(&self, ty: Ty) -> String {
+        debug_assert_eq!(self.dispatch_receiver, Some(ty));
+        match &self.dispatch_diagnostic_name {
+            Some(DelegateDispatchDiagnosticName::Source(name)) => name.to_string(),
+            Some(DelegateDispatchDiagnosticName::Anonymous) => "*".to_string(),
+            None => panic!("a delegate dispatch diagnostic must retain its source kind"),
+        }
+    }
+
+    fn this_ref_diagnostic_ty(&self, ty: Ty) -> String {
+        if let Some(extension) = self.extension_receiver {
+            debug_assert_eq!(extension, ty);
+            return delegate_diagnostic_ty(extension);
+        }
+        if let Some(dispatch) = self.dispatch_receiver {
+            debug_assert_eq!(dispatch, ty);
+            match &self.dispatch_diagnostic_name {
+                Some(DelegateDispatchDiagnosticName::Source(name)) => return name.to_string(),
+                Some(DelegateDispatchDiagnosticName::Anonymous) => {
+                    return "<anonymous>".to_string()
+                }
+                None => panic!("a delegate dispatch diagnostic must retain its source kind"),
             }
         }
         delegate_diagnostic_ty(ty)
@@ -155,7 +188,7 @@ pub(crate) struct DelegateConventionDiagnosticCandidate {
 }
 
 pub(crate) enum DelegateConventionSelection {
-    None,
+    None(Vec<crate::libraries::FunctionInfo>),
     Selected(crate::libraries::FunctionInfo, Ty),
     Ambiguous(Vec<crate::libraries::FunctionInfo>),
 }
@@ -220,7 +253,7 @@ pub(super) fn select_delegate_operator_return(
 ) -> Option<Ty> {
     match select_delegate_operator(resolver, receiver, name, args) {
         DelegateConventionSelection::Selected(_, ret) => Some(ret),
-        DelegateConventionSelection::None | DelegateConventionSelection::Ambiguous(_) => None,
+        DelegateConventionSelection::None(_) | DelegateConventionSelection::Ambiguous(_) => None,
     }
 }
 
@@ -357,6 +390,26 @@ pub(super) fn select_delegate_operator(
     name: &str,
     args: &[Ty],
 ) -> DelegateConventionSelection {
+    select_delegate_operator_in_kind(resolver, receiver, name, args, None)
+}
+
+pub(super) fn select_delegate_operator_kind(
+    resolver: &crate::symbol_resolver::SymbolResolver,
+    receiver: Ty,
+    name: &str,
+    args: &[Ty],
+    kind: crate::libraries::FnKind,
+) -> DelegateConventionSelection {
+    select_delegate_operator_in_kind(resolver, receiver, name, args, Some(kind))
+}
+
+fn select_delegate_operator_in_kind(
+    resolver: &crate::symbol_resolver::SymbolResolver,
+    receiver: Ty,
+    name: &str,
+    args: &[Ty],
+    kind: Option<crate::libraries::FnKind>,
+) -> DelegateConventionSelection {
     let callables = resolver.receiver_callables(receiver, name);
     crate::trace_compiler!(
         "resolve",
@@ -380,8 +433,13 @@ pub(super) fn select_delegate_operator(
     // `getValue`. Dropping such a candidate here is the second of those: the property gets the
     // ordinary "no convention" diagnostic instead of a selected call whose argument list cannot be
     // mapped onto the declaration's slots.
-    let overloads = callables
+    let diagnostic_candidates = callables
         .functions()
+        .iter()
+        .filter(|candidate| kind.is_none_or(|kind| candidate.kind == kind))
+        .cloned()
+        .collect::<Vec<_>>();
+    let overloads = diagnostic_candidates
         .iter()
         .filter(|candidate| {
             is_usable_delegate_convention(candidate.flags.operator, candidate.context_count)
@@ -407,7 +465,7 @@ pub(super) fn select_delegate_operator(
             DelegateConventionSelection::Selected(selected, ret)
         }
         crate::symbol_resolver::ReceiverFunctionSelection::None => {
-            DelegateConventionSelection::None
+            DelegateConventionSelection::None(diagnostic_candidates)
         }
         crate::symbol_resolver::ReceiverFunctionSelection::Ambiguous(candidates) => {
             DelegateConventionSelection::Ambiguous(candidates)
@@ -433,7 +491,7 @@ fn delegate_convention_candidates(
     delegate_convention_candidates_from_functions(callables.functions(), name, candidate_result)
 }
 
-fn delegate_convention_candidates_from_functions(
+pub(super) fn delegate_convention_candidates_from_functions(
     functions: &[crate::libraries::FunctionInfo],
     name: &str,
     candidate_result: &mut dyn FnMut(
@@ -443,7 +501,7 @@ fn delegate_convention_candidates_from_functions(
     functions
         .iter()
         .map(|candidate| {
-            let parameters = candidate.callable.params.as_slice();
+            let parameters = candidate.semantic_params();
             let (context, value) = parameters.split_at(
                 // A provider states its context count independently of its parameter list; a
                 // disagreement must render a shorter prefix, never index past the list.
@@ -556,7 +614,7 @@ fn render_delegate_convention_failure(
         Some(reference) => reference,
         None => site.star_projected_reference(),
     };
-    let mut signature = vec![site.diagnostic_ty(this_ref), reference];
+    let mut signature = vec![site.this_ref_diagnostic_ty(this_ref), reference];
     signature.extend(value.map(delegate_diagnostic_ty));
     let signature = format!("{name}({})", signature.join(", "));
     Some(match failure {
@@ -809,7 +867,8 @@ impl Checker<'_> {
         self.diags.error(site.by_span, message);
     }
 
-    fn report_excluded_member_extension_delegate_convention_failure(
+    #[allow(clippy::too_many_arguments)]
+    fn report_inapplicable_delegate_convention_failure(
         &mut self,
         site: DelegateConventionSite,
         delegate_ty: Ty,
@@ -817,34 +876,48 @@ impl Checker<'_> {
         this_ref: Ty,
         property: Option<Ty>,
         value: Option<Ty>,
-        candidates: &[super::member_extension_selection::MemberExtensionConventionDiagnosticCandidate],
+        members: &[crate::libraries::FunctionInfo],
+        member_extensions: &[super::member_extension_selection::MemberExtensionConventionDiagnosticCandidate],
+        extensions: &[crate::libraries::FunctionInfo],
     ) {
-        let candidates = candidates
-            .iter()
-            .map(|candidate| {
-                let result = if candidate.ret.mentions_pending() {
-                    let declaration = candidate.stable_declaration.expect(
-                        "an undetermined excluded delegate candidate retains its declaration",
-                    );
-                    self.resolved_index
-                        .and_then(|index| index.signature(declaration))
-                        .map(|signature| signature.result.get())
-                        .expect("an excluded delegate candidate has a finalized result")
-                } else {
-                    candidate.ret
-                };
-                let context_count = candidate.context_count.min(candidate.params.len());
-                let (context, parameters) = candidate.params.split_at(context_count);
-                delegate_convention_diagnostic_candidate(
-                    name,
-                    Some(candidate.extension_receiver),
-                    context,
-                    parameters,
-                    &candidate.parameter_names,
-                    result,
-                )
+        let ordinary = |functions: &[crate::libraries::FunctionInfo]| {
+            delegate_convention_candidates_from_functions(functions, name, &mut |candidate| {
+                Ok(candidate.callable.ret)
             })
-            .collect::<Vec<_>>();
+            .expect("a checked delegate convention candidate has a finalized result")
+        };
+        let candidates = if !members.is_empty() {
+            ordinary(members)
+        } else if !member_extensions.is_empty() {
+            member_extensions
+                .iter()
+                .map(|candidate| {
+                    let result = if candidate.ret.mentions_pending() {
+                        let declaration = candidate.stable_declaration.expect(
+                            "an undetermined excluded delegate candidate retains its declaration",
+                        );
+                        self.resolved_index
+                            .and_then(|index| index.signature(declaration))
+                            .map(|signature| signature.result.get())
+                            .expect("an excluded delegate candidate has a finalized result")
+                    } else {
+                        candidate.ret
+                    };
+                    let context_count = candidate.context_count.min(candidate.params.len());
+                    let (context, parameters) = candidate.params.split_at(context_count);
+                    delegate_convention_diagnostic_candidate(
+                        name,
+                        Some(candidate.extension_receiver),
+                        context,
+                        parameters,
+                        &candidate.parameter_names,
+                        result,
+                    )
+                })
+                .collect()
+        } else {
+            ordinary(extensions)
+        };
         let message = delegate_convention_message_with_candidates(
             site.clone(),
             delegate_ty,
@@ -854,7 +927,7 @@ impl Checker<'_> {
             value,
             &candidates,
         )
-        .expect("excluded member-extension delegate candidates must produce a diagnostic");
+        .expect("retained delegate candidates must produce a diagnostic");
         self.diags.error(site.by_span, message);
     }
 
@@ -880,16 +953,21 @@ impl Checker<'_> {
                     value,
                     &candidates,
                 ),
-            DelegateOperatorFailure::ExcludedMemberExtensions(candidates) => self
-                .report_excluded_member_extension_delegate_convention_failure(
-                    site,
-                    delegate_ty,
-                    name,
-                    this_ref,
-                    property,
-                    value,
-                    &candidates,
-                ),
+            DelegateOperatorFailure::InapplicableCandidates {
+                members,
+                member_extensions,
+                extensions,
+            } => self.report_inapplicable_delegate_convention_failure(
+                site,
+                delegate_ty,
+                name,
+                this_ref,
+                property,
+                value,
+                &members,
+                &member_extensions,
+                &extensions,
+            ),
             DelegateOperatorFailure::AmbiguousMemberExtensions(candidates) => self
                 .report_member_extension_delegate_convention_ambiguity(
                     site,
@@ -1259,15 +1337,16 @@ impl Checker<'_> {
         let select_kind = |kind| {
             // Context parameters exclude a candidate here for the same reason as in
             // `select_delegate_operator`: the generated accessor has no scope to fill one from.
-            let overloads = callables
+            let diagnostic_candidates = callables
                 .functions()
                 .iter()
+                .filter(|candidate| candidate.kind == kind)
+                .cloned()
+                .collect::<Vec<_>>();
+            let overloads = diagnostic_candidates
+                .iter()
                 .filter(|candidate| {
-                    candidate.kind == kind
-                        && is_usable_delegate_convention(
-                            candidate.flags.operator,
-                            candidate.context_count,
-                        )
+                    is_usable_delegate_convention(candidate.flags.operator, candidate.context_count)
                 })
                 .cloned()
                 .collect::<Vec<_>>();
@@ -1288,7 +1367,7 @@ impl Checker<'_> {
                     applied_receiver,
                 )) => OrdinaryDelegateSelection::Selected(selected, ret, applied_receiver),
                 crate::symbol_resolver::ReceiverFunctionSelection::None => {
-                    OrdinaryDelegateSelection::None
+                    OrdinaryDelegateSelection::None(diagnostic_candidates)
                 }
                 crate::symbol_resolver::ReceiverFunctionSelection::Ambiguous(candidates) => {
                     OrdinaryDelegateSelection::Ambiguous(candidates)
@@ -1308,7 +1387,7 @@ impl Checker<'_> {
                     ))
                 };
             }
-            OrdinaryDelegateSelection::None => {
+            OrdinaryDelegateSelection::None(members) => {
                 let syntax = vec![delegate; args.len()];
                 let member_extension = member_extension_function_with(
                     &self.fed_source(),
@@ -1412,12 +1491,18 @@ impl Checker<'_> {
                     OrdinaryDelegateSelection::Selected(selected, ret, applied_receiver) => {
                         (selected, ret, applied_receiver)
                     }
-                    OrdinaryDelegateSelection::None => {
-                        return if optional || excluded.is_empty() {
+                    OrdinaryDelegateSelection::None(extensions) => {
+                        return if optional
+                            || (members.is_empty() && excluded.is_empty() && extensions.is_empty())
+                        {
                             DelegateOperatorSelection::None
                         } else {
                             DelegateOperatorSelection::Failure(
-                                DelegateOperatorFailure::ExcludedMemberExtensions(excluded),
+                                DelegateOperatorFailure::InapplicableCandidates {
+                                    members,
+                                    member_extensions: excluded,
+                                    extensions,
+                                },
                             )
                         };
                     }

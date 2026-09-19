@@ -11,9 +11,15 @@ pub struct SignatureDelegateSite {
     pub mutable: bool,
     /// Original declaration spelling used only at the diagnostic boundary. This is deliberately
     /// distinct from the resolved dispatch identity.
-    pub dispatch_source_name: Option<SigNameId>,
+    pub dispatch_diagnostic_name: Option<SignatureDelegateDispatchName>,
     /// Exact source origin of the `by` keyword.
     pub by_origin: OriginId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SignatureDelegateDispatchName {
+    Source(SigNameId),
+    Anonymous,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,8 +44,14 @@ pub struct ResolvedSignatureDelegateSite {
     pub diagnostic_owner: DeclarationId,
     pub kind: ResolvedSignatureDelegateSiteKind,
     pub mutable: bool,
-    pub dispatch_source_name: Option<Box<str>>,
+    pub dispatch_diagnostic_name: Option<ResolvedDelegateDispatchName>,
     pub by_origin: OriginId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResolvedDelegateDispatchName {
+    Source(Box<str>),
+    Anonymous,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

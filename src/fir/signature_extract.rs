@@ -297,15 +297,22 @@ impl SignatureConstraintExtractor {
                         .delegate_by_span
                         .expect("an inferred delegated property retains its `by` keyword"),
                 );
-                let dispatch_source_name = enclosing_classifier.map(|(_, _, classifier)| {
-                    self.graph.intern_name(
-                        classifier
-                            .name
-                            .rsplit('.')
-                            .next()
-                            .unwrap_or(&classifier.name),
-                    )
-                });
+                let dispatch_diagnostic_name =
+                    enclosing_classifier.map(|(_, declaration, classifier)| {
+                        if file.is_anonymous_object_class(declaration) {
+                            super::SignatureDelegateDispatchName::Anonymous
+                        } else {
+                            super::SignatureDelegateDispatchName::Source(
+                                self.graph.intern_name(
+                                    classifier
+                                        .name
+                                        .rsplit('.')
+                                        .next()
+                                        .unwrap_or(&classifier.name),
+                                ),
+                            )
+                        }
+                    });
                 let dispatch = enclosing_classifier.map(|(_, _, classifier)| {
                     let declaration = self
                         .source_classifiers
@@ -328,7 +335,7 @@ impl SignatureConstraintExtractor {
                     diagnostic_owner: stub.id,
                     kind,
                     mutable: property.is_var,
-                    dispatch_source_name,
+                    dispatch_diagnostic_name,
                     by_origin,
                 }
             });
@@ -801,10 +808,14 @@ impl SignatureConstraintExtractor {
                         extension: property.receiver.is_some(),
                     },
                     mutable: property.is_var,
-                    dispatch_source_name: Some(
-                        self.graph
-                            .intern_name(class.name.rsplit('.').next().unwrap_or(&class.name)),
-                    ),
+                    dispatch_diagnostic_name: Some(if file.is_anonymous_object_class(classifier) {
+                        super::SignatureDelegateDispatchName::Anonymous
+                    } else {
+                        super::SignatureDelegateDispatchName::Source(
+                            self.graph
+                                .intern_name(class.name.rsplit('.').next().unwrap_or(&class.name)),
+                        )
+                    }),
                     by_origin: origin(
                         property
                             .delegate_by_span
@@ -2267,7 +2278,7 @@ impl SignatureConstraintExtractor {
                                                 .owner,
                                             kind: super::SignatureDelegateSiteKind::StatementLocal,
                                             mutable: *is_var,
-                                            dispatch_source_name: None,
+                                            dispatch_diagnostic_name: None,
                                             by_origin: origin(*by_span),
                                         },
                                     })
