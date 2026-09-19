@@ -494,6 +494,7 @@ fn module_inner_class_resolver_from_shapes(
     const ABSTRACT: u16 = 0x0400;
     const ANNOTATION: u16 = 0x2000;
     const ENUM: u16 = 0x4000;
+    const SYNTHETIC: u16 = 0x1000;
 
     let classes = classes.into_iter().collect::<Vec<_>>();
     let module_names = classes
@@ -552,10 +553,30 @@ fn module_inner_class_resolver_from_shapes(
         );
     }
     let classpath = classpath_inner_class_resolver(cp);
+    // The serialization plugin's generated nested class is literally named `$serializer`, so its JVM
+    // name ends in a doubled `$` — a remainder the boundary rule above deliberately refuses, and a
+    // shape the checker's classifier snapshot never carries at all because the plugin creates the
+    // class during lowering. The file that DECLARES it registers a candidate of its own
+    // (`jvm::inner_classes`), so the row was missing only where the reference comes from ANOTHER
+    // FILE of the same module. Requiring the enclosing half to be a class this module declares is
+    // the same evidence the snapshot loop demands, and the flags are kotlinc's: measured
+    // `public static final synthetic` for a serialized class of public, internal and private
+    // visibility alike, the serializer itself always being public. `javap` does not print
+    // `ACC_SYNTHETIC` on an `InnerClasses` row, so read the raw `access_flags` when checking it.
     std::rc::Rc::new(move |internal: &str| {
         source
             .get(internal)
             .cloned()
+            .or_else(|| {
+                let outer = internal.strip_suffix("$$serializer")?;
+                module_names
+                    .contains(&crate::types::type_name(outer))
+                    .then(|| crate::jvm::classfile::InnerClassDetails {
+                        outer: Some(outer.to_string()),
+                        name: Some("$serializer".to_string()),
+                        access: PUBLIC | STATIC | FINAL | SYNTHETIC,
+                    })
+            })
             .or_else(|| classpath(internal))
     })
 }
