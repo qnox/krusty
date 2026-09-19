@@ -118,3 +118,66 @@ fn a_non_tail_unit_return_keeps_its_exit_loop() {
         "a Unit return that is not the tail still needs the exit loop"
     );
 }
+
+/// Every `Variable` index the lowered file declares, in declaration order.
+fn declared_indices(file: &krusty::ir::IrFile) -> Vec<u32> {
+    file.exprs
+        .iter()
+        .filter_map(|e| match e {
+            krusty::ir::IrExpr::Variable { index, .. } => Some(*index),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A SUCCESSFUL promotion reserves nothing — no result local, and so no hole in the numbering that
+/// every later local would be shifted past.
+///
+/// The classification used to run after the result slot had been reserved and every return already
+/// rewritten into an assignment and a break. On the promoted path those were abandoned: the slot
+/// number stayed consumed and the two nodes stayed in the arena, unreachable. Nothing downstream
+/// reported it, because the spill-field compaction that reads these locals renumbers them anyway —
+/// which is exactly why it is asserted here, on the lowered IR, rather than through a spill array.
+///
+/// The fixture puts a declaration AFTER the promoted expansion, so a hole would move it.
+#[test]
+fn a_promoted_expansion_reserves_no_result_local() {
+    // A promoted expansion FIRST, then one that keeps its loop. The abandoned slot number is never
+    // declared, so a single expansion hides the hole entirely — only a LATER allocation reveals it,
+    // shifted past a number nothing occupies.
+    let file = lowered(
+        "inline fun twice(x: Int, block: (Int) -> Int): Int {\n\
+        \x20   val y = x + 1\n\
+        \x20   return block(y)\n\
+         }\n\
+         inline fun guarded(x: Int, block: (Int) -> Int): Int {\n\
+        \x20   if (x < 0) return 0\n\
+        \x20   return block(x)\n\
+         }\n\
+         fun run(n: Int): Int {\n\
+        \x20   val first = twice(n) { it * 2 }\n\
+        \x20   val second = guarded(first) { it + 1 }\n\
+        \x20   return second\n\
+         }\n",
+        "PromotedNoSlot",
+    );
+    assert_eq!(
+        exit_loops(&file),
+        1,
+        "exactly one expansion keeps its loop; the other must take the promoted path"
+    );
+
+    // Contiguous from the lowest DECLARED index: the parameters occupy the numbers below it and
+    // are not `Variable` nodes, so the base is the fixture's first local rather than zero.
+    let indices = declared_indices(&file);
+    let mut sorted = indices.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let lowest = *sorted.first().expect("the fixture declares locals");
+    let highest = *sorted.last().expect("the fixture declares locals");
+    assert_eq!(
+        sorted,
+        (lowest..=highest).collect::<Vec<_>>(),
+        "a promoted expansion must leave no gap in the local numbering: {indices:?}"
+    );
+}

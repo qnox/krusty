@@ -158,14 +158,12 @@ impl BodyLowering<'_> {
         let local_base = self.next_temporary;
         self.next_temporary = self.next_temporary.checked_add(local_count)?;
 
-        // Every return the expansion rewrites, so the tail-only shape can be recognized below.
-        let mut rewritten_returns: Vec<(ExprId, Option<ExprId>)> = Vec::new();
-        let result_slot = (result_ty != Ty::Unit).then(|| {
-            let slot = self.next_temporary;
-            self.next_temporary += 1;
-            slot
-        });
-        let label = format!("$fir_inline${}_{}", target.raw(), self.next_temporary);
+        // Every return this expansion contains, COLLECTED but not yet rewritten. Which shape the
+        // expansion takes is decided from this list, and only the loop shape costs a result local
+        // and a break per return — so nothing is reserved or allocated until the shape is known.
+        // Reserving first left a hole in the local numbering and a pair of unreachable arena nodes
+        // behind every successful tail promotion, which shifts every later local identity.
+        let mut returns: Vec<(ExprId, Option<ExprId>)> = Vec::new();
 
         for (&source, &copy) in &cloned {
             let generated_zero = match self.ir.expr(source) {
@@ -237,28 +235,13 @@ impl BodyLowering<'_> {
                 _ => None,
             };
             if let Some(value) = returned {
-                rewritten_returns.push((copy, value));
-                // This return has crossed its checked callable boundary and is now represented by
-                // the expression-local break below.  The sparse depth fact belongs to the old
-                // `Return` node shape; leaving it on the replacement block makes an enclosing
-                // inline-lambda template try to consume the same return a second time.
+                returns.push((copy, value));
+                // This return has crossed its checked callable boundary and will be represented by
+                // the block that replaces it, in EITHER shape. The sparse depth fact belongs to the
+                // old `Return` node; leaving it on the replacement makes an enclosing inline-lambda
+                // template try to consume the same return a second time. Removing it is a fact
+                // about the node, not a commitment to the loop shape, so it happens here.
                 self.ir.checked_return_depths.remove(&copy);
-                let exit = self.ir.add_expr(IrExpr::Break {
-                    label: Some(label.clone()),
-                });
-                self.ir.exprs[copy as usize] =
-                    if let (Some(slot), Some(value)) = (result_slot, value) {
-                        let assign = self.ir.add_expr(IrExpr::SetValue { var: slot, value });
-                        IrExpr::Block {
-                            stmts: vec![assign, exit],
-                            value: None,
-                        }
-                    } else {
-                        IrExpr::Block {
-                            stmts: vec![exit],
-                            value: None,
-                        }
-                    };
             }
         }
 
@@ -285,7 +268,7 @@ impl BodyLowering<'_> {
         // emits — it leaves it on the operand stack. The loop form costs an unnamed local, and when
         // the expansion crosses a suspension that local takes a continuation field kotlinc has no
         // counterpart for.
-        if let [(tail, value)] = rewritten_returns[..] {
+        if let [(tail, value)] = returns[..] {
             if produce_sole_tail_return(self.ir, cloned_root, tail, value) {
                 let mut statements = operand_declarations;
                 statements.push(cloned_root);
@@ -295,6 +278,33 @@ impl BodyLowering<'_> {
                     value,
                 }));
             }
+        }
+
+        // The loop shape, and only now: the result local is reserved here, so a promoted expansion
+        // above leaves no hole in the numbering, and each return is rewritten into the break that
+        // carries it out.
+        let result_slot = (result_ty != Ty::Unit).then(|| {
+            let slot = self.next_temporary;
+            self.next_temporary += 1;
+            slot
+        });
+        let label = format!("$fir_inline${}_{}", target.raw(), self.next_temporary);
+        for (copy, value) in returns {
+            let exit = self.ir.add_expr(IrExpr::Break {
+                label: Some(label.clone()),
+            });
+            self.ir.exprs[copy as usize] = if let (Some(slot), Some(value)) = (result_slot, value) {
+                let assign = self.ir.add_expr(IrExpr::SetValue { var: slot, value });
+                IrExpr::Block {
+                    stmts: vec![assign, exit],
+                    value: None,
+                }
+            } else {
+                IrExpr::Block {
+                    stmts: vec![exit],
+                    value: None,
+                }
+            };
         }
 
         let mut statements = operand_declarations;
