@@ -1,0 +1,941 @@
+//! Mapping already-selected Kotlin stdlib declarations onto native runtime functions.
+//!
+//! The frontend has already picked an overload; nothing here is resolution. A declaration arrives
+//! as an owner, a name and its semantic parameter types, and the question is only which C function
+//! realizes it.
+//!
+//! **Why the owner is spelled as a JVM facade.** krusty's only symbol provider today reads the
+//! Kotlin/JVM stdlib jar, so `kotlin.io.println` is presented as a member of `kotlin/io/ConsoleKt`.
+//! That is a property of where the *signatures* come from, not of what gets emitted: the compiled
+//! program contains no JVM and links only against `krusty_rt.c`. Phase 7 of
+//! `docs/BUILD_AND_NATIVE_PLAN.md` replaces the provider with klib ingestion, at which point the
+//! owner becomes a Kotlin package and [`facade_package`] disappears with it.
+
+use crate::types::Ty;
+
+/// Undo the JVM provider's mapping of Kotlin built-ins onto their Java counterparts.
+///
+/// Part of the same temporary bridge as [`facade_package`]: `kotlin.String` reaches a backend
+/// spelled `java/lang/String` because the signatures were read out of a JVM jar. Normalizing here
+/// keeps every table below written in Kotlin names, so nothing has to be rewritten when the
+/// provider becomes klib-based.
+fn kotlin_owner(owner: &str) -> &str {
+    match owner {
+        "java/lang/String" => "kotlin/String",
+        "java/lang/Object" => "kotlin/Any",
+        "java/lang/Comparable" => "kotlin/Comparable",
+        "java/lang/Number" => "kotlin/Number",
+        "java/lang/Throwable" => "kotlin/Throwable",
+        "java/lang/Error" => "kotlin/Error",
+        "java/lang/Exception" => "kotlin/Exception",
+        "java/lang/RuntimeException" => "kotlin/RuntimeException",
+        "java/lang/IllegalStateException" => "kotlin/IllegalStateException",
+        "java/lang/IllegalArgumentException" => "kotlin/IllegalArgumentException",
+        "java/lang/AssertionError" => "kotlin/AssertionError",
+        "java/lang/NullPointerException" => "kotlin/NullPointerException",
+        "java/lang/ClassCastException" => "kotlin/ClassCastException",
+        "java/lang/IndexOutOfBoundsException" => "kotlin/IndexOutOfBoundsException",
+        "java/lang/ArithmeticException" => "kotlin/ArithmeticException",
+        "java/lang/UnsupportedOperationException" => "kotlin/UnsupportedOperationException",
+        "java/lang/NumberFormatException" => "kotlin/NumberFormatException",
+        "java/util/NoSuchElementException" => "kotlin/NoSuchElementException",
+        "java/util/ConcurrentModificationException" => "kotlin/ConcurrentModificationException",
+        "java/lang/Enum" => "kotlin/Enum",
+        // The collections. Kotlin has no `java.util.ArrayList`: `kotlin.collections.ArrayList` is
+        // the type, and this spelling is only how a JVM jar presents it.
+        "java/util/ArrayList" => "kotlin/collections/ArrayList",
+        "java/util/List" => "kotlin/collections/List",
+        "java/util/Collection" => "kotlin/collections/Collection",
+        "java/util/Iterator" => "kotlin/collections/Iterator",
+        "java/lang/Iterable" => "kotlin/collections/Iterable",
+        // The text types, on the same footing. Kotlin has no `java.lang.StringBuilder` and no
+        // `java.lang.CharSequence`: `kotlin.text.StringBuilder` and `kotlin.CharSequence` are the
+        // types, and these spellings are only how a JVM jar presents them. `AbstractStringBuilder`
+        // is where the JVM declares the builder's own members, so it arrives under that name too.
+        "java/lang/StringBuilder" | "java/lang/AbstractStringBuilder" => {
+            "kotlin/text/StringBuilder"
+        }
+        "java/lang/CharSequence" => "kotlin/CharSequence",
+        other => other,
+    }
+}
+
+/// Is this `kotlin.Any` — the root class, under either spelling the provider may hand over?
+///
+/// The root declares no state and no constructor to run, so a `super()` reaching it is nothing to
+/// emit. Both spellings are checked here for the reason [`kotlin_owner`] exists: `kotlin.Any`
+/// arrives as `java/lang/Object` when the signature came out of a JVM jar.
+pub(super) fn is_any(owner: crate::types::TypeName) -> bool {
+    matches!(kotlin_owner(&owner.render()), "kotlin/Any")
+}
+
+/// The runtime type descriptor for a `Throwable` the runtime provides, if this is one.
+///
+/// These classes are declared in no file krusty compiles, so there is no layout and no constructor
+/// to call — the runtime carries the descriptor, the one reference field and the `toString` Kotlin
+/// specifies, and `kt_throwable_new` builds one. The chain is Kotlin's, so a `catch` clause naming
+/// any of them is an ordinary `kt_is_instance` against the descriptor named here.
+///
+/// A class the PROGRAM declares that extends one of these is not this: it has its own layout and
+/// its own constructor, and is emitted like any other class.
+pub(super) fn throwable_descriptor(owner: crate::types::TypeName) -> Option<&'static str> {
+    Some(match kotlin_owner(&owner.render()) {
+        "kotlin/Throwable" => "kt_type_throwable",
+        "kotlin/Error" => "kt_type_error",
+        "kotlin/Exception" => "kt_type_exception",
+        "kotlin/RuntimeException" => "kt_type_runtime_exception",
+        "kotlin/IllegalStateException" => "kt_type_illegal_state_exception",
+        "kotlin/IllegalArgumentException" => "kt_type_illegal_argument_exception",
+        "kotlin/NotImplementedError" => "kt_type_not_implemented_error",
+        "kotlin/AssertionError" => "kt_type_assertion_error",
+        "kotlin/NullPointerException" => "kt_type_null_pointer_exception",
+        "kotlin/ClassCastException" => "kt_type_class_cast_exception",
+        "kotlin/IndexOutOfBoundsException" => "kt_type_index_out_of_bounds_exception",
+        "kotlin/ArithmeticException" => "kt_type_arithmetic_exception",
+        "kotlin/UnsupportedOperationException" => "kt_type_unsupported_operation_exception",
+        "kotlin/NumberFormatException" => "kt_type_number_format_exception",
+        "kotlin/NoSuchElementException" => "kt_type_no_such_element_exception",
+        "kotlin/ConcurrentModificationException" => "kt_type_concurrent_modification_exception",
+        "kotlin/UninitializedPropertyAccessException" => {
+            "kt_type_uninitialized_property_access_exception"
+        }
+        _ => return None,
+    })
+}
+
+/// How a `Throwable` constructor's single parameter supplies the message.
+pub(super) enum ThrowableMessage {
+    /// `message: String?` — the string IS the message, and a `null` stays `null`.
+    Verbatim,
+    /// `message: Any?` — the message is its `toString`, which for `null` is `"null"`. This is
+    /// `AssertionError`'s only one-argument form, and the difference from [`Self::Verbatim`] is
+    /// observable exactly there: `AssertionError(null)` reports `null` where `Exception(null)`
+    /// reports no message at all.
+    Rendered,
+}
+
+/// Which message a one-argument `Throwable` constructor takes, or `None` for one that is not a
+/// message at all.
+///
+/// `Throwable`'s constructors are told apart by this one parameter. A `cause: Throwable?` is the
+/// other one-argument form and answers `None`, because this `Throwable` has no cause field and
+/// accepting it would silently drop what the program passed.
+pub(super) fn throwable_message(ty: &Ty) -> Option<ThrowableMessage> {
+    match ty {
+        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => throwable_message(inner),
+        Ty::Obj(owner, _) => match kotlin_owner(&owner.render()) {
+            "kotlin/String" => Some(ThrowableMessage::Verbatim),
+            // A `cause`, under any name in the hierarchy.
+            name if throwable_descriptor(crate::types::type_name(name)).is_some() => None,
+            _ => Some(ThrowableMessage::Rendered),
+        },
+        // `AssertionError(42)` and its siblings: Java gives each width its own overload, and every
+        // one of them reports the value's text.
+        _ if ty.is_jvm_scalar() => Some(ThrowableMessage::Rendered),
+        _ => None,
+    }
+}
+
+/// The Kotlin package a JVM file facade stands for: `kotlin/io/ConsoleKt` → `kotlin/io`.
+///
+/// Returns `None` for a name that is not a facade, so a member function of a real class can never
+/// be mistaken for a top-level one.
+fn facade_package(owner: &str) -> Option<&str> {
+    let (package, facade) = owner.rsplit_once('/')?;
+    facade.strip_suffix("Kt").map(|_| package)
+}
+
+/// How a console overload's argument is carried.
+enum ConsoleOperand {
+    /// A machine scalar, named by the runtime's suffix for it.
+    Scalar(&'static str),
+    /// A reference — the `Any?` overload, exactly as Kotlin's own overload set selects it.
+    Reference,
+}
+
+fn console_operand(ty: Ty) -> ConsoleOperand {
+    match ty {
+        // Each unsigned type has its own entry point rather than taking the `Any?` overload: the
+        // value would have to be boxed to reach that one, and it is the runtime that boxes — with
+        // the descriptor that makes it print as the value and not as the signed number sharing its
+        // bits.
+        Ty::UByte => return ConsoleOperand::Scalar("ubyte"),
+        Ty::UShort => return ConsoleOperand::Scalar("ushort"),
+        Ty::UInt => return ConsoleOperand::Scalar("uint"),
+        Ty::ULong => return ConsoleOperand::Scalar("ulong"),
+        _ => {}
+    }
+    match ty {
+        Ty::Byte => ConsoleOperand::Scalar("byte"),
+        Ty::Short => ConsoleOperand::Scalar("short"),
+        Ty::Int => ConsoleOperand::Scalar("int"),
+        Ty::Long => ConsoleOperand::Scalar("long"),
+        Ty::Char => ConsoleOperand::Scalar("char"),
+        Ty::Boolean => ConsoleOperand::Scalar("boolean"),
+        Ty::Float => ConsoleOperand::Scalar("float"),
+        Ty::Double => ConsoleOperand::Scalar("double"),
+        _ => ConsoleOperand::Reference,
+    }
+}
+
+/// The runtime function realizing a selected dependency callable, or `None` when the native
+/// runtime does not implement that declaration yet.
+pub(super) fn runtime_function(owner: &str, name: &str, params: &[Ty]) -> Option<String> {
+    match (facade_package(kotlin_owner(owner))?, name, params) {
+        ("kotlin/io", "println", []) => Some("kt_println_unit".to_string()),
+        ("kotlin/io", name @ ("print" | "println"), [argument]) => {
+            match console_operand(*argument) {
+                ConsoleOperand::Scalar(suffix) => Some(format!("kt_{name}_{suffix}")),
+                ConsoleOperand::Reference => Some(format!("kt_{name}_any")),
+            }
+        }
+        // The throws a program writes on purpose. Each is a `Nothing` or a check that diverges, so
+        // the caller's own bottom-value contract takes over from here; the runtime's part is the
+        // diagnosable exit this target gives a throw until it has exceptions.
+        //
+        // Only the forms that take no `lazyMessage` are named. That parameter is a LAMBDA of an
+        // `inline` declaration whose body is not here to splice, and Kotlin lets such a lambda
+        // return from the enclosing function — so invoking it as an ordinary function value would
+        // be a miscompile rather than a slower answer, and the form declines instead.
+        ("kotlin", "TODO", []) => Some("kt_not_implemented".to_string()),
+        ("kotlin", "TODO", [_]) => Some("kt_not_implemented_reason".to_string()),
+        ("kotlin", "error", [_]) => Some("kt_illegal_state".to_string()),
+        ("kotlin", "require", [Ty::Boolean]) => Some("kt_require".to_string()),
+        ("kotlin", "check", [Ty::Boolean]) => Some("kt_check".to_string()),
+        _ => None,
+    }
+}
+
+/// One of `kotlin.test`'s assertions, as (runtime symbol, whether a message argument is present).
+///
+/// The corpus checks itself with these — they are most of what `// WITH_STDLIB` buys it — so they
+/// are worth realizing directly rather than waiting for the whole of `kotlin.test` to be
+/// splicable. Each compares and, when the comparison fails, raises the `AssertionError` Kotlin
+/// specifies with Kotlin's own wording.
+///
+/// The operands cross as REFERENCES, which is why this does not go through [`runtime_function`]:
+/// `assertEquals` is generic, so a call with `Int` arguments arrives typed `Int`, and the
+/// comparison Kotlin makes is `==` — structural, on whatever the values are.
+pub(super) fn assertion_call(
+    owner: &str,
+    name: &str,
+    params: &[Ty],
+) -> Option<(&'static str, usize)> {
+    if facade_package(kotlin_owner(owner))? != "kotlin/test" {
+        return None;
+    }
+    let (symbol, compared) = match name {
+        "assertEquals" => ("kt_assert_equals", 2),
+        "assertTrue" => ("kt_assert_true", 1),
+        "assertFalse" => ("kt_assert_false", 1),
+        _ => return None,
+    };
+    // What the DECLARATION takes beyond the compared operands is a `message: String?`, and only
+    // that. `assertEquals` also has a form whose third parameter is a floating-point tolerance;
+    // answering that one as if the tolerance were a message would silently compare exactly, so it
+    // falls through to the decline.
+    //
+    // The count returned is the COMPARED operands, not the declaration's arity: `message` is
+    // defaulted, so a call that leaves it out still names a three-parameter declaration, and
+    // reading the arity here would take the second operand for the message.
+    match params.len() {
+        n if n == compared => {}
+        n if n == compared + 1 && is_string_type(&params[compared]) => {}
+        _ => return None,
+    }
+    Some((symbol, compared))
+}
+
+/// Whether this names `assertFailsWith`, which reaches a backend under the name kotlin-test
+/// gives its non-inline half.
+///
+/// It takes no class operand: the reified type argument is resolved into the call's RETURN type
+/// before a backend sees it, so the caller reads the class to test against from there.
+pub(super) fn is_assert_fails_with(owner: &str, name: &str) -> bool {
+    facade_package(kotlin_owner(owner)) == Some("kotlin/test") && name == "assertFailsWithAny"
+}
+
+/// Is this `kotlin.String`, at either nullability and under either spelling?
+fn is_string_type(ty: &Ty) -> bool {
+    match ty {
+        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => is_string_type(inner),
+        Ty::Obj(owner, _) => kotlin_owner(&owner.render()) == "kotlin/String",
+        _ => false,
+    }
+}
+
+/// A question Kotlin lets a program ask of a floating-point value directly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum FloatPredicate {
+    /// `Double.isNaN()` / `Float.isNaN()`.
+    IsNaN,
+    /// `isInfinite()`, true for either infinity and false for `NaN`.
+    IsInfinite,
+    /// `isFinite()`, the negation of both of the above.
+    IsFinite,
+}
+
+/// Which of those a selected dependency member is, or `None` for anything else.
+///
+/// They are extensions on the primitive, so they reach a backend as members of the file facade the
+/// stdlib declares them in — `kotlin/NumbersKt` here, which is the `kotlin/io/ConsoleKt` situation
+/// again and is normalized in the same place. Each is one comparison, so naming them lets the
+/// generator emit that rather than call into the runtime with a boxed operand.
+pub(super) fn float_predicate(owner: &str, name: &str) -> Option<FloatPredicate> {
+    if facade_package(kotlin_owner(owner))? != "kotlin" {
+        return None;
+    }
+    match name {
+        "isNaN" => Some(FloatPredicate::IsNaN),
+        "isInfinite" => Some(FloatPredicate::IsInfinite),
+        "isFinite" => Some(FloatPredicate::IsFinite),
+        _ => None,
+    }
+}
+
+/// Which member of `kotlin.Enum` an accessor names, or `None` for anything else.
+///
+/// Every enum constant answers `name` and `ordinal` from the storage its base contributes, and the
+/// accessor reaches a backend spelled as the provider named it — `getName` on `java/lang/Enum`,
+/// since the signatures come from a JVM jar. Normalizing that here keeps the one place that knows
+/// the spelling the same one that knows every other.
+pub(super) fn enum_member(owner: &str, accessor: &str) -> Option<&'static str> {
+    if kotlin_owner(owner) != "kotlin/Enum" {
+        return None;
+    }
+    match accessor {
+        "name" => Some("name"),
+        "ordinal" => Some("ordinal"),
+        _ => None,
+    }
+}
+
+/// What a scope function's call yields once its block has run.
+///
+/// `apply`, `also`, `let` and `run` differ in exactly this and in nothing else: each evaluates the
+/// receiver once, hands it to the block, and then yields either the receiver it was called on or
+/// whatever the block returned. Kotlin's own signatures say which.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ScopeResult {
+    /// `T.apply(block: T.() -> Unit): T` and `T.also(block: (T) -> Unit): T`.
+    Receiver,
+    /// `T.let(block: (T) -> R): R` and `T.run(block: T.() -> R): R`.
+    BlockResult,
+}
+
+/// Which scope function a selected dependency member is, or `None` for anything else.
+///
+/// A block written at the call site never arrives here: these are `inline`, and the checked
+/// lowering splices such a block into its caller. What arrives is the call whose block is an
+/// ordinary function VALUE, which has no body to splice.
+pub(super) fn scope_function(owner: &str, name: &str) -> Option<ScopeResult> {
+    if facade_package(kotlin_owner(owner))? != "kotlin" {
+        return None;
+    }
+    match name {
+        "apply" | "also" => Some(ScopeResult::Receiver),
+        "let" | "run" => Some(ScopeResult::BlockResult),
+        _ => None,
+    }
+}
+
+/// The runtime function realizing a selected dependency MEMBER, called with the receiver as its
+/// first argument. Receiver and arguments are passed as references, so a scalar receiver boxes —
+/// which is what `4.toString()` means anyway.
+/// `a until b` — the half-open range builder, which the provider presents as an extension function
+/// of the ranges file facade rather than a member of the range it answers.
+///
+/// Recognized here rather than where ranges are lowered, for the same reason [`facade_package`]
+/// lives here: the facade is the JVM provider's spelling, not Kotlin's.
+pub(super) fn is_range_until(owner: &str, name: &str, arity: usize) -> bool {
+    is_ranges_facade(owner, name, arity, "until")
+}
+
+/// Whether a declaration is `downTo` on the ranges facade — the descending counterpart of `until`,
+/// and built the same way: an extension of the facade rather than a member of what it answers.
+pub(super) fn is_range_down_to(owner: &str, name: &str, arity: usize) -> bool {
+    is_ranges_facade(owner, name, arity, "downTo")
+}
+
+/// Whether a declaration is `step` on the ranges facade. Its receiver is the range or progression
+/// being stepped, so unlike `until` and `downTo` the RECEIVER says which width this is.
+pub(super) fn is_range_step(owner: &str, name: &str, arity: usize) -> bool {
+    is_ranges_facade(owner, name, arity, "step")
+}
+
+/// Whether a declaration is `reversed` on the ranges facade.
+pub(super) fn is_range_reversed(owner: &str, name: &str, arity: usize) -> bool {
+    facade_package(kotlin_owner(owner)) == Some("kotlin/ranges") && name == "reversed" && arity == 0
+}
+
+fn is_ranges_facade(owner: &str, name: &str, arity: usize, wanted: &str) -> bool {
+    facade_package(kotlin_owner(owner)) == Some("kotlin/ranges") && name == wanted && arity == 1
+}
+
+/// Whether a getter is `KCallable.name` — the one member of the reflection surface whose answer a
+/// program can have without any reflection metadata existing, because the declaration it names is
+/// written in the same file.
+pub(super) fn is_callable_name(owner: crate::types::TypeName, name: &str) -> bool {
+    name == "name"
+        && [
+            "kotlin/reflect/KCallable",
+            "kotlin/reflect/KFunction",
+            "kotlin/reflect/KProperty",
+        ]
+        .iter()
+        .any(|candidate| owner.matches(candidate))
+}
+
+/// Whether a declaration's owner is the file facade the stdlib's delegate operators on a property
+/// reference live in. `kotlin.getValue`/`kotlin.setValue` are top-level extensions of
+/// `KProperty0`/`KProperty1`, so they reach a backend as members of
+/// `kotlin/PropertyReferenceDelegatesKt`.
+pub(super) fn is_property_delegates_facade(owner: &str) -> bool {
+    kotlin_owner(owner) == "kotlin/PropertyReferenceDelegatesKt"
+}
+
+/// Whether a declaration's owner is the file facade `lazy` and `Lazy.getValue` live in. Both are
+/// top-level declarations of `kotlin`, so they reach a backend as members of `kotlin/LazyKt`.
+pub(super) fn is_lazy_facade(owner: &str) -> bool {
+    kotlin_owner(owner) == "kotlin/LazyKt"
+}
+
+/// Whether a declaration's owner is the file facade `to` lives in. `kotlin.to` is a top-level
+/// extension, so it reaches a backend as a member of `kotlin/TuplesKt` — the `kotlin/io/ConsoleKt`
+/// situation again, normalized in the same place.
+pub(super) fn is_tuples_facade(owner: &str) -> bool {
+    kotlin_owner(owner) == "kotlin/TuplesKt"
+}
+
+/// Whether a declaration's owner is the collections file facade `listOf` and its neighbours live
+/// in. They are top-level functions of `kotlin.collections`, so they reach a backend as members of
+/// the facade class the stdlib declares them in — the `kotlin/io/ConsoleKt` situation again, and
+/// normalized in the same place.
+pub(super) fn is_collections_facade(owner: &str) -> bool {
+    facade_package(kotlin_owner(owner)) == Some("kotlin/collections")
+}
+
+/// How a program iterates a receiver it could only type by an INTERFACE.
+///
+/// `Iterable` and `Iterator` both have a Kotlin spelling and a `java.util` one — the provider
+/// presents a Kotlin collection interface under whichever name the declaration it read carried —
+/// and normalizing that here is the point: a backend asks which of the two roles a type plays, not
+/// which library spelled it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum IterationRole {
+    /// Something a `for` loop asks for an iterator.
+    Iterable,
+    /// The iterator itself.
+    Iterator,
+}
+
+/// Which role a type name plays, or `None` for anything that plays neither.
+///
+/// The concrete ranges are `Iterable` here as much as the interfaces are, because the runtime's own
+/// `kt_iterable_*` walk dispatches on the DESCRIPTOR and reaches a range as readily as a list. They
+/// are safe to name for the same reason the interfaces are: a file declaring a class that extends
+/// one of them overrides a dependency method and is declined whole. A member that must not be
+/// answered this way — one whose result depends on the receiver being a list — is read by
+/// `list_symbol` behind an `is_list` check, never through this.
+pub(super) fn iteration_role(internal: crate::types::TypeName) -> Option<IterationRole> {
+    // The table below is written in Kotlin names; a JVM jar's spelling is normalized to one first.
+    let internal = crate::types::type_name(kotlin_owner(&internal.render()));
+    [
+        ("kotlin/collections/Iterable", IterationRole::Iterable),
+        ("kotlin/collections/Collection", IterationRole::Iterable),
+        ("kotlin/collections/List", IterationRole::Iterable),
+        // The growable list. It is iterated exactly as a read-only list is: the runtime hands out
+        // the one list iterator, whose cursor is an index and whose bound is `kt_list_size`, which
+        // both shapes answer.
+        (
+            "kotlin/collections/MutableIterable",
+            IterationRole::Iterable,
+        ),
+        (
+            "kotlin/collections/MutableCollection",
+            IterationRole::Iterable,
+        ),
+        ("kotlin/collections/MutableList", IterationRole::Iterable),
+        ("kotlin/collections/ArrayList", IterationRole::Iterable),
+        (
+            "kotlin/collections/MutableIterator",
+            IterationRole::Iterator,
+        ),
+        ("kotlin/ranges/IntRange", IterationRole::Iterable),
+        ("kotlin/ranges/LongRange", IterationRole::Iterable),
+        ("kotlin/ranges/CharRange", IterationRole::Iterable),
+        ("kotlin/collections/Iterator", IterationRole::Iterator),
+        // The primitive iterators an array hands out. Each is a concrete stdlib class rather than
+        // an interface, and naming them is safe for the reason the interfaces are: the only objects
+        // wearing one here are the runtime's own walks, and a file declaring its own subclass of
+        // one overrides a dependency method and is declined whole. `IntIterator`, `LongIterator`
+        // and `CharIterator` are deliberately ABSENT — a range's iterator wears those, and they are
+        // read by the narrow protocol before this is consulted at all.
+        ("kotlin/collections/ByteIterator", IterationRole::Iterator),
+        ("kotlin/collections/ShortIterator", IterationRole::Iterator),
+        (
+            "kotlin/collections/BooleanIterator",
+            IterationRole::Iterator,
+        ),
+        ("kotlin/collections/FloatIterator", IterationRole::Iterator),
+        ("kotlin/collections/DoubleIterator", IterationRole::Iterator),
+    ]
+    .into_iter()
+    .find_map(|(candidate, role)| internal.matches(candidate).then_some(role))
+}
+
+/// Which role a TYPE plays, including the two the runtime walks that are not `Iterable` at all.
+///
+/// Neither an array nor a `CharSequence` is a `kotlin.collections.Iterable`, and Kotlin still lets
+/// a program reach every `Iterable` member on one, through an extension declared for it. The
+/// runtime walks both — an array's element at its own width, a string's by UTF-16 unit — so the
+/// role is what matters at a call site and the interface list is not.
+pub(super) fn iteration_role_of(ty: Ty) -> Option<IterationRole> {
+    let ty = ty.non_null();
+    if ty.is_array() {
+        return Some(IterationRole::Iterable);
+    }
+    let internal = ty.obj_internal()?;
+    let walkable_text = [
+        "kotlin/String",
+        "kotlin/CharSequence",
+        "java/lang/String",
+        "java/lang/CharSequence",
+    ];
+    if walkable_text
+        .iter()
+        .any(|candidate| internal.matches(candidate))
+    {
+        return Some(IterationRole::Iterable);
+    }
+    iteration_role(internal)
+}
+
+/// Whether a type name is a list the native runtime builds.
+pub(super) fn is_list_type(internal: crate::types::TypeName) -> bool {
+    matches!(
+        kotlin_owner(&internal.render()),
+        "kotlin/collections/List"
+            | "kotlin/collections/Collection"
+            // The MUTABLE ones read the same way: every question `List` answers, a `MutableList`
+            // answers identically, and the runtime gives both one entry point.
+            | "kotlin/collections/MutableList"
+            | "kotlin/collections/MutableCollection"
+            | "kotlin/collections/ArrayList"
+    )
+}
+
+/// The growable list the runtime provides, if this names one.
+///
+/// `kotlin.collections.ArrayList` is declared in no file krusty compiles, so constructing one takes
+/// the path `Any()` and the throwables already take: the runtime allocates it.
+pub(super) fn is_array_list(internal: crate::types::TypeName) -> bool {
+    kotlin_owner(&internal.render()) == "kotlin/collections/ArrayList"
+}
+
+/// A qualified name with the FILE FACADE a nested class is qualified by removed, or `None` when it
+/// names no facade.
+///
+/// `castAnonymousClassKt$box$1` is the JVM's binary name for an anonymous object inside a top-level
+/// `box`, and it is right there — but there is no facade class on the native target at all: a
+/// top-level property is a global and a top-level function is a symbol, neither owned by anything.
+/// Kotlin/Native names that object `box$1`.
+///
+/// A facade is recognized by its `Kt` suffix, which is the same test [`facade_package`] makes for
+/// the same reason. That spelling is a JVM provider detail, which is why the test lives here.
+pub(super) fn without_file_facade(qualified: &str) -> Option<String> {
+    let (package, tail) = match qualified.rfind('.') {
+        Some(at) => (&qualified[..=at], &qualified[at + 1..]),
+        None => ("", qualified),
+    };
+    let (facade, nested) = tail.split_once('$')?;
+    (facade.ends_with("Kt") && !nested.is_empty()).then(|| format!("{package}{nested}"))
+}
+
+/// Whether this names `kotlin.CharSequence`, under either spelling a provider may hand over.
+///
+/// It wears a runtime descriptor for the reason `Number` and `Comparable` do: no instances of its
+/// own, and both the string and the builder point at it, so a cast or an `is` against it has
+/// something to compare.
+pub(super) fn is_char_sequence(internal: crate::types::TypeName) -> bool {
+    ["kotlin/CharSequence", "java/lang/CharSequence"]
+        .iter()
+        .any(|candidate| internal.matches(candidate))
+}
+
+/// The string builder the runtime provides, if this names one.
+///
+/// Like [`is_array_list`], `kotlin.text.StringBuilder` is declared in no file krusty compiles, so
+/// constructing one is the runtime's job rather than the generator's.
+pub(super) fn is_string_builder(internal: crate::types::TypeName) -> bool {
+    kotlin_owner(&internal.render()) == "kotlin/text/StringBuilder"
+}
+
+/// `x.indices` — the range of an indexable value's positions, which the provider presents as an
+/// extension property of the arrays or text file facade rather than a member.
+///
+/// Answering it needs the receiver's own `size`, so only the caller can decide whether THIS
+/// receiver has one; this says only that the declaration named is that extension property.
+///
+/// `name` is the PROPERTY's, not its accessor's. `indices` is realized five ways — `getIndices`
+/// for text, and one value-class-mangled spelling per unsigned array width — so a table written in
+/// accessor spellings would have to list all five and would still be guessing at the sixth.
+pub(super) fn is_indices(owner: &str, name: &str) -> bool {
+    name == "indices"
+        && matches!(
+            facade_package(kotlin_owner(owner)),
+            Some("kotlin/collections" | "kotlin/text")
+        )
+}
+
+/// A dependency member the runtime answers with its arguments carried as VALUES, and the signature
+/// it is called with: `(receiver and parameters, result)`.
+///
+/// The ordinary member path crosses everything as a reference, which is right for a member that
+/// asks about an object and wrong for one that asks about a NUMBER — `s[i]` would box the index to
+/// pass it and the runtime would read the box as the index.
+pub(super) fn scalar_member(
+    owner: &str,
+    name: &str,
+    params: &[Ty],
+) -> Option<(&'static str, Vec<Ty>, Ty)> {
+    let reference = Ty::nullable(Ty::obj("kotlin/Any"));
+    // `kotlin.text`'s top-level extensions on `String`, which reach a backend as members of that
+    // package's file facade — the `kotlin/io/ConsoleKt` situation, read through the same helper so
+    // a facade kotlinc split in two (`StringsKt__StringsKt`) is the same answer.
+    if facade_package(kotlin_owner(owner)) == Some("kotlin/text") {
+        return match (name, params) {
+            ("substring", [Ty::Int, Ty::Int]) => Some((
+                "kt_string_substring",
+                vec![reference, Ty::Int, Ty::Int],
+                Ty::obj("kotlin/String"),
+            )),
+            ("substring", [Ty::Int]) => Some((
+                "kt_string_substring_from",
+                vec![reference, Ty::Int],
+                Ty::obj("kotlin/String"),
+            )),
+            _ => None,
+        };
+    }
+    match (kotlin_owner(owner), name, params) {
+        // `s[i]`. It arrives under EITHER name for the reason [`kotlin_owner`] exists: a mapped
+        // builtin whose realization names a different physical member hands over that physical
+        // name, and `kotlin.CharSequence.get` is realized as `java.lang.CharSequence.charAt`. The
+        // Kotlin spelling still reaches here from a source that did not go through a realization,
+        // so both are the same member rather than one replacing the other.
+        (
+            "kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder",
+            "get" | "charAt",
+            [Ty::Int],
+        ) => Some(("kt_string_get", vec![reference, Ty::Int], Ty::Char)),
+        // `s.subSequence(a, b)` is `s.substring(a, b)`; the return type only says less about the
+        // result, which the call site already knows.
+        ("kotlin/String" | "kotlin/CharSequence", "subSequence", [Ty::Int, Ty::Int]) => Some((
+            "kt_string_substring",
+            vec![reference, Ty::Int, Ty::Int],
+            Ty::obj("kotlin/String"),
+        )),
+        // The ANSWER is an `Int`, so this cannot go through the reference-carried member path
+        // below: `a < b` would box the very comparison it is asking about.
+        ("kotlin/String", "compareTo", [_]) => {
+            Some(("kt_string_compare_to", vec![reference, reference], Ty::Int))
+        }
+        // `kotlin.Number`'s six conversions. A site that could type its value only as a `Number`
+        // hands over a box, and which primitive is inside is the descriptor's answer — so the
+        // runtime reads it rather than the generator guessing from the static type.
+        //
+        // Each arrives under EITHER name, for the reason [`kotlin_owner`] exists and exactly as
+        // `kotlin.CharSequence.get`/`java.lang.CharSequence.charAt` does: a mapped builtin whose
+        // realization names a different physical member hands over that physical name. Observed:
+        // `toByte`/`toShort` come through as `byteValue`/`shortValue` while `toInt`/`toLong` keep
+        // the Kotlin spelling, so neither list is the one to write alone. The two spellings are the
+        // SAME member, not one replacing the other.
+        ("kotlin/Number", "toByte" | "byteValue", []) => {
+            Some(("kt_number_to_byte", vec![reference], Ty::Byte))
+        }
+        ("kotlin/Number", "toShort" | "shortValue", []) => {
+            Some(("kt_number_to_short", vec![reference], Ty::Short))
+        }
+        ("kotlin/Number", "toInt" | "intValue", []) => {
+            Some(("kt_number_to_int", vec![reference], Ty::Int))
+        }
+        ("kotlin/Number", "toLong" | "longValue", []) => {
+            Some(("kt_number_to_long", vec![reference], Ty::Long))
+        }
+        ("kotlin/Number", "toFloat" | "floatValue", []) => {
+            Some(("kt_number_to_float", vec![reference], Ty::Float))
+        }
+        ("kotlin/Number", "toDouble" | "doubleValue", []) => {
+            Some(("kt_number_to_double", vec![reference], Ty::Double))
+        }
+        _ => None,
+    }
+}
+
+/// `x++` on a primitive that arrived as an OBJECT, as the type it steps and the step itself.
+///
+/// `var i: Int? = 10; i++` selects `Int.inc()`, which the provider presents as a member of
+/// `java/lang/Integer` — the receiver is a box only because the site's static type was nullable,
+/// and what is in it is the very primitive the member was selected on. So this needs no descriptor
+/// read, unlike [`scalar_member`]'s `Number` conversions: the owner already says.
+pub(super) fn boxed_step(owner: &str, name: &str, params: &[Ty]) -> Option<(Ty, i64)> {
+    if !params.is_empty() {
+        return None;
+    }
+    let step = match name {
+        "inc" => 1,
+        "dec" => -1,
+        _ => return None,
+    };
+    let ty = match owner {
+        "java/lang/Byte" => Ty::Byte,
+        "java/lang/Short" => Ty::Short,
+        "java/lang/Integer" => Ty::Int,
+        "java/lang/Long" => Ty::Long,
+        "java/lang/Character" => Ty::Char,
+        "java/lang/Float" => Ty::Float,
+        "java/lang/Double" => Ty::Double,
+        _ => return None,
+    };
+    Some((ty, step))
+}
+
+/// The unsigned integer a value-class member is declared on, for an owner that names one.
+///
+/// Kotlin compiles each of these members to a static taking the wrapped value, and the provider
+/// presents them under the value class's own name with kotlinc's `-impl` suffix. Both are spellings,
+/// which is why they are read here; what the caller gets back is the TYPE, which is what decides
+/// how wide the operands are and which questions are asked unsigned.
+pub(super) fn unsigned_owner(owner: &str) -> Option<Ty> {
+    Some(match kotlin_owner(owner) {
+        "kotlin/UByte" => Ty::UByte,
+        "kotlin/UShort" => Ty::UShort,
+        "kotlin/UInt" => Ty::UInt,
+        "kotlin/ULong" => Ty::ULong,
+        _ => return None,
+    })
+}
+
+/// Whether an accessor is `CharSequence.length`.
+///
+/// Every `CharSequence` this target can produce is a string — `subSequence` answers one, and
+/// nothing in the runtime makes another — which is the same position `scalar_member` already takes
+/// for `CharSequence.get`. A user class implementing `kotlin.CharSequence` is not one of these and
+/// keeps its own member, which the receiver's own type routes elsewhere long before this.
+pub(super) fn is_char_sequence_length(owner: crate::types::TypeName, name: &str) -> bool {
+    // The provider presents it under the Kotlin name of the property, not the JVM accessor's:
+    // `length`, where `kotlin.Enum`'s two arrive as `getName`/`getOrdinal`. Both spellings are
+    // taken because which one a provider uses is the provider's business, not this table's.
+    name == "length"
+        && (["kotlin/CharSequence", "java/lang/CharSequence"]
+            .iter()
+            .any(|candidate| owner.matches(candidate))
+            // A builder's `length` is the same question about the same text, and the runtime
+            // answers both from one place; see `kt_text_of`.
+            || kotlin_owner(&owner.render()) == "kotlin/text/StringBuilder")
+}
+
+/// Whether an accessor is `Throwable.message`.
+///
+/// The property is declared on `kotlin.Throwable` itself, so a subclass reading it — the program's
+/// own or one of the runtime's — arrives here under the root's owner. Both spellings are taken for
+/// the reason [`is_char_sequence_length`] gives: which one a provider uses is its business.
+///
+/// `cause` is deliberately NOT here. This `Throwable` has no cause field, so answering it would be
+/// answering `null` to a program that passed one, and that declines instead.
+pub(super) fn is_throwable_message(owner: crate::types::TypeName, name: &str) -> bool {
+    name == "message" && matches!(kotlin_owner(&owner.render()), "kotlin/Throwable")
+}
+
+/// The runtime function answering a `KClass` name accessor, or `None` for anything else.
+///
+/// Both spellings of each are taken for the reason `is_char_sequence_length` takes both: which one
+/// a provider presents a property's accessor under is the provider's business, not this table's.
+pub(super) fn class_name_accessor(
+    owner: crate::types::TypeName,
+    name: &str,
+) -> Option<&'static str> {
+    if !owner.matches("kotlin/reflect/KClass") {
+        return None;
+    }
+    match name {
+        "simpleName" => Some("kt_class_simple_name"),
+        "qualifiedName" => Some("kt_class_qualified_name"),
+        _ => None,
+    }
+}
+
+pub(super) fn runtime_member(owner: &str, name: &str, params: &[Ty]) -> Option<&'static str> {
+    // `removeSuffix` is a top-level extension of `kotlin.text`, so it arrives as a member of that
+    // package's file facade; everything it takes and answers is a reference, which is this path.
+    if facade_package(kotlin_owner(owner)) == Some("kotlin/text") {
+        match (name, params) {
+            ("removeSuffix", [_]) => return Some("kt_string_remove_suffix"),
+            // `appendLine` is Kotlin's own, declared beside the builder rather than on it, so it
+            // arrives as a member of the facade with the builder as its receiver.
+            ("appendLine", [_]) => return Some("kt_string_builder_append_line"),
+            ("appendLine", []) => return Some("kt_string_builder_append_new_line"),
+            ("append", [_]) => return Some("kt_string_builder_append"),
+            _ => {}
+        }
+    }
+    match (kotlin_owner(owner), name, params) {
+        ("kotlin/String", "plus", [_]) => Some("kt_string_plus"),
+        // A builder's `append` takes one of a dozen overloads on the JVM and one function here:
+        // every operand is rendered through its own `toString`, which is the same answer for all of
+        // them, and the reference path has already boxed whichever primitive arrived.
+        ("kotlin/text/StringBuilder", "append", [_]) => Some("kt_string_builder_append"),
+        ("kotlin/text/StringBuilder", "appendLine", [_]) => Some("kt_string_builder_append_line"),
+        ("kotlin/text/StringBuilder", "appendLine", []) => {
+            Some("kt_string_builder_append_new_line")
+        }
+
+        (_, "toString", []) => Some("kt_to_string"),
+        // `kotlin.Any`'s other two members, dispatched through the receiver's vtable.
+        (_, "hashCode", []) => Some("kt_hash_code"),
+        (_, "equals", [_]) => Some("kt_equals"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_facade_names_its_package() {
+        assert_eq!(facade_package("kotlin/io/ConsoleKt"), Some("kotlin/io"));
+        assert_eq!(facade_package("kotlin/text/StringsKt"), Some("kotlin/text"));
+    }
+
+    #[test]
+    fn a_class_is_not_a_facade() {
+        // `kotlin/text/Regex` has no `Kt` suffix, and `kotlin/collections/AbstractMutableList` must
+        // not be read as a facade for `kotlin/collections` merely because its name ends in `t`.
+        assert_eq!(facade_package("kotlin/text/Regex"), None);
+        assert_eq!(
+            facade_package("kotlin/collections/AbstractMutableList"),
+            None
+        );
+        assert_eq!(facade_package("Ungrouped"), None);
+    }
+
+    #[test]
+    fn console_overloads_select_by_parameter_representation() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        assert_eq!(
+            runtime_function("kotlin/io/ConsoleKt", "println", &[any]).as_deref(),
+            Some("kt_println_any"),
+            "a reference argument takes the Any? overload, as it does in Kotlin"
+        );
+        assert_eq!(
+            runtime_function("kotlin/io/ConsoleKt", "println", &[Ty::Int]).as_deref(),
+            Some("kt_println_int"),
+            "a scalar argument must not be boxed to reach the console"
+        );
+        assert_eq!(
+            runtime_function("kotlin/io/ConsoleKt", "print", &[Ty::Boolean]).as_deref(),
+            Some("kt_print_boolean")
+        );
+        assert_eq!(
+            runtime_function("kotlin/io/ConsoleKt", "println", &[]).as_deref(),
+            Some("kt_println_unit")
+        );
+    }
+
+    #[test]
+    fn the_half_open_range_builder_is_recognized_on_its_facade() {
+        assert!(is_range_until("kotlin/ranges/RangesKt", "until", 1));
+        assert!(is_range_until("kotlin/ranges/URangesKt", "until", 1));
+        // A member of a real class in the same package is not the facade's extension, and neither
+        // is a same-named function of another package.
+        assert!(!is_range_until("kotlin/ranges/IntRange", "until", 1));
+        assert!(!is_range_until("kotlin/text/StringsKt", "until", 1));
+        assert!(!is_range_until("kotlin/ranges/RangesKt", "downTo", 1));
+        assert!(!is_range_until("kotlin/ranges/RangesKt", "until", 2));
+    }
+
+    #[test]
+    fn the_indices_extension_is_recognized_on_either_facade() {
+        assert!(is_indices("kotlin/collections/ArraysKt", "indices"));
+        assert!(is_indices("kotlin/text/StringsKt", "indices"));
+        assert!(!is_indices("kotlin/collections/ArraysKt", "size"));
+        assert!(!is_indices("kotlin/collections/AbstractList", "indices"));
+        // The accessor spelling is NOT the key: `indices` is realized as `getIndices` for text and
+        // as a value-class-mangled name per unsigned array width, and none of those is what the
+        // declaration is called.
+        assert!(!is_indices("kotlin/collections/ArraysKt", "getIndices"));
+    }
+
+    #[test]
+    fn an_unsigned_member_is_recognized_by_its_value_class() {
+        assert_eq!(unsigned_owner("kotlin/UInt"), Some(Ty::UInt));
+        assert_eq!(unsigned_owner("kotlin/ULong"), Some(Ty::ULong));
+        assert_eq!(unsigned_owner("kotlin/Int"), None);
+    }
+
+    #[test]
+    fn a_java_spelled_builtin_is_normalized_to_its_kotlin_name() {
+        // The JVM jar presents `kotlin.String` as `java.lang.String`. A table written in Kotlin
+        // names must still match, or every Kotlin built-in would silently go unimplemented.
+        assert_eq!(
+            runtime_member("java/lang/String", "plus", &[Ty::String]),
+            Some("kt_string_plus")
+        );
+    }
+
+    #[test]
+    fn string_concatenation_and_rendering_are_runtime_members() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        assert_eq!(
+            runtime_member("kotlin/String", "plus", &[any]),
+            Some("kt_string_plus")
+        );
+        assert_eq!(
+            runtime_member("kotlin/Int", "toString", &[]),
+            Some("kt_to_string")
+        );
+        assert_eq!(
+            runtime_member("kotlin/Any", "hashCode", &[]),
+            Some("kt_hash_code")
+        );
+        assert_eq!(
+            runtime_member("kotlin/Any", "equals", &[any]),
+            Some("kt_equals")
+        );
+        assert_eq!(
+            runtime_member("kotlin/String", "repeat", &[Ty::Int]),
+            None,
+            "an unimplemented member must decline"
+        );
+    }
+
+    #[test]
+    fn a_floating_point_value_prints_through_its_own_overload() {
+        // Kotlin's overload set has one per primitive, and so does the runtime: the value reaches
+        // it unboxed, and `krusty_fp.c` decides what it looks like.
+        assert_eq!(
+            runtime_function("kotlin/io/ConsoleKt", "println", &[Ty::Double]).as_deref(),
+            Some("kt_println_double")
+        );
+        assert_eq!(
+            runtime_function("kotlin/io/ConsoleKt", "print", &[Ty::Float]).as_deref(),
+            Some("kt_print_float")
+        );
+    }
+
+    #[test]
+    fn an_unimplemented_declaration_is_declined_rather_than_guessed() {
+        assert_eq!(
+            runtime_function("kotlin/text/StringsKt", "repeat", &[Ty::String, Ty::Int]),
+            None,
+            "a missing runtime function must produce a diagnostic, never a call to a symbol that \
+             does not exist"
+        );
+        assert_eq!(
+            runtime_function("kotlin/io/ConsoleKt", "readLine", &[]),
+            None
+        );
+    }
+}

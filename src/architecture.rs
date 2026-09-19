@@ -345,6 +345,89 @@ mod tests {
     }
 
     #[test]
+    fn native_facade_has_no_crate_dependencies() {
+        assert_allowed_crate_modules("src/native/mod.rs", &[]);
+    }
+
+    #[test]
+    fn the_native_runtime_sources_are_target_text_only() {
+        // `runtime.rs` and `gc.rs` carry C source and its design notes. Neither has any business
+        // knowing what a Kotlin type or a compiler IR is.
+        assert_allowed_crate_modules("src/native/runtime.rs", &[]);
+        assert_allowed_crate_modules("src/native/gc.rs", &[]);
+    }
+
+    #[test]
+    fn the_class_model_uses_only_ir_contract_dependencies() {
+        // `fir` is on this list for the identities common IR carries by value: a checked property
+        // operation names a `PropertyId`, and an override edge names the `CallableId` it resolved.
+        // Both are part of the IR contract, not a way back into the frontend.
+        // `names` for the same reason `lower/statics.rs` has it: Kotlin's accessor-naming rule is
+        // what common lowering applied when it named an abstract property's accessor, and reading
+        // it from the same place is what lets the interface and its implementation agree on one
+        // key for the member.
+        assert_allowed_crate_modules("src/native/classes.rs", &["fir", "ir", "names", "types"]);
+        assert_allowed_crate_modules("src/native/intrinsics.rs", &["types"]);
+    }
+
+    #[test]
+    fn the_code_generator_uses_only_ir_contract_dependencies() {
+        // `jvm` for the same one reason as the retired emitter: the only symbol provider reads a
+        // JVM classpath, so a selected dependency declaration resolves through it. Phase 7 removes
+        // it; the budget keeps it from spreading meanwhile.
+        assert_allowed_crate_modules(
+            "src/native/codegen/mod.rs",
+            &["backend", "diag", "frontend", "jvm"],
+        );
+        assert_allowed_crate_modules("src/native/codegen/lower.rs", &["ir", "jvm", "types"]);
+        // `fir` only for the checked property and callable ids the IR itself carries.
+        assert_allowed_crate_modules(
+            "src/native/codegen/lower/objects.rs",
+            &["fir", "ir", "types"],
+        );
+        // `names` is Kotlin's own accessor-naming rule, which common lowering already applied when
+        // it named a source-written accessor; reading it from the same place is what keeps the two
+        // from drifting.
+        assert_allowed_crate_modules(
+            "src/native/codegen/lower/statics.rs",
+            &["fir", "names", "types"],
+        );
+        assert_allowed_crate_modules("src/native/codegen/lower/functions.rs", &["ir", "types"]);
+        assert_allowed_crate_modules("src/native/codegen/lower/arrays.rs", &["types"]);
+    }
+
+    #[test]
+    fn the_linker_knows_nothing_about_kotlin() {
+        // Objects in, an executable out. A linker that imported the IR or the type system would be
+        // a linker that had started making language decisions.
+        assert_allowed_crate_modules("src/native/linker/mod.rs", &[]);
+        assert_allowed_crate_modules("src/native/linker/elf.rs", &[]);
+        assert_allowed_crate_modules("src/native/prebuilt.rs", &[]);
+    }
+
+    #[test]
+    fn jvm_spellings_of_kotlin_builtins_stay_in_one_place() {
+        // `kotlin.String` reaches the backend spelled `java/lang/String`, and a top-level function
+        // reaches it owned by a file facade. Both are artifacts of reading signatures out of a JVM
+        // jar, and both are normalized in `intrinsics.rs`. A second file learning to recognize
+        // those spellings is how a temporary bridge becomes permanent.
+        for path in rust_files_under("src/native") {
+            if path.ends_with("intrinsics.rs") {
+                continue;
+            }
+            let text = fs::read_to_string(&path).expect("read native source");
+            for forbidden in ["java/lang", "java/util", "Kt\""] {
+                assert!(
+                    !text.contains(forbidden),
+                    "{} spells a JVM provider detail (`{forbidden}`); normalize it in \
+                     src/native/intrinsics.rs instead",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn fir_lower_facade_uses_only_common_lowering_dependencies() {
         assert_allowed_crate_modules("src/fir_lower/mod.rs", &["fir", "ir", "types"]);
     }
@@ -538,6 +621,7 @@ mod tests {
             "tests",
             &[
                 "ast",
+                "backend",
                 "compiler",
                 "conformance",
                 "dhat",
@@ -548,6 +632,7 @@ mod tests {
                 "js",
                 "jvm",
                 "lexer",
+                "native",
                 "libraries",
                 "metadata",
                 "parser",
@@ -706,6 +791,15 @@ mod tests {
         }
     }
 
+    /// The tracing macro is not a dependency in the sense these budgets are about.
+    ///
+    /// A budget says which parts of the compiler a file may KNOW about — which layer's concepts it
+    /// is allowed to reason in. `trace_compiler!` carries no concepts: it is off by default, where
+    /// it compiles to nothing at all, and `CLAUDE.md` names it as THE way to emit diagnostics from
+    /// compiler code. Counting it would mean every file that ever traces has to widen its budget to
+    /// say so, which tells a reader nothing and makes the real entries harder to see.
+    const CROSS_CUTTING: &[&str] = &["trace_compiler"];
+
     fn collect_path_module(path: &syn::Path, modules: &mut BTreeSet<String>, roots: &[&str]) {
         let mut segments = path.segments.iter();
         if segments
@@ -713,7 +807,10 @@ mod tests {
             .is_some_and(|segment| is_crate_root(segment, roots))
         {
             if let Some(module) = segments.next() {
-                modules.insert(module.ident.to_string());
+                let module = module.ident.to_string();
+                if !CROSS_CUTTING.contains(&module.as_str()) {
+                    modules.insert(module);
+                }
             }
         }
     }

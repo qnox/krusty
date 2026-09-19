@@ -30,6 +30,9 @@
 //! - `value_classes` — inline/value-class transform (`jvm/value_classes.rs`).
 //! - `splice` — inline-function bytecode splicing (`jvm/ir_emit.rs`).
 //! - `cache` — classpath cache hit-rate summary (`jvm/classpath.rs`), emitted once at end of a run.
+//! - `native` — the native code generator (`native/codegen/`): the Cranelift function emitted for
+//!   each body, which is what a wrong ANSWER from a compiled program is read out of when the IR
+//!   that produced it looks right.
 
 /// The canonical trace categories (see the module docs). Listed here so the set is discoverable in one
 /// place; `KRUSTY_TRACE=all` enables every category regardless.
@@ -46,6 +49,7 @@ pub const CATEGORIES: &[&str] = &[
     "value_classes",
     "splice",
     "cache",
+    "native",
 ];
 
 #[cfg(feature = "trace")]

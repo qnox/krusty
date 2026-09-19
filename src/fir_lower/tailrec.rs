@@ -524,6 +524,36 @@ fn loop_step(ir: &mut IrFile, call: ExprId, frame: &Frame, origin: OriginId) -> 
     }
 }
 
+/// Whether a self-call survives in `body`.
+///
+/// This is the one thing a backend needs to know about a `tailrec` the rewrite could not finish.
+/// The `loopable` gate above answers whether the rewrite was ATTEMPTED; it cannot answer whether it
+/// reached every self-call, because a call in a position the rewrite does not descend into — under
+/// a `try`, inside an inline body, or one the DAG shares — stays a call in a function that was
+/// loop-rewritten everywhere else. Such a function recurses to exactly the depth the source wrote
+/// `tailrec` to avoid, so a backend that cannot make it constant-stack on its own has to hear about
+/// it here rather than discover it as a stack overflow at run time.
+pub(super) fn recurses_into_itself(ir: &IrFile, body: ExprId, function: FunId) -> bool {
+    let mut pending = vec![body];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::Call {
+            callee: Callee::Local(target),
+            ..
+        } = ir.expr(expression)
+        {
+            if *target == function {
+                return true;
+            }
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    false
+}
+
 fn tail_value(
     ir: &mut IrFile,
     expression: ExprId,
@@ -549,6 +579,29 @@ fn tail_value(
             } else {
                 stmts.push(generated(ir, IrExpr::Return(None), origin));
             }
+            Ok(generated(ir, IrExpr::Block { stmts, value: None }, origin))
+        }
+        // A `Unit` function's block can end in a bare `return`. Everything that runs before it and
+        // after nothing else is still in TAIL position — `f(x); return` is a tail call in Kotlin,
+        // and the source wrote `tailrec` because that call recurses to a depth no stack survives.
+        // Only the statement immediately before the `return` qualifies: anything earlier has code
+        // after it.
+        IrExpr::Block {
+            mut stmts,
+            value: None,
+        } if result == Ty::Unit
+            && matches!(
+                stmts.last().map(|last| ir.expr(*last)),
+                Some(IrExpr::Return(None))
+            )
+            && stmts.len() > 1 =>
+        {
+            let returned = stmts.pop().expect("checked non-empty just above");
+            let tail = stmts
+                .pop()
+                .expect("checked for a second statement just above");
+            stmts.push(tail_value(ir, tail, frame, result, origin)?);
+            stmts.push(returned);
             Ok(generated(ir, IrExpr::Block { stmts, value: None }, origin))
         }
         IrExpr::Block { mut stmts, value } => {

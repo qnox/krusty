@@ -262,6 +262,59 @@ the gate). Tests with `.java` sources are the one exception: they need the harne
 javac runner, so the survey reports them under a dedicated `javac-dependent` category instead of a
 first compiler error.
 
+### Native lane
+
+The same corpus runs through krusty's own code generator and linker
+(`tests/kotlin_box_native_conformance.rs`, in the `conformance` binary):
+
+```sh
+./run-tests.sh --test conformance kotlin_codegen_box_native_conformance -- --nocapture
+just conformance-native-run "$(just conformance-bin)" 2.4.10   # CI's form; prints the report
+```
+
+Each single-file case is compiled with a program entry that prints `box()`'s result, linked against
+the prebuilt runtime, and RUN; it must print `OK`. **Skipping is permitted, miscompiling is not:** a
+construct the generator declines is counted by name (the sorted list printed with the report is the
+backlog), a frontend rejection is counted, multi-file and non-native-targeted cases are set aside —
+and any case the generator ACCEPTS that prints anything else, exits nonzero, panics the compiler or
+does not finish in ten seconds fails the test — unless it is listed in
+`tests/native_box_expected_failures.txt` with the reason it is a KNOWN defect shared with the JVM
+lane (a listed case that starts passing fails the test until the line is removed). A compiler
+panic outside `src/native/` is reported as a frontend panic, not a native failure. There is no
+percentage floor yet.
+`KRUSTY_NATIVE_BOX_LIMIT=<n>` samples the corpus evenly; `KRUSTY_KOTLIN_BOX_DIR` selects it (the
+vendored `tests/box_data/` is the fallback); `KRUSTY_NATIVE_CONFORMANCE_REPORT=<file>` writes the
+report line and the decline table. The lane skips, and says so in its report, when this build of
+krusty carries no prebuilt runtime (no clang at build time).
+
+**Triaging a native failure.** Before listing a case as a known failure, compile the same source
+with krusty's JVM backend (`common::compile_in_process` + `common::run_box`, the two helpers the
+JVM lane uses) and compare. An identical wrong answer means the defect is in the shared frontend or
+common lowering, and the list entry should say so and quote it; anything else is the generator's and
+gets fixed, not listed. `KRUSTY_NATIVE_BOX_TRACE=<substring>` prints the case behind every decline
+whose reason contains that substring, which is how a line in the table becomes a file to read.
+
+### The collector, and what conformance cannot reach
+
+The box corpus tests language semantics; it does not keep anything alive across a collection, so it
+cannot see a collector bug at all. Two suites cover that instead, and they found a miscompile the
+corpus passed 7,352 cases with:
+
+* `tests/native_gc_e2e.rs` — the collector's invariants from C, against hand-written types, one
+  exit code per property: unrooted objects reclaimed, rooted ones intact, precise field and array
+  tracing (an object named only by a `Long`'s bits must go), cycles, interior pointers, registered
+  global roots, static-storage references, slot reuse, large objects, the automatic trigger, and a
+  mixed live set across repeated collections.
+* `tests/native_gc_stress_e2e.rs` — the same collector against types the GENERATOR emitted, driven
+  by Kotlin programs that allocate far past the threshold while holding a live set that is verified
+  afterwards: object graphs, replaced array entries, references held only in deep frames, closure
+  captures, every root mechanism at once, and interleaved allocation sizes. Every program is
+  deterministic; a collector bug shows up as damaged data or a wrong number, never as flakiness.
+
+`tests/native_concurrency_e2e.rs` pins the other half: there are no threads, what that makes
+meaningless (`@Volatile`, a non-suspending `suspend`) compiles, and what it makes impossible (a real
+suspension) is declined rather than quietly dropped.
+
 ## JVM-Running Tests
 
 Do not spawn `javac` or `java` per test unless the test is explicitly about the CLI/process boundary.
@@ -273,6 +326,40 @@ Use the shared helpers in `tests/common`:
 
 These helpers compile in process where possible and reuse persistent JVM runners/servers inside a test
 binary. Per-test JVM startup is one of the easiest ways to degrade the suite.
+
+## The Suite Runs on Every Enabled Backend
+
+The suite is written ONCE. Which targets a run exercises is a property of the RUNNER, not of the
+helper a test happens to call: every box-running helper — `expect_box_ok_with_stdlib`,
+`expect_box_run_with_stdlib` and `compile_and_run_with_stdlib` — compiles, links and RUNS the same
+source on each enabled target and requires the same answer the JVM gave. There is no separate suite
+to write and keep in step: the programs the suite already has were written to pin krusty's
+semantics, they are small, and the string `box()` returns is already their oracle.
+
+`KRUSTY_TEST_BACKENDS` is the switch — a comma-separated list, defaulting to every target this build
+can actually reach. `KRUSTY_TEST_BACKENDS=jvm` narrows a run to the reference target alone.
+(`KRUSTY_NATIVE_E2E=0` is the earlier spelling of the same thing and still works.)
+
+Adding a target — wasm next — is a `TestBackend` variant and one match arm in
+`tests/common/mod.rs`. It is never an edit to a test, and never a second suite.
+
+What a cross-checked run means:
+
+- The JVM is the reference: it decides the expected answer, so a program that deliberately answers
+  something other than `OK` takes part on the same terms as one that does not.
+- A construct the generator **declines** is a skip. A younger backend says "not lowered yet" that
+  way, and failing a test for it would turn every JVM-side test into that backend's to-do list.
+- A program it **accepts** must answer what the JVM answered. A different string, a crash or a
+  failed link fails the test it came from, where the shape that provoked it is already written down.
+
+The native target needs a prebuilt runtime for the host, the same condition the native tests carry;
+without one it simply does not run.
+
+A test written FOR a native construct wants the opposite of that third rule: it exists to pin that
+the construct is lowered, so "not supported yet" is the failure it is meant to catch.
+`common::expect_native_box(src, stem, expected)` is that claim — it runs the program on the native
+target alone and FAILS on a decline, naming what declined. Use it for a directed native test
+(`tests/native_delegation_e2e.rs`), never for a semantics test that belongs in the shared suite.
 
 ## Environment Overrides
 

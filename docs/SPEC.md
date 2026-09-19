@@ -1333,6 +1333,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   completed surrogate pair comes back out as text), which is what lets the constant pool keep deduping
   on value equality. `trimIndent`/`trimMargin` fold in code units too, matching how Kotlin measures an
   indent. Tests: `tests/utf16_string_constant_e2e.rs`, `kt_string::tests`.
+  **A floating-point value renders as the SHORTEST decimal that reads back as exactly that value**,
+  plainly while the magnitude is in `[10^-3, 10^7)` and as `d.dddEn` outside it — `0.1` is `"0.1"`,
+  `0.1 + 0.2` is `"0.30000000000000004"`, `9999999.0` is `"9999999.0"` and `1.0E7` is `"1.0E7"`.
+  Two clauses beyond "shortest" are Kotlin's own: where ONE significant digit would suffice, the
+  two-digit decimals are considered alongside it and the closer to the value wins, which is why
+  `Double.MIN_VALUE` is `"4.9E-324"` rather than the shorter, equally round-tripping `5E-324`; and
+  `equals` on a BOXED value compares bits where `==` on two `Double`s compares numbers, so a boxed
+  `NaN` equals itself and a boxed `0.0` does not equal `-0.0`, each the opposite of the unboxed
+  answer. The native runtime computes the digits with exact integer arithmetic
+  (`src/native/runtime/krusty_fp.c`), verified against the JVM's own rendering over a million
+  values. `%` on two of them is IEEE's remainder TRUNCATED toward zero — the sign of the left
+  operand and a magnitude below the right one's — which the native runtime computes exactly on the
+  significands, since no instruction provides it on every target.
+  Tests: `tests/float_rendering_e2e.rs`.
+  `length` counts those same UTF-16 code units, which is not free for a runtime that stores UTF-8:
+  the native runtime walks the bytes (`kt_string_length`), counting each byte that is not a
+  continuation byte and adding one more for each four-byte sequence, because a code point above
+  U+FFFF is written as a surrogate PAIR. `"aé中🙂".length` is 5 where the byte length is 10 and the
+  code-point count is 4 (`tests/native_codegen_e2e.rs::a_strings_length_counts_utf16_code_units`).
   - Where that indent ENDS is `Char.isWhitespace()`, which on the JVM is
     `Character.isWhitespace(c) || Character.isSpaceChar(c)` — **not** Rust's `char::is_whitespace`
     (the Unicode `White_Space` property). Checked against JBR 21 over the whole BMP, the two sets
@@ -1696,6 +1715,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   uses a `kotlin/jvm/internal/Ref$XxxRef` holder. An inlined scope function (`let`/`also`/`run`/`apply`)
   needs no shared cell because its body is inlined, and a closure that writes a *field* (capturing
   `this`) is still skipped.
+  A LOCAL or ANONYMOUS CLASS shares the same cell the same way, through a field rather than a
+  lambda capture: `var a = 1; object { init { a = 2 } }` leaves `a` at 2, because the field carries
+  the cell the enclosing function allocated and not a copy of the value. Common IR keeps that
+  field's SEMANTIC element type and marks the coordinate in `IrFile::shared_class_capture_fields`,
+  so no backend's holder representation reaches the frontend: the JVM realizes it as `Ref$XxxRef`
+  (`jvm::shared_captures`) and the native backend as a plain reference to the cell
+  (`native::captures`), each at the marked coordinate and nowhere else
+  (`tests/native_codegen_e2e.rs::a_local_class_shares_the_mutable_locals_it_captures`).
 - Classes with **no primary constructor** (`class A { constructor(…) { … } }`): every constructor is a
   secondary `<init>`. A constructor delegating to `super(…)` (or implicitly, to a no-arg base/`Object`)
   runs the field initializers + `init {}` blocks (source order) before its own body; one delegating to a
@@ -1706,7 +1733,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same superclass shape. **Field-initializer default-value elision:** kotlinc omits a field initializer
   that stores the field's JVM default (`0`/`false`/`null`/`'\0'`, incl. `0.toByte()`), so a value a base
   constructor's virtual call already wrote survives; krusty does the same (test
-  `secondary_ctor_noprimary_e2e`, corpus `fieldInitializerOptimization`). The delegation `<init>`
+  `secondary_ctor_noprimary_e2e`, corpus `fieldInitializerOptimization`). The rule is KOTLIN's
+  rather than the JVM's and holds for every target krusty emits for, because each clears an
+  object's storage when it allocates (the native runtime in `kt_gc_allocate`) — so both backends
+  read it from one place, `IrFile::is_elided_initializer_store`, keyed by the store's exact
+  identity rather than its shape, since a later `init { x = 0 }` is a different statement with
+  different meaning. The delegation `<init>`
   *target signature* is read live from the (post-`value_classes`-pass) class at emit time, so the lowerer
   needs no value-class knowledge and a value-class `super(…)` argument erases correctly. A secondary
   constructor with lowerable defaults emits and calls the synthetic `DefaultConstructorMarker` overload;
@@ -1896,6 +1928,483 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `(a..b).reversed()`, a chained `… step n step m`), the header continues the trailing `step`/infix
   calls itself (`progression.step(n)`) and iterates the result as a plain `for-each`, rather than
   stopping at the bare iterable and reporting `expected ')'`.
+- **A range's own answers, reproduced by krusty's native runtime.** The native target owns
+  `IntRange`, `LongRange` and `CharRange` rather than reading them out of a library, so each answer
+  is a decision written down here and pinned by `tests/native_ranges_e2e.rs`:
+  - `a until b` answers the EMPTY range when `b` is the element type's minimum, rather than
+    computing `b - 1` and wrapping round to the maximum — which would make every value a member.
+  - An empty range is one whose `first` exceeds its `last`; that is a value, not an error, and
+    `3..1` is it.
+  - `equals` is true when both ranges are empty, or when both bounds match, and only WITHIN one
+    range type: `1..3` is an `IntRange` and never equals the `LongRange` of the same bounds.
+  - `hashCode` is `-1` for an empty range, else `31 * first + last` with each bound folded through
+    its own `hashCode` first — which for a `Long` is its two halves xored together.
+  - `toString` is `"$first..$last"`, with a `CharRange`'s bounds rendered as the characters they are
+    (`'a'..'c'` renders `a..c`, not `97..99`).
+  - Iterating a materialized range terminates at the element type's maximum: the iterator carries a
+    "there is another" bit rather than testing `next <= last`, because incrementing past the maximum
+    wraps and that test would never stop. Kotlin's own `IntProgressionIterator` carries the same bit.
+  A `Char` bound is compared UNSIGNED, so a code point above `0x7FFF` is not a negative number:
+  `'\uFF00' in '\uF000'..'\uFFFF'` is true. Tests: `tests/native_ranges_e2e.rs`.
+
+- **An UNSIGNED `for` over a range is a counted loop on the unsigned ring, and it stops at its last
+  element.** A signed `for (i in a..b)` is turned into a plain `while` by common lowering before any
+  backend sees it, but an unsigned one is left as a checked range loop carrying its two BOUNDS —
+  because the comparison and the step both have to be read unsigned, which is a target decision and
+  not a spelling. Nothing is constructed: krusty's native target realizes it as the ordinary
+  header/body/step/exit graph over one counter local, with `icmp` unsigned rather than signed.
+  - Both bounds are evaluated ONCE, in source order, before the loop runs: `a..b` builds a range
+    before anything walks it, so a bound with an effect has that effect exactly once even when the
+    range turns out to be empty, and a body assigning to what named a bound cannot move it.
+  - A CLOSED range (`a..b`, `a downTo b`) stops AT its last element: the step asks whether the
+    counter has REACHED the bound and leaves the loop if it has, rather than advancing and
+    comparing. `for (i in (UInt.MAX_VALUE - 2u)..UInt.MAX_VALUE)` runs three times; advancing first
+    would wrap the counter to `0u` and start the walk over. `for (i in 2u downTo 0u)` is the mirror,
+    and runs three times rather than stepping below `0u` round to the maximum.
+  - A HALF-OPEN range (`a..<b`) needs no such guard: its header already stops one short of the
+    bound, so the counter never leaves the type. `0u..<0u` runs zero times, as does `5u..1u`.
+  - The step advances at the `continue` target, so a `continue` that skips the rest of the body
+    still advances the counter, and a labelled `break` leaves every loop up to the one it names.
+  Tests: `tests/native_ranges_e2e.rs`.
+
+- **A string is indexed by UTF-16 code unit, whatever it is stored as.** krusty's native runtime
+  stores text as UTF-8, and Kotlin's `String` is a sequence of UTF-16 code units, so `s.length`,
+  `s[i]` and `s.indices` all answer in units and not in bytes or code points. A character outside
+  the BMP is one UTF-8 sequence and TWO Kotlin indices, and reads back as the surrogate pair Kotlin
+  stores: in `"a\u00E9\u4E2D\uD83D\uDE00z"`, `length` is 6, `s[3]` is `\uD83D` and `s[4]` is
+  `\uDE00`. `x.indices` is `0..size - 1`, which for an empty receiver is the empty range `0..-1`.
+  Test: `tests/native_strings_e2e.rs`, `tests/native_ranges_e2e.rs`.
+
+- **A callable reference compares by the declaration it names, and by the receiver it bound.**
+  `::foo == ::foo` is true although each `::foo` is written in its own place, and
+  `one::value == other::value` is false for two distinct receivers of the same property. krusty's
+  native target reaches both without any reflection metadata: it emits one TYPE per referenced
+  property rather than one per site, so the type IS the declaration, and `equals` compares the type
+  pointer plus — for a bound reference — the two receivers through `Any.equals`. A site that binds
+  no receiver has one instance for the whole program, so its references are the same object.
+  `KCallable.name` answers the property's Kotlin name; `get` answers a reference, so a primitive
+  property boxes on the way out and is unboxed back at the call site.
+  Tests: `tests/native_property_reference_e2e.rs`.
+
+- **A delegated property's `KProperty` metadata is a property reference, and a LOCAL one answers
+  only its name.** `val x: Int by D()` hands the delegate an object so `getValue(thisRef, property)`
+  can ask the property about itself; for a member property that object is exactly the reference
+  `C::x` is, and krusty's native target emits one and the same type for both. A LOCAL delegated
+  property has no storage and no accessors to reach, and Kotlin gives its metadata no receiver to
+  read through, so `get` and `set` on it are the runtime's loud failure rather than a body — no type
+  a program can name there declares them.
+  The metadata a member's delegation needs is a static the class owns, and on the JVM an owner says
+  WHEN the initializer runs. Here it says nothing, because this initializer cannot tell: a property
+  reference with no bound receiver is one object per property with no state and nothing to allocate,
+  the same value however early it is asked for — which is the same reason a `const val`'s owner says
+  nothing. Any other class-owned initializer still declines rather than guess at the order.
+  Tests: `tests/native_property_reference_e2e.rs`.
+
+- **A property reference carries at most ONE receiver, and which kind it is does not change the
+  object.** `x::p` binds a class's receiver and `"ab"::ext` an extension one; either way it is the
+  single operand the accessor leads with, so krusty's native target stores one field and `get` takes
+  one argument. `String::id` on an extension property is the unbound form of the same thing, and
+  calls the top-level accessor the checked lowering built rather than reading storage — an extension
+  property has no object of its own to keep a field in. A property whose accessor wants MORE than
+  one receiver (a member extension property) or operands beyond it (context parameters) is declined:
+  the object has no room to carry them. Which it is comes from the property's LAYOUT rather than from
+  the reference node's `extension_receiver` flag, which is a fact about the accessor's parameter list
+  and not about this object.
+  Tests: `tests/native_property_reference_e2e.rs`.
+
+- **A list is the array a vararg call already built, with a header.** `listOf(...)` reaches a
+  backend with its elements packed into an `Array<T>`, and krusty's native target wraps that array
+  rather than copying it — which is what Kotlin's own `listOf(vararg)` does, and what makes the
+  elements traced by a collector that already knows how to trace an array. Being READ-ONLY is what
+  makes sharing sound: nothing a program can write through reaches it. `MutableList`, `Set` and
+  `Map` are not this type and decline by name. The list answers all three of `kotlin.Any`'s members
+  by its contents, as Kotlin's `List` does.
+  Which call reaches the runtime is decided by the RECEIVER's type, never by the owner declaring the
+  member — the same rule ranges follow, and for the same reason: `iterator` is declared on
+  `Iterable`, which a user class may implement, and a file declaring such a class overrides a
+  dependency method and is declined whole.
+  **`Iterable` is the one type that cannot decide, because a RANGE is one too.** A generic body or
+  an inlined stdlib extension — `for (e in this)` inside `Iterable<T>.forEach` — types its receiver
+  by the interface, and no static type can then say which of the two iterable things the runtime has
+  is in hand; reading a range as a list takes a bound for a pointer. So an interface-typed receiver
+  routes to a runtime dispatch on the DESCRIPTOR, and `next` there answers a reference, because a
+  receiver typed by the interface has its element type erased.
+  Tests: `tests/native_lists_e2e.rs`.
+
+- **Which `listOf` a call selected is a fact about the declaration, and only its PHYSICAL parameter
+  says so.** Kotlin declares `listOf` twice — over a vararg and over one element — and which one a
+  call took decides whether its argument IS the list's elements or is one OF them. Neither the
+  argument nor the semantic parameter can answer: the single-element overload's parameter is `T`,
+  and `T` may itself be an array, so `listOf(anArray)` takes that overload and answers a list of one
+  array; and `arrayOf(1, 2, 3)` lowers to the very vararg node a packed call would have, so the two
+  arrive looking identical. A vararg parameter is PHYSICALLY an array however its element type was
+  substituted, which is the one thing that separates them.
+  Tests: `tests/native_lists_e2e.rs`
+  (`a_single_element_list_is_not_a_vararg_call_of_length_one`).
+
+- **An array and a string are walkable even though neither is an `Iterable`.** Kotlin declares
+  every `Iterable` member for both, through extensions, and a program may keep the receiver as a
+  value and ask it for an iterator. So the runtime walks both, and what decides how an element is
+  read is the receiver's own DESCRIPTOR: an array's says how wide the element is and how to box its
+  bits, which a receiver typed by an interface cannot. A string's "elements" are the UTF-16 units
+  Kotlin counts, so its walk is the one `length` and `get` already pay for rather than a pass over
+  the bytes.
+  Giving them an iterator is not about one member: every `Iterable` member reaches them through the
+  same dispatch once they have one, so `joinToString`, `map` and `forEach` came with it.
+  A primitive array's iterator is also a concrete stdlib CLASS — `ByteArray.iterator()` is a
+  `ByteIterator`, which declares `nextByte` beside the inherited `next`. Every spelling reaches the
+  same object; what differs is the type the call site expects, and the runtime having boxed by the
+  array's own element descriptor is what makes the unboxing read the bits that were written.
+  Naming those concrete classes is safe for the reason the interfaces are: the only objects wearing
+  one here are the runtime's own walks, and a file declaring its own subclass of one overrides a
+  dependency method and is declined whole. `IntIterator`, `LongIterator` and `CharIterator` are
+  deliberately absent from that list — a range's iterator wears those, and the narrow protocol below
+  reads them first.
+
+  A primitive array's iterator answers through TWO protocols. `IntArray.iterator()` has the static
+  type `IntIterator`, whose `next` carries a number rather than a reference — the same narrow
+  protocol a range's iterator uses — so the walk answers there as well, and the receiver's own
+  descriptor is what tells the two objects apart at run time. A reference array's iterator is typed
+  `Iterator<T>` and never reaches that path, which is why a pointer is never returned as a number.
+  Tests: `tests/native_lists_e2e.rs` (`an_array_is_walked_at_its_elements_own_width`,
+  `a_string_is_walked_by_utf16_unit`, `an_arrays_iterable_members_reach_the_same_runtime_walk`,
+  `an_arrays_iterator_answers_through_the_narrow_protocol_too`,
+  `a_primitive_arrays_iterator_answers_its_own_narrow_spellings`,
+  `every_primitive_arrays_iterator_answers_at_its_own_width`).
+
+- **`withIndex()` is lazy, and yields a data class.** It answers an ITERABLE rather than a list:
+  Kotlin's is lazy, and the loop consuming it may stop early. The object it makes keeps the source
+  until something asks it for an iterator, and that iterator counts as it walks — so the index is a
+  position in the walk and not a property of what is being walked, which is what makes
+  `(10..12).withIndex()` count from zero. `IndexedValue` is a Kotlin data class, so its `equals`,
+  `hashCode` and `toString` are the data class's and not identity's, and `component1`/`component2`
+  answer the same two questions a destructuring asks.
+  Tests: `tests/native_lists_e2e.rs` (`with_index_pairs_each_element_with_its_position`,
+  `a_with_index_walk_destructures_and_stops_where_it_is_told`,
+  `a_range_walks_with_an_index_the_same_way_a_list_does`, `an_indexed_value_is_a_data_class`).
+
+- **A floating-point field compares and hashes by its BITS.** Kotlin's `Double.equals` is not
+  `==`, and it disagrees with it in both directions: `NaN` equals itself, and `0.0` does not equal
+  `-0.0`. A data class holding one therefore reinterprets the value as an integer of the same width
+  and compares that — a reinterpretation and never a conversion, since converting would round and
+  rounding `NaN` loses the distinction the rule exists for. The hash comes off the same bits, which
+  is what makes `NaN`'s hash a number at all: `Float` gives its 32 directly and `Double` folds its
+  64 exactly as `Long` does. Both answers were pinned against krusty's JVM backend.
+  Test: `tests/native_codegen_e2e.rs` (`a_floating_point_data_class_field_compares_by_its_bits`).
+
+- **An override that changes representation is reached through a BRIDGE in the base's slot.**
+  `A<T : Number>.foo(): T` erases its result to a reference, and `Z : A<Int>` overriding it returns
+  an unboxed machine integer. The base's slot cannot hold that body — a caller reading the slot
+  through `A` would read an integer as a pointer — so it holds a small function with the BASE's
+  signature that converts each operand and forwards. The override keeps a slot of its own, with its
+  own signature, which is what a call through `Z` reads.
+  The bridge forwards by DISPATCH rather than by calling the override, and that is the whole reason
+  it names a slot and not a function: a further subclass replaces the target slot with its own body,
+  and a bridge that had named the override would keep running the wrong one.
+  An INTERFACE base of a different representation still declines. Its slot number is placed
+  program-wide rather than in this class's vtable, so there is no entry here to put a bridge in.
+  Tests: `tests/native_classes_e2e.rs`
+  (`an_override_that_changes_representation_is_reached_through_a_bridge`,
+  `a_bridge_reaches_a_further_override_rather_than_the_one_that_needed_it`,
+  `a_bridge_converts_its_arguments_as_well_as_its_answer`).
+
+- **`super.p` on a property is the base class's own realization, reached without dispatch.** A
+  `super` access on a PROPERTY names the property and not an accessor, and a class whose accessors
+  are the default ones declares no method for it at all — so the method search the native generator
+  does for `super.f()` finds nothing to call. What the program asked for is still well defined: the
+  NAMED class's implementation. A source-written accessor of that class is called directly; a
+  default one is the field that class contributes, which is a distinct field from the override's
+  because an overriding `var` declares storage of its own — and `super.b` is exactly how a program
+  can tell the two apart.
+  Nothing on this path may dispatch. `super.p` is written inside the override of `p`, so reaching
+  the slot would reach the accessor doing the asking and the program would not finish.
+  Tests: `tests/native_classes_e2e.rs`
+  (`a_super_property_read_reaches_the_base_classs_own_storage`,
+  `a_super_property_write_reaches_the_base_classs_own_storage`,
+  `a_super_property_reaches_a_written_accessor_without_dispatching`,
+  `a_super_property_of_an_interface_reaches_its_default_accessor`).
+
+- **A class literal is one type descriptor, and `KClass` is equal by the type it stands for.**
+  `String::class` names a type statically; `x::class` reads the descriptor the OBJECT is wearing, so
+  `val x: CharSequence = ""` answers `String::class`. A scalar receiver is boxed first — there is no
+  descriptor on a machine integer — which is also why `(n++)::class` answers `Int::class` and not
+  the class of something that has no object; the receiver still runs, exactly once.
+  The object is an ordinary allocation rather than a canonical instance, because Kotlin promises
+  `KClass` equality by the class and not identity: the runtime compares descriptors, so
+  `x::class == String::class` is true without a table of canonical instances existing anywhere.
+  `simpleName` and `qualifiedName` come off the descriptor's own Kotlin name, which every type
+  already carries for `toString`. `KClass.toString` prints `class <qualified name>` — what a JVM
+  WITH `kotlin-reflect` prints; a JVM without it appends "(Kotlin reflection is not available)",
+  which is a fact about that dependency rather than about either backend, so the cross-backend
+  differential covers the two names and not the rendering.
+  Tests: `tests/native_class_literals_e2e.rs` (`a_bound_literal_answers_the_runtime_class`,
+  `two_literals_of_one_type_are_equal_without_being_the_same_object`,
+  `a_bound_literal_evaluates_its_receiver_exactly_once`,
+  `a_literal_over_a_primitive_names_the_boxed_type`, `the_names_agree_with_the_jvm_backend`).
+
+- **`throw` on the native target reports the exception and ends the program — and that is Kotlin's
+  answer, not a stopgap.** A file containing any `try` is declined WHOLE, so inside a file this
+  backend emits there is no handler and no `finally` between a throw and the end of the program. An
+  exception nothing handles ends the program in Kotlin, so terminating at the throw is the correct
+  behaviour for every program this backend accepts today. It exits 134, the code the JVM backend
+  uses for an abnormal end and the one a failed cast already uses here, and writes
+  `Exception in thread "main" ` followed by the exception's `toString`.
+  `Throwable` is an ordinary object with ONE reference field (`message`), a real `super` chain and
+  Kotlin's own `toString` — the qualified name, and `: message` after it when there is one. Six
+  classes are provided by the runtime with Kotlin's own chain: `Throwable`; `Error` and `Exception`
+  under it; `RuntimeException` under `Exception`; `IllegalStateException` and
+  `IllegalArgumentException` under `RuntimeException`; plus `NotImplementedError` under `Error`.
+  The chain is what a `catch` clause will match against, by the `kt_is_instance` that already walks
+  `super` — so the design of `catch` is fixed by this, and nothing about it is settled by the
+  reporting behaviour above.
+  These classes are declared in no file krusty compiles, so constructing one takes the path `Any()`
+  already took: no layout and no constructor to call, the runtime allocates it. The no-argument and
+  `message: String?` constructors are realized; a `cause` DECLINES, because this `Throwable` has no
+  cause field and answering `null` to a program that passed one is worse than refusing it.
+  `throw` is `Nothing`, so nothing reads a value from it.
+  Tests: `tests/native_exceptions_e2e.rs` (all).
+
+- **The stdlib functions that throw raise Kotlin's own exception, through the same path a written
+  `throw` takes.** `TODO()` raises `NotImplementedError`, `error(message)` and a failed `check`
+  raise `IllegalStateException`, and a failed `require` raises `IllegalArgumentException` — each
+  with the message the stdlib specifies, and each handed to the same runtime entry point as
+  `throw e`. The realization is not a convenience: `error(m)` IS `throw IllegalStateException(m)` in
+  Kotlin, so a `catch` must not be able to tell them apart, and one object with one report is what
+  keeps that true. (These reported a `krusty:` line of the runtime's own while there was no
+  `Throwable` to report.)
+  `TODO()` is a `Nothing`, so the caller's bottom-value contract takes over from the call.
+  The forms taking a `lazyMessage` still DECLINE. That parameter is a lambda of an `inline`
+  declaration whose body is not here to splice, and Kotlin lets such a lambda return from the
+  enclosing function — so invoking it as an ordinary function value would be a miscompile rather
+  than a slower answer.
+  Tests: `tests/native_throws_e2e.rs` (all), `tests/native_codegen_e2e.rs`
+  (`a_throw_a_program_wrote_stops_it_and_says_what_happened`).
+
+- **`joinToString()` is realized only with every parameter at its default.** The stdlib declares
+  six parameters, all defaulted, and the native backend has no `$default` synthetic of a dependency
+  to call — so the defaults would have to be written into the backend, and the only set worth
+  writing is the whole-declaration one a program gets by passing nothing: `", "` between the
+  elements, nothing around them, no limit, and each element rendered by its own `toString`. A call
+  that passes anything declines, with the argument it passed still in sight.
+  A range joins the same way a list does: the member is declared on `Iterable`, and the runtime's
+  walk dispatches on the descriptor rather than on the static type.
+  Tests: `tests/native_lists_e2e.rs` (`a_list_joins_to_a_string_with_the_default_separator`,
+  `joining_renders_each_element_through_its_own_to_string`,
+  `a_range_joins_the_same_way_a_list_does`, `joining_with_an_argument_still_declines`).
+
+- **Slicing and ordering a string on the native target are by UTF-16 unit.** A krusty string holds
+  UTF-8 and Kotlin indexes by UTF-16 code unit, so `substring`, `subSequence` and `compareTo` all
+  walk the text rather than its bytes: `é` is two bytes and one unit, `𝄞` four bytes and two.
+  A slice SHARES the receiver's storage — a substring is a view, and the text it names is already
+  there. Slicing between the halves of one character is a loud failure: Kotlin answers that with an
+  unpaired surrogate and UTF-8 has no encoding for one, so there is no string to hand back and
+  saying so beats handing back a different text.
+  `compareTo` answers Java's magnitude and not just a sign — the difference of the first units that
+  differ, or of the lengths when one string is a prefix — because a program may print it.
+  `removeSuffix` is settled by BYTES, which is sound because UTF-8 is a prefix code: two texts end
+  the same way exactly when their trailing bytes do.
+  `CharSequence.length` is a string's length here. Every `CharSequence` this target can produce is
+  a string, which is the position the member table already took for `CharSequence.get`.
+  Tests: `tests/native_strings_e2e.rs`
+  (`a_substring_of_text_outside_ascii_counts_the_units_kotlin_counts`,
+  `a_subsequence_is_the_same_slice_and_answers_its_length`, `strings_order_by_their_units`,
+  `a_suffix_is_removed_only_when_the_string_ends_there`,
+  `the_comparison_magnitude_agrees_with_the_jvm_backend`), `tests/native_codegen_e2e.rs`
+  (`a_slice_between_the_halves_of_one_character_fails_loudly`).
+
+- **A primitive's member, asked of a value that arrived as an object.** Two shapes on the native
+  target, and what separates them is who knows which primitive is in the box.
+  `n.toInt()` where `n` is a `Number`: the site could type it only as `Number`, so the DESCRIPTOR
+  is the only thing that knows, and the runtime reads it. Kotlin's own conversion rules hold —
+  a floating-point source saturates to the target's nearest end, `NaN` answers zero, and a
+  narrower integer target goes through `Int` first — none of which is a C cast.
+  `x++` where `x` is an `Int?`: the frontend selected `Int.inc()`, so the owner already says what
+  is in the box and the receiver is taken at that type directly. It must NOT make the round trip
+  through a reference: boxing reads the source's own type and unboxing reads the target's, so a
+  disagreement between them comes back as changed bits rather than as a decline.
+  A step wraps in the width of the type it steps, `Byte.MAX_VALUE.inc()` being `Byte.MIN_VALUE`.
+  Tests: `tests/native_boxed_numbers_e2e.rs`
+  (`a_number_holding_a_double_saturates_and_answers_zero_for_nan`,
+  `a_number_narrows_through_int_the_way_kotlin_defines_it`,
+  `a_boxed_int_steps_through_the_member_it_selected`,
+  `a_step_wraps_in_the_width_of_the_type_it_steps`,
+  `the_conversion_table_agrees_with_the_jvm_backend`).
+
+- **The small-value box cache is keyed by the whole value.** Kotlin lets a program observe box
+  identity in -128..127, so the native runtime keeps one static object per value in that range. The
+  slot has to be chosen from the value itself and not from its low word: `Long.MIN_VALUE`'s low
+  32 bits are zero and `Long.MAX_VALUE`'s are -1, so a truncating key put them in the slots for 0
+  and -1 and handed those boxes back — `"${Long.MIN_VALUE}"` printed `0` once anything had boxed a
+  zero, and `boxed(0L) == boxed(Long.MIN_VALUE)` answered true.
+  Test: `tests/native_codegen_e2e.rs`
+  (`a_long_outside_the_cache_is_not_confused_with_one_inside_it`).
+
+- **`by ::foo` delegates to the reference's own `get` and `set`.** The stdlib declares four
+  operators in `kotlin/PropertyReferenceDelegatesKt` — `getValue` and `setValue` on `KProperty0`
+  and on `KProperty1` — each an `inline` one-liner over the reference's own member. A dependency
+  `inline` body is not there to splice, so the native generator realizes them instead, and which of
+  the two overloads a site means is read off the RECEIVER's type: a `KProperty1` is handed the
+  delegating property's owner as its receiver, a `KProperty0` carries its own or needs none. The
+  `property` metadata operand these operators ignore is still evaluated.
+  The delegate is the reference and not a copy of the value, so each read asks the property again —
+  which a source-written getter makes visible.
+  Tests: `tests/native_property_reference_e2e.rs`
+  (`a_property_delegating_to_a_bound_reference_reads_through_it`,
+  `a_property_delegating_to_a_top_level_reference_reads_and_writes`,
+  `a_property_delegating_to_an_unbound_reference_is_handed_the_owner`,
+  `delegating_to_a_reference_reaches_the_source_accessor`).
+
+- **A class's initializers are bodies too.** The native generator declares a type for every
+  property reference and every local delegated property's metadata in a pass over the file, and
+  those passes have to finish before the FIRST body is defined — not before the first top-level
+  function is. A class's property initializers and `init` blocks are lowered as part of its
+  constructor, so `class A { val r = C::z }` reaches a reference site while the classes are being
+  defined; declaring afterwards left exactly those sites unrealized and the program declined.
+  Tests: `tests/native_property_reference_e2e.rs`
+  (`a_reference_written_in_a_class_body_is_realized`, `a_reference_in_an_init_block_is_realized`,
+  `a_local_delegated_property_of_a_class_body_is_realized`).
+
+- **`::foo.name` is a compile-time constant on the native target.** A callable reference is a
+  lambda object there: it carries the code, not the declaration, so nothing in the emitted object
+  knows what the source called it — and it does not have to. The one place a program can ask is
+  `KCallable.name` on a reference written right at the read, where the node itself names the
+  declaration, so the name is folded at compile time and no reflection metadata has to exist for
+  it. A constructor reference answers `<init>`, which is the name Kotlin gives it. A reference
+  reaching the read through a variable still declines: there the node is a read, not a reference,
+  and the declaration is no longer in hand.
+  The receiver is still EVALUATED — `x::foo.name` runs `x` and then answers the constant — because
+  the constant is the answer, not the expression.
+  Tests: `tests/native_callable_name_e2e.rs`
+  (`a_top_level_function_reference_answers_its_name`, `a_constructor_reference_is_called_init`,
+  `the_bound_receiver_is_still_evaluated`,
+  `a_reference_reaching_the_read_through_a_variable_declines`).
+
+- **`x in a..b` builds no range.** The checker leaves the membership test as its BOUNDS rather than
+  as a range object, so the whole of it is two comparisons — and each form puts them somewhere
+  different: `..<` excludes its high end, and `downTo` writes its ends the other way round, so the
+  low one is the second. `Char` and the unsigned integers compare unsigned, `Char` because its own
+  carrier is narrow enough that a signed comparison would call its upper half negative.
+  Both ends are still EVALUATED, and before the subject: `x in a..b` is `(a..b).contains(x)`, and a
+  receiver is evaluated before an argument. Comparing without building a range must not change
+  that, which is why all three operands are evaluated before any comparison rather than as each one
+  is needed.
+  Tests: `tests/native_ranges_e2e.rs` (`a_range_membership_test_builds_no_range`,
+  `a_range_membership_test_reads_its_counter_the_right_way`,
+  `a_range_membership_test_evaluates_its_bounds_before_its_subject`).
+
+- **A spread makes a vararg array whose length only run time knows.** A `vararg` call normally
+  builds its array from elements the generator can count, so each has a constant offset. `f(a, *xs,
+  b)` is as long as `xs` is: the length is summed at run time from the non-spread count plus each
+  spread array's own, and the elements are placed at a running index — a spread by copying its
+  elements in, the rest one at a time. The running index counts ELEMENTS, so the stride is what
+  turns it into an address, and a spread copies by that same stride rather than by a pointer's
+  width.
+  The COPY is also the semantics: the callee's `vararg` array is its own, and a spread that passed
+  the caller's array itself would let a write reach back through it.
+  Tests: `tests/native_spread_e2e.rs`.
+
+- **A `fun interface` method may be an extension, and that changes nothing about the object.**
+  Kotlin lets the single abstract method take a receiver (`fun String.foo(): String`), and inside
+  the lambda implementing it `this` is that receiver. The receiver is a declared PARAMETER of the
+  interface method, so it arrives where every other argument does and the SAM thunk forwards it
+  with the rest. The generator used to decline the shape on the strength of a flag saying a
+  receiver was present, without asking whether that made any difference to it — it did not. Context
+  parameters still decline, because those are operands the object genuinely does not carry.
+  Tests: `tests/native_sam_e2e.rs`.
+
+- **What a parameter is CARRIED as comes from the record, not from reading the body.** A `var` a
+  closure captures is replaced by a cell, and the parameter still says `Int` because `Int` is what
+  the programmer wrote; believing the declaration truncates a pointer into a 32-bit parameter.
+  Common lowering RECORDS which parameters carry a holder, in `shared_capture_parameters`, and that
+  record is the answer. Inferring it from the body instead — a body that reaches a holder through
+  `RefGet`/`RefSet` is holding one — cannot see a parameter the body only PASSES ON: a lambda that
+  does nothing with the cell but hand it to an object it constructs dereferences it nowhere.
+  The failure is worth writing down because of how it presented. The truncation is invisible where
+  it happens: the REFERENCE path still read the cell and rendered the right number, while every
+  SCALAR use of the same variable read a different one. `"" + x` said `1` and `x == 1` said false,
+  in the same expression. An array index is what shows the scalar path on its own.
+  Tests: `tests/native_gc_stress_e2e.rs`
+  (`a_capture_a_lambda_only_passes_on_is_still_a_cell`).
+
+- **`map` and `forEach` are answered for whichever iterable the receiver holds.** Both are declared
+  on `Iterable`, which a range wears as much as a list does, so they go through the same dispatch on
+  the DESCRIPTOR that iteration itself does. `map` answers a list — an array with a header — so the
+  runtime asks the iterable its size once and allocates once; the result list is built before the
+  walk, because every element comes from a call that may collect, and the half-filled result has to
+  be a root across each one.
+  Tests: `tests/native_lists_e2e.rs` (`map_and_for_each_walk_whichever_iterable_they_are_handed`,
+  `a_mapped_list_holds_what_the_transform_made`).
+
+- **`by lazy { … }` is where the runtime calls back into emitted code.** A `Lazy` holds its
+  initializer until the first read and its value afterwards, with one bit saying which; the
+  initializer is dropped once it has run, as Kotlin's own `SynchronizedLazyImpl` does, since keeping
+  it would keep its captures alive for nothing. Computing the value means CALLING the initializer,
+  which is a function value — so the runtime dispatches through the one vtable slot a function value
+  declares beyond `kotlin.Any`'s three, where krusty's generator puts `invoke`. That slot is the
+  contract between the two, and nothing but a function value ever reaches something that calls
+  through it.
+  Only the one-argument `lazy` is realized. The overloads taking a thread-safety mode or a lock
+  decline by arity: this target has no threads yet, and answering one of those as if it were the
+  plain form would silently drop what the program asked for. `Lazy.toString` does not force the
+  value — that is the whole point of its wording.
+  Tests: `tests/native_lists_e2e.rs` (`a_lazy_value_is_computed_once_and_only_when_asked`,
+  `a_lazy_initializer_reads_what_it_captured`,
+  `a_lazy_holds_its_value_and_answers_before_it_has_one`).
+
+- **`a to b` is a runtime object, and a checked property read of one is decided by its receiver.**
+  A `Pair` is two references with the three `kotlin.Any` members answering componentwise, as
+  Kotlin's data class does; `component1`/`component2` are the same two questions under the names a
+  destructuring uses. `Triple` is not one of these. What the pair added to the rule that the
+  RECEIVER decides is a case where a name alone genuinely collides: a range declares `first` too,
+  and a getter guard that read only the name answered a range's bound out of a pair's header.
+  Tests: `tests/native_lists_e2e.rs` (`a_pair_carries_two_values_and_answers_by_them`,
+  `a_pair_destructures_through_its_components`), and `tests/native_ranges_e2e.rs`, which is what
+  caught the collision.
+
+- **A `Nothing`-typed producer that returns is a checked bottom value, and the completion mode is
+  what says so.** `Nothing` promises there is no value, and most producers keep the promise by never
+  coming back; two do not. A call whose generic result is SUBSTITUTED to `Nothing` really produces
+  something — the substitution is erased at the call — and kotlinc carries on with it. A call that
+  genuinely answers `Nothing` has no continuation, so a path reaching past one is a callee that
+  lied. Common lowering tells the two apart once, from the producer rather than its spelling, and
+  krusty's native target realizes that decision in BOTH positions rather than re-deciding by
+  position: a substituted result is handed to whatever asked and discarded in statement position,
+  and a genuine one ends the path with a runtime failure. The JVM throws
+  `KotlinNothingValueException` there; this target does NOT raise it as a `Throwable`, unlike the
+  stdlib's own throwers, because reaching it means a callee lied about its type — a defect in what
+  was emitted rather than something a program is entitled to catch.
+  Tests: `tests/native_bottom_value_e2e.rs`.
+
+- **An unbroken `while (true)` is not left.** Nothing branches to the exit of a loop whose condition
+  is never false and which no `break` leaves, so the exit is taken out of the graph rather than left
+  unreachable in it, and the statement after the loop — including the end of a function written this
+  way — is not a position. This is how a `Nothing`-returning function is written, and Kotlin reads
+  it the same way, which is why it types such a body `Nothing` and lets the function declare it.
+  Tests: `tests/native_bottom_value_e2e.rs`
+  (`a_loop_that_is_never_false_is_left_only_by_a_break`).
+
+- **A `tailrec` the rewrite did not finish is declined, not emitted.** The modifier is a promise
+  about the STACK: the source chose a recursion depth because the loop rewrite will remove the
+  recursion, so a backend that emits an ordinary call does not answer slowly, it crashes. Whether
+  the rewrite was ATTEMPTED is a property of the declaration (a receiver to re-bind, context
+  parameters); whether it FINISHED is a property of the lowered body, because a self-call in a
+  position the rewrite does not descend into — inside a loop, under a `try` — survives in a
+  function loop-rewritten everywhere else. Common lowering now records both, and krusty's native
+  target declines what is left recursive: how deep a native stack goes is the machine's business,
+  and a gate must not depend on it.
+  Tests: `tests/native_tailrec_e2e.rs`.
+
+- **A reference names a property, not a slot.** A top-level property with source-written accessors,
+  or a delegated one, has no slot for a reference to read: its value is computed or lives in the
+  delegate. The reference reaches it the only way anything does — through the accessor pair the
+  checked lowering built — which is the same path an extension property's reference takes, and the
+  only difference between them is whether that accessor leads with a receiver. A site with none has
+  none to pass, bound or unbound. This is also what a TOP-LEVEL delegated property needs before any
+  `::` is written: the metadata its `getValue(thisRef, property)` is handed is that same reference
+  object.
+  Tests: `tests/native_property_reference_e2e.rs`
+  (`a_top_level_property_with_accessors_is_referenced_through_them`,
+  `a_top_level_delegated_property_asks_its_delegate_through_a_reference`).
 - **A signature-pass block statement never fails the block's result on its own.** The solver
   evaluates a block's statements for the constraints they contribute (an anonymous object's
   member selection, a scoped generic binding) and then its result expression. A statement that
@@ -3088,6 +3597,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   their existing breadth-first grouping; ordering applies within each interface. Tests:
   `tests/interface_delegation_e2e.rs::forwarders_follow_interface_declaration_order`,
   `…::forwarder_emission_is_byte_deterministic`.
+
+- **A delegated implementation beats a super-interface's redeclared default.** `class Impl : Base2,
+  Base by Delegate()` where `interface Base2 : Base` redeclares `test()` with a body answers the
+  DELEGATE, not `Base2`'s default: the forwarder synthesized for `by Delegate()` is an
+  implementation the class supplies, and an implementation always wins over an inherited default.
+  `Base` and `Base2` name the SAME member, so a dispatch model that numbers members per declaring
+  classifier has to number both spellings together — giving `Base2.test` a number of its own makes
+  a class that registered its forwarder under `Base.test` look like it supplies nothing, and it
+  silently takes the default. krusty's native target numbers interface members program-wide and
+  groups every spelling of one vtable entry into a single number for exactly this reason; the JVM
+  target gets it from `invokeinterface`. Corpus:
+  `codegen/box/delegation/hiddenSuperOverrideIn1.0.kt`. Tests:
+  `tests/native_delegation_e2e.rs::a_delegated_member_beats_a_redeclaring_interfaces_default`,
+  `…::an_anonymous_object_delegates_one_of_its_supertypes`.
 
 - **Property with a backing field + custom accessor referencing `field`.** `val x = "O" get() = field
   + "K"` / `var v = 1 get() = field + 10 set(value) { field = value * 2 }` — a stored backing field
@@ -4356,6 +4879,194 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   declarations are statements everywhere, not only in scripts; the soft-keyword prefix no longer
   parses as an expression name (`src/frontend.rs::modifier_prefixed_local_functions_parse_in_bodies`).
 
+- **A `Unit` call before a bare `return` is in tail position.** In a `Unit`-returning `tailrec`
+  function the tail call is written as a statement, and Kotlin still counts it as a tail call when
+  the only thing after it is `return` — `f(x); return` and `if (c) { f(x) }; return` both cost no
+  stack. The checked lowering rewrites the statement immediately before a trailing bare `return`,
+  and only that one: anything earlier has code after it and stays an ordinary call, which is what
+  the corpus marks `NON_TAIL_RECURSIVE_CALL`. Descent is into blocks, `when` branches and returns
+  alone, so a self-call guarded by a loop or a `try` is left recursive
+  (`src/fir_lower/tailrec.rs`,
+  `tests/native_codegen_e2e.rs::a_unit_tail_call_before_a_bare_return_becomes_a_loop`).
+
+- **A `tailrec` the rewrite declines is declined by the backend too, not compiled.** `tailrec` is a
+  promise about stack, and the sources that use it recurse past any stack, so emitting the recursion
+  means emitting a program that dies on a guard page where it should print its answer — and whether
+  it dies depends on the machine's stack limit, which makes a gate that accepts it unreproducible.
+  Since the rewrite became a question about the FRAME rather than about where a function was
+  declared (see "What `tailrec` loops is a FRAME" below), a member and an extension are rewritten
+  like any top-level function, and what remains recursive is narrower: a context parameter, a local
+  `tailrec`, an OVERRIDABLE member — which the frontend rejects outright, because looping it would
+  devirtualize a virtual call — and a self-call in a position the rewrite does not descend into,
+  such as under a `try`. The checked lowering records every one of them in
+  `IrFile::unlooped_tailrec` and the native backend declines the file
+  (`src/fir_lower/sink.rs`, `src/native/codegen/lower.rs`,
+  `tests/native_codegen_e2e.rs::a_tailrec_the_checked_lowering_leaves_recursive_is_declined`).
+
+- **A `value class` answers by the value it wraps.** `IC(1) == IC(1)` is true, `IC(1).toString()`
+  is `IC(n=1)`, and the hash is the wrapped value's — where an ordinary class answers all three by
+  identity. The JVM reaches that by erasing the class to its underlying value entirely; natively
+  the object stays and the three members are synthesized beside it, which is the same answer by a
+  different road and needs none of the JVM's mangling or box adapters. A value class that declares
+  one of the three keeps its own (`src/native/classes.rs`, `src/native/codegen/lower/objects.rs`,
+  `tests/native_codegen_e2e.rs::a_value_class_answers_by_the_value_it_wraps`).
+
+- **An operand of a bounded type parameter is a box, and operators unbox it.** `T : Int` is carried
+  as a reference, exactly as the JVM carries it, while Kotlin's `+` is the primitive operator. The
+  operand is therefore unboxed through its bound before the two sides are unified, and the RESULT
+  of the operation is that primitive rather than the reference the declaration spells — a caller
+  told otherwise skips the boxing the next parameter needs. Unifying by machine type without this
+  adds a pointer to an integer and prints the sum as an answer
+  (`src/native/codegen/lower.rs`,
+  `tests/native_codegen_e2e.rs::an_operand_of_a_bounded_type_parameter_is_unboxed`).
+
+- **An interface member has one slot number, program-wide.** A call through an interface-typed
+  value knows the interface and not the class, so the number it dispatches on has to mean the same
+  member in every implementation. Each class's table is therefore its own slots, padded to a common
+  base, then one entry per interface member in the program; a class fills the entries of interfaces
+  it implements and the rest are the abstract trap, which nothing can name through a type it has.
+  A class satisfying an interface member with a method it INHERITS (a fake override) points the
+  interface's number at the inherited slot. Where the inherited method's representation differs
+  from the interface's — `Raw.foo(): Int` for `Boxed.foo(): Any` — a bridge is needed and the file
+  is declined instead (`src/native/classes.rs`,
+  `tests/native_codegen_e2e.rs::an_interface_dispatches_through_a_program_wide_slot`,
+  `::an_override_that_needs_a_bridge_is_declined`).
+
+- **An adapted callable reference needs no adapting here.** A reference is adapted when the
+  function it names does not match the type it is used as: an argument left to its default, a
+  `vararg` given one element, a result discarded for a `Unit`-returning expectation. The checked
+  lowering builds an adapter function for each, and that adapter is an ordinary function, so the
+  reference is an ordinary function value. The decline that said otherwise was a guess about work
+  someone else had already done (`src/native/codegen/lower/functions.rs`,
+  `tests/native_codegen_e2e.rs::an_adapted_callable_reference_runs`).
+
+- **Touching an enum builds all of it, then its companion.** Kotlin initializes an enum class as a
+  whole: every constant in declaration order, and the companion object after — a program that only
+  ever mentions `E.Y` still runs `E.init(x)` first. So one initializer per enum fills every
+  constant's slot and then asks for the companion, and reading a constant, `values()`, `valueOf`
+  and a call to a companion member all run it. Its flag is set BEFORE the constants are built, so a
+  constant's own constructor reaching back into the enum finds the work under way rather than
+  starting it again, which is what the JVM's re-entrant class initialization does. An enum's
+  constructor deliberately does NOT create the companion, though every other class's does: that
+  would run the companion's `init` in the middle of the first constant
+  (`src/native/codegen/lower/enums.rs`,
+  `tests/native_codegen_e2e.rs::an_enum_class_is_built_whole_when_it_is_touched`).
+
+- **An enum constant's `name`, `ordinal` and `toString` come from `kotlin.Enum`'s own storage.**
+  The base is the language's, declared in no file, so the two fields sit at fixed offsets ahead of
+  the class's own and the runtime answers `toString` with the name — where `kotlin.Any` would
+  answer with the identity (`src/native/classes.rs`, `src/native/runtime/krusty_rt.c`).
+
+- **An exhaustive `when` needs no `else`, and gets a loud failure instead.** The frontend proves
+  exhaustiveness over an enum or a sealed hierarchy; the generator does not repeat the proof, so
+  the fall-through is the runtime's failure — which is what Kotlin puts there too
+  (`NoWhenBranchMatchedException`). It costs a few unreachable instructions and never a wrong
+  answer (`src/native/codegen/lower.rs`).
+
+- **A secondary constructor delegates, then runs its own body.** `constructor(x) : this(x, x) { … }`
+  reaches another constructor of the same class, which runs the class's initializers; a
+  `super(…)`-delegating one belongs to a class with NO primary constructor, and common lowering has
+  already folded that class's initializers into this constructor's body, so running them again here
+  runs them twice. A delegation argument may call a companion member, so the companion is created
+  first, exactly as the primary constructor creates it (`src/native/codegen/lower/objects.rs`,
+  `tests/native_codegen_e2e.rs::a_class_may_have_more_than_one_constructor`).
+
+- **A default argument is evaluated in the CALLEE's frame.** `fun f(a: Int, b: Int = a + 1)` writes
+  its default in terms of a parameter, so the call site cannot compute it. Each omission shape gets
+  a wrapper taking exactly the supplied arguments, which declares the callee's whole frame, fills
+  the omitted slots in declaration order, and calls through — the JVM's `$default` synthetic
+  answers the same problem with a bitmask because its callers may be in another compilation unit.
+  A defaulted call on an open member still dispatches on its receiver: filling arguments does not
+  decide which implementation runs (`src/native/codegen/lower/defaults.rs`,
+  `tests/native_codegen_e2e.rs::a_call_may_leave_arguments_out`).
+
+- **A member extension's override is recorded nowhere, and still overrides.** The frontend's
+  override tables carry no edge for `override fun String.decorate()`, so a model reading only those
+  tables gives it a slot of its own — and a call through the base's type then reaches the base's
+  body, which is a wrong answer with nothing to signal it. The IR answers the question that name
+  matching alone cannot: a declaration written WITHOUT `override` is listed as a fresh one, so a
+  method absent from that list matching an inherited member by name and machine signature is that
+  member's override (`src/native/classes.rs`,
+  `tests/native_codegen_e2e.rs::an_override_the_tables_do_not_record_still_dispatches`).
+
+- **An `inner` class carries its outer instance in a field, written first.** `this@Outer` and an
+  unqualified read of an outer member are both loads of that field, and one enclosing-instance edge
+  is one load, so a doubly nested `inner` class follows one per level. The store runs BEFORE the
+  superclass constructor — Kotlin's own order, which a base-class `init` calling an overridden
+  method can observe. The JVM needs that order for its verifier; here it is kept because it is the
+  language's (`src/native/codegen/lower/objects.rs`,
+  `tests/native_codegen_e2e.rs::an_inner_class_reaches_its_enclosing_instance`).
+
+- **A SAM conversion changes which table a function value wears.** A lambda converted to a `fun
+  interface` is still an object holding its captures; what differs is that a caller reaches it
+  through the interface's own member number rather than a single invoke slot, so its table is as
+  long as every class's and starts from the INTERFACE's own — default methods included, and any
+  `kotlin.Any` member the interface overrides kept in `Any`'s slot, where the runtime's own
+  rendering looks. Converting a NULLABLE function value yields null when it is null, rather than a
+  wrapper around nothing (`src/native/codegen/lower/functions.rs`, `src/native/classes.rs`,
+  `tests/native_codegen_e2e.rs::a_lambda_becomes_the_fun_interface_it_is_converted_to`,
+  `::converting_a_null_function_value_to_a_fun_interface_yields_null`).
+
+- **`is` finds an interface in the type, not on the chain.** Single inheritance gives one superclass
+  chain, and an interface is not on it, so each type descriptor carries the interfaces it implements
+  — transitively, so an interface's own bases and a superclass's interfaces answer too
+  (`src/native/runtime/krusty_rt.c`, `src/native/codegen/lower/objects.rs`,
+  `tests/native_codegen_e2e.rs::an_interface_answers_is_and_as`).
+
+- **A data class's members are Kotlin's, down to the per-field hash.** `equals`, `hashCode`,
+  `toString` and `componentN` are synthesized by common lowering; what a backend supplies is the
+  per-field hash and comparison they are written in terms of, and each has one right answer a
+  program can print: `Boolean` hashes to 1231 or 1237, `Long` to `(v xor (v ushr 32)).toInt()`,
+  the narrower integers to themselves widened, and a reference through its own `hashCode`. A field
+  comparison is `equals`, not the machine's `==`. A field holding a floating-point value is
+  declined natively for now, because the `toString` synthesized beside it would have to render one
+  (`src/native/codegen/lower.rs`,
+  `tests/native_codegen_e2e.rs::a_data_class_gets_kotlins_equality_hashing_and_rendering`).
+
+- **A data class renders an ARRAY field by content, nullable or not.** `A(x=[0, 1], y=null)`. The
+  checked lowering has to see through the `?` when it decides a field is an array — `is_array` is
+  false for `Array<Int>?` — and the JVM realization has to name `java.util.Arrays.toString(Object[])`
+  for a reference array, since no `Integer[]` overload exists to name. Both were wrong, and the two
+  wrongs were invisible together: the nullable field never reached the call that would have failed
+  (`src/fir_lower/data_classes.rs`, `src/jvm/ir_emit.rs`,
+  `tests/dataclass_hash_and_sam_e2e.rs::data_class_array_fields_render_their_contents`).
+
+- **An extension property is its accessors.** `val Cell.doubled get() = value * 2` has no backing
+  field — there is no object of its own to keep one in — so every read and write is a call to the
+  accessor, with the receiver passed as an argument. The parameter order is Kotlin's declaration
+  order: context parameters, then the extension receiver, then the value a setter takes, which is
+  what the checked lowering records in `IrFile::local_property_layouts` when it builds the
+  accessors (`src/native/codegen/lower/statics.rs`,
+  `tests/native_codegen_e2e.rs::an_extension_property_is_read_and_written_through_its_accessors`).
+
+- **A scope function whose block is a function value is still a scope function.** `apply`, `also`,
+  `let` and `run` are `inline`, so a block written at the call site is spliced and never reaches a
+  backend. A block that arrives as a function-typed parameter (`fun build(instructions: Box.() ->
+  Unit) = fresh().apply(instructions)`) has no body to splice, so the call survives and has to be
+  realized: invoke the block on the receiver, which is evaluated once, and yield the receiver for
+  `apply`/`also` or the block's result for `let`/`run`
+  (`src/native/codegen/lower/scope.rs`,
+  `tests/native_codegen_e2e.rs::a_scope_function_whose_block_is_a_function_value_runs`).
+
+- **An `inline` call's block is the call site's own code.** `x.apply { … }` and its siblings are
+  `inline`, and the checked lowering splices the block into the caller rather than making a
+  function value of it. What it leaves behind is a cleared standalone implementation and an
+  orphaned lambda node, both unreachable; a backend must emit neither, and must not DECLARE the
+  cleared implementation either — an exported symbol that is never defined fails the object's own
+  consistency check. Emitting the node's thunk fails later still, at the link, because the thunk
+  calls that implementation (`src/native/codegen/lower.rs`, `src/native/codegen/lower/functions.rs`,
+  `tests/native_codegen_e2e.rs::the_stdlib_scope_functions_are_expanded_at_the_call_site`).
+
+- **Equality on a function value is declined natively.** Kotlin answers `::f == ::f` with `true`:
+  a callable reference compares by the declaration it names and the receiver it binds, not by
+  identity. A lambda's `equals`/`hashCode` ARE identity, which the native backend would answer
+  correctly — but by the time a value reaches a comparison its type no longer says which it is
+  (`val f: (Int) -> Int = ::double` wears the same `Function1` a lambda wears), so the one type
+  they share is declined for both rather than answered wrongly for one. Identity through `===`
+  stays available, and a capture-free lambda is one object
+  (`src/native/codegen/lower.rs`,
+  `tests/native_codegen_e2e.rs::comparing_two_function_values_is_declined`).
+
 - **What `tailrec` loops is a FRAME, not a top-level function.** A tail self-call can be stepped
   whenever the next turn reads only slots the step reassigns. That is true of more than a top-level
   `fun` called by name, and the three shapes differ only in where the caller's values sit:
@@ -5440,6 +6151,648 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   backends (`codegen/box/casts/kt83324.kt`, `codegen/box/objectExpression/expr3.kt`).
   Tests: `tests/loop_backedge_narrowing_e2e.rs` (all eight, each answer taken from kotlinc 2.4.10
   first).
+
+### Native target (`src/native/`)
+
+The native backend has no `kotlinc` to be differential against — Kotlin/Native's output is LLVM
+bitcode, not comparable bytes — so each decision below is recorded here with the test that pins it,
+and behavior is checked by RUNNING the emitted program.
+
+- **`Int?` is a reference, `Int` is a machine scalar.** A nullable primitive has to represent
+  `null`, so it boxes, exactly as it does on the JVM. Anything else would need a sentinel value,
+  and Kotlin has no integer that is not a legal `Int`.
+  Tests: `src/native/codegen/lower.rs` (`a_nullable_primitive_is_carried_as_a_reference`).
+
+- **`compareTo` on floating-point values is a TOTAL order, not C's `<`/`>`.** Kotlin orders every
+  `NaN` above every other value (including itself) and `-0.0` below `0.0`; C's comparison operators
+  answer `false` to all four relations on `NaN`. The runtime falls back to the IEEE-754 bit patterns
+  after the ordinary comparisons, which is what `java.lang.Double.compare` does and what Kotlin's
+  `Double.compareTo` is specified to do. The same operation reached through `<` (`a < b`) keeps IEEE
+  semantics — the two spellings genuinely differ in Kotlin.
+  Tests: `tests/native_codegen_e2e.rs` (`comparisons_and_boolean_logic_run`); the ordering itself
+  lives in `src/native/runtime/krusty_rt.c`.
+
+- **`compareTo` is a runtime call, not an emitted `a < b ? -1 : …`.** The lowered form has the
+  receiver and the argument as arbitrary expressions, and a ternary would evaluate each of them
+  twice — changing the program whenever either has a side effect.
+
+- **A floating-point value cannot be rendered, and therefore cannot be boxed.** Kotlin's
+  `Double.toString` is Java's shortest-round-trip algorithm: `1.0` prints as `1.0`, `1e20` as
+  `1.0E20`. C's `%g` is not that algorithm — it printed `1` and `1e+20` — so the runtime was already
+  producing strings Kotlin never would. The runtime therefore has no `kt_box_double`/`kt_box_float`
+  at all, which makes it *impossible* for a floating-point value to reach a position where something
+  would render it: `println(1.0)` is declined at compile time with a diagnostic instead. Arithmetic
+  and `compareTo` on floating-point values are unaffected.
+
+- **Concurrency follows Kotlin/Native's memory model, not the JVM's.** The native target is a
+  Kotlin Multiplatform target with no Java interop, so its contract is Kotlin/Native's: `@Volatile`
+  (`kotlin.concurrent.Volatile`) makes backing-field reads and writes atomic and writes visible to
+  other threads — and *only* backing-field operations, so a property whose accessor touches the
+  field more than once is not atomic as a whole — and `kotlin.concurrent.atomics` supplies
+  compare-and-swap. Two JVM rules are deliberately NOT reproduced because Kotlin/Native does not
+  have them: `synchronized` does not exist on this target, and there is no `final`-field freeze, so
+  no release fence is emitted at constructor exit. Requiring the JVM memory model would be a
+  stronger guarantee than Kotlin/Native offers, so code correct under Kotlin/Native stays correct
+  here. Nothing concurrent is implemented yet; this records the target the implementation aims at.
+
+- **The native runtime is freestanding — it uses no C library.** This is what makes
+  cross-compilation work: `clang` compiles for every architecture and `ld.lld` links all of them,
+  but a libc call would demand a target sysroot (headers plus a target C library) for each one,
+  which is the per-architecture toolchain problem the native track exists to avoid. The runtime
+  issues `write`, `mmap` and `exit_group` directly through a syscall shim per architecture, uses
+  only the freestanding headers C11 §4 guarantees (`stdint.h`, `stddef.h`, `stdbool.h`), defines
+  `memcpy`/`memset` itself (a compiler may synthesize calls to them), and supplies its own `_start`
+  — in assembly, because at process entry the stack is aligned as if nothing had been called, which
+  is not the alignment a compiled function's prologue assumes.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`one_host_links_a_static_executable_for_every_supported_architecture`), which asserts each
+  produced binary's ELF machine number rather than trusting that the cross build happened.
+
+- **`String` is UTF-8 bytes in the native runtime, and exposes no `length`.** Kotlin's
+  `String.length` counts UTF-16 code units, which is not the byte count for any non-ASCII text.
+  Exposing a byte count under that name would be wrong for `"é".length`, so the runtime exposes
+  nothing rather than something wrong. A string constant containing an unpaired surrogate — legal
+  in Kotlin, unencodable in UTF-8 — makes the backend decline the file with a diagnostic.
+  Tests: `tests/native_codegen_e2e.rs` (`a_string_literal_with_an_unpaired_surrogate_is_declined`,
+  `non_ascii_text_survives_the_round_trip`).
+
+- **`+`, `-`, `*` and unary `-` wrap; `/` and `%` go through the runtime; shifts mask their count.**
+  Kotlin wraps integer arithmetic on overflow, and so do the machine's `iadd`/`isub`/`imul`/`ineg`,
+  so the code generator emits them directly. Division is different: the machine traps on both a zero
+  divisor and `Int.MIN_VALUE / -1`, where Kotlin throws for the first and wraps for the second, so
+  `/` and `%` are calls to `kt_div_*`/`kt_rem_*` (the runtime aborts with a message on zero, having no
+  exceptions yet). A shift count outside `0..31` (or `0..63`) is masked in Kotlin; Cranelift's
+  `ishl`/`sshr`/`ushr` mask the count to the operand width, which is the same rule, so shifts are
+  emitted directly. `%` on floating-point operands is declined until the runtime has `fmod`.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`integer_arithmetic_follows_kotlin_where_the_machine_traps_or_wraps_differently`).
+
+- **`==` on references is declined, not emitted as C's `==`.** Kotlin's `==` is `equals`; C's
+  compares addresses. A structural-equality runtime does not exist yet, and emitting the address
+  comparison would compile, link, run and answer a different question. `x == null` and `===` ARE
+  address comparisons in Kotlin, and those are emitted as one.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`structural_equality_on_references_is_declined_rather_than_compared_by_address`).
+
+- **`==` on references is `equals`, dispatched through the receiver.** Kotlin's `==` is
+  `a?.equals(b) ?: (b === null)`, which is exactly what the runtime's `kt_equals` does: null-safe,
+  then a call through the receiver's vtable, so an overridden `equals` answers for itself and a
+  class without one falls back to identity. Two separately built strings with the same text are
+  equal, and a scalar on either side boxes, because `any == 5` means `any?.equals(5)` there too.
+  Tests: `tests/native_codegen_e2e.rs` (`structural_equality_on_references_asks_the_receiver`,
+  `a_null_check_and_identity_stay_pointer_comparisons`).
+
+- **Boxing a small value hands out the same object every time.** A program can observe box
+  identity — `boxBoolean(true) === boxBoolean(true)` is true in Kotlin — because the JVM and
+  Kotlin/Native both cache small boxes. The runtime caches the range the JVM specifies: every
+  `Byte`, `Short`/`Int`/`Long` in -128..127, `Char` in 0..127, and both `Boolean`s. The cache is
+  static storage, which both keeps it alive across every collection and costs the collector
+  nothing: a candidate address that resolves to no heap chunk is dropped, by the conservative root
+  scan and the precise field tracer alike. Outside the range a box is a fresh object and identity
+  is unspecified, as Kotlin says.
+  Tests: `tests/native_codegen_e2e.rs` (`boxing_a_small_value_hands_out_the_same_object`).
+
+- **`x!!` is a runtime check, and on a nullable primitive it is the unboxing.** The check lives in
+  the runtime (`kt_not_null`) so the failure reads the same whatever produced the null, and so the
+  generator emits no branch for what is, on every path that matters, a value passing through.
+  Kotlin throws a `NullPointerException` here; with no exception machinery yet the honest
+  realization is a diagnosable exit.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`a_not_null_assertion_passes_a_value_through_and_fails_on_null`).
+
+- **A `when` whose arms disagree on a carrier is a reference.** `when (s) { "a" -> 1; else -> null }`
+  is `Int?`: taking the first arm's type would carry it as `Int` and store the `null` arm's pointer
+  into a 32-bit slot. An arm that leaves (a `return`) has no type and does not vote.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`a_when_whose_arms_have_different_types_is_carried_as_a_reference`).
+
+- **An array is one object shape, and what varies is its type descriptor.** A header, a length,
+  then the elements; the descriptor says how wide an element is and whether the collector should
+  look inside. So `IntArray` and `Array<String>` are the same shape, every array type belongs to
+  the RUNTIME rather than to a program (an array's descriptor depends on the element WIDTH, not on
+  the element type someone wrote), and a `LongArray` is never walked as pointers even though its
+  elements are pointer-width.
+  **What an array stores is not always what its element type says**: `Array<Int>` holds boxed
+  elements while `IntArray` holds the integers, so a read converts from the stored carrier to the
+  type the operation declares — the boundary the JVM crosses with a `checkcast` and an
+  `intValue()`. **Every access is bounds-checked**, compared unsigned so one comparison catches a
+  negative index too; Kotlin throws `IndexOutOfBoundsException` and, with no exception machinery
+  yet, the honest realization is a diagnosable exit. `==` on arrays is identity, as Kotlin says, so
+  array types take `kotlin.Any`'s vtable rather than the built-in value one.
+  Tests: `tests/native_codegen_e2e.rs` (`arrays_read_write_and_know_their_size`,
+  `an_array_index_outside_its_bounds_fails_loudly`,
+  `a_reference_array_is_traced_through_collection`,
+  `a_reference_array_of_a_primitive_boxes_at_the_element_boundary`).
+
+- **`Unit` is a value, and it is the runtime's.** A position that wants a reference — `val u: Any =
+  Unit`, an `Any?` argument, a `Unit`-returning lambda's result — gets the runtime's singleton, so
+  there is one `Unit` program-wide and a file that merely mentions it emits nothing.
+  Tests: `tests/native_codegen_e2e.rs` (`the_unit_value_is_the_runtimes_own`).
+
+- **A function value is an object, and calling one is a vtable dispatch.** Common lowering has
+  already made a lambda's body a top-level function whose LEADING parameters are the captured
+  values, so what remains is an object holding those captures, with its body in the vtable slot
+  after `kotlin.Any`'s three. The thunk in that slot takes and returns references and converts at
+  the boundary — Kotlin's own `FunctionN.invoke` convention, and for the same reason: a call site
+  knows the arity but not which lambda it holds, so every function value of an arity has to be
+  callable one way. A `Unit`-returning lambda answers with the runtime's `Unit`.
+  **A lambda that captures nothing is one object**, not one per evaluation — `{}` has the same
+  `hashCode` every time, which a program can see — and with no fields to hold it needs no
+  allocation at all, so it lives in static storage. One that does capture is a fresh object each
+  time, because each holds its own values, and those are traced through its descriptor like any
+  other field.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`a_lambda_is_an_object_that_can_be_passed_called_and_returned`,
+  `a_lambda_that_captures_nothing_is_one_object`,
+  `a_function_value_survives_collection_with_its_captures`).
+
+- **A captured `var` is one cell, shared — and the cell is what is carried, whatever the
+  declaration says.** Common lowering boxes a mutable local that a closure captures into a holder
+  and rewrites its reads and writes to go through it, so the closure and the frame that made it see
+  each other's writes rather than a copy. That holder is a one-field object here, traced when the
+  field holds a reference. The declaration is NOT what says so: a local declared `var n: Int` keeps
+  `Int` on its `Variable` node and on the lambda body's parameter, because `Int` is what the
+  programmer wrote, while what is stored and passed is the cell. The initializer settles the local
+  (a holder is created by `RefNew`) and the body settles the parameter (it reaches a holder through
+  `RefGet`/`RefSet` rather than using the value). Believing the declaration truncates a pointer into
+  a 32-bit slot — a miscompile with no symptom where it happens, which is why it took a program that
+  kept something alive across a collection and read it back to see it.
+  Tests: `tests/native_codegen_e2e.rs` (`a_lambda_captures_a_mutable_local_by_reference`);
+  `tests/native_gc_stress_e2e.rs` (`closures_and_their_captures_survive_collection`).
+
+- **Concurrency: there is none yet, and that is a tested claim rather than an omission.** The
+  runtime's whole kernel interface is `write`, `mmap`, `munmap` and `exit_group`; nothing creates
+  anything that runs concurrently, so the collector stops nothing. `@Volatile` therefore compiles as
+  an ordinary property — with one thread its meaning is exhausted, and there is no observer for it
+  to be wrong for — and a `suspend` function that never actually suspends is an ordinary function,
+  because `suspend` is a calling convention rather than concurrency. A function that DOES suspend is
+  declined: it needs a state machine to resume into, and compiling it into a straight call would run
+  a coroutine body to its first suspension and silently carry on.
+  Tests: `tests/native_concurrency_e2e.rs` — including one that reads the syscall header, so adding
+  `clone` fails there before the Kotlin/Native memory model this target committed to is implemented.
+
+- **A companion object is initialized when its class is first constructed.** That is the moment the
+  JVM would have run the class's `<clinit>`, and what a `<clinit>` does for a class with a companion
+  is create the companion instance, running its initializers — so they run before the constructed
+  class's own, once, and not at all until something constructs the class. Construction is the only
+  such trigger the generator can see; the JVM's other one, a class-static call, is declined by name.
+  Tests: `tests/native_classes_e2e.rs`
+  (`a_companion_object_is_initialized_when_its_class_is_first_constructed`).
+
+- **`===` between two primitives compares the values.** Kotlin defines identity equality on values
+  of a primitive type as `==` (it warns that the distinction is meaningless there). Boxing each
+  side and comparing the boxes' addresses would say `0L !== 0L`, which the corpus caught. Identity
+  on floating-point values (`-0.0`, `NaN`) is declined until the runtime pins its rules.
+  Tests: `tests/native_codegen_e2e.rs` (`identity_equality_on_primitives_compares_values`).
+
+- **The unsigned integers are carried by the checked type, not by the bits.** Common lowering
+  erases each of the four value classes to the signed machine integer it wraps, which is right
+  about the REPRESENTATION and silent about how to read it: `4294967295u` and `-1` are the same 32
+  bits. The generator recovers the difference from `ir.logical_types`, the checked type beside each
+  expression, and four decisions follow from it.
+
+  * **The carrier keeps the signedness.** `Carrier::Scalar(clif::Type, signed)` answers *unsigned*
+    for the four, so every widening zero-extends and every ABI parameter is `uext`. A member the
+    machine already answers the same way either way — `plus`, `minus`, `times`, the bitwise
+    operators, `inv` — is the signed instruction, because two's complement makes the bits identical;
+    a member where the machine offers both and the choice is the point — `compareTo` and the
+    orderings, `div`, `rem` — takes the unsigned one; `shr` is a LOGICAL shift, since the top bit is
+    a value. A member named by neither declines by name rather than falling back to the signed
+    answer, which is why the family was declined whole before this.
+  * **`UByte` and `UShort` are narrowed where the checked type says so.** Both reach the generator
+    already widened into an `Int` — `UShort.MAX_VALUE` arrives as `Const(Int(-1))` — so a value
+    whose checked type is narrower than the bits carrying it is `ireduce`d to its own width before
+    anything reads it. Only where the physical carrier is a scalar: the same expression boxed is a
+    reference, and reducing a pointer is not a narrowing.
+  * **Each has its own runtime descriptor.** `kt_type_ubyte`/`ushort`/`uint`/`ulong` sit beside the
+    signed ones, so a boxed `1u` answers `is UInt` and not `is Int`, `1u as? Int` is `null`, and
+    `"$any"` renders the value rather than the sign. Structural equality and `hashCode` group each
+    unsigned descriptor with the signed field it shares — the descriptors have already been required
+    to match, so the bits decide equality, and Kotlin defines each unsigned `hashCode` as the
+    wrapped value's.
+  * **`toString` leaves the machine.** `kt_ubyte_to_string` and its three siblings render through an
+    unsigned division loop; the signed renderer negates into unsigned space to reach the digits,
+    which is exactly the step that must not happen here.
+
+  Tests: `tests/native_unsigned_e2e.rs` (the whole file), `tests/native_codegen_e2e.rs`
+  (`an_unsigned_integer_is_not_the_signed_one_sharing_its_bits`).
+
+- **Arithmetic on `Byte`/`Short`/`Char` produces `Int`.** Kotlin has no `Byte.plus(Byte): Byte`, so
+  the operands of a built-in arithmetic operator on a narrow integer type are widened to `i32`
+  first (sign-extended, or zero-extended for `Char`) and the result is an `Int`. Only `Char` against
+  `Char` compares unsigned; widened to `Int` it is non-negative and a signed compare says the same.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`integer_arithmetic_follows_kotlin_where_the_machine_traps_or_wraps_differently`, `narrow`).
+
+- **A loop is four blocks — header, body, update, exit — and `break`/`continue` are edges.** A
+  labeled `break` targets the named loop's exit block and `continue` its update block (the header
+  when there is no update), so a lowered `for`, whose step is a statement sequence carrying its own
+  overflow guard, runs that sequence at the `continue` target and its guard's labeled `break` finds
+  the loop it names while the update is still being lowered. An `if`/`when` is a chain of
+  conditional branches into one merge block; when it is used as a value the merge block carries it
+  as a block parameter. An arm or a loop body that leaves (`return`, `break`, `continue`) simply
+  contributes no edge, and whatever the IR still puts after it lands in a block nothing reaches.
+  Tests: `tests/native_codegen_e2e.rs` (`arithmetic_locals_and_control_flow_run`,
+  `a_function_call_and_recursion_run`).
+
+- **An unsupported construct declines the whole file with a diagnostic.** The JVM backend can afford
+  a best effort because `kotlinc` decides what is correct; nothing decides that for native yet, so a
+  partial emission would produce a program that links and misbehaves.
+  Tests: `tests/native_codegen_e2e.rs` (`an_unsupported_construct_is_declined_with_a_diagnostic`).
+
+- **Every heap object begins with its type, and memory is reclaimed by a mark-sweep collector whose
+  roots are conservative and whose heap tracing is precise.** A `KType` descriptor names the byte
+  offset of every reference-typed field, and the collector follows exactly those; a `Long` field
+  holding a pointer's bits does not keep anything alive. Roots — the stack and the callee-saved
+  registers — are the one place scanned conservatively, because the code generator emits no stack
+  maps yet: any stack word that points into an allocated object
+  (interior pointers included) roots it. Global slots are roots only when registered
+  (`kt_gc_add_global_root`); static storage is never scanned and never treated as an object.
+  Collection is triggered by allocation volume since the last collection (never by heap size, which
+  would double the heap each cycle for a program with a small live set) and can be forced with
+  `kt_gc_collect()`.
+  Tests: `tests/native_gc_e2e.rs` (`the_collector_reclaims_garbage_and_keeps_what_is_reachable`,
+  whose C program pins precise heap tracing by an object referenced only from a `kt_long` field
+  being reclaimed, and interior-pointer rooting, cycle reclamation, slot reuse, large-object
+  unmapping and the automatic trigger);
+  `tests/native_codegen_e2e.rs` (`a_program_that_allocates_heavily_runs_under_collection`).
+
+- **The collector never moves an object.** A conservative root cannot be updated — the word that
+  looks like a pointer may be an integer — so nothing that a root might refer to may change
+  address. That forecloses compaction and a copying nursery until krusty owns its code generator and
+  can emit stack maps (`docs/BUILD_AND_NATIVE_PLAN.md`, *Decided: krusty owns its runtime*, step 3).
+  The heap is shaped accordingly: size-segregated chunks, a freed slot reused in place, a large
+  object in a mapping of its own that is returned to the kernel when it dies.
+  Tests: `tests/native_gc_e2e.rs` (rooted objects are read back at the same address with the same
+  contents after a collection; a second batch the size of a freed first batch maps nothing new).
+
+- **A `String`'s text is a heap object of its own — a byte array with no reference fields — and the
+  string's type lists the field holding it as a reference.** The text therefore lives exactly as
+  long as some string uses it, and two strings may share one array. A literal is different: its
+  bytes stay in static storage and the string's array field is `NULL`, so the collector has nothing
+  to trace and nothing to free. Rendering a number or a `Char` allocates a byte array the same way;
+  the runtime keeps that array in a local across any further allocation, which is what makes it a
+  root.
+  Tests: `tests/native_gc_e2e.rs` (a string built across repeated collections prints intact, and a
+  literal and `Unit` pass through a collection untouched);
+  `tests/native_codegen_e2e.rs` (`a_program_that_allocates_heavily_runs_under_collection`).
+
+- **A class instance is a header followed by the superclass's fields, then its own.** The object
+  header stays one word — the collector's contract is `header->type` and nothing here changes it.
+  Fields follow in the classic single-inheritance layout: the superclass's fields as a prefix in the
+  superclass's order, then this class's in declaration order, each aligned to its size
+  (`Boolean`/`Byte` 1, `Short`/`Char` 2, `Int`/`Float` 4, `Long`/`Double`/reference 8), and a
+  subclass's first field packed directly after the superclass's last (not after its rounded size).
+  The instance size rounds up to 8. One computation of the layout feeds both the loads and stores
+  the code generator emits and the `reference_offsets` table in the class's descriptor, so the
+  program and the collector cannot disagree about where a reference is.
+  Tests: `src/native/classes.rs` (`fields_follow_the_superclass_prefix_and_align_to_their_size`,
+  `a_subclass_field_packs_after_the_superclass_field_not_after_its_rounded_size`);
+  `tests/native_classes_e2e.rs`
+  (`a_three_level_hierarchy_inherits_fields_and_overrides_at_each_level`,
+  `a_linked_chain_built_under_collection_pressure_is_traced_through_emitted_layouts` — the test that
+  catches a wrong `reference_offsets`).
+
+- **Virtual dispatch goes through the type descriptor, and every vtable begins with `kotlin.Any`'s
+  three slots: `equals`, `hashCode`, `toString`, in that order.** A call is
+  `obj->type->vtable[slot]`: one indirection more than a vtable pointer in the header, in exchange
+  for leaving the header — and the collector — untouched. A class's table is its superclass's with
+  overridden slots replaced and new members appended, so a slot assigned at the declaring class is
+  valid down the whole hierarchy. Open properties are members too: an `open`/`override` property
+  dispatches through a getter (and, for a `var`, a setter) slot, synthesized as a field access when
+  the source wrote no accessor. `super.f()` is a direct call to the named class's body. An abstract
+  member's slot is a runtime function that fails loudly rather than a NULL to jump through. An
+  override that changes a parameter's or result's machine representation (`T` specialized to `Int`)
+  would need a bridge method and is declined by name.
+  Tests: `src/native/classes.rs` (`a_new_method_appends_and_an_override_replaces_the_slot`,
+  `a_three_level_chain_keeps_slot_numbers_stable`,
+  `an_override_that_changes_representation_is_declined`); `tests/native_classes_e2e.rs`
+  (`a_call_through_a_base_typed_value_reaches_the_override`,
+  `a_super_call_runs_the_base_implementation_then_the_override`,
+  `an_abstract_method_dispatches_to_each_implementation`,
+  `an_open_property_read_through_the_base_type_reaches_the_override`).
+
+- **The default `hashCode` derives from the object's address, and the default `toString` is
+  `<qualified name>@<hex hashCode>`.** An identity hash from the address is legitimate only because
+  this collector never moves an object — conservative roots forbid it — so the address is stable
+  for the object's whole life. `equals` defaults to reference identity. A user `toString` is reached
+  from `println(obj)`, from `"$obj"` and from an explicit call alike, because the runtime's
+  rendering dispatches through slot 2 for anything that is not one of its own value types; the
+  built-in values compare by value and hash as Kotlin specifies (a `String` over its UTF-16 code
+  units). Structural `==` between references stays declined (see above); `x == null` is emitted as
+  the pointer comparison Kotlin defines it to be.
+  Tests: `tests/native_classes_e2e.rs`
+  (`a_user_to_string_is_reached_through_println_templates_and_explicit_calls`).
+
+- **`is` walks the superclass chain; a failed `as` fails loudly, as the placeholder for
+  `ClassCastException`.** `obj is T` is false for `null` and true when `T`'s descriptor is on the
+  object's `super` chain; `as?` yields the object or `null`; `as T?` and a compiler-inserted smart
+  cast let `null` through; `as T` to a non-null type fails on `null`. There are no exceptions in the
+  runtime yet, so a failed cast exits with a message naming both types — the same realization
+  unboxing `null` already uses — rather than passing the object through and letting the program read
+  a subclass's fields off a base object. A check against a type that is neither a class of the file
+  nor a runtime value type declines.
+  Tests: `tests/native_classes_e2e.rs` (`is_and_safe_casts_follow_the_superclass_chain`,
+  `a_failed_cast_fails_loudly_naming_both_types`).
+
+- **An array type is one of those runtime types, and what its descriptor separates is the element
+  WIDTH.** `is`, `as` and `as?` against `IntArray` or `Array<*>` ask the runtime about the same
+  descriptor an allocation already stamps on the array, because the collector has to be told the
+  element width and whether to look inside. That width is exactly Kotlin's own erasure here:
+  `Array<String>` and `Array<Foo>` are one type, `IntArray` is neither of them, and `is Array<*>` is
+  the only form a program may write. An `as` to an array is therefore CHECKED like a class's, where
+  before it fell through to a coercion — which changes nothing about a reference and so let an
+  `Array<String>` be read as an `IntArray`, four bytes out of every eight-byte slot. An unsigned
+  array still declines: the runtime lays out no array for it, so there is no descriptor to name.
+  Tests: `tests/native_type_checks_e2e.rs`, and `tests/native_classes_e2e.rs`
+  (`a_failed_cast_to_an_array_fails_loudly_too`).
+
+- **A cast is CHECKED whenever its target is held as a reference and the runtime names it; a scalar
+  target is a representation change.** The rule is not about arrays: a cast with no descriptor to
+  check against fell through to a coercion, and a coercion changes nothing about a reference — so
+  `(1 as Any) as String` handed the box back typed `String` and `length` read a field off the wrong
+  object. `String` and an array are the runtime's types rather than the program's, and both are now
+  asked about exactly as a declared class is. `x as Int` stays a coercion, and deliberately: it is
+  an unboxing, and routing it through the object check would answer with the box where the site
+  wants the number. A target the runtime does not name — a dependency's interface, a type parameter
+  — still coerces, which is Kotlin's own erasure.
+  Tests: `tests/native_type_checks_e2e.rs` (`a_string_is_asked_about_the_same_way_a_class_is`,
+  `an_unboxing_cast_stays_a_representation_change`), `tests/native_classes_e2e.rs`
+  (`a_failed_cast_to_a_string_fails_loudly_too`).
+
+- **An annotation on a declaration is metadata this target does not keep; an annotation INSTANCE is
+  a value it declines to build.** Nothing emitted for this target can be asked what annotations a
+  declaration carries, so applying one changes nothing a program can observe and the declaration
+  costs the generator nothing to accept — every target a program may write one on, a class, a
+  function, a property, a field, a parameter, a local and an expression. Constructing one declines,
+  and the line is at the value rather than at each thing done with it: Kotlin defines an annotation
+  instance's `equals`, `hashCode` and `toString` over its arguments, with array members compared and
+  rendered by CONTENT, and this backend would give it `kotlin.Any`'s identity ones. Reading a
+  member would then answer correctly while comparing two instances answered `false` where Kotlin
+  says `true` — a half-right that answers rather than declines. (The JVM backend realizes these
+  members through an `annotationImpl` class it synthesizes itself, so the shared lowering hands a
+  backend the annotation class directly; making the instance work here is therefore a question for
+  the common lowering rather than a second copy of Kotlin's rule.)
+  Tests: `tests/native_annotations_e2e.rs`.
+
+- **Two `is` checks are settled by the type alone, and one more is the runtime's `Unit`.** `Nothing`
+  has no instances, so `x is Nothing` is false and `x is Nothing?` is exactly `x == null`; every
+  non-`null` value is an `Any`, so `x is Any` is `x != null` and `x is Any?` is true of everything.
+  The receiver is still evaluated: the constant is the answer, not the expression. `Unit` reaches a
+  check spelled as the object it is rather than as the carrier the generator names, and answers
+  through the one descriptor either way.
+  krusty's JVM backend answers `is Nothing` and `is Unit` with `true` for every non-`null` value —
+  `ref_internal` has no arm for either, so it emits `instanceof java/lang/Object`. That is a defect
+  in shared code, fixed on its own branch; the native tests for these two shapes assert this backend
+  only until it lands, rather than pinning the wrong answer.
+  Tests: `tests/native_type_checks_e2e.rs` (`nothing_is_a_type_no_value_is_an_instance_of`,
+  `any_is_the_question_of_whether_there_is_a_value_at_all`,
+  `a_settled_check_still_evaluates_its_receiver`, `unit_is_asked_about_as_the_object_it_is`).
+
+- **`Number` and `Comparable` are descriptors the value types POINT AT, not types anything wears.**
+  Neither has an instance of its own — every value that is one is a boxed primitive or a string — so
+  each is a runtime descriptor named by the boxes' interface lists, which are flattened and
+  transitive because `is` scans them at each step of the super chain rather than walking an interface
+  hierarchy. Which box points at which is Kotlin's own asymmetry and not a rule about machine width:
+  `Char` and `Boolean` are `Comparable` and not `Number`, and an unsigned integer is `Comparable` and
+  not `Number` either, being a value class rather than a `java.lang.Number`. Every one of those
+  answers is the reference compiler's, asked of it directly.
+  Tests: `tests/native_builtin_supertypes_e2e.rs`.
+
+- **A top-level property is a global slot, initialized before the entry function, and rooted in the
+  collector if it holds a reference.** The JVM realizes a top-level property as a private static
+  field plus a `getX`/`setX` pair (and an `access$get<X>$p` bridge when a sibling class reads a
+  private one) because of JVM visibility rules; none of that applies natively, so a read is a load
+  from the slot and a write is a store. An accessor is called only where the SOURCE wrote one
+  (`val doubled get() = …`), which is exactly when common lowering emits an accessor function —
+  the property's `field` reads inside it lower to the slot as any other read does. Initializers run
+  in declaration order at process start, which is where the JVM would have run the facade's
+  `<clinit>`: a program touches the facade by calling its entry point. A reference-typed slot is
+  registered with `kt_gc_add_global_root` BEFORE the first initializer runs, because a later
+  initializer may allocate and the collection that follows must already trace the earlier slots.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`top_level_properties_initialize_before_main_and_hold_their_values`,
+  `a_top_level_property_is_a_collector_root`,
+  `a_top_level_property_with_custom_accessors_runs_their_bodies`).
+
+- **An `object` declaration is one lazily constructed instance in a static slot registered as a
+  collector root.** Static storage is never scanned, so the emitted getter registers the slot with
+  `kt_gc_add_global_root` before it allocates and assigns the slot before running the constructor;
+  whatever the singleton references then survives every collection. The test creates the singleton
+  in a frame that is gone and overwritten before the churn, so only the registration keeps it alive
+  — removing the registration makes the program fault.
+  Tests: `tests/native_classes_e2e.rs`
+  (`an_object_declaration_is_one_instance_rooted_across_collections`).
+
+- **Initialization order is Kotlin's: superclass constructor first, then this class's parameter
+  stores, then its property initializers and `init` blocks in source order.** The superclass
+  constructor's arguments are evaluated from the derived constructor's parameters before the call.
+  Slots are zeroed by the allocator, so a field read before its store observes `null`/`0`, as it
+  does on the JVM.
+  Tests: `tests/native_classes_e2e.rs`
+  (`initialization_runs_the_superclass_first_then_fields_then_init_blocks`).
+
+- **A generic class erases its type parameters to references.** `Box<T>(val value: T)` stores `T`
+  as a `KRef`; a scalar argument boxes on the way in and unboxes on the way out, exactly as on the
+  JVM.
+  Tests: `tests/native_classes_e2e.rs` (`a_generic_class_erases_its_parameter_to_a_reference`).
+
+- **`list += x` appends the ELEMENT; `list += xs` appends every element of `xs`. The operand is the
+  LAST physical parameter, never the first.** Kotlin declares `plusAssign` once per shape of
+  right-hand side, and the two spellings are identical at the call site, so only the operand's type
+  separates them. Most of these declarations are EXTENSIONS, which carry their receiver as the first
+  physical parameter — so reading the first asks whether the RECEIVER is a collection, which is
+  always true, and `xs += 1` walks the integer as if it were one. A member has only the operand,
+  where first and last coincide. The same rule tells `removeAt(index)` from `remove(element)`, and
+  there it must read the PHYSICAL parameter rather than the semantic one: `MutableList<Int>` has
+  substituted `E` to `Int`, so both overloads look like `remove(Int)` until the realization is
+  consulted.
+  Tests: `tests/native_lists_e2e.rs` (`plus_assign_appends_an_element_or_every_element`,
+  `plus_assign_of_an_int_appends_it_rather_than_walking_it`),
+  `tests/mapped_collection_scope_e2e.rs` (`remove_of_an_absent_element_is_not_an_index`).
+
+- **A progression's last element is computed modulo the step, never from the distance between its
+  bounds.** `first + ((last - first) / step) * step` is right for every range a program is likely to
+  write and wrong for the widest: `Long.MIN_VALUE..Long.MAX_VALUE` spans more than a `Long` can
+  hold, so the subtraction wraps and the walk stops after one element instead of reaching three.
+  Reducing both bounds modulo the step never forms that distance — every intermediate stays inside
+  `0 until step` — which is why Kotlin's own `getProgressionLastElement` is written this way.
+  Tests: `tests/native_ranges_e2e.rs` (`a_progression_spanning_the_whole_range_reaches_every_step`);
+  the corpus cases are `codegen/box/ranges/stepped/**/…StepMaxValue.kt`.
+
+- **`StringBuilder` is a growable UTF-8 buffer whose `toString` COPIES, and whose `equals` and
+  `hashCode` stay identity.** `substring` shares its receiver's storage because a string is a value
+  and nothing can write through it; a builder can be written through, so a view handed out before an
+  `append` would change under a program already holding it — and would change only sometimes, since
+  a write within the current capacity rewrites bytes in place while a write past it moves them. The
+  copy is what makes the snapshot a value. `equals`/`hashCode` are NOT overridden, here or on any
+  Kotlin target: two builders holding the same text are different objects.
+  Every question about a builder's CONTENT — `length`, `sb[i]`, iterating it — is answered by the
+  same runtime entry points a `String`'s questions reach, which read the text through one accessor
+  rather than off a string's fields. `append` renders its operand through the operand's own
+  `toString`, which is the same answer for all dozen JVM overloads and is why they need one
+  function. `appendLine` appends `\n` and not the host's line separator, which is what Kotlin
+  specifies on every target. `sb.append(null)` is an overload AMBIGUITY in Kotlin — kotlinc rejects
+  it too — so a bare `null` needs a type.
+  The class is declared in no file krusty compiles, so constructing one takes the path `Any()` and
+  `ArrayList()` already take: the runtime allocates it. `StringBuilder(capacity)` is a hint nothing
+  observable depends on; `StringBuilder(text)` copies the text.
+  Tests: `tests/native_string_builders_e2e.rs` (all).
+
+- **An exception propagates through a PENDING SLOT, and every call checks it.** `throw` records the
+  exception in one runtime slot and RETURNS the frame's zero value; every call site loads the slot
+  and branches — to the innermost enclosing `try`'s dispatch block, or out of the frame with the
+  slot still set, which IS the propagation. A caller never reads the value a throwing call
+  returned, because it checks first. The slot is a GC root: between the throw and the `catch` that
+  names it the exception is reachable from no frame.
+  The slot is READ, not fetched through an accessor. A call clobbers the caller-saved registers, so
+  one after every call doubles what a frame keeps alive across a call boundary — and the frames
+  grow. The corpus priced that exactly: a 100,000-deep recursion overflowed its stack when the
+  check was a call and does not when it is a load. One load and one predicted branch is also what
+  the design was costed at.
+  EVERY call in a function body carries the check, including the DISPATCHED one, which is the only
+  call this backend emits outside the shared helper — a `try` whose body invokes a lambda is the
+  common shape, and the exception walked straight out of the `try` until that call checked too.
+  The handler machinery itself must NOT check: deciding which clause takes the exception happens
+  while one is pending by construction, so a check there reads the very slot being examined, finds
+  it set, and leaves — every `catch` then swallows nothing.
+  Clauses are tried in source order, which is Kotlin's and the JVM's, by `kt_is_instance` against
+  each clause's type; a clause that matches CLEARS the slot before running, because from there the
+  exception is handled and the handler's own calls check that slot like any others. No clause
+  matching falls through to where the exception was already going.
+  Tests: `tests/native_try_catch_e2e.rs` (all).
+
+- **`finally` runs on FOUR exit edges, and an exception raised inside one LEAVES the `try` it
+  belongs to.** The edges are: the body completing, each handler completing, an exception no clause
+  matched, and a `return`, `break` or `continue` written inside. The block is re-lowered on each —
+  which is what kotlinc emits too, since the paths are disjoint and a copy on each runs once.
+  A `try` with a `finally` therefore needs a SECOND handler above clause selection: an exception
+  raised in a `catch` clause is not offered to that same `try`'s other clauses, but must still run
+  the `finally` on the way out. And the `finally` itself is lowered at the handler depth its `try`
+  was ENTERED at, because an exception raised inside a `finally` leaves that `try` — without that,
+  a throwing `finally` arrives back at its own dispatch and runs a second time
+  (`codegen/box/finally/breakAndOuterFinally.kt`, which logged `… finally finally`).
+  On the propagating edge the pending slot is CLEARED and the exception held in a local, because
+  the block's own calls each check that slot and the first would otherwise turn straight round.
+  Afterwards the exception resumes unless the `finally` outranked it. Every rule here came from
+  kotlinc 2.4.10 rather than from reading the construct: a `finally` that THROWS replaces the
+  exception in flight, one that RETURNS swallows it, a `return` in a `finally` beats a `return` in
+  the body, nested finallys run innermost first, and a `break` out of a `try` runs its `finally` on
+  the breaking turn.
+  A `break` runs the finallys entered INSIDE the loop it leaves and no others, which is what the
+  loop depth recorded at each `try` is for.
+  Tests: `tests/native_try_catch_e2e.rs` (the ten `finally` cases).
+
+- **The runtime's own failures are Kotlin exceptions a program can catch.** Each was a diagnosable
+  exit while no handler could exist to see the difference; each is now the exception Kotlin
+  specifies, raised through the same slot a written `throw` uses, so a clause cannot tell the two
+  apart. A failed cast is `ClassCastException` reading `class A cannot be cast to class B`, which
+  is Kotlin/Native's wording; `x!!` is `NullPointerException` with NO message and `null as T` is
+  one whose message names the target type — kotlinc 2.4.10 confirms both, and conflating them is
+  the easy mistake, since a null is not an instance of anything and there is no class to report as
+  a cast's source. Division by zero is `ArithmeticException("/ by zero")`, an index outside an
+  array is `IndexOutOfBoundsException`, `valueOf` of an unknown constant is
+  `IllegalArgumentException`, a non-positive `step` is `IllegalArgumentException`, and writing
+  through a list while walking it is `ConcurrentModificationException` — decided by a MODIFICATION
+  COUNT rather than the size, because `remove` during a walk can leave the cursor inside the
+  shortened list where the bound says nothing is wrong.
+  Every one of these RETURNS after raising, and every caller must act on that: the exception is
+  recorded, not raised, so falling through reaches the machine divide or the out-of-range read the
+  check was there to avoid. Division by zero took a SIGFPE until each site returned.
+  Tests: `tests/native_try_catch_e2e.rs`
+  (`the_runtimes_own_failures_are_catchable_kotlin_exceptions`,
+  `a_failed_cast_names_both_classes_the_way_kotlin_native_does`,
+  `a_null_cast_is_a_null_pointer_exception_naming_the_target_type`, `valueof_of_an_unknown_constant_throws`),
+  `tests/native_lists_e2e.rs` (`writing_through_a_list_while_walking_it_is_a_concurrent_modification`).
+
+- **A cast whose target is a primitive is still a question about the object, unless the source is
+  already that same primitive.** `(1 as Any) as Byte` is a `ClassCastException` in Kotlin: the
+  widths are convertible and the TYPES are not. So is `it as Byte` where `it` is a type parameter
+  the call substituted to `Int` — and that one arrives with both sides already unboxed, because
+  Kotlin has no cast between two primitive types (`val x: Int = 1; x as Byte` does not compile), so
+  a scalar-to-other-scalar cast can only have come from erasure. Both ask the descriptor before
+  reading anything out; unboxing and converting first answers `1` to a program Kotlin refuses.
+  Where there is no descriptor to test against — an erased type parameter — the NON-NULL-ness of
+  the cast is still checked, and the node's own operation is what decides it, never the spelling of
+  the target: an unbounded `T` is not nullable as a type and `null as T` is still legal, because
+  `T` may be instantiated with a nullable one. Reading the target instead made eight programs throw
+  that Kotlin accepts.
+  Tests: `tests/native_try_catch_e2e.rs`
+  (`a_cast_between_two_primitives_can_only_be_an_erased_object_cast`); the corpus cases are
+  `codegen/box/casts/{asForConstants,asWithGeneric,castToDefinitelyNotNullType,kt59022}.kt`.
+
+- **A `lateinit` read is guarded wherever a field is LOADED, not wherever one is written in the
+  source.** There are four paths that load a field — the `GetField` node, a property read that
+  finds storage rather than a getter, the `super` read that does, and the synthesized accessor a
+  property reached through a vtable slot arrives at — and a property that OVERRIDES another takes
+  the last of them. Putting the guard on the load is what makes one rule serve all four. Kotlin
+  puts it at the read rather than tracking initialization because the field being null IS the
+  evidence, which is also why `lateinit` is confined to types that have a null.
+  A TOP-LEVEL `lateinit var` is NOT guarded, and that is common lowering's gap rather than this
+  backend's: its getter carries no check and krusty's JVM backend answers null there too
+  (`codegen/box/properties/lateinit/topLevel/`, both ledgered).
+  Tests: `tests/native_try_catch_e2e.rs` (`reading_a_lateinit_property_before_it_is_set_throws`,
+  `a_lateinit_property_that_overrides_one_is_guarded_too`).
+
+- **`CharSequence` is a descriptor the text types point at, and a cast to a type PARAMETER is a
+  cast to its bound.** `CharSequence` has no instances of its own, so it takes the arrangement
+  `Number` and `Comparable` already use — except that TWO types point at it, a `String` and a
+  `StringBuilder`. Answering the question with the string's own descriptor would have been sound
+  while a string was the only text this runtime made, and stopped being sound the moment there was
+  a builder.
+  A bound is all that is left of a type parameter at run time, and it is exactly what kotlinc
+  checks: `fun <T : CharSequence> f(x: Any?) = x as T` rejects a non-`CharSequence` inside `f`,
+  before the call site's own cast to the argument it was given. An unbounded parameter bounds at
+  `Any?`, where there is nothing to check.
+  Tests: `tests/native_string_builders_e2e.rs` (`both_text_types_answer_to_char_sequence`),
+  `tests/typeparam_cast_e2e.rs` (`class_bounded_type_param_cast_checkcasts`, which cross-checks the
+  two backends).
+
+- **`assertFailsWith<T> { … }` reads its expected class from the call's RETURN type, and a wrong
+  throw FAILS the assertion rather than propagating.** The reified `T` never reaches a backend as a
+  type argument — kotlinc resolves it into the return type — so there is no class operand to find,
+  and the descriptor that type already wears is the test. It is the same `kt_is_instance` a `catch`
+  clause makes, so a SUPERTYPE matches: `assertFailsWith<RuntimeException>` takes an
+  `IllegalStateException`. The block is the LAST argument, never the first: `message` is declared
+  before it and defaulted, so a call that omits it passes one argument and a call that supplies it
+  passes two.
+  A block that throws the WRONG type raises `AssertionError` and the original exception is
+  REPLACED, not allowed past — kotlin-test catches `Throwable` and fails on what it caught.
+  Letting it propagate is the plausible reading and it is wrong; kotlinc 2.4.10 settled it, along
+  with the wording of both failures and the `". "` a supplied message is joined by.
+  Tests: `tests/native_try_catch_e2e.rs` (the five `assert_fails_with*` cases).
+
+- **A boxed floating-point value compares and hashes by CANONICALIZED bits: every NaN is one
+  value.** This is `java.lang.Double.doubleToLongBits`, and the difference from
+  `doubleToRawLongBits` is the whole point — `0.0 / 0.0` produces a NaN with the sign bit SET on
+  x86 (`fff8…`) where the `Double.NaN` constant does not (`7ff8…`), so comparing raw bits answers
+  false for two values Kotlin calls equal. `hashCode` canonicalizes through the same helper,
+  because two values that compare equal must hash equal and two NaNs do compare equal.
+  (`0.0.equals(-0.0)` stays FALSE: those differ in a bit that is not a NaN payload. The scalar
+  comparison emitted for `==` is a third rule again, where `0.0 == -0.0` is true.)
+  Tests: the corpus case is `codegen/box/arithmetic/division.kt` (`assertEquals(Double.NaN, 0.0 / 0.0)`).
+
+- **A branch's type is read from the IR, not from what lowering has emitted so far.** A `when`
+  types itself BEFORE lowering any arm, because its merge block has to know whether it carries a
+  value. A local's type was answered from the slot map, which is a lowering artifact — a slot is
+  in it once its declaring statement has been emitted — so a branch ending in a local that branch
+  DECLARES had no type. The `when` then typed as no-value, every arm was lowered as a statement,
+  and whatever the branch computed went nowhere: the destination read zero.
+  That is the shape every inline function spliced into a branch takes, which is how
+  `if (c) Array(2) { … } else Array(5) { … }` answered an array of size 0 while the same
+  constructor answered 2 outside a branch. The declaring `IrExpr::Variable` carries the type, so
+  the question goes there.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`a_branch_ending_in_a_local_it_declares_still_has_a_value`, which cross-checks the two backends).
+
+- **A class nested in the FILE FACADE is not qualified by it on this target.**
+  `castAnonymousClassKt$box$1` is the JVM's binary name for an anonymous object inside a top-level
+  `box`, and it is right there — but there is no facade class here at all: a top-level property is
+  a global and a top-level function is a symbol, neither owned by anything. Kotlin/Native names
+  that object `box$1`, and that is what a failed cast reports. Only the PACKAGE separator becomes a
+  dot: a `$` is Kotlin's own nesting separator and stays one, so a class local to `box` reads
+  `box$MyLocalObject` rather than as a package that does not exist.
+  Tests: the corpus cases are `codegen/box/casts/nativeCCEMessage/` (all four).
 
 ## 8. Success criteria for the PoC
 

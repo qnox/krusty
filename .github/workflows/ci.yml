@@ -137,6 +137,20 @@ jobs:
           name: pct-${{ matrix.version }}
           path: pct.txt
           if-no-files-found: error
+      # The native lane: the same corpus through krusty's own code generator and linker. No
+      # percentage floor yet — the gate is that every case the generator ACCEPTS prints OK.
+      - name: run native conformance ${{ matrix.version }}
+        run: |
+          set -euo pipefail
+          just conformance-native-run "$PWD/conformance-bin" "${{ matrix.version }}" > native.txt
+          head -1 native.txt
+      - name: upload native report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-${{ matrix.version }}
+          path: native.txt
+          if-no-files-found: error
       - name: enforce >= 55%
         run: |
           set -euo pipefail

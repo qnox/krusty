@@ -12,6 +12,8 @@ mod common {
     pub use super::e2e_support::*;
 }
 
+#[path = "abi_fingerprint_e2e.rs"]
+mod abi_fingerprint_e2e;
 #[path = "abstract_instantiation_check_e2e.rs"]
 mod abstract_instantiation_check_e2e;
 #[path = "abstract_member_check_e2e.rs"]
@@ -532,6 +534,8 @@ mod elvis_nullability_join_e2e;
 mod elvis_return_smartcast_e2e;
 #[path = "elvis_signature_inference_e2e.rs"]
 mod elvis_signature_inference_e2e;
+#[path = "emission_determinism_e2e.rs"]
+mod emission_determinism_e2e;
 #[path = "empty_loop_body_e2e.rs"]
 mod empty_loop_body_e2e;
 #[path = "engine_declaration_types_e2e.rs"]
@@ -1024,6 +1028,42 @@ mod named_ctor_args_e2e;
 mod named_super_arg_e2e;
 #[path = "narrowed_this_member_call_e2e.rs"]
 mod narrowed_this_member_call_e2e;
+#[path = "native_bottom_value_e2e.rs"]
+mod native_bottom_value_e2e;
+#[path = "native_classes_e2e.rs"]
+mod native_classes_e2e;
+#[path = "native_codegen_e2e.rs"]
+mod native_codegen_e2e;
+#[path = "native_concurrency_e2e.rs"]
+mod native_concurrency_e2e;
+#[path = "native_delegation_e2e.rs"]
+mod native_delegation_e2e;
+#[path = "native_exceptions_e2e.rs"]
+mod native_exceptions_e2e;
+#[path = "native_gc_e2e.rs"]
+mod native_gc_e2e;
+#[path = "native_gc_stress_e2e.rs"]
+mod native_gc_stress_e2e;
+#[path = "native_lists_e2e.rs"]
+mod native_lists_e2e;
+#[path = "native_property_reference_e2e.rs"]
+mod native_property_reference_e2e;
+#[path = "native_ranges_e2e.rs"]
+mod native_ranges_e2e;
+#[path = "native_receiver_property_e2e.rs"]
+mod native_receiver_property_e2e;
+#[path = "native_sam_e2e.rs"]
+mod native_sam_e2e;
+#[path = "native_spread_e2e.rs"]
+mod native_spread_e2e;
+#[path = "native_string_builders_e2e.rs"]
+mod native_string_builders_e2e;
+#[path = "native_strings_e2e.rs"]
+mod native_strings_e2e;
+#[path = "native_tailrec_e2e.rs"]
+mod native_tailrec_e2e;
+#[path = "native_unsigned_e2e.rs"]
+mod native_unsigned_e2e;
 #[path = "nested_class_ctor_scope_e2e.rs"]
 mod nested_class_ctor_scope_e2e;
 #[path = "nested_class_supertype_e2e.rs"]
@@ -1648,6 +1688,29 @@ mod reified_value_class_splice_e2e;
 
 #[path = "file_private_extension_scope_e2e.rs"]
 mod file_private_extension_scope_e2e;
+
+#[path = "native_callable_name_e2e.rs"]
+mod native_callable_name_e2e;
+
+#[path = "native_boxed_numbers_e2e.rs"]
+mod native_boxed_numbers_e2e;
+
+#[path = "native_throws_e2e.rs"]
+mod native_throws_e2e;
+#[path = "native_try_catch_e2e.rs"]
+mod native_try_catch_e2e;
+
+#[path = "native_type_checks_e2e.rs"]
+mod native_type_checks_e2e;
+
+#[path = "native_annotations_e2e.rs"]
+mod native_annotations_e2e;
+
+#[path = "native_builtin_supertypes_e2e.rs"]
+mod native_builtin_supertypes_e2e;
+
+#[path = "native_class_literals_e2e.rs"]
+mod native_class_literals_e2e;
 
 mod serializer_metadata_class_id_e2e;
 #[path = "common/kotlin_metadata.rs"]
