@@ -6,143 +6,19 @@
 
 use super::classfile::ClassWriter;
 use super::classreader::{utf8_value, MethodCode, C};
-use crate::types::TypeName;
 use std::collections::HashMap;
 
 mod relocation;
 pub use relocation::{
     bootstrap_members, references_private_member, relocate_const, relocate_insns,
 };
+mod method_bodies;
+pub use method_bodies::{MethodBodies, PropertyAccess, StaticMemberRealization};
 mod continuation_flow;
 mod reified_operands;
 use continuation_flow::caller_continuation_reachable;
 pub use reified_operands::substitute_reified;
 use reified_operands::{reify_markers, set_reified_operand};
-
-/// A platform realization selected only while emitting an already-resolved semantic member call.
-/// Nothing in checking or common lowering sees this owner/descriptor.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StaticMemberRealization {
-    pub owner: String,
-    pub name: String,
-    pub descriptor: String,
-}
-
-/// How a compiled class realizes a PROPERTY read. Kotlin source can declare getter/setter behavior, but
-/// a use such as `Dispatchers.IO` denotes the property rather than a JVM method call, so the emitter asks
-/// the class file what that read actually compiles to. `is_static` means the realization takes no receiver
-/// (a `@JvmStatic` accessor, or a `static` field): the receiver is an expression the program still
-/// evaluates, but it is not passed.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PropertyAccess {
-    /// `getfield` / `getstatic <owner>.<name>:<descriptor>`.
-    Field {
-        owner: String,
-        name: String,
-        descriptor: String,
-        is_static: bool,
-    },
-    /// `invokevirtual` / `invokeinterface` / `invokestatic <owner>.<name><descriptor>`.
-    Accessor {
-        owner: String,
-        name: String,
-        descriptor: String,
-        is_static: bool,
-        is_interface: bool,
-    },
-    /// `invokestatic <owner>.<name>(<owner>)<ret>` — a synthetic static that takes the receiver as its
-    /// ARGUMENT. This is how a private member is reached from outside its class: an `inline` function's
-    /// body is spliced into the caller, where the private backing field is unreachable, so kotlinc emits
-    /// an `access$get<X>$p` bridge on the declaring class and the splice calls that.
-    AccessBridge {
-        owner: String,
-        name: String,
-        descriptor: String,
-    },
-}
-
-/// The narrow capability the bytecode inliner needs from the classpath (interface segregation /
-/// least-knowledge): read a method's compiled body by owner/name/descriptor. *Whether* a callee is
-/// `inline` is function metadata that travels with the resolved signature (decoded once, alongside the
-/// signature, in `metadata.rs`) and reaches the emitter via the IR — it is not re-queried here. The
-/// emitter depends only on this, not on the whole `Classpath` (caches, jimage, type indexes).
-pub trait MethodBodies {
-    /// The compiled `Code` body of `owner.name descriptor`, or `None` if absent/abstract/native.
-    fn body(&self, owner: &str, name: &str, descriptor: &str) -> Option<MethodCode>;
-    /// Whether `owner` (a JVM internal name) is an INTERFACE — a static method on an interface (a Kotlin
-    /// interface's `foo$default` synthetic) must be referenced by an `InterfaceMethodref` constant even for
-    /// `invokestatic`, else the JVM throws `IncompatibleClassChangeError`. Default `false` (a class owner);
-    /// the classpath overrides it. Only meaningful for a resolved-classpath `Callee::Static` owner.
-    fn owner_is_interface(&self, _owner: &str) -> bool {
-        false
-    }
-    /// Whether `owner.name descriptor` (a method OR a field) is `ACC_PRIVATE`. A private member an
-    /// inline body references is legal in the DEFINING class but unreachable once the body is
-    /// spliced into another class — the splice must decline so the caller emits a real call
-    /// instead. Default `false` (no visibility information).
-    fn member_is_private(&self, _owner: &str, _name: &str, _descriptor: &str) -> bool {
-        false
-    }
-    /// Whether `owner.name descriptor` is PROVABLY reachable from any other class: a public member
-    /// of a public class, both read from a class file this compilation can see.
-    ///
-    /// This is the question a relocated `BootstrapMethods` entry has to answer, and it is not the
-    /// complement of [`MethodBodies::member_is_private`]. "Not private" also covers a
-    /// package-private or protected member, and a public member of a package-private class, none
-    /// of which a host in another package may reference — and it covers a member this compilation
-    /// cannot see at all, where the honest answer is "unknown", not "fine".
-    ///
-    /// Default `false`: an implementation with no visibility information proves nothing, so the
-    /// caller declines. Declining costs a real call; guessing costs a `BootstrapMethodError` at
-    /// the relocated instruction, after verification, when it first runs.
-    fn member_is_publicly_reachable(&self, _owner: &str, _name: &str, _descriptor: &str) -> bool {
-        false
-    }
-    /// Whether `owner.name descriptor` is `ACC_STATIC`. A Kotlin `@JvmStatic` member of an `object` or
-    /// companion is an ordinary MEMBER in the language — the front end resolves and lowers it as one, with
-    /// a receiver — but kotlinc emits its method as a static that takes no receiver. Only the emitter can
-    /// see that, and only it needs to: it drops the receiver and uses `invokestatic`. Default `false` (a
-    /// virtual method); the classpath overrides it.
-    fn method_is_static(&self, _owner: &str, _name: &str, _descriptor: &str) -> bool {
-        false
-    }
-    /// Find a static runtime realization for a semantic array member with this exact JVM descriptor.
-    /// The emitter asks only after resolution has selected the member; implementations must return a
-    /// unique metadata-declared top-level function or `None`.
-    fn static_array_member_realization(
-        &self,
-        _name: &str,
-        _descriptor: &str,
-    ) -> Option<StaticMemberRealization> {
-        None
-    }
-    /// How reading the Kotlin property `property` of `owner` is realized by that class file — the
-    /// accessor or field the emitter must use, and whether it takes a receiver. Walks supertypes, since a
-    /// property may be declared above the receiver's own class. `None` when `owner` isn't a compiled class
-    /// this source can see, or declares no such property; the caller then falls back to the JVM naming
-    /// convention. Default `None`; the classpath overrides it.
-    fn property_read_access(&self, _owner: &str, _property: &str) -> Option<PropertyAccess> {
-        None
-    }
-    /// The write analogue of [`Self::property_read_access`] — the setter or field a `var` property's
-    /// assignment compiles to. `None` when `owner` isn't a compiled class this source can see, declares no
-    /// such property, or the property is read-only.
-    fn property_write_access(&self, _owner: &str, _property: &str) -> Option<PropertyAccess> {
-        None
-    }
-    /// Decode one checked provider accessor identity into its exact JVM property realization.
-    fn external_property_access(
-        &self,
-        _accessor: crate::fir::ExternalCallableId,
-    ) -> Option<PropertyAccess> {
-        None
-    }
-    /// JVM storage for an already-resolved semantic singleton classifier. This is queried only by
-    /// bytecode realization; front-end and common IR never observe the owner or field name.
-    fn singleton_storage(&self, _classifier: TypeName) -> Option<(TypeName, String)> {
-        None
-    }
-}
 
 fn utf8(cp: &[C], i: u16) -> Option<&str> {
     match cp.get(i as usize)? {
