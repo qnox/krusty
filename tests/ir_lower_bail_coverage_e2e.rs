@@ -584,11 +584,27 @@ fn delegated_property_notnull_round_trips() {
     );
 }
 
+/// A delegate class that supplies no convention is refused by the FRONT END, which names both
+/// methods it lacks; the backend is never asked. The differential against kotlinc lives with the
+/// delegate-boundary tests — here the point is that this is not a backend bail.
 #[test]
-fn delegated_property_custom_class_rejected() {
-    assert!(rejects(
-        "class D\nclass C { var x: Int by D() }\nfun main() { println(C().x) }\n"
-    ));
+fn delegated_property_custom_class_is_refused_by_the_front_end() {
+    let source = "class D\nclass C { var x: Int by D() }\nfun main() { println(C().x) }\n";
+    assert_eq!(
+        common::front_end_diagnostics_located(
+            source,
+            &[common::stdlib_jar()],
+            Some(common::jdk_modules().as_path()),
+        ),
+        vec![
+            "2:22: error: type 'D' has no method 'getValue(C, KMutableProperty1<*, *>)', so it \
+             cannot serve as a delegate."
+                .to_string(),
+            "2:22: error: type 'D' has no method 'setValue(C, KMutableProperty1<*, *>, Int)', so \
+             it cannot serve as a delegate for var (read-write property)."
+                .to_string(),
+        ],
+    );
 }
 
 #[test]
