@@ -13429,10 +13429,11 @@ impl<'a> Emitter<'a> {
             &body.bootstrap_methods,
             &mut |o, n, d| self.bodies.member_is_private(o, n, d),
             &mut |o, n, d| self.bodies.member_is_publicly_reachable(o, n, d),
+            &mut |class| self.bodies.class_is_publicly_reachable(class),
         ) {
             crate::trace_compiler!(
                 "splice",
-                "private member reference in {owner}.{name}{descriptor}"
+                "inaccessible relocation dependency in {owner}.{name}{descriptor}"
             );
             return false;
         }

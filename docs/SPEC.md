@@ -2810,11 +2810,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   The instruction names a `BootstrapMethods` entry of its DEFINING class by index, not a pool entry,
   so relocation re-interns the entry — its method handle, its static arguments and its name/type —
   in the host (`ClassWriter::add_bootstrap` dedupes). Whether it may move is decided from the
-  entry's dependency graph, never from the factory's spelling: `inline::bootstrap_members` reports
-  every member the handle and its static arguments reach, `None` for a constant kind relocation
-  cannot carry (`CONSTANT_Dynamic`, a handle onto a non-member, an index past the pool), and
-  `references_private_member` refuses a splice when any reached member is `ACC_PRIVATE` — the same
-  question it asks of an instruction operand, at the only other place a body names a member. That is
+  entry's dependency graph, never from the factory's spelling: the relocation inventory reports
+  every member and class the handle, its descriptors, its static arguments, and the call-site
+  descriptor reach, `None` for a
+  constant kind or descriptor relocation cannot carry (`CONSTANT_Dynamic`, a handle onto a
+  non-member, an index past the pool), and `references_private_member` refuses a splice unless each
+  bootstrap dependency is provably public — a stricter question than it asks of an ordinary
+  instruction operand, because bootstrap linkage has no verifier-visible use site. That is
   what separates a `StringConcatFactory` entry (a public factory, a recipe string, constants) from a
   `LambdaMetafactory` one (an implementation handle in the declaring class, usually private and
   synthetic), without either name appearing in the rule. An inaccessible entry that relocated would

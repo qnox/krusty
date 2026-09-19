@@ -9,8 +9,8 @@
 //! The two halves live together because they answer one question between them. Relocation is
 //! mechanical: it either re-interns an entry or reports that it cannot. Eligibility is the
 //! judgement, and it is the half with no second chance — the verifier does not look inside a
-//! bootstrap entry, so a member the host may not reference throws `BootstrapMethodError` when the
-//! relocated instruction first executes, long after anything could have refused it.
+//! bootstrap entry, so a dependency the host may not reference throws `BootstrapMethodError` when
+//! the relocated instruction first executes, long after anything could have refused it.
 //!
 //! The writer boundary is deliberately narrow: nothing here decides WHAT to emit. A `ClassWriter`
 //! is taken only to intern, and every function reports failure rather than emitting something
@@ -18,6 +18,90 @@
 use super::{class_name, instruction_len, name_and_type, pool_operand, utf8, utf8_value, Insn};
 use crate::jvm::classfile::ClassWriter;
 use crate::jvm::classreader::C;
+
+type MemberDependency<'a> = (&'a str, &'a str, &'a str);
+
+/// Every linkage dependency carried by one bootstrap entry.
+#[derive(Debug, Eq, PartialEq)]
+struct BootstrapDependencies<'a> {
+    members: Vec<MemberDependency<'a>>,
+    classes: Vec<&'a str>,
+}
+
+fn valid_internal_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('/')
+        && !name.ends_with('/')
+        && !name.contains("//")
+        && !name.contains(['.', ';', '['])
+}
+
+/// The reference class named by one field descriptor, if any. Primitive scalars and primitive
+/// arrays have no class dependency. The full descriptor must be consumed.
+fn field_descriptor_class(descriptor: &str) -> Option<Option<&str>> {
+    let base = descriptor.trim_start_matches('[');
+    if base.len() == 1
+        && matches!(
+            base.as_bytes()[0],
+            b'B' | b'C' | b'D' | b'F' | b'I' | b'J' | b'S' | b'Z'
+        )
+    {
+        return Some(None);
+    }
+    let class = base.strip_prefix('L')?.strip_suffix(';')?;
+    valid_internal_name(class).then_some(Some(class))
+}
+
+fn descriptor_classes<'a>(descriptor: &'a str, method: bool) -> Option<Vec<&'a str>> {
+    let fields = if method {
+        let (parameters, result) = crate::jvm::names::parse_method_descriptor(descriptor)?;
+        parameters
+            .into_iter()
+            .chain((result != "V").then_some(result))
+            .collect::<Vec<_>>()
+    } else {
+        vec![descriptor]
+    };
+    fields
+        .into_iter()
+        .try_fold(Vec::new(), |mut classes, field| {
+            if let Some(class) = field_descriptor_class(field)? {
+                classes.push(class);
+            }
+            Some(classes)
+        })
+}
+
+fn class_constant_dependencies(name: &str) -> Option<Vec<&str>> {
+    if name.starts_with('[') {
+        return descriptor_classes(name, false);
+    }
+    valid_internal_name(name).then_some(vec![name])
+}
+
+fn member_dependency<'a>(
+    src_cp: &'a [C],
+    kind: u8,
+    member: u16,
+) -> Option<(MemberDependency<'a>, Vec<&'a str>)> {
+    let (class, signature, method) = match (kind, src_cp.get(member as usize)?) {
+        (1..=4, C::Fieldref(class, signature)) => (*class, *signature, false),
+        (5 | 8, C::Methodref(class, signature)) => (*class, *signature, true),
+        (6 | 7, C::Methodref(class, signature) | C::InterfaceMethodref(class, signature)) => {
+            (*class, *signature, true)
+        }
+        (9, C::InterfaceMethodref(class, signature)) => (*class, *signature, true),
+        _ => return None,
+    };
+    let owner = class_name(src_cp, class)?;
+    if !valid_internal_name(owner) {
+        return None;
+    }
+    let (name, descriptor) = name_and_type(src_cp, signature)?;
+    let mut classes = vec![owner];
+    classes.extend(descriptor_classes(descriptor, method)?);
+    Some(((owner, name, descriptor), classes))
+}
 
 /// Re-intern the source constant-pool entry at `idx` (from the inline body's defining class, `src_cp`)
 /// into the target class's pool (`cw`), returning the new pool index. Resolving each entry to its
@@ -75,13 +159,14 @@ pub fn relocate_const(src_cp: &[C], idx: u16, cw: &mut ClassWriter) -> Option<u1
     }
 }
 
-/// Every member one `BootstrapMethods` entry reaches, as `(owner, name, descriptor)`: the handle
-/// naming the factory, and each static argument that names a member in turn.
+/// Every member and class one `BootstrapMethods` entry reaches: the handle naming the factory, its
+/// member descriptor, and every static argument.
 ///
 /// This is the complete dependency graph an `invokedynamic` carries. Relocating the instruction
 /// into another class re-interns every one of these in the HOST's pool, so the property that
 /// decides whether the entry may move is structural, not a question of which factory it names: the
-/// host must be allowed to reference each member, and each entry must be a constant kind
+/// host must be allowed to reference each member and every class named by a class constant or
+/// descriptor, and each entry must be a constant kind
 /// [`relocate_const`] can re-intern. A `StringConcatFactory` entry reaches only its own public
 /// factory, a recipe string and constants; a `LambdaMetafactory` one also names an implementation
 /// handle in the DEFINING class, which is usually private and synthetic — but a concat entry may
@@ -91,48 +176,55 @@ pub fn relocate_const(src_cp: &[C], idx: u16, cw: &mut ClassWriter) -> Option<u1
 /// `None` when any reachable entry is a kind relocation cannot carry (a `CONSTANT_Dynamic`, a
 /// handle onto something that is not a member, an index past the pool). Fail closed: the caller
 /// cannot vouch for what it cannot read, and declining only means a real call is emitted.
-pub fn bootstrap_members<'a>(
+fn bootstrap_dependencies<'a>(
     src_cp: &'a [C],
     handle: u16,
     arguments: &[u16],
-) -> Option<Vec<(&'a str, &'a str, &'a str)>> {
+) -> Option<BootstrapDependencies<'a>> {
     // JVMS 4.7.23: a bootstrap method is named by a `CONSTANT_MethodHandle` and nothing else. A
     // slot holding anything else is a table this walk cannot read, not an entry with no members.
-    if !matches!(src_cp.get(handle as usize), Some(C::MethodHandle(..))) {
+    if !matches!(src_cp.get(handle as usize), Some(C::MethodHandle(6 | 8, _))) {
         return None;
     }
     let mut members = Vec::new();
+    let mut classes = Vec::new();
     let mut pending: Vec<u16> = Vec::with_capacity(1 + arguments.len());
     pending.push(handle);
     pending.extend_from_slice(arguments);
     while let Some(index) = pending.pop() {
         match src_cp.get(index as usize)? {
             // A handle is the only entry that names a member the host would have to reference.
-            C::MethodHandle(_, member) => {
-                let (class, signature) = match src_cp.get(*member as usize)? {
-                    C::Methodref(c, nt) | C::InterfaceMethodref(c, nt) | C::Fieldref(c, nt) => {
-                        (*c, *nt)
-                    }
-                    _ => return None,
-                };
-                let owner = class_name(src_cp, class)?;
-                let (name, descriptor) = name_and_type(src_cp, signature)?;
-                members.push((owner, name, descriptor));
+            C::MethodHandle(kind, member) => {
+                let (member, member_classes) = member_dependency(src_cp, *kind, *member)?;
+                members.push(member);
+                classes.extend(member_classes);
             }
-            // A `MethodType` and the value constants re-intern as themselves, reaching nothing. A
-            // `Class` argument names a type, whose own accessibility the verifier decides at the
-            // use site exactly as it does for a `checkcast` the body already carries.
-            C::MethodType(_)
-            | C::Class(_)
-            | C::String(_)
-            | C::Integer(_)
-            | C::Float(_)
-            | C::Long(_)
-            | C::Double(_) => {}
+            C::MethodType(descriptor) => {
+                classes.extend(descriptor_classes(utf8(src_cp, *descriptor)?, true)?);
+            }
+            C::Class(name) => {
+                classes.extend(class_constant_dependencies(utf8(src_cp, *name)?)?);
+            }
+            // Validation must consume exactly the indirection relocation will consume. Accepting
+            // the String slot alone would let a malformed payload fail only after an earlier
+            // bootstrap entry had already mutated the destination writer.
+            C::String(value) => {
+                utf8_value(src_cp, *value)?;
+            }
+            C::Integer(_) | C::Float(_) | C::Long(_) | C::Double(_) => {}
             _ => return None,
         }
     }
-    Some(members)
+    Some(BootstrapDependencies { members, classes })
+}
+
+/// Compatibility projection for callers interested only in member dependencies.
+pub fn bootstrap_members<'a>(
+    src_cp: &'a [C],
+    handle: u16,
+    arguments: &[u16],
+) -> Option<Vec<(&'a str, &'a str, &'a str)>> {
+    bootstrap_dependencies(src_cp, handle, arguments).map(|dependencies| dependencies.members)
 }
 
 /// Whether `code` references (through `src_cp`) a method/field `is_private` flags as `ACC_PRIVATE`.
@@ -148,9 +240,11 @@ pub fn bootstrap_members<'a>(
 /// runs.
 ///
 /// A `BootstrapMethods` entry must PROVE reachability through `is_publicly_reachable`. Its handle
-/// and static arguments appear in no instruction operand, nothing verifies them, and an entry that
-/// cannot be reached throws `BootstrapMethodError` the first time the relocated instruction
-/// executes — after verification, so no earlier check catches it. Anything unproven declines.
+/// and static arguments appear in no instruction operand. Member handles are checked through
+/// `is_publicly_reachable`; class constants and every reference type in member/method-type
+/// descriptors are checked through `class_is_publicly_reachable`. An entry that cannot be reached
+/// throws `BootstrapMethodError` the first time the relocated instruction executes — after
+/// verification, so no earlier check catches it. Anything unproven declines.
 ///
 /// `bootstraps` is the DEFINING class's table, indexed as `CONSTANT_InvokeDynamic` indexes it.
 pub fn references_private_member(
@@ -159,6 +253,7 @@ pub fn references_private_member(
     bootstraps: &[(u16, Vec<u16>)],
     is_private: &mut dyn FnMut(&str, &str, &str) -> bool,
     is_publicly_reachable: &mut dyn FnMut(&str, &str, &str) -> bool,
+    class_is_publicly_reachable: &mut dyn FnMut(&str) -> bool,
 ) -> bool {
     let mut pc = 0;
     while pc < code.len() {
@@ -178,11 +273,18 @@ pub fn references_private_member(
                 // An `invokedynamic` names a bootstrap entry rather than a member. Its whole graph
                 // is walked; an unreadable one reports `true` for the same reason a malformed
                 // instruction does.
-                Some(C::InvokeDynamic(entry, _)) => {
+                Some(C::InvokeDynamic(entry, call_site)) => {
                     let Some((handle, arguments)) = bootstraps.get(*entry as usize) else {
                         return true;
                     };
-                    let Some(members) = bootstrap_members(src_cp, *handle, arguments) else {
+                    let Some(dependencies) = bootstrap_dependencies(src_cp, *handle, arguments)
+                    else {
+                        return true;
+                    };
+                    let Some((_, descriptor)) = name_and_type(src_cp, *call_site) else {
+                        return true;
+                    };
+                    let Some(call_site_classes) = descriptor_classes(descriptor, true) else {
                         return true;
                     };
                     // A bootstrap entry must PROVE reachability, where an instruction operand
@@ -190,9 +292,18 @@ pub fn references_private_member(
                     // member, for a public member of a package-private class, and for a member
                     // this compilation cannot see at all — and an entry that fails any of those
                     // throws at LINKAGE, so no verifier check exists to fall back on.
-                    if !members.into_iter().all(|(owner, name, descriptor)| {
-                        is_publicly_reachable(owner, name, descriptor)
-                    }) {
+                    if !dependencies
+                        .members
+                        .into_iter()
+                        .all(|(owner, name, descriptor)| {
+                            is_publicly_reachable(owner, name, descriptor)
+                        })
+                        || !dependencies
+                            .classes
+                            .into_iter()
+                            .chain(call_site_classes)
+                            .all(&mut *class_is_publicly_reachable)
+                    {
                         return true;
                     }
                     None
@@ -220,6 +331,25 @@ pub fn relocate_insns(
     bootstraps: &[(u16, Vec<u16>)],
     cw: &mut ClassWriter,
 ) -> Option<()> {
+    // Validate every bootstrap graph before interning anything. A later malformed entry must not
+    // leave a partially relocated bootstrap or constant-pool graph in the destination writer.
+    for insn in insns.iter() {
+        let Insn::Plain { op: 0xba, operands } = insn else {
+            continue;
+        };
+        let [high, low, 0, 0] = operands.as_slice() else {
+            return None;
+        };
+        let source = u16::from_be_bytes([*high, *low]);
+        let C::InvokeDynamic(bootstrap, name_and_type_index) = *src_cp.get(source as usize)? else {
+            return None;
+        };
+        let (handle, arguments) = bootstraps.get(bootstrap as usize)?;
+        bootstrap_dependencies(src_cp, *handle, arguments)?;
+        let (_, descriptor) = name_and_type(src_cp, name_and_type_index)?;
+        crate::jvm::names::parse_method_descriptor(descriptor)?;
+    }
+
     for insn in insns.iter_mut() {
         let Insn::Plain { op, operands } = insn else {
             continue;
@@ -290,4 +420,158 @@ pub fn relocate_insns(
         }
     }
     Some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bootstrap_pool(argument: C, argument_utf8: &str) -> Vec<C> {
+        vec![
+            C::Other,
+            C::Utf8("public/Bootstrap".to_string()),
+            C::Class(1),
+            C::Utf8("bootstrap".to_string()),
+            C::Utf8("()V".to_string()),
+            C::NameAndType(3, 4),
+            C::Methodref(2, 5),
+            C::MethodHandle(6, 6),
+            C::Utf8(argument_utf8.to_string()),
+            argument,
+            C::Utf8("run".to_string()),
+            C::NameAndType(10, 4),
+            C::InvokeDynamic(0, 11),
+        ]
+    }
+
+    fn references_unreachable_class(pool: &[C]) -> bool {
+        references_private_member(
+            &[0xba, 0x00, 0x0c, 0x00, 0x00, 0xb1],
+            pool,
+            &[(7, vec![9])],
+            &mut |_, _, _| false,
+            &mut |_, _, _| true,
+            &mut |class| class != "hidden/Type",
+        )
+    }
+
+    #[test]
+    fn inaccessible_class_argument_including_array_element_declines() {
+        let pool = bootstrap_pool(C::Class(8), "[[Lhidden/Type;");
+        assert_eq!(
+            bootstrap_dependencies(&pool, 7, &[9]),
+            Some(BootstrapDependencies {
+                members: vec![("public/Bootstrap", "bootstrap", "()V")],
+                classes: vec!["hidden/Type", "public/Bootstrap"],
+            })
+        );
+        assert!(references_unreachable_class(&pool));
+    }
+
+    #[test]
+    fn inaccessible_method_type_argument_declines() {
+        let pool = bootstrap_pool(C::MethodType(8), "(Lhidden/Type;)V");
+        assert_eq!(
+            bootstrap_dependencies(&pool, 7, &[9]),
+            Some(BootstrapDependencies {
+                members: vec![("public/Bootstrap", "bootstrap", "()V")],
+                classes: vec!["hidden/Type", "public/Bootstrap"],
+            })
+        );
+        assert!(references_unreachable_class(&pool));
+    }
+
+    #[test]
+    fn member_descriptor_reference_types_join_the_dependency_inventory() {
+        let mut pool = bootstrap_pool(C::String(8), "recipe");
+        pool[4] = C::Utf8("(Lhidden/Argument;)[Lhidden/Result;".to_string());
+        assert_eq!(
+            bootstrap_dependencies(&pool, 7, &[9]),
+            Some(BootstrapDependencies {
+                members: vec![(
+                    "public/Bootstrap",
+                    "bootstrap",
+                    "(Lhidden/Argument;)[Lhidden/Result;"
+                )],
+                classes: vec!["public/Bootstrap", "hidden/Argument", "hidden/Result"],
+            })
+        );
+    }
+
+    #[test]
+    fn malformed_bootstrap_descriptor_fails_closed() {
+        let pool = bootstrap_pool(C::MethodType(8), "(Lhidden/Type)V");
+        assert_eq!(bootstrap_dependencies(&pool, 7, &[9]), None);
+        assert!(references_unreachable_class(&pool));
+    }
+
+    #[test]
+    fn inaccessible_call_site_descriptor_type_declines() {
+        let mut pool = bootstrap_pool(C::String(8), "recipe");
+        pool.push(C::Utf8("(Lhidden/Type;)V".to_string()));
+        pool[11] = C::NameAndType(10, 13);
+        assert!(references_unreachable_class(&pool));
+    }
+
+    #[test]
+    fn all_bootstrap_graphs_are_validated_before_writer_mutation() {
+        let mut pool = bootstrap_pool(C::String(8), "recipe");
+        pool.extend([
+            C::Utf8("(Lbroken)V".to_string()),
+            C::MethodType(13),
+            C::InvokeDynamic(1, 11),
+        ]);
+        let mut instructions = vec![
+            Insn::Plain {
+                op: 0xba,
+                operands: vec![0, 12, 0, 0],
+            },
+            Insn::Plain {
+                op: 0xba,
+                operands: vec![0, 15, 0, 0],
+            },
+        ];
+        let mut writer = ClassWriter::new("Host", "java/lang/Object");
+        assert!(relocate_insns(
+            &mut instructions,
+            &pool,
+            &[(7, vec![9]), (7, vec![14])],
+            &mut writer,
+        )
+        .is_none());
+        assert_eq!(
+            writer.finish(),
+            ClassWriter::new("Host", "java/lang/Object").finish(),
+            "a later malformed bootstrap must be found before the first entry mutates the writer"
+        );
+    }
+
+    #[test]
+    fn malformed_later_string_is_found_before_writer_mutation() {
+        let mut pool = bootstrap_pool(C::String(8), "recipe");
+        pool.extend([C::Integer(7), C::String(13), C::InvokeDynamic(1, 11)]);
+        let mut instructions = vec![
+            Insn::Plain {
+                op: 0xba,
+                operands: vec![0, 12, 0, 0],
+            },
+            Insn::Plain {
+                op: 0xba,
+                operands: vec![0, 15, 0, 0],
+            },
+        ];
+        let mut writer = ClassWriter::new("Host", "java/lang/Object");
+        assert!(relocate_insns(
+            &mut instructions,
+            &pool,
+            &[(7, vec![9]), (7, vec![14])],
+            &mut writer,
+        )
+        .is_none());
+        assert_eq!(
+            writer.finish(),
+            ClassWriter::new("Host", "java/lang/Object").finish(),
+            "a malformed later string must be found before the first entry mutates the writer"
+        );
+    }
 }

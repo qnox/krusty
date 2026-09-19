@@ -2690,7 +2690,8 @@ mod tests {
                 &mut never_private,
                 &mut |owner: &str, name: &str, _: &str| {
                     !(owner == "fixture/LibKt" && name == "lambda$0")
-                }
+                },
+                &mut |_: &str| true,
             ),
             "the implementation handle is reached only through the bootstrap entry"
         );
@@ -2700,7 +2701,8 @@ mod tests {
                 &pool,
                 &bootstraps,
                 &mut never_private,
-                &mut |_: &str, _: &str, _: &str| true
+                &mut |_: &str, _: &str, _: &str| true,
+                &mut |_: &str| true,
             ),
             "an entry whose members are all provably reachable does not decline"
         );
@@ -2710,7 +2712,8 @@ mod tests {
                 &pool,
                 &bootstraps,
                 &mut never_private,
-                &mut |_: &str, _: &str, _: &str| false
+                &mut |_: &str, _: &str, _: &str| false,
+                &mut |_: &str| true,
             ),
             "a member nothing can prove reachable declines — which is what an UNKNOWN owner \
              answers. The standard is proof, not the absence of a `private` flag."
@@ -2721,7 +2724,8 @@ mod tests {
                 &pool,
                 &[],
                 &mut never_private,
-                &mut |_: &str, _: &str, _: &str| true
+                &mut |_: &str, _: &str, _: &str| true,
+                &mut |_: &str| true,
             ),
             "an `invokedynamic` naming an entry the table does not have fails closed"
         );

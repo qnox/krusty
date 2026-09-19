@@ -69,6 +69,12 @@ pub trait MethodBodies {
         false
     }
 
+    /// Whether a class named by a relocated bootstrap dependency is provably reachable from any
+    /// destination class. Unknown and non-public classes return false.
+    fn class_is_publicly_reachable(&self, _class: &str) -> bool {
+        false
+    }
+
     /// Whether a selected JVM method realization is static.
     fn method_is_static(&self, _owner: &str, _name: &str, _descriptor: &str) -> bool {
         false
