@@ -17,6 +17,7 @@ use super::classfile::{
 use super::classreader::ClassInfo;
 use super::names::method_descriptor;
 use crate::libraries::{CallSig, GenericSig, ParamList, TypeKind};
+use crate::metadata::decode::{DecodedPackageFragment, QName};
 use crate::types::{intern, type_name, Ty, TypeName, Visibility};
 use std::collections::HashMap;
 
@@ -4170,37 +4171,6 @@ fn parse_type_class_and_nullable(body: &[u8]) -> (Option<u64>, bool) {
 // (field 30 → `TypeTable.type` field 1), whose `Type.class_name` (field 6) is a `QualifiedNameTable`
 // id, resolved against the fragment's `StringTable` exactly as kotlinc's `NameResolverImpl`.
 
-/// One `QualifiedNameTable.QualifiedName`: parent id (`-1` at the root), short-name id into the
-/// `StringTable`, and kind (`0` CLASS, `1` PACKAGE, `2` LOCAL; default PACKAGE).
-struct QName {
-    parent: i64,
-    short: usize,
-    kind: u64,
-}
-
-fn parse_qname(body: &[u8]) -> QName {
-    let mut pb = Pb { b: body, i: 0 };
-    let mut q = QName {
-        parent: -1,
-        short: 0,
-        kind: 1,
-    };
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (1, 0) => q.parent = pb.varint().map(|v| v as i64).unwrap_or(-1),
-            (2, 0) => q.short = pb.varint().unwrap_or(0) as usize,
-            (3, 0) => q.kind = pb.varint().unwrap_or(1),
-            (_, w) => {
-                if pb.skip(w).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-    q
-}
-
 /// Resolve a `QualifiedNameTable` id to its internal name, mirroring `NameResolverImpl.traverseIds`:
 /// walk the parent chain, prepending each segment, joining PACKAGE segments with `/` and the relative
 /// CLASS segments with `.`, then `package/Relative.Class` (`kotlin/collections/MutableList`).
@@ -4818,7 +4788,7 @@ fn parse_builtin_package_functions(
 /// .class_name` → `QualifiedNameTable`). The single source for both the collection hierarchy and a
 /// builtin type's API — no curated/hardcoded tables.
 pub fn parse_builtins(data: &[u8]) -> BuiltinPackage {
-    let Some(pf) = klib_validation::strip_builtins_header(data) else {
+    let Some(pf) = crate::metadata::decode::strip_builtins_header(data) else {
         return BuiltinPackage::default();
     };
     parse_builtin_package_fragment(pf)
@@ -4827,7 +4797,7 @@ pub fn parse_builtins(data: &[u8]) -> BuiltinPackage {
 /// Parse the compiler-owned builtin `PackageFragment` after its version header. Dependency-owned
 /// `.knm` entries use the fallible checked entry point in `klib_validation` instead.
 fn parse_builtin_package_fragment(pf: &[u8]) -> BuiltinPackage {
-    klib_validation::decode_package_fragment(pf)
+    crate::metadata::decode::decode_package_fragment(pf)
         .and_then(parse_decoded_package_fragment)
         .unwrap_or_default()
 }
@@ -4836,17 +4806,17 @@ fn parse_builtin_package_fragment(pf: &[u8]) -> BuiltinPackage {
 /// this only through the fallible decoder; compiler-owned builtins retain their historical empty
 /// result on an invalid embedded resource at the wrapper above.
 fn parse_decoded_package_fragment(
-    decoded: klib_validation::DecodedPackageFragment<'_>,
+    decoded: DecodedPackageFragment<'_>,
 ) -> Result<BuiltinPackage, klib_validation::PackageFragmentDecodeError> {
+    let inventory = klib_validation::semantic_inventory(&decoded)?;
     let mut out = BuiltinPackage::default();
-    let klib_validation::DecodedPackageFragment {
+    let DecodedPackageFragment {
         strings,
         qnames,
         package,
         classes,
         file_annotations: _,
         class_names: _,
-        inventory,
     } = decoded;
     for cb in &classes {
         let mut cp = Pb { b: cb, i: 0 };

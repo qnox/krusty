@@ -50,7 +50,7 @@ fn validate_annotation_value(
 ) -> Result<(), PackageFragmentDecodeError> {
     let mut cursor = Cursor::new(body, 0);
     let mut kinds = 0;
-    while cursor.offset < body.len() {
+    while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "annotation value")?;
         match (number, wire) {
             (1, 0) => {
@@ -100,7 +100,7 @@ fn validate_annotation(
 ) -> Result<(), PackageFragmentDecodeError> {
     let mut cursor = Cursor::new(body, 0);
     let mut class_id = None;
-    while cursor.offset < body.len() {
+    while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "annotation")?;
         match (number, wire) {
             (1, 0) => {
@@ -114,7 +114,7 @@ fn validate_annotation(
                 let mut argument = Cursor::new(argument, 0);
                 let mut name = None;
                 let mut value = None;
-                while argument.offset < argument.bytes.len() {
+                while !argument.at_end() {
                     let (number, wire) = field(&mut argument, "annotation argument")?;
                     match (number, wire) {
                         (1, 0) => name = Some(argument.varint("annotation argument name")?),
@@ -155,7 +155,7 @@ fn validate_annotation_fields(
     context: &str,
 ) -> Result<(), PackageFragmentDecodeError> {
     let mut cursor = Cursor::new(body, 0);
-    while cursor.offset < body.len() {
+    while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, context)?;
         if annotation_fields.contains(&number) {
             require_wire(&cursor, wire, 2, context)?;
@@ -175,7 +175,7 @@ fn message_bodies<'a>(
 ) -> Result<Vec<&'a [u8]>, PackageFragmentDecodeError> {
     let mut cursor = Cursor::new(body, 0);
     let mut bodies = Vec::new();
-    while cursor.offset < body.len() {
+    while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, context)?;
         if number == field_number {
             require_wire(&cursor, wire, 2, context)?;
@@ -206,7 +206,7 @@ fn type_table_bodies<'a>(
     let types = message_bodies(table, 1, "type table")?;
     let mut cursor = Cursor::new(table, 0);
     let mut first_nullable = None;
-    while cursor.offset < table.len() {
+    while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "type table")?;
         if number == 2 {
             require_wire(&cursor, wire, 0, "type table")?;
@@ -260,7 +260,7 @@ impl SemanticTables<'_> {
         let mut outer_ids = Vec::new();
         let mut abbreviated_inline = Vec::new();
         let mut abbreviated_ids = Vec::new();
-        while cursor.offset < body.len() {
+        while !cursor.at_end() {
             let (number, wire) = field(&mut cursor, context)?;
             match (number, wire) {
                 (2, 2) => {
@@ -269,7 +269,7 @@ impl SemanticTables<'_> {
                     let mut projection = 2;
                     let mut inline = Vec::new();
                     let mut ids = Vec::new();
-                    while argument.offset < argument.bytes.len() {
+                    while !argument.at_end() {
                         let (number, wire) = field(&mut argument, "type argument")?;
                         match (number, wire) {
                             (1, 0) => projection = argument.varint("type projection")?,
@@ -485,7 +485,7 @@ impl SemanticTables<'_> {
             let mut ids = 0;
             let mut names_seen = 0;
             let mut variances = 0;
-            while cursor.offset < body.len() {
+            while !cursor.at_end() {
                 let (number, wire) = field(&mut cursor, "type-parameter declaration")?;
                 match (number, wire) {
                     (1, 0) => {
@@ -543,7 +543,7 @@ impl SemanticTables<'_> {
                 validate_annotation(&annotation, self.strings, self.qnames)?;
                 let mut cursor = Cursor::new(&annotation, 0);
                 let mut class_id = None;
-                while cursor.offset < annotation.len() {
+                while !cursor.at_end() {
                     let (number, wire) = field(&mut cursor, "type-parameter annotation")?;
                     if number == 1 {
                         require_wire(&cursor, wire, 0, "type-parameter annotation")?;
@@ -588,7 +588,7 @@ fn validate_contract_expression(
     let mut cursor = Cursor::new(body, 0);
     let mut inline_types = Vec::new();
     let mut type_ids = Vec::new();
-    while cursor.offset < body.len() {
+    while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "contract expression")?;
         match (number, wire) {
             (4, 2) => inline_types.push(cursor.length_delimited("contract is-instance type")?.0),
@@ -722,7 +722,7 @@ fn semantic_function(
         validate_contract(contract, &contract_tables, &type_parameters)?;
     }
     let mut extras = Cursor::new(body, 0);
-    while extras.offset < body.len() {
+    while !extras.at_end() {
         let (number, wire) = field(&mut extras, "function declaration")?;
         match (number, wire) {
             (14, 2) => {
@@ -863,7 +863,7 @@ fn semantic_property(
     let mut return_id = None;
     let mut legacy_flags = None;
     let mut modern_flags = None;
-    while cursor.offset < body.len() {
+    while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "property declaration")?;
         match (number, wire) {
             (1, 0) => legacy_flags = Some(cursor.varint("property flags")?),
@@ -886,7 +886,7 @@ fn semantic_property(
                 let (packed, base) =
                     cursor.length_delimited("property context receiver type ids")?;
                 let mut packed = Cursor::new(packed, base);
-                while packed.offset < packed.bytes.len() {
+                while !packed.at_end() {
                     let id = packed.varint("property context receiver type id")?;
                     tables.ty_by_id(id, &type_parameters, 0, "property context receiver")?;
                 }
@@ -957,7 +957,7 @@ fn validate_type_alias(
     let mut underlying_id = None;
     let mut expanded_body = None;
     let mut expanded_id = None;
-    while cursor.offset < body.len() {
+    while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "type-alias declaration")?;
         match (number, wire) {
             (2, 0) => name = Some(cursor.varint("type-alias name")?),
@@ -998,7 +998,7 @@ fn validate_enum_entry(
     validate_annotation_fields(body, &[2, 170], strings, qnames, "enum entry")?;
     let mut cursor = Cursor::new(body, 0);
     let mut names = 0;
-    while cursor.offset < body.len() {
+    while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "enum entry")?;
         if number == 1 {
             require_wire(&cursor, wire, 0, "enum entry")?;
@@ -1035,7 +1035,7 @@ fn semantic_constructor(
     let mut names = Vec::new();
     let mut defaults = Vec::new();
     let mut vararg = None;
-    while cursor.offset < body.len() {
+    while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "constructor declaration")?;
         match (number, wire) {
             (1, 0) => flags = cursor.varint("constructor flags")?,
@@ -1076,7 +1076,7 @@ fn semantic_class_header(body: &[u8]) -> Result<SemanticClassHeader, PackageFrag
     let mut cursor = Cursor::new(body, 0);
     let mut flags = 6;
     let mut fq_name = None;
-    while cursor.offset < body.len() {
+    while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "class declaration")?;
         match (number, wire) {
             (1, 0) => flags = cursor.varint("class flags")?,
@@ -1129,14 +1129,14 @@ fn semantic_class(
     let mut functions = Vec::new();
     let mut properties = Vec::new();
     let mut type_aliases = Vec::new();
-    while cursor.offset < body.len() {
+    while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "class declaration")?;
         match (number, wire) {
             (2, 0) => supertype_ids.push(cursor.varint("class supertype id")?),
             (2, 2) => {
                 let (packed, base) = cursor.length_delimited("class supertype ids")?;
                 let mut packed = Cursor::new(packed, base);
-                while packed.offset < packed.bytes.len() {
+                while !packed.at_end() {
                     supertype_ids.push(packed.varint("class supertype id")?);
                 }
             }
@@ -1148,7 +1148,7 @@ fn semantic_class(
             (7, 2) => {
                 let (packed, base) = cursor.length_delimited("nested-class name ids")?;
                 let mut packed = Cursor::new(packed, base);
-                while packed.offset < packed.bytes.len() {
+                while !packed.at_end() {
                     let id = packed.varint("nested-class name id")?;
                     semantic_string(strings, id, "nested-class name")?;
                 }
@@ -1160,7 +1160,7 @@ fn semantic_class(
             (16, 2) => {
                 let (packed, base) = cursor.length_delimited("sealed-subclass names")?;
                 let mut packed = Cursor::new(packed, base);
-                while packed.offset < packed.bytes.len() {
+                while !packed.at_end() {
                     let id = packed.varint("sealed-subclass qualified-name id")?;
                     semantic_qname(strings, qnames, id, "sealed subclass")?;
                 }
@@ -1189,7 +1189,7 @@ fn semantic_class(
             (21, 2) => {
                 let (packed, base) = cursor.length_delimited("class context receiver type ids")?;
                 let mut packed = Cursor::new(packed, base);
-                while packed.offset < packed.bytes.len() {
+                while !packed.at_end() {
                     let id = packed.varint("class context receiver type id")?;
                     tables.ty_by_id(id, &type_parameters, 0, "class context receiver")?;
                 }
@@ -1270,7 +1270,6 @@ pub(super) fn parse(
         classes,
         file_annotations,
         class_names,
-        inventory: _,
     } = decoded;
     let mut result = BuiltinPackage::default();
     for annotation in file_annotations {
