@@ -507,3 +507,184 @@ fn a_cross_file_defaulted_call_maps_its_lines_like_kotlinc() {
     );
     assert_eq!(method_lines(&krusty, "int run(int)"), want, "run lines");
 }
+
+/// The complete `LineNumberTable` of one method, from both compilers, asserted equal — and the
+/// reference's own table spelled out so a change in it is visible in the diff rather than silently
+/// redefining the contract.
+fn assert_line_table(name: &str, src: &str, class: &str, signature: &str, want: &[&str]) {
+    let (reference, krusty) = disassemble_both(name, src, class);
+    let reference_lines = method_lines(&reference, signature);
+    assert_eq!(
+        reference_lines, want,
+        "{name}: kotlinc's own table for `{signature}`"
+    );
+    assert_eq!(
+        method_lines(&krusty, signature),
+        reference_lines,
+        "{name}: complete line table for `{signature}`, offsets included"
+    );
+}
+
+/// A FUNCTION VALUE's invocation is a dispatch like any other: `Function2.invoke` returns to the
+/// line the call is written on, after its operands have each marked their own.
+#[test]
+fn a_multi_line_function_value_invocation_returns_to_its_line() {
+    assert_line_table(
+        "FunctionValueDispatch",
+        "fun run(f: (Int, Int) -> Int, x: Int): Int = f(\n\
+         \x20   x,\n\
+         \x20   x + 1,\n\
+         )\n",
+        "FunctionValueDispatchKt",
+        "int run(kotlin.jvm.functions.Function2<? super java.lang.Integer, ? super java.lang.Integer, java.lang.Integer>, int)",
+        &["line 1: 6", "line 2: 7", "line 3: 11", "line 1: 17", "line 4: 28"],
+    );
+}
+
+/// `enumValueOf<E>(…)` keeps TWO entries at one offset: the call's own line, then the operand's.
+/// A mark that replaced the entry already at that offset could not reproduce it.
+#[test]
+fn a_multi_line_enum_value_of_keeps_both_entries_at_its_dispatch() {
+    assert_line_table(
+        "EnumValueOfDispatch",
+        "enum class E { A, B }\n\
+         \n\
+         fun run(s: String): E = enumValueOf<E>(\n\
+         \x20   s\n\
+         )\n",
+        "EnumValueOfDispatchKt",
+        "E run(java.lang.String)",
+        &["line 3: 6", "line 4: 6", "line 5: 10"],
+    );
+}
+
+/// The member realization of the same operation, `E.valueOf(…)`.
+#[test]
+fn a_multi_line_enum_member_value_of_returns_to_its_line() {
+    assert_line_table(
+        "EnumMemberValueOfDispatch",
+        "enum class E { A, B }\n\
+         \n\
+         fun run(s: String): E = E.valueOf(\n\
+         \x20   s\n\
+         )\n",
+        "EnumMemberValueOfDispatchKt",
+        "E run(java.lang.String)",
+        &["line 4: 6", "line 3: 7", "line 5: 10"],
+    );
+}
+
+/// A defaulted CONSTRUCTOR takes the same synthesized-operand rule as a defaulted method call: the
+/// call's line returns at the FIRST placeholder, not at the `invokespecial` after the whole group.
+#[test]
+fn a_defaulted_construction_maps_its_lines_like_kotlinc() {
+    assert_line_table(
+        "DefaultedConstruction",
+        "class P(val a: Int = 1, val b: Int, val c: Int = 3)\n\
+         \n\
+         fun run(x: Int): P = P(\n\
+         \x20   b = x,\n\
+         )\n",
+        "DefaultedConstructionKt",
+        "P run(int)",
+        &["line 3: 0", "line 4: 5", "line 3: 6", "line 5: 12"],
+    );
+}
+
+/// A primitive `compareTo` is lowered to `Integer.compare`, which is still a real dispatch and
+/// still returns to the call's line.
+#[test]
+fn a_multi_line_primitive_compare_to_returns_to_its_line() {
+    assert_line_table(
+        "PrimitiveCompareDispatch",
+        "fun run(x: Int, y: Int): Int = x.compareTo(\n\
+         \x20   y\n\
+         )\n",
+        "PrimitiveCompareDispatchKt",
+        "int run(int, int)",
+        &["line 1: 0", "line 2: 1", "line 1: 2", "line 3: 5"],
+    );
+}
+
+/// The control that keeps the rule from becoming "mark every intrinsic": `String.get` is lowered to
+/// a real `charAt` dispatch and already agrees with kotlinc, and an array read is no dispatch at
+/// all. Both tables must stay exactly as they are.
+#[test]
+fn a_multi_line_string_get_and_array_get_are_unchanged() {
+    assert_line_table(
+        "StringGetDispatch",
+        "fun run(s: String, i: Int): Char = s.get(\n\
+         \x20   i\n\
+         )\n",
+        "StringGetDispatchKt",
+        "char run(java.lang.String, int)",
+        &["line 1: 6", "line 2: 7", "line 1: 8", "line 3: 11"],
+    );
+    assert_line_table(
+        "ArrayGetDispatch",
+        "fun run(a: IntArray, i: Int): Int = a.get(\n\
+         \x20   i\n\
+         )\n",
+        "ArrayGetDispatchKt",
+        "int run(int[], int)",
+        &["line 1: 6", "line 2: 7", "line 3: 9"],
+    );
+}
+
+/// A property READ through a computed accessor dispatches to the getter, so the accessor's line
+/// returns at that dispatch rather than partway through the physical receiver sequence.
+#[test]
+fn a_multi_line_property_read_returns_to_its_accessor_line() {
+    assert_line_table(
+        "PropertyGetDispatch",
+        "class Box(private val x: Int) {\n\
+         \x20   val value: Int get() = x + 1\n\
+         }\n\
+         \n\
+         fun run(b: Box): Int =\n\
+         \x20   b\n\
+         \x20       .value\n",
+        "PropertyGetDispatchKt",
+        "int run(Box)",
+        &["line 6: 6", "line 7: 7"],
+    );
+}
+
+/// And a property WRITE: the assignment's own line returns before the setter invocation, after the
+/// value expression has marked its line.
+#[test]
+fn a_multi_line_property_write_returns_to_its_accessor_line() {
+    assert_line_table(
+        "PropertySetDispatch",
+        "class Box { var value: Int = 0 }\n\
+         \n\
+         fun run(b: Box, x: Int) {\n\
+         \x20   b\n\
+         \x20       .value =\n\
+         \x20       x\n\
+         }\n",
+        "PropertySetDispatchKt",
+        "void run(Box, int)",
+        &["line 4: 6", "line 6: 7", "line 5: 8", "line 7: 11"],
+    );
+}
+
+/// The other realization of the same source operation: inside a `reified` inline function the
+/// classifier is not yet known, so the emitted template carries the reified marker instead of a
+/// resolved `valueOf`. It is still an inline call SITE, and takes the same rule.
+#[test]
+fn a_reified_enum_value_of_template_marks_its_call_site() {
+    assert_line_table(
+        "ReifiedEnumValueOfDispatch",
+        "enum class E { A, B }\n\
+         \n\
+         inline fun <reified T : Enum<T>> lookup(s: String): T = enumValueOf<T>(\n\
+         \x20   s\n\
+         )\n\
+         \n\
+         fun run(s: String): E = lookup(s)\n",
+        "ReifiedEnumValueOfDispatchKt",
+        "T lookup(java.lang.String)",
+        &["line 3: 8", "line 4: 8", "line 5: 21"],
+    );
+}

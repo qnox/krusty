@@ -6417,6 +6417,114 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/expression_line_marks_e2e.rs` (a bare return, a value return and an implicit `Unit`
   return each through a `finally`, plus an explicit return whose call is a constructor) and
   `tests/try_debug_lines_e2e.rs`.
+
+- **A `try` with a `finally` reserves its two parked slots where it OPENS, and nested `try`s share
+  them.** Such a `try` parks two things while a finalizer runs: the value a `return` out of it
+  computed before leaving, and the exception its catch-all caught. kotlinc reserves both with the
+  `try` itself, so every local an inlined copy of the finalizer declares sits ABOVE them; krusty
+  allocated each where it was first used, which put the first copy's locals underneath and moved
+  everything the `try` parks one slot up. The cost was not a name: a slot-higher parked exception
+  is an extra `top` in every StackMapTable frame recorded while the finalizer runs, and a longer
+  store in every copy, so the frames and the exception table's offsets both diverged.
+
+  Nested `try`s SHARE both slots, which is also what kotlinc emits. Only one return is ever in
+  flight, and a `try` inside the body runs its handler strictly before the enclosing one is
+  entered — so the enclosing slots are free for it. The parked-exception slot stays in the reuse
+  pool while the body is emitted and is taken back out before the handler, where it holds the
+  exception across the whole inlined finalizer and a `try` inside that copy must not be given it.
+
+  A TYPED catch's parameter takes the same slot the catch-all parks in, which is also what kotlinc
+  emits: the two are never live at once — a catch body runs because its type MATCHED, and the
+  catch-all parks only while unwinding past it — and the parked value is dead the moment the
+  handler rethrows. A slot of its own pushed the parameter above the reserved one and cost a wide
+  `astore` at every catch. A `return` written in a catch body is the other half of that scope: the
+  slot the TRY reserved is live there, so it takes one of its own, as kotlinc's does.
+
+  The LAST catch of a `try` with no `finally` falls through to the join instead of jumping to it:
+  nothing stands between them, so the jump would be to the next instruction. Every other catch has
+  the next handler, or its own copy of the finalizer, in the way and still needs it.
+
+  Tests: `a_finally_with_its_own_handler_types_the_parked_exception`, which compares the complete
+  exception table and the complete frame list — offsets, `top` padding and all — against kotlinc;
+  `a_nested_finally_copy_stays_inside_the_outer_region`, which compares the complete code; and
+  `a_typed_catch_does_not_guard_its_own_finalizer_copy`, whose complete table is the reference
+  compiler's rather than a pinning of krusty's own.
+
+- **A `catch` parameter is a debug local like any other.** It is DECLARED by its `IrCatch` rather
+  than by a variable node, so it has no declaration expression the source-name and provenance
+  tables can be keyed by; it carries the same two facts in the record that declares it
+  (`IrCatchBinding`) and is rendered through the same JVM debug-name boundary as every other local.
+  Writing the source spelling straight into the local variable table cost the `$iv` suffixes: the
+  reference compiler names an inlined catch parameter `e$iv` at one expansion deep and `e$iv$iv` at
+  two, exactly as it names an ordinary copied local, and krusty wrote a bare `e` at every depth. An
+  expansion that clones a `try` nests the binding's provenance as it nests a local's.
+  (`a_catch_parameter_is_named_where_it_is_declared`,
+  `an_inlined_catch_parameter_is_named_at_its_expansion_depth`.)
+
+- **A CALL's `LineNumberTable` entries: which physical operation is a dispatch, and which operands
+  the call invented.** A multi-line call's operands each mark their own line as they are pushed, so
+  by the time the `invoke*` is reached the line in effect is the last operand's. kotlinc puts the
+  call's own line back at the dispatch. Getting this right is one question asked per physical
+  operation, and every answer is pinned by a complete-table differential in
+  `tests/expression_line_marks_e2e.rs` — the table from kotlinc and the table from krusty, offsets
+  included, with kotlinc's own spelled out so a change in it is visible in the diff.
+  - **A dispatch restores the call's line.** Every `IrExpr::Call` callee form, `IrExpr::New`,
+    `IrExpr::MethodCall`, `IrExpr::InvokeFunction` (a function value's `FunctionN.invoke`),
+    `IrExpr::EnumValueOf`, a property read or write realized as an ACCESSOR, and the intrinsics
+    whose lowering IS a call — `PrimitiveCompare`'s `Integer.compare`, `String.get`'s `charAt`.
+  - **An operation that dispatches nothing does not.** An array read or write, a field read or
+    write, an arithmetic or comparison instruction: the operand's line stays in effect through it,
+    and marking there would add an entry kotlinc does not have. So the rule cannot be "mark every
+    intrinsic" — `x.compareTo(\n y\n)` and `a.get(\n i\n)` are the same source shape and take
+    opposite answers. Both are asserted.
+  - **Operands the CALL synthesized carry the call's line, not the last supplied argument's.**
+    kotlinc returns to the call's line at the FIRST synthetic `$default` operand — the omitted-
+    parameter placeholder — rather than at the `invokestatic`, because the placeholders, mask words
+    and marker realize the ABI and not anything the source wrote. A supplied argument between two
+    such runs puts its own line in effect and the next run restores the call's. With every
+    parameter supplied, the mask push is that first synthetic operand. A defaulted CONSTRUCTOR
+    takes the identical rule: it previously restored the line only at the `invokespecial`, three
+    bytes late.
+  - **Which operands those are is RECORDED, never recognized by shape.** A realized `Const(0)` and
+    a source `0` are the same node, so the pass that invents them records their physical positions
+    against the call (`jvm::default_call_operands::DefaultCallOperands`, the backend-owned table the
+    default-call realization already fills). Nothing about JVM synthetic operands is persisted
+    in common IR.
+
+- **`enumValueOf<E>(name)` and `E.valueOf(name)` are different declarations, and are kept apart.**
+  Both reach the same entry lookup and emit the same `invokestatic`, and kotlinc gives them
+  opposite line tables: the classifier's own MEMBER is an ordinary dispatch, so the call's line
+  returns at the invoke (`line 4: 6, line 3: 7`); the standard library's top-level `enumValueOf` is
+  `inline`, so what follows is its expansion and kotlinc marks the call SITE, keeping the call's
+  line and its argument's line as TWO entries at one offset (`line 3: 6, line 4: 6`). Checking
+  collapsed both onto one `FirClassifierCallable::EnumValueOf`, so krusty could only pick one
+  answer; `TopLevelEnumValueOf` and `IrExpr::EnumValueOf::declaration` now carry the selection to
+  the backend. Two entries at one offset needed a debug-line operation of its own
+  (`CodeBuilder::mark_line_retained`): ordinary marking replaces at a repeated offset, which is
+  correct everywhere else and here would lose one of the two positions. The same operation opens an
+  emitted `inline fun` TEMPLATE on its own body line, which kotlinc records beside the body's first
+  instruction line. Tests: `a_multi_line_enum_value_of_keeps_both_entries_at_its_dispatch`,
+  `a_multi_line_enum_member_value_of_returns_to_its_line`,
+  `a_reified_enum_value_of_template_marks_its_call_site`.
+
+- **An assignment's write dispatches where its LVALUE is named.** `b\n    .value =\n    x` puts the
+  setter call on the `.value` line, the way a multi-line call's dispatch returns to its selector's
+  line — kotlinc records `line 4: 6, line 6: 7, line 5: 8, line 7: 11`, and krusty had no entry for
+  the accessor at all. A member assignment is a STATEMENT, whose only line was its first, so the
+  lvalue's line is now carried from the parser (`assignment_target_lines`, parallel to the existing
+  `assignment_target_spans`) through `FirStatementDebugLines::target` to the lowered write. Test:
+  `a_multi_line_property_write_returns_to_its_accessor_line`, with
+  `a_multi_line_property_read_returns_to_its_accessor_line` for the read.
+
+- **A labeled `break`/`continue` leaves the loop it NAMES, or the file is refused.** The emitter
+  looked the label up on its loop stack and fell back to the innermost loop when it found nothing,
+  so a transfer and its loop that disagreed about which loop this is produced a jump the source
+  never wrote — silently. There is no fallback now: an unmatched label is an emit error and the
+  file is skipped, which is the same fail-closed answer the operand-arity contract gives. Tests:
+  `break_continue_e2e::labeled_break_and_continue_leave_the_loop_they_name` (a labeled `break` and
+  a labeled `continue` out of a nested loop, each through a `finally` that must run on the way),
+  and `jvm::ir_emit::try_emission::tests::a_break_naming_a_loop_that_is_not_open_is_refused_not_redirected`.
+
 - **An inline HOF lambda may call an ENCLOSING-class member (build.840 kk1).** `class H { fun f(es) =
   es.find { same(it.v, 3) }; fun same(a, b) = … }` — the inline-spliced `find` lambda calls `same`, a method
   of the enclosing class. krusty cleared `cur_class` for a spliced lambda's body (only a REAL closure
