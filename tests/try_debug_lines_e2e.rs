@@ -369,15 +369,14 @@ fn a_loop_transfer_out_of_a_try_runs_its_finally() {
                \x20   return sb.toString()\n\
                }\n";
     let jdk = common::jdk_modules();
-    let Some(out) = common::compile_and_run_box(
+    // Fails CLOSED: a missing JVM runner is a broken harness, not a passing contract.
+    let out = common::compile_and_run_box(
         src,
         "LoopTransferFinally",
         &[common::stdlib_jar()],
         Some(jdk.as_path()),
-    ) else {
-        eprintln!("skipping: JVM runner unavailable");
-        return;
-    };
+    )
+    .expect("a JVM runner is required to observe that the finalizer ran on the transfer path");
     assert_eq!(out.trim(), "TFTF");
 }
 
@@ -407,10 +406,7 @@ fn a_loop_transfer_finalizer_copy_leaves_the_protected_region() {
                \x20       return seen\n\
                \x20   }\n\
                }\n";
-    let Some((reference, krusty)) = disassemble_both("LoopTransferRegion", src, "Looping") else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
+    let (reference, krusty) = disassemble_both("LoopTransferRegion", src, "Looping");
     assert_eq!(
         numeric_rows(&krusty, "int run(int)", "Exception table:"),
         numeric_rows(&reference, "int run(int)", "Exception table:"),
