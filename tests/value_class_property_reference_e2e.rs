@@ -151,6 +151,122 @@ fn a_reference_to_a_value_class_typed_top_level_property_resolves() {
         ),
         "OK"
     );
+
+    // The DECLARATION surface, compared against the reference compiler rather than pinned. A
+    // top-level property of value-class type is realized over the CARRIER — `private static int`,
+    // `getTopLevel()I`, `setTopLevel-<hash>(int)` — and the reference follows the declaration it
+    // calls. Keeping it boxed here is what made the mangled reference name a method nothing had.
+    let source = "@JvmInline\n\
+                  value class Z(val x: Int)\n\
+                  \n\
+                  var topLevel: Z = Z(0)\n\
+                  val readOnly: Z = Z(9)\n\
+                  \n\
+                  fun read(z: Z = topLevel) = z.x\n";
+    let ours = krusty_dump("ValueClassTopLevelDecl", source);
+    let reference = kotlinc_dump(
+        "ValueClassTopLevelDeclRef",
+        source,
+        "ValueClassTopLevelDeclRefKt",
+    );
+    let surface = |dump: &str| {
+        method_headers(dump)
+            .into_iter()
+            .filter(|header| header.contains("TopLevel") || header.contains("ReadOnly"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        surface(
+            ours.get("ValueClassTopLevelDeclKt")
+                .expect("krusty emits the facade")
+        ),
+        surface(&reference),
+        "the top-level accessors are kotlinc's"
+    );
+    assert_eq!(
+        surface(&reference),
+        vec![
+            "public static final int getTopLevel()".to_string(),
+            "public static final void setTopLevel-IQRRRT4(int)".to_string(),
+            "public static final int getReadOnly()".to_string(),
+        ],
+        "spelled out, so a reference change is visible here"
+    );
+
+    // The STORAGE those accessors read, and one reader of it. The field descriptor is the decision
+    // the accessor names follow, and a defaulted parameter is the reader that exposes a disagreement
+    // between the two: while the declaration said `LZ;` and the field said `I`, the default-argument
+    // path boxed the carrier back into an `Integer` and cast it to `Z`.
+    let ours_facade = ours
+        .get("ValueClassTopLevelDeclKt")
+        .expect("krusty emits the facade");
+    assert_eq!(
+        field_lines(ours_facade),
+        field_lines(&reference),
+        "the top-level storage is kotlinc's"
+    );
+    assert_eq!(
+        field_lines(&reference),
+        vec![
+            "private static int topLevel".to_string(),
+            "private static final int readOnly".to_string(),
+        ],
+        "spelled out, so a storage change is visible here"
+    );
+    assert_eq!(
+        method_body(ours_facade, "read-IQRRRT4$default"),
+        method_body(&reference, "read-IQRRRT4$default"),
+        "a defaulted read of the property exchanges the carrier, as kotlinc's does"
+    );
+}
+
+/// The field declarations of one `javap -p -c` dump, in order.
+fn field_lines(dump: &str) -> Vec<String> {
+    dump.lines()
+        .map(str::trim)
+        .filter(|line| line.ends_with(';') && !line.contains('(') && !line.contains('='))
+        .filter(|line| line.starts_with("private ") || line.starts_with("public "))
+        .map(|line| line.trim_end_matches(';').to_string())
+        .collect()
+}
+
+/// The instruction mnemonics + operands of one method of a `javap -c` dump, constant-pool indices
+/// dropped so two compilers' bodies compare by what they do.
+fn method_body(dump: &str, name: &str) -> Vec<String> {
+    let mut body = Vec::new();
+    let mut inside = false;
+    for line in dump.lines() {
+        let trimmed = line.trim();
+        let instruction_index = trimmed
+            .split_once(": ")
+            .is_some_and(|(index, _)| index.parse::<u32>().is_ok());
+        if trimmed.ends_with(';') && !instruction_index {
+            // Every declaration in the dump ends the previous one's body, `static {};` included.
+            inside = trimmed.contains(name);
+            continue;
+        }
+        if !inside || !instruction_index {
+            continue;
+        }
+        let (index, rest) = trimmed.split_once(": ").expect("an indexed instruction");
+        let instruction = rest.split_whitespace().next().unwrap_or_default();
+        let operand = rest
+            .split_once("// ")
+            .map(|(_, comment)| comment.trim().to_string())
+            .or_else(|| {
+                rest.split_once(char::is_whitespace)
+                    .map(|(_, operand)| operand.trim().to_string())
+                    .filter(|operand| !operand.is_empty())
+            })
+            .unwrap_or_default();
+        body.push(
+            format!("{index}: {instruction} {operand}")
+                .trim_end()
+                .to_string(),
+        );
+    }
+    assert!(!body.is_empty(), "no body for {name}");
+    body
 }
 
 /// `javap -c` of every class krusty emits for one source, keyed by internal name.
