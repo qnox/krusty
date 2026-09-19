@@ -391,11 +391,13 @@ impl SignatureConstraintExtractor {
                     result = if stub.signature_inference
                         == Some(super::InferredSignatureKind::DelegatedProperty)
                     {
+                        let site = self.graph.add_delegate_site(
+                            delegate_site.expect("an inferred delegated property retains its site"),
+                        );
                         self.graph.add_expr(SigExpr::Delegate {
                             delegate: result,
                             scope,
-                            site: delegate_site
-                                .expect("an inferred delegated property retains its site"),
+                            site,
                         })
                     } else {
                         result
@@ -836,11 +838,13 @@ impl SignatureConstraintExtractor {
                 );
                 if stub.signature_inference == Some(super::InferredSignatureKind::DelegatedProperty)
                 {
+                    let site = self.graph.add_delegate_site(
+                        delegate_site.expect("an inferred delegated property retains its site"),
+                    );
                     result = self.graph.add_expr(SigExpr::Delegate {
                         delegate: result,
                         scope: member_scope,
-                        site: delegate_site
-                            .expect("an inferred delegated property retains its site"),
+                        site,
                     });
                 }
                 self.graph
@@ -2266,23 +2270,25 @@ impl SignatureConstraintExtractor {
                                 None => {
                                     let delegate =
                                         self.consumed_expression(file, *delegate, scope, origin)?;
-                                    self.graph.add_expr(SigExpr::Delegate {
-                                        delegate,
-                                        scope,
-                                        site: super::SignatureDelegateSite {
-                                            diagnostic_owner: self
-                                                .graph
-                                                .scope(scope)
-                                                .expect(
-                                                    "a local delegate must retain its owner scope",
-                                                )
-                                                .owner,
+                                    let diagnostic_owner = self
+                                        .graph
+                                        .scope(scope)
+                                        .expect("a local delegate must retain its owner scope")
+                                        .owner;
+                                    let site = self.graph.add_delegate_site(
+                                        super::SignatureDelegateSite {
+                                            diagnostic_owner,
                                             kind: super::SignatureDelegateSiteKind::StatementLocal,
                                             mutable: *is_var,
                                             dispatch_diagnostic_name:
                                                 super::SignatureDelegateDispatchName::NONE,
                                             by_origin: origin(*by_span),
                                         },
+                                    );
+                                    self.graph.add_expr(SigExpr::Delegate {
+                                        delegate,
+                                        scope,
+                                        site,
                                     })
                                 }
                             };

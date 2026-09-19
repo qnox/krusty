@@ -1,5 +1,19 @@
 use crate::fir::{DeclarationId, OriginId, ResolvedTy, SigExprId, SigNameId};
 
+/// Compact identity for a delegate-site record owned by the temporary signature graph.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SignatureDelegateSiteId(u32);
+
+impl SignatureDelegateSiteId {
+    pub(super) fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    pub(super) const fn raw(self) -> u32 {
+        self.0
+    }
+}
+
 /// Declaration-owned facts needed to select and diagnose a delegated-property convention during
 /// Pass 1. Statement locals have no declaration in the stable header inventory, so they retain the
 /// enclosing declaration only as their diagnostic owner; their semantic site remains explicitly

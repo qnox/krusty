@@ -1207,6 +1207,9 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         let delegate = evaluate_expression(
                             semantics, delegate, graph, demand, memo, computing,
                         )?;
+                        let site = graph
+                            .delegate_site(site)
+                            .expect("a delegated signature retains its graph-owned site");
                         let kind = match site.kind {
                             SignatureDelegateSiteKind::TopLevel { extension } => {
                                 ResolvedSignatureDelegateSiteKind::TopLevel { extension }

@@ -245,7 +245,7 @@ pub enum SigExpr {
     Delegate {
         delegate: SigExprId,
         scope: SignatureScopeId,
-        site: SignatureDelegateSite,
+        site: SignatureDelegateSiteId,
     },
     Join {
         operands: OperandRange,
@@ -339,6 +339,7 @@ pub struct SignatureGraph {
     callable_selections: Vec<DeferredCallableSelection>,
     member_selections: Vec<DeferredMemberSelection>,
     value_selections: Vec<DeferredValueSelection>,
+    delegate_sites: Vec<SignatureDelegateSite>,
     type_syntax: HeaderSyntaxArena,
     type_names: LookupNames,
     constraints: Vec<SignatureConstraint>,
@@ -365,6 +366,22 @@ impl SignatureGraph {
 
     pub fn expr(&self, id: SigExprId) -> Option<SigExpr> {
         self.nodes.get(id.raw() as usize).copied()
+    }
+
+    pub(super) fn add_delegate_site(
+        &mut self,
+        site: SignatureDelegateSite,
+    ) -> SignatureDelegateSiteId {
+        let id = SignatureDelegateSiteId::from_raw(next_id(
+            self.delegate_sites.len(),
+            "signature delegate sites",
+        ));
+        self.delegate_sites.push(site);
+        id
+    }
+
+    fn delegate_site(&self, id: SignatureDelegateSiteId) -> Option<SignatureDelegateSite> {
+        self.delegate_sites.get(id.raw() as usize).copied()
     }
 
     pub fn add_operands(&mut self, operands: impl IntoIterator<Item = SigExprId>) -> OperandRange {
@@ -674,6 +691,7 @@ impl SignatureGraph {
             + self.callable_selections.len() * std::mem::size_of::<DeferredCallableSelection>()
             + self.member_selections.len() * std::mem::size_of::<DeferredMemberSelection>()
             + self.value_selections.len() * std::mem::size_of::<DeferredValueSelection>()
+            + self.delegate_sites.len() * std::mem::size_of::<SignatureDelegateSite>()
             + self.type_syntax.storage_payload_bytes()
             + self.type_names.storage_payload_bytes()
             + self.constraints.len() * std::mem::size_of::<SignatureConstraint>()
