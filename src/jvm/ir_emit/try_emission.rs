@@ -113,7 +113,6 @@ impl Emitter<'_> {
             self.next_slot += slot_words(rt);
             Some(s)
         };
-        const RESULT_KEY: u32 = 3_000_000;
         // A `finally` that diverges (`finally { throw }`) never falls through to `after`.
         let fin_diverges = finally.is_some_and(|f| self.discarding_diverges(f));
 
@@ -157,9 +156,21 @@ impl Emitter<'_> {
         let mut after_reachable = false;
         if !body_diverges {
             if let Some(f) = finally {
+                // The result has just been stored and is loaded again at `after`, so it is live
+                // across the finalizer inlined here. A finalizer that records frames of its own — a
+                // nested `try`, a `when`, a null-safe call — must type it in each of them, or the
+                // merge at `after`, which does type it, is rejected as inconsistent. The lease ends
+                // with this copy: the handler copies below are reached on edges that never stored it.
+                let parked = result_slot.map(|slot| self.lease_temporary(slot, rt));
                 self.emit(f, code);
+                if let Some(parked) = parked {
+                    self.release_temporary(parked);
+                }
             } // `finally` inlined on the normal path
             if !fin_diverges {
+                if let Some(f) = finally {
+                    debug_lines::mark_block_exit(self.ir, f, code);
+                }
                 code.goto(after);
                 after_reachable = true;
             }
@@ -231,9 +242,16 @@ impl Emitter<'_> {
             }
             if !cbody_diverges {
                 if let Some(f) = finally {
+                    let parked = result_slot.map(|slot| self.lease_temporary(slot, rt));
                     self.emit(f, code);
+                    if let Some(parked) = parked {
+                        self.release_temporary(parked);
+                    }
                 } // `finally` inlined after the catch
                 if !fin_diverges {
+                    if let Some(f) = finally {
+                        debug_lines::mark_block_exit(self.ir, f, code);
+                    }
                     code.goto(after);
                     after_reachable = true;
                 }
@@ -293,14 +311,15 @@ impl Emitter<'_> {
         }
 
         if after_reachable {
-            if let Some(slot) = result_slot {
-                self.slots.insert(RESULT_KEY, (slot, rt));
-            }
+            // The result is live from the merge frame at `after` until it is loaded.
+            let result_lease = result_slot.map(|slot| self.lease_temporary(slot, rt));
             self.frame(after, vec![], code);
             self.bind(after, code);
             if let Some(slot) = result_slot {
                 load(rt, slot, code);
-                self.slots.remove(&RESULT_KEY);
+            }
+            if let Some(lease) = result_lease {
+                self.release_temporary(lease);
             }
         } else {
             // Every path diverges — `after` is dead; bind it so any stray reference resolves, but emit
