@@ -35,6 +35,8 @@ mod interface_compatibility;
 mod member_schedule;
 mod operand_stack;
 mod return_emission;
+mod try_emission;
+use try_emission::FinallyRegion;
 mod secondary_constructor;
 mod vararg;
 mod when;
@@ -12852,11 +12854,12 @@ struct Emitter<'a> {
     var_types: HashMap<u32, Ty>,
     next_slot: u16,
     ret: Ty,
-    /// Stack of enclosing loops' `(continue_label, break_label)` — `break`/`continue` target the top.
-    /// Stack of enclosing loops: `(continue_label, break_label, source_label)`. A labeled
-    /// `break@l`/`continue@l` targets the entry whose `source_label == Some(l)`; an unlabeled one
-    /// targets the innermost (top).
-    loop_stack: Vec<(Label, Label, Option<String>)>,
+    /// Active loops: `(continue target, break target, checked common-IR target identity,
+    /// active-finalizer depth on entry)`. FIR checking resolves a source label to a control target;
+    /// lowering replaces its spelling with this generated identity before the backend sees it. The
+    /// depth makes a `break`/`continue` run exactly the finalizers it leaves — those pushed inside
+    /// the loop — and no outer one.
+    loop_stack: Vec<(Label, Label, Option<String>, usize)>,
     /// Operand-stack verification types sitting BELOW the expression currently being emitted (an
     /// arithmetic LHS held on the stack across a branchy RHS, e.g. a data-class `hashCode` accumulator
     /// `result*31 + <branchy nullable-field hash>`). Prepended to every recorded stack-map frame's stack
@@ -12876,6 +12879,18 @@ struct Emitter<'a> {
     /// Active `finally` bodies, outermost first. A source-level control transfer executes these
     /// before leaving its protected region; the stack carries exact IR identities, not syntax.
     return_finalizers: Vec<u32>,
+    /// Catch-all handler temporaries whose handler has finished, available for a later handler to
+    /// lease. The exception a handler parks is dead once that handler has rethrown, so a nested
+    /// handler's slot is reusable by the enclosing one — which is what kotlinc does, keeping the
+    /// store in its one-byte form. Every entry holds a `Throwable`, so any of them fits any handler.
+    ///
+    /// The pool belongs to ONE emitter and starts empty by construction, so a slot returned by one
+    /// method's handler can never be handed to another's: an emitter emits one body.
+    free_exception_slots: Vec<u16>,
+    /// Protected-region accumulators for the active `try`s that have a `finally`, outermost first.
+    /// A copy of a try's own finalizer must not lie inside that try's own ranges, or an exception
+    /// raised while the finalizer runs re-enters the same handler and runs it a second time.
+    finally_regions: Vec<FinallyRegion>,
     /// A statement at the lexical tail of a loop body may branch directly to the loop's next
     /// iteration. This is an emitter control-flow target, not a semantic `continue` manufactured in
     /// common IR. Blocks pass it only to their terminal statement.
@@ -12925,6 +12940,8 @@ impl<'a> Emitter<'a> {
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,
             return_finalizers: Vec::new(),
+            free_exception_slots: Vec::new(),
+            finally_regions: Vec::new(),
             terminal_statement_target: None,
             generated_initializer: false,
         }
@@ -13867,7 +13884,8 @@ impl<'a> Emitter<'a> {
                 } else {
                     start
                 };
-                self.loop_stack.push((bottom, end, label.clone()));
+                self.loop_stack
+                    .push((bottom, end, label.clone(), self.return_finalizers.len()));
                 let enclosing_terminal_target = self.terminal_statement_target.replace(bottom);
                 let retained_body_scope = if post_test {
                     match self.ir.expr(body).clone() {
@@ -13923,16 +13941,8 @@ impl<'a> Emitter<'a> {
                 self.frame(end, vec![], code);
                 self.bind(end, code);
             }
-            IrExpr::Break { label } => {
-                let (_, end) = self.loop_target(&label);
-                self.frame(end, vec![], code);
-                code.goto(end);
-            }
-            IrExpr::Continue { label } => {
-                let (cont, _) = self.loop_target(&label);
-                self.frame(cont, vec![], code);
-                code.goto(cont);
-            }
+            IrExpr::Break { label } => self.emit_loop_transfer(&label, true, code),
+            IrExpr::Continue { label } => self.emit_loop_transfer(&label, false, code),
             other => {
                 self.emit_discarding_node(e, &other, code);
             }
@@ -14958,13 +14968,11 @@ impl<'a> Emitter<'a> {
             // `break`/`continue` are `Nothing`-typed: in value position (e.g. `x ?: break`) they diverge
             // — emit the jump and push nothing; the consuming branch is dead past this point.
             IrExpr::Break { label } => {
-                let (_, end) = self.loop_target(label);
-                code.goto(end);
+                self.emit_loop_transfer(label, true, code);
                 return;
             }
             IrExpr::Continue { label } => {
-                let (cont, _) = self.loop_target(label);
-                code.goto(cont);
+                self.emit_loop_transfer(label, false, code);
                 return;
             }
             IrExpr::Const(c) => match c {
@@ -18815,7 +18823,9 @@ impl<'a> Emitter<'a> {
     /// The loop label a branch body jumps to when it does nothing else.
     ///
     /// `None` unless the body IS a `break` or `continue` — one that also computed something would
-    /// have to emit that first, and the jump could then not be fused into the condition.
+    /// have to emit that first, and the jump could then not be fused into the condition. Leaving a
+    /// `try` counts as computing something: the transfer runs every `finally` it leaves, so a fused
+    /// jump would skip them.
     fn loop_jump_target(&self, body: u32) -> Option<Label> {
         let mut node = self.ir.expr(body);
         if let IrExpr::Block { stmts, value } = node {
@@ -18827,11 +18837,16 @@ impl<'a> Emitter<'a> {
             }
             node = self.ir.expr(*only);
         }
-        match node {
-            IrExpr::Break { label } => Some(self.loop_target(label).1),
-            IrExpr::Continue { label } => Some(self.loop_target(label).0),
-            _ => None,
+        let (label, brk) = match node {
+            IrExpr::Break { label } => (label, true),
+            IrExpr::Continue { label } => (label, false),
+            _ => return None,
+        };
+        let (cont, end, depth) = self.loop_transfer_target(label);
+        if self.return_finalizers.len() > depth {
+            return None;
         }
+        Some(if brk { end } else { cont })
     }
 
     fn emit_when(
@@ -19014,239 +19029,7 @@ impl<'a> Emitter<'a> {
         self.bind(end, code);
     }
 
-    /// `try { body } catch (v: E) { … } …` (no `finally`). The body value (and each catch value) is
-    /// stored into a result temp, then loaded at the merge — mirroring kotlinc. The protected region
-    /// `[start, end)` covers the body+store; each catch is an exception-table handler whose frame has
-    /// the caught exception on the stack and the pre-`try` locals (the result temp/catch var read as
-    /// `top` there, since an exception may occur before they are assigned).
-    fn emit_try(
-        &mut self,
-        expression: u32,
-        body: u32,
-        catches: &[crate::ir::IrCatch],
-        finally: Option<u32>,
-        result: &Ty,
-        code: &mut CodeBuilder,
-    ) {
-        let rt = ir_ty_to_jvm(result);
-        let is_stmt = matches!(rt, Ty::Unit | Ty::Nothing);
-        let result_slot = if is_stmt {
-            None
-        } else {
-            let s = self.next_slot;
-            self.next_slot += slot_words(rt);
-            Some(s)
-        };
-        // A `finally` that diverges (`finally { throw }`) never falls through to `after`.
-        let fin_diverges = finally.map_or(false, |f| self.discarding_diverges(f));
-
-        let start = code.new_label();
-        let end = code.new_label();
-        let after = code.new_label();
-
-        self.bind(start, code);
-        // kotlinc opens every protected region with a `nop` carrying the `try` keyword's line, so the
-        // region starts at an instruction of its own rather than sharing the body's first one. The
-        // exception table's `from` is that `nop`.
-        debug_lines::mark_expression_start(self.ir, expression, code);
-        code.nop();
-        let body_diverges = if is_stmt {
-            self.discarding_diverges(body)
-        } else {
-            self.diverges(body)
-        };
-        if let Some(finalizer) = finally {
-            self.return_finalizers.push(finalizer);
-        }
-        if is_stmt || body_diverges {
-            // Statement, or a diverging body (`throw`/`return`): no value reaches the result temp.
-            self.emit(body, code);
-        } else {
-            self.emit_value(body, code);
-            store(rt, result_slot.unwrap(), code);
-        }
-        if finally.is_some() {
-            self.return_finalizers.pop();
-        }
-        self.bind(end, code);
-        let mut after_reachable = false;
-        if !body_diverges {
-            if let Some(f) = finally {
-                // The result has just been stored and is loaded again at `after`, so it is live
-                // across the finalizer inlined here. A finalizer that records frames of its own — a
-                // nested `try`, a `when`, a null-safe call — must type it in each of them, or the
-                // merge at `after`, which does type it, is rejected as inconsistent. The lease ends
-                // with this copy: the handler copies below are reached on edges that never stored it.
-                let parked = result_slot.map(|slot| self.lease_temporary(slot, rt));
-                self.emit(f, code);
-                if let Some(parked) = parked {
-                    self.release_temporary(parked);
-                }
-            } // `finally` inlined on the normal path
-            if !fin_diverges {
-                if let Some(f) = finally {
-                    debug_lines::mark_block_exit(self.ir, f, code);
-                }
-                code.goto(after);
-                after_reachable = true;
-            }
-        }
-
-        // The `finally` catch-all must protect the body and each catch BODY, but NOT the inlined finally
-        // code (normal-path, per-catch, or its own) — otherwise an exception thrown inside an inlined
-        // finally re-enters the handler and the finally runs twice. Collect each catch body's range
-        // (`[cbody_start, cbody_end)`, ending before that catch's inlined finally).
-        let mut fin_ranges: Vec<(Label, Label)> = vec![(start, end)];
-        for c in catches {
-            let handler = code.new_label();
-            // A handler is entered over the exception edge, not by a branch — and a diverging `try`
-            // body leaves the stream dead exactly here, so binding must revive on the range it guards
-            // rather than on an incoming branch.
-            code.bind_handler(handler, &[(start, end)]);
-            let exc_internal = crate::jvm::names::classfile_internal_name(&c.exc_internal.render());
-            let exc_ci = self.cw.class_ref(&exc_internal);
-            // Handler entry: the exception is the sole stack value; locals are the pre-`try` state.
-            self.frame(handler, vec![VerifType::Object(exc_ci)], code);
-            let exc_ty = Ty::obj(&exc_internal);
-            let cslot = self.next_slot;
-            self.next_slot += 1;
-            self.slots.insert(c.var, (cslot, exc_ty));
-            store(exc_ty, cslot, code);
-            let local_start =
-                (code.bytes.len() <= u16::MAX as usize).then_some(code.bytes.len() as u16);
-            let cbody_start = code.new_label();
-            self.bind(cbody_start, code);
-            let cbody_diverges = if is_stmt {
-                self.discarding_diverges(c.body)
-            } else {
-                self.diverges(c.body)
-            };
-            if let Some(finalizer) = finally {
-                self.return_finalizers.push(finalizer);
-            }
-            if is_stmt || cbody_diverges {
-                self.emit(c.body, code);
-            } else {
-                self.emit_value(c.body, code);
-                store(rt, result_slot.unwrap(), code);
-            }
-            if finally.is_some() {
-                self.return_finalizers.pop();
-            }
-            self.slots.remove(&c.var);
-            // The catch body is protected by the finally handler (a throw in a catch runs the finally),
-            // but the catch's own inlined finally (below) is not.
-            let cbody_end = code.new_label();
-            self.bind(cbody_end, code);
-            if self.record_locals {
-                if let (Some(name), Some(start_pc)) = (c.name.as_deref(), local_start) {
-                    let end_pc = code.bytes.len().min(u16::MAX as usize) as u16;
-                    code.add_local_entry(
-                        start_pc,
-                        Some(end_pc.saturating_sub(start_pc)),
-                        cslot,
-                        name,
-                        &local_variable_desc(exc_ty),
-                    );
-                }
-            }
-            if finally.is_some() {
-                fin_ranges.push((cbody_start, cbody_end));
-            }
-            if !cbody_diverges {
-                if let Some(f) = finally {
-                    // Same as the normal path: this catch stored the result, and `after` loads it.
-                    let parked = result_slot.map(|slot| self.lease_temporary(slot, rt));
-                    self.emit(f, code);
-                    if let Some(parked) = parked {
-                        self.release_temporary(parked);
-                    }
-                } // `finally` inlined after the catch
-                if !fin_diverges {
-                    if let Some(f) = finally {
-                        debug_lines::mark_block_exit(self.ir, f, code);
-                    }
-                    code.goto(after);
-                    after_reachable = true;
-                }
-            }
-            code.add_exception(start, end, handler, exc_ci);
-        }
-
-        // `finally` catch-all: any exception not handled above (in the body or a catch body) runs the
-        // `finally` then re-throws. It protects only the body + catch bodies (`fin_ranges`), NOT the
-        // inlined finally code — which lies past those ranges, so it doesn't re-catch itself.
-        if let Some(f) = finally {
-            let fin_handler = code.new_label();
-            // Exception edge — see the `catch` handler above; this one guards the body and every
-            // catch body (`fin_ranges`), which are complete by now.
-            code.bind_handler(fin_handler, &fin_ranges);
-            let thr_ci = self.cw.class_ref("java/lang/Throwable");
-            self.frame(fin_handler, vec![VerifType::Object(thr_ci)], code);
-            let thr_ty = Ty::obj("java/lang/Throwable");
-            let tslot = self.next_slot;
-            self.next_slot += 1;
-            // The handler's entry belongs to the finalizer copy it introduces, not to the `finally`
-            // keyword — mark it before the store so both copies open on the same line.
-            debug_lines::mark_block_entry(self.ir, f, code);
-            store(thr_ty, tslot, code);
-            // The caught exception is LIVE in `tslot` across the whole inlined `finally` (it is re-raised
-            // after it). Register it so any StackMapTable frame recorded WHILE emitting the finally —
-            // e.g. a `finally` that itself contains a `try`/`catch` — lists `tslot` as an initialized
-            // local; otherwise the trailing `aload tslot; athrow` reads a slot the verifier sees as `top`.
-            // Each nested catch-all handler takes its own lease, so their lifetimes nest correctly.
-            let thr_lease = self.lease_temporary(tslot, thr_ty);
-            self.emit(f, code);
-            self.release_temporary(thr_lease);
-            // Re-raise the caught exception after the `finally` — unless the `finally` itself transfers
-            // control (`finally { return … }` / `finally { throw … }`), in which case the rethrow is
-            // unreachable and emitting it would leave a dead instruction without a stackmap frame.
-            if !fin_diverges {
-                load(thr_ty, tslot, code);
-                code.athrow();
-            }
-            // `catch_type` 0 = catch-all (any throwable), matching kotlinc's `finally` table entry.
-            for (rs, re) in fin_ranges {
-                code.add_exception(rs, re, fin_handler, 0);
-            }
-        }
-
-        if after_reachable {
-            // The result is live from the merge frame at `after` until it is loaded.
-            let result_lease = result_slot.map(|slot| self.lease_temporary(slot, rt));
-            self.frame(after, vec![], code);
-            self.bind(after, code);
-            if let Some(slot) = result_slot {
-                load(rt, slot, code);
-            }
-            if let Some(lease) = result_lease {
-                self.release_temporary(lease);
-            }
-        } else {
-            // Every path diverges — `after` is dead; bind it so any stray reference resolves, but emit
-            // no frame (nothing reaches it) and leave no value (the `try` is `Nothing`-typed).
-            self.bind(after, code);
-        }
-    }
-
     /// Whether emitting `e` as a value always transfers control away (returns/throws), so control
-    /// Resolve a `break`/`continue` target to `(continue_label, break_label)`. `None` → the innermost
-    /// loop; `Some(l)` → the nearest enclosing loop carrying `l@`. Falls back to the innermost if the
-    /// label isn't found (a compilable program always has the labeled loop in scope).
-    fn loop_target(&self, label: &Option<String>) -> (Label, Label) {
-        let entry = match label {
-            Some(l) => self
-                .loop_stack
-                .iter()
-                .rev()
-                .find(|(_, _, sl)| sl.as_deref() == Some(l.as_str()))
-                .or_else(|| self.loop_stack.last()),
-            None => self.loop_stack.last(),
-        };
-        let (cont, end, _) = entry.expect("break/continue outside loop");
-        (*cont, *end)
-    }
-
     /// never falls through past it. Used to suppress dead `goto`s and unreachable merge frames.
     fn diverges(&self, e: u32) -> bool {
         self.ir
