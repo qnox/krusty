@@ -3180,3 +3180,55 @@ fn deserialize_opens_kotlincs_locals_and_switches_on_the_index() {
         "element-index dispatch"
     );
 }
+
+/// A property whose element serializer must be ALLOCATED (`List<Nested>`) fills the
+/// `$childSerializers` slot that belongs to it, rather than leaving that slot null.
+///
+/// krusty filled the identical slot for `List<String>` and left this one null, so the defect was
+/// invisible on every fixture whose collections held builtins. A null slot is not only a byte
+/// difference: a reader of the cache gets `null` where a serializer belongs, so the slot has to
+/// hold something before anything is taught to read it.
+///
+/// What it holds is still not what kotlinc writes — kotlinc defers construction through
+/// `LazyKt.lazy(PUBLICATION, …)` over an `invokedynamic`-bound factory, where krusty constructs
+/// eagerly and wraps with `lazyOf`. The reference half of this test pins that difference so the
+/// remaining work is stated rather than assumed.
+#[test]
+fn a_composed_element_serializer_is_cached_rather_than_left_null() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let source = "import kotlinx.serialization.Serializable\n\
+                  @Serializable\n\
+                  data class Leaf(val id: Int)\n\
+                  @Serializable\n\
+                  data class Branch(val count: Int, val leaves: List<Leaf>)\n";
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let Some(built) =
+        compare_with_kotlinc_plugin("ComposedCache", source, "Branch", &cp, "25", &extra)
+    else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let initializer = |text: &str| {
+        text.lines()
+            .skip_while(|line| !line.trim_start().starts_with("static {}"))
+            .take_while(|line| !line.contains("InnerClasses:"))
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let reference = initializer(&built.reference);
+    assert!(
+        reference.contains("kotlin/LazyKt.lazy:") && reference.contains("invokedynamic"),
+        "the reference defers the composed serializer behind a lazy over a bound factory:\n\
+         {reference}"
+    );
+    let krusty = initializer(&built.krusty);
+    assert!(
+        krusty.contains("Leaf$$serializer"),
+        "krusty's class initializer must cache the composed element serializer, not a null:\n\
+         {krusty}"
+    );
+}
