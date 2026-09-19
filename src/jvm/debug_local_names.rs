@@ -15,10 +15,26 @@ pub(super) fn lambda_implementation_name(origin: &IrLambdaOrigin) -> String {
 /// inline depth, and stable lambda identity; only this module owns kotlinc's `$this$`, `$iv`, and
 /// `_u24` conventions.
 pub(super) fn name(ir: &IrFile, declaration: ExprId) -> Option<String> {
-    match ir.debug_local_provenance(declaration) {
+    render(
+        ir,
+        ir.value_names.get(&declaration).map(String::as_str),
+        ir.debug_local_provenance(declaration),
+    )
+}
+
+/// Render one debug local from the two facts common IR carries for every binding: the source
+/// spelling it was declared with, and its provenance.
+///
+/// A `catch` parameter is declared by its `IrCatch` rather than by a `Variable` node, so it has no
+/// declaration expression the two tables could be keyed by and hands the same facts over directly.
+pub(super) fn render(
+    ir: &IrFile,
+    source: Option<&str>,
+    provenance: Option<IrDebugLocalProvenance>,
+) -> Option<String> {
+    match provenance {
         Some(IrDebugLocalProvenance::InlineValue { role, depth }) => {
-            let source = ir.value_names.get(&declaration)?;
-            let escaped = source.replace('$', "_u24");
+            let escaped = source?.replace('$', "_u24");
             let mut rendered = match role {
                 IrInlineLocalRole::Value => escaped,
                 IrInlineLocalRole::DispatchReceiver => format!("$this${escaped}"),
@@ -35,7 +51,7 @@ pub(super) fn name(ir: &IrFile, declaration: ExprId) -> Option<String> {
                 lambda_implementation_name(origin).replace('$', "_u24")
             ))
         }
-        None => ir.value_names.get(&declaration).cloned(),
+        None => source.map(str::to_owned),
     }
 }
 

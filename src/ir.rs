@@ -1152,11 +1152,45 @@ pub struct IrSamTarget {
 pub struct IrCatch {
     /// Value index the caught exception is bound to.
     pub var: u32,
-    /// Source parameter name, absent for compiler-generated handlers.
-    pub name: Option<String>,
+    /// The debug-visible binding, absent for a compiler-generated handler — which binds no source
+    /// name and must not appear in a local variable table.
+    pub binding: Option<IrCatchBinding>,
     /// JVM internal name of the caught exception type.
     pub exc_internal: TypeName,
     pub body: ExprId,
+}
+
+/// A `catch (e: E)` parameter's debug-local facts.
+///
+/// A catch binding is DECLARED by its `IrCatch`, not by a `Variable` node, so it has no declaration
+/// expression for `IrFile::value_names` and `IrFile::debug_local_provenance` to be keyed by. It
+/// carries the same two facts they hold for every other local, in the record that declares it, and
+/// a target renders it through the same boundary rather than writing the source spelling out.
+#[derive(Clone, Debug)]
+pub struct IrCatchBinding {
+    /// Source spelling, as the declaration wrote it.
+    pub name: String,
+    /// Inline provenance. `None` while the binding is still in the body that declared it; an
+    /// expansion that clones this catch nests it exactly as it nests an ordinary local's.
+    pub(crate) provenance: Option<IrDebugLocalProvenance>,
+}
+
+impl IrCatchBinding {
+    pub(crate) fn source(name: String) -> Self {
+        Self {
+            name,
+            provenance: None,
+        }
+    }
+
+    /// Carry this binding one inline expansion deeper. A binding with no provenance yet is one
+    /// this expansion is the first to clone, so it starts at depth one like any copied local.
+    pub(crate) fn nest_inline(&mut self) {
+        self.provenance = Some(self.provenance.map_or_else(
+            || IrDebugLocalProvenance::inline_value(IrInlineLocalRole::Value, 1),
+            IrDebugLocalProvenance::nested_inline,
+        ));
+    }
 }
 
 /// Built-in binary operators carried by `IrExpr::PrimitiveBinOp`.

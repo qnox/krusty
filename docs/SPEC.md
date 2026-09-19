@@ -6418,6 +6418,40 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   return each through a `finally`, plus an explicit return whose call is a constructor) and
   `tests/try_debug_lines_e2e.rs`.
 
+- **A `try` with a `finally` reserves its two parked slots where it OPENS, and nested `try`s share
+  them.** Such a `try` parks two things while a finalizer runs: the value a `return` out of it
+  computed before leaving, and the exception its catch-all caught. kotlinc reserves both with the
+  `try` itself, so every local an inlined copy of the finalizer declares sits ABOVE them; krusty
+  allocated each where it was first used, which put the first copy's locals underneath and moved
+  everything the `try` parks one slot up. The cost was not a name: a slot-higher parked exception
+  is an extra `top` in every StackMapTable frame recorded while the finalizer runs, and a longer
+  store in every copy, so the frames and the exception table's offsets both diverged.
+
+  Nested `try`s SHARE both slots, which is also what kotlinc emits. Only one return is ever in
+  flight, and a `try` inside the body runs its handler strictly before the enclosing one is
+  entered — so the enclosing slots are free for it. The parked-exception slot stays in the reuse
+  pool while the body is emitted and is taken back out before the handler, where it holds the
+  exception across the whole inlined finalizer and a `try` inside that copy must not be given it.
+
+  The LAST catch of a `try` with no `finally` falls through to the join instead of jumping to it:
+  nothing stands between them, so the jump would be to the next instruction. Every other catch has
+  the next handler, or its own copy of the finalizer, in the way and still needs it.
+
+  Tests: `a_finally_with_its_own_handler_types_the_parked_exception`, which compares the complete
+  exception table and the complete frame list — offsets, `top` padding and all — against kotlinc,
+  and `a_nested_finally_copy_stays_inside_the_outer_region`, which compares the complete code.
+
+- **A `catch` parameter is a debug local like any other.** It is DECLARED by its `IrCatch` rather
+  than by a variable node, so it has no declaration expression the source-name and provenance
+  tables can be keyed by; it carries the same two facts in the record that declares it
+  (`IrCatchBinding`) and is rendered through the same JVM debug-name boundary as every other local.
+  Writing the source spelling straight into the local variable table cost the `$iv` suffixes: the
+  reference compiler names an inlined catch parameter `e$iv` at one expansion deep and `e$iv$iv` at
+  two, exactly as it names an ordinary copied local, and krusty wrote a bare `e` at every depth. An
+  expansion that clones a `try` nests the binding's provenance as it nests a local's.
+  (`a_catch_parameter_is_named_where_it_is_declared`,
+  `an_inlined_catch_parameter_is_named_at_its_expansion_depth`.)
+
 - **A CALL's `LineNumberTable` entries: which physical operation is a dispatch, and which operands
   the call invented.** A multi-line call's operands each mark their own line as they are pushed, so
   by the time the `invoke*` is reached the line in effect is the last operand's. kotlinc puts the
