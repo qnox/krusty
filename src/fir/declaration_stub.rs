@@ -73,6 +73,11 @@ impl DeclarationFlags {
     /// getter. This is stable declaration shape used only for diagnostic recovery when that
     /// signature fails; it retains neither the determining expression nor a source coordinate.
     pub const INFERRED_PROPERTY_TYPE: u64 = 1 << 35;
+    /// The declaration WROTE `actual`. It is the mirror of [`Self::EXPECT`] and the only thing that
+    /// makes a declaration an implementation of an `expect`: without it a plain declaration of the
+    /// same shape in the same package would actualize one, which suppresses the unmatched-`expect`
+    /// error, excludes the `expect` subtree and inherits its defaults — all from a coincidence.
+    pub const ACTUAL: u64 = 1 << 36;
 
     pub const fn with(mut self, flag: u64, enabled: bool) -> Self {
         if enabled {

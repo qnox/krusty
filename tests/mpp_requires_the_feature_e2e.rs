@@ -10,10 +10,10 @@
 //! MEMBER `actual` is reported as well, at its own column.
 
 use super::common;
+use common::ledger;
 
 /// kotlinc's exact sentence.
-const MESSAGE: &str =
-    "error: 'expect' and 'actual' declarations can be used only in multiplatform \
+const MESSAGE: &str = "'expect' and 'actual' declarations can be used only in multiplatform \
                        projects. Learn more about Kotlin Multiplatform: \
                        https://kotl.in/multiplatform-setup";
 
@@ -51,13 +51,14 @@ fn an_expect_declaration_needs_the_multiplatform_feature() {
         false,
     );
     assert!(!ok, "the compile must fail:\n{report}");
-    assert!(
-        report.contains(&format!("Main.kt:3:1: {MESSAGE}")),
-        "at the `expect` keyword, in the reference compiler's words:\n{report}"
-    );
-    assert!(
-        report.contains(&format!("Main.kt:5:1: {MESSAGE}")),
-        "once per declaration carrying it:\n{report}"
+    assert_eq!(
+        ledger(&report),
+        [
+            format!("Main.kt:3:1: {MESSAGE}"),
+            format!("Main.kt:5:1: {MESSAGE}"),
+        ],
+        "the whole ledger: at each `expect` keyword, in the reference compiler's words, once per \
+         declaration carrying it:\n{report}"
     );
 }
 
@@ -76,13 +77,13 @@ fn an_actual_declaration_needs_it_too_members_included() {
         false,
     );
     assert!(!ok, "the compile must fail:\n{report}");
-    assert!(
-        report.contains(&format!("Main.kt:3:1: {MESSAGE}")),
-        "the top-level `actual`:\n{report}"
-    );
-    assert!(
-        report.contains(&format!("Main.kt:6:5: {MESSAGE}")),
-        "and the member one, at column 5:\n{report}"
+    assert_eq!(
+        ledger(&report),
+        [
+            format!("Main.kt:3:1: {MESSAGE}"),
+            format!("Main.kt:6:5: {MESSAGE}"),
+        ],
+        "the whole ledger: the top-level `actual`, then the member one at its own column:\n{report}"
     );
 }
 
@@ -100,9 +101,10 @@ fn the_feature_restores_the_previous_behaviour() {
         true,
     );
     assert!(ok, "a matched expect/actual pair still compiles:\n{report}");
-    assert!(
-        !report.contains("multiplatform"),
-        "and says nothing about multiplatform projects:\n{report}"
+    assert_eq!(
+        ledger(&report),
+        Vec::<String>::new(),
+        "and reports nothing at all:\n{report}"
     );
 }
 
@@ -119,7 +121,7 @@ fn a_file_with_neither_modifier_is_untouched() {
         false,
     );
     assert!(ok, "an ordinary compile is unaffected:\n{report}");
-    assert!(!report.contains("multiplatform"), "{report}");
+    assert_eq!(ledger(&report), Vec::<String>::new(), "{report}");
 }
 
 /// An `expect` with no `actual`, with the feature on, in the reference compiler's own words and at
@@ -142,15 +144,13 @@ fn an_unmatched_expect_names_the_module_it_looked_in() {
 
     let (ok, report) = compile(SOURCE, true);
     assert!(!ok, "the compile must fail:\n{report}");
-    for (line, name) in [(3, "helper"), (5, "Holder"), (9, "prop")] {
-        assert!(
-            report.contains(&format!(
-                "Main.kt:{line}:1: error: expected {name} has no actual declaration in module \
-                 <main> for JVM"
-            )),
-            "{name} at the `expect` keyword:\n{report}"
-        );
-    }
+    assert_eq!(
+        ledger(&report),
+        [(3, "helper"), (5, "Holder"), (9, "prop")].map(|(line, name)| format!(
+            "Main.kt:{line}:1: expected {name} has no actual declaration in module <main> for JVM"
+        )),
+        "the whole ledger, each at its own `expect` keyword:\n{report}"
+    );
 }
 
 /// And the module it names is the one `-module-name` gave it.
@@ -176,9 +176,9 @@ fn the_module_a_diagnostic_names_is_the_declared_one() {
         .expect("run krusty");
     let mut report = String::from_utf8_lossy(&out.stdout).into_owned();
     report.push_str(&String::from_utf8_lossy(&out.stderr));
-    assert!(
-        report
-            .contains("error: expected helper has no actual declaration in module <mylib> for JVM"),
-        "the declared module name, not the default:\n{report}"
+    assert_eq!(
+        ledger(&report),
+        ["Main.kt:3:1: expected helper has no actual declaration in module <mylib> for JVM"],
+        "the whole ledger, naming the declared module rather than the default:\n{report}"
     );
 }

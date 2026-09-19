@@ -12,64 +12,46 @@
 //! function returning `Unit`).
 
 use super::common;
+use common::Reported;
 
-/// The measured shape of one report line, so the comparison is about the RENDERING and not about
-/// which absolute path each compiler happened to print.
-#[derive(Debug, Eq, PartialEq)]
-struct Reported {
-    line: u32,
-    column: u32,
-    rendered: String,
-}
-
+/// The sentence this check emits. It is never used to SELECT report lines — the ledgers below are
+/// complete — only to state that a fixture the check must stay silent about produced none.
 const SENTENCE: &str = "has no corresponding expected declaration";
 
-/// Every reported line, in the order the compiler printed it.
-///
-/// The sequence is NOT sorted. Diagnostic order is part of what this compares: both compilers
-/// report these in source order, and a sort would hide a regression that reordered them — which is
-/// exactly what happened while members were collected as all functions followed by all properties.
-fn reported(report: &str, stem: &str) -> Vec<Reported> {
-    report
-        .lines()
-        .filter(|line| line.contains(SENTENCE))
-        .filter_map(|line| {
-            let (position, message) = line.split_once(": error: ")?;
-            let mut position = position.rsplit(':');
-            let column = position.next()?.parse().ok()?;
-            let line = position.next()?.parse().ok()?;
-            // Both compilers print a path; only the file it ends in has to agree.
-            let path = position.next()?;
-            assert!(
-                path.ends_with(&format!("{stem}.kt")),
-                "an unexpected file reported: {path}"
-            );
-            Some(Reported {
-                line,
-                column,
-                rendered: message.trim_end().to_string(),
-            })
-        })
-        .collect::<Vec<_>>()
+/// The files one differential compiles, and the extra reference-compiler arguments a split source
+/// set needs.
+struct Args<'a> {
+    sources: &'a [std::path::PathBuf],
+    reference: &'a [&'a str],
 }
 
-/// Compile `source` with the reference compiler and with krusty, and return both reports.
-fn both(source: &str, stem: &str) -> (Vec<Reported>, Vec<Reported>) {
-    let dir = common::scratch_dir().expect("scratch dir");
-    let file = dir.join(format!("{stem}.kt"));
-    std::fs::write(&file, source).expect("write the fixture");
-
-    let reference_out = dir.join("reference");
+/// Run both compilers over the files already written into `dir` and return both complete ledgers.
+fn both_reports(
+    dir: &std::path::Path,
+    stem: &str,
+    args: Args<'_>,
+) -> (Vec<Reported>, Vec<Reported>) {
+    let reference_out = dir.join(format!("{stem}-reference"));
     std::fs::create_dir_all(&reference_out).expect("reference output directory");
-    let (_, reference) = common::kotlinc_compile(&[
-        "-Xmulti-platform".to_string(),
+    let mut reference_args = vec!["-Xmulti-platform".to_string()];
+    reference_args.extend(
+        args.reference
+            .iter()
+            .map(|argument| (*argument).to_string()),
+    );
+    reference_args.extend([
         "-d".to_string(),
         reference_out.to_string_lossy().into_owned(),
         "-cp".to_string(),
         common::stdlib_jar().to_string_lossy().into_owned(),
-        file.to_string_lossy().into_owned(),
-    ])
-    .expect("reference kotlinc available");
+    ]);
+    reference_args.extend(
+        args.sources
+            .iter()
+            .map(|source| source.to_string_lossy().into_owned()),
+    );
+    let (status, reference) =
+        common::kotlinc_compile(&reference_args).expect("reference kotlinc available");
 
     let out = std::process::Command::new(common::krusty_binary())
         .args([
@@ -80,14 +62,116 @@ fn both(source: &str, stem: &str) -> (Vec<Reported>, Vec<Reported>) {
         ])
         .arg(common::stdlib_jar())
         .arg("-d")
-        .arg(dir.join("krusty"))
-        .arg(&file)
+        .arg(dir.join(format!("{stem}-krusty")))
+        .args(args.sources)
         .output()
         .expect("run krusty");
     let mut krusty = String::from_utf8_lossy(&out.stdout).into_owned();
     krusty.push_str(&String::from_utf8_lossy(&out.stderr));
+    // The two compilers must agree on whether the source is REJECTED, not only on what they
+    // printed. A krusty run that died before reaching the check, or a fixture that stopped
+    // provoking anything, otherwise compares two empty ledgers and passes.
+    assert_eq!(
+        status != 0,
+        !out.status.success(),
+        "the compilers disagree on whether this source is rejected\nreference:\n{reference}\nkrusty:\n{krusty}"
+    );
 
-    (reported(&reference, stem), reported(&krusty, stem))
+    (common::reported(&reference), common::reported(&krusty))
+}
+
+/// Compile one single-file `source` with both compilers and return both complete ledgers.
+fn both(source: &str, stem: &str) -> (Vec<Reported>, Vec<Reported>) {
+    let dir = common::scratch_dir().expect("scratch dir");
+    let file = dir.join(format!("{stem}.kt"));
+    std::fs::write(&file, source).expect("write the fixture");
+    both_reports(
+        &dir,
+        stem,
+        Args {
+            sources: std::slice::from_ref(&file),
+            reference: &[],
+        },
+    )
+}
+
+/// Compile a SPLIT source set — a common fragment and a platform one — with both compilers.
+///
+/// The reference compiler rejects an `expect` and its `actual` in the same module before it reaches
+/// any of the questions here, so a single-file fixture can only ever measure the unmatched half.
+/// `-Xcommon-sources` is how kotlinc is told which of the files it is compiling are the common
+/// fragment; `-Xexpect-actual-classes` silences its beta warning for classifiers.
+fn both_split(
+    stem: &str,
+    common: &[(&str, &str)],
+    platform: &[(&str, &str)],
+) -> (Vec<Reported>, Vec<Reported>) {
+    let dir = common::scratch_dir().expect("scratch dir");
+    let write = |files: &[(&str, &str)]| {
+        files
+            .iter()
+            .map(|(name, source)| {
+                let path = dir.join(name);
+                std::fs::write(&path, source).expect("write a fragment");
+                path
+            })
+            .collect::<Vec<_>>()
+    };
+    let common_paths = write(common);
+    let mut sources = common_paths.clone();
+    sources.extend(write(platform));
+    let common_sources = format!(
+        "-Xcommon-sources={}",
+        common_paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    both_reports(
+        &dir,
+        stem,
+        Args {
+            sources: &sources,
+            reference: &["-Xexpect-actual-classes", &common_sources],
+        },
+    )
+}
+
+/// Assert that krusty's report is the reference compiler's, EXCEPT for errors named in
+/// `unimplemented` — diagnostics krusty does not implement at all, which have nothing to do with
+/// this check and which the fixture cannot avoid provoking.
+///
+/// The list is asserted from both sides: every entry must actually appear in the reference report,
+/// so it cannot outlive the gap it names, and what is left over after removing them must be
+/// krusty's complete ledger. A fixture that can avoid the diagnostic does so instead of listing it.
+fn assert_identical_except(source: &str, stem: &str, unimplemented: &[&str]) {
+    let (reference, krusty) = both(source, stem);
+    assert!(
+        !reference.is_empty(),
+        "the fixture must make the reference compiler report something"
+    );
+    for message in unimplemented {
+        assert!(
+            reference
+                .iter()
+                .any(|entry| entry.rendered.starts_with(message)),
+            "the reference compiler no longer reports `{message}`, so it must stop being excused"
+        );
+    }
+    let expected = reference
+        .iter()
+        .filter(|entry| {
+            !unimplemented
+                .iter()
+                .any(|message| entry.rendered.starts_with(message))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        krusty.iter().collect::<Vec<_>>(),
+        expected,
+        "krusty's complete ledger must be the reference compiler's, minus the named gaps"
+    );
 }
 
 /// Assert that krusty's report is exactly the reference compiler's.
@@ -148,7 +232,7 @@ fn stdlib_shaped_declarations_render_the_same_way() {
          actual fun Int.receiver(): Int = this\n\
          actual fun listParam(c: List<Int>): Int = 1\n\
          actual val <T> List<T>.ext: Int get() = 1\n\
-         actual typealias GenericAlias<T> = List<T>\n",
+         actual typealias GenericAlias<T> = Array<T>\n",
         "Stdlib",
     );
 }
@@ -168,7 +252,7 @@ fn a_callable_renders_every_modifier_it_wrote_in_order() {
          actual tailrec fun loop(n: Int): Int = if (n == 0) 0 else loop(n - 1)\n\
          actual inline infix fun Int.both(other: Int): Int = other\n\
          actual inline suspend fun sus(f: () -> Int): Int = f()\n\
-         actual inline operator fun Int.times2(other: Int): Int = other\n",
+         actual inline operator fun Int.times(other: Int): Int = other\n",
         "Modifiers",
     );
 }
@@ -219,7 +303,7 @@ fn a_classifier_is_rendered_as_the_reference_compiler_renders_it() {
          actual abstract class Ab\n\
          actual sealed class Se\n\
          actual data class Data(val x: Int)\n\
-         actual value class Wrapped(val x: Int)\n\
+         @JvmInline actual value class Wrapped(val x: Int)\n\
          actual enum class Colors { A }\n\
          actual annotation class Anno\n\
          actual class OnlyIface : I\n\
@@ -237,7 +321,7 @@ fn a_classifier_is_rendered_as_the_reference_compiler_renders_it() {
 /// type.
 #[test]
 fn a_type_alias_is_rendered_as_the_reference_compiler_renders_it() {
-    assert_identical(
+    assert_identical_except(
         "package plib\n\
          \n\
          class Parcel<T>\n\
@@ -246,6 +330,13 @@ fn a_type_alias_is_rendered_as_the_reference_compiler_renders_it() {
          actual typealias GenericAlias<T> = Parcel<T>\n\
          actual typealias FunAlias = (Int) -> String\n",
         "Aliases",
+        // A function type IS a classifier with declaration-site variance (`Function1<in P1,
+        // out R>`), so no function-type alias can avoid these two, and the shape is worth
+        // keeping. Both are diagnostics krusty does not implement at all.
+        &[
+            "aliased class cannot have type parameters with declaration-site variance.",
+            "type arguments on the right-hand side of actual type alias must be its type parameters",
+        ],
     );
 }
 
@@ -260,23 +351,32 @@ fn a_type_alias_is_rendered_as_the_reference_compiler_renders_it() {
 /// file is exactly how a matched pair looks. Only krusty's side is asserted here.
 #[test]
 fn a_matched_actual_is_silent() {
-    let (_, krusty) = both(
-        "package plib\n\
-         \n\
-         expect fun helper(): Int\n\
-         actual fun helper(): Int = 1\n\
-         \n\
-         expect class Holder\n\
-         actual class Holder\n\
-         \n\
-         expect val prop: Int\n\
-         actual val prop: Int = 2\n\
-         \n\
-         expect class Aliased\n\
-         actual typealias Aliased = String\n\
-         \n\
-         fun ordinary(): Int = helper()\n",
+    let (reference, krusty) = both_split(
         "Matched",
+        &[(
+            "MatchedCommon.kt",
+            "package plib\n\
+             \n\
+             expect fun helper(): Int\n\
+             expect class Holder\n\
+             expect val prop: Int\n\
+             expect class Aliased\n",
+        )],
+        &[(
+            "MatchedPlatform.kt",
+            "package plib\n\
+             \n\
+             actual fun helper(): Int = 1\n\
+             actual class Holder\n\
+             actual val prop: Int = 2\n\
+             actual typealias Aliased = String\n\
+             \n\
+             fun ordinary(): Int = helper()\n",
+        )],
+    );
+    assert!(
+        reference.is_empty(),
+        "the fixture must be a source the reference compiler ACCEPTS: {reference:?}"
     );
     assert!(
         krusty.is_empty(),
@@ -298,7 +398,7 @@ fn an_actual_matched_through_an_alias_is_silent() {
     std::fs::write(
         &common_file,
         "package plib
-         
+
          expect class S
          expect fun f(value: S): S
          expect val S.tag: S
@@ -308,7 +408,7 @@ fn an_actual_matched_through_an_alias_is_silent() {
     std::fs::write(
         &platform,
         "package plib
-         
+
          actual fun f(value: String): String = value
          actual val String.tag: String get() = this
          actual typealias S = String
@@ -635,21 +735,7 @@ fn a_member_names_its_own_file_when_several_are_compiled() {
 
     // Each report's own complete sequence, file included — the coordinate a single-file fixture
     // cannot state.
-    let ledger = |report: &str| {
-        report
-            .lines()
-            .filter(|line| line.contains(SENTENCE))
-            .filter_map(|line| {
-                let (position, message) = line.split_once(": error: ")?;
-                let mut position = position.rsplit(':');
-                let column = position.next()?;
-                let number = position.next()?;
-                let path = std::path::Path::new(position.next()?);
-                let file = path.file_name()?.to_string_lossy().into_owned();
-                Some(format!("{file}:{number}:{column}: {}", message.trim_end()))
-            })
-            .collect::<Vec<_>>()
-    };
+    let ledger = common::ledger;
     let reference = ledger(&reference);
     assert_eq!(
         reference,
@@ -730,7 +816,7 @@ fn a_member_that_actualizes_nothing_under_a_matched_owner_is_reported() {
     let mut krusty = String::from_utf8_lossy(&out.stdout).into_owned();
     krusty.push_str(&String::from_utf8_lossy(&out.stderr));
 
-    let reference = reported(&reference, "PlatformBody");
+    let reference = common::reported(&reference);
     assert_eq!(
         reference
             .iter()
@@ -743,7 +829,7 @@ fn a_member_that_actualizes_nothing_under_a_matched_owner_is_reported() {
         "the owner and the member it does actualize are both silent; the other two are not"
     );
     assert_eq!(
-        reported(&krusty, "PlatformBody"),
+        common::reported(&krusty),
         reference,
         "and krusty's whole report is the same one"
     );
@@ -857,12 +943,12 @@ fn members_that_tie_on_the_child_key_still_actualize() {
     krusty.push_str(&String::from_utf8_lossy(&out.stderr));
 
     assert_eq!(
-        reported(&reference, "TiedBody"),
+        common::reported(&reference),
         vec![],
         "every member actualizes one of the expect members"
     );
     assert_eq!(
-        reported(&krusty, "TiedBody"),
+        common::reported(&krusty),
         vec![],
         "and krusty agrees — a tie on the child key is broken, not abandoned"
     );
@@ -871,5 +957,177 @@ fn members_that_tie_on_the_child_key_still_actualize() {
     assert!(
         !krusty.contains("internal error"),
         "no member is left without a resolved record:\n{krusty}"
+    );
+}
+
+/// A plain declaration of the same shape does NOT actualize an `expect`.
+///
+/// Actualization used to accept every non-`expect` declaration as a candidate implementation,
+/// because compact headers carried no record of the modifier. A declaration that happens to have
+/// the `expect`'s package, kind, name, receiver and arity then filled it — which silences the
+/// unmatched-`expect` error, excludes the `expect` subtree from the module and hands the
+/// declaration the `expect`'s defaults, all from a coincidence.
+#[test]
+fn an_ordinary_declaration_of_the_same_shape_does_not_actualize() {
+    let (reference, krusty) = both_split(
+        "PlainShape",
+        &[(
+            "PlainShapeCommon.kt",
+            "package plib\n\
+             \n\
+             expect fun paired(value: Int): Int\n\
+             expect class Held\n",
+        )],
+        &[(
+            "PlainShapePlatform.kt",
+            "package plib\n\
+             \n\
+             fun paired(value: Int): Int = value\n\
+             class Held\n",
+        )],
+    );
+    assert!(
+        !reference.is_empty(),
+        "the reference compiler must reject an `expect` nothing actualizes"
+    );
+    assert_eq!(
+        krusty, reference,
+        "krusty's complete ledger must be the reference compiler's"
+    );
+}
+
+/// The same classifier written two ways — imported in one fragment, fully qualified in the other —
+/// is ONE classifier, and the pair matches.
+///
+/// A comparison of the two declarations' unresolved type PATHS sees `Tally` against
+/// `plib.model.Tally` and refuses them.
+#[test]
+fn an_imported_and_a_qualified_spelling_of_one_classifier_match() {
+    let (reference, krusty) = both_split(
+        "SpellingMatch",
+        &[
+            (
+                "SpellingMatchModel.kt",
+                "package plib.model\n\nclass Tally\n",
+            ),
+            (
+                "SpellingMatchCommon.kt",
+                "package plib\n\
+                 \n\
+                 expect fun takes(value: plib.model.Tally): Int\n",
+            ),
+        ],
+        &[(
+            "SpellingMatchPlatform.kt",
+            "package plib\n\
+             \n\
+             import plib.model.Tally\n\
+             \n\
+             actual fun takes(value: Tally): Int = 1\n",
+        )],
+    );
+    assert!(
+        reference.is_empty(),
+        "the reference compiler accepts the pair: {reference:?}"
+    );
+    assert!(
+        krusty.is_empty(),
+        "and so must krusty, rather than reporting the `actual`: {krusty:?}"
+    );
+}
+
+/// Two classifiers with the same SIMPLE name in different packages are two classifiers, and the
+/// pair does not match.
+///
+/// This is the other half of the spelling question: a comparison that resolves nothing sees
+/// `Tally` against `Tally` and pairs declarations that have nothing to do with each other.
+#[test]
+fn identical_simple_names_from_different_packages_do_not_match() {
+    let (reference, krusty) = both_split(
+        "SpellingClash",
+        &[
+            ("SpellingClashLeft.kt", "package plib.left\n\nclass Tally\n"),
+            (
+                "SpellingClashRight.kt",
+                "package plib.right\n\nclass Tally\n",
+            ),
+            (
+                "SpellingClashCommon.kt",
+                "package plib\n\
+                 \n\
+                 import plib.left.Tally\n\
+                 \n\
+                 expect fun takes(value: Tally): Int\n",
+            ),
+        ],
+        &[(
+            "SpellingClashPlatform.kt",
+            "package plib\n\
+             \n\
+             import plib.right.Tally\n\
+             \n\
+             actual fun takes(value: Tally): Int = 1\n",
+        )],
+    );
+    assert!(
+        !reference.is_empty(),
+        "the reference compiler must refuse the pair"
+    );
+    assert_eq!(
+        krusty, reference,
+        "krusty's complete ledger must be the reference compiler's"
+    );
+}
+
+/// A `typealias` that actualizes an `expect class` also answers for the members keyed on it.
+///
+/// A member EXTENSION on the expect classifier is keyed by its receiver, and the platform fragment
+/// writes that receiver as the alias's TARGET — so the child key only agrees once the alias has
+/// been followed.
+#[test]
+fn a_member_extension_on_an_actualized_alias_matches() {
+    let (reference, krusty) = both_split(
+        "AliasReceiver",
+        &[(
+            "AliasReceiverCommon.kt",
+            "package plib\n\
+             \n\
+             expect class Carried\n\
+             \n\
+             expect fun Carried.carried(): Int\n",
+        )],
+        &[(
+            "AliasReceiverPlatform.kt",
+            "package plib\n\
+             \n\
+             actual typealias Carried = String\n\
+             \n\
+             actual fun String.carried(): Int = length\n",
+        )],
+    );
+    assert!(
+        reference.is_empty(),
+        "the reference compiler accepts the pair: {reference:?}"
+    );
+    assert!(krusty.is_empty(), "and so must krusty: {krusty:?}");
+}
+
+/// A file's `actual typealias`es are reported where the SOURCE writes them, not after everything
+/// else it declares.
+///
+/// The aliases live in their own parser list, and a report that emptied one list after the other
+/// put every alias last however the source interleaved them. Two aliases with a callable between
+/// them, and a third after it, is the smallest source that can tell the two orders apart.
+#[test]
+fn an_alias_is_reported_where_the_source_writes_it() {
+    assert_identical(
+        "package plib\n\
+         \n\
+         actual typealias First = String\n\
+         actual fun between(): Int = 1\n\
+         actual typealias Second = Int\n\
+         actual val trailing: Int get() = 2\n\
+         actual typealias Third = Long\n",
+        "Interleaved",
     );
 }
