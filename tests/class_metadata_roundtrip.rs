@@ -30,7 +30,8 @@ fn class_info_kind(internal: &str, d1: Vec<u8>, d2: Vec<String>, kind: Option<i3
         interfaces: Vec::<String>::new().into(),
         fields: Vec::new(),
         methods: Vec::new(),
-        meta: decode_metadata(&d1_strings, &d2, kind, internal, None, &[]),
+        meta: decode_metadata(&d1_strings, &d2, kind, internal, None, &[])
+            .expect("round-trip metadata decodes"),
         signature: None,
         retention: None,
         annotations: Vec::new(),

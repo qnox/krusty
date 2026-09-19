@@ -1307,7 +1307,8 @@ mod tests {
             "a/AKt",
             None,
             &[],
-        );
+        )
+        .expect("decode generated facade metadata");
 
         let [property] = decoded.package_properties.as_ref() else {
             panic!(

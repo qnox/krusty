@@ -1199,6 +1199,11 @@ where
         (Vec::new(), streamed)
     };
     let streamed = streamed.or(recovery_streamed);
+    if let Err(error) = symbols.libraries.validate_initialization() {
+        diags.diags.truncate(diagnostics_start);
+        diags.set_file(0);
+        diags.error(Span::new(0, 0), error.message);
+    }
     diags.collapse_duplicates_from(diagnostics_start);
     let analysis = SourceSetAnalysis {
         files: if retain_inspection_analysis {
