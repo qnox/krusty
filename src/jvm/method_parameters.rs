@@ -187,20 +187,58 @@ pub(super) fn primary_constructor(
     parameters
 }
 
+/// Everything a class KIND prepends to EVERY constructor it declares, ahead of what the
+/// declaration wrote: an `enum class` carries `(String $enum$name, int $enum$ordinal)` on its
+/// primary and on each secondary alike. Carried as ONE description — the physical types and the
+/// reflected identities together — because a prefix that reaches the descriptor but not
+/// `MethodParameters` (or the generated debug identities, or the default stub, or the `this(…)`
+/// delegation) is exactly how a constructor comes to describe an arity it does not have.
+#[derive(Clone, Default)]
+pub(super) struct OwnerConstructorPrefix {
+    pub(super) types: Vec<Ty>,
+    parameters: Vec<MethodParameter>,
+}
+
+impl OwnerConstructorPrefix {
+    /// An ordinary class prepends nothing.
+    pub(super) fn none() -> Self {
+        Self::default()
+    }
+
+    /// `java.lang.Enum` needs the constant's name and ordinal, so kotlinc threads them through
+    /// every constructor of an `enum class` and marks both `ACC_SYNTHETIC` in `MethodParameters`.
+    /// They are not value parameters: a body's value ids still start at the first declared one.
+    pub(super) fn enum_class() -> Self {
+        Self {
+            types: vec![Ty::String, Ty::Int],
+            parameters: vec![
+                parameter("$enum$name", SYNTHETIC),
+                parameter("$enum$ordinal", SYNTHETIC),
+            ],
+        }
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.types.len()
+    }
+}
+
 pub(super) fn secondary_constructor(
     class: &IrClass,
     constructor: &IrSecondaryCtor,
+    owner_prefix: &OwnerConstructorPrefix,
     physical_parameters: &[Ty],
 ) -> Vec<MethodParameter> {
     if constructor.synthetic || physical_parameters.is_empty() {
         return Vec::new();
     }
     assert_eq!(
-        constructor.prefix_params.len() + constructor.named_params.len(),
+        owner_prefix.len() + constructor.prefix_params.len() + constructor.named_params.len(),
         physical_parameters.len(),
         "secondary constructor identities must match its physical JVM parameters"
     );
-    let mut parameters = constructor_prefix(class, constructor.prefix_params.len());
+    let mut parameters = owner_prefix.parameters.clone();
+    parameters.extend(constructor_prefix(class, constructor.prefix_params.len()));
     parameters.extend(
         constructor
             .named_params
@@ -211,10 +249,7 @@ pub(super) fn secondary_constructor(
 }
 
 pub(super) fn enum_constructor(class: &IrClass) -> Vec<MethodParameter> {
-    let mut parameters = vec![
-        parameter("$enum$name", SYNTHETIC),
-        parameter("$enum$ordinal", SYNTHETIC),
-    ];
+    let mut parameters = OwnerConstructorPrefix::enum_class().parameters;
     parameters.extend(class.ctor_args.iter().map(|argument| {
         parameter(
             argument

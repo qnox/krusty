@@ -1914,7 +1914,7 @@ fn extract_file_stub_inventory(
                 signature_inference: None,
                 initialization_order: None,
                 kind: DeclarationKind::Constructor,
-                visibility: Visibility::Public,
+                visibility: constructor.visibility,
                 flags: DeclarationFlags::default(),
             });
         }

@@ -10,8 +10,10 @@ use retained_defaults::{retain_class_default_spans, retain_param_default_spans};
 pub(crate) use return_labels::ReturnLabelSpans;
 
 mod call_shape;
+mod constructors;
 pub(crate) use call_shape::explicit_call_receiver;
 pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
+pub use constructors::{CtorDelegation, CtorDelegationCall, SecondaryCtor};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct ExprId(pub u32);
@@ -1251,37 +1253,6 @@ impl ClassDecl {
     pub fn is_annotation(&self) -> bool {
         self.kind == ClassKind::Annotation
     }
-}
-
-/// A secondary constructor `constructor(params) [: this(args) | : super(args)] [{ body }]`.
-#[derive(Clone, Debug)]
-pub struct SecondaryCtor {
-    pub annotations: Vec<AnnotationRef>,
-    pub annotation_args: Vec<Vec<ExprId>>,
-    pub params: Vec<Param>,
-    pub delegation: CtorDelegation,
-    pub body: Option<ExprId>,
-    /// Source range from `constructor` through its delegation call or body.
-    pub span: Span,
-}
-
-/// How a secondary constructor delegates: to another constructor of the same class (`this(...)`),
-/// to a base-class constructor (`super(...)`), or implicitly (none written).
-#[derive(Clone, Debug)]
-pub enum CtorDelegation {
-    None,
-    This(CtorDelegationCall),
-    Super(CtorDelegationCall),
-}
-
-#[derive(Clone, Debug)]
-pub struct CtorDelegationCall {
-    pub args: Vec<ExprId>,
-    pub names: Vec<Option<String>>,
-    /// Whether the last argument was written as a SYNTACTIC trailing lambda (`f(1) {}`). A `this(…)` /
-    /// `super(…)` delegation can never have one; a constructor CALL can, and the distinction decides
-    /// whether that argument may fill a `vararg` slot.
-    pub trailing_lambda: bool,
 }
 
 /// A class with NO primary constructor names its base class WITHOUT parentheses — `class D : Base {

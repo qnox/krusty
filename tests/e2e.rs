@@ -56,6 +56,8 @@ mod arity_error_coverage_e2e;
 mod assert_intrinsic_e2e;
 #[path = "backend_rejection_coverage_e2e.rs"]
 mod backend_rejection_coverage_e2e;
+#[path = "backend_temporary_leases_e2e.rs"]
+mod backend_temporary_leases_e2e;
 #[path = "backing_field_accessor_e2e.rs"]
 mod backing_field_accessor_e2e;
 #[path = "backtick_identifier_e2e.rs"]
@@ -90,6 +92,8 @@ mod break_continue_expr_e2e;
 mod break_continue_in_branch_e2e;
 #[path = "bridge_debug_tables_e2e.rs"]
 mod bridge_debug_tables_e2e;
+#[path = "bridge_return_unbox_e2e.rs"]
+mod bridge_return_unbox_e2e;
 #[path = "build1017_oo1_vcparam_result_takeif_e2e.rs"]
 mod build1017_oo1_vcparam_result_takeif_e2e;
 #[path = "build1018_pp1_suspend_block_firstornull_e2e.rs"]
@@ -394,6 +398,8 @@ mod context_local_fun_e2e;
 mod context_parameter_signature_order_e2e;
 #[path = "context_parameters_e2e.rs"]
 mod context_parameters_e2e;
+#[path = "continuation_spill_order_e2e.rs"]
+mod continuation_spill_order_e2e;
 #[path = "contract_calls_in_place_e2e.rs"]
 mod contract_calls_in_place_e2e;
 #[path = "contract_erasure_e2e.rs"]
@@ -556,6 +562,8 @@ mod enum_generic_interface_e2e;
 mod enum_implements_interface_e2e;
 #[path = "enum_inner_class_chain_e2e.rs"]
 mod enum_inner_class_chain_e2e;
+#[path = "enum_secondary_constructor_e2e.rs"]
+mod enum_secondary_constructor_e2e;
 #[path = "enum_value_of_intrinsic_e2e.rs"]
 mod enum_value_of_intrinsic_e2e;
 #[path = "enum_vararg_e2e.rs"]
@@ -1127,6 +1135,8 @@ mod object_value_inference_e2e;
 mod omitted_default_generic_overload_e2e;
 #[path = "one_armed_when_fallthrough_e2e.rs"]
 mod one_armed_when_fallthrough_e2e;
+#[path = "try_debug_lines_e2e.rs"]
+mod try_debug_lines_e2e;
 
 #[path = "declaration_debug_lines_e2e.rs"]
 mod declaration_debug_lines_e2e;
@@ -1443,6 +1453,8 @@ mod suspend_return_type_recovery_e2e;
 mod suspend_single_operand_hoist_e2e;
 #[path = "suspend_spill_slot_reuse_e2e.rs"]
 mod suspend_spill_slot_reuse_e2e;
+#[path = "suspend_super_call_refusal_e2e.rs"]
+mod suspend_super_call_refusal_e2e;
 #[path = "suspend_throw_operand_e2e.rs"]
 mod suspend_throw_operand_e2e;
 #[path = "suspend_try_catch_shapes_e2e.rs"]
