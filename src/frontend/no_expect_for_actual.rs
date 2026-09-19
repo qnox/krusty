@@ -96,9 +96,62 @@ enum Target {
 /// Every `actual` in the source set — top-level and hoisted nested classifiers alike — with the
 /// syntactic half of its rendering. Whether each one actualized anything is settled in [`report`],
 /// from its stable declaration identity and nothing else.
+/// Report every top-level implementation the source wrote WITHOUT `actual`.
+///
+/// A declaration sharing an `expect`'s package, kind, name, receiver and arity is the
+/// implementation that header was written for. The reference compiler says so at the declaration's
+/// own name and leaves the `expect` matched, rather than reporting the header as unfilled — the
+/// coincidence is an error about the implementation, and treating it as a valid one instead let a
+/// declaration that never claimed anything inherit the `expect`'s defaults in silence.
+///
+/// Reported while every file's syntax is still live, because the name is the coordinate and the
+/// compact inventory anchors only the declaration's whole range.
+pub(super) fn report_unmarked_implementations(
+    unmarked: &[crate::fir::DeclarationId],
+    files: &[File],
+    headers: &crate::fir::StreamedHeaderModule,
+    diags: &mut DiagSink,
+) {
+    if unmarked.is_empty() {
+        return;
+    }
+    let mut names = std::collections::HashMap::new();
+    for (index, file) in files.iter().enumerate() {
+        for &declaration in &file.decls {
+            let (name, span) = match file.decl(declaration) {
+                Decl::Fun(function) => (function.name_span, function.span),
+                Decl::Property(property) => (property.name_span, property.span),
+                Decl::Class(class) => (class.name_span, class.span),
+            };
+            names.insert((index as u32, span.lo, span.hi), name);
+        }
+        for alias in &file.type_alias_decls {
+            names.insert(
+                (index as u32, alias.span.lo, alias.span.hi),
+                alias.name_span,
+            );
+        }
+    }
+    for &declaration in unmarked {
+        let Some(anchor) = headers.declarations.anchor(declaration) else {
+            continue;
+        };
+        let file = anchor.source.raw();
+        let Some(&name) = names.get(&(file, anchor.range.lo, anchor.range.hi)) else {
+            continue;
+        };
+        diags.set_file(file);
+        diags.error(
+            name,
+            "declaration must be marked with 'actual'.".to_string(),
+        );
+    }
+}
+
 pub(super) fn collect(files: &[File]) -> Vec<UnmatchedActual> {
     let mut unmatched = Vec::new();
     for (index, file) in files.iter().enumerate() {
+        let file_start = unmatched.len();
         let package = file.package.clone().unwrap_or_default();
         // Which hoisted classifier is a `companion object` is an edge its OWNER records; the
         // companion itself is an ordinary singleton declaration. The reference compiler renders
@@ -185,6 +238,11 @@ pub(super) fn collect(files: &[File]) -> Vec<UnmatchedActual> {
                 },
             });
         }
+        // A file's `actual` declarations and its `actual typealias`es are two lists, and a report
+        // that emptied one after the other put every alias last however the source interleaved
+        // them. Diagnostic order is source order, so they are merged on the one coordinate both
+        // carry — the declaration's own range.
+        unmatched[file_start..].sort_by_key(|entry| (entry.anchor.lo, entry.anchor.hi));
     }
     unmatched
 }

@@ -32,7 +32,7 @@ impl Parser<'_> {
             && self
                 .t
                 .get(self.i + 1)
-                .map_or(false, |t| t.kind == TokenKind::Colon)
+                .is_some_and(|t| t.kind == TokenKind::Colon)
         {
             target = self.text().to_string();
             self.bump();

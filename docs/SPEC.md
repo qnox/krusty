@@ -4529,12 +4529,48 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `actual` is passed over in silence: a member whose resolved record cannot be reached reports an
   internal error at its own name rather than disappearing.
 
+  **An implementation is a declaration that WROTE `actual`.** A declaration sharing an `expect`'s
+  package, kind, name, receiver and arity is the implementation that header was written for, and
+  the reference compiler says so AT THE DECLARATION — `declaration must be marked with 'actual'.`
+  at its own name — while leaving the header matched. Accepting such a declaration as a valid
+  implementation instead let it suppress the unmatched-`expect` error, exclude the `expect`
+  subtree and inherit the header's defaults from a coincidence; reporting the header as
+  unactualized instead would name the same mismatch from the side that did not get it wrong. The
+  modifier is unrecoverable afterwards — it is gone by the time headers are compacted, and a
+  declaration's shape says nothing about what it claimed — so the parser's record of it is
+  published as `DeclarationFlags::ACTUAL`.
+  (`an_ordinary_declaration_of_the_same_shape_does_not_actualize`.)
+
+  **What a pair compares is a classifier IDENTITY, not a spelling.** Actualization runs before
+  signatures are resolved, so the identity is the one each file's package and imports establish
+  over the classifiers the module declares: `plib.model.Tally` written out and `Tally` under
+  `import plib.model.Tally` are one classifier, and `Tally` imported from `plib.left` and from
+  `plib.right` are two. A path nothing claims keeps its own spelling, which is a canonical form
+  both sides reach the same way rather than a fallback to the text. A TYPE PARAMETER is matched by
+  POSITION, the owners' before the declaration's own — `expect class A<B, C> { fun o(b: B): C }`
+  against `actual class A<C, B> { actual fun o(b: C): B }` is one legal pair, and a member that
+  started from an empty scope could not see it. An `actual typealias` is followed by the QUALIFIED
+  identity of the `expect class` it actualizes, in the member-extension receiver key as well as in
+  the type comparison. There is no lone-candidate fallback: every kind answers — a callable, a
+  constructor and a property by their input shapes, and the kinds that declare no inputs by the
+  coarse key that bucketed them — where accepting a single coarse candidate paired declarations
+  whose shapes had already been compared and rejected.
+  (`an_imported_and_a_qualified_spelling_of_one_classifier_match`,
+  `identical_simple_names_from_different_packages_do_not_match`,
+  `a_member_extension_on_an_actualized_alias_matches`.)
+
+  A file's `actual typealias`es are reported where the SOURCE writes them: they live in their own
+  parser list, and a report that emptied one list after the other put every alias last however the
+  source interleaved them. (`an_alias_is_reported_where_the_source_writes_it`.)
+
   Note the deliberate model
   difference this check makes visible: the reference compiler rejects an `expect` and its `actual`
   in the same module, while krusty compiles a platform module and its `dependsOn` chain as one
   source set, so a pair in one file is matched here and unmatched there. Tests:
   `no_expect_for_actual_e2e` — differential against the reference compiler on the same source,
-  because a rendering this detailed is exactly what a transcription gets wrong.
+  because a rendering this detailed is exactly what a transcription gets wrong, and comparing each
+  compiler's COMPLETE ordered ledger of errors: a comparison that keeps only this check's own
+  sentence cannot see a second diagnostic either compiler started or stopped reporting.
 
 - **Operator extensions on nullable PRIMITIVE receivers dispatch by call-site nullability.**
   `operator fun Int?.inc()`, `Long?.compareTo(Long?)`, `Int?.times(Int)` (the dispatchable set:

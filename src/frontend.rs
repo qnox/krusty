@@ -328,14 +328,27 @@ fn strip_selected_expects(
 /// Publish expect-owned default presence on surviving actual headers and return the stable
 /// provider→target work. Matched expect syntax remains in the active Pass-1 parser stream only
 /// until those defaults become checked FIR; compact-header exclusion keeps it out of signatures.
+struct ActualizedHeaders {
+    /// Top-level `expect` declarations an `actual` replaced. Their subtrees are excluded.
+    matched: std::collections::HashSet<crate::fir::DeclarationId>,
+    /// The `actual` declarations that actualized something.
+    targets: std::collections::HashSet<crate::fir::DeclarationId>,
+    /// Expect-owned defaults, as stable provider→target work.
+    defaults: Vec<crate::fir::DefaultArgumentProvider>,
+    /// Implementations that did not write `actual`.
+    unmarked: Vec<crate::fir::DeclarationId>,
+    /// `expect` declarations an implementation was written for and none matched.
+    incompatible: std::collections::HashSet<crate::fir::DeclarationId>,
+}
+
 fn actualize_headers_and_collect_inherited_defaults(
     headers: &mut crate::fir::StreamedHeaderModule,
-) -> (
-    std::collections::HashSet<crate::fir::DeclarationId>,
-    std::collections::HashSet<crate::fir::DeclarationId>,
-    Vec<crate::fir::DefaultArgumentProvider>,
-) {
-    let pairs = crate::fir::actualized_declaration_pairs(headers);
+) -> ActualizedHeaders {
+    let crate::fir::Actualization {
+        pairs,
+        unmarked,
+        incompatible,
+    } = crate::fir::actualization(headers);
     // The declarations that actualized something, which is the authority on whether an `actual`
     // found its `expect`: this matcher compares resolved type SHAPES and follows an
     // `actual typealias`, so it pairs `expect val S.tag: S` with `actual val String.tag: String`
@@ -380,11 +393,13 @@ fn actualize_headers_and_collect_inherited_defaults(
     // already authoritative for signature collection, while inherited defaults still need their
     // provider declaration long enough to become checked target-owned FIR. Removing the parser
     // declaration here forced later code to recover it by `(file, TextRange)`.
-    (
-        crate::fir::matched_expect_declarations(headers),
-        actualized_targets,
-        work,
-    )
+    ActualizedHeaders {
+        matched: crate::fir::matched_expect_declarations(headers),
+        targets: actualized_targets,
+        defaults: work,
+        unmarked,
+        incompatible,
+    }
 }
 
 /// The compilation target a diagnostic names. krusty compiles for the JVM; when a second target
@@ -404,6 +419,7 @@ const DIAGNOSTIC_PLATFORM: &str = "JVM";
 fn report_unmatched_expect_roots(
     headers: &crate::fir::StreamedHeaderModule,
     matched: &std::collections::HashSet<crate::fir::DeclarationId>,
+    incompatible: &std::collections::HashSet<crate::fir::DeclarationId>,
     symbols: &FrontendSymbols,
     module_name: &str,
     silent: bool,
@@ -417,6 +433,11 @@ fn report_unmatched_expect_roots(
                 .anchor(stub.id)
                 .is_some_and(|anchor| anchor.owner.is_none())
             && !matched.contains(&stub.id)
+            // An implementation WAS written for this header and its input shapes disagree. The
+            // reference compiler reports that on the implementation and says nothing here; naming
+            // the header as unactualized as well reports one mismatch twice, from the side that
+            // did not get it wrong.
+            && !incompatible.contains(&stub.id)
             && !symbols.is_source_optional_expectation(stub.id)
     }) {
         let source = stub.source.raw() as usize;
@@ -1000,39 +1021,62 @@ where
         diags.set_file(error.source as u32);
         diags.error(Span::new(0, 0), error.message);
     }
-    let (mut signature_default_work_items, matched_expect_declarations, actualized_targets) =
-        if multiplatform {
-            let (matched, actualized_targets, defaults) =
-                actualize_headers_and_collect_inherited_defaults(&mut pass1_headers);
-            pass1_headers.exclude_declaration_subtrees(&matched);
-            // Explicit expect→actual default mappings remain valid after exclusion because their
-            // provider anchors and bounded syntax live through the rest of Pass 1. Enumerate ordinary
-            // self-owned defaults only after exclusion so a removed expect constructor cannot schedule
-            // an orphan target with no surviving signature or callable.
-            let signature_default_work_items = signature_default_work(&pass1_headers, &defaults);
-            // Actualization publishes stable expect-default providers before syntax is compacted. Once
-            // that source-set operation is complete, retain only Pass-1 signature/inline fragments.
-            if !retain_inspection_analysis {
-                for (file, _source) in files
-                    .iter_mut()
-                    .zip(&mut reparse_sources)
-                    .take(inferred_count)
+    let (
+        mut signature_default_work_items,
+        matched_expect_declarations,
+        actualized_targets,
+        incompatible_expects,
+    ) = if multiplatform {
+        let ActualizedHeaders {
+            matched,
+            targets: actualized_targets,
+            defaults,
+            unmarked,
+            incompatible,
+        } = actualize_headers_and_collect_inherited_defaults(&mut pass1_headers);
+        // Reported here, while every file's syntax is still live: the diagnostic points at the
+        // declaration's NAME, and the compact inventory anchors only its whole range.
+        no_expect_for_actual::report_unmarked_implementations(
+            &unmarked,
+            &files,
+            &pass1_headers,
+            diags,
+        );
+        pass1_headers.exclude_declaration_subtrees(&matched);
+        // Explicit expect→actual default mappings remain valid after exclusion because their
+        // provider anchors and bounded syntax live through the rest of Pass 1. Enumerate ordinary
+        // self-owned defaults only after exclusion so a removed expect constructor cannot schedule
+        // an orphan target with no surviving signature or callable.
+        let signature_default_work_items = signature_default_work(&pass1_headers, &defaults);
+        // Actualization publishes stable expect-default providers before syntax is compacted. Once
+        // that source-set operation is complete, retain only Pass-1 signature/inline fragments.
+        if !retain_inspection_analysis {
+            for (file, _source) in files
+                .iter_mut()
+                .zip(&mut reparse_sources)
+                .take(inferred_count)
+            {
+                retained_syntax::compact(file);
+                #[cfg(test)]
                 {
-                    retained_syntax::compact(file);
-                    #[cfg(test)]
-                    {
-                        _source.released_before_collection = true;
-                    }
+                    _source.released_before_collection = true;
                 }
             }
-            (signature_default_work_items, matched, actualized_targets)
-        } else {
-            (
-                signature_default_work(&pass1_headers, &[]),
-                std::collections::HashSet::new(),
-                std::collections::HashSet::new(),
-            )
-        };
+        }
+        (
+            signature_default_work_items,
+            matched,
+            actualized_targets,
+            incompatible,
+        )
+    } else {
+        (
+            signature_default_work(&pass1_headers, &[]),
+            std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
+        )
+    };
     let platform = if inferred_count < files.len() {
         let mut dependency_diags = DiagSink::new();
         let mut dependency_symbols =
@@ -1066,6 +1110,7 @@ where
         report_unmatched_expect_roots(
             &pass1_headers,
             &matched_expect_declarations,
+            &incompatible_expects,
             &symbols,
             module_name,
             expect_bodies_rejected,

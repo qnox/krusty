@@ -308,14 +308,20 @@ fn a_body_error_suppresses_the_unmatched_expect_report_everywhere() {
 /// gets BOTH sentences, the feature-gate one first, exactly as the reference compiler orders them.
 #[test]
 fn the_body_is_rejected_with_or_without_the_multiplatform_feature() {
-    let (ok, report) = compile("package plib\n\nexpect fun exprBody(): Int = 1\n", false);
+    const SOURCE: &str = "package plib\n\nexpect fun exprBody(): Int = 1\n";
+    let (ok, report) = compile(SOURCE, false);
     assert!(!ok, "the compile must fail:\n{report}");
-    let gate = report
-        .find("can be used only in multiplatform projects")
-        .expect("the feature-gate diagnostic");
-    let body = report.find(BODY).expect("the body diagnostic");
-    assert!(gate < body, "the feature gate is reported first:\n{report}");
-    assert!(report.contains(&format!("Main.kt:3:1: {BODY}")), "{report}");
+    assert_eq!(
+        ledger(&report, &[("Main.kt", SOURCE)]),
+        [
+            "Main.kt:3:1: error: 'expect' and 'actual' declarations can be used only in \
+             multiplatform projects. Learn more about Kotlin Multiplatform: \
+             https://kotl.in/multiplatform-setup"
+                .to_string(),
+            format!("Main.kt:3:1: {BODY}"),
+        ],
+        "the whole ledger, in order: the feature gate first, then the body:\n{report}"
+    );
 }
 
 /// And a body-less `expect` is untouched: the check must not cost an ordinary header a diagnostic.
