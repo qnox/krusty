@@ -254,7 +254,7 @@ pub(super) fn plugin_and_runtime() -> Option<(PathBuf, Vec<PathBuf>)> {
 /// javap output reduced to what this test asserts: member signatures, flags, instructions, debug
 /// tables, and the `InnerClasses` table, with constant-pool indices erased because their numbering
 /// is an emission-order artifact.
-fn structure(disassembly: &str) -> Vec<String> {
+pub(super) fn structure(disassembly: &str) -> Vec<String> {
     let mut out = Vec::new();
     for raw in disassembly.lines() {
         let line = raw.trim_end();
@@ -3181,31 +3181,27 @@ fn deserialize_opens_kotlincs_locals_and_switches_on_the_index() {
     );
 }
 
-/// A CLASS-owned static whose Kotlin type has type arguments carries its generic `Signature`, the
-/// same rule a facade static and an instance field already follow.
+/// INTEGRATION coverage for the class-owned static `Signature` rule: the plugin-generated
+/// `$childSerializers` is a class-owned static like any other, so it records one too.
 ///
-/// The class-owned path wrote its field through the one writer that takes no signature argument, so
-/// erasure was the whole record: `$childSerializers` declared `[Lkotlin/Lazy;` where kotlinc also
-/// says `[Lkotlin/Lazy<Lkotlinx/serialization/KSerializer<Ljava/lang/Object;>;>;`. Asserted against
-/// the reference rather than spelled out, so the expectation cannot drift from what kotlinc writes.
+/// The rule itself — and its genericity — is pinned on a repository-owned fixture that names
+/// nothing from the serialization surface, in `class_static_signature_e2e`. This case exists
+/// because it is the one the corpus showed, not because it defines the rule.
+///
+/// Asserted against the reference rather than spelled out, so the expectation cannot drift from
+/// what kotlinc writes.
 #[test]
 fn a_class_owned_static_records_its_parameterized_signature() {
-    let Some((plugin, cp)) = plugin_and_runtime() else {
-        eprintln!("skipping: serialization plugin or runtime jar not available locally");
-        return;
-    };
+    let (plugin, cp) = plugin_and_runtime()
+        .expect("the serialization plugin and runtime must be available to this regression");
     let source = "import kotlinx.serialization.Serializable\n\
                   @Serializable\n\
                   data class Twig(val id: Int)\n\
                   @Serializable\n\
                   data class Bough(val count: Int, val twigs: List<Twig>)\n";
     let extra = vec![format!("-Xplugin={}", plugin.display())];
-    let Some(built) =
-        compare_with_kotlinc_plugin("StaticSignature", source, "Bough", &cp, "25", &extra)
-    else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
+    let built = compare_with_kotlinc_plugin("StaticSignature", source, "Bough", &cp, "25", &extra)
+        .expect("the reference compiler and javap must be available to this regression");
     // The `Signature:` line javap prints for the named field, with its constant-pool index erased.
     let field_signature = |text: &str, field: &str| {
         text.lines()
