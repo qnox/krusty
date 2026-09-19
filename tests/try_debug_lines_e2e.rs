@@ -94,6 +94,32 @@ fn numeric_rows(text: &str, signature: &str, section: &str) -> Vec<String> {
         .collect()
 }
 
+/// The complete `LocalVariableTable` of one method, in printed order.
+///
+/// `columns` says how much of each row to keep: the whole row where both compilers agree byte for
+/// byte, or `slot name descriptor` where they do not and the offsets would report a difference this
+/// projection is not about.
+fn local_variable_table(
+    text: &str,
+    signature: &str,
+    columns: std::ops::Range<usize>,
+) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .skip_while(|line| !line.contains(signature))
+        .skip_while(|line| !line.starts_with("LocalVariableTable"))
+        .skip(2)
+        .take_while(|line| line.starts_with(|c: char| c.is_ascii_digit()))
+        .map(|line| {
+            line.split_whitespace()
+                .skip(columns.start)
+                .take(columns.len())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
+
 fn method_lines(text: &str, signature: &str) -> Vec<String> {
     method_section(text, signature, "LineNumberTable")
         .into_iter()
@@ -316,33 +342,48 @@ fn a_finally_with_its_own_handler_types_the_parked_exception() {
                \x20   }\n\
                }\n";
     let (reference, krusty) = disassemble_both("ParkedExceptionFrames", src, "Parked");
-    // The catch types and their order, not the offsets: krusty's finalizer copy is a few bytes
-    // longer than kotlinc's here, which is its own gap and not what this test is about.
-    let guarded = |text: &str| {
-        numeric_rows(text, "int run(int)", "Exception table:")
-            .into_iter()
-            .filter_map(|row| row.split_whitespace().nth(3).map(str::to_string))
-            .collect::<Vec<_>>()
-    };
+    // Complete, in kotlinc's order, offsets included. The guarded ranges used to be compared by
+    // catch TYPE alone and the frames with their `top` padding stripped, because krusty reserved
+    // this `try`'s two slots — the parked return value and the parked exception — where they were
+    // first used rather than where the `try` opens, so the finalizer's own locals sat underneath
+    // them and everything the `try` parks moved one slot up. The copies were also three bytes
+    // longer for a `goto` to the next instruction. Both are closed, so nothing here is projected
+    // away.
+    let table = |text: &str| numeric_rows(text, "int run(int)", "Exception table:");
+    let want = table(&reference);
     assert_eq!(
-        guarded(&krusty),
-        guarded(&reference),
-        "the guarded ranges kotlinc declares, in its order"
+        want,
+        [
+            "5    11    14   Class java/lang/Exception",
+            "23    29    32   Class java/lang/Exception",
+            "0     5    22   any",
+            "22    23    22   any",
+        ],
+        "kotlinc's complete exception table"
     );
-    // Each frame's populated locals and its stack. The `top` padding is dropped: krusty opens one
-    // more local than kotlinc in this shape, so its parked exception sits a slot higher — its own
-    // gap, and not what a missing lease looks like, which is the Throwable absent from the frame.
-    let frames = |text: &str| {
-        method_section(text, "int run(int)", "StackMapTable")
-            .into_iter()
-            .filter(|row| row.starts_with("locals") || row.starts_with("stack"))
-            .map(|row| row.replace("top, ", "").replace(", top", ""))
-            .collect::<Vec<_>>()
-    };
+    assert_eq!(table(&krusty), want, "run exception table");
+    let frames = |text: &str| method_section(text, "int run(int)", "StackMapTable");
     let want = frames(&reference);
-    assert!(
-        want.iter().any(|row| row.contains("java/lang/Throwable")),
-        "kotlinc types the parked exception in a frame, which is what this pins: {want:?}"
+    assert_eq!(
+        want,
+        [
+            "frame_type = 255 /* full_frame */",
+            "offset_delta = 14",
+            "locals = [ class Parked, int, int ]",
+            "stack = [ class java/lang/Exception ]",
+            "frame_type = 5 /* same */",
+            "frame_type = 255 /* full_frame */",
+            "offset_delta = 1",
+            "locals = [ class Parked, int ]",
+            "stack = [ class java/lang/Throwable ]",
+            "frame_type = 255 /* full_frame */",
+            "offset_delta = 9",
+            "locals = [ class Parked, int, top, class java/lang/Throwable ]",
+            "stack = [ class java/lang/Exception ]",
+            "frame_type = 5 /* same */",
+        ],
+        "kotlinc's complete frame list: the parked exception is slot 3, typed while the \
+         finalizer's own handler records frames over it"
     );
     assert_eq!(frames(&krusty), want, "run frames");
 }
@@ -512,5 +553,110 @@ fn a_finalizer_copy_that_throws_the_caught_type_does_not_re_enter_the_catch() {
         out.trim(),
         "PROPAGATED",
         "the finalizer's throw leaves the try it belongs to instead of entering its own catch"
+    );
+}
+
+/// A `catch (e: E)` parameter is a debug local like any other. It is DECLARED by its `IrCatch`
+/// rather than by a variable node, so it has no declaration expression the name and provenance
+/// tables could be keyed by, and it used to carry a bare source spelling that JVM emission wrote
+/// straight into the table — the one local in the file that never reached the debug-name boundary.
+///
+/// Here, where nothing is inlined, that is invisible: the spelling IS the name, and both compilers
+/// agree on the complete table down to the offsets.
+#[test]
+fn a_catch_parameter_is_named_where_it_is_declared() {
+    let src = "class Ledger {\n\
+               \x20   fun record(tag: String): String {\n\
+               \x20       try {\n\
+               \x20           return \"kept \" + tag\n\
+               \x20       } catch (e: IllegalStateException) {\n\
+               \x20           return \"caught \" + e.message\n\
+               \x20       }\n\
+               \x20   }\n\
+               }\n";
+    let (reference, krusty) = disassemble_both("DeclaredCatchName", src, "Ledger");
+    let table = |text: &str| local_variable_table(text, "java.lang.String record(", 0..5);
+    let want = table(&reference);
+    assert_eq!(
+        want,
+        [
+            "28 23 2 e Ljava/lang/IllegalStateException;",
+            "0 51 0 this LLedger;",
+            "0 51 1 tag Ljava/lang/String;",
+        ],
+        "kotlinc's complete table, offsets included"
+    );
+    assert_eq!(table(&krusty), want, "record local variable table");
+}
+
+/// The same binding once it is inlined. kotlinc suffixes it with one `$iv` per expansion it sits
+/// inside, exactly as it suffixes an ordinary local, so the binding has to carry the same
+/// provenance an ordinary local carries and be rendered through the same boundary — a spelling
+/// copied at lowering cannot say how deep the copy that used it ended up.
+///
+/// `once` and `nested` differ only in how many expansions the catch is cloned into, so a name that
+/// were a constant suffix, or no suffix, would fail on one of the two.
+///
+/// Byte equality is not attainable and the reason is stated rather than worked around: krusty emits
+/// no inline-depth markers (`$i$f`, `$i$a`) and no entries for an expansion's own copied locals, so
+/// it writes two rows where kotlinc writes five and seven. That is a whole missing table, it is not
+/// what this change is about, and pinning both projections is what makes closing it visible here.
+/// The offsets are left out for the same reason — they differ because the row counts do.
+#[test]
+fn an_inlined_catch_parameter_is_named_at_its_expansion_depth() {
+    let src = "inline fun guarded(tag: String, block: () -> String): String {\n\
+               \x20   try {\n\
+               \x20       return block() + tag\n\
+               \x20   } catch (e: IllegalStateException) {\n\
+               \x20       return \"caught \" + e.message\n\
+               \x20   }\n\
+               }\n\
+               \n\
+               inline fun twice(tag: String, block: () -> String): String = guarded(tag, block)\n\
+               \n\
+               fun once(tag: String): String = guarded(tag) { tag }\n\
+               \n\
+               fun nested(tag: String): String = twice(tag) { tag }\n";
+    let (reference, krusty) = disassemble_both("NestedCatchNames", src, "NestedCatchNamesKt");
+    let table = |text: &str, method: &str| local_variable_table(text, method, 2..5);
+    assert_eq!(
+        table(&reference, "java.lang.String once("),
+        [
+            "3 $i$a$-guarded-NestedCatchNamesKt$once$1 I",
+            "4 e$iv Ljava/lang/IllegalStateException;",
+            "2 $i$f$guarded I",
+            "1 tag$iv Ljava/lang/String;",
+            "0 tag Ljava/lang/String;",
+        ],
+        "kotlinc's complete table for one expansion"
+    );
+    assert_eq!(
+        table(&krusty, "java.lang.String once("),
+        [
+            "2 e$iv Ljava/lang/IllegalStateException;",
+            "0 tag Ljava/lang/String;",
+        ],
+        "krusty's complete table for one expansion: the catch parameter carries its frame"
+    );
+    assert_eq!(
+        table(&reference, "java.lang.String nested("),
+        [
+            "5 $i$a$-twice-NestedCatchNamesKt$nested$1 I",
+            "6 e$iv$iv Ljava/lang/IllegalStateException;",
+            "4 $i$f$guarded I",
+            "3 tag$iv$iv Ljava/lang/String;",
+            "2 $i$f$twice I",
+            "1 tag$iv Ljava/lang/String;",
+            "0 tag Ljava/lang/String;",
+        ],
+        "kotlinc's complete table for two"
+    );
+    assert_eq!(
+        table(&krusty, "java.lang.String nested("),
+        [
+            "3 e$iv$iv Ljava/lang/IllegalStateException;",
+            "0 tag Ljava/lang/String;",
+        ],
+        "krusty's complete table for two: one frame per expansion, not a constant suffix"
     );
 }

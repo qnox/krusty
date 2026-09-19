@@ -12901,6 +12901,13 @@ struct Emitter<'a> {
     /// The pool belongs to ONE emitter and starts empty by construction, so a slot returned by one
     /// method's handler can never be handed to another's: an emitter emits one body.
     free_exception_slots: Vec<u16>,
+    /// Return-value spill slots reserved by the active `try`s that have a `finally`, outermost
+    /// first. A `return` out of such a `try` evaluates its value BEFORE the finalizer runs and
+    /// parks it, and kotlinc reserves that slot with the `try` rather than at the `return` — ahead
+    /// of the parked-exception slot and of every local the inlined finalizer copies declare.
+    /// Allocating it at the `return` instead put the finalizer's own locals underneath it and moved
+    /// everything the `try` reserves one slot up.
+    pending_return_spills: Vec<Option<u16>>,
     /// Protected-region accumulators for the active `try`s that have a `finally`, outermost first.
     /// A copy of a try's own finalizer must not lie inside that try's own ranges, or an exception
     /// raised while the finalizer runs re-enters the same handler and runs it a second time.
@@ -12955,6 +12962,7 @@ impl<'a> Emitter<'a> {
             lambda_modes: env.lambda_modes,
             return_finalizers: Vec::new(),
             free_exception_slots: Vec::new(),
+            pending_return_spills: Vec::new(),
             finally_regions: Vec::new(),
             terminal_statement_target: None,
             generated_initializer: false,
