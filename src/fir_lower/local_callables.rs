@@ -1048,7 +1048,9 @@ impl BodyLowering<'_> {
         // A `tailrec` LOCAL gets the same loop transform a declared one gets in `sink.rs`. It was
         // never applied here, so `tailrec fun` inside a function kept its self-call and overflowed
         // the stack at the depth the modifier exists to make safe.
-        let frame = tailrec.then(|| local_tailrec_frame(nested.ir, function, nested.body_slots()));
+        let frame = tailrec
+            .then(|| local_tailrec_frame(nested.ir, function, nested.body_slots()))
+            .transpose()?;
         let callable = if let Some(frame) = frame {
             finish_tailrec_body(nested.ir, roots, frame, body_origin(body))?
         } else {
@@ -1222,14 +1224,25 @@ fn body_origin(body: &FirBody) -> crate::fir::OriginId {
 /// so a contextual local declined silently — and an extension receiver, which the IR carries as an
 /// ordinary parameter at its own position, was miscounted the same way. The difference between the
 /// two ends of the list is the one number that is right for all of them.
+/// A list shorter than the prefix is an invalid checked shape, so this FAILS rather than reading
+/// it as a function with no logical parameters: saturating there would silently give the loop a
+/// frame that reassigns nothing, which is exactly the "declined in silence" failure mode above.
 fn local_tailrec_frame(
     ir: &crate::ir::IrFile,
     function: crate::ir::FunId,
     slots: super::BodySlots,
-) -> TailrecFrame {
-    let logical_parameters = ir.functions[function as usize]
-        .params
-        .len()
-        .saturating_sub(slots.first_parameter as usize);
-    TailrecFrame::of_local_body(function, slots, logical_parameters)
+) -> Result<TailrecFrame, FirLoweringFailure> {
+    let parameters = ir.functions[function as usize].params.len();
+    let logical_parameters = parameters
+        .checked_sub(slots.first_parameter as usize)
+        .ok_or(FirLoweringFailure::MalformedLocalFrame {
+            function,
+            parameters,
+            first_parameter: slots.first_parameter,
+        })?;
+    Ok(TailrecFrame::of_local_body(
+        function,
+        slots,
+        logical_parameters,
+    ))
 }

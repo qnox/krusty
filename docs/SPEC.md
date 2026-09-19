@@ -4403,9 +4403,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   call's whole argument list against a smaller number, so a CONTEXTUAL local declined in silence —
   and a local EXTENSION, whose receiver the IR carries as an ordinary parameter at its own
   position, was miscounted the same way. A capture is an implementation detail of lifting, not a
-  Kotlin reason to revoke the constant-stack contract.
+  Kotlin reason to revoke the constant-stack contract. A physical list SHORTER than that prefix is
+  an invalid checked shape rather than a frame with no logical parameters, so it fails closed
+  (`FirLoweringFailure::MalformedLocalFrame`): saturating there would hand the loop a frame that
+  reassigns nothing, which is the same silent decline in a different disguise.
+
+  **A local declared inside a class MEMBER is lifted onto that class**, as a private static, so its
+  self-call is a `Callee::ClassStatic` rather than a `Callee::Local` — the same declaration reached
+  through the owner it was lifted onto. The self-call test recognized only `Local`, so this shape,
+  which is ordinary Kotlin and which kotlinc runs flat, recursed until `StackOverflowError`. The
+  callee IDENTITY answers it; the owner's spelling is not consulted. Test:
+  `a_class_member_local_tailrec_runs_flat` — a plain member's local, one that captures a property,
+  and one in a companion, each a million deep and each compared against the reference compiler.
   Tests: `tests/tailrec_e2e.rs` (`a_member_tailrec_runs_flat`, `an_extension_tailrec_runs_flat`,
   `a_member_call_on_another_instance_still_recurses`, `a_local_tailrec_runs_flat`,
+  `a_class_member_local_tailrec_runs_flat`,
   `a_capturing_local_tailrec_runs_flat` — read-only, mutated, and both at once —
   `a_contextual_local_tailrec_runs_flat`, `an_extension_local_tailrec_runs_flat`, each a million
   deep and each asking the reference compiler the same question, and

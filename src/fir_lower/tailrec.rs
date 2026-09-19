@@ -323,8 +323,16 @@ impl Frame {
 /// while `Other().count(n - 1)` is a different one and has to stay a call.
 fn is_self_call(ir: &IrFile, call: ExprId, frame: &Frame) -> bool {
     match ir.expr(call) {
+        // A local function declared inside a class member is lifted onto that class as a private
+        // STATIC, so its self-call is a `ClassStatic` rather than a `Local`. It is the same
+        // declaration and the same frame — the callee identity says so, not the owner's spelling —
+        // and recognizing only `Local` left that shape recursing until `StackOverflowError`.
         IrExpr::Call {
-            callee: Callee::Local(target),
+            callee:
+                Callee::Local(target)
+                | Callee::ClassStatic {
+                    function: target, ..
+                },
             dispatch_receiver: None,
             args,
         } => {

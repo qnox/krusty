@@ -415,7 +415,8 @@ fun box(): String {\n\
 /// and overflowed the stack at the depth the modifier exists to make safe. kotlinc runs all of
 /// these flat, and so does krusty now, for every shape a local declaration can have.
 ///
-/// Every expectation is kotlinc's, taken by compiling and running the same `box()` under it.
+/// Every expectation is kotlinc's, taken by compiling and running the same `box()` under it —
+/// including this one, which used to run only krusty and so could have pinned a wrong answer.
 #[test]
 fn a_local_tailrec_runs_flat() {
     const SRC: &str = "fun counted(): Int {\n\
@@ -433,8 +434,40 @@ fun box(): String {\n\
     if (unitReturning() != 1000000) return \"fail unit: \" + unitReturning()\n\
     return \"OK\"\n\
 }\n";
-    let out = run(SRC);
-    assert_eq!(out, "OK");
+    common::expect_box_same_as_kotlinc(SRC, "LocalTailrec");
+}
+
+/// A local `tailrec` declared inside a CLASS member. Lifting attaches it to the lexical class as a
+/// private static, so its self-call is a `ClassStatic` rather than a `Local` — the same declaration
+/// reached through the owner it was lifted onto. Recognizing only `Local` left this valid shape
+/// recursing until `StackOverflowError` at exactly the depth the modifier exists to make safe.
+#[test]
+fn a_class_member_local_tailrec_runs_flat() {
+    const SRC: &str = "class Ledger(val step: Int) {\n\
+    fun counted(): Int {\n\
+        tailrec fun go(n: Int, acc: Int): Int = if (n == 0) acc else go(n - 1, acc + 1)\n\
+        return go(1000000, 0)\n\
+    }\n\
+    fun captured(): Int {\n\
+        val by = step\n\
+        tailrec fun go(n: Int, acc: Int): Int = if (n == 0) acc else go(n - 1, acc + by)\n\
+        return go(1000000, 0)\n\
+    }\n\
+    companion object {\n\
+        fun inCompanion(): Int {\n\
+            tailrec fun go(n: Int, acc: Int): Int = if (n == 0) acc else go(n - 1, acc + 1)\n\
+            return go(1000000, 0)\n\
+        }\n\
+    }\n\
+}\n\
+fun box(): String {\n\
+    val ledger = Ledger(2)\n\
+    if (ledger.counted() != 1000000) return \"fail counted: \" + ledger.counted()\n\
+    if (ledger.captured() != 2000000) return \"fail captured: \" + ledger.captured()\n\
+    if (Ledger.inCompanion() != 1000000) return \"fail companion: \" + Ledger.inCompanion()\n\
+    return \"OK\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "ClassMemberLocalTailrec");
 }
 
 /// A local `tailrec` that CAPTURES, at the depth the modifier exists for.
