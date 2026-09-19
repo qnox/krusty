@@ -8,10 +8,9 @@
 //! question about resolved identity. Both live here, apart from the top-level check's own
 //! collection, because they are answered per classifier rather than per source set.
 
-use super::resolved::ResolvedDeclarations;
+use super::resolved::{Resolved, ResolvedDeclarations};
 use super::{callable_modifiers, property_modifiers, render_callable, visibility};
 use crate::diag::{DiagSink, Span};
-use crate::resolve::Signature;
 use crate::types::{Ty, Visibility};
 
 /// One `actual` member of a classifier: where its diagnostic is reported — its own name — plus the
@@ -194,7 +193,8 @@ pub(super) fn report_members(
     members: &[Member],
     actualized: &std::collections::HashSet<crate::fir::DeclarationId>,
     declarations: &ResolvedDeclarations<'_>,
-    headers: &crate::fir::StreamedHeaderModule,
+    identities: &crate::fir::DeclarationIdentities,
+    file: u32,
     owner: Option<crate::fir::DeclarationId>,
     diags: &mut DiagSink,
 ) {
@@ -211,7 +211,13 @@ pub(super) fn report_members(
         return;
     };
     for member in members {
-        match render_member(member, actualized, class, headers) {
+        match render_member(
+            member,
+            identities.get(file, member.anchor),
+            actualized,
+            class,
+            declarations,
+        ) {
             Ok(Rendered::Actualized) => {}
             Ok(Rendered::Unmatched(rendered)) => diags.error(
                 member.name,
@@ -238,24 +244,24 @@ enum Rendered {
 /// the same authority the owner's own outcome is read from.
 fn render_member(
     member: &Member,
+    stable: Option<crate::fir::DeclarationId>,
     actualized: &std::collections::HashSet<crate::fir::DeclarationId>,
     class: &crate::resolve::ClassSig,
-    headers: &crate::fir::StreamedHeaderModule,
+    declarations: &ResolvedDeclarations<'_>,
 ) -> Result<Rendered, &'static str> {
-    let actualized_member = |stable: Option<crate::fir::DeclarationId>| {
-        stable.is_some_and(|declaration| actualized.contains(&declaration))
-    };
+    let stable = stable.ok_or("has no stable declaration identity")?;
+    if actualized.contains(&stable) {
+        return Ok(Rendered::Actualized);
+    }
     match &member.kind {
         MemberKind::Function {
             parameters,
             type_parameters,
             modifiers,
         } => {
-            let signature = member_signature(class, member, headers)
-                .ok_or("has no resolved signature under its declaring classifier")?;
-            if actualized_member(signature.stable_declaration) {
-                return Ok(Rendered::Actualized);
-            }
+            let Some(Resolved::Function(signature)) = declarations.get(stable) else {
+                return Err("has no resolved signature under its declaring classifier");
+            };
             render_callable(
                 signature,
                 member.modality,
@@ -272,11 +278,8 @@ fn render_member(
             visibility: declared,
             owner,
         } => {
-            let shape = member_constructor(class, member, headers)
+            let shape = member_constructor(class, stable)
                 .ok_or("has no resolved shape under its declaring classifier")?;
-            if actualized_member(shape.stable) {
-                return Ok(Rendered::Actualized);
-            }
             let rendered = parameters
                 .iter()
                 .enumerate()
@@ -310,11 +313,8 @@ fn render_member(
             )))
         }
         MemberKind::Property { is_var, modifiers } => {
-            let property = member_property(class, member, headers)
+            let property = member_property(declarations, stable)
                 .ok_or("has no resolved property under its declaring classifier")?;
-            if actualized_member(property.stable) {
-                return Ok(Rendered::Actualized);
-            }
             if property.ty.mentions_pending() {
                 return Err("has a type that did not resolve");
             }
@@ -339,119 +339,61 @@ fn render_member(
     }
 }
 
-/// The resolved parameter shape of the secondary constructor this diagnostic is about, with the
-/// identity that says whether it actualized anything. A classifier keeps the two in parallel
-/// vectors, so the identity's position is the shape's position.
+/// The resolved parameter shape of the secondary constructor this diagnostic is about.
+///
+/// A constructor has no name to be indexed by at all: the classifier keeps its secondary
+/// constructors' identities and their shapes in parallel vectors, so the identity's position is
+/// the shape's position.
 struct ResolvedMemberConstructor<'symbols> {
-    stable: Option<crate::fir::DeclarationId>,
     parameters: &'symbols [Ty],
 }
 
-fn member_constructor<'symbols>(
-    class: &'symbols crate::resolve::ClassSig,
-    member: &Member,
-    headers: &crate::fir::StreamedHeaderModule,
-) -> Option<ResolvedMemberConstructor<'symbols>> {
+fn member_constructor(
+    class: &crate::resolve::ClassSig,
+    stable: crate::fir::DeclarationId,
+) -> Option<ResolvedMemberConstructor<'_>> {
     let position = class
         .secondary_constructor_declarations
         .iter()
-        .position(|&stable| is_member(stable, member, headers))?;
+        .position(|&declaration| declaration == Some(stable))?;
     Some(ResolvedMemberConstructor {
-        stable: class.secondary_constructor_declarations[position],
         parameters: class.secondary_ctor_shapes.get(position)?,
     })
-}
-
-/// Whether a resolved declaration is the source member this diagnostic is about.
-///
-/// The compact header inventory anchors every declaration on its own source range, and a resolved
-/// signature carries that identity. Comparing it is what tells two overloads apart; a name/arity
-/// key cannot, and left BOTH of a tied pair unrendered — a member the source wrote, reported
-/// nowhere, with nothing saying why.
-fn is_member(
-    stable: Option<crate::fir::DeclarationId>,
-    member: &Member,
-    headers: &crate::fir::StreamedHeaderModule,
-) -> bool {
-    stable
-        .and_then(|declaration| headers.declarations.anchor(declaration))
-        .is_some_and(|anchor| anchor.range == member.anchor)
-}
-
-/// The resolved signature of the member function this diagnostic is about.
-///
-/// Both tables are consulted for the same reason the two property tables are: a classifier keeps
-/// its ordinary members and its member EXTENSION functions apart, and the source wrote one
-/// declaration either way. `actual fun Int.foo(): String` lives only in the second, and looking in
-/// the first alone left it with no resolved signature at all.
-fn member_signature<'symbols>(
-    class: &'symbols crate::resolve::ClassSig,
-    member: &Member,
-    headers: &crate::fir::StreamedHeaderModule,
-) -> Option<&'symbols Signature> {
-    if let Some(signature) = class
-        .methods
-        .get(member.text.as_str())
-        .and_then(|candidates| {
-            candidates
-                .iter()
-                .find(|signature| is_member(signature.stable_declaration, member, headers))
-        })
-    {
-        return Some(signature);
-    }
-    class
-        .member_ext_funs
-        .get(member.text.as_str())?
-        .iter()
-        .map(|candidate| candidate.signature())
-        .find(|signature| is_member(signature.stable_declaration, member, headers))
 }
 
 /// What a resolved member property contributes to its rendering, whichever of the classifier's
 /// two property tables holds it. An ordinary member and a member EXTENSION property are separate
 /// declarations with separate semantic records; the rendering differs only by the receiver.
 struct ResolvedMemberProperty {
-    /// The declaration's stable identity, which is what says whether it actualized anything.
-    stable: Option<crate::fir::DeclarationId>,
     visibility: Visibility,
     ty: Ty,
     /// The declared extension receiver, for a member extension property.
     receiver: Option<Ty>,
 }
 
-/// The resolved property this diagnostic is about, by the same identity.
+/// The resolved property this diagnostic is about, by its declaration identity alone.
 ///
-/// Both tables are consulted because a classifier keeps its ordinary members and its member
-/// extension properties apart, and the source wrote one declaration either way. The identity —
-/// never the name — decides which record is this member's, so a name shared between the two
-/// tables cannot answer with the wrong one.
+/// Both of a classifier's property tables are published under that identity, so this neither picks
+/// a table to try first nor enters one by name: a name shared between the two cannot answer with
+/// the wrong record because no name is consulted.
 fn member_property(
-    class: &crate::resolve::ClassSig,
-    member: &Member,
-    headers: &crate::fir::StreamedHeaderModule,
+    declarations: &ResolvedDeclarations<'_>,
+    stable: crate::fir::DeclarationId,
 ) -> Option<ResolvedMemberProperty> {
-    if let Some(property) = class
-        .declared_props
-        .get(member.text.as_str())
-        .filter(|property| is_member(property.stable_declaration, member, headers))
-    {
-        return Some(ResolvedMemberProperty {
-            stable: property.stable_declaration,
+    match declarations.get(stable)? {
+        Resolved::MemberProperty(property) => Some(ResolvedMemberProperty {
             visibility: property.visibility,
             ty: property.ty,
             receiver: None,
-        });
-    }
-    class
-        .member_ext_props
-        .get(member.text.as_str())?
-        .iter()
-        .find(|property| is_member(property.stable_declaration(), member, headers))
-        .map(|property| ResolvedMemberProperty {
-            stable: property.stable_declaration(),
+        }),
+        Resolved::MemberExtensionProperty(property) => Some(ResolvedMemberProperty {
             visibility: property.visibility(),
             ty: property.ret(),
             receiver: Some(property.receiver_ty()),
-        })
+        }),
+        Resolved::Function(_)
+        | Resolved::Property(_)
+        | Resolved::ExtensionProperty(_)
+        | Resolved::Classifier(_) => None,
+    }
 }

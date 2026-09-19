@@ -17,7 +17,10 @@
 //! set for it to be ambiguous about — and the alias's DECLARATION identity still comes from the
 //! compact header inventory, like every other declaration's.
 
-use crate::resolve::{ClassSig, ExtPropSig, Signature, SourcePropertySig, SymbolTable};
+use crate::resolve::{
+    ClassSig, DeclaredPropertySig, ExtPropSig, MemberExtPropSig, Signature, SourcePropertySig,
+    SymbolTable,
+};
 use crate::types::{Ty, TypeName};
 use std::collections::HashMap;
 
@@ -27,17 +30,32 @@ pub(super) enum Resolved<'symbols> {
     Property(&'symbols SourcePropertySig),
     ExtensionProperty(&'symbols ExtPropSig),
     Classifier(&'symbols ClassSig),
+    /// A member property. A classifier keeps its ordinary members and its member EXTENSION
+    /// properties in separate tables with separate record types, and the source wrote one
+    /// declaration either way.
+    MemberProperty(&'symbols DeclaredPropertySig),
+    MemberExtensionProperty(&'symbols MemberExtPropSig),
 }
 
 /// Every source declaration the check can be asked about, by stable declaration identity.
 pub(super) struct ResolvedDeclarations<'symbols> {
     by_identity: HashMap<crate::fir::DeclarationId, Resolved<'symbols>>,
     aliases: &'symbols HashMap<TypeName, (Vec<String>, Ty)>,
+    /// A source `typealias`'s qualified identity as a declared TYPE, by its declaration identity.
+    ///
+    /// The expansion table is keyed by that qualified name, which is what a use site resolves; the
+    /// alias's DECLARATION is identified like every other declaration's. Both are published from
+    /// the compact header inventory once, so a reader asks by the declaration it holds rather than
+    /// rebuilding a name from the syntax it came from.
+    alias_identities: HashMap<crate::fir::DeclarationId, TypeName>,
 }
 
 impl<'symbols> ResolvedDeclarations<'symbols> {
     /// Walk each published table once and index it by the identity its records already carry.
-    pub(super) fn publish(symbols: &'symbols SymbolTable) -> Self {
+    pub(super) fn publish(
+        symbols: &'symbols SymbolTable,
+        headers: &crate::fir::StreamedHeaderModule,
+    ) -> Self {
         let mut by_identity = HashMap::new();
         for signature in symbols.funs.values().flatten().chain(
             symbols
@@ -64,10 +82,57 @@ impl<'symbols> ResolvedDeclarations<'symbols> {
             if let Some(declaration) = class.stable_declaration {
                 by_identity.insert(declaration, Resolved::Classifier(class));
             }
+            // A classifier's members are declarations too, and they live in four tables of their
+            // own. Publishing them here is what lets a member be asked for by identity instead of
+            // entering a name-indexed table and filtering what comes back.
+            for signature in class.methods.values().flatten() {
+                if let Some(declaration) = signature.stable_declaration {
+                    by_identity.insert(declaration, Resolved::Function(signature));
+                }
+            }
+            for function in class.member_ext_funs.values().flatten() {
+                let signature = function.signature();
+                if let Some(declaration) = signature.stable_declaration {
+                    by_identity.insert(declaration, Resolved::Function(signature));
+                }
+            }
+            for property in class.declared_props.values() {
+                if let Some(declaration) = property.stable_declaration {
+                    by_identity.insert(declaration, Resolved::MemberProperty(property));
+                }
+            }
+            for property in class.member_ext_props.values().flatten() {
+                if let Some(declaration) = property.stable_declaration() {
+                    by_identity.insert(declaration, Resolved::MemberExtensionProperty(property));
+                }
+            }
+        }
+        // The alias's qualified identity, from the inventory's own record of what it declared:
+        // the package of the file it is in and the name it published.
+        let mut alias_identities = HashMap::new();
+        for stub in &headers.stubs {
+            if stub.kind != crate::fir::DeclarationKind::TypeAlias {
+                continue;
+            }
+            let Some(spelling) = stub
+                .lookup_name
+                .and_then(|name| headers.lookup_names.get(name))
+            else {
+                continue;
+            };
+            let Some(package) = headers
+                .sources
+                .get(stub.source)
+                .map(|source| source.package)
+            else {
+                continue;
+            };
+            alias_identities.insert(stub.id, crate::types::type_name_child(package, spelling));
         }
         Self {
             by_identity,
             aliases: &symbols.source_alias_expansions,
+            alias_identities,
         }
     }
 
@@ -85,12 +150,20 @@ impl<'symbols> ResolvedDeclarations<'symbols> {
     ) -> Option<&'symbols ClassSig> {
         match self.by_identity.get(&declaration)? {
             Resolved::Classifier(class) => Some(class),
-            Resolved::Function(_) | Resolved::Property(_) | Resolved::ExtensionProperty(_) => None,
+            Resolved::Function(_)
+            | Resolved::Property(_)
+            | Resolved::ExtensionProperty(_)
+            | Resolved::MemberProperty(_)
+            | Resolved::MemberExtensionProperty(_) => None,
         }
     }
 
-    /// A source `typealias`'s own formal names and its resolved expansion.
-    pub(super) fn alias_expansion(&self, qualified: &str) -> Option<&(Vec<String>, Ty)> {
-        self.aliases.get(&crate::types::type_name(qualified))
+    /// A source `typealias`'s own formal names and its resolved expansion, by the alias's
+    /// DECLARATION identity.
+    pub(super) fn alias_expansion(
+        &self,
+        declaration: crate::fir::DeclarationId,
+    ) -> Option<&(Vec<String>, Ty)> {
+        self.aliases.get(self.alias_identities.get(&declaration)?)
     }
 }

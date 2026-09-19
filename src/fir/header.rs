@@ -19,6 +19,18 @@ use nested_classifiers::nested_classifier_owners;
 
 mod actualization;
 
+/// The inventory's declaration identities, keyed by the source range each was anchored on.
+pub struct DeclarationIdentities {
+    by_range: std::collections::HashMap<(u32, TextRange), DeclarationId>,
+}
+
+impl DeclarationIdentities {
+    /// The declaration the inventory anchored on this range, if it inventoried one.
+    pub fn get(&self, source: u32, range: TextRange) -> Option<DeclarationId> {
+        self.by_range.get(&(source, range)).copied()
+    }
+}
+
 pub use actualization::{
     actualization, actualized_declaration_pairs, matched_expect_declarations, Actualization,
     ActualizedDeclarationPair,
@@ -3171,6 +3183,30 @@ impl StreamedHeaderModule {
         declaration: DeclarationId,
     ) -> &[HeaderVisibilitySuppressionApplication] {
         self.visibility_suppressions.declaration(declaration)
+    }
+
+    /// The stable identity the inventory anchored on each declaration's own source range.
+    ///
+    /// A declaration's identity IS its anchor here: the inventory interns every declaration under
+    /// `(source, range, owner, kind, sibling)` while the parser unit is live. A consumer that
+    /// holds a parser declaration therefore has the coordinate half of that key and nothing else,
+    /// and this publishes the map once instead of leaving each reader to walk the inventory
+    /// comparing ranges — which is a search whose cost and whose answer both depend on how many
+    /// declarations the module has.
+    ///
+    /// Entries are in inventory order and the first wins, which is the declaration a walk of the
+    /// stubs would have found.
+    pub fn declaration_identities(&self) -> DeclarationIdentities {
+        let mut by_range = std::collections::HashMap::with_capacity(self.stubs.len());
+        for stub in &self.stubs {
+            let Some(anchor) = self.declarations.anchor(stub.id) else {
+                continue;
+            };
+            by_range
+                .entry((anchor.source.raw(), anchor.range))
+                .or_insert(stub.id);
+        }
+        DeclarationIdentities { by_range }
     }
 
     pub(crate) fn detached_type_roots(

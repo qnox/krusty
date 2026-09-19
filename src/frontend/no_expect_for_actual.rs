@@ -85,9 +85,6 @@ enum Target {
         members: Vec<Member>,
     },
     TypeAlias {
-        /// Fully-qualified internal name (`pkg/Alias`), which is how the alias's resolved
-        /// expansion is keyed.
-        qualified: String,
         name: String,
         visibility: Visibility,
     },
@@ -152,7 +149,6 @@ pub(super) fn collect(files: &[File]) -> Vec<UnmatchedActual> {
     let mut unmatched = Vec::new();
     for (index, file) in files.iter().enumerate() {
         let file_start = unmatched.len();
-        let package = file.package.clone().unwrap_or_default();
         // Which hoisted classifier is a `companion object` is an edge its OWNER records; the
         // companion itself is an ordinary singleton declaration. The reference compiler renders
         // the word, so the edge is read back here rather than guessed from the name `Companion`,
@@ -224,11 +220,6 @@ pub(super) fn collect(files: &[File]) -> Vec<UnmatchedActual> {
                 name: declaration.name_span,
                 anchor: declaration.span,
                 target: Target::TypeAlias {
-                    qualified: if package.is_empty() {
-                        declaration.name.clone()
-                    } else {
-                        format!("{package}/{}", declaration.name)
-                    },
                     name: declaration.name.clone(),
                     visibility: file
                         .type_alias_visibility
@@ -261,8 +252,11 @@ pub(super) fn report(
     headers: &crate::fir::StreamedHeaderModule,
     diags: &mut DiagSink,
 ) {
-    // Published once, and only looked up below: this pass never walks a resolved table itself.
-    let declarations = ResolvedDeclarations::publish(symbols);
+    // Published once, and only looked up below: this pass never walks a resolved table itself, and
+    // never searches the inventory for a declaration either. Both are indexed by the one identity
+    // a declaration has.
+    let declarations = ResolvedDeclarations::publish(symbols, headers);
+    let identities = headers.declaration_identities();
     for actual in unmatched {
         // Every diagnostic this iteration writes belongs to this declaration's file, members
         // included. Setting it only before the owner's own error left a member's inheriting
@@ -275,7 +269,7 @@ pub(super) fn report(
         // Nothing is passed over in silence: an `actual` this check cannot answer for reports an
         // internal error at its own name, so a declaration the source wrote never disappears
         // because a lookup returned nothing.
-        let stable = actual.stable(headers);
+        let stable = actual.stable(&identities);
         match stable
             .ok_or("has no stable declaration identity")
             .and_then(|stable| {
@@ -301,7 +295,15 @@ pub(super) fn report(
         // owner's diagnostic — an unmatched member under a MATCHED owner is reported here just
         // the same, and so is every member of an owner whose own rendering could not be produced.
         if let Target::Classifier { members, .. } = &actual.target {
-            report_members(members, actualized, &declarations, headers, stable, diags);
+            report_members(
+                members,
+                actualized,
+                &declarations,
+                &identities,
+                actual.file,
+                stable,
+                diags,
+            );
         }
     }
 }
@@ -317,20 +319,9 @@ impl UnmatchedActual {
     /// `actual typealias`, so it reported pairs that had matched.
     fn stable(
         &self,
-        headers: &crate::fir::StreamedHeaderModule,
+        identities: &crate::fir::DeclarationIdentities,
     ) -> Option<crate::fir::DeclarationId> {
-        headers
-            .stubs
-            .iter()
-            .map(|stub| stub.id)
-            .find(|&declaration| {
-                headers
-                    .declarations
-                    .anchor(declaration)
-                    .is_some_and(|anchor| {
-                        anchor.source.raw() == self.file && anchor.range == self.anchor
-                    })
-            })
+        identities.get(self.file, self.anchor)
     }
 }
 
@@ -379,11 +370,9 @@ impl UnmatchedActual {
                 };
                 render_classifier(signature, name, shape)
             }
-            Target::TypeAlias {
-                qualified,
-                name,
-                visibility,
-            } => render_type_alias(declarations, qualified, name, *visibility),
+            Target::TypeAlias { name, visibility } => {
+                render_type_alias(declarations, stable, name, *visibility)
+            }
         }
     }
 }
@@ -789,12 +778,12 @@ fn render_classifier(
 
 fn render_type_alias(
     declarations: &ResolvedDeclarations<'_>,
-    qualified: &str,
+    stable: crate::fir::DeclarationId,
     name: &str,
     declared: Visibility,
 ) -> Result<String, &'static str> {
     let (formals, target) = declarations
-        .alias_expansion(qualified)
+        .alias_expansion(stable)
         .ok_or("has no resolved expansion")?;
     if target.mentions_pending() {
         return Err("expands to a type that did not resolve");
