@@ -113,7 +113,17 @@ impl BodyLowering<'_> {
                     // An argument that is already a local read still becomes a local OF THE
                     // EXPANSION: kotlinc copies it so the inline parameter has its own identity,
                     // name and lifetime. Reusing the caller's slot silently erased the parameter.
-                    (IrExpr::GetValue(slot), None) if parameter_names.get(index).is_none() => {
+                    //
+                    // A FUNCTION-typed argument is the exception, and keeps the caller's slot: an
+                    // inline function parameter is SPLICED at each of its call sites rather than
+                    // stored, so it has no local of its own to name. Copying one both invents a
+                    // local kotlinc has no counterpart for and hides the lambda from the splicer —
+                    // a forwarded `p` (`inline fun block(p: () -> Unit) = blockImpl(p)`) then
+                    // materialized a `Function0` whose implementation method was never emitted.
+                    (IrExpr::GetValue(slot), None)
+                        if parameter_names.get(index).is_none()
+                            || matches!(ty.non_null(), crate::types::Ty::Fun(_)) =>
+                    {
                         Some(*slot)
                     }
                     (IrExpr::Lambda { .. }, Some(_)) => return None,

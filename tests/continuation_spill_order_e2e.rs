@@ -87,12 +87,7 @@ fn a_spliced_lambdas_value_parameters_keep_their_names() {
                suspend fun run(tag: String): String {\n\
                \x20   return tagged(tag) { p -> step(p) + p }\n\
                }\n";
-    let Some((slots, names)) =
-        debug_metadata_names(src, "LambdaSpillNames", "LambdaSpillNamesKt$run$1")
-    else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
+    let (slots, names) = debug_metadata_names(src, "LambdaSpillNames", "LambdaSpillNamesKt$run$1");
     assert_eq!(
         names,
         ["tag", "tag$iv", "prefix$iv", "suffix$iv", "p"],
@@ -173,12 +168,8 @@ fn a_spliced_lambda_names_each_of_its_value_parameters() {
                suspend fun run(seed: String): String {\n\
                \x20   return pair { text, count -> step(seed + text) + count }\n\
                }\n";
-    let Some((slots, names)) =
-        debug_metadata_names(src, "LambdaTwoParameters", "LambdaTwoParametersKt$run$1")
-    else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
+    let (slots, names) =
+        debug_metadata_names(src, "LambdaTwoParameters", "LambdaTwoParametersKt$run$1");
     assert_eq!(names, ["seed", "text", "count"]);
     // As elsewhere in this file, the positions still carry an unnamed temporary of the expansion
     // that kotlinc does not have. Stated rather than hidden; closing it fails this and updates it.
@@ -200,12 +191,8 @@ fn a_lambda_declared_inside_an_inline_function_gains_its_frame() {
                }\n\
                \n\
                suspend fun run(seed: String): String = outer(seed)\n";
-    let Some((slots, names)) =
-        debug_metadata_names(src, "LambdaInsideInline", "LambdaInsideInlineKt$run$1")
-    else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
+    let (slots, names) =
+        debug_metadata_names(src, "LambdaInsideInline", "LambdaInsideInlineKt$run$1");
     assert_eq!(names, ["seed", "prefix$iv", "p$iv"]);
     assert_eq!(slots, ["L$0", "L$1", "L$4"]);
 }
@@ -228,10 +215,7 @@ fn a_member_inline_extension_names_both_of_its_receivers() {
                \x20   }\n\
                \x20   suspend fun run(b: Box, u: String): String = b.send(u)\n\
                }\n";
-    let Some((_, names)) = debug_metadata_spills(src, "BothReceivers", "Host$run$1") else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
+    let (_, names) = debug_metadata_spills(src, "BothReceivers", "Host$run$1");
     assert_eq!(
         names,
         ["b", "u", "this_$iv", "$this$send$iv", "url$iv", "local$iv"]
@@ -258,11 +242,7 @@ fn a_context_parameter_does_not_displace_the_inline_receiver() {
                \n\
                context(ctx: Ctx)\n\
                suspend fun run(b: Box, u: String): String = b.send(u)\n";
-    let Some((_, names)) = debug_metadata_spills(src, "ContextReceiver", "ContextReceiverKt$run$1")
-    else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
+    let (_, names) = debug_metadata_spills(src, "ContextReceiver", "ContextReceiverKt$run$1");
     assert_eq!(
         names,
         [

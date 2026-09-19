@@ -6465,6 +6465,39 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   at runtime (trailing `Continuation` parameter), so `as`/`is` against a suspend fn type checkcast/test
   `Function{n+1}` (KT-66093). (`suspend_fn_type_cast_targets_arity_plus_one_interface`.)
 
+- **An inline expansion's parameters are locals OF THAT EXPANSION, named by their ROLE.** A spilled
+  local's debug name is what a debugger shows while stepping through an inlined body, and krusty
+  produced the wrong one in three distinct ways:
+  - An argument that was already a local read reused the CALLER's slot, so the inline parameter had
+    no identity of its own and vanished from the spill names. kotlinc copies it; the expansion's
+    parameter gets its own slot, name and lifetime. A FUNCTION-typed argument is the exception and
+    keeps the caller's slot: an inline function parameter is SPLICED at each of its call sites
+    rather than stored, so there is no local to name. Copying one hid the lambda from the splicer,
+    so a forwarded `p` — `inline fun block(p: () -> Unit) { blockImpl(p) }` — materialized a
+    `Function0` whose implementation method was never emitted and the program died at its first
+    call with `NoSuchMethodError` (box `labels/nestedInlineLabels.kt`, reduced into
+    `a_forwarded_inline_lambda_parameter_is_still_spliced`).
+  - A member inline EXTENSION binds two receivers at once, and Kotlin keeps them distinct: the
+    containing class's `this` and the receiver being extended are different values. One role could
+    not stand for both, so `IrInlineLocalRole` has `DispatchReceiver` and `ExtensionReceiver`, and
+    the JVM boundary owns their spellings — `this_` for the callable's own `this`,
+    `$this$<callable>` for the receiver it extends, each with one `$iv` per inline depth.
+  - WHERE the extension receiver sits is a semantic coordinate, not position zero: Kotlin signs a
+    context extension `(contexts…, receiver, values…)`, so it follows the context parameters the
+    callable declares.
+  - A spliced lambda's own VALUE parameters are locals of the splice and keep their source names;
+    its CAPTURES are not — they are the enclosing locals, already named where they were declared.
+
+  Nothing is recovered from a name here: the role and the coordinate are recorded where the
+  expansion is built, and the `$this$`/`$iv` spellings exist only at the JVM boundary. Tests:
+  `an_inline_expansions_parameters_and_receiver_are_named_spills`,
+  `a_member_inline_extension_names_both_of_its_receivers`,
+  `a_context_parameter_does_not_displace_the_inline_receiver`,
+  `a_spliced_lambdas_value_parameters_keep_their_names`,
+  `a_spliced_lambda_names_each_of_its_value_parameters`,
+  `a_lambda_declared_inside_an_inline_function_gains_its_frame`, and the naming unit tests in
+  `jvm::debug_local_names`.
+
 - **A suspend fn carries NO `checkNotNullParameter` on its value parameters.** kotlinc's state-machine
   RE-ENTRY call (`foo(null, continuation)`) passes null for every value parameter — the real values live
   in the continuation's spill fields — so an entry null-check would throw on resume. kotlinc emits none;
