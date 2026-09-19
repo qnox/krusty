@@ -73,19 +73,18 @@ const DELEGATE_MESSAGE: &str = "expected property cannot be delegated.";
 /// does not report it, though an `init` block in the same position it does.
 pub(super) fn validate_expect_bodies(file: &File, diagnostics: &mut DiagSink) -> bool {
     let before = diagnostics.diags.len();
-    for id in &file.expect_decls {
-        match file.decl(*id) {
+    for expect in &file.expect_decls {
+        match file.decl(expect.declaration) {
             Decl::Fun(function) => {
                 // The whole declaration is the header, so the keyword that introduced it is where
-                // the reference compiler points; the `fun` token is the fallback.
-                let at = super::expect_keyword_before(file, function.span).unwrap_or(function.span);
+                // the reference compiler points. It travels with the declaration; nothing here
+                // searches for it, and nothing substitutes another position when it is absent.
                 if !matches!(function.body, crate::ast::FunBody::None) {
-                    diagnostics.error(at, BODY_MESSAGE);
+                    diagnostics.error(expect.keyword, BODY_MESSAGE);
                 }
             }
             Decl::Property(property) => {
-                let at = super::expect_keyword_before(file, property.span).unwrap_or(property.span);
-                validate_expect_property(file, property, at, diagnostics);
+                validate_expect_property(file, property, expect.keyword, diagnostics);
             }
             Decl::Class(class) => validate_expect_class(file, class, diagnostics),
         }
@@ -106,8 +105,15 @@ fn validate_expect_class(file: &File, class: &crate::ast::ClassDecl, diagnostics
     for step in &class.init_order {
         if let crate::ast::ClassInit::Block(body) = step {
             // At the `init` keyword, not at the `{` the block expression's own span starts on.
-            if let Some(span) = file.init_block_keywords.get(body) {
-                diagnostics.error(*span, BODY_MESSAGE);
+            // The parser records that keyword for every `init` block it parses, so an absent one is
+            // a broken parse product rather than a block to skip: reporting nothing here would drop
+            // the diagnostic for an implementation the header really carries.
+            match file.init_block_keywords.get(body) {
+                Some(span) => diagnostics.error(*span, BODY_MESSAGE),
+                None => diagnostics.error(
+                    class.span,
+                    "internal error: an init block in an expect classifier has no `init` keyword",
+                ),
             }
         }
     }
@@ -128,20 +134,31 @@ fn validate_expect_property(
     declaration: crate::diag::Span,
     diagnostics: &mut DiagSink,
 ) {
+    // Each of these positions is a parse product of the very syntax being reported, so an absent
+    // one is a broken arena rather than a reason to relocate the diagnostic. Reporting it at the
+    // declaration instead would put the message somewhere the reference compiler never puts it,
+    // and the complete ordered ledger the regressions compare would silently stop matching.
+    let missing = |what: &str| format!("internal error: an expect property's {what} has no span");
     if let Some(init) = property.init {
         // At the initializer EXPRESSION: `expect val x: Int = 3` is reported under the `3`.
-        let at = file.expr_span(init).unwrap_or(declaration);
-        diagnostics.error(at, INITIALIZER_MESSAGE);
+        match file.expr_span(init) {
+            Some(at) => diagnostics.error(at, INITIALIZER_MESSAGE),
+            None => diagnostics.error(declaration, missing("initializer")),
+        }
     }
     if let Some(delegate) = property.delegate {
         // A delegate is an implementation too, and gets its own sentence — at the delegate
         // EXPRESSION (`by lazy { 1 }` is reported under `lazy { 1 }`).
-        let at = file.expr_span(delegate).unwrap_or(declaration);
-        diagnostics.error(at, DELEGATE_MESSAGE);
+        match file.expr_span(delegate) {
+            Some(at) => diagnostics.error(at, DELEGATE_MESSAGE),
+            None => diagnostics.error(declaration, missing("delegate")),
+        }
     }
     if property.getter.is_some() {
-        let at = property.getter_span.unwrap_or(declaration);
-        diagnostics.error(at, BODY_MESSAGE);
+        match property.getter_span {
+            Some(at) => diagnostics.error(at, BODY_MESSAGE),
+            None => diagnostics.error(declaration, missing("getter")),
+        }
     }
     if let Some(setter) = &property.setter {
         if setter.body.is_some() {
