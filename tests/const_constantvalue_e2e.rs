@@ -39,3 +39,44 @@ fn const_field_has_constantvalue_and_no_clinit() {
         "an all-const-folded facade must have NO <clinit> (kotlinc emits none)"
     );
 }
+
+/// A `const val`'s FIELD visibility follows its declaration; every other facade static is private
+/// whatever the source said, because it is reached through accessors.
+///
+/// krusty published `private const val` as `public static final`, leaking a declaration the source
+/// hid — and it was the whole difference on facades whose members and pool already matched
+/// kotlinc's. Measured against kotlinc 2.4.10: `private` → 0x001A, `internal` and `public` →
+/// 0x0019, since `internal` is a Kotlin boundary with no JVM spelling.
+///
+/// The plain `private val` beside them pins the other half: its field was already private, and the
+/// fix must not be a blanket "statics follow the source".
+#[test]
+fn a_const_val_field_carries_its_declarations_visibility() {
+    let ci = facade(
+        "private const val HIDDEN = 4\n\
+         internal const val SHARED = 5\n\
+         const val OPEN = 6\n\
+         private val COMPUTED = \"x\"\n\
+         fun box() = HIDDEN + SHARED + OPEN + COMPUTED.length\n",
+    );
+    let access = |name: &str| -> u16 {
+        ci.fields
+            .iter()
+            .find(|field| field.name == name)
+            .unwrap_or_else(|| {
+                let names: Vec<&String> = ci.fields.iter().map(|field| &field.name).collect();
+                panic!("no {name} field; facade has {names:?}")
+            })
+            .access
+    };
+    const PRIVATE_STATIC_FINAL: u16 = 0x001A;
+    const PUBLIC_STATIC_FINAL: u16 = 0x0019;
+    assert_eq!(access("HIDDEN"), PRIVATE_STATIC_FINAL, "private const val");
+    assert_eq!(access("SHARED"), PUBLIC_STATIC_FINAL, "internal const val");
+    assert_eq!(access("OPEN"), PUBLIC_STATIC_FINAL, "public const val");
+    assert_eq!(
+        access("COMPUTED"),
+        PRIVATE_STATIC_FINAL,
+        "a non-const facade static stays private whatever the source said"
+    );
+}

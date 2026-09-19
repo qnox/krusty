@@ -4938,13 +4938,25 @@ fn emit_statics(
         return;
     }
     for &(static_index, s) in &facade_statics {
-        // kotlinc: `const val` → `public static final`; a plain `val` → `private static final`; a `var`
-        // → `private static` (mutated through the synthesized setter). The private field is read/written
-        // directly only from within the facade; other classes go through the get/set accessors.
+        // kotlinc: `const val` → `static final` at the DECLARATION's visibility; a plain `val` →
+        // `private static final`; a `var` → `private static` (mutated through the synthesized
+        // setter). The private field is read/written directly only from within the facade; other
+        // classes go through the get/set accessors.
+        //
+        // A `const val` is the one shape whose field visibility follows the source: measured against
+        // kotlinc 2.4.10, `private const val` is `private static final` (0x001A) while `internal`
+        // and `public` are both `public static final` (0x0019) — `internal` is a Kotlin-only
+        // boundary with no JVM spelling. Publishing a private one as public leaks a declaration the
+        // source hid, and it is the whole difference on a facade that otherwise matches.
         let acc = if ir.is_jvm_field_static(static_index) {
             0x0009 | if s.is_var { 0 } else { 0x0010 } // PUBLIC | STATIC [| FINAL]
         } else if s.is_const {
-            0x0019 // PUBLIC | STATIC | FINAL
+            let visibility = if s.visibility.is_private() {
+                0x0002
+            } else {
+                0x0001
+            };
+            visibility | 0x0018 // [PRIVATE | PUBLIC] | STATIC | FINAL
         } else if s.is_var {
             0x000A // PRIVATE | STATIC
         } else {
