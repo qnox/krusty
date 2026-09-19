@@ -5,7 +5,7 @@
 //! This module owns only container/schema facts; target adapters own semantic identities.
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PackageFragmentDecodeError {
+pub struct PackageFragmentDecodeError {
     pub(crate) offset: usize,
     pub(crate) detail: String,
 }
