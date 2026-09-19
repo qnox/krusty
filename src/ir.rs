@@ -34,11 +34,13 @@ pub enum IrNodeOrigin {
 mod bottom_values;
 mod bridges;
 mod constructors;
+mod references;
 pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
 pub use bridges::{Bridge, BridgeKind};
 pub(crate) use constructors::IrSecondaryConstructorRole;
 pub use constructors::{IrJvmValueClassSecondaryCtor, IrSecondaryCtor, IrSecondaryCtorLines};
+pub use references::{FuncRef, PropRef, PropertyAccessorRole};
 
 /// A compiler-supplied operation selected from a real semantic declaration. This is an operation
 /// identity, not a library name: backends implement it without recovering signature facts from text.
@@ -1846,164 +1848,6 @@ pub enum FrDispatch {
     SuspendConvert,
 }
 
-/// A synthesized function-reference subclass of `kotlin/jvm/internal/FunctionReferenceImpl`. See
-/// `emit_func_ref_class`. `param_tys`/`ret_ty` are the LOGICAL `invoke` signature (for `VirtualUnbound`,
-/// `param_tys[0]` is the receiver); the SAM interface erases them to `Object`, so `invoke` casts.
-#[derive(Clone, Debug)]
-pub struct FuncRef {
-    /// Adapted callable references use Kotlin's `AdaptedFunctionReference` carrier so equality and
-    /// hashing include the checked adaptation arity/flags instead of lambda identity.
-    pub adapted: bool,
-    pub bound: bool,
-    /// Leading adapter parameters stored as subclass fields rather than in the runtime callable
-    /// reference's semantic receiver slot. This is fixed by JVM realization from the common
-    /// reference's explicit ordinary captures; emission never infers it from capture cardinality.
-    pub field_capture_count: u32,
-    /// Kotlin source-level function arity. Backends add any representation parameters, such as a
-    /// suspend continuation, when selecting their callable carrier.
-    pub arity: u8,
-    /// The referenced declaration is suspend. The generated reference carries Kotlin's semantic
-    /// suspend-function identity; each backend owns its physical calling convention.
-    pub is_suspend: bool,
-    /// Exact current-module declaration selected by the frontend when this carrier invokes a
-    /// source callable directly. A backend uses the stable identity only to realize physical
-    /// naming/layout; reflection continues to expose `fn_name`, the Kotlin declaration name.
-    pub module_target: Option<crate::fir::CallableId>,
-    /// Exact common-IR helper invoked by this carrier when callable-reference adaptation generated
-    /// a local wrapper. This is a stable IR identity, so backend liveness and access-bridge planning
-    /// never rediscover the helper from its synthesized name and arity.
-    pub local_target: Option<FunId>,
-    /// Class passed to `super(...)` (the reference's declaring class); `None` = the file facade.
-    pub owner_class: Option<TypeName>,
-    pub fn_name: String,
-    pub flags: i32,
-    pub dispatch: FrDispatch,
-    /// Class the target method is invoked on; `None` = the file facade.
-    pub call_owner: Option<TypeName>,
-    pub call_name: String,
-    pub reflection_name: Option<String>,
-    /// The physical static bridge takes the original dispatch receiver as parameter zero, while
-    /// reflection still describes the referenced instance declaration without that receiver.
-    pub reflection_receiver_parameter: bool,
-    /// Reflection declaration return when the invoked helper has a different ABI. Constructor
-    /// adapters return the constructed value, while their reflected declaration returns JVM void.
-    pub reflection_target_ret_ty: Option<Ty>,
-    /// Declaration parameters used only for callable-reference identity. An adapted reference
-    /// invokes a generated wrapper whose ABI is in `target_param_tys`, while equality/reflection
-    /// must retain the original declaration descriptor.
-    pub reflection_target_param_tys: Option<Vec<Ty>>,
-    /// The target method is declared on an INTERFACE (`invokeinterface`, not `invokevirtual`).
-    pub call_interface: bool,
-    /// The LOGICAL `invoke` parameter types. For `VirtualUnbound`, `param_tys[0]` is the receiver
-    /// (excluded from the method descriptor / signature). The emitter derives the JVM signature and
-    /// reference metadata signature from these + `ret_ty`.
-    pub param_tys: Vec<Ty>,
-    pub ret_ty: Ty,
-    /// The PHYSICAL target-call parameter/return types after backend lowerings such as JVM value-class
-    /// erasure. Same shape as `param_tys` (including the unbound receiver slot when present).
-    pub target_param_tys: Vec<Ty>,
-    pub target_ret_ty: Ty,
-    /// Per logical invoke parameter: `Some(value_class_internal)` means the erased Object argument is a
-    /// boxed value-class instance and must be unboxed before the physical target call.
-    pub unbox_params: Vec<Option<TypeName>>,
-    /// Parallel to `unbox_params`: nullable value-class parameters unbox `null` to a null underlying.
-    pub unbox_param_nullable: Vec<bool>,
-    /// `Some(value_class_internal)` means the physical target returns the value-class underlying and the
-    /// function-reference `invoke` must box it back before returning Object.
-    pub box_ret: Option<TypeName>,
-    /// `StaticBound` only: `Some(value_class_internal)` when the CAPTURED receiver is a value class
-    /// (`Z(42)::ext`). The receiver is stored boxed as `Object`; the emitter `checkcast`s it to the box
-    /// class then `unbox-impl`s it to the underlying before the mangled `invokestatic ext-<hash>(under)`.
-    pub staticbound_recv_unbox: Option<TypeName>,
-}
-
-/// A synthesized property-reference class's metadata (`Type::prop` → `Type$prop$N`): the referenced
-/// property's owner, name, getter, and value type. The backend emits the `PropertyReference1Impl`
-/// subclass from this.
-#[derive(Clone, Debug)]
-pub struct PropRef {
-    /// Referenced property's owner class; `None` = the file facade.
-    pub owner_internal: Option<TypeName>,
-    /// Physical owner of a member accessor. This differs from `owner_internal` for an inherited
-    /// property reference (`Derived::p` reflects on `Derived` but may invoke `Base.getP`).
-    pub call_owner_internal: Option<TypeName>,
-    pub prop_name: String,
-    pub getter_name: String,
-    pub getter_descriptor: Option<String>,
-    pub setter_name: Option<String>,
-    pub setter_descriptor: Option<String>,
-    /// JVM-only property-reference boundary: the accessor uses this value class's erased carrier,
-    /// while `KProperty.get`/`set` exchange the boxed value-class object through `Object`.
-    pub boxed_value_class: Option<TypeName>,
-    /// The selected member accessor is declared by an interface. Static extension/top-level
-    /// accessors ignore this bit; instance references use it to choose `invokeinterface` without
-    /// querying a class model again during emission.
-    pub owner_is_interface: bool,
-    pub prop_ty: Ty,
-    /// `false` = an unbound `Type::prop` (a `PropertyReference1Impl` singleton with `get(Object)`);
-    /// `true` = a bound `obj::prop` (a `PropertyReference0Impl` constructed with the captured receiver,
-    /// whose `get()` reads `this.receiver`).
-    pub bound: bool,
-    /// A top-level property reference `::foo` (a `(Mutable)PropertyReference0Impl` singleton): the
-    /// getter/setter are STATIC on the file facade, so `get`/`set` dispatch via `invokestatic`
-    /// (`owner_internal = None` is resolved at emit). No receiver is captured.
-    pub static_dispatch: bool,
-    /// The referenced property is a `var` — emit a `set(Object)` override (calls `setName`). Only
-    /// meaningful with `static_dispatch` (a `MutablePropertyReference0Impl`).
-    pub mutable: bool,
-    /// An EXTENSION property reference (`obj::ext`, `Type::ext` where `val Recv.ext`): the getter/setter
-    /// are STATIC methods on this facade taking the receiver as the first argument (`getExt(Recv)` /
-    /// `setExt(Recv, v)`), unlike a member reference's instance `getExt()`. `None` for member/top-level
-    /// references. The reference's receiver-class metadata still lives in `owner_internal`.
-    pub ext_facade: Option<Option<TypeName>>,
-}
-
-impl FuncRef {
-    pub fn owner_class_or_facade(&self, facade: &str) -> String {
-        self.owner_class
-            .map(TypeName::render)
-            .unwrap_or_else(|| facade.to_string())
-    }
-
-    pub fn call_owner_or_facade(&self, facade: &str) -> String {
-        self.call_owner
-            .map(TypeName::render)
-            .unwrap_or_else(|| facade.to_string())
-    }
-
-    pub fn call_owner_key(&self) -> String {
-        self.call_owner.map(TypeName::render).unwrap_or_default()
-    }
-
-    pub fn call_owner_is_facade(&self) -> bool {
-        self.call_owner.is_none()
-    }
-}
-
-impl PropRef {
-    pub fn owner_or_facade(&self, facade: &str) -> String {
-        self.owner_internal
-            .map(TypeName::render)
-            .unwrap_or_else(|| facade.to_string())
-    }
-
-    pub fn owner(&self) -> Option<String> {
-        self.owner_internal.map(TypeName::render)
-    }
-
-    pub fn call_owner(&self) -> Option<String> {
-        self.call_owner_internal.map(TypeName::render)
-    }
-
-    pub fn ext_facade_or_facade(&self, facade: &str) -> Option<String> {
-        self.ext_facade.as_ref().map(|f| {
-            f.as_ref()
-                .map(|facade| facade.render())
-                .unwrap_or_else(|| facade.to_string())
-        })
-    }
-}
-
 impl IrClass {
     /// Minimal backend-neutral shape for a compiler-generated class. The producer sets only the
     /// semantic payload it owns (for example `prop_ref`); target passes choose representation.
@@ -2281,6 +2125,19 @@ pub struct IrStatic {
     /// accessors; cross-class reads inside the file go through a synthesized `access$get<X>$p` bridge
     /// (kotlinc's shape).
     pub visibility: crate::types::Visibility,
+    /// The setter's JVM name when it is not the ordinary `set<X>` spelling — a value-class-typed
+    /// property mangles it, because a value-class PARAMETER always does. `None` ⇒ the ordinary name.
+    pub setter_jvm_name: Option<String>,
+    /// The type this static was DECLARED with, when the JVM pass erased its storage to a value
+    /// class's carrier (a file facade's property, which kotlinc erases the same way). `None` ⇒ the
+    /// storage keeps the boxed value-class object, or holds no value class at all.
+    ///
+    /// The whole declared type, not just the classifier: once `ty` holds the carrier, every fact
+    /// the accessors still need — which value class it is AND whether it was nullable — is only
+    /// here. Reading them back off the erased type made a `var x: Label?` publish a non-null
+    /// `String` setter, which then refused the `null` the property accepts. Every reader consults
+    /// this rather than re-deciding, so a read of the field and the field itself cannot disagree.
+    pub erased_declared_ty: Option<Ty>,
     /// `true` when this backing field has a CUSTOM accessor (`val x = init get() = field…`): the field
     /// is still emitted + initialized in `<clinit>`, but the trivial `getX`/`setX` accessors are NOT
     /// auto-generated here — the custom `getX`/`setX` are emitted as ordinary facade methods (their

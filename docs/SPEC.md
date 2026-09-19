@@ -4995,11 +4995,82 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type is built with the property's own type (`[V]` at arity 0, `[Recv, V]` at arity 1). Two things
   are deliberately NOT asserted, because a wrong type is worse than none: a type still mentioning a
   type parameter (the use site's substitution is not applied here), and an EXTENSION property's value
-  type (written in terms of the property's own parameters). A VALUE-CLASS-typed property reference
-  declines outright — kotlinc emits those accessors under the value-class name mangle, which the
-  reference does not yet carry. Tests: `tests/toplevel_property_ref_e2e.rs::toplevel_property_refs_run`,
-  box `callableReference/property/extensionPropertyWithExtensionType.kt`,
-  `inlineClasses/callableReferences/inlineClassTypeMemberVar.kt`.
+  type (written in terms of the property's own parameters). Tests:
+  `tests/toplevel_property_ref_e2e.rs::toplevel_property_refs_run`,
+  box `callableReference/property/extensionPropertyWithExtensionType.kt`.
+
+- **A property reference names the accessor the declaration actually realizes, value classes
+  included.** krusty emitted a reference class that called an accessor declared nowhere, so the
+  program failed at its first `get` with a `NoSuchMethodError` — an unlinkable artifact emitted
+  without a diagnostic. Four rules, each measured against the reference compiler's own emitted body
+  (box `inlineClasses/callableReferences/*`, 14 cases; box total 6317 → 6337, twenty cases moving
+  and none regressing — the `annotations/instances/annotationInstances*` pair flips run to run on
+  any commit and is excluded):
+  - A **member** of a value class is realized statically over the erased carrier, so the reference
+    casts its receiver, unboxes it, and calls statically: `checkcast Z; Z.unbox-impl()I;
+    Z.getXx-impl(I)I`. The `-impl` suffix is the structural form the declaration side uses when the
+    signature needs no value-class hash of its own.
+  - An **extension on** a value class is the same shape through its facade, with the hash-mangled
+    name the declaration carries: `ExtKt.getXx-IQRRRT4(I)I`, not `getXx(LZ;)I`.
+  - Which of those two a reference is, is RECORDED, never inferred. `PropRef::ext_facade` is `Some`
+    for an extension AND for a private member reached through an `access$…` bridge — the bridge's
+    accessor is static in the same way, so it names an owner there rather than a facade. Reading it
+    as "this is an extension" rebuilt `getXx-IQRRRT4(I)I` for a private member whose declaration is
+    `getXx-impl(I)I`, and `(this::xx).get()` on a value class failed with
+    `NoSuchMethodError: 'int Z.getXx-IQRRRT4(int)'`. `PropRef::accessor_role` now carries the
+    selection made where the three cases are distinguishable, and a private member of a value class
+    takes the member rule with kotlinc's bridge in front of it: `Z` declares
+    `private static final getXx-impl(I)I` and publishes `public static final access$getXx-impl(I)I`
+    beside it, and the reference calls the bridge. Publishing the accessor ITSELF was a declaration
+    bug one layer below references, and not value-class-specific: `materialize_member_property` —
+    the path a member property with a CUSTOM accessor takes — recorded its accessors' source order
+    but never entered them in `ir.private_methods`, unlike the two sibling paths that handle
+    backing-field properties, so every private computed member property was emitted `ACC_PUBLIC`. A
+    value class made it visible because there the accessor is also renamed and called from a
+    separate class. The bridge is the existing function-reference access-bridge emitter, which had
+    no populating caller and assumed an instance target; a value class's accessor is already
+    callable without an instance, so it takes a STATIC target too — the bridge carries exactly its
+    parameters and `invokestatic`s it.
+  - The value class's own **underlying** property is the exception and takes no rewrite: reading it
+    is the unbox, and its accessor stays an ordinary instance getter on the box (`Z.getX()I` —
+    which is also the signature the reference reports, exactly as kotlinc's does, even though
+    kotlinc's body shortcuts to `unbox-impl`).
+  - A property whose **TYPE** is a value class already carried the mangled accessor name, but a
+    member or top-level property has no written descriptor, so the one synthesized from its
+    semantic type (`()LZ;`) named a method the declaration does not have: it exchanges the carrier
+    (`()I`, `(I)V`). The descriptor is now synthesized from the carrier, which also gives
+    `box-impl`/`unbox-impl` at the `KProperty` boundary their correct signatures.
+
+  A **top-level** property of value-class type is realized over the CARRIER as well, so the rule
+  above has no exception left to carve out. kotlinc emits `private static int topLevel`,
+  `public static final int getTopLevel()` and `public static final void setTopLevel-IQRRRT4(int)`,
+  and krusty emits that surface now. The setter's name mangles and the getter's does not, which is
+  `vc_mangle`'s standing rule read at a file facade: a value-class PARAMETER always contributes to
+  the hash, a value-class RESULT contributes only outside a file class (`is_file_class` suppresses
+  the return contribution — a member keeps its `getZ-a_XrcN0()I`, the facade's `getTopLevel()I` has
+  no hash at all). Both halves of that realization are RECORDED on the declaration rather than
+  recomputed at each site that has to agree with it: `IrStatic::erased_value_class` names the class
+  the storage was erased over (`None` ⇒ the boxed convention) and `IrStatic::setter_jvm_name` the
+  setter's spelling (`None` ⇒ the ordinary `set<X>`), and the set of erased facade properties is
+  handed to the reference pass. A reader that re-decides is a reader that can disagree: while the
+  declared type still said `LZ;` and the field said `I`, the value-class boxing analysis read
+  `getstatic gz:I` as a BOXED value and a defaulted parameter `fun test(z: Z = gz)` got
+  `Integer.valueOf; checkcast Z; unbox-impl` over a carrier that was never boxed — a
+  `ClassCastException` at the first call. The decision is therefore taken once, before any boxing
+  analysis runs, and the storage erased afterwards, where the initializer rewrites that still speak
+  in the declared type are already done. A COMPANION property's
+  field stays BOXED (`LX;`) with its initializer boxed to match: only the top-level one lives on
+  the facade kotlinc erases, and holding both under one rule is what named a `getTopLevel()LZ;` no
+  declaration had. The reference's reflection owner and top-level flag keep reading `ext_facade`
+  alone: a member of a value class is still a MEMBER reference (`ldc Z.class`, flags 0), and only
+  the physical call shape changes. A RECEIVERLESS accessor's descriptor stays the property's own
+  type rather than the `PropRef`'s recorded one, which for a companion-block or access-bridged
+  property names the owner it is called with — a descriptor this reference passes nothing for (it
+  emitted an `invokestatic` on an empty stack). Tests:
+  `tests/value_class_property_reference_e2e.rs` — the member, private-member and top-level cases
+  each diff krusty's emitted accessor surface against the reference compiler's rather than against
+  a pinned expectation — and
+  `companion_e2e::companion_block_mutable_property_reference_is_receiverless`.
 - **A property on a BUILTIN receiver is one table, read by both phases.** `String.length`, `Char.code`
   and an array's `size` have no class file to resolve against. The body checker knew them; the
   SIGNATURE phase did not, so `const val code = a.code` reported "cannot infer the type of property"
