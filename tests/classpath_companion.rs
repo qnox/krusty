@@ -15,7 +15,7 @@ use std::rc::Rc;
 fn classpath_class_companion_object_is_detected() {
     let stdlib = common::stdlib_jar();
     let cp = Rc::new(Classpath::new(vec![stdlib]));
-    let libs = JvmLibraries::new(cp);
+    let libs = JvmLibraries::new(cp).expect("JVM provider initialization");
 
     // `kotlin.random.Random` has a companion object `Default` — a `public static final
     // kotlin/random/Random$Default Default` field on `Random` (the same shape as

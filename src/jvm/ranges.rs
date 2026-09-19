@@ -7,8 +7,14 @@ use crate::fir::FirRangeOperation;
 use crate::ir::{Callee, ExprId, IrCheckedOperation, IrExpr, IrFile, IrTypeOp};
 use crate::types::Ty;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum RangeRealizationFailure {
+    Initialization(crate::libraries::PlatformInitializationError),
+    Operation(RangeOperationFailure),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct RangeRealizationFailure {
+pub(super) struct RangeOperationFailure {
     expression: ExprId,
     operation: FirRangeOperation,
     start: Ty,
@@ -22,7 +28,7 @@ pub(super) fn realize(
     ir: &mut IrFile,
     classpath: Rc<Classpath>,
 ) -> Result<(), RangeRealizationFailure> {
-    let runtime = JvmLibraries::new(classpath);
+    let runtime = JvmLibraries::new(classpath).map_err(RangeRealizationFailure::Initialization)?;
     let expression_count = ir.exprs.len();
     for expression in 0..expression_count {
         let IrExpr::Checked(IrCheckedOperation::RangeConstruction {
@@ -36,15 +42,15 @@ pub(super) fn realize(
         else {
             continue;
         };
-        let failure = RangeRealizationFailure {
+        let failure = RangeRealizationFailure::Operation(RangeOperationFailure {
             expression: expression as ExprId,
             operation,
             start: start_type,
             end: end_type,
-        };
+        });
         let construction = runtime
             .range_construction(start_type, end_type)
-            .ok_or(failure)?;
+            .ok_or_else(|| failure.clone())?;
         let start = coerce(
             ir,
             expression as ExprId,
@@ -76,9 +82,11 @@ pub(super) fn realize(
                     }
                 }
             }
-            FirRangeOperation::OpenEnd | FirRangeOperation::Until => {
-                static_call(construction.until.ok_or(failure)?, start, end)
-            }
+            FirRangeOperation::OpenEnd | FirRangeOperation::Until => static_call(
+                construction.until.ok_or_else(|| failure.clone())?,
+                start,
+                end,
+            ),
             // `downTo` is an ordinary provider-selected extension call and must not arrive as a
             // compiler-supplied range-construction operation.
             FirRangeOperation::DownTo => return Err(failure),
@@ -109,12 +117,14 @@ pub(super) fn realize(
                 let replacement = unsigned_range_loop(
                     ir, &runtime, variable, counter, operation, start, end, body, label,
                 )
-                .ok_or(RangeRealizationFailure {
-                    expression: expression as ExprId,
-                    operation,
-                    start: counter,
-                    end: counter,
-                })?;
+                .ok_or(RangeRealizationFailure::Operation(
+                    RangeOperationFailure {
+                        expression: expression as ExprId,
+                        operation,
+                        start: counter,
+                        end: counter,
+                    },
+                ))?;
                 ir.exprs[expression] = replacement;
             }
             IrExpr::Checked(IrCheckedOperation::RangeContains {
@@ -128,12 +138,14 @@ pub(super) fn realize(
                 let replacement = unsigned_range_contains(
                     ir, &runtime, operation, value, start, end, negated, counter,
                 )
-                .ok_or(RangeRealizationFailure {
-                    expression: expression as ExprId,
-                    operation,
-                    start: counter,
-                    end: counter,
-                })?;
+                .ok_or(RangeRealizationFailure::Operation(
+                    RangeOperationFailure {
+                        expression: expression as ExprId,
+                        operation,
+                        start: counter,
+                        end: counter,
+                    },
+                ))?;
                 ir.exprs[expression] = replacement;
             }
             IrExpr::Checked(

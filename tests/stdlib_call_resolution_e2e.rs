@@ -33,7 +33,9 @@ fn resolve_errors(src: &str) -> Option<Vec<String>> {
         src, &toks, &mut diags, &features,
     )];
     let cp = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(cp_paths));
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),
+    );
     let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
     let _ = check_file(&files[0], &mut syms, &mut diags);
     Some(
@@ -130,7 +132,8 @@ fn kotlin_test_assert_fails_with_default_is_inline_only_callable() {
     );
     cp_paths.push(jdk);
     let cp = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(cp_paths));
-    let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(cp);
+    let platform =
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization");
     let overloads = match platform
         .symbols(
             krusty::symbol_source::SymbolNamespace::Package(krusty::types::type_name(
@@ -166,7 +169,8 @@ fn enum_reflection_functions_are_published_from_stdlib_metadata() {
     assert!(!cp_paths.is_empty(), "stdlib classpath unavailable");
     cp_paths.push(common::jdk_modules());
     let cp = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(cp_paths));
-    let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(cp);
+    let platform =
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization");
 
     for (name, arity) in [("enumValues", 0), ("enumValueOf", 1)] {
         let overloads = match platform

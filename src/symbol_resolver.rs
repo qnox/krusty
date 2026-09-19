@@ -8127,7 +8127,6 @@ mod tests {
         assert_eq!(functions.overloads.len(), 1);
         assert_eq!(source.queries.get(), 1);
     }
-
     #[test]
     fn mapped_mutable_list_inherits_the_mutable_iterator_declaration() {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
@@ -8135,7 +8134,8 @@ mod tests {
         };
         let source = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
-        ));
+        ))
+        .expect("provider");
         let receiver = Ty::obj_args("kotlin/collections/MutableList", &[Ty::Int]);
         let functions = members_in_hierarchy(&source, receiver, "iterator")
             .into_parts()

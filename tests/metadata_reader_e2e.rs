@@ -109,7 +109,8 @@ fn result_get_or_throw_resolves_as_inline_extension() {
     // extension on a `Result` receiver — found at the erased `Object` rung, disambiguated by the
     // @Metadata receiver. (Byte-equal codegen additionally needs value-class param erasure.)
     let sl = common::stdlib_jar();
-    let libs = JvmLibraries::new(Rc::new(Classpath::new(vec![sl])));
+    let libs =
+        JvmLibraries::new(Rc::new(Classpath::new(vec![sl]))).expect("JVM provider initialization");
     // `getOrThrow` lives in `kotlin/ResultKt` (package `kotlin`); an unqualified extension resolves only
     // through the import scope, so put `kotlin` in scope (matching a file that has `Result` in scope).
     let scope = vec![type_name("kotlin")];
@@ -146,7 +147,8 @@ fn result_get_or_throw_resolves_as_inline_extension() {
 #[test]
 fn result_get_or_null_resolves_as_nullable_metadata_member() {
     let sl = common::stdlib_jar();
-    let libs = JvmLibraries::new(Rc::new(Classpath::new(vec![sl])));
+    let libs =
+        JvmLibraries::new(Rc::new(Classpath::new(vec![sl]))).expect("JVM provider initialization");
     use krusty::symbol_resolver::{SymRecv, Symbol};
     let m = krusty::symbol_resolver::SymbolResolver::new(&libs)
         .resolve_symbol(

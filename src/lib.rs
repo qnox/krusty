@@ -31,6 +31,7 @@ pub mod ir_print;
 pub mod java_source;
 pub mod js;
 pub mod jvm;
+pub mod klib;
 pub mod kt_string;
 pub mod lexer;
 pub mod libraries;

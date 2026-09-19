@@ -26,7 +26,7 @@ fn krusty_compile(src: &str, stem: &str, cp: &Rc<Classpath>) -> Option<Vec<(Stri
     let mut d = DiagSink::new();
     let inputs = [SourceInput::kotlin(src).with_file_stem(stem)];
     let stems = [stem.to_string()];
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
         platform,

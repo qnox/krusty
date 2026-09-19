@@ -487,6 +487,15 @@ pub struct SourceHeaderError {
     pub message: String,
 }
 
+/// A dependency/provider failure discovered before the frontend may query declarations.
+/// Providers retain their typed ingestion error internally and expose its stable diagnostic at this
+/// boundary; the frontend reports it once and does not enter signature collection with a partial
+/// symbol source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlatformInitializationError {
+    pub message: String,
+}
+
 /// One foreign-language source whose declaration headers a target provider must normalize before
 /// Kotlin signature solving. This is a bounded Pass-1 input view: providers may parse `text` during
 /// the call, but the semantic result must not retain it or use its coordinates as symbol identity.
@@ -498,6 +507,11 @@ pub struct PlatformSourceHeaderInput<'a> {
 }
 
 pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
+    /// Confirm that every selected dependency was ingested completely before declaration lookup.
+    fn validate_initialization(&self) -> Result<(), PlatformInitializationError> {
+        Ok(())
+    }
+
     /// Install declaration headers contributed by platform source languages before Kotlin
     /// signature resolution starts. `source_classifiers` is the stable, qualified Kotlin
     /// classifier inventory already extracted in Pass 1; it lets a Java provider resolve a header

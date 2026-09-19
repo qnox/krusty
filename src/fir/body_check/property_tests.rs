@@ -258,9 +258,12 @@ fn dependency_static_field_read_keeps_only_its_provider_identity() {
     };
     let mut classpath = crate::toolchain::classpath_jars_for("");
     classpath.push(jdk);
-    let platform = Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-        std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
-    ));
+    let platform = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(classpath),
+        ))
+        .expect("JVM provider initialization"),
+    );
     let (body, _) = checked_function_body_with_platform(
         "fun output(): java.io.PrintStream? = System.out\n",
         "output",

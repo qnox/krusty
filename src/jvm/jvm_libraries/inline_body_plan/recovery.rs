@@ -348,7 +348,8 @@ mod tests {
         };
         let libraries = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
             vec![stdlib],
-        )));
+        )))
+        .expect("JVM provider initialization");
         let symbols =
             libraries.symbols(SymbolNamespace::Package(type_name("kotlin")), "runCatching");
         let callable = symbols
@@ -489,7 +490,8 @@ mod tests {
         };
         let warm = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
             vec![stdlib.clone()],
-        )));
+        )))
+        .expect("JVM provider initialization");
         let warm_symbols =
             warm.symbols(SymbolNamespace::Package(type_name("kotlin")), "runCatching");
         assert!(warm_symbols
@@ -500,7 +502,8 @@ mod tests {
 
         let libraries = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
             vec![stdlib],
-        )));
+        )))
+        .expect("JVM provider initialization");
         let symbols =
             libraries.symbols(SymbolNamespace::Package(type_name("kotlin")), "runCatching");
         let callable = symbols

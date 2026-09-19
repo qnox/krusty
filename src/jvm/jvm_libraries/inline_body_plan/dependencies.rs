@@ -279,7 +279,8 @@ mod tests {
             .expect("inline dependency test requires the repository Kotlin stdlib");
         let libraries = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
             vec![stdlib],
-        )));
+        )))
+        .expect("JVM provider initialization");
         let member = libraries
             .inline_plan_member(("java/util/Collection", "add", "(Ljava/lang/Object;)Z", true))
             .expect("Collection.add must normalize through its mutable Kotlin declaration");
@@ -315,7 +316,8 @@ mod tests {
         };
         let warm = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
             vec![stdlib.clone()],
-        )));
+        )))
+        .expect("JVM provider initialization");
         assert!(iterable_for_each_indexed(&warm)
             .callable
             .inline_body_plan
@@ -341,7 +343,8 @@ mod tests {
 
         let current = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
             vec![stdlib],
-        )));
+        )))
+        .expect("JVM provider initialization");
         let function = iterable_for_each_indexed(&current);
         let Some(InlineBodyPlan::Iteration {
             index: Some(InlineIterationIndex::Checked { overflow }),

@@ -17,7 +17,7 @@ fn load(internal: &str) -> Option<(LibraryType, Option<KotlinMeta>)> {
         return None;
     }
     let meta = cp.find(internal).map(|ci| ci.meta.clone());
-    let libs = JvmLibraries::new(cp);
+    let libs = JvmLibraries::new(cp).expect("JVM provider initialization");
     let lib = libs.classifier(type_name(internal))?;
     Some(((*lib).clone(), meta))
 }
@@ -140,11 +140,13 @@ fn renders_a_builtin_with_its_kotlin_supertypes_and_members() {
         return;
     };
 
-    let rendered =
-        match materialize(&cp, "kotlin/Long", "", "", false).expect("materialize kotlin/Long") {
-            MaterializedSource::Rendered(rendered) => rendered,
-            MaterializedSource::Attached { .. } => panic!("expected a rendered stub"),
-        };
+    let rendered = match materialize(&cp, "kotlin/Long", "", "", false)
+        .expect("initialize JVM provider")
+        .expect("materialize kotlin/Long")
+    {
+        MaterializedSource::Rendered(rendered) => rendered,
+        MaterializedSource::Attached { .. } => panic!("expected a rendered stub"),
+    };
 
     assert!(
         rendered.text.contains("class Long : Number, Comparable {"),
@@ -190,8 +192,9 @@ fn opens_the_real_stdlib_source_for_a_builtin() {
         return;
     }
 
-    let materialized =
-        materialize(&cp, "kotlin/Long", "", "", true).expect("materialize kotlin/Long");
+    let materialized = materialize(&cp, "kotlin/Long", "", "", true)
+        .expect("initialize JVM provider")
+        .expect("materialize kotlin/Long");
     assert!(
         matches!(materialized, MaterializedSource::Attached { .. }),
         "fell back to a rendered stub instead of the stdlib source"
@@ -362,6 +365,7 @@ fn finds_a_top_level_function_in_the_facade_source() {
     let cp = Rc::new(Classpath::new(vec![classes]));
 
     let (text, span) = materialize(&cp, "com/example/UtilsKt", "makeWidget", "()V", true)
+        .expect("initialize JVM provider")
         .expect("materialize facade")
         .into_text_and_span("makeWidget", "");
 
@@ -406,6 +410,7 @@ fn finds_generic_extension_and_overloaded_facade_callables() {
         "(Ljava/lang/Object;Ljava/lang/Object;)V",
         true,
     )
+    .expect("initialize JVM provider")
     .expect("materialize overloaded function")
     .into_text_and_span("choose", "");
     let (extension_text, extension) = materialize(
@@ -415,6 +420,7 @@ fn finds_generic_extension_and_overloaded_facade_callables() {
         "(Ljava/lang/String;I)V",
         true,
     )
+    .expect("initialize JVM provider")
     .expect("materialize extension function")
     .into_text_and_span("decorate", "");
     let (_, property) =
@@ -499,6 +505,7 @@ fn points_at_the_declaration_rather_than_an_earlier_mention() {
     let cp = Rc::new(Classpath::new(vec![classes]));
 
     let (text, span) = materialize(&cp, "com/example/Widget", "", "", true)
+        .expect("initialize JVM provider")
         .expect("materialize widget")
         .into_text_and_span("", "");
 
@@ -520,7 +527,10 @@ fn materialize_prefers_attached_source_and_honors_the_flag() {
         return;
     }
 
-    match materialize(&cp, "kotlin/text/Regex", "", "", true).expect("materialize Regex") {
+    match materialize(&cp, "kotlin/text/Regex", "", "", true)
+        .expect("initialize JVM provider")
+        .expect("materialize Regex")
+    {
         MaterializedSource::Rendered(rendered) => {
             assert!(rendered.text.contains("class Regex"), "{}", rendered.text)
         }
@@ -539,11 +549,16 @@ fn materialize_prefers_attached_source_and_honors_the_flag() {
         )],
     );
     let cp2 = Rc::new(Classpath::new(vec![classes]));
-    match materialize(&cp2, "com/example/Widget", "", "", true).expect("materialize widget") {
+    match materialize(&cp2, "com/example/Widget", "", "", true)
+        .expect("initialize JVM provider")
+        .expect("materialize widget")
+    {
         MaterializedSource::Attached { text, .. } => assert!(text.contains("class Widget")),
         MaterializedSource::Rendered(_) => panic!("expected attached source, got a stub"),
     }
-    assert!(materialize(&cp2, "com/example/Widget", "", "", false).is_none());
+    assert!(materialize(&cp2, "com/example/Widget", "", "", false)
+        .expect("initialize JVM provider")
+        .is_none());
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -609,12 +624,23 @@ fn a_ranked_dependency_class_becomes_a_file_with_a_range() {
 
     let candidates = index.candidates("AbstractList", 4);
     assert!(!candidates.is_empty());
-    let located = krusty_lsp::locate_dependencies(&cp, &cache, candidates, false);
-
-    let listed = located
+    let listed_index = candidates
         .iter()
-        .find(|found| found.candidate.internal == "kotlin/collections/AbstractList")
-        .expect("the ranked class must be locatable");
+        .position(|candidate| candidate.internal == "kotlin/collections/AbstractList")
+        .expect("the ranked class must be present");
+    let expected = candidates.clone();
+    let located = krusty_lsp::locate_dependencies(&cp, &cache, candidates, false)
+        .expect("the ranked classes must be locatable");
+    assert_eq!(
+        located
+            .iter()
+            .map(|found| &found.candidate)
+            .collect::<Vec<_>>(),
+        expected.iter().collect::<Vec<_>>(),
+        "every ranked candidate must be located once and in rank order"
+    );
+
+    let listed = &located[listed_index];
     // A client that will not open a URI without a range needs both, and the file has to be on disk
     // by the time the response leaves.
     assert!(

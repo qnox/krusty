@@ -739,13 +739,20 @@ pub fn locate(
     cache_root: &std::path::Path,
     candidates: Vec<DependencyCandidate>,
     use_sources: bool,
-) -> Vec<LocatedDependency> {
-    locate_with(cache_root, candidates, |candidate| {
-        let source =
-            crate::deps_render::materialize(classpath, &candidate.internal, "", "", use_sources)?;
+) -> Result<Vec<LocatedDependency>, krusty::jvm::PlatformInitializationError> {
+    let libraries = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())?;
+    Ok(locate_with(cache_root, candidates, |candidate| {
+        let source = crate::deps_render::materialize_with_libraries(
+            classpath,
+            &libraries,
+            &candidate.internal,
+            "",
+            "",
+            use_sources,
+        )?;
         // No member name: a class-name query points at the class declaration itself.
         Some(source.into_text_and_span("", ""))
-    })
+    }))
 }
 
 /// Finish dependency locations using a host-provided semantic materializer.

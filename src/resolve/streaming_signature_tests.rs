@@ -551,7 +551,10 @@ fun box() = Sam(Outer("O")::Inner).get("K").text()
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -584,7 +587,10 @@ fun array(): IntArray = Sam(::IntArray).make(2)
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -619,7 +625,10 @@ fun merge(map: java.util.HashMap<String, Int>) = map.merge("a", 2, Int::plus)
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -655,7 +664,10 @@ fun adapt(): BottomSam = BottomSam(::thr)
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -696,7 +708,10 @@ fun box() = Reader(Value::read)
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -740,7 +755,10 @@ class App {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -841,9 +859,12 @@ fn inferred_explicit_backing_field_uses_public_type_as_generic_expectation() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
-        )),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+                crate::jvm::classpath::Classpath::new(classpath),
+            ))
+            .expect("JVM provider initialization"),
+        ),
         &LangFeatures::from_source(source),
         &mut diagnostics,
     );
@@ -929,9 +950,12 @@ fun box() = Package.Outer.Nested().first + Outer.Nested().second
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
-        )),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+                crate::jvm::classpath::Classpath::new(classpath),
+            ))
+            .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -1094,7 +1118,8 @@ class Holder {
         crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
             "// WITH_STDLIB",
         )),
-    ));
+    ))
+    .expect("JVM provider initialization");
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
         Box::new(platform),
@@ -1477,7 +1502,10 @@ class Callable<T> : suspend (T) -> String {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::from_source(source),
         |_, _| {},
         &mut diagnostics,
@@ -2302,7 +2330,10 @@ fn java_static_field_qualifier_becomes_a_value_before_member_selection() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -2340,7 +2371,10 @@ fn java_source_static_call_finalizes_through_classifier_candidates() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -2744,7 +2778,10 @@ fn inferred_property_reference_finalizes_before_body_streaming() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -2775,7 +2812,10 @@ fn companion_lateinit_reference_finalizes_inferred_boolean_signature() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::from_source(inputs[0].text),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -2811,7 +2851,10 @@ fn inferred_signature_invokes_nominal_constructor_reference_through_callable_sha
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -2861,7 +2904,10 @@ fn inferred_signatures_select_nested_and_unbound_inner_constructor_references() 
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -2996,7 +3042,10 @@ fn qualified_companion_singleton_reference_is_bound_during_signature_solving() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3021,7 +3070,10 @@ fn object_property_reference_is_bound_in_the_signature_graph() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3065,7 +3117,10 @@ fn natural_bound_callable_reference_prefers_the_member_rung_over_extensions() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3105,7 +3160,10 @@ class Child : Base<String>("") {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3170,7 +3228,10 @@ fn delegated_signature_checks_bound_property_reference_against_reflective_parame
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3204,7 +3265,10 @@ fn nested_object_value_resolves_in_a_delegated_signature() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3236,7 +3300,10 @@ fn extension_delegate_conventions_receive_the_property_extension_receiver() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3281,7 +3348,10 @@ fn same_named_delegated_extensions_form_distinct_signature_dependencies() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3325,7 +3395,10 @@ fn inline_delegate_preparation_does_not_commit_unchecked_constructor_types() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3359,7 +3432,10 @@ fn explicit_generic_constructor_shapes_a_trailing_lambda_signature() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3388,7 +3464,10 @@ fn expected_callable_reference_specializes_a_postponed_generic_argument() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3788,7 +3867,10 @@ fn compact_graph_finalizes_an_extension_property_after_legacy_approximation_decl
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -3954,7 +4036,10 @@ fn inherited_generic_member_extension_is_visible_inside_a_receiver_lambda() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -4873,9 +4958,12 @@ fn dependency_extension_constraints_finalize_the_enclosing_generic_signature() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
-        )),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+                crate::jvm::classpath::Classpath::new(classpath),
+            ))
+            .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -4925,9 +5013,12 @@ fn bounded_contract_declaration_publishes_by_stable_identity() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
-        )),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+                crate::jvm::classpath::Classpath::new(classpath),
+            ))
+            .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -4999,9 +5090,12 @@ fn pass_one_contract_is_visible_when_caller_source_streams_first() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
-        )),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+                crate::jvm::classpath::Classpath::new(classpath),
+            ))
+            .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -5353,7 +5447,10 @@ fn nested_generic_member_signature_uses_its_published_type_parameter_identity() 
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::from_source(source),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -5422,7 +5519,10 @@ fn assert_jvm_streaming_frontend(source: &str, stem: &str) {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::from_source(source),
         |files, symbols| crate::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -5451,7 +5551,10 @@ fun statement(scope: Scope<List<String>>) = exec { scope returns emptyList() }
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -5485,7 +5588,10 @@ fun broken() = run { undefinedCall(); 1 }
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -5546,7 +5652,10 @@ fun sourceContract(runtime: Runtime?) = run {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -5595,7 +5704,10 @@ fun destructured(line: String) = run {
     let mut diagnostics = DiagSink::new();
     let _ = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -5684,7 +5796,10 @@ class Holder {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -5734,7 +5849,10 @@ fun explicit(repo: Repo, scope: Scope) = stub { repo.delete(scope.any()) }
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -5787,7 +5905,10 @@ fun safeNe(r: Runtime?) = run { if (r?.status != null) r.mock else false }
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -5832,7 +5953,10 @@ fun conditional(r: Runtime?, flag: Boolean) = run {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         &mut diagnostics,
     );

@@ -14,6 +14,7 @@ use krusty::ast::{ClassDecl, Decl, File, FunBody, FunDecl, PropDecl, Stmt, TypeR
 use krusty::diag::{DiagSink, Diagnostic, DiagnosticKind, Severity};
 use krusty::features::LangFeatures;
 use krusty::frontend;
+#[cfg(test)]
 use krusty::libraries::SemanticPlatform;
 use krusty::source::SourceInput;
 use krusty::types::Ty;
@@ -106,19 +107,22 @@ impl FileAnalysis {
 /// is checked in that shared context. This mirrors the batch compiler while retaining a compact
 /// per-file handoff for editor queries.
 #[cfg(test)]
-pub fn analyze_source_set(
-    sources: &[&str],
-    platform: Box<dyn SemanticPlatform>,
-) -> SourceSetAnalysis {
+pub fn analyze_source_set<P>(sources: &[&str], platform: P) -> SourceSetAnalysis
+where
+    P: Into<frontend::PlatformProvider>,
+{
     analyze_source_set_with_features(sources, platform, &LangFeatures::new())
 }
 
 #[cfg(test)]
-pub fn analyze_source_set_with_features(
+pub fn analyze_source_set_with_features<P>(
     sources: &[&str],
-    platform: Box<dyn SemanticPlatform>,
+    platform: P,
     project_features: &LangFeatures,
-) -> SourceSetAnalysis {
+) -> SourceSetAnalysis
+where
+    P: Into<frontend::PlatformProvider>,
+{
     let inputs = sources
         .iter()
         .map(|source| SourceInput::kotlin(source))
@@ -126,11 +130,14 @@ pub fn analyze_source_set_with_features(
     analyze_source_inputs_with_features(&inputs, platform, project_features)
 }
 
-pub fn analyze_source_inputs_with_features(
+pub fn analyze_source_inputs_with_features<P>(
     inputs: &[SourceInput<'_>],
-    platform: Box<dyn SemanticPlatform>,
+    platform: P,
     project_features: &LangFeatures,
-) -> SourceSetAnalysis {
+) -> SourceSetAnalysis
+where
+    P: Into<frontend::PlatformProvider>,
+{
     analyze_source_inputs_prefix_with_features(
         inputs,
         inputs.len(),
@@ -140,13 +147,16 @@ pub fn analyze_source_inputs_with_features(
     )
 }
 
-pub fn analyze_source_inputs_prefix_with_features(
+pub fn analyze_source_inputs_prefix_with_features<P>(
     inputs: &[SourceInput<'_>],
     checked_count: usize,
     inferred_count: usize,
-    platform: Box<dyn SemanticPlatform>,
+    platform: P,
     project_features: &LangFeatures,
-) -> SourceSetAnalysis {
+) -> SourceSetAnalysis
+where
+    P: Into<frontend::PlatformProvider>,
+{
     let mut diags = DiagSink::new();
     let analysis = frontend::analyze_source_set_prefix_with_features_trimmed(
         inputs,
@@ -1026,7 +1036,7 @@ mod tests {
                       \u{20} val n = if (c == p.Color.RED) 1 else 2\n\
                       \u{20} return w.size() + pt.x() + n\n\
                       }";
-        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
         let analysis = analyze_source_set(&[source], platform);
 
         assert!(
@@ -1079,7 +1089,7 @@ mod tests {
                       class Child : Parent() {\n\
                       \u{20} override fun getStyle(): DialogStyle = DialogStyle.COMPACT\n\
                       }";
-        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
         let analysis = analyze_source_set(&[source], platform);
 
         assert!(
@@ -1125,7 +1135,7 @@ mod tests {
         classpath.set_stub_overlay(stubs);
 
         let source = "package a\nfun use(x: p.Item): String = x.name";
-        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
         let analysis = analyze_source_set(&[source], platform);
 
         assert!(
@@ -1174,7 +1184,7 @@ mod tests {
                       \u{20} println(j)\n\
                       \u{20} return u.size\n\
                       }";
-        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
         let analysis = analyze_source_set(&[source], platform);
 
         assert!(
@@ -1236,7 +1246,7 @@ mod tests {
                       \u{20} add(this)\n\
                       \u{20} return if (error) null else list\n\
                       }";
-        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
         let analysis = analyze_source_set(&[source], platform);
 
         assert!(
@@ -1300,7 +1310,7 @@ mod tests {
                       \u{20} x.entries.find(::pred)?.marker?.let { return it }\n\
                       \u{20} return null\n\
                       }";
-        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
         let analysis = analyze_source_set(&[source, support], platform);
 
         assert!(
@@ -1357,7 +1367,7 @@ mod tests {
                       fun go() {\n\
                       \u{20} Registry.Handler.publish(Event(\"x\"))\n\
                       }";
-        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
         let analysis = analyze_source_set(&[source], platform);
 
         assert!(
@@ -1412,7 +1422,7 @@ mod tests {
                       \u{20} val v = c.get(p.Keys.NAME) ?: return 0\n\
                       \u{20} return v.length\n\
                       }";
-        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
         let analysis = analyze_source_set(&[source], platform);
 
         assert!(
@@ -1476,7 +1486,7 @@ mod tests {
             krusty::source::SourceInput::kotlin(main),
             krusty::source::SourceInput::kotlin(dep),
         ];
-        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
         let mut diags = krusty::diag::DiagSink::new();
         krusty::frontend::analyze_source_set_prefix_with_features(
             &inputs,
@@ -1534,7 +1544,7 @@ mod tests {
                       import p.Visitor\n\
                       class V : Visitor()\n\
                       fun go(): Holder = Holder(V())";
-        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
         let analysis = analyze_source_set(&[source], platform);
 
         assert!(
@@ -1592,7 +1602,7 @@ mod tests {
                       \u{20} h.reg(\"x\", f)\n\
                       \u{20} h.reg(\"y\")\n\
                       }";
-        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
         let analysis = analyze_source_set(&[source], platform);
 
         assert!(
@@ -1672,7 +1682,7 @@ mod tests {
                       fun stat() {\n\
                       \u{20} Builder.analyze(\"f\") { place, dep -> println(place) }\n\
                       }";
-        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
         let analysis = analyze_source_set(&[source], platform);
 
         assert!(
@@ -1724,7 +1734,7 @@ mod tests {
                       \u{20} val m = Maps.create<String, Int> { s -> s.length }\n\
                       \u{20} return m[\"x\"] ?: 0\n\
                       }";
-        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
         let analysis = analyze_source_set(&[source], platform);
 
         assert!(
@@ -1771,7 +1781,7 @@ mod tests {
         // `getURLPath()` as `urlPath`, regardless of the declaring API.
         let source = "package a\n\
                       fun use(l: p.Language): String = l.id + l.urlPath";
-        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
         let analysis = analyze_source_set(&[source], platform);
 
         assert!(
@@ -1827,7 +1837,7 @@ mod tests {
                       fun bad(x: p.Presentation) {\n\
                       \u{20} x.rank = 1\n\
                       }";
-        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
         let analysis = analyze_source_set(&[source], platform);
 
         let messages: Vec<&str> = analysis.files[0]

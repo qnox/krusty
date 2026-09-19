@@ -22,7 +22,10 @@ pub fn compile_in_process_files(
         .map(|((_, source), stem)| SourceInput::kotlin(source).with_file_stem(stem))
         .collect::<Vec<_>>();
     let cp = super::cached_classpath(cp_jars, jdk_modules);
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
+            .expect("JVM provider initialization"),
+    );
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
         platform,

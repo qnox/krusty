@@ -28,8 +28,11 @@ fn lower_with_classpath(
     jars.extend_from_slice(extra_classpath);
     let cp = Rc::new(krusty::jvm::classpath::Classpath::new(jars));
 
-    let (mut captured, diagnostics) =
-        common::capture_common_ir(src, "PluginInput", Box::new(JvmLibraries::new(cp)));
+    let (mut captured, diagnostics) = common::capture_common_ir(
+        src,
+        "PluginInput",
+        Box::new(JvmLibraries::new(cp).expect("JVM provider initialization")),
+    );
     if !diagnostics.is_empty() {
         return None;
     }

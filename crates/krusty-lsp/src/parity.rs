@@ -404,7 +404,7 @@ pub fn run_plan(plan: &ModulePlan) -> ModuleReport {
     for feature in &plan.language_features {
         features.enable(feature);
     }
-    let platform = Box::new(JvmLibraries::new(classpath.clone()));
+    let platform = JvmLibraries::new(classpath.clone());
     let analysis = crate::compiler_analysis::analyze_source_inputs_prefix_with_features(
         &inputs,
         plan.checked.len(),

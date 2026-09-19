@@ -47,6 +47,9 @@ mod value_class_declarations;
 pub mod value_classes;
 
 pub use backend::{prepare_module_symbols, JvmBackend};
+// Public JVM clients should not need to reach through the compiler's semantic-platform ownership
+// module merely to name the initialization error returned by `JvmLibraries`.
+pub use crate::libraries::PlatformInitializationError;
 
 /// Kotlin distribution artifacts used by JVM command-line defaults.
 pub fn kotlin_stdlib_jar() -> Option<std::path::PathBuf> {

@@ -732,9 +732,12 @@ mod tests {
     #[test]
     fn suspend_inline_finally_plan_is_fully_checked_and_opaque() {
         let classpath = crate::toolchain::classpath_jars_for("// WITH_STDLIB\n// WITH_COROUTINES");
-        let platform = Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
-        ));
+        let platform = Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+                crate::jvm::classpath::Classpath::new(classpath),
+            ))
+            .expect("JVM provider initialization"),
+        );
         let (body, _) = checked_function_body_with_platform(
             "import kotlinx.coroutines.sync.Mutex\n\
              import kotlinx.coroutines.sync.withLock\n\

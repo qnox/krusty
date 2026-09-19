@@ -73,7 +73,9 @@ fun pick(): List<P> = listOf(A()) + listOf(B())\n"
     let (captured, diagnostics) = common::capture_common_ir(
         &main,
         "OperatorExpectedResult",
-        Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp)),
+        Box::new(
+            krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),
+        ),
     );
     assert_eq!(diagnostics, Vec::<String>::new());
     let [ir] = captured.as_slice() else {

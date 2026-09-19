@@ -31,6 +31,15 @@ boundary.
   backend lowering passes. If a temporary common-lowering hook is needed while the IR lacks a neutral
   node, keep the hook narrow, backend-owned, and record it as migration debt rather than adding JVM
   spelling or platform policy to core lowering.
+- **Library ingestion is split the same way.** A compiled Kotlin library's *container* is
+  target-independent and lives in core: `src/klib.rs` reads a `.klib` in either shape the toolchain
+  ships (a zip for JS/wasm, an unpacked directory for Native), parses its `default/manifest`, and
+  reports the `default/linkdata/package_*` metadata fragments and `default/ir/*` entries. It depends
+  on no other compiler module — an architecture guard enforces that — because Native, JS and wasm all
+  read the same container and only differ in what they do with a decoded declaration. Turning a
+  fragment into symbols is a *symbol source* concern; turning a symbol into a representation is the
+  backend's. The JVM backend consumes the core reader too, for the common `expect` headers Kotlin
+  ships in a klib beside `kotlin-stdlib.jar`, which is a use of a klib and not a second reader.
 - **Process front ends** are separate workspace packages. The root `krusty` package is a compiler
   library and exposes frontend and backend contracts. `crates/krusty-cli` owns kotlinc-compatible
   batch argument parsing, filesystem output, and process exit behavior, while `crates/krusty-lsp`

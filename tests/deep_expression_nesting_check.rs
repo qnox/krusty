@@ -26,7 +26,10 @@ fn compile(src: &str) -> (Vec<String>, bool) {
     let inputs = [SourceInput::kotlin(src).with_file_stem("Deep")];
     let stems = ["Deep".to_string()];
     let cp = std::rc::Rc::new(Classpath::new(Vec::new()));
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
+            .expect("JVM provider initialization"),
+    );
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
         platform,

@@ -37,12 +37,12 @@ fn diverging_property_initializer_runs() {
     let files = vec![parse(SRC, &toks, &mut d)];
     let mut syms = collect_signatures_with_cp(
         &files,
-        Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
-                stdlib.clone(),
-                jdk.clone(),
-            ])),
-        )),
+        Box::new(
+            krusty::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+                krusty::jvm::classpath::Classpath::new(vec![stdlib.clone(), jdk.clone()]),
+            ))
+            .expect("JVM provider initialization"),
+        ),
         &mut d,
     );
     let _ = check_file(&files[0], &mut syms, &mut d);

@@ -7,6 +7,7 @@
 //!   Function extension method_signature = 100 → JvmMethodSignature { name = 1, desc = 2 }.
 //! String ids index the `d2` table.
 
+pub(super) mod klib_validation;
 mod type_annotations;
 
 use super::classfile::{
@@ -347,7 +348,7 @@ fn parse_type_param(body: &[u8]) -> Option<ParsedTypeParam> {
             }
             // `ProtoBuf.TypeParameter.annotation` and
             // `BuiltInsProtoBuf.typeParameterAnnotation`, respectively.
-            (100, 2) | (150, 2) => {
+            (100, 2) | (150, 2) | (170, 2) => {
                 let n = pb.varint()? as usize;
                 annotation_bodies.push(pb.bytes(n)?.to_vec());
             }
@@ -4228,12 +4229,6 @@ fn resolve_qname(qnames: &[QName], strings: &[String], mut idx: i64) -> String {
     }
 }
 
-/// Drop the `BuiltInsBinaryVersion` header, returning the `PackageFragment` proto bytes.
-fn strip_builtins_header(data: &[u8]) -> Option<&[u8]> {
-    let count = u32::from_be_bytes(*data.get(0..4)?.first_chunk::<4>()?) as usize;
-    data.get(4 + 4 * count..)
-}
-
 /// A type decoded from a `.kotlin_builtins` fragment. A bare internal name cannot express the two
 /// facets the fragment actually records — a class's type ARGUMENTS (`Set<Map.Entry<K, V>>`) and a
 /// reference to a declared type PARAMETER (`E` of `List<E>`) — so both are modelled here. Class names
@@ -4823,83 +4818,36 @@ fn parse_builtin_package_functions(
 /// .class_name` → `QualifiedNameTable`). The single source for both the collection hierarchy and a
 /// builtin type's API — no curated/hardcoded tables.
 pub fn parse_builtins(data: &[u8]) -> BuiltinPackage {
-    let Some(pf) = strip_builtins_header(data) else {
+    let Some(pf) = klib_validation::strip_builtins_header(data) else {
         return BuiltinPackage::default();
     };
-    parse_package_fragment(pf)
+    parse_builtin_package_fragment(pf)
 }
 
-/// Parse one raw Kotlin metadata `PackageFragment`, as stored in a KLIB `.knm` entry. Builtins use
-/// the same protobuf after a small version header; keeping the carrier split at this boundary lets
-/// both providers share the declaration decoder without fabricating a builtins header.
-pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
+/// Parse the compiler-owned builtin `PackageFragment` after its version header. Dependency-owned
+/// `.knm` entries use the fallible checked entry point in `klib_validation` instead.
+fn parse_builtin_package_fragment(pf: &[u8]) -> BuiltinPackage {
+    klib_validation::decode_package_fragment(pf)
+        .and_then(parse_decoded_package_fragment)
+        .unwrap_or_default()
+}
+
+/// Build semantic declarations from the single checked package-fragment walk. External KLIBs call
+/// this only through the fallible decoder; compiler-owned builtins retain their historical empty
+/// result on an invalid embedded resource at the wrapper above.
+fn parse_decoded_package_fragment(
+    decoded: klib_validation::DecodedPackageFragment<'_>,
+) -> Result<BuiltinPackage, klib_validation::PackageFragmentDecodeError> {
     let mut out = BuiltinPackage::default();
-    let mut strings: Vec<String> = Vec::new();
-    let mut qnames: Vec<QName> = Vec::new();
-    let mut package = None;
-    let mut classes: Vec<&[u8]> = Vec::new();
-    let mut pb = Pb { b: pf, i: 0 };
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (1, 2) => {
-                let Some(n) = pb.varint() else { break };
-                let Some(b) = pb.bytes(n as usize) else { break };
-                let mut sp = Pb { b, i: 0 };
-                while !sp.at_end() {
-                    let Some(t) = sp.varint() else { break };
-                    match (t >> 3, t & 7) {
-                        (1, 2) => {
-                            let Some(m) = sp.varint() else { break };
-                            let Some(s) = sp.bytes(m as usize) else { break };
-                            strings.push(String::from_utf8_lossy(s).into_owned());
-                        }
-                        (_, w) => {
-                            if sp.skip(w).is_none() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            (2, 2) => {
-                let Some(n) = pb.varint() else { break };
-                let Some(b) = pb.bytes(n as usize) else { break };
-                let mut qp = Pb { b, i: 0 };
-                while !qp.at_end() {
-                    let Some(t) = qp.varint() else { break };
-                    match (t >> 3, t & 7) {
-                        (1, 2) => {
-                            let Some(m) = qp.varint() else { break };
-                            let Some(qb) = qp.bytes(m as usize) else {
-                                break;
-                            };
-                            qnames.push(parse_qname(qb));
-                        }
-                        (_, w) => {
-                            if qp.skip(w).is_none() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            (3, 2) => {
-                let Some(n) = pb.varint() else { break };
-                package = pb.bytes(n as usize);
-            }
-            (4, 2) => {
-                let Some(n) = pb.varint() else { break };
-                let Some(b) = pb.bytes(n as usize) else { break };
-                classes.push(b);
-            }
-            (_, w) => {
-                if pb.skip(w).is_none() {
-                    break;
-                }
-            }
-        }
-    }
+    let klib_validation::DecodedPackageFragment {
+        strings,
+        qnames,
+        package,
+        classes,
+        file_annotations: _,
+        class_names: _,
+        inventory,
+    } = decoded;
     for cb in &classes {
         let mut cp = Pb { b: cb, i: 0 };
         let mut fq = None;
@@ -4910,6 +4858,7 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
         // declaration and forces downstream JVM-specific code to guess which input it received.
         let mut flags = 6u64;
         let mut supids: Vec<u64> = Vec::new();
+        let mut supertype_bodies: Vec<&[u8]> = Vec::new();
         let mut types: Vec<&[u8]> = Vec::new();
         let mut ctors: Vec<&[u8]> = Vec::new();
         let mut funcs: Vec<&[u8]> = Vec::new();
@@ -4921,6 +4870,11 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                 // Class.flags = 1 (varint). `CLASS_KIND` occupies bits 6..8 (after HAS_ANNOTATIONS,
                 // VISIBILITY[3], MODALITY[2]); 1 = INTERFACE.
                 (1, 0) => flags = cp.varint().unwrap_or(6),
+                (2, 0) => {
+                    if let Some(supertype) = cp.varint() {
+                        supids.push(supertype);
+                    }
+                }
                 (3, 0) => fq = cp.varint(),
                 (4, 0) => companion_name_id = cp.varint(),
                 (2, 2) => {
@@ -4930,6 +4884,13 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                             supids.extend(packed_varints(b));
                         }
                     }
+                }
+                (6, 2) => {
+                    let Some(n) = cp.varint() else { break };
+                    let Some(body) = cp.bytes(n as usize) else {
+                        break;
+                    };
+                    supertype_bodies.push(body);
                 }
                 (f, 2) if f == CLASS_TYPE_PARAMETER_FIELD => {
                     // The names behind every `Type.type_parameter` id a member of this class references.
@@ -5021,9 +4982,14 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
         let type_of_id = |tid: u64, tps: &TypeParamNames| -> Option<BuiltinTy> {
             tables.ty_by_id(tid as usize, tps, 0)
         };
-        let supertype_tys: Vec<BuiltinTy> = supids
+        let supertype_tys: Vec<BuiltinTy> = supertype_bodies
             .iter()
-            .filter_map(|&sid| type_of_id(sid, &class_tparams))
+            .filter_map(|body| tables.ty(body, &class_tparams, 0))
+            .chain(
+                supids
+                    .iter()
+                    .filter_map(|&sid| type_of_id(sid, &class_tparams)),
+            )
             .collect();
         let supertypes: Vec<String> = supertype_tys
             .iter()
@@ -5099,9 +5065,9 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                 &type_param_bodies(fb, MEMBER_TYPE_PARAMETER_FIELD),
                 &mut fn_tparams,
             );
-            let type_of_id = |tid: u64| type_of_id(tid, &fn_tparams);
             let mut p = Pb { b: fb, i: 0 };
             let mut name_id = None;
+            let mut ret_body = None;
             let mut ret_id = None;
             // `Function.flags` has protobuf default PUBLIC FINAL (`6`), matching `parse_function`.
             let mut flags = 6u64;
@@ -5112,7 +5078,11 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                 match (tag >> 3, tag & 7) {
                     (9, 0) => flags = p.varint().unwrap_or(6),
                     (2, 0) => name_id = p.varint(), // name
-                    (7, 0) => ret_id = p.varint(),  // return_type_id (type-table ref)
+                    (3, 2) => {
+                        let Some(length) = p.varint() else { break };
+                        ret_body = p.bytes(length as usize);
+                    }
+                    (7, 0) => ret_id = p.varint(), // return_type_id (type-table ref)
                     (6, 2) => {
                         // value_parameter: ValueParameter.type_id = 4 (type-table ref)
                         if let Some(n) = p.varint() {
@@ -5132,20 +5102,21 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
                 }
             }
             if complete {
-                if let (Some(ni), Some(ri)) = (name_id, ret_id) {
+                if let Some(ni) = name_id {
                     // The return type's nullability (`Map.get(K): V?`) lives on the type-table entry's
                     // `Type.nullable` flag — the JVM descriptor erases it.
-                    let ret_nullable = types
-                        .get(ri as usize)
-                        .is_some_and(|tb| parse_type_nullable(tb));
+                    let ret_nullable = ret_body.is_some_and(parse_type_nullable)
+                        || ret_id
+                            .and_then(|id| types.get(id as usize))
+                            .is_some_and(|body| parse_type_nullable(body));
                     // Record nullable returns separately too: a call may still resolve to the ERASED
                     // classpath method (`java/util/Map.get` → `Object`), which carries no Kotlin
                     // nullability, and this is then the only surviving record that the source return is `T?`.
                     if let Some(name) = strings.get(ni as usize).filter(|_| ret_nullable) {
                         nullable_member_returns.push((name.clone(), params.len()));
                     }
-                    if let Some((name, ret)) = strings.get(ni as usize).cloned().zip(type_of_id(ri))
-                    {
+                    let ret = builtin_type_ref(ret_body, ret_id, &tables, &fn_tparams);
+                    if let Some((name, ret)) = strings.get(ni as usize).cloned().zip(ret) {
                         members.push(BuiltinMember {
                             name,
                             params,
@@ -5242,7 +5213,8 @@ pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
     if let Some(package) = package {
         out.functions = parse_builtin_package_functions(package, &strings, &qnames);
     }
-    out
+    klib_validation::verify_semantic_inventory(&inventory, &out)?;
+    Ok(out)
 }
 
 fn builtin_class_kind(flags: u64) -> TypeKind {
@@ -5484,13 +5456,12 @@ mod builtin_class_access_tests {
 #[cfg(test)]
 mod module_reader_tests {
     use super::{
-        decode_metadata_type, decode_properties, parse_function, parse_package_fragment,
-        parse_type_alias, parse_type_facts, primary_erasure_bounds, read_kotlin_module,
-        value_parameter_type, MetaCtx, ParsedValueParam,
+        decode_metadata_type, decode_properties, klib_validation, parse_function, parse_type_alias,
+        parse_type_facts, primary_erasure_bounds, read_kotlin_module, value_parameter_type,
+        BuiltinTy, MetaCtx, ParsedValueParam,
     };
-    use crate::libraries::TypeKind;
     use crate::metadata::module::build_kotlin_module;
-    use crate::types::{Ty, Visibility};
+    use crate::types::Ty;
     use std::collections::HashMap;
 
     /// The decoded contract of a stdlib function, or `None` when the stdlib jar is not
@@ -6103,33 +6074,16 @@ mod module_reader_tests {
     }
 
     #[test]
-    fn raw_klib_package_fragment_exposes_js_static_annotation() {
-        let Some(library_dir) = crate::toolchain::kotlinc_lib_dir() else {
-            return;
-        };
-        let Ok(file) = std::fs::File::open(library_dir.join("kotlin-stdlib-wasm-js.klib")) else {
-            return;
-        };
-        let mut archive = zip::ZipArchive::new(file).expect("read Kotlin JS stdlib KLIB");
-        let mut entry = archive
-            .by_name("default/linkdata/package_kotlin.js/13_js.knm")
-            .expect("Kotlin common JS annotation header metadata fragment");
-        let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut entry, &mut bytes).expect("read KLIB metadata fragment");
-
-        let package = parse_package_fragment(&bytes);
-        let annotation = package
-            .classes
-            .get("kotlin/js/JsStatic")
-            .expect("JsStatic declaration from metadata, not a JVM hardcode");
-        assert_eq!(annotation.kind, TypeKind::Annotation);
-        assert_eq!(annotation.visibility, Visibility::Public);
-        assert!(
-            annotation.is_expect,
-            "JsStatic must come from common expect metadata"
-        );
-        assert!(annotation.constructors.iter().any(|constructor| {
-            constructor.params.is_empty() && constructor.visibility == Visibility::Public
-        }));
+    fn repository_owned_klib_fragment_decodes_semantic_declarations() {
+        // Exact bytes from Kotlin's checked-in `unpackedExampleKlib` fixture. Keeping them here
+        // makes semantic KLIB decoding independent of an installed Kotlin distribution.
+        let bytes = b"\x0a\x1d\x0a\x04main\x0a\x06kotlin\x0a\x04Unit\x0a\x07main.kt\x12\x0c\x0a\x02\x10\x01\x0a\x06\x08\x00\x10\x02\x18\x00\x1a\x1c\x1a\x07\x10\x00\x38\x00\xe0\x0a\x03\xf2\x01\x04\x0a\x02\x30\x01\xd8\x0a\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01\xe0\x0a\x00\xea\x0a\x00";
+        let package = klib_validation::parse_package_fragment_checked(bytes)
+            .expect("repository-owned semantic KLIB fragment");
+        assert!(package.classes.is_empty());
+        assert_eq!(package.functions.len(), 1);
+        assert_eq!(package.functions[0].name, "main");
+        assert_eq!(package.functions[0].params, Vec::<BuiltinTy>::new());
+        assert_eq!(package.functions[0].ret, BuiltinTy::class("kotlin/Unit"));
     }
 }

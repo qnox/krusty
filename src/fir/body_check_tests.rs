@@ -1500,7 +1500,8 @@ suspend fun inspect(): Boolean {
         crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
             "// WITH_REFLECT",
         )),
-    ));
+    ))
+    .expect("JVM provider initialization");
     let analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("SuspendClassifierTests")],
         Box::new(platform),

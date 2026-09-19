@@ -188,9 +188,12 @@ fn range_loop_commits_a_platform_integer_bound_to_its_checked_lower_bound() {
     };
     let mut classpath = crate::toolchain::classpath_jars_for("// WITH_STDLIB");
     classpath.push(jdk);
-    let platform = Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-        std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
-    ));
+    let platform = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(classpath),
+        ))
+        .expect("JVM provider initialization"),
+    );
     let (body, _) = checked_function_body_with_platform(
         "// WITH_STDLIB\n\
          fun run(values: ArrayList<Int>) {\n\

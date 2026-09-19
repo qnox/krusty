@@ -1285,7 +1285,8 @@ mod tests {
             .expect("collection-transform provider test requires the repository JDK modules");
         let libraries = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
             vec![stdlib, jdk],
-        )));
+        )))
+        .expect("JVM provider initialization");
         for (
             name,
             descriptor,
@@ -1474,7 +1475,8 @@ mod tests {
         };
         let libraries = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
             vec![stdlib],
-        )));
+        )))
+        .expect("JVM provider initialization");
         assert_plan(
             &libraries,
             "kotlin/collections",
@@ -1581,7 +1583,8 @@ mod tests {
         };
         let libraries = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
             vec![stdlib, jdk],
-        )));
+        )))
+        .expect("JVM provider initialization");
         assert_plan(
             &libraries,
             "kotlin/text",
@@ -1626,7 +1629,8 @@ mod tests {
         };
         let libraries = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
             vec![stdlib],
-        )));
+        )))
+        .expect("JVM provider initialization");
         let mut declaration = callable(
             &libraries,
             "kotlin/collections",
@@ -1673,7 +1677,8 @@ mod tests {
         };
         let libraries = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
             vec![stdlib],
-        )));
+        )))
+        .expect("JVM provider initialization");
         let plain = callable(
             &libraries,
             "kotlin/collections",

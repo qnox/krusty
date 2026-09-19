@@ -376,11 +376,14 @@ fn pass_two_uses_stable_header_flags_for_top_level_val_smart_casts() {
     )
     .with_file_stem("StableTopLevelVal")];
     let mut diagnostics = DiagSink::new();
-    let platform = Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-        std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-            crate::toolchain::classpath_jars_for("// WITH_REFLECT"),
-        )),
-    ));
+    let platform = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+                "// WITH_REFLECT",
+            )),
+        ))
+        .expect("JVM provider initialization"),
+    );
     let analysis = analyze_source_set_with_features_and_prepare(
         &inputs,
         platform,
@@ -1006,11 +1009,14 @@ fn enum_entry_generic_member_signature_finalizes_from_compact_headers() {
     )
     .with_file_stem("EnumEntryGenericMember")];
     let mut diagnostics = DiagSink::new();
-    let platform = Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-        std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-            crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
-        )),
-    ));
+    let platform = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+                "// WITH_STDLIB",
+            )),
+        ))
+        .expect("JVM provider initialization"),
+    );
     let analysis = analyze_source_set_with_features_and_prepare(
         &inputs,
         platform,
@@ -1191,9 +1197,12 @@ fn source_optional_expectation_keeps_finalized_constructor_and_file_suppression(
     if let Some(jdk) = crate::toolchain::jdk_modules() {
         classpath.push(jdk);
     }
-    let platform = Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-        std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
-    ));
+    let platform = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(classpath),
+        ))
+        .expect("JVM provider initialization"),
+    );
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features_and_prepare(
         &inputs,
@@ -2085,16 +2094,19 @@ fn dependency_receiver_function_typealias_keeps_its_function_shape() {
         .with_file_stem("ReceiverAliasDependency"),
     ];
     let mut diagnostics = DiagSink::new();
-    let platform = Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-        std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-            crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
-        )),
-    ));
+    let platform = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+                "// WITH_STDLIB",
+            )),
+        ))
+        .expect("JVM provider initialization"),
+    );
     let analysis = analyze_source_set_with_features_and_prepare_prefix(
         &inputs,
         1,
         1,
-        platform,
+        platform.into(),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,
@@ -4418,9 +4430,12 @@ fn reparsed_contextual_collection_literal_replaces_its_fallback_call_target() {
     if let Some(jdk) = crate::toolchain::jdk_modules() {
         classpath.push(jdk);
     }
-    let platform = Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-        std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
-    ));
+    let platform = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(classpath),
+        ))
+        .expect("JVM provider initialization"),
+    );
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features_and_prepare(
         &inputs,
