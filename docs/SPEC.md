@@ -4559,6 +4559,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `identical_simple_names_from_different_packages_do_not_match`,
   `a_member_extension_on_an_actualized_alias_matches`.)
 
+  **Syntax meets resolution at ONE identity.** The check holds parser declarations — names,
+  modifiers, spans — and has to find what each resolved to. It asks the compact header inventory
+  for the identity it anchored on that declaration's own range, through a map the inventory
+  publishes once, rather than walking the stub list comparing ranges; and it asks one published
+  index for the resolved record, rather than entering a name-keyed table and filtering what comes
+  back. Every member table a classifier keeps — its methods, its member extension functions, its
+  declared properties, its member extension properties — is in that index, so a name shared
+  between two of them cannot answer with the wrong record, because no name is consulted. A
+  `typealias` is the one declaration whose resolved expansion is keyed by a qualified TYPE name
+  rather than by a declaration; that name is published once from the inventory beside the alias's
+  declaration identity, so a reader asks by the declaration it holds.
+
   A file's `actual typealias`es are reported where the SOURCE writes them: they live in their own
   parser list, and a report that emptied one list after the other put every alias last however the
   source interleaved them. (`an_alias_is_reported_where_the_source_writes_it`.)
