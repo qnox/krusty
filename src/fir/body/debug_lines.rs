@@ -10,6 +10,58 @@ use crate::diag::Span;
 
 use super::*;
 
+/// Read one parsed file's expression and statement line maps, keyed by the spans checked FIR
+/// carries.
+///
+/// Both maps are the same responsibility — turning the parser's per-node line arrays into the
+/// span-keyed form a checked body is given — and they live beside the records they build rather
+/// than in the checking entry point, which owns neither.
+pub(crate) fn of_file(
+    file: &crate::ast::File,
+) -> (
+    HashMap<Span, FirExpressionDebugLines>,
+    HashMap<Span, FirStatementDebugLines>,
+) {
+    let expressions = file
+        .expr_spans
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(raw, span)| {
+            (
+                span,
+                FirExpressionDebugLines {
+                    source: file.expr_source_lines.get(raw).copied().unwrap_or(0),
+                    end: file.expr_end_lines.get(raw).copied().unwrap_or(0),
+                },
+            )
+        })
+        .collect();
+    let statements = file
+        .stmt_spans
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(raw, span)| {
+            (
+                span,
+                FirStatementDebugLines {
+                    source: file.stmt_lines.get(raw).copied().unwrap_or(0),
+                    // An assignment's lvalue line. A member assignment is a STATEMENT, whose only
+                    // line is its first, so the accessor dispatch has no line of its own to restore
+                    // unless the lvalue's travels with it.
+                    target: file
+                        .assignment_target_lines
+                        .get(&(raw as u32))
+                        .copied()
+                        .unwrap_or(0),
+                },
+            )
+        })
+        .collect();
+    (expressions, statements)
+}
+
 /// Line-only source metadata for one EXPRESSION.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FirExpressionDebugLines {
