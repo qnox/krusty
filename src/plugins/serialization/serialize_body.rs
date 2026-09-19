@@ -112,23 +112,13 @@ impl SerializeBody<'_> {
         let element_serializer = |ir: &mut IrFile, ctx: &PluginContext, i: usize, ty: &Ty| {
             if plan
                 .as_ref()
-                .is_some_and(|plan| plan.cached.get(i).copied().unwrap_or(false))
+                .is_some_and(|plan| plan.caches(i, fields.len()))
             {
-                let cache = ir.add_expr(IrExpr::GetValue(cache_local));
-                let index = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
-                let slot = ir.add_expr(IrExpr::Call {
-                    callee: Callee::Intrinsic {
-                        operation: crate::ir::IrIntrinsic::ArrayGet,
-                        ret: super::child_serializer_cache::lazy_cache_element_ty(),
-                    },
-                    dispatch_receiver: Some(cache),
-                    args: vec![index],
-                });
-                return Some(ir.add_expr(IrExpr::Call {
-                    callee: virtual_iface("kotlin/Lazy", "getValue", "()Ljava/lang/Object;"),
-                    dispatch_receiver: Some(slot),
-                    args: vec![],
-                }));
+                return Some(super::child_serializer_cache::read_cached_slot(
+                    ir,
+                    cache_local,
+                    i,
+                ));
             }
             element_serializer_expr(ir, ctx, ty)
         };

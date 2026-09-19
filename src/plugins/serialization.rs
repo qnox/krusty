@@ -2344,32 +2344,17 @@ impl IrPlugin for SerializationPlugin {
                             .iter()
                             .enumerate()
                             .map(|(i, _ty)| {
-                                if let (Some(local), Some(true)) = (
+                                if let (Some(local), true) = (
                                     cache_local,
-                                    plan.as_ref().and_then(|plan| plan.cached.get(i).copied()),
+                                    plan.as_ref().is_some_and(|plan| {
+                                        plan.caches(i, serializer_field_types.len())
+                                    }),
                                 ) {
                                     // `cache[i].value` — the `Lazy` yields `Object`, which is
                                     // exactly what an `aastore` into the `KSerializer[]` takes, so
                                     // kotlinc narrows nothing here.
-                                    let cache = ir.add_expr(IrExpr::GetValue(local));
-                                    let index = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
-                                    let slot = ir.add_expr(IrExpr::Call {
-                                        callee: Callee::Intrinsic {
-                                            operation: crate::ir::IrIntrinsic::ArrayGet,
-                                            ret: child_serializer_cache::lazy_cache_element_ty(),
-                                        },
-                                        dispatch_receiver: Some(cache),
-                                        args: vec![index],
-                                    });
-                                    let cached = ir.add_expr(IrExpr::Call {
-                                        callee: virtual_iface(
-                                            "kotlin/Lazy",
-                                            "getValue",
-                                            "()Ljava/lang/Object;",
-                                        ),
-                                        dispatch_receiver: Some(slot),
-                                        args: vec![],
-                                    });
+                                    let cached =
+                                        child_serializer_cache::read_cached_slot(ir, local, i);
                                     // The cache holds the property's serializer WITHOUT its own
                                     // nullability: a `List<T>?` caches the list serializer and
                                     // wraps `.nullable` at each use, which is also where the
@@ -2424,19 +2409,18 @@ impl IrPlugin for SerializationPlugin {
                         let ret = ir.add_expr(IrExpr::Return(Some(arr)));
                         let mut stmts = Vec::with_capacity(2);
                         if let Some(local) = cache_local {
-                            // The accessor the PLAN names, by its function id: its spelling is
-                            // read back from the declaration rather than rebuilt here, so the two
-                            // cannot drift apart.
+                            // The accessor the PLAN names, by its function id. `ClassStatic`
+                            // keeps that semantic identity: the name and the JVM descriptor are
+                            // both formed at the JVM boundary from the declaration itself, so
+                            // neither can drift from what the plan published.
                             let accessor = plan
                                 .as_ref()
                                 .expect("a cache local exists only with a plan")
                                 .accessor;
                             let read = ir.add_expr(IrExpr::Call {
-                                callee: Callee::Static {
+                                callee: Callee::ClassStatic {
                                     owner: serialized,
-                                    name: ir.functions[accessor as usize].name.clone(),
-                                    descriptor: "()[Lkotlin/Lazy;".to_string(),
-                                    inline: InlineKind::None,
+                                    function: accessor,
                                 },
                                 dispatch_receiver: None,
                                 args: vec![],

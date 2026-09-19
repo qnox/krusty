@@ -31,6 +31,30 @@ pub(super) fn lazy_cache_ty() -> Ty {
     Ty::obj_args("kotlin/Array", &[lazy_cache_element_ty()])
 }
 
+/// Read element `k` out of a `Lazy[]` cache already loaded into `cache_local` — `cache[k].value`.
+///
+/// All three readers (`childSerializers`, `deserialize`, `write$Self`) want exactly this, and the
+/// shape is a property of how this module STORES the cache, so it is derived here once instead of
+/// each reader repeating `kotlin/Lazy`'s member spelling. The value arrives as `Object`, which the
+/// use site narrows to what it takes.
+pub(super) fn read_cached_slot(ir: &mut IrFile, cache_local: u32, k: usize) -> ExprId {
+    let cache = ir.add_expr(IrExpr::GetValue(cache_local));
+    let index = ir.add_expr(IrExpr::Const(IrConst::Int(k as i32)));
+    let slot = ir.add_expr(IrExpr::Call {
+        callee: Callee::Intrinsic {
+            operation: crate::ir::IrIntrinsic::ArrayGet,
+            ret: lazy_cache_element_ty(),
+        },
+        dispatch_receiver: Some(cache),
+        args: vec![index],
+    });
+    ir.add_expr(IrExpr::Call {
+        callee: super::virtual_iface("kotlin/Lazy", "getValue", "()Ljava/lang/Object;"),
+        dispatch_receiver: Some(slot),
+        args: vec![],
+    })
+}
+
 /// What one class's `$childSerializers` cache IS, published by the pass that builds it.
 ///
 /// Every reader — the `$serializer`'s `childSerializers` and `deserialize`, and the serialized
@@ -48,6 +72,25 @@ pub(super) struct ChildSerializerCachePlan {
     pub(super) accessor: u32,
     /// Which serialized properties, in element order, the cache holds a slot for.
     pub(super) cached: Vec<bool>,
+}
+
+impl ChildSerializerCachePlan {
+    /// Whether element `k` is cached, checked against the caller's own element count.
+    ///
+    /// The plan is published with exactly one entry per serialized element, so a length that
+    /// disagrees is an invalid intermediate state rather than an "uncached" answer. Reading it as
+    /// one would re-enter the legacy inline derivation for elements the serialized class DID give
+    /// a slot, leaving a `$childSerializers` array that nothing reads and two derivations of the
+    /// same element serializer in one class.
+    pub(super) fn caches(&self, k: usize, elements: usize) -> bool {
+        assert_eq!(
+            self.cached.len(),
+            elements,
+            "the child-serializer cache plan holds {} entries for {elements} elements",
+            self.cached.len(),
+        );
+        self.cached[k]
+    }
 }
 
 /// One class awaiting its `$childSerializers` cache: its id, its INTERNED qualified name, and the
