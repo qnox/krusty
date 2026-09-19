@@ -87,15 +87,11 @@ pub(super) fn add_child_serializer_cache(
         let lazy_arr_ty = Ty::obj_args("kotlin/Array", &[Ty::nullable(lazy_serializer)]);
         // A slot is `null` ONLY where the property needs no cache — its serializer is a singleton
         // read at each use. A property that DOES need one and whose serializer cannot be
-        // constructed gets no cache at all: a `null` in a slot a reader will dereference is the
-        // defect this pass exists to remove, and the element-serializer question has already been
-        // answered as well as it ever will be by the time the second pass runs.
-        //
-        // Declining leaves the class exactly as it was before any cache existed — every use builds
-        // its serializer inline — rather than refusing the file over a shape that compiled and ran
-        // correctly before.
+        // constructed publishes an unsupported residual: a `null` in a slot a reader will
+        // dereference is the defect this pass exists to remove, and silently omitting the cache
+        // would merely select the legacy inline lowering after the cache plan had failed.
         let mut elems: Vec<ExprId> = Vec::with_capacity(foo_fields.len());
-        for (index, (name, ty)) in foo_fields.iter().enumerate() {
+        for (index, (_, ty)) in foo_fields.iter().enumerate() {
             if !cached[index] {
                 elems.push(ir.add_expr(IrExpr::Const(IrConst::Null)));
                 continue;
@@ -113,7 +109,7 @@ pub(super) fn add_child_serializer_cache(
                     plugin: "serialization",
                     kind: "child-serializer-cache",
                     exprs: Vec::new(),
-                    data: vec![serialized, type_name(name)],
+                    data: vec![serialized],
                 });
                 ir.statics.push(crate::ir::IrStatic {
                     name: "$childSerializers".to_string(),

@@ -30,7 +30,6 @@
 //! - `value_classes` — inline/value-class transform (`jvm/value_classes.rs`).
 //! - `splice` — inline-function bytecode splicing (`jvm/ir_emit.rs`).
 //! - `cache` — classpath cache hit-rate summary (`jvm/classpath.rs`), emitted once at end of a run.
-//! - `serialization` — kotlinx-serialization plugin generation decisions (`plugins/serialization.rs`).
 
 /// The canonical trace categories (see the module docs). Listed here so the set is discoverable in one
 /// place; `KRUSTY_TRACE=all` enables every category regardless.
@@ -47,7 +46,6 @@ pub const CATEGORIES: &[&str] = &[
     "value_classes",
     "splice",
     "cache",
-    "serialization",
 ];
 
 #[cfg(feature = "trace")]
