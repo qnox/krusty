@@ -228,6 +228,10 @@ impl Emitter<'_> {
         // code (normal-path, per-catch, or its own) — otherwise an exception thrown inside an inlined
         // finally re-enters the handler and the finally runs twice. Collect each catch body's range
         // (`[cbody_start, cbody_end)`, ending before that catch's inlined finally).
+        // A catch body is a scope of its own: the slot reserved for a `return` out of the TRY is
+        // live there — the caught exception now occupies the one beside it — so a `return` written
+        // in a catch takes a slot of its own, as kotlinc's does.
+        self.pending_return_spills.push(None);
         for (ordinal, c) in catches.iter().enumerate() {
             let handler = code.new_label();
             // A handler is entered over the exception edge, not by a branch — and a diverging `try`
@@ -239,17 +243,30 @@ impl Emitter<'_> {
             // Handler entry: the exception is the sole stack value; locals are the pre-`try` state.
             self.frame(handler, vec![VerifType::Object(exc_ci)], code);
             let exc_ty = Ty::obj(&exc_internal);
-            let cslot = self.next_slot;
-            self.next_slot += 1;
+            // A typed catch's parameter takes the slot the `finally` catch-all parks its own
+            // exception in, which is what kotlinc emits: the two are never live at once — a catch
+            // body runs because its type MATCHED, and the catch-all parks only while unwinding past
+            // it — and the parked value is dead the moment the handler rethrows. Giving the
+            // parameter a slot of its own instead pushed it above the reserved one and cost a wide
+            // `astore` at every catch.
+            let cslot = parked_slot.unwrap_or_else(|| {
+                let fresh = self.next_slot;
+                self.next_slot += 1;
+                fresh
+            });
             self.slots.insert(c.var, (cslot, exc_ty));
+            // The `finally` guards this catch from its ENTRY, the store of the caught exception
+            // included — kotlinc protects the handler's own entry the same way it protects the
+            // catch-all's, and a throw between the exception edge and the body is still a throw out
+            // of the `try` the finalizer belongs to.
+            if let Some(finalizer) = finally {
+                self.open_finally_segment(finalizer, code);
+            }
             store(exc_ty, cslot, code);
             let local_start =
                 (code.bytes.len() <= u16::MAX as usize).then_some(code.bytes.len() as u16);
             let cbody_start = code.new_label();
             self.bind(cbody_start, code);
-            if let Some(finalizer) = finally {
-                self.open_finally_segment(finalizer, code);
-            }
             let cbody_diverges = if is_stmt {
                 self.discarding_diverges(c.body)
             } else {
@@ -332,6 +349,7 @@ impl Emitter<'_> {
                 code.add_exception(range_start, range_end, handler, exc_ci);
             }
         }
+        self.pending_return_spills.pop();
 
         // `finally` catch-all: any exception not handled above (in the body or a catch body) runs the
         // `finally` then re-throws. It protects only the body + catch bodies (`fin_ranges`), NOT the

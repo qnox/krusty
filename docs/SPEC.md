@@ -6433,13 +6433,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   pool while the body is emitted and is taken back out before the handler, where it holds the
   exception across the whole inlined finalizer and a `try` inside that copy must not be given it.
 
+  A TYPED catch's parameter takes the same slot the catch-all parks in, which is also what kotlinc
+  emits: the two are never live at once — a catch body runs because its type MATCHED, and the
+  catch-all parks only while unwinding past it — and the parked value is dead the moment the
+  handler rethrows. A slot of its own pushed the parameter above the reserved one and cost a wide
+  `astore` at every catch. A `return` written in a catch body is the other half of that scope: the
+  slot the TRY reserved is live there, so it takes one of its own, as kotlinc's does.
+
   The LAST catch of a `try` with no `finally` falls through to the join instead of jumping to it:
   nothing stands between them, so the jump would be to the next instruction. Every other catch has
   the next handler, or its own copy of the finalizer, in the way and still needs it.
 
   Tests: `a_finally_with_its_own_handler_types_the_parked_exception`, which compares the complete
-  exception table and the complete frame list — offsets, `top` padding and all — against kotlinc,
-  and `a_nested_finally_copy_stays_inside_the_outer_region`, which compares the complete code.
+  exception table and the complete frame list — offsets, `top` padding and all — against kotlinc;
+  `a_nested_finally_copy_stays_inside_the_outer_region`, which compares the complete code; and
+  `a_typed_catch_does_not_guard_its_own_finalizer_copy`, whose complete table is the reference
+  compiler's rather than a pinning of krusty's own.
 
 - **A `catch` parameter is a debug local like any other.** It is DECLARED by its `IrCatch` rather
   than by a variable node, so it has no declaration expression the source-name and provenance

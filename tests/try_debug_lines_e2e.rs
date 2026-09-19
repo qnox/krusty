@@ -292,18 +292,16 @@ fn a_typed_catch_does_not_guard_its_own_finalizer_copy() {
         ],
         "kotlinc's complete exception table"
     );
-    let got = numeric_rows(&krusty, "int run(BrassMeter)", "Exception table:");
+    // The whole table, not a row of it: krusty's used to start the catch body's guarded range one
+    // byte late and protect the handler's entry one byte too far, because the caught exception took
+    // a slot of its own above the one the catch-all parks in — a wide `astore` — and the range
+    // opened after that store rather than at it. Both are the `finally`'s own contract, so both are
+    // compared against the reference compiler rather than pinned.
     assert_eq!(
-        got,
-        vec![
-            "6     9    15   Class AmberSignal".to_string(),
-            "6     9    26   any".to_string(),
-            "16    19    26   any".to_string(),
-            "26    28    26   any".to_string(),
-        ],
+        numeric_rows(&krusty, "int run(BrassMeter)", "Exception table:"),
+        want,
         "krusty's complete exception table"
     );
-    assert_eq!(got[0], want[0], "typed catch range");
 }
 
 /// The same rule where the body falls through instead of returning: the finalizer copy sits after
@@ -715,7 +713,7 @@ fn an_inlined_catch_parameter_is_named_at_its_expansion_depth() {
     assert_eq!(
         table(&krusty, "java.lang.String nested("),
         [
-            "3 e$iv$iv Ljava/lang/IllegalStateException;",
+            "2 e$iv$iv Ljava/lang/IllegalStateException;",
             "0 tag Ljava/lang/String;",
         ],
         "krusty's complete table for two: one frame per expansion, not a constant suffix"

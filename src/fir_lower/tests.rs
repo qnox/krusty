@@ -153,10 +153,7 @@ fn catch_parameter_name_survives_checked_fir_lowering() {
             _ => None,
         })
         .expect("checked try expression must retain its catch clause");
-    assert_eq!(
-        catch.binding.as_ref().map(|binding| binding.name.as_str()),
-        Some("failure"),
-    );
+    assert_eq!(catch.binding_name(), Some("failure"));
 }
 
 #[test]
