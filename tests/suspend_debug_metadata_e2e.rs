@@ -1,12 +1,6 @@
 use super::common;
 
-fn javap_path() -> Option<String> {
-    // The pooled JavaRunner carries javap in-process; only a JDK home is required.
-    let _ = common::java_home();
-    Some("pooled".to_string())
-}
-
-fn disassemble(_javap: &str, bytes: &[u8], class_file_name: &str, _tag: &str) -> String {
+fn disassemble(bytes: &[u8], class_file_name: &str, _tag: &str) -> String {
     let dir = common::scratch_dir().expect("scratch dir");
     let class_file = dir.join(class_file_name);
     std::fs::write(&class_file, bytes).expect("write continuation class");
@@ -14,36 +8,29 @@ fn disassemble(_javap: &str, bytes: &[u8], class_file_name: &str, _tag: &str) ->
         .expect("pooled JavaRunner unavailable")
 }
 
-fn kotlinc_class(source_name: &str, source: &str, class_name: &str) -> Option<Vec<u8>> {
+fn kotlinc_class(source_name: &str, source: &str, class_name: &str) -> Vec<u8> {
     let root = common::scratch_dir().expect("reference scratch dir");
     let out = root.join("classes");
     std::fs::create_dir_all(&out).expect("reference output dir");
     let source_path = root.join(format!("{source_name}.kt"));
     std::fs::write(&source_path, source).expect("reference source");
-    let compiled = common::kotlinc_compile(&[
+    let (code, stderr) = common::kotlinc_compile(&[
         "-d".to_string(),
         out.to_string_lossy().into_owned(),
         source_path.to_string_lossy().into_owned(),
-    ]);
-    let Some((code, stderr)) = compiled else {
-        let _ = std::fs::remove_dir_all(root);
-        return None;
-    };
+    ])
+    .expect("reference kotlinc must be available under the test harness");
     assert_eq!(code, 0, "kotlinc failed: {stderr}");
     let bytes = std::fs::read(out.join(format!("{class_name}.class")))
         .unwrap_or_else(|error| panic!("read kotlinc class {class_name}: {error}"));
     let _ = std::fs::remove_dir_all(root);
-    Some(bytes)
+    bytes
 }
 
 #[test]
 fn continuation_emits_debug_and_enclosing_metadata() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(javap) = javap_path() else {
-        return;
-    };
-
     let source = "package demo\n\
         suspend fun leaf(value: Int): Int = value\n\
         suspend fun work(value: Int): Int {\n\
@@ -62,7 +49,7 @@ fn continuation_emits_debug_and_enclosing_metadata() {
         .find_map(|(name, bytes)| (name == "demo/DebugKt$work$1").then_some(bytes))
         .expect("work continuation");
 
-    let text = disassemble(&javap, bytes, "DebugKt$work$1.class", "debug");
+    let text = disassemble(bytes, "DebugKt$work$1.class", "debug");
     let annotation = text
         .rsplit_once("RuntimeVisibleAnnotations:")
         .map(|(_, annotation)| annotation)
@@ -115,10 +102,6 @@ fn continuation_emits_debug_and_enclosing_metadata() {
 fn continuation_metadata_repeats_spills_for_each_suspension() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(javap) = javap_path() else {
-        return;
-    };
-
     let source = "package demo\n\
         suspend fun leaf(value: String) {}\n\
         suspend fun work(orgId: String, id: String): String {\n\
@@ -136,7 +119,7 @@ fn continuation_metadata_repeats_spills_for_each_suspension() {
         .iter()
         .find_map(|(name, bytes)| (name == "demo/MultiStateKt$work$1").then_some(bytes))
         .expect("work continuation");
-    let text = disassemble(&javap, bytes, "MultiStateKt$work$1.class", "multi_state");
+    let text = disassemble(bytes, "MultiStateKt$work$1.class", "multi_state");
     let annotation = text
         .rsplit_once("RuntimeVisibleAnnotations:")
         .map(|(_, annotation)| annotation)
@@ -158,10 +141,6 @@ fn continuation_metadata_repeats_spills_for_each_suspension() {
 fn continuation_metadata_preserves_elvis_subject_lines() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(javap) = javap_path() else {
-        return;
-    };
-
     let source = "package demo\n\
         suspend fun find(id: String): String? = id\n\
         suspend fun work(id: String): String {\n\
@@ -178,7 +157,7 @@ fn continuation_metadata_preserves_elvis_subject_lines() {
         .iter()
         .find_map(|(name, bytes)| (name == "demo/ElvisLineKt$work$1").then_some(bytes))
         .expect("work continuation");
-    let text = disassemble(&javap, bytes, "ElvisLineKt$work$1.class", "elvis_line");
+    let text = disassemble(bytes, "ElvisLineKt$work$1.class", "elvis_line");
     let annotation = text
         .rsplit_once("RuntimeVisibleAnnotations:")
         .map(|(_, annotation)| annotation)
@@ -196,10 +175,6 @@ fn continuation_metadata_preserves_elvis_subject_lines() {
 fn continuation_metadata_orders_mixed_spills_and_terminal_resume() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(javap) = javap_path() else {
-        return;
-    };
-
     let source = "package demo\n\
         suspend fun leaf() {}\n\
         suspend fun work(count: Int, ref: String) {\n\
@@ -216,7 +191,7 @@ fn continuation_metadata_orders_mixed_spills_and_terminal_resume() {
         .iter()
         .find_map(|(name, bytes)| (name == "demo/MixedSpillsKt$work$1").then_some(bytes))
         .expect("work continuation");
-    let text = disassemble(&javap, bytes, "MixedSpillsKt$work$1.class", "mixed_spills");
+    let text = disassemble(bytes, "MixedSpillsKt$work$1.class", "mixed_spills");
     let annotation = text
         .rsplit_once("RuntimeVisibleAnnotations:")
         .map(|(_, annotation)| annotation)
@@ -240,10 +215,6 @@ fn continuation_metadata_orders_mixed_spills_and_terminal_resume() {
 fn continuation_metadata_uses_multiline_call_selector_line() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(javap) = javap_path() else {
-        return;
-    };
-
     let source = "package demo\n\
         class Repo {\n\
         \x20 suspend fun find(): String = \"\"\n\
@@ -263,12 +234,7 @@ fn continuation_metadata_uses_multiline_call_selector_line() {
         .iter()
         .find_map(|(name, bytes)| (name == "demo/SelectorLineKt$work$1").then_some(bytes))
         .expect("work continuation");
-    let text = disassemble(
-        &javap,
-        bytes,
-        "SelectorLineKt$work$1.class",
-        "selector_line",
-    );
+    let text = disassemble(bytes, "SelectorLineKt$work$1.class", "selector_line");
     let annotation = text
         .rsplit_once("RuntimeVisibleAnnotations:")
         .map(|(_, annotation)| annotation)
@@ -286,10 +252,6 @@ fn continuation_metadata_uses_multiline_call_selector_line() {
 fn continuation_metadata_uses_nested_branch_resume_line() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(javap) = javap_path() else {
-        return;
-    };
-
     let source = "package demo\n\
         suspend fun leaf(): Int = 1\n\
         suspend fun work(flag: Boolean): Int {\n\
@@ -309,12 +271,7 @@ fn continuation_metadata_uses_nested_branch_resume_line() {
         .iter()
         .find_map(|(name, bytes)| (name == "demo/NestedResumeKt$work$1").then_some(bytes))
         .expect("work continuation");
-    let text = disassemble(
-        &javap,
-        bytes,
-        "NestedResumeKt$work$1.class",
-        "nested_resume",
-    );
+    let text = disassemble(bytes, "NestedResumeKt$work$1.class", "nested_resume");
     let annotation = text
         .rsplit_once("RuntimeVisibleAnnotations:")
         .map(|(_, annotation)| annotation)
@@ -332,10 +289,6 @@ fn continuation_metadata_uses_nested_branch_resume_line() {
 fn continuation_metadata_uses_returned_expression_end_line() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(javap) = javap_path() else {
-        return;
-    };
-
     // The arms must be consumed, not returned: an `if` whose arms are tail suspend calls needs no
     // continuation at all — kotlinc emits none for it, so its resume lines have no ground truth.
     let source = "package demo\n\
@@ -353,11 +306,7 @@ fn continuation_metadata_uses_returned_expression_end_line() {
         \x20\x20 return picked + base\n\
         \x20 }\n\
         }\n";
-    let Some(reference) = kotlinc_class("ReturnedExpression", source, "demo/Chooser$choose$1")
-    else {
-        eprintln!("skipping: reference kotlinc unavailable");
-        return;
-    };
+    let reference = kotlinc_class("ReturnedExpression", source, "demo/Chooser$choose$1");
     let classes = common::compile_in_process_files(
         &[("ReturnedExpression", source)],
         &[stdlib, jdk.clone()],
@@ -368,14 +317,8 @@ fn continuation_metadata_uses_returned_expression_end_line() {
         .iter()
         .find_map(|(name, bytes)| (name == "demo/Chooser$choose$1").then_some(bytes))
         .expect("choose continuation");
-    let text = disassemble(
-        &javap,
-        bytes,
-        "Chooser$choose$1.class",
-        "returned_expression",
-    );
+    let text = disassemble(bytes, "Chooser$choose$1.class", "returned_expression");
     let reference_text = disassemble(
-        &javap,
         &reference,
         "ref-Chooser$choose$1.class",
         "returned_expression_reference",
@@ -399,10 +342,6 @@ fn continuation_metadata_uses_returned_expression_end_line() {
 fn continuation_metadata_keeps_names_with_each_scope_snapshot() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(javap) = javap_path() else {
-        return;
-    };
-
     let source = "package demo\n\
         suspend fun leaf(value: String): String = value\n\
         suspend fun work(input: String): String {\n\
@@ -421,7 +360,7 @@ fn continuation_metadata_keeps_names_with_each_scope_snapshot() {
         .iter()
         .find_map(|(name, bytes)| (name == "demo/ScopeNamesKt$work$1").then_some(bytes))
         .expect("work continuation");
-    let text = disassemble(&javap, bytes, "ScopeNamesKt$work$1.class", "scope_names");
+    let text = disassemble(bytes, "ScopeNamesKt$work$1.class", "scope_names");
     let annotation = text
         .rsplit_once("RuntimeVisibleAnnotations:")
         .map(|(_, annotation)| annotation)
@@ -443,10 +382,6 @@ fn continuation_metadata_keeps_names_with_each_scope_snapshot() {
 fn continuation_metadata_omits_unnamed_loop_spills() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(javap) = javap_path() else {
-        return;
-    };
-
     let source = "package demo\n\
         suspend fun consume(value: String): String = value\n\
         suspend fun work(values: List<String>, seed: String): String {\n\
@@ -467,7 +402,7 @@ fn continuation_metadata_omits_unnamed_loop_spills() {
         .iter()
         .find_map(|(name, bytes)| (name == "demo/LoopSpillsKt$work$1").then_some(bytes))
         .expect("work continuation");
-    let text = disassemble(&javap, bytes, "LoopSpillsKt$work$1.class", "loop_spills");
+    let text = disassemble(bytes, "LoopSpillsKt$work$1.class", "loop_spills");
     let annotation = text
         .rsplit_once("RuntimeVisibleAnnotations:")
         .map(|(_, annotation)| annotation)
@@ -499,10 +434,6 @@ fn continuation_metadata_omits_unnamed_loop_spills() {
 fn continuation_metadata_uses_later_value_branch_as_resume_line() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(javap) = javap_path() else {
-        return;
-    };
-
     let source = "package demo\n\
         suspend fun find(): String? = null\n\
         suspend fun work(): String {\n\
@@ -521,12 +452,7 @@ fn continuation_metadata_uses_later_value_branch_as_resume_line() {
         .iter()
         .find_map(|(name, bytes)| (name == "demo/ValueBranchLineKt$work$1").then_some(bytes))
         .expect("work continuation");
-    let text = disassemble(
-        &javap,
-        bytes,
-        "ValueBranchLineKt$work$1.class",
-        "value_branch_line",
-    );
+    let text = disassemble(bytes, "ValueBranchLineKt$work$1.class", "value_branch_line");
     let annotation = text
         .rsplit_once("RuntimeVisibleAnnotations:")
         .map(|(_, annotation)| annotation)
@@ -544,10 +470,6 @@ fn continuation_metadata_uses_later_value_branch_as_resume_line() {
 fn continuation_metadata_uses_try_end_and_catch_name() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(javap) = javap_path() else {
-        return;
-    };
-
     let source = "package demo\n\
         suspend fun leaf() {}\n\
         suspend fun work() {\n\
@@ -568,12 +490,7 @@ fn continuation_metadata_uses_try_end_and_catch_name() {
         .iter()
         .find_map(|(name, bytes)| (name == "demo/TryResumeLineKt$work$1").then_some(bytes))
         .expect("work continuation");
-    let text = disassemble(
-        &javap,
-        bytes,
-        "TryResumeLineKt$work$1.class",
-        "try_resume_line",
-    );
+    let text = disassemble(bytes, "TryResumeLineKt$work$1.class", "try_resume_line");
     let annotation = text
         .rsplit_once("RuntimeVisibleAnnotations:")
         .map(|(_, annotation)| annotation)
@@ -597,10 +514,6 @@ fn continuation_metadata_uses_try_end_and_catch_name() {
 fn continuation_metadata_uses_successor_initializer_line() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(javap) = javap_path() else {
-        return;
-    };
-
     let source = "package demo\n\
         suspend fun leaf() {}\n\
         suspend fun work(flag: Boolean): Int {\n\
@@ -619,12 +532,7 @@ fn continuation_metadata_uses_successor_initializer_line() {
         .iter()
         .find_map(|(name, bytes)| (name == "demo/SuccessorLineKt$work$1").then_some(bytes))
         .expect("work continuation");
-    let text = disassemble(
-        &javap,
-        bytes,
-        "SuccessorLineKt$work$1.class",
-        "successor_line",
-    );
+    let text = disassemble(bytes, "SuccessorLineKt$work$1.class", "successor_line");
     let annotation = text
         .rsplit_once("RuntimeVisibleAnnotations:")
         .map(|(_, annotation)| annotation)
@@ -642,10 +550,6 @@ fn continuation_metadata_uses_successor_initializer_line() {
 fn continuation_metadata_marks_direct_tail_suspension() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(javap) = javap_path() else {
-        return;
-    };
-
     let source = "package demo\n\
         suspend fun leaf(value: Int): Int = value\n\
         suspend fun work(): Int {\n\
@@ -662,7 +566,7 @@ fn continuation_metadata_marks_direct_tail_suspension() {
         .iter()
         .find_map(|(name, bytes)| (name == "demo/TailResumeKt$work$1").then_some(bytes))
         .expect("work continuation");
-    let text = disassemble(&javap, bytes, "TailResumeKt$work$1.class", "tail_resume");
+    let text = disassemble(bytes, "TailResumeKt$work$1.class", "tail_resume");
     let annotation = text
         .rsplit_once("RuntimeVisibleAnnotations:")
         .map(|(_, annotation)| annotation)
@@ -680,10 +584,6 @@ fn continuation_metadata_marks_direct_tail_suspension() {
 fn continuation_metadata_uses_inline_lambda_smap_line() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(javap) = javap_path() else {
-        return;
-    };
-
     let source = "package demo\n\
         suspend fun values(): List<Int> = listOf(1)\n\
         suspend fun work(): List<Int> =\n\
@@ -698,12 +598,7 @@ fn continuation_metadata_uses_inline_lambda_smap_line() {
         .iter()
         .find_map(|(name, bytes)| (name == "demo/InlineResumeKt$work$1").then_some(bytes))
         .expect("work continuation");
-    let text = disassemble(
-        &javap,
-        bytes,
-        "InlineResumeKt$work$1.class",
-        "inline_resume",
-    );
+    let text = disassemble(bytes, "InlineResumeKt$work$1.class", "inline_resume");
     let annotation = text
         .rsplit_once("RuntimeVisibleAnnotations:")
         .map(|(_, annotation)| annotation)
@@ -721,10 +616,6 @@ fn continuation_metadata_uses_inline_lambda_smap_line() {
 fn continuation_metadata_uses_trailing_lambda_selector_line() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(javap) = javap_path() else {
-        return;
-    };
-
     let source = "package demo\n\
         suspend fun values(): List<Int> = listOf(1)\n\
         suspend fun work(): List<Int> {\n\
@@ -743,7 +634,6 @@ fn continuation_metadata_uses_trailing_lambda_selector_line() {
         .find_map(|(name, bytes)| (name == "demo/TrailingLambdaLineKt$work$1").then_some(bytes))
         .expect("work continuation");
     let text = disassemble(
-        &javap,
         bytes,
         "TrailingLambdaLineKt$work$1.class",
         "trailing_lambda_line",
@@ -765,10 +655,6 @@ fn continuation_metadata_uses_trailing_lambda_selector_line() {
 fn continuation_metadata_uses_named_member_call_selector_line() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(javap) = javap_path() else {
-        return;
-    };
-
     let source = "package demo\n\
         class Recorder {\n\
         \x20 suspend fun save(label: String, value: Int): Int = value\n\
@@ -790,12 +676,7 @@ fn continuation_metadata_uses_named_member_call_selector_line() {
         .iter()
         .find_map(|(name, bytes)| (name == "demo/NamedMemberLineKt$work$1").then_some(bytes))
         .expect("work continuation");
-    let text = disassemble(
-        &javap,
-        bytes,
-        "NamedMemberLineKt$work$1.class",
-        "named_member_line",
-    );
+    let text = disassemble(bytes, "NamedMemberLineKt$work$1.class", "named_member_line");
     let annotation = text
         .rsplit_once("RuntimeVisibleAnnotations:")
         .map(|(_, annotation)| annotation)
@@ -812,9 +693,6 @@ fn continuation_metadata_uses_named_member_call_selector_line() {
 #[test]
 fn continuation_uses_synthetic_kotlin_metadata() {
     let stdlib = common::stdlib_jar();
-    let Some(javap) = javap_path() else {
-        return;
-    };
     let source = "package demo\n\
         class Service {\n\
         \x20 suspend fun leaf(value: Int): Int = value\n\
@@ -829,7 +707,7 @@ fn continuation_uses_synthetic_kotlin_metadata() {
         .iter()
         .find_map(|(name, bytes)| (name == "demo/Service$work$1").then_some(bytes))
         .expect("work continuation");
-    let text = disassemble(&javap, bytes, "Service$work$1.class", "synthetic");
+    let text = disassemble(bytes, "Service$work$1.class", "synthetic");
 
     let metadata = text
         .rsplit_once("kotlin.Metadata(")
@@ -950,10 +828,6 @@ fn continuation_uses_synthetic_kotlin_metadata() {
 fn continuation_metadata_numbers_spills_in_declaration_order() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(javap) = javap_path() else {
-        return;
-    };
-
     let source = "package demo\n\
         suspend fun find(name: String): String? = name\n\
         suspend fun load(names: List<String>): List<String> {\n\
@@ -974,15 +848,10 @@ fn continuation_metadata_numbers_spills_in_declaration_order() {
         .iter()
         .find_map(|(name, bytes)| (name == "demo/SpillOrderKt$load$1").then_some(bytes))
         .expect("load continuation");
-    let text = disassemble(&javap, bytes, "SpillOrderKt$load$1.class", "spill_order");
+    let text = disassemble(bytes, "SpillOrderKt$load$1.class", "spill_order");
 
-    let Some(reference_bytes) = kotlinc_class("SpillOrder", source, "demo/SpillOrderKt$load$1")
-    else {
-        eprintln!("skipping: reference kotlinc unavailable");
-        return;
-    };
+    let reference_bytes = kotlinc_class("SpillOrder", source, "demo/SpillOrderKt$load$1");
     let reference_text = disassemble(
-        &javap,
         &reference_bytes,
         "ReferenceSpillOrderKt$load$1.class",
         "reference_spill_order",
@@ -1024,10 +893,6 @@ fn continuation_metadata_numbers_spills_in_declaration_order() {
 fn continuation_pool_interns_spills_then_metadata_then_used_fields() {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let Some(javap) = javap_path() else {
-        return;
-    };
-
     let source = "package demo\n\
         class Loader {\n\
         \x20 suspend fun find(name: String): String? = name\n\
@@ -1050,13 +915,9 @@ fn continuation_pool_interns_spills_then_metadata_then_used_fields() {
         .iter()
         .find_map(|(name, bytes)| (name == "demo/Loader$load$1").then_some(bytes))
         .expect("load continuation");
-    let text = disassemble(&javap, bytes, "Loader$load$1.class", "pool_order");
-    let Some(reference_bytes) = kotlinc_class("PoolOrder", source, "demo/Loader$load$1") else {
-        eprintln!("skipping: reference kotlinc unavailable");
-        return;
-    };
+    let text = disassemble(bytes, "Loader$load$1.class", "pool_order");
+    let reference_bytes = kotlinc_class("PoolOrder", source, "demo/Loader$load$1");
     let reference_text = disassemble(
-        &javap,
         &reference_bytes,
         "ReferenceLoader$load$1.class",
         "reference_pool_order",
@@ -1113,10 +974,7 @@ fn continuation_pool_interns_spills_then_metadata_then_used_fields() {
 /// generated class in a coroutine-using corpus.
 #[test]
 fn a_suspending_loops_continuation_is_byte_identical() {
-    let Some(dir) = common::scratch_dir() else {
-        eprintln!("skipping: no scratch dir");
-        return;
-    };
+    let dir = common::scratch_dir().expect("scratch directory for byte differential");
     let source = "package demo\n\
         class Store {\n\
         \x20 suspend fun find(name: String): String? = name\n\
@@ -1135,16 +993,14 @@ fn a_suspending_loops_continuation_is_byte_identical() {
     std::fs::create_dir_all(&reference_dir).expect("reference output directory");
     let file = dir.join("Identical.kt");
     std::fs::write(&file, source).expect("write fixture");
-    let Some((code, stderr)) = common::kotlinc_compile(&[
+    let (code, stderr) = common::kotlinc_compile(&[
         "-d".to_string(),
         reference_dir.to_string_lossy().into_owned(),
         "-jvm-target".to_string(),
         "25".to_string(),
         file.to_string_lossy().into_owned(),
-    ]) else {
-        eprintln!("skipping: reference kotlinc unavailable");
-        return;
-    };
+    ])
+    .expect("reference kotlinc must be available under the test harness");
     assert_eq!(code, 0, "kotlinc failed: {stderr}");
 
     let classes = common::compile_in_process_metadata_cp_module_target(
@@ -1177,5 +1033,79 @@ fn a_suspending_loops_continuation_is_byte_identical() {
             .zip(&theirs)
             .position(|(a, b)| a != b)
             .unwrap_or(0)
+    );
+}
+
+/// `i`, `s` and `n` are one zipped debugger contract: `i[k]` says which resume state `s[k]`/`n[k]`
+/// belong to. A single-suspension fixture cannot catch a misalignment between them, because every
+/// `i` entry is zero and the arrays cannot disagree about state boundaries.
+///
+/// Two suspensions with different live sets, and both kinds of non-reference spill, so the state
+/// concatenation and the per-state reset of the positions are both observable. Compared against
+/// kotlinc rather than pinned, so the contract stays tied to the reference compiler.
+#[test]
+fn continuation_metadata_zips_its_arrays_across_two_states() {
+    let jdk = common::jdk_modules();
+    let stdlib = common::stdlib_jar();
+
+    let source = "package demo\n\
+        class Velarium\n\
+        fun merge(left: Velarium, right: Velarium, amount: Long, count: Int): Velarium = left\n\
+        suspend fun leaf(): Velarium = Velarium()\n\
+        suspend fun work(r: Velarium, a: Int, b: Long): Velarium {\n\
+        \x20 val first = a + 1\n\
+        \x20 val x = leaf()\n\
+        \x20 val before = merge(r, x, b, first)\n\
+        \x20 val between = b + 1\n\
+        \x20 val y = leaf()\n\
+        \x20 return merge(before, y, between, first)\n\
+        }\n";
+    let reference = kotlinc_class("TwoStates", source, "demo/TwoStatesKt$work$1");
+    let classes = common::compile_in_process_files(
+        &[("TwoStates", source)],
+        &[stdlib, jdk.clone()],
+        Some(jdk.as_path()),
+    )
+    .expect("compile two-state continuation");
+    let bytes = classes
+        .iter()
+        .find_map(|(name, bytes)| (name == "demo/TwoStatesKt$work$1").then_some(bytes))
+        .expect("work continuation");
+
+    let arrays = |text: &str| -> Vec<String> {
+        let annotation = text
+            .rsplit_once("RuntimeVisibleAnnotations:")
+            .map(|(_, annotation)| annotation)
+            .expect("runtime-visible annotations");
+        annotation
+            .split_whitespace()
+            .filter(|token| {
+                token.starts_with("i=[") || token.starts_with("s=[") || token.starts_with("n=[")
+            })
+            .map(str::to_string)
+            .collect()
+    };
+    let want = arrays(&disassemble(
+        &reference,
+        "TwoStatesKt$work$1.class",
+        "two_states_reference",
+    ));
+    assert_eq!(
+        want,
+        [
+            "i=[0,0,0,0,1,1,1,1,1,1,1]",
+            "s=[\"L$0\",\"I$0\",\"J$0\",\"I$1\",\"L$0\",\"L$1\",\"L$2\",\"I$0\",\"J$0\",\"I$1\",\"J$1\"]",
+            "n=[\"r\",\"a\",\"b\",\"first\",\"r\",\"x\",\"before\",\"a\",\"b\",\"first\",\"between\"]",
+        ],
+        "kotlinc's own arrays, spelled out so a reference change is visible here"
+    );
+    assert_eq!(
+        arrays(&disassemble(
+            bytes,
+            "TwoStatesKt$work$1.class",
+            "two_states"
+        )),
+        want,
+        "complete zipped DebugMetadata arrays"
     );
 }
