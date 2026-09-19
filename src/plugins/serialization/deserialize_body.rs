@@ -24,31 +24,19 @@ struct ElementDecode<'a> {
     /// The local the serialized class's `$childSerializers` was loaded into, and which elements it
     /// holds — `None` when the class has no cache. A cached element is READ from the slot instead
     /// of rebuilt here, which is what kotlinc emits.
-    cache: Option<(u32, &'a [bool])>,
+    cache: Option<(
+        u32,
+        &'a super::child_serializer_cache::ChildSerializerCachePlan,
+    )>,
 }
 
 impl ElementDecode<'_> {
     /// `cache[k].value` when element `k` is cached — the `Lazy` yields `Object`, which the decode
     /// call's own parameter type narrows at the use site, exactly as kotlinc does.
     fn cached_slot(&self, ir: &mut IrFile, k: usize) -> Option<ExprId> {
-        let (local, cached) = self.cache?;
-        cached.get(k).copied().unwrap_or(false).then(|| {
-            let cache = ir.add_expr(IrExpr::GetValue(local));
-            let index = ir.add_expr(IrExpr::Const(IrConst::Int(k as i32)));
-            let slot = ir.add_expr(IrExpr::Call {
-                callee: crate::ir::Callee::Intrinsic {
-                    operation: crate::ir::IrIntrinsic::ArrayGet,
-                    ret: super::child_serializer_cache::lazy_cache_element_ty(),
-                },
-                dispatch_receiver: Some(cache),
-                args: vec![index],
-            });
-            ir.add_expr(IrExpr::Call {
-                callee: virtual_iface("kotlin/Lazy", "getValue", "()Ljava/lang/Object;"),
-                dispatch_receiver: Some(slot),
-                args: vec![],
-            })
-        })
+        let (local, plan) = self.cache?;
+        plan.caches(k, self.fields.len())
+            .then(|| super::child_serializer_cache::read_cached_slot(ir, local, k))
     }
 
     fn block(&self, ir: &mut IrFile, ctx: &PluginContext, k: usize) -> ExprId {
@@ -414,7 +402,7 @@ impl DeserializeBody<'_> {
             field_locals: &field_locals,
             seen_locals: &seen_locals,
             composite_local,
-            cache: cache_local.zip(cache_plan.as_ref().map(|plan| plan.cached.as_slice())),
+            cache: cache_local.zip(cache_plan.as_ref()),
         };
         let body = {
             let this0 = ir.add_expr(IrExpr::GetValue(0));
@@ -484,14 +472,12 @@ impl DeserializeBody<'_> {
             }));
             if let (Some(local), Some(plan)) = (cache_local, cache_plan.as_ref()) {
                 // The accessor the PLAN names, by its function id — its owner is the serialized
-                // class's own interned identity and its spelling is read back from the
-                // declaration, so nothing here reconstructs either from text.
+                // class's own interned identity, and `ClassStatic` leaves the name and the JVM
+                // descriptor to be formed at the JVM boundary from the declaration itself.
                 let read = ir.add_expr(IrExpr::Call {
-                    callee: crate::ir::Callee::Static {
+                    callee: crate::ir::Callee::ClassStatic {
                         owner: ir.classes[foo_id as usize].fq_name_id(),
-                        name: ir.functions[plan.accessor as usize].name.clone(),
-                        descriptor: "()[Lkotlin/Lazy;".to_string(),
-                        inline: crate::libraries::InlineKind::None,
+                        function: plan.accessor,
                     },
                     dispatch_receiver: None,
                     args: vec![],
