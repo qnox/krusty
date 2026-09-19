@@ -779,3 +779,97 @@ fn context_parameters_are_rendered_before_the_visibility() {
         "ContextParameters",
     );
 }
+
+/// Members that TIE on actualization's coarse child key still pair, so neither is reported.
+///
+/// Actualization keys a matched classifier's children by kind, name, receiver and arity, which two
+/// overloads differing only in a parameter's TYPE share. Giving up on that tie left BOTH unpaired,
+/// and reporting a member by its own outcome then named two members that had actualized perfectly
+/// well — `extensionMember`, `extensionFunctionInDelegatedSam`,
+/// `delegationToExpectInterface_withNewMembersSameName` and `overloadAlias3-3` in the box corpus.
+/// The same parameter-shape comparison the top-level matcher already makes breaks the tie.
+///
+/// A member EXTENSION function is here for a second reason: it lives in its own receiver-keyed
+/// table, so looking for it among the ordinary methods found no resolved signature at all.
+#[test]
+fn members_that_tie_on_the_child_key_still_actualize() {
+    let dir = common::scratch_dir().expect("scratch dir");
+    let header = dir.join("TiedHeader.kt");
+    let platform = dir.join("TiedBody.kt");
+    std::fs::write(
+        &header,
+        "package plib\n\
+         \n\
+         class Tally\n\
+         class Ledger\n\
+         \n\
+         expect class Holder {\n\
+         \x20   fun absorb(one: Tally): Int\n\
+         \x20   fun absorb(one: Ledger): Int\n\
+         \x20   fun Tally.counted(): Int\n\
+         \x20   val Tally.tallied: Int\n\
+         }\n",
+    )
+    .expect("write the common header");
+    std::fs::write(
+        &platform,
+        "package plib\n\
+         \n\
+         actual class Holder {\n\
+         \x20   actual fun absorb(one: Tally): Int = 1\n\
+         \x20   actual fun absorb(one: Ledger): Int = 2\n\
+         \x20   actual fun Tally.counted(): Int = 3\n\
+         \x20   actual val Tally.tallied: Int get() = 4\n\
+         }\n",
+    )
+    .expect("write the platform body");
+
+    let reference_out = dir.join("tied-reference");
+    std::fs::create_dir_all(&reference_out).expect("reference output directory");
+    let (_, reference) = common::kotlinc_compile(&[
+        "-Xmulti-platform".to_string(),
+        "-Xexpect-actual-classes".to_string(),
+        format!("-Xcommon-sources={}", header.to_string_lossy()),
+        "-d".to_string(),
+        reference_out.to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        common::stdlib_jar().to_string_lossy().into_owned(),
+        header.to_string_lossy().into_owned(),
+        platform.to_string_lossy().into_owned(),
+    ])
+    .expect("reference kotlinc available");
+
+    let out = std::process::Command::new(common::krusty_binary())
+        .args([
+            "-XXLanguage:+MultiPlatformProjects",
+            "-no-stdlib",
+            "-no-jdk",
+            "-cp",
+        ])
+        .arg(common::stdlib_jar())
+        .arg("-d")
+        .arg(dir.join("tied-krusty"))
+        .arg(&header)
+        .arg(&platform)
+        .output()
+        .expect("run krusty");
+    let mut krusty = String::from_utf8_lossy(&out.stdout).into_owned();
+    krusty.push_str(&String::from_utf8_lossy(&out.stderr));
+
+    assert_eq!(
+        reported(&reference, "TiedBody"),
+        vec![],
+        "every member actualizes one of the expect members"
+    );
+    assert_eq!(
+        reported(&krusty, "TiedBody"),
+        vec![],
+        "and krusty agrees — a tie on the child key is broken, not abandoned"
+    );
+    // A dropped diagnostic would also produce an empty report, so the fixture's own health is
+    // stated: krusty compiled it, rather than failing before the check could run.
+    assert!(
+        !krusty.contains("internal error"),
+        "no member is left without a resolved record:\n{krusty}"
+    );
+}

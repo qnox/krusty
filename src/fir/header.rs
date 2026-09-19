@@ -4347,14 +4347,27 @@ pub fn actualized_declaration_pairs(
             let Some(candidates) = actual_children.get(&key) else {
                 continue;
             };
-            if candidates.len() == 1 {
-                let pair = ActualizedDeclarationPair {
-                    expect: child.id,
-                    actual: candidates[0],
-                };
-                if !pairs.contains(&pair) {
-                    pairs.push(pair);
-                }
+            // The child key is deliberately coarse — kind, name, receiver and arity — so members
+            // that differ only in a parameter's TYPE tie on it. `select_actual` is the same
+            // comparison the top-level matcher already makes, and it is what tells
+            // `actual fun foo(a: String)` from `actual fun foo(a: Any)` beside it. Giving up on a
+            // tie leaves BOTH members unpaired, which reads downstream as two members that
+            // actualized nothing.
+            let actual = select_actual(headers, child, candidates, &actualized_aliases)
+                // The shape comparison only SHARPENS the coarse key. Where it cannot decide —
+                // a constructor, an accessor, an enum entry, none of which it compares — the
+                // previous unambiguous-candidate rule still applies, so no pairing this used to
+                // make is lost and only ties it could not break are gained.
+                .or_else(|| (candidates.len() == 1).then(|| candidates[0]));
+            let Some(actual) = actual else {
+                continue;
+            };
+            let pair = ActualizedDeclarationPair {
+                expect: child.id,
+                actual,
+            };
+            if !pairs.contains(&pair) {
+                pairs.push(pair);
             }
         }
     }

@@ -379,15 +379,32 @@ fn is_member(
 }
 
 /// The resolved signature of the member function this diagnostic is about.
+///
+/// Both tables are consulted for the same reason the two property tables are: a classifier keeps
+/// its ordinary members and its member EXTENSION functions apart, and the source wrote one
+/// declaration either way. `actual fun Int.foo(): String` lives only in the second, and looking in
+/// the first alone left it with no resolved signature at all.
 fn member_signature<'symbols>(
     class: &'symbols crate::resolve::ClassSig,
     member: &Member,
     headers: &crate::fir::StreamedHeaderModule,
 ) -> Option<&'symbols Signature> {
-    class
+    if let Some(signature) = class
         .methods
+        .get(member.text.as_str())
+        .and_then(|candidates| {
+            candidates
+                .iter()
+                .find(|signature| is_member(signature.stable_declaration, member, headers))
+        })
+    {
+        return Some(signature);
+    }
+    class
+        .member_ext_funs
         .get(member.text.as_str())?
         .iter()
+        .map(|candidate| candidate.signature())
         .find(|signature| is_member(signature.stable_declaration, member, headers))
 }
 
