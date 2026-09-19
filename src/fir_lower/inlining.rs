@@ -120,9 +120,15 @@ impl BodyLowering<'_> {
                     // local kotlinc has no counterpart for and hides the lambda from the splicer —
                     // a forwarded `p` (`inline fun block(p: () -> Unit) = blockImpl(p)`) then
                     // materialized a `Function0` whose implementation method was never emitted.
+                    // A parameter with no name to align against is a broken contract between this
+                    // expansion and the callable's published header, not a shape to fall back on:
+                    // reusing the caller's slot there erases the parameter's identity silently.
+                    // Decline the expansion before anything is mutated instead.
+                    (IrExpr::GetValue(_), None) if parameter_names.get(index).is_none() => {
+                        return None
+                    }
                     (IrExpr::GetValue(slot), None)
-                        if parameter_names.get(index).is_none()
-                            || matches!(ty.non_null(), crate::types::Ty::Fun(_)) =>
+                        if matches!(ty.non_null(), crate::types::Ty::Fun(_)) =>
                     {
                         Some(*slot)
                     }

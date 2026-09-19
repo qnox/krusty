@@ -87,18 +87,17 @@ fn a_spliced_lambdas_value_parameters_keep_their_names() {
                suspend fun run(tag: String): String {\n\
                \x20   return tagged(tag) { p -> step(p) + p }\n\
                }\n";
-    let (slots, names) = debug_metadata_names(src, "LambdaSpillNames", "LambdaSpillNamesKt$run$1");
+    let (slots, names) = debug_metadata_spills(src, "LambdaSpillNames", "LambdaSpillNamesKt$run$1");
     assert_eq!(
         names,
         ["tag", "tag$iv", "prefix$iv", "suffix$iv", "p"],
         "both compilers name the same spilled locals"
     );
-    // As with the inline parameters, the POSITIONS are not yet kotlinc's `L$0..L$4`: one unnamed
-    // temporary of the expansion still takes a field krusty's `L$2`. Stated rather than hidden.
     assert_eq!(
         slots,
-        ["L$0", "L$1", "L$3", "L$4", "L$5"],
-        "krusty's positions, still carrying one unnamed extra spill"
+        ["L$0", "L$1", "L$2", "L$3", "L$4"],
+        "and the same positions: `debug_metadata_spills` asserts both compilers' arrays equal, \
+         so this states what they are"
     );
 }
 
@@ -132,7 +131,7 @@ fn an_inline_expansions_parameters_and_receiver_are_named_spills() {
                }\n\
                \n\
                suspend fun run(b: Box, u: String): String = b.send(u)\n";
-    let (slots, names) = debug_metadata_names(src, "InlineSpillNames", "InlineSpillNamesKt$run$1");
+    let (slots, names) = debug_metadata_spills(src, "InlineSpillNames", "InlineSpillNamesKt$run$1");
     assert_eq!(
         names,
         [
@@ -147,14 +146,10 @@ fn an_inline_expansions_parameters_and_receiver_are_named_spills() {
         ],
         "both compilers name the same spilled locals"
     );
-    // The field POSITIONS are not yet kotlinc's `L$0..L$7`: krusty still spills three unnamed
-    // temporaries of the expansion that kotlinc does not, which pushes the named ones apart. That
-    // is the remaining half of this divergence and it is stated here rather than hidden, so closing
-    // it fails this assertion and updates it.
     assert_eq!(
         slots,
-        ["L$0", "L$1", "L$2", "L$3", "L$5", "L$8", "L$9", "L$10"],
-        "krusty's positions, still carrying three unnamed extra spills"
+        ["L$0", "L$1", "L$2", "L$3", "L$4", "L$5", "L$6", "L$7"],
+        "and both place them in the same fields"
     );
 }
 
@@ -169,11 +164,9 @@ fn a_spliced_lambda_names_each_of_its_value_parameters() {
                \x20   return pair { text, count -> step(seed + text) + count }\n\
                }\n";
     let (slots, names) =
-        debug_metadata_names(src, "LambdaTwoParameters", "LambdaTwoParametersKt$run$1");
+        debug_metadata_spills(src, "LambdaTwoParameters", "LambdaTwoParametersKt$run$1");
     assert_eq!(names, ["seed", "text", "count"]);
-    // As elsewhere in this file, the positions still carry an unnamed temporary of the expansion
-    // that kotlinc does not have. Stated rather than hidden; closing it fails this and updates it.
-    assert_eq!(slots, ["L$0", "L$2", "I$0"]);
+    assert_eq!(slots, ["L$0", "L$1", "I$0"]);
 }
 
 /// A lambda declared INSIDE an inline function is spliced one expansion deeper, so its parameter
@@ -192,9 +185,9 @@ fn a_lambda_declared_inside_an_inline_function_gains_its_frame() {
                \n\
                suspend fun run(seed: String): String = outer(seed)\n";
     let (slots, names) =
-        debug_metadata_names(src, "LambdaInsideInline", "LambdaInsideInlineKt$run$1");
+        debug_metadata_spills(src, "LambdaInsideInline", "LambdaInsideInlineKt$run$1");
     assert_eq!(names, ["seed", "prefix$iv", "p$iv"]);
-    assert_eq!(slots, ["L$0", "L$1", "L$4"]);
+    assert_eq!(slots, ["L$0", "L$1", "L$2"]);
 }
 
 /// A member inline EXTENSION binds both receivers at once, and Kotlin keeps them distinct: the
@@ -284,6 +277,38 @@ fn debug_metadata_keeps_the_spill_order_after_the_references() {
     );
 }
 
+/// Two suspensions inside one inline expansion, so the `i`/`s`/`n` arrays are genuinely ZIPPED:
+/// `i[k]` is the state that `s[k]`/`n[k]` belong to. A fixture with a single suspension cannot show
+/// that contract at all — every entry carries state 0 there, so a compiler that dropped the array
+/// entirely, emitted a constant, or mis-grouped the two states would still match.
+///
+/// It also shows the part the single-state cases cannot: the SAME local is re-spilled under the
+/// same slot in the second state (`tag`, `tag$iv` and `p` all appear twice), and `first` joins them
+/// only in the state where it is live.
+#[test]
+fn two_suspensions_in_one_expansion_zip_their_states_with_their_spills() {
+    let src = "suspend fun step(v: String): String = v\n\
+               \n\
+               inline fun <T> twice(tag: String, block: (String) -> T): T = block(tag + \"!\")\n\
+               \n\
+               suspend fun run(tag: String): String {\n\
+               \x20   return twice(tag) { p ->\n\
+               \x20       val first = step(p)\n\
+               \x20       val second = step(first + tag)\n\
+               \x20       second + p\n\
+               \x20   }\n\
+               }\n";
+    let (states, slots, names) =
+        debug_metadata_arrays(src, "TwoStateSpills", "TwoStateSpillsKt$run$1");
+    assert_eq!(states, ["0", "0", "0", "1", "1", "1", "1"]);
+    assert_eq!(
+        slots,
+        ["L$0", "L$1", "L$2", "L$0", "L$1", "L$2", "L$3"],
+        "the second state re-spills the same three slots and adds one"
+    );
+    assert_eq!(names, ["tag", "tag$iv", "p", "tag", "tag$iv", "p", "first"]);
+}
+
 /// An inline expansion whose ONLY return is its tail needs neither a result local nor the loop that
 /// carries a non-local return out of it. kotlinc leaves that value on the operand stack; krusty
 /// always built `var result = zero; loop@ while (true) { body; break@loop }; result`, and the
@@ -292,15 +317,11 @@ fn debug_metadata_keeps_the_spill_order_after_the_references() {
 /// That field is the user-visible cost of the loop form and the reason this change is worth making.
 /// Counting `While` nodes says the loop is gone; only this says what its absence buys.
 ///
-/// Both compilers' complete arrays and field lists are stated, because they do not yet agree and
-/// the remaining difference is not this change's: krusty names only `tag` where kotlinc also names
-/// `tag$iv` and `p`, the inline expansion's own parameters. Giving those their own slots is the
-/// spill-provenance work, not this; asserting kotlinc's numbers on both sides here would be
-/// asserting that work instead.
-///
-/// What IS this change's is measured against the branch's own base: three reference fields there,
-/// two here. The one that went is the expansion's result local — a slot the source never wrote,
-/// live across the suspension for as long as the loop form allocated it before the body ran.
+/// With the spill provenance this branch carries, both arrays are kotlinc's exactly: `tag`, the
+/// expansion's own `tag$iv`, and the spliced lambda's `p`, in kotlinc's own field positions. On the
+/// tail-return branch alone krusty named only `tag`; on this branch alone the positions carried the
+/// result local. The two together are what reach parity, which is why this asserts equality rather
+/// than each compiler's numbers separately.
 #[test]
 fn a_tail_only_inline_expansion_keeps_its_value_on_the_stack() {
     let src = "suspend fun step(v: String): String = v\n\
@@ -310,57 +331,82 @@ fn a_tail_only_inline_expansion_keeps_its_value_on_the_stack() {
                suspend fun run(tag: String): String {\n\
                \x20   return quick(tag) { p -> step(p) + p }\n\
                }\n";
-    let (reference, krusty) =
-        disassemble_verbose("TailInlineExpansion", src, "TailInlineExpansionKt$run$1");
-    assert_eq!(
-        (
-            metadata_array(&reference, "s"),
-            metadata_array(&reference, "n")
-        ),
-        (
-            vec!["L$0".to_string(), "L$1".to_string(), "L$2".to_string()],
-            vec!["tag".to_string(), "tag$iv".to_string(), "p".to_string()],
-        ),
-        "kotlinc's complete spill arrays",
-    );
-    assert_eq!(
-        (metadata_array(&krusty, "s"), metadata_array(&krusty, "n")),
-        (vec!["L$0".to_string()], vec!["tag".to_string()]),
-        "krusty's complete spill arrays: `tag$iv` and `p` are #1037's, not this change's",
-    );
+    let (slots, names) =
+        debug_metadata_spills(src, "TailInlineExpansion", "TailInlineExpansionKt$run$1");
+    assert_eq!(slots, ["L$0", "L$1", "L$2"]);
+    assert_eq!(names, ["tag", "tag$iv", "p"]);
 
-    // The field layout is the half the `@DebugMetadata` arrays cannot show, and the half this
-    // change moves: the third reference field was the expansion's result local.
-    let (reference, krusty) = disassemble_both(
-        "TailInlineExpansionFields",
+    // The field layout is the half the `@DebugMetadata` arrays cannot show: the loop form allocated
+    // a result local before the body ran, so it took a field of its own for a slot the source never
+    // wrote. Both compilers declare the same three references now.
+    let fields = spill_fields(
         src,
+        "TailInlineExpansionFields",
         "TailInlineExpansionFieldsKt$run$1",
     );
-    assert_eq!(
-        continuation_fields(&reference),
-        ["L$0", "L$1", "L$2"],
-        "kotlinc's complete field list",
-    );
-    assert_eq!(
-        continuation_fields(&krusty),
-        ["L$0", "L$1"],
-        "krusty's complete field list, one shorter than this branch's base",
-    );
+    assert_eq!(fields, ["L$0", "L$1", "L$2"]);
 }
 
-/// The `n` array of a continuation's `@DebugMetadata`, asserted equal between the compilers, with
-/// KRUSTY's `s` array returned alongside it. Use this where the names agree but the field positions
-/// do not yet, so a test can pin the names and state the positions separately.
-fn debug_metadata_names(src: &str, name: &str, class: &str) -> (Vec<String>, Vec<String>) {
+/// One method's `LocalVariableTable`, projected to `<slot> <name> <descriptor>` in printed order.
+///
+/// The start/length columns are deliberately left out: they are byte offsets, and the two compilers
+/// differ in instruction count for reasons this change does not own. What is projected is the
+/// naming contract itself — which slot carries which local, under which name.
+fn local_variable_table(text: &str, method: &str) -> Vec<String> {
+    let mut lines = text
+        .lines()
+        .skip_while(|line| !line.trim_start().starts_with(method));
+    assert!(lines.next().is_some(), "no `{method}` in:\n{text}");
+    let mut rows = lines
+        .skip_while(|line| !line.trim().starts_with("LocalVariableTable"))
+        .skip(2)
+        .map_while(|line| {
+            let mut columns = line.split_whitespace();
+            let (_start, _length, slot, name, descriptor) = (
+                columns.next()?,
+                columns.next()?,
+                columns.next()?,
+                columns.next()?,
+                columns.next()?,
+            );
+            slot.parse::<u32>().ok()?;
+            Some(format!("{slot} {name} {descriptor}"))
+        })
+        .collect::<Vec<_>>();
+    rows.dedup();
+    rows
+}
+
+/// The `i`, `s` and `n` arrays of a continuation's `@DebugMetadata`, from BOTH compilers — asserted
+/// equal, and returned so the test can also state what they are.
+///
+/// `i` is the state each spill belongs to. It is only meaningful once a method suspends more than
+/// once, which is why it has a helper of its own rather than being folded into every case.
+fn debug_metadata_arrays(
+    src: &str,
+    name: &str,
+    class: &str,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
     let (reference, krusty) = disassemble_verbose(name, src, class);
-    let want = metadata_array(&reference, "n");
-    assert!(!want.is_empty(), "{class}: kotlinc records spilled locals");
-    assert_eq!(
-        metadata_array(&krusty, "n"),
-        want,
-        "{class} @DebugMetadata spilled local names"
+    let arrays = |text: &str| {
+        (
+            metadata_array(text, "i"),
+            metadata_array(text, "s"),
+            metadata_array(text, "n"),
+        )
+    };
+    let want = arrays(&reference);
+    assert!(
+        !want.0.is_empty(),
+        "{class}: kotlinc records a state per spilled local"
     );
-    (metadata_array(&krusty, "s"), want)
+    assert_eq!(
+        want.0.len(),
+        want.1.len(),
+        "{class}: kotlinc's `i` and `s` arrays are zipped"
+    );
+    assert_eq!(arrays(&krusty), want, "{class} @DebugMetadata arrays");
+    want
 }
 
 /// The `s` and `n` arrays of a continuation's `@DebugMetadata`, from BOTH compilers — asserted
@@ -402,7 +448,7 @@ fn continuation_fields(text: &str) -> Vec<String> {
 
 fn debug_metadata_spills(src: &str, name: &str, class: &str) -> (Vec<String>, Vec<String>) {
     let (reference, krusty) = disassemble_verbose(name, src, class);
-    let array = |text: &str, key: &str| metadata_array(text, key);
+    let array = metadata_array;
     let want = (array(&reference, "s"), array(&reference, "n"));
     assert!(
         !want.0.is_empty(),
@@ -500,4 +546,64 @@ fn disassemble(name: &str, src: &str, class: &str, verbose: bool) -> (String, St
         .unwrap_or_else(|| panic!("{name}: javap unavailable for the emitted class"));
     let _ = std::fs::remove_dir_all(dir);
     (reference, krusty)
+}
+
+/// The caller's `LocalVariableTable` for the same two-state expansion, from BOTH compilers.
+///
+/// The `@DebugMetadata` arrays say what a debugger is told while the coroutine is SUSPENDED; the
+/// local variable table says what it is told while stepping. They are separate attributes and a
+/// change can reach one without the other, so the affected caller is pinned here too.
+///
+/// Byte equality is not attainable and the reason is stated rather than worked around: krusty emits
+/// no local-variable entries at all for the inline expansion inside a suspend caller — no `$i$f` or
+/// `$i$a` inline-depth markers, and no entry for the expansion's own locals. That is a whole
+/// missing table rather than the unnamed-temp residue, it is not what this change is about, and
+/// pinning both projections is what makes closing it visible here.
+#[test]
+fn the_callers_local_variable_table_is_pinned_on_both_sides() {
+    let src = "suspend fun step(v: String): String = v\n\
+               \n\
+               inline fun <T> twice(tag: String, block: (String) -> T): T = block(tag + \"!\")\n\
+               \n\
+               suspend fun run(tag: String): String {\n\
+               \x20   return twice(tag) { p ->\n\
+               \x20       val first = step(p)\n\
+               \x20       val second = step(first + tag)\n\
+               \x20       second + p\n\
+               \x20   }\n\
+               }\n";
+    let (reference, krusty) = disassemble_verbose("TwoStateLvt", src, "TwoStateLvtKt");
+    assert_eq!(
+        local_variable_table(&reference, "public static final java.lang.Object run("),
+        [
+            "5 $i$a$-twice-TwoStateLvtKt$run$2 I",
+            "6 first Ljava/lang/String;",
+            "7 second Ljava/lang/String;",
+            "4 p Ljava/lang/String;",
+            "3 $i$f$twice I",
+            "2 tag$iv Ljava/lang/String;",
+            "0 tag Ljava/lang/String;",
+            "1 $completion Lkotlin/coroutines/Continuation;",
+            "9 $continuation Lkotlin/coroutines/Continuation;",
+            "8 $result Ljava/lang/Object;",
+            "2 tag$iv Ljava/lang/String;",
+            "4 p Ljava/lang/String;",
+            "2 tag$iv Ljava/lang/String;",
+            "4 p Ljava/lang/String;",
+            "6 first Ljava/lang/String;",
+            "5 $i$a$-twice-TwoStateLvtKt$run$2 I",
+            "3 $i$f$twice I",
+            "5 $i$a$-twice-TwoStateLvtKt$run$2 I",
+            "3 $i$f$twice I",
+        ],
+        "kotlinc's complete table for the caller"
+    );
+    assert_eq!(
+        local_variable_table(&krusty, "public static final java.lang.Object run("),
+        [
+            "0 tag Ljava/lang/String;",
+            "1 $completion Lkotlin/coroutines/Continuation;",
+        ],
+        "krusty's complete table for the caller: the expansion's locals are absent from it"
+    );
 }
