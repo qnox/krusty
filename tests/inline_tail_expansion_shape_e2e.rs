@@ -16,7 +16,10 @@ fn lowered(src: &str, stem: &str) -> krusty::ir::IrFile {
         common::stdlib_jar(),
         common::jdk_modules(),
     ]));
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
+            .expect("JVM provider initialization"),
+    );
     let (files, diagnostics) = common::capture_common_ir(src, stem, platform);
     assert!(diagnostics.is_empty(), "frontend rejected: {diagnostics:?}");
     files.into_iter().next().expect("one lowered file")
