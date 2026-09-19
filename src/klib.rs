@@ -297,6 +297,10 @@ impl KlibArchive {
             source,
         })?;
         let directory = zip_directory_layout(path, &mut file)?;
+        // The raw EOCD range/count is authoritative. Census it before handing the file to `zip`,
+        // whose parser may otherwise reject the same malformed count with version-specific wording
+        // before this boundary can report the exact offending record.
+        reject_duplicate_zip_entries(path, directory)?;
         file.seek(std::io::SeekFrom::Start(0))
             .map_err(|source| KlibError::Io {
                 operation: "seek",
@@ -307,7 +311,6 @@ impl KlibArchive {
             path: path.to_path_buf(),
             detail: error.to_string(),
         })?;
-        reject_duplicate_zip_entries(path, directory)?;
         if archive.central_directory_start() != directory.start
             || archive.len() != usize::from(directory.entry_count)
         {
