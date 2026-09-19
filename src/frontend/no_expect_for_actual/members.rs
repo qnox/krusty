@@ -8,12 +8,10 @@
 //! question about resolved identity. Both live here, apart from the top-level check's own
 //! collection, because they are answered per classifier rather than per source set.
 
-use super::{
-    callable_modifiers, classifier_signature, property_modifiers, render_callable, visibility,
-};
-use crate::ast::DeclId;
+use super::resolved::ResolvedDeclarations;
+use super::{callable_modifiers, property_modifiers, render_callable, visibility};
 use crate::diag::{DiagSink, Span};
-use crate::resolve::{Signature, SymbolTable};
+use crate::resolve::Signature;
 use crate::types::{Ty, Visibility};
 
 /// One `actual` member of a classifier: where its diagnostic is reported — its own name — plus the
@@ -195,13 +193,12 @@ fn member_modality(
 pub(super) fn report_members(
     members: &[Member],
     actualized: &std::collections::HashSet<crate::fir::DeclarationId>,
-    symbols: &SymbolTable,
+    declarations: &ResolvedDeclarations<'_>,
     headers: &crate::fir::StreamedHeaderModule,
-    file: u32,
-    owner: DeclId,
+    owner: Option<crate::fir::DeclarationId>,
     diags: &mut DiagSink,
 ) {
-    let Some(class) = classifier_signature(symbols, file, owner) else {
+    let Some(class) = owner.and_then(|owner| declarations.classifier(owner)) else {
         for member in members {
             diags.error(
                 member.name,
