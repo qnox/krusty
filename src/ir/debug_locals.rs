@@ -38,10 +38,17 @@ impl IrDebugLocalProvenance {
     }
 }
 
+/// What a local materialized by an inline expansion IS to the expanded callable. A member inline
+/// EXTENSION binds both receivers at once, and Kotlin keeps them distinct — the containing class's
+/// `this` and the extension's receiver are different values with different debug identities — so
+/// one receiver role cannot stand for the other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IrInlineLocalRole {
     Value,
+    /// The containing class's `this`, bound because the inline callable is a member.
     DispatchReceiver,
+    /// The receiver the inline callable extends.
+    ExtensionReceiver,
 }
 
 /// Stable source identity and lexical naming context for one lowered lambda implementation. A

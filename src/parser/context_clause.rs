@@ -96,6 +96,7 @@ impl Parser<'_> {
                 ty: self.parse_type(),
                 is_vararg: false,
                 vararg_span: None,
+                is_materialized_lambda: false,
                 default: None,
                 annotations: Vec::new(),
                 annotation_args: Vec::new(),

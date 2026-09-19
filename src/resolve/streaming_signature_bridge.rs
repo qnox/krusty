@@ -26,6 +26,7 @@ mod semantics;
 mod source_contracts;
 mod stable_function_index;
 mod type_parameter_publication;
+mod value_parameter_publication;
 
 pub(super) use declaration_aliases::publish_compact_nested_aliases;
 pub(crate) use declaration_conflicts::finalize_streamed_top_level_conflicts;
@@ -6049,12 +6050,7 @@ pub(crate) fn finalized_streamed_signature_index(
                     .expect("a compact failed callable parameter must retain its spelling");
                 (
                     name,
-                    crate::fir::ResolvedValueParameterFlags::new(
-                        parameter.flags.is_vararg(),
-                        parameter.flags.has_default(),
-                        parameter.flags.is_property(),
-                        parameter.flags.is_mutable_property(),
-                    ),
+                    value_parameter_publication::published_flags(parameter),
                 )
             }),
         );
@@ -6217,32 +6213,29 @@ pub(crate) fn finalized_streamed_signature_index(
                             .expect("a compact callable parameter must retain its spelling");
                         (
                             name,
-                            crate::fir::ResolvedValueParameterFlags::new(
-                                parameter.flags.is_vararg(),
-                                parameter.flags.has_default(),
-                                parameter.flags.is_property(),
-                                parameter.flags.is_mutable_property(),
-                            )
-                            .with_implicit_integer_coercion(
-                                stable_signature
-                                    .and_then(|signature| {
-                                        signature.implicit_integer_coercion.get(ordinal)
-                                    })
-                                    .copied()
-                                    .unwrap_or(false),
-                            )
-                            .with_exact(
-                                stable_signature
-                                    .and_then(|signature| signature.exact_params.get(ordinal))
-                                    .copied()
-                                    .unwrap_or(false),
-                            )
-                            .with_no_infer(
-                                stable_signature
-                                    .and_then(|signature| signature.no_infer_params.get(ordinal))
-                                    .copied()
-                                    .unwrap_or(false),
-                            ),
+                            value_parameter_publication::published_flags(parameter)
+                                .with_implicit_integer_coercion(
+                                    stable_signature
+                                        .and_then(|signature| {
+                                            signature.implicit_integer_coercion.get(ordinal)
+                                        })
+                                        .copied()
+                                        .unwrap_or(false),
+                                )
+                                .with_exact(
+                                    stable_signature
+                                        .and_then(|signature| signature.exact_params.get(ordinal))
+                                        .copied()
+                                        .unwrap_or(false),
+                                )
+                                .with_no_infer(
+                                    stable_signature
+                                        .and_then(|signature| {
+                                            signature.no_infer_params.get(ordinal)
+                                        })
+                                        .copied()
+                                        .unwrap_or(false),
+                                ),
                         )
                     })
                     .collect::<Vec<_>>();
@@ -6361,17 +6354,12 @@ pub(crate) fn finalized_streamed_signature_index(
                                 .expect("a compact constructor parameter must retain its spelling");
                             (
                                 name,
-                                crate::fir::ResolvedValueParameterFlags::new(
-                                    parameter.flags.is_vararg(),
-                                    parameter.flags.has_default(),
-                                    parameter.flags.is_property(),
-                                    parameter.flags.is_mutable_property(),
-                                )
-                                .with_implicit_integer_coercion(
-                                    stable_constructor_implicit_integer_coercion(
-                                        table, stub.id, ordinal,
+                                value_parameter_publication::published_flags(parameter)
+                                    .with_implicit_integer_coercion(
+                                        stable_constructor_implicit_integer_coercion(
+                                            table, stub.id, ordinal,
+                                        ),
                                     ),
-                                ),
                             )
                         }),
                 );
@@ -6475,6 +6463,12 @@ pub(crate) fn finalized_streamed_signature_index(
             },
             stub.flags.has(crate::fir::DeclarationFlags::INLINE),
         );
+        // This publication is driven by a resolved `Signature`, which carries each parameter's
+        // semantic type and none of the modifiers written beside it. The declaration's own compact
+        // header is ordinal-parallel to `param_names` — both count the context parameters first and
+        // neither carries the extension receiver — so the modifiers are read from there rather than
+        // left unpublished on this path alone.
+        let header_parameters = value_parameter_publication::header_parameters(headers, stub.id);
         index.publish_callable_parameters(
             callable,
             signature
@@ -6493,6 +6487,11 @@ pub(crate) fn finalized_streamed_signature_index(
                                 .unwrap_or(false),
                             false,
                             false,
+                        )
+                        .with_materialized_lambda(
+                            header_parameters
+                                .get(ordinal)
+                                .is_some_and(|parameter| parameter.flags.materializes_its_lambda()),
                         )
                         .with_implicit_integer_coercion(
                             signature

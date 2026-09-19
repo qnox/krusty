@@ -581,7 +581,7 @@ impl BodyLowering<'_> {
             .insert(outer_declaration, local_names.outer_receiver.to_string());
         self.ir.set_debug_local_provenance(
             outer_declaration,
-            IrDebugLocalProvenance::inline_value(IrInlineLocalRole::DispatchReceiver, 1),
+            IrDebugLocalProvenance::inline_value(IrInlineLocalRole::ExtensionReceiver, 1),
         );
         statements.push(outer_declaration);
         let outer_read = self.ir.add_expr(IrExpr::GetValue(outer_slot));
@@ -597,7 +597,7 @@ impl BodyLowering<'_> {
             .insert(inner_declaration, local_names.inner_receiver.to_string());
         self.ir.set_debug_local_provenance(
             inner_declaration,
-            IrDebugLocalProvenance::inline_value(IrInlineLocalRole::DispatchReceiver, 2),
+            IrDebugLocalProvenance::inline_value(IrInlineLocalRole::ExtensionReceiver, 2),
         );
         statements.push(inner_declaration);
 
