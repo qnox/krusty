@@ -85,7 +85,7 @@ pub(super) fn add_cached_descriptor(
         owner: Some(owner),
         visibility: Visibility::Private,
         setter_jvm_name: None,
-        erased_value_class: None,
+        erased_declared_ty: None,
         custom_accessor: true,
         line: 0,
         source_order: u32::MAX,

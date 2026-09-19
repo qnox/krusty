@@ -5045,7 +5045,13 @@ fn emit_statics(
         }
         // kotlinc visits the accessor's name, descriptor, and nullability annotation BEFORE its
         // body's field cluster; the accessor maps to the property's declaration line.
-        let nullability = field_nullability_kind(ir, facade, &s.name, s.ty);
+        //
+        // An accessor's nullability is the PROPERTY's, which for a value-class-typed static whose
+        // storage was erased is no longer readable off `s.ty` — that holds the carrier now. Reading
+        // it there published a non-null `String` setter for a `var x: Label?` and refused the null
+        // the property accepts, so the declaration's own recorded type answers instead.
+        let accessor_ty = s.erased_declared_ty.unwrap_or(s.ty);
+        let nullability = field_nullability_kind(ir, facade, &s.name, accessor_ty);
         let acc_ann = match nullability {
             1 => Some("Lorg/jetbrains/annotations/NotNull;"),
             2 => Some("Lorg/jetbrains/annotations/Nullable;"),
@@ -7082,17 +7088,63 @@ fn property_setter_target(pr: &crate::ir::PropRef, ext: bool) -> (String, String
     (name, descriptor)
 }
 
+/// Convert a value class at the erased `KProperty` boundary, letting `null` pass through.
+///
+/// A NULLABLE value class crosses that boundary as either its box or `null`, and kotlinc's
+/// reference guards the conversion on exactly that. An unconditional `box-impl`/`unbox-impl`
+/// dereferences the null instead — `set(null)` on a `var x: Label?` died with a
+/// `NullPointerException` inside `Label.unbox-impl`.
+fn value_class_boundary_conversion(
+    cw: &mut ClassWriter,
+    code: &mut CodeBuilder,
+    nullable: bool,
+    locals: Vec<VerifType>,
+    boxed: VerifType,
+    result: Ty,
+    convert: impl FnOnce(&mut ClassWriter, &mut CodeBuilder),
+) {
+    if !nullable {
+        convert(cw, code);
+        return;
+    }
+    let null_case = code.new_label();
+    let done = code.new_label();
+    code.dup();
+    // At the branch target the DUPLICATE is still on the stack — the value as it arrived, not the
+    // one the conversion would have produced.
+    code.add_frame_if_new(null_case, locals.clone(), vec![boxed]);
+    code.ifnull(null_case);
+    convert(cw, code);
+    let converted = verif_for_jvm_free(cw, result);
+    code.add_frame_if_new(done, locals, vec![converted]);
+    code.goto(done);
+    code.bind(null_case);
+    code.pop();
+    code.aconst_null();
+    code.bind(done);
+}
+
 fn box_property_reference_value(
     cw: &mut ClassWriter,
     code: &mut CodeBuilder,
     property: &crate::ir::PropRef,
     physical: Ty,
+    locals: Vec<VerifType>,
 ) {
     if let Some(value_class) = property.boxed_value_class {
         let owner = value_class.render();
         let descriptor = format!("({})L{owner};", type_descriptor(ir_ty_to_jvm(&physical)));
         let method = cw.methodref(&owner, "box-impl", &descriptor);
-        code.invokestatic(method, slot_words(ir_ty_to_jvm(&physical)) as i32, 1);
+        let carrier = verif_for_jvm_free(cw, ir_ty_to_jvm(&physical));
+        value_class_boundary_conversion(
+            cw,
+            code,
+            property.prop_ty.is_nullable(),
+            locals,
+            carrier,
+            Ty::obj_name(value_class),
+            |_, code| code.invokestatic(method, slot_words(ir_ty_to_jvm(&physical)) as i32, 1),
+        );
     } else if physical.is_jvm_scalar() {
         box_prim_free(
             cw,
@@ -7422,7 +7474,11 @@ fn emit_prop_ref_class(
     target
         .getter(pr)
         .emit_get(&mut cw, &mut get, target.getter_ret);
-    box_property_reference_value(&mut cw, &mut get, pr, target.getter_ret);
+    let get_locals = vec![
+        VerifType::ObjectName(fq.clone()),
+        VerifType::ObjectName("java/lang/Object".to_string()),
+    ];
+    box_property_reference_value(&mut cw, &mut get, pr, target.getter_ret, get_locals);
     get.areturn();
     finish_code::<0x0001>(
         &mut cw,
@@ -7483,7 +7539,8 @@ fn emit_bound_prop_ref_class(
     target
         .getter(pr)
         .emit_get(&mut cw, &mut get, target.getter_ret);
-    box_property_reference_value(&mut cw, &mut get, pr, target.getter_ret);
+    let get_locals = vec![VerifType::ObjectName(fq.clone())];
+    box_property_reference_value(&mut cw, &mut get, pr, target.getter_ret, get_locals);
     get.areturn();
     finish_code::<0x0001>(&mut cw, "get", "()Ljava/lang/Object;", &mut get, 1);
 
@@ -7567,7 +7624,8 @@ fn emit_toplevel_prop_ref_class(
     let gref = cw.methodref(&call_owner, &pr.getter_name, &getter_desc);
     get.invokestatic(gref, 0, slot_words(getter_jvm) as i32);
     if carrier {
-        box_property_reference_value(&mut cw, &mut get, pr, getter_jvm);
+        let get_locals = vec![VerifType::ObjectName(fq.clone())];
+        box_property_reference_value(&mut cw, &mut get, pr, getter_jvm, get_locals);
     } else if prop_jvm.is_jvm_scalar() {
         box_prim_free(
             &mut cw,
@@ -7580,12 +7638,19 @@ fn emit_toplevel_prop_ref_class(
 
     // `set(Object)V` (a `var`): invokestatic <facade>.setName(v) after casting/unboxing the argument.
     if pr.mutable {
-        let (setter, setter_desc) = match (&pr.setter_name, &pr.setter_descriptor, carrier) {
-            (Some(name), Some(descriptor), true) => (name.clone(), descriptor.clone()),
-            _ => (
-                property_setter_name(&pr.prop_name),
-                format!("({prop_desc})V"),
-            ),
+        // The NAME is always the one the reference recorded, exactly as the getter's is: the
+        // realization that chose it is the only thing that knows a `@JvmName`, an access bridge or
+        // a value-class mangle. Only the DESCRIPTOR depends on whether the accessors exchange the
+        // carrier. Pairing the two made a boxed-storage value-class property — `var x: Z?`, whose
+        // setter still mangles because its PARAMETER does — fall back to the plain spelling and
+        // name a method the facade does not declare.
+        let setter = pr
+            .setter_name
+            .clone()
+            .unwrap_or_else(|| property_setter_name(&pr.prop_name));
+        let setter_desc = match (&pr.setter_descriptor, carrier) {
+            (Some(descriptor), true) => descriptor.clone(),
+            _ => format!("({prop_desc})V"),
         };
         let setter_jvm = setter_desc
             .strip_prefix('(')
@@ -7606,7 +7671,18 @@ fn emit_toplevel_prop_ref_class(
                     "unbox-impl",
                     &format!("(){}", type_descriptor(setter_jvm)),
                 );
-                set.invokevirtual(unbox, 0, slot_words(setter_jvm) as i32);
+                value_class_boundary_conversion(
+                    &mut cw,
+                    &mut set,
+                    pr.prop_ty.is_nullable(),
+                    vec![
+                        VerifType::ObjectName(fq.clone()),
+                        VerifType::ObjectName("java/lang/Object".to_string()),
+                    ],
+                    VerifType::ObjectName(owner.clone()),
+                    setter_jvm,
+                    |_, set| set.invokevirtual(unbox, 0, slot_words(setter_jvm) as i32),
+                );
             }
         } else if prop_jvm.is_jvm_scalar() {
             let adapter = semantic_scalar_adapter(pr.prop_ty, prop_jvm);
