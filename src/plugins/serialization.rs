@@ -38,7 +38,10 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 mod child_serializer_cache;
-use child_serializer_cache::{add_child_serializer_cache, PendingChildSerializerCache};
+use child_serializer_cache::{
+    add_child_serializer_cache, lazy_cache_ty, ChildSerializerCachePlan,
+    PendingChildSerializerCache,
+};
 mod annotations;
 mod signatures;
 
@@ -116,6 +119,9 @@ pub struct SerializationPlugin {
     pub abi: SerializationAbi,
     pub module: String,
     write_self_methods: Mutex<HashMap<TypeName, u32>>,
+    /// What each serialized class's `$childSerializers` cache is, published by the pass that builds
+    /// it and consumed by every reader. Keyed by the SERIALIZED class, not the `$serializer`.
+    child_serializer_caches: Mutex<HashMap<TypeName, ChildSerializerCachePlan>>,
 }
 
 impl SerializationPlugin {
@@ -124,6 +130,7 @@ impl SerializationPlugin {
             abi,
             module: module.into(),
             write_self_methods: Mutex::new(HashMap::new()),
+            child_serializer_caches: Mutex::new(HashMap::new()),
         }
     }
 
@@ -157,6 +164,19 @@ impl SerializationPlugin {
             .lock()
             .expect("serialization write$Self registry")
             .clear();
+    }
+
+    /// The cache plan for `owner`, or `None` when that class has no cache at all.
+    ///
+    /// A reader asks this rather than searching `ir.statics` for the field's spelling: the
+    /// builder's answer IS the contract, so the two cannot disagree about which properties have a
+    /// slot.
+    fn child_serializer_cache(&self, owner: TypeName) -> Option<ChildSerializerCachePlan> {
+        self.child_serializer_caches
+            .lock()
+            .expect("child serializer cache plans")
+            .get(&owner)
+            .cloned()
     }
 
     fn write_self_method(&self, owner: TypeName) -> Option<u32> {
@@ -1527,6 +1547,10 @@ impl IrPlugin for SerializationPlugin {
     fn generate_declarations(&self, ir: &mut IrFile, ctx: &PluginContext) {
         // A host can be reused for another IR file; generated `FunId`s belong only to this arena.
         self.clear_write_self_methods();
+        self.child_serializer_caches
+            .lock()
+            .expect("child serializer cache plans")
+            .clear();
         let mut pending_caches: Vec<PendingChildSerializerCache> = Vec::new();
         for class_id in ctx.classes_with(type_name(SERIALIZABLE_FQ)) {
             let class_fq = ir.classes[class_id as usize].fq_name();
@@ -2081,7 +2105,14 @@ impl IrPlugin for SerializationPlugin {
             }
         }
         for (class_id, serialized, foo_fields) in pending_caches {
-            add_child_serializer_cache(ir, ctx, class_id, serialized, &foo_fields);
+            if let Some(plan) =
+                add_child_serializer_cache(ir, ctx, class_id, serialized, &foo_fields)
+            {
+                self.child_serializer_caches
+                    .lock()
+                    .expect("child serializer cache plans")
+                    .insert(serialized, plan);
+            }
         }
     }
 
@@ -2292,11 +2323,62 @@ impl IrPlugin for SerializationPlugin {
                         // krusty-generated `<T>$serializer.INSTANCE`; a directly-supported field uses the
                         // builtin `…Serializer.INSTANCE`. An unsupported field type contributes `null`
                         // (placeholder) so the array arity still matches the descriptor's element count.
+                        // The serialized class's cache PLAN, as the pass that built it published
+                        // it: which elements have a slot, and the accessor to reach them through.
+                        // kotlinc reads `$childSerializers` once at the top of the method and takes
+                        // each cached element out of it, rather than rebuilding the serializer the
+                        // cache already holds. The local is the first free one after the receiver,
+                        // and the result array lands above it.
+                        let serialized = ir.classes[foo_id as usize].fq_name_id();
+                        let plan = self.child_serializer_cache(serialized);
+                        let cache_local = plan.as_ref().map(|_| {
+                            u32::try_from(ir.functions[fid as usize].params.len())
+                                .expect("too many childSerializers parameters")
+                                + 1
+                        });
                         let elements: Vec<ExprId> = serializer_field_types
                             .iter()
                             .enumerate()
                             .map(|(i, _ty)| {
-                                if let Some(inst) = contextual_serializer_for(
+                                if let (Some(local), Some(true)) = (
+                                    cache_local,
+                                    plan.as_ref().and_then(|plan| plan.cached.get(i).copied()),
+                                ) {
+                                    // `cache[i].value` — the `Lazy` yields `Object`, which is
+                                    // exactly what an `aastore` into the `KSerializer[]` takes, so
+                                    // kotlinc narrows nothing here.
+                                    let cache = ir.add_expr(IrExpr::GetValue(local));
+                                    let index = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
+                                    let slot = ir.add_expr(IrExpr::Call {
+                                        callee: Callee::Intrinsic {
+                                            operation: crate::ir::IrIntrinsic::ArrayGet,
+                                            ret: Ty::obj_args(
+                                                "kotlin/Lazy",
+                                                &[kserializer_of(class_ty("kotlin/Any"))],
+                                            ),
+                                        },
+                                        dispatch_receiver: Some(cache),
+                                        args: vec![index],
+                                    });
+                                    let cached = ir.add_expr(IrExpr::Call {
+                                        callee: virtual_iface(
+                                            "kotlin/Lazy",
+                                            "getValue",
+                                            "()Ljava/lang/Object;",
+                                        ),
+                                        dispatch_receiver: Some(slot),
+                                        args: vec![],
+                                    });
+                                    // The cache holds the property's serializer WITHOUT its own
+                                    // nullability: a `List<T>?` caches the list serializer and
+                                    // wraps `.nullable` at each use, which is also where the
+                                    // `Object` the `Lazy` yields is narrowed.
+                                    if is_nullable(&serializer_field_types[i]) {
+                                        wrap_nullable_serializer(ir, cached)
+                                    } else {
+                                        cached
+                                    }
+                                } else if let Some(inst) = contextual_serializer_for(
                                     ir,
                                     property_is_contextual(ctx, ir, class_id, &fields[i].0),
                                     &serializer_field_types[i],
@@ -2339,10 +2421,37 @@ impl IrPlugin for SerializationPlugin {
                             elements,
                         });
                         let ret = ir.add_expr(IrExpr::Return(Some(arr)));
-                        let body = ir.add_expr(IrExpr::Block {
-                            stmts: vec![ret],
-                            value: None,
-                        });
+                        let mut stmts = Vec::with_capacity(2);
+                        if let Some(local) = cache_local {
+                            // The accessor the PLAN names, by its function id: its spelling is
+                            // read back from the declaration rather than rebuilt here, so the two
+                            // cannot drift apart.
+                            let accessor = plan
+                                .as_ref()
+                                .expect("a cache local exists only with a plan")
+                                .accessor;
+                            let read = ir.add_expr(IrExpr::Call {
+                                callee: Callee::Static {
+                                    owner: serialized,
+                                    name: ir.functions[accessor as usize].name.clone(),
+                                    descriptor: "()[Lkotlin/Lazy;".to_string(),
+                                    inline: InlineKind::None,
+                                },
+                                dispatch_receiver: None,
+                                args: vec![],
+                            });
+                            // Declared rather than merely assigned: the local's TYPE is what tells
+                            // the backend an element load off it is an `aaload`, and a bare
+                            // `SetValue` carries no declaration for it to read.
+                            stmts.push(ir.add_expr(IrExpr::Variable {
+                                index: local,
+                                ty: lazy_cache_ty(),
+                                init: Some(read),
+                                named: false,
+                            }));
+                        }
+                        stmts.push(ret);
+                        let body = ir.add_expr(IrExpr::Block { stmts, value: None });
                         ir.functions[fid as usize].body = Some(body);
                     }
                     // A serializer without type parameters keeps the semantic interface-default
