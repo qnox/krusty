@@ -1,6 +1,7 @@
 //! Source locations retained for declaration modifiers with modifier-owned diagnostics.
 
 use super::{Parser, TokenKind};
+use crate::ast::{AnnotationRef, ExprId};
 use crate::diag::Span;
 
 impl Parser<'_> {
@@ -18,6 +19,77 @@ impl Parser<'_> {
     /// (parallel to [`Parser::take_pending_annotations`]), clearing the buffer.
     pub(super) fn take_pending_annotation_args(&mut self) -> Vec<Vec<crate::ast::ExprId>> {
         std::mem::take(&mut self.pending_annotation_args)
+    }
+
+    /// Consume one annotation and retain its complete classifier reference plus arguments. `None` for
+    /// a use-site `@file:`/`@get:` target, which does not apply to the declaration/type parameter itself.
+    pub(super) fn parse_annotation(&mut self) -> (Option<AnnotationRef>, Vec<ExprId>) {
+        self.bump(); // '@'
+                     // optional use-site target: `file:`, `get:`, `param:`, ...
+        let mut use_site = false;
+        let mut target = String::new();
+        if self.at(TokenKind::Ident)
+            && self
+                .t
+                .get(self.i + 1)
+                .map_or(false, |t| t.kind == TokenKind::Colon)
+        {
+            target = self.text().to_string();
+            self.bump();
+            self.bump(); // ':'
+            use_site = true;
+        }
+        // Kotlin's grouped file-target form omits `@file:` from each entry:
+        // `@file:[JvmName("Facade") JvmMultifileClass]`. Each entry is still an independent file
+        // annotation with its own reference and arguments. Consume the group at the annotation
+        // grammar boundary so the following `package` remains an ordinary file directive.
+        if target == "file" && self.at(TokenKind::LBracket) {
+            self.bump(); // '['
+            loop {
+                self.skip_newlines();
+                if self.at(TokenKind::RBracket) || self.at(TokenKind::Eof) {
+                    break;
+                }
+                let (qname, annotation_span) = self.parse_annotation_reference();
+                let args = self.parse_annotation_args();
+                if !qname.is_empty() {
+                    self.file.file_annotations.push((
+                        AnnotationRef {
+                            name: qname,
+                            span: annotation_span,
+                        },
+                        args,
+                    ));
+                }
+                if self.at(TokenKind::Comma) {
+                    self.bump();
+                }
+            }
+            self.eat(TokenKind::RBracket);
+            return (None, Vec::new());
+        }
+        let (qname, annotation_span) = self.parse_annotation_reference();
+        let args = self.parse_annotation_args();
+        if target == "file" && !qname.is_empty() {
+            self.file.file_annotations.push((
+                AnnotationRef {
+                    name: qname.clone(),
+                    span: annotation_span,
+                },
+                args.clone(),
+            ));
+        }
+        if use_site || qname.is_empty() {
+            (None, args)
+        } else {
+            (
+                Some(AnnotationRef {
+                    name: qname,
+                    span: annotation_span,
+                }),
+                args,
+            )
+        }
     }
 
     pub(super) fn skip_decl_prefix(&mut self) -> Vec<String> {
