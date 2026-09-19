@@ -3156,3 +3156,133 @@ fn deserialize_opens_kotlincs_locals_and_switches_on_the_index() {
         "element-index dispatch"
     );
 }
+/// `ACC_SYNTHETIC` does not cross a compilation boundary.
+///
+/// A generated `$serializer`'s `InnerClasses` row carries `ACC_SYNTHETIC` (0x1019) in the module
+/// that DECLARES it, and `0x0019` in every module that only references it: kotlinc knows a class is
+/// compiler-generated while it is compiling it, and a class read back from the classpath is just a
+/// declaration. krusty copied the bit off the dependency's own row.
+///
+/// `javap` prints neither form's `ACC_SYNTHETIC` on an `InnerClasses` line, so this reads the raw
+/// `access_flags`; an eyeballed expectation would have accepted the wrong value.
+#[test]
+fn a_classpath_serializers_inner_classes_row_drops_acc_synthetic() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let stem = "ClasspathSerializerSynthetic";
+    let Some(work) = common::scratch_dir().map(|dir| dir.join(stem)) else {
+        eprintln!("skipping: no scratch directory");
+        return;
+    };
+    let dependency = work.join("dep");
+    std::fs::create_dir_all(&dependency).expect("create dependency directory");
+    let dep_source = work.join("Dep.kt");
+    std::fs::write(
+        &dep_source,
+        "import kotlinx.serialization.Serializable\n\
+         @Serializable\n\
+         data class Dep(val id: Int)\n",
+    )
+    .expect("write dependency source");
+    let mut arguments = vec![
+        format!("-Xplugin={}", plugin.display()),
+        "-jvm-target".to_string(),
+        "25".to_string(),
+        "-classpath".to_string(),
+        cp.iter()
+            .map(|jar| jar.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(":"),
+        "-d".to_string(),
+        dependency.to_string_lossy().into_owned(),
+    ];
+    arguments.push(dep_source.to_string_lossy().into_owned());
+    let Some((code, stderr)) = common::kotlinc_compile(&arguments) else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    assert_eq!(code, 0, "{stem}: kotlinc rejected the dependency: {stderr}");
+
+    // The dependency's OWN row is the control: it must still carry the bit.
+    let dep_bytes = std::fs::read(dependency.join("Dep$$serializer.class"))
+        .expect("the dependency emitted its serializer");
+    assert_eq!(
+        inner_class_access(&dep_bytes, "Dep$$serializer"),
+        Some(0x1019),
+        "{stem}: the declaring module's own row carries ACC_SYNTHETIC"
+    );
+
+    // Both sides of the consumer are compiled here rather than through
+    // `compare_with_kotlinc_plugin`, which allocates a scratch directory of its own and hands back
+    // disassembly — and `javap` is exactly the tool that cannot show this bit.
+    let mut consumer_cp = cp.clone();
+    consumer_cp.push(dependency.clone());
+    let reference = work.join("ref");
+    std::fs::create_dir_all(&reference).expect("create reference directory");
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class User(val dep: Dep)\n";
+    let user_source = work.join("User.kt");
+    std::fs::write(&user_source, src).expect("write consumer source");
+    let (code, stderr) = common::kotlinc_compile(&[
+        format!("-Xplugin={}", plugin.display()),
+        "-jvm-target".to_string(),
+        "25".to_string(),
+        "-classpath".to_string(),
+        consumer_cp
+            .iter()
+            .map(|entry| entry.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(":"),
+        "-d".to_string(),
+        reference.to_string_lossy().into_owned(),
+        user_source.to_string_lossy().into_owned(),
+    ])
+    .expect("the reference compiler was available for the dependency, so it is here too");
+    assert_eq!(code, 0, "{stem}: kotlinc rejected the consumer: {stderr}");
+    let reference_bytes = std::fs::read(reference.join("User$$serializer.class"))
+        .expect("kotlinc emitted the consumer's serializer");
+
+    let classes = common::compile_in_process_metadata_cp_module_target(
+        src,
+        stem,
+        &consumer_cp,
+        "main",
+        Some(69),
+    )
+    .unwrap_or_else(|| panic!("{stem}: krusty failed to compile the consumer"));
+    let (_, krusty_bytes) = classes
+        .iter()
+        .find(|(name, _)| name == "User$$serializer")
+        .unwrap_or_else(|| panic!("{stem}: krusty emitted no User$$serializer"));
+
+    const CLASSPATH_ROW: u16 = 0x0019;
+    assert_eq!(
+        inner_class_access(&reference_bytes, "Dep$$serializer"),
+        Some(CLASSPATH_ROW),
+        "{stem}: kotlinc's row for the CLASSPATH serializer"
+    );
+    assert_eq!(
+        inner_class_access(krusty_bytes, "Dep$$serializer"),
+        Some(CLASSPATH_ROW),
+        "{stem}: krusty's row for the CLASSPATH serializer"
+    );
+    // The consumer's OWN generated serializer still carries the bit, on both sides.
+    assert_eq!(
+        inner_class_access(krusty_bytes, "User$$serializer"),
+        inner_class_access(&reference_bytes, "User$$serializer"),
+        "{stem}: the consumer's own row"
+    );
+}
+
+/// The raw `access_flags` of the `InnerClasses` row naming `inner`, or `None` when there is none.
+fn inner_class_access(bytes: &[u8], inner: &str) -> Option<u16> {
+    krusty::jvm::classreader::parse_class(bytes)
+        .ok()?
+        .inner_classes
+        .iter()
+        .find(|entry| entry.inner == inner)
+        .map(|entry| entry.access)
+}

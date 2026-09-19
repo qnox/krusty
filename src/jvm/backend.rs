@@ -574,7 +574,13 @@ pub fn classpath_inner_class_resolver(
                 Some(crate::jvm::classfile::InnerClassDetails {
                     outer: entry.outer.clone(),
                     name: entry.name.clone(),
-                    access: entry.access,
+                    // ACC_SYNTHETIC does NOT cross the compilation boundary. kotlinc knows a class
+                    // is compiler-generated only while it is compiling it; a class read back from
+                    // the classpath is just a declaration, and the row it writes for one omits the
+                    // bit even though that class's OWN row carries it. Measured on a generated
+                    // `$serializer`: 0x1019 in the module that declares it, 0x0019 in every module
+                    // that only references it.
+                    access: entry.access & !0x1000,
                 })
             })
             .or_else(|| {
