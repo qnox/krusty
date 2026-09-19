@@ -999,6 +999,10 @@ pub struct PropParam {
     /// `true` for a `val`/`var` parameter (a property → backing field + accessor); `false` for a
     /// plain constructor parameter (in scope for `init`/body-property initializers, but not a field).
     pub is_property: bool,
+    /// `true` for a primary-constructor property that wrote `actual`. A constructor property is a
+    /// declaration of its own, so it actualizes — or fails to actualize — independently of the
+    /// classifier whose header declares it.
+    pub is_actual: bool,
     pub is_override: bool,
     /// `open` or `override` without `final`.
     pub is_open: bool,
