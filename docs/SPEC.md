@@ -2806,6 +2806,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `ACC_PRIVATE` method/field is never spliced (the member is legal only inside the defining class;
   kotlinc rewrites to a synthetic `access$…` bridge krusty does not model — the fallback real call
   stays in the class).
+  **An `invokedynamic` relocates with its whole bootstrap entry, and only if that entry may move.**
+  The instruction names a `BootstrapMethods` entry of its DEFINING class by index, not a pool entry,
+  so relocation re-interns the entry — its method handle, its static arguments and its name/type —
+  in the host (`ClassWriter::add_bootstrap` dedupes). Whether it may move is decided from the
+  entry's dependency graph, never from the factory's spelling: the relocation inventory reports
+  every member and class the handle, its descriptors, its static arguments, and the call-site
+  descriptor reach, `None` for a
+  constant kind or descriptor relocation cannot carry (`CONSTANT_Dynamic`, a handle onto a
+  non-member, an index past the pool), and `references_private_member` refuses a splice unless each
+  bootstrap dependency is provably public — a stricter question than it asks of an ordinary
+  instruction operand, because bootstrap linkage has no verifier-visible use site. That is
+  what separates a `StringConcatFactory` entry (a public factory, a recipe string, constants) from a
+  `LambdaMetafactory` one (an implementation handle in the declaring class, usually private and
+  synthetic), without either name appearing in the rule. An inaccessible entry that relocated would
+  throw `BootstrapMethodError` when its instruction first executes — after verification, so only a
+  RUN observes it: `classpath_inline_splice_e2e::the_relocated_concatenation_bootstrap_links_and_runs`
+  executes the spliced concatenation for that reason, beside the emitted-form assertions.
   **Cross-file source calls to `inline fun`s link as facade statics.** A same-file call
   splices the body; a call from ANOTHER file of the same module has no AST to splice, so the
   defining file lowers + emits the inline fun as a facade static (kotlinc's `public static

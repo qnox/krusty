@@ -232,6 +232,8 @@ mod classpath_fun_typed_property_lambda_e2e;
 mod classpath_function_reference_e2e;
 #[path = "classpath_hidden_deprecated_e2e.rs"]
 mod classpath_hidden_deprecated_e2e;
+#[path = "classpath_inline_splice_e2e.rs"]
+mod classpath_inline_splice_e2e;
 #[path = "classpath_inner_classes_e2e.rs"]
 mod classpath_inner_classes_e2e;
 #[path = "classpath_is_smartcast_e2e.rs"]

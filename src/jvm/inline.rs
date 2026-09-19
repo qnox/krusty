@@ -6,124 +6,19 @@
 
 use super::classfile::ClassWriter;
 use super::classreader::{utf8_value, MethodCode, C};
-use crate::types::TypeName;
 use std::collections::HashMap;
 
+mod relocation;
+pub use relocation::{
+    bootstrap_members, references_private_member, relocate_const, relocate_insns,
+};
+mod method_bodies;
+pub use method_bodies::{MethodBodies, PropertyAccess, StaticMemberRealization};
 mod continuation_flow;
 mod reified_operands;
 use continuation_flow::caller_continuation_reachable;
 pub use reified_operands::substitute_reified;
 use reified_operands::{reify_markers, set_reified_operand};
-
-/// A platform realization selected only while emitting an already-resolved semantic member call.
-/// Nothing in checking or common lowering sees this owner/descriptor.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StaticMemberRealization {
-    pub owner: String,
-    pub name: String,
-    pub descriptor: String,
-}
-
-/// How a compiled class realizes a PROPERTY read. Kotlin source can declare getter/setter behavior, but
-/// a use such as `Dispatchers.IO` denotes the property rather than a JVM method call, so the emitter asks
-/// the class file what that read actually compiles to. `is_static` means the realization takes no receiver
-/// (a `@JvmStatic` accessor, or a `static` field): the receiver is an expression the program still
-/// evaluates, but it is not passed.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PropertyAccess {
-    /// `getfield` / `getstatic <owner>.<name>:<descriptor>`.
-    Field {
-        owner: String,
-        name: String,
-        descriptor: String,
-        is_static: bool,
-    },
-    /// `invokevirtual` / `invokeinterface` / `invokestatic <owner>.<name><descriptor>`.
-    Accessor {
-        owner: String,
-        name: String,
-        descriptor: String,
-        is_static: bool,
-        is_interface: bool,
-    },
-    /// `invokestatic <owner>.<name>(<owner>)<ret>` — a synthetic static that takes the receiver as its
-    /// ARGUMENT. This is how a private member is reached from outside its class: an `inline` function's
-    /// body is spliced into the caller, where the private backing field is unreachable, so kotlinc emits
-    /// an `access$get<X>$p` bridge on the declaring class and the splice calls that.
-    AccessBridge {
-        owner: String,
-        name: String,
-        descriptor: String,
-    },
-}
-
-/// The narrow capability the bytecode inliner needs from the classpath (interface segregation /
-/// least-knowledge): read a method's compiled body by owner/name/descriptor. *Whether* a callee is
-/// `inline` is function metadata that travels with the resolved signature (decoded once, alongside the
-/// signature, in `metadata.rs`) and reaches the emitter via the IR — it is not re-queried here. The
-/// emitter depends only on this, not on the whole `Classpath` (caches, jimage, type indexes).
-pub trait MethodBodies {
-    /// The compiled `Code` body of `owner.name descriptor`, or `None` if absent/abstract/native.
-    fn body(&self, owner: &str, name: &str, descriptor: &str) -> Option<MethodCode>;
-    /// Whether `owner` (a JVM internal name) is an INTERFACE — a static method on an interface (a Kotlin
-    /// interface's `foo$default` synthetic) must be referenced by an `InterfaceMethodref` constant even for
-    /// `invokestatic`, else the JVM throws `IncompatibleClassChangeError`. Default `false` (a class owner);
-    /// the classpath overrides it. Only meaningful for a resolved-classpath `Callee::Static` owner.
-    fn owner_is_interface(&self, _owner: &str) -> bool {
-        false
-    }
-    /// Whether `owner.name descriptor` (a method OR a field) is `ACC_PRIVATE`. A private member an
-    /// inline body references is legal in the DEFINING class but unreachable once the body is
-    /// spliced into another class — the splice must decline so the caller emits a real call
-    /// instead. Default `false` (no visibility information).
-    fn member_is_private(&self, _owner: &str, _name: &str, _descriptor: &str) -> bool {
-        false
-    }
-    /// Whether `owner.name descriptor` is `ACC_STATIC`. A Kotlin `@JvmStatic` member of an `object` or
-    /// companion is an ordinary MEMBER in the language — the front end resolves and lowers it as one, with
-    /// a receiver — but kotlinc emits its method as a static that takes no receiver. Only the emitter can
-    /// see that, and only it needs to: it drops the receiver and uses `invokestatic`. Default `false` (a
-    /// virtual method); the classpath overrides it.
-    fn method_is_static(&self, _owner: &str, _name: &str, _descriptor: &str) -> bool {
-        false
-    }
-    /// Find a static runtime realization for a semantic array member with this exact JVM descriptor.
-    /// The emitter asks only after resolution has selected the member; implementations must return a
-    /// unique metadata-declared top-level function or `None`.
-    fn static_array_member_realization(
-        &self,
-        _name: &str,
-        _descriptor: &str,
-    ) -> Option<StaticMemberRealization> {
-        None
-    }
-    /// How reading the Kotlin property `property` of `owner` is realized by that class file — the
-    /// accessor or field the emitter must use, and whether it takes a receiver. Walks supertypes, since a
-    /// property may be declared above the receiver's own class. `None` when `owner` isn't a compiled class
-    /// this source can see, or declares no such property; the caller then falls back to the JVM naming
-    /// convention. Default `None`; the classpath overrides it.
-    fn property_read_access(&self, _owner: &str, _property: &str) -> Option<PropertyAccess> {
-        None
-    }
-    /// The write analogue of [`Self::property_read_access`] — the setter or field a `var` property's
-    /// assignment compiles to. `None` when `owner` isn't a compiled class this source can see, declares no
-    /// such property, or the property is read-only.
-    fn property_write_access(&self, _owner: &str, _property: &str) -> Option<PropertyAccess> {
-        None
-    }
-    /// Decode one checked provider accessor identity into its exact JVM property realization.
-    fn external_property_access(
-        &self,
-        _accessor: crate::fir::ExternalCallableId,
-    ) -> Option<PropertyAccess> {
-        None
-    }
-    /// JVM storage for an already-resolved semantic singleton classifier. This is queried only by
-    /// bytecode realization; front-end and common IR never observe the owner or field name.
-    fn singleton_storage(&self, _classifier: TypeName) -> Option<(TypeName, String)> {
-        None
-    }
-}
 
 fn utf8(cp: &[C], i: u16) -> Option<&str> {
     match cp.get(i as usize)? {
@@ -151,79 +46,6 @@ fn name_and_type(cp: &[C], i: u16) -> Option<(&str, &str)> {
         C::NameAndType(n, d) => Some((utf8(cp, *n)?, utf8(cp, *d)?)),
         _ => None,
     }
-}
-
-/// Re-intern the source constant-pool entry at `idx` (from the inline body's defining class, `src_cp`)
-/// into the target class's pool (`cw`), returning the new pool index. Resolving each entry to its
-/// semantic form (class/method/field names, descriptors, constant values) and re-interning is what
-/// lets a body compiled against one class run inside another. `None` for an entry kind not yet
-/// relocatable (`invokedynamic`/method handles — those need bootstrap-method relocation too).
-pub fn relocate_const(src_cp: &[C], idx: u16, cw: &mut ClassWriter) -> Option<u16> {
-    match src_cp.get(idx as usize)? {
-        C::Class(n) => Some(cw.class_ref(utf8(src_cp, *n)?)),
-        // A value-bearing string uses the class reader's single code-unit accessor. Names and
-        // descriptors use `utf8` above; duplicating the variant conversion here risks making
-        // classpath constant inlining disagree with `ConstantValue` field reads.
-        C::String(u) => Some(cw.const_string_kt(&utf8_value(src_cp, *u)?)),
-        C::Integer(v) => Some(cw.const_int(*v)),
-        C::Float(b) => Some(cw.const_float(f32::from_bits(*b))),
-        C::Long(v) => Some(cw.const_long(*v)),
-        C::Double(b) => Some(cw.const_double(f64::from_bits(*b))),
-        C::Methodref(c, nt) => {
-            let cn = class_name(src_cp, *c)?.to_string();
-            let (n, d) = name_and_type(src_cp, *nt)?;
-            Some(cw.methodref(&cn, &n.to_string(), &d.to_string()))
-        }
-        C::Fieldref(c, nt) => {
-            let cn = class_name(src_cp, *c)?.to_string();
-            let (n, d) = name_and_type(src_cp, *nt)?;
-            Some(cw.fieldref(&cn, &n.to_string(), &d.to_string()))
-        }
-        C::InterfaceMethodref(c, nt) => {
-            let cn = class_name(src_cp, *c)?.to_string();
-            let (n, d) = name_and_type(src_cp, *nt)?;
-            Some(cw.interface_methodref(&cn, &n.to_string(), &d.to_string()))
-        }
-        _ => None,
-    }
-}
-
-/// Whether any instruction in `code` references (through `src_cp`) a method/field `is_private`
-/// flags as `ACC_PRIVATE`. Such a body runs legally only inside its DEFINING class: spliced into a
-/// caller, the reference is an `IllegalAccessError` (kotlinc rewrites it to a synthetic `access$…`
-/// bridge — unmodelled here), so the splicer must decline. A malformed body reports `true` — the
-/// caller cannot verify what it cannot walk, and declining is always safe (a real call instead).
-pub fn references_private_member(
-    code: &[u8],
-    src_cp: &[C],
-    is_private: &mut dyn FnMut(&str, &str, &str) -> bool,
-) -> bool {
-    let mut pc = 0;
-    while pc < code.len() {
-        let Some(len) = instruction_len(code, pc) else {
-            return true;
-        };
-        if let Some((off, width)) = pool_operand(code[pc]) {
-            let idx = if width == 1 {
-                u16::from(code[pc + off])
-            } else {
-                u16::from_be_bytes([code[pc + off], code[pc + off + 1]])
-            };
-            let member = match src_cp.get(idx as usize) {
-                Some(C::Methodref(c, nt) | C::InterfaceMethodref(c, nt) | C::Fieldref(c, nt)) => {
-                    class_name(src_cp, *c).zip(name_and_type(src_cp, *nt))
-                }
-                _ => None,
-            };
-            if let Some((owner, (name, descriptor))) = member {
-                if is_private(owner, name, descriptor) {
-                    return true;
-                }
-            }
-        }
-        pc += len;
-    }
-    false
 }
 
 /// The length in bytes of the instruction at `pc` (opcode + operands), including the variable-length
@@ -786,55 +608,6 @@ pub fn set_pool_operand(insn: &mut Insn, idx: u16) {
             }
         }
     }
-}
-
-/// Relocate every constant-pool reference in a disassembled body into `cw`'s pool (the insn-level
-/// counterpart of [`relocate_code`], so relocation composes with the local/return/reified transforms
-/// before reassembly). `None` on `invokedynamic` or an unsupported one-byte pool operand. An `ldc`
-/// whose relocated index exceeds a byte is widened to the identical-semantics `ldc_w` form.
-pub fn relocate_insns(insns: &mut [Insn], src_cp: &[C], cw: &mut ClassWriter) -> Option<()> {
-    for insn in insns.iter_mut() {
-        let Insn::Plain { op, operands } = insn else {
-            continue;
-        };
-        let Some((off, width)) = pool_operand(*op) else {
-            continue;
-        };
-        if *op == 0xba {
-            // invokedynamic — unrelocatable without bootstrap-method handling. UNREACHABLE for an inline
-            // body: kotlinc compiles lambdas inside `inline` functions as anonymous-class singletons
-            // (`getstatic …$N.INSTANCE`), never `invokedynamic`, precisely so the inliner can copy them.
-            return None;
-        }
-        // `off` is relative to the opcode; in `operands` (opcode stripped) it is `off - 1`.
-        let o = off - 1;
-        let src_idx = if width == 1 {
-            *operands.get(o)? as u16
-        } else {
-            (*operands.get(o)? as u16) << 8 | *operands.get(o + 1)? as u16
-        };
-        let new = relocate_const(src_cp, src_idx, cw)?;
-        if width == 1 {
-            if new > 0xff {
-                // `ldc` (0x12) is the only 1-byte-pool-index op; its relocated index overflowed a byte
-                // (the host class's pool is large — common when splicing a stdlib body like `require`'s
-                // into a big file). Widen to `ldc_w` (0x13), the identical-semantics 2-byte form. The
-                // assembler derives instruction length from the opcode, so the size change is handled
-                // downstream (see `old_offsets`). A non-`ldc` 1-byte op has no wide form → bail.
-                if *op != 0x12 {
-                    return None;
-                }
-                *op = 0x13;
-                *operands = vec![(new >> 8) as u8, (new & 0xff) as u8];
-                continue;
-            }
-            operands[o] = new as u8;
-        } else {
-            operands[o] = (new >> 8) as u8;
-            operands[o + 1] = (new & 0xff) as u8;
-        }
-    }
-    Some(())
 }
 
 /// Redirect every `return`/`?return` in an inline body to the end of the inlined region instead of
@@ -2066,7 +1839,7 @@ pub fn splice_unified(
             return None;
         }
     }
-    relocate_insns(&mut insns, &body.source_cp, cw)?;
+    relocate_insns(&mut insns, &body.source_cp, &body.bootstrap_methods, cw)?;
     // Repoint each reified type-bearing op at its concrete type (post-relocation, so the fresh CLASS pool
     // ref survives). An unmapped type-parameter name (`reified` lacks it) or a malformed type-bearing
     // instruction skips the whole splice rather than emitting the erased placeholder.
@@ -2463,7 +2236,7 @@ pub fn splice(
     let mut insns = disassemble(&body.code)?;
     // Reified first (nops the marker region) so its now-dead ldc isn't needlessly relocated.
     let patches = substitute_reified(&mut insns, &body.source_cp, cw, type_map);
-    relocate_insns(&mut insns, &body.source_cp, cw)?;
+    relocate_insns(&mut insns, &body.source_cp, &body.bootstrap_methods, cw)?;
     for (j, idx) in patches {
         set_pool_operand(&mut insns[j], idx);
     }
@@ -2763,6 +2536,7 @@ mod tests {
             stackmap: None,
             handlers: vec![],
             locals: vec![],
+            bootstrap_methods: Vec::new(),
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         let out =
@@ -2820,6 +2594,143 @@ mod tests {
         assert_eq!(assemble(&t), [0x15, 0x0a, 0xb1]); // iload 10; return
     }
 
+    /// A bootstrap entry's dependency graph is every member the host would have to reference.
+    #[test]
+    fn a_bootstrap_entry_reports_the_members_it_reaches() {
+        // 1 …7: the factory handle. 8…13: a `MethodType` argument and a second handle, onto a
+        // member of the class that declared the `invokedynamic`.
+        let pool = vec![
+            C::Other,
+            C::Utf8("java/lang/invoke/StringConcatFactory".to_string()),
+            C::Class(1),
+            C::Utf8("makeConcatWithConstants".to_string()),
+            C::Utf8("()V".to_string()),
+            C::NameAndType(3, 4),
+            C::Methodref(2, 5),
+            C::MethodHandle(6, 6),
+            C::MethodType(4),
+            C::Utf8("fixture/LibKt".to_string()),
+            C::Class(9),
+            C::Utf8("helper$private".to_string()),
+            C::NameAndType(11, 4),
+            C::Methodref(10, 12),
+            C::MethodHandle(6, 13),
+        ];
+
+        assert_eq!(
+            bootstrap_members(&pool, 7, &[]),
+            Some(vec![(
+                "java/lang/invoke/StringConcatFactory",
+                "makeConcatWithConstants",
+                "()V"
+            )]),
+            "the factory handle is itself a member the host must be allowed to reference"
+        );
+
+        assert_eq!(
+            bootstrap_members(&pool, 7, &[8, 14]),
+            Some(vec![
+                ("fixture/LibKt", "helper$private", "()V"),
+                ("java/lang/invoke/StringConcatFactory", "makeConcatWithConstants", "()V"),
+            ]),
+            "a handle reached through a STATIC ARGUMENT is part of the graph too — this is the \
+             shape a `LambdaMetafactory` entry has, and the factory's own spelling cannot reveal it"
+        );
+
+        // A `CONSTANT_Dynamic` (or any entry this reader does not model) parses as `C::Other`.
+        assert_eq!(
+            bootstrap_members(&pool, 7, &[0]),
+            None,
+            "an unsupported static argument fails closed rather than relocating unread"
+        );
+        assert_eq!(
+            bootstrap_members(&pool, 8, &[]),
+            None,
+            "a bootstrap whose handle slot is not a method handle fails closed"
+        );
+        assert_eq!(
+            bootstrap_members(&pool, 999, &[]),
+            None,
+            "an index past the pool fails closed"
+        );
+    }
+
+    /// A body whose `invokedynamic` reaches a PRIVATE member through its bootstrap entry declines,
+    /// although no instruction operand names that member. Without the bootstrap walk the splice is
+    /// accepted and the relocated instruction throws `BootstrapMethodError` when it first runs.
+    #[test]
+    fn a_bootstrap_reaching_a_private_member_declines() {
+        let mut pool = vec![
+            C::Other,
+            C::Utf8("java/lang/invoke/LambdaMetafactory".to_string()),
+            C::Class(1),
+            C::Utf8("metafactory".to_string()),
+            C::Utf8("()V".to_string()),
+            C::NameAndType(3, 4),
+            C::Methodref(2, 5),
+            C::MethodHandle(6, 6),
+            C::Utf8("fixture/LibKt".to_string()),
+            C::Class(8),
+            C::Utf8("lambda$0".to_string()),
+            C::NameAndType(10, 4),
+            C::Methodref(9, 11),
+            C::MethodHandle(6, 12),
+            C::NameAndType(3, 4),
+        ];
+        pool.push(C::InvokeDynamic(0, 14));
+        let code = [0xba, 0x00, 0x0f, 0x00, 0x00, 0xb1]; // invokedynamic #15; return
+        let bootstraps = vec![(7u16, vec![13u16])];
+
+        let mut never_private = |_: &str, _: &str, _: &str| false;
+        assert!(
+            references_private_member(
+                &code,
+                &pool,
+                &bootstraps,
+                &mut never_private,
+                &mut |owner: &str, name: &str, _: &str| {
+                    !(owner == "fixture/LibKt" && name == "lambda$0")
+                },
+                &mut |_: &str| true,
+            ),
+            "the implementation handle is reached only through the bootstrap entry"
+        );
+        assert!(
+            !references_private_member(
+                &code,
+                &pool,
+                &bootstraps,
+                &mut never_private,
+                &mut |_: &str, _: &str, _: &str| true,
+                &mut |_: &str| true,
+            ),
+            "an entry whose members are all provably reachable does not decline"
+        );
+        assert!(
+            references_private_member(
+                &code,
+                &pool,
+                &bootstraps,
+                &mut never_private,
+                &mut |_: &str, _: &str, _: &str| false,
+                &mut |_: &str| true,
+            ),
+            "a member nothing can prove reachable declines — which is what an UNKNOWN owner \
+             answers. The standard is proof, not the absence of a `private` flag."
+        );
+        assert!(
+            references_private_member(
+                &code,
+                &pool,
+                &[],
+                &mut never_private,
+                &mut |_: &str, _: &str, _: &str| true,
+                &mut |_: &str| true,
+            ),
+            "an `invokedynamic` naming an entry the table does not have fails closed"
+        );
+    }
+
     #[test]
     fn is_reified_inline_negative() {
         // A plain body (iconst_1; ireturn) with no marker is not reified-inline.
@@ -2831,6 +2742,7 @@ mod tests {
             stackmap: None,
             handlers: vec![],
             locals: vec![],
+            bootstrap_methods: Vec::new(),
         };
         assert!(!is_reified_inline(&body));
     }
@@ -2846,6 +2758,7 @@ mod tests {
             stackmap: None,
             handlers: vec![],
             locals: vec![],
+            bootstrap_methods: Vec::new(),
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         let tm = HashMap::new();
@@ -2943,7 +2856,7 @@ mod tests {
         let code = [0xb8, 0x00, 0x06, 0xb1]; // invokestatic #6 ; return
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         let mut insns = disassemble(&code).unwrap();
-        relocate_insns(&mut insns, &src_cp, &mut cw).expect("relocate");
+        relocate_insns(&mut insns, &src_cp, &[], &mut cw).expect("relocate");
         let out = assemble(&insns);
         let expected = cw.methodref("Foo", "bar", "()V");
         assert_eq!((out[1] as u16) << 8 | out[2] as u16, expected);
