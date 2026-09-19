@@ -65,8 +65,13 @@ impl ElementDecode<'_> {
             // desc, k, ContextualSerializer(<type>::class), null).
             // `decodeSerializableElement` merges into the value decoded so far, so the element's
             // own local is what it receives — a literal `null` discards whatever a merging
-            // serializer would have built on. The local is still `top` on the first pass, which is
-            // exactly the state kotlinc reads it in.
+            // serializer would have built on.
+            //
+            // On the first pass that local holds its JVM zero, which for a reference element is
+            // `null`: the body declares and zero-initializes every field local before decoding
+            // begins. So the first decode of an element passes the same `null` the old code
+            // spelled out, and every LATER one passes what the previous decode produced — which is
+            // the whole difference, and the reason disassembly parity alone does not prove it.
             let prev = ir.add_expr(IrExpr::GetValue(self.field_locals[k]));
             let method = if is_nullable(&ty) {
                 "decodeNullableSerializableElement"
@@ -98,8 +103,13 @@ impl ElementDecode<'_> {
             });
             // `decodeSerializableElement` merges into the value decoded so far, so the element's
             // own local is what it receives — a literal `null` discards whatever a merging
-            // serializer would have built on. The local is still `top` on the first pass, which is
-            // exactly the state kotlinc reads it in.
+            // serializer would have built on.
+            //
+            // On the first pass that local holds its JVM zero, which for a reference element is
+            // `null`: the body declares and zero-initializes every field local before decoding
+            // begins. So the first decode of an element passes the same `null` the old code
+            // spelled out, and every LATER one passes what the previous decode produced — which is
+            // the whole difference, and the reason disassembly parity alone does not prove it.
             let prev = ir.add_expr(IrExpr::GetValue(self.field_locals[k]));
             let method = if is_nullable(&ty) {
                 "decodeNullableSerializableElement"
@@ -132,8 +142,13 @@ impl ElementDecode<'_> {
                 .unwrap_or_else(|| ir.add_expr(IrExpr::Const(IrConst::Null)));
             // `decodeSerializableElement` merges into the value decoded so far, so the element's
             // own local is what it receives — a literal `null` discards whatever a merging
-            // serializer would have built on. The local is still `top` on the first pass, which is
-            // exactly the state kotlinc reads it in.
+            // serializer would have built on.
+            //
+            // On the first pass that local holds its JVM zero, which for a reference element is
+            // `null`: the body declares and zero-initializes every field local before decoding
+            // begins. So the first decode of an element passes the same `null` the old code
+            // spelled out, and every LATER one passes what the previous decode produced — which is
+            // the whole difference, and the reason disassembly parity alone does not prove it.
             let prev = ir.add_expr(IrExpr::GetValue(self.field_locals[k]));
             let method = if is_nullable(&ty) {
                 "decodeNullableSerializableElement"

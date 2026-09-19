@@ -39,6 +39,8 @@ pub(super) struct SerializeBody<'a> {
     pub(super) type_parameter_serializer_fields: &'a [Option<u32>],
     pub(super) write_self: Option<u32>,
     pub(super) write_self_name: String,
+    /// The serialized class's `$childSerializers` plan, or `None` when it has no cache.
+    pub(super) cache: Option<super::child_serializer_cache::ChildSerializerCachePlan>,
 }
 
 impl SerializeBody<'_> {
@@ -53,6 +55,7 @@ impl SerializeBody<'_> {
             type_parameter_serializer_fields: tp_field,
             write_self,
             write_self_name,
+            cache: cache_plan,
         } = self;
         let ser_idx = serializer_class as usize;
         let class_id = foo_id;
@@ -98,26 +101,25 @@ impl SerializeBody<'_> {
         // bridge the `$serializer` needs. The local is the first free one after its three
         // parameters. The inlined generic shape lives on the `$serializer` and has no such reach,
         // so it keeps building its element serializers.
-        let cached = super::cached_element_serializers(ir, ctx, class_id, fields);
-        let cache_static = delegate
-            .then(|| {
-                ir.statics
-                    .iter()
-                    .position(|s| s.name == "$childSerializers" && s.owner_matches(&class_internal))
-            })
-            .flatten();
+        // The plan, as the pass that built the cache published it: which properties have a slot and
+        // which static holds them. Not a search of `ir.statics` for the field's spelling, and not a
+        // second answer to which properties are cached.
+        let plan = delegate.then_some(cache_plan).flatten();
         let cache_local = 3u32;
         // The element serializer for property `i`: the cache slot when the class caches it, else
-        // built here. One question decides it — `cached_element_serializers` — so this can never
-        // read a slot the serialized class did not write.
+        // built here. The PLAN decides, so this can never read a slot the serialized class did not
+        // write.
         let element_serializer = |ir: &mut IrFile, ctx: &PluginContext, i: usize, ty: &Ty| {
-            if cache_static.is_some() && cached[i] {
+            if plan
+                .as_ref()
+                .is_some_and(|plan| plan.cached.get(i).copied().unwrap_or(false))
+            {
                 let cache = ir.add_expr(IrExpr::GetValue(cache_local));
                 let index = ir.add_expr(IrExpr::Const(IrConst::Int(i as i32)));
                 let slot = ir.add_expr(IrExpr::Call {
                     callee: Callee::Intrinsic {
                         operation: crate::ir::IrIntrinsic::ArrayGet,
-                        ret: super::lazy_cache_element_ty(),
+                        ret: super::child_serializer_cache::lazy_cache_element_ty(),
                     },
                     dispatch_receiver: Some(cache),
                     args: vec![index],
@@ -363,11 +365,13 @@ impl SerializeBody<'_> {
             });
             ir.functions[fid as usize].body = Some(body);
         } else if let Some(write_self) = delegated_write_self {
-            if let Some(index) = cache_static {
-                let read = ir.add_expr(IrExpr::GetStatic(index as u32));
+            if let Some(plan) = plan.as_ref() {
+                // `write$Self` is a static member of the class that OWNS the cache, so it reads the
+                // static directly. The plan names which one.
+                let read = ir.add_expr(IrExpr::GetStatic(plan.static_index));
                 let declaration = ir.add_expr(IrExpr::Variable {
                     index: cache_local,
-                    ty: super::lazy_cache_ty(),
+                    ty: super::child_serializer_cache::lazy_cache_ty(),
                     init: Some(read),
                     named: false,
                 });
@@ -525,6 +529,9 @@ mod tests {
             type_parameter_serializer_fields: &[None],
             write_self: Some(write_self),
             write_self_name: "write$Self".to_owned(),
+            // This fixture's property has no derivable serializer at all, so its class has no
+            // cache to plan.
+            cache: None,
         }
         .generate(&mut ir, &PluginContext::default());
 
