@@ -2128,12 +2128,16 @@ pub struct IrStatic {
     /// The setter's JVM name when it is not the ordinary `set<X>` spelling — a value-class-typed
     /// property mangles it, because a value-class PARAMETER always does. `None` ⇒ the ordinary name.
     pub setter_jvm_name: Option<String>,
-    /// The value class this static's storage was REALIZED over, when the JVM pass erased it to that
-    /// class's carrier (a file facade's property, which kotlinc erases the same way). Every reader —
-    /// the boxing analysis and the emitter alike — consults this rather than re-deciding, so a read
-    /// of the field and the field itself can never disagree. `None` ⇒ the storage keeps the boxed
-    /// value-class object, or holds no value class at all.
-    pub erased_value_class: Option<crate::types::TypeName>,
+    /// The type this static was DECLARED with, when the JVM pass erased its storage to a value
+    /// class's carrier (a file facade's property, which kotlinc erases the same way). `None` ⇒ the
+    /// storage keeps the boxed value-class object, or holds no value class at all.
+    ///
+    /// The whole declared type, not just the classifier: once `ty` holds the carrier, every fact
+    /// the accessors still need — which value class it is AND whether it was nullable — is only
+    /// here. Reading them back off the erased type made a `var x: Label?` publish a non-null
+    /// `String` setter, which then refused the `null` the property accepts. Every reader consults
+    /// this rather than re-deciding, so a read of the field and the field itself cannot disagree.
+    pub erased_declared_ty: Option<Ty>,
     /// `true` when this backing field has a CUSTOM accessor (`val x = init get() = field…`): the field
     /// is still emitted + initialized in `<clinit>`, but the trivial `getX`/`setX` accessors are NOT
     /// auto-generated here — the custom `getX`/`setX` are emitted as ordinary facade methods (their

@@ -473,3 +473,111 @@ fn a_reference_to_a_private_member_of_a_value_class_resolves() {
         "an ordinary class's private reference is unchanged"
     );
 }
+
+/// Whether a facade-owned property of value-class type is realized over the carrier is decided by
+/// the ERASURE that actually happens, not by stripping nullability off the declared type.
+///
+/// `Z?` over a scalar carrier stays the boxed `LZ;` — a primitive cannot carry null — while `S?`
+/// over a reference carrier erases to that reference, which carries null itself. Null-stripping
+/// answered "carrier" for both, so a read of the boxed field reported an unboxed value and the
+/// default-argument path unboxed something nothing had boxed.
+#[test]
+fn a_nullable_value_class_property_is_realized_like_kotlincs() {
+    let source = "@JvmInline\n\
+                  value class Crate(val count: Int)\n\
+                  \n\
+                  @JvmInline\n\
+                  value class Label(val text: String)\n\
+                  \n\
+                  var nullableScalar: Crate? = null\n\
+                  var nonNullScalar: Crate = Crate(1)\n\
+                  var nullableReference: Label? = null\n\
+                  var nonNullReference: Label = Label(\"x\")\n\
+                  \n\
+                  fun readScalar(value: Crate? = nullableScalar) = value?.count ?: 0\n\
+                  fun readReference(value: Label? = nullableReference) = value?.text ?: \"\"\n";
+    let ours = krusty_dump("NullableValueClassDecl", source);
+    let reference = kotlinc_dump(
+        "NullableValueClassDeclRef",
+        source,
+        "NullableValueClassDeclRefKt",
+    );
+    let facade = ours
+        .get("NullableValueClassDeclKt")
+        .expect("krusty emits the facade");
+    let surface = |dump: &str| {
+        method_headers(dump)
+            .into_iter()
+            .filter(|header| {
+                header.contains("NullableScalar")
+                    || header.contains("NonNullScalar")
+                    || header.contains("NullableReference")
+                    || header.contains("NonNullReference")
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        surface(facade),
+        surface(&reference),
+        "the accessors are kotlinc's"
+    );
+    assert_eq!(
+        surface(&reference),
+        vec![
+            "public static final Crate getNullableScalar()".to_string(),
+            "public static final void setNullableScalar-r2IY7fI(Crate)".to_string(),
+            "public static final int getNonNullScalar()".to_string(),
+            "public static final void setNonNullScalar-7VWGoa4(int)".to_string(),
+            "public static final java.lang.String getNullableReference()".to_string(),
+            "public static final void setNullableReference-JN_5DKc(java.lang.String)".to_string(),
+            "public static final java.lang.String getNonNullReference()".to_string(),
+            "public static final void setNonNullReference-tTogt1o(java.lang.String)".to_string(),
+        ],
+        "spelled out, so a change in the reference compiler is visible here"
+    );
+    assert_eq!(
+        field_lines(facade),
+        field_lines(&reference),
+        "the storage is kotlinc's"
+    );
+    assert_eq!(
+        field_lines(&reference),
+        vec![
+            "private static Crate nullableScalar".to_string(),
+            "private static int nonNullScalar".to_string(),
+            "private static java.lang.String nullableReference".to_string(),
+            "private static java.lang.String nonNullReference".to_string(),
+        ],
+        "a nullable SCALAR carrier stays boxed; a nullable REFERENCE carrier does not",
+    );
+
+    // The reference side follows the same decision, and the program runs.
+    assert_eq!(
+        run(
+            "@JvmInline\n\
+             value class Crate(val count: Int)\n\
+             \n\
+             @JvmInline\n\
+             value class Label(val text: String)\n\
+             \n\
+             var nullableScalar: Crate? = null\n\
+             var nullableReference: Label? = null\n\
+             \n\
+             fun box(): String {\n\
+             \x20   val scalar = ::nullableScalar\n\
+             \x20   scalar.set(Crate(42))\n\
+             \x20   if (scalar.get()?.count != 42) return \"FAIL1\"\n\
+             \x20   scalar.set(null)\n\
+             \x20   if (scalar.get() != null) return \"FAIL2\"\n\
+             \x20   val label = ::nullableReference\n\
+             \x20   label.set(Label(\"held\"))\n\
+             \x20   if (label.get()?.text != \"held\") return \"FAIL3\"\n\
+             \x20   label.set(null)\n\
+             \x20   if (label.get() != null) return \"FAIL4\"\n\
+             \x20   return \"OK\"\n\
+             }\n",
+            "NullableValueClassRef",
+        ),
+        "OK"
+    );
+}

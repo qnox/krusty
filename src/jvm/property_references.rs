@@ -240,6 +240,9 @@ fn classifier_property(
         owner_internal: Some(owner),
         call_owner_internal: Some(owner),
         prop_name: name.to_string(),
+        declared_getter_name: getter.to_string(),
+        declared_setter_name: None,
+        facade_storage: false,
         getter_name: getter.to_string(),
         getter_descriptor: None,
         setter_name: None,
@@ -323,6 +326,13 @@ fn external_property(
         owner_internal: Some(owner),
         call_owner_internal: Some(callable.owner),
         prop_name: name.to_string(),
+        declared_getter_name: callable.name.clone(),
+        declared_setter_name: setter
+            .as_ref()
+            .map(|(_, setter)| setter.callable.name.clone()),
+        // A dependency's storage was realized by whoever compiled it, and its accessors are read
+        // from that artifact's metadata rather than realized again here.
+        facade_storage: false,
         getter_name: callable.name.clone(),
         getter_descriptor: Some(descriptor),
         setter_name: setter
@@ -462,6 +472,22 @@ fn module_property(
         owner_internal: Some(owner),
         call_owner_internal: Some(enclosing.unwrap_or(declaration_facade)),
         prop_name: name.to_string(),
+        declared_getter_name: super::module_calls::property_getter_name(property),
+        declared_setter_name: reference_mutable.then(|| crate::names::property_setter_name(name)),
+        // The facade's own storage: no owner, no extension receiver, no companion association, and
+        // no accessor the source wrote. Every one of those is a fact of THIS declaration, so the
+        // answer travels with the reference instead of being looked up in the declaring file.
+        facade_storage: enclosing.is_none()
+            && property.extension_receiver.is_none()
+            && !companion_associated
+            && !property
+                .flags
+                .has(crate::fir::DeclarationFlags::CUSTOM_GETTER)
+            && !property
+                .flags
+                .has(crate::fir::DeclarationFlags::CUSTOM_SETTER)
+            && !property.flags.has(crate::fir::DeclarationFlags::DELEGATED)
+            && !property.flags.has(crate::fir::DeclarationFlags::CONST),
         getter_name: if access_bridge {
             format!("access${}$p", crate::names::property_getter_name(name))
         } else {

@@ -89,6 +89,22 @@ pub struct PropRef {
     /// property reference (`Derived::p` reflects on `Derived` but may invoke `Base.getP`).
     pub call_owner_internal: Option<TypeName>,
     pub prop_name: String,
+    /// The accessor names the DECLARATION carries, before any `access$…` bridge is put in front of
+    /// them and before any target-specific mangling.
+    ///
+    /// Selection already resolved these — a `@get:JvmName("readY")` accessor is named `readY` here,
+    /// whatever the property is spelled. A later representation pass that rebuilds them from
+    /// [`Self::prop_name`] discards that answer and names a method the declaration does not have.
+    pub declared_getter_name: String,
+    pub declared_setter_name: Option<String>,
+    /// The referenced property's storage lives on a FILE FACADE and has no accessor of its own:
+    /// the shape whose value-class-typed storage a target may realize over the carrier.
+    ///
+    /// Recorded from the selected declaration's own facts, so a reference from another file of the
+    /// module answers the same as the declaration there. Joining the two sides by property spelling
+    /// instead could not see a sibling file's declaration at all, and could match an unrelated
+    /// same-spelled one.
+    pub facade_storage: bool,
     pub getter_name: String,
     pub getter_descriptor: Option<String>,
     pub setter_name: Option<String>,

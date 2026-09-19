@@ -462,11 +462,19 @@ pub(crate) fn lower_value_classes(
         if !property.is_facade_owned() || property.custom_accessor {
             continue;
         }
-        property.erased_value_class = property
-            .ty
+        // Derived from the erasure that actually happens, never from stripping nullability. `erase`
+        // owns the rule and `nullable_is_boxed` is its single source of truth: `Z?` over a SCALAR
+        // carrier stays the boxed `LZ;`, because a primitive cannot carry null, while `S?` over a
+        // reference carrier erases to that reference, which carries null itself. Null-stripping
+        // answered "carrier" for both, so a read of the boxed field reported `Unboxed` and step 5
+        // unboxed a value nothing had boxed.
+        let declared = property.ty;
+        property.erased_declared_ty = declared
             .non_null()
             .obj_internal()
-            .filter(|fq_name| under.contains_key(fq_name));
+            .filter(|fq_name| under.contains_key(fq_name))
+            .filter(|_| erase(&declared, &under) != declared)
+            .map(|_| declared);
     }
 
     // A semantic property operation deliberately keeps the Kotlin property name. For an owner compiled
@@ -4347,7 +4355,6 @@ pub(crate) fn lower_value_classes(
     // boxes it back. Every other value-class-typed static keeps the boxed field, so its initializer
     // is boxed to match — `box_tail` only boxes an unboxed `constructor-impl`/`unbox-impl` tail, so
     // an already-boxed init is left untouched.
-    let mut erased_top_level_statics: HashSet<String> = HashSet::new();
     for si in 0..ir.statics.len() {
         let Some(x) = ir.statics[si]
             .ty
@@ -4357,15 +4364,23 @@ pub(crate) fn lower_value_classes(
         else {
             continue;
         };
-        if ir.statics[si].erased_value_class.is_none() {
+        let erased = ir.statics[si].erased_declared_ty.is_some();
+        let declared = ir.statics[si].ty;
+        if !erased {
             let root = ir.statics[si].init;
             box_tail(ir, root, x, &under);
-            continue;
         }
-        let declared = ir.statics[si].ty;
         let property = &mut ir.statics[si];
-        property.ty = erase(&declared, &under);
-        if property.is_var {
+        if erased {
+            property.ty = erase(&declared, &under);
+        }
+        // The SETTER's name is decided by its parameter, not by the storage: a value-class
+        // parameter always contributes to the hash, whether the field behind it holds the carrier
+        // or the box. `var nullableScalar: Crate?` keeps a boxed field AND takes
+        // `setNullableScalar-<hash>(Crate)`, which tying the two decisions together left unmangled.
+        // (The getter keeps its plain name: a value-class RESULT alone contributes no hash inside a
+        // file class.)
+        if property.is_var && property.is_facade_owned() && !property.custom_accessor {
             property.setter_jvm_name = Some(vc_mangle(
                 &crate::names::property_setter_name(&property.name),
                 std::slice::from_ref(&declared),
@@ -4375,7 +4390,6 @@ pub(crate) fn lower_value_classes(
                 false,
             ));
         }
-        erased_top_level_statics.insert(property.name.clone());
     }
 
     let lambda_implementation_ids: HashSet<u32> = ir
@@ -4688,14 +4702,7 @@ pub(crate) fn lower_value_classes(
         }
     }
 
-    property_references::realize(
-        ir,
-        &callable_under,
-        &vc_properties,
-        &erased_top_level_statics,
-    );
-
-    true
+    property_references::realize(ir, &callable_under, &vc_properties)
 }
 
 /// Box an unboxed value-class result at every tail position of `id` (recursing `when`/block/return
@@ -5164,7 +5171,11 @@ impl<'a> CallTypes<'a> {
     /// The value class a static's storage was realized over, so `getstatic` yields the CARRIER and
     /// not a box. `None` ⇒ this static keeps the boxed convention, or holds no value class at all.
     fn erased_static_value_class(&self, index: u32) -> Option<TypeName> {
-        self.statics.get(index as usize)?.erased_value_class
+        self.statics
+            .get(index as usize)?
+            .erased_declared_ty?
+            .non_null()
+            .obj_internal()
     }
 
     fn get(&self, id: &u32) -> Option<&Ty> {
