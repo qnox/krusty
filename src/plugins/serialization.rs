@@ -38,7 +38,10 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 mod child_serializer_cache;
-use child_serializer_cache::{add_child_serializer_cache, PendingChildSerializerCache};
+use child_serializer_cache::{
+    add_child_serializer_cache, ChildSerializerCachePlan, ChildSerializersBody,
+    PendingChildSerializerCache,
+};
 mod annotations;
 mod signatures;
 
@@ -116,6 +119,9 @@ pub struct SerializationPlugin {
     pub abi: SerializationAbi,
     pub module: String,
     write_self_methods: Mutex<HashMap<TypeName, u32>>,
+    /// What each serialized class's `$childSerializers` cache is, published by the pass that builds
+    /// it and consumed by every reader. Keyed by the SERIALIZED class, not the `$serializer`.
+    child_serializer_caches: Mutex<HashMap<TypeName, ChildSerializerCachePlan>>,
 }
 
 impl SerializationPlugin {
@@ -124,6 +130,7 @@ impl SerializationPlugin {
             abi,
             module: module.into(),
             write_self_methods: Mutex::new(HashMap::new()),
+            child_serializer_caches: Mutex::new(HashMap::new()),
         }
     }
 
@@ -157,6 +164,19 @@ impl SerializationPlugin {
             .lock()
             .expect("serialization write$Self registry")
             .clear();
+    }
+
+    /// The cache plan for `owner`, or `None` when that class has no cache at all.
+    ///
+    /// A reader asks this rather than searching `ir.statics` for the field's spelling: the
+    /// builder's answer IS the contract, so the two cannot disagree about which properties have a
+    /// slot.
+    fn child_serializer_cache(&self, owner: TypeName) -> Option<ChildSerializerCachePlan> {
+        self.child_serializer_caches
+            .lock()
+            .expect("child serializer cache plans")
+            .get(&owner)
+            .cloned()
     }
 
     fn write_self_method(&self, owner: TypeName) -> Option<u32> {
@@ -1527,6 +1547,10 @@ impl IrPlugin for SerializationPlugin {
     fn generate_declarations(&self, ir: &mut IrFile, ctx: &PluginContext) {
         // A host can be reused for another IR file; generated `FunId`s belong only to this arena.
         self.clear_write_self_methods();
+        self.child_serializer_caches
+            .lock()
+            .expect("child serializer cache plans")
+            .clear();
         let mut pending_caches: Vec<PendingChildSerializerCache> = Vec::new();
         for class_id in ctx.classes_with(type_name(SERIALIZABLE_FQ)) {
             let class_fq = ir.classes[class_id as usize].fq_name();
@@ -2081,7 +2105,14 @@ impl IrPlugin for SerializationPlugin {
             }
         }
         for (class_id, serialized, foo_fields) in pending_caches {
-            add_child_serializer_cache(ir, ctx, class_id, serialized, &foo_fields);
+            if let Some(plan) =
+                add_child_serializer_cache(ir, ctx, class_id, serialized, &foo_fields)
+            {
+                self.child_serializer_caches
+                    .lock()
+                    .expect("child serializer cache plans")
+                    .insert(serialized, plan);
+            }
         }
     }
 
@@ -2272,6 +2303,8 @@ impl IrPlugin for SerializationPlugin {
                             write_self: self
                                 .write_self_method(ir.classes[foo_id as usize].fq_name_id()),
                             write_self_name: self.write_self_name(),
+                            cache: self
+                                .child_serializer_cache(ir.classes[foo_id as usize].fq_name_id()),
                         }
                         .generate(ir, ctx);
                     }
@@ -2283,67 +2316,24 @@ impl IrPlugin for SerializationPlugin {
                             fields: &fields,
                             nested_serializers: &nested,
                             type_parameter_serializer_fields: &tp_field,
+                            cache: self
+                                .child_serializer_cache(ir.classes[foo_id as usize].fq_name_id()),
                         }
                         .generate(ir, ctx);
                     }
                     "childSerializers" => {
-                        // Return the per-field element-serializer array (arity == field count): one
-                        // `KSerializer` singleton per property. A nested `@Serializable` field uses the
-                        // krusty-generated `<T>$serializer.INSTANCE`; a directly-supported field uses the
-                        // builtin `…Serializer.INSTANCE`. An unsupported field type contributes `null`
-                        // (placeholder) so the array arity still matches the descriptor's element count.
-                        let elements: Vec<ExprId> = serializer_field_types
-                            .iter()
-                            .enumerate()
-                            .map(|(i, _ty)| {
-                                if let Some(inst) = contextual_serializer_for(
-                                    ir,
-                                    property_is_contextual(ctx, ir, class_id, &fields[i].0),
-                                    &serializer_field_types[i],
-                                ) {
-                                    // `@Contextual` / file-level `@UseContextualSerialization` property.
-                                    inst
-                                } else if let Some(fidx) = tp_field[i] {
-                                    // Type-parameter element: `this.typeSerialK` (the ctor-supplied serializer).
-                                    let this = ir.add_expr(IrExpr::GetValue(0));
-                                    ir.add_expr(IrExpr::GetField {
-                                        receiver: this,
-                                        class: ser_idx as u32,
-                                        index: fidx,
-                                    })
-                                } else if let Some(internal) =
-                                    field_serializer_of(ctx, ir, class_id, &fields[i].0)
-                                {
-                                    // Explicit per-property serializer: `new X()` (or `X.INSTANCE`),
-                                    // wrapped `.nullable` for a nullable property.
-                                    let base = build_field_serializer_instance(ir, internal);
-                                    if is_nullable(&serializer_field_types[i]) {
-                                        wrap_nullable_serializer(ir, base)
-                                    } else {
-                                        base
-                                    }
-                                } else if let Some(e) =
-                                    element_serializer_expr(ir, ctx, &serializer_field_types[i])
-                                {
-                                    // Nested @Serializable (generic `Foo<A>` → `Foo.serializer(A_ser)`,
-                                    // or non-generic `Foo$serializer.INSTANCE`) | builtin `…Serializer`.
-                                    e
-                                } else {
-                                    ir.add_expr(IrExpr::Const(IrConst::Null))
-                                }
-                            })
-                            .collect();
-                        let arr = ir.add_expr(IrExpr::Vararg {
-                            array_type: Ty::obj_args("kotlin/Array", &[class_ty(KSERIALIZER_FQ)]),
-                            spreads: vec![false; elements.len()],
-                            elements,
-                        });
-                        let ret = ir.add_expr(IrExpr::Return(Some(arr)));
-                        let body = ir.add_expr(IrExpr::Block {
-                            stmts: vec![ret],
-                            value: None,
-                        });
-                        ir.functions[fid as usize].body = Some(body);
+                        ChildSerializersBody {
+                            function: fid,
+                            serializer_class: ser_idx as u32,
+                            serialized_class: foo_id,
+                            declaring_class: class_id,
+                            fields: &fields,
+                            serializer_field_types: &serializer_field_types,
+                            type_parameter_serializer_fields: &tp_field,
+                            plan: self
+                                .child_serializer_cache(ir.classes[foo_id as usize].fq_name_id()),
+                        }
+                        .generate(ir, ctx);
                     }
                     // A serializer without type parameters keeps the semantic interface-default
                     // delegation installed when its member was declared.

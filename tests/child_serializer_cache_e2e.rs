@@ -10,7 +10,7 @@
 //! Every step fails closed: a missing plugin, runtime, reference compiler or a failed krusty
 //! compile is a failure, not a skip.
 use super::serialization_companion_byte_parity_e2e::{
-    compare_with_kotlinc_plugin, plugin_and_runtime,
+    compare_with_kotlinc_plugin, method_instructions, plugin_and_runtime,
 };
 
 /// A class's `<clinit>` instructions, with constant-pool indices erased because their numbering is
@@ -209,5 +209,193 @@ fn mutually_referential_classes_each_cache_the_other() {
         edge_cache,
         cycle_initializer("Edge", "Node"),
         "`Edge`'s complete cache initializer — neither class can be generated first"
+    );
+}
+
+/// The fixture for the composed-element differentials below: TWO cached elements, so a reader that
+/// confuses one slot for another is visible, beside a primitive element that gets no slot at all.
+///
+/// Every composed element here is non-nullable on purpose. A nullable one additionally exercises
+/// the narrowing of the serializer operand, which is a separate concern with its own coverage; a
+/// fixture mixing the two would fail for a reason that has nothing to do with the cache.
+const COMPOSED_ELEMENTS_SRC: &str = "import kotlinx.serialization.Serializable\n\
+     @Serializable\n\
+     data class Item(val id: Int)\n\
+     @Serializable\n\
+     data class Holder(val count: Int, val items: List<Item>, val tags: List<String>)\n";
+
+const NULLABLE_COMPOSED_ELEMENT_SRC: &str = "import kotlinx.serialization.Serializable\n\
+     @Serializable\n\
+     data class Item(val id: Int)\n\
+     @Serializable\n\
+     data class NullableHolder(val items: List<Item>?)\n";
+
+/// `childSerializers()` was the only method the cache work pinned, and it is the one method where a
+/// wrong cache is harmless — it rebuilds the array either way. The two methods that CONSUME the
+/// cache are `deserialize`, which reads a slot per element, and the serialized class's `write$Self`,
+/// which reads the static directly. Compare both against kotlinc instruction for instruction.
+#[test]
+fn a_composed_class_deserializes_exactly_as_kotlinc() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let Some(built) = compare_with_kotlinc_plugin(
+        "ComposedElementsDeserialize",
+        COMPOSED_ELEMENTS_SRC,
+        "Holder$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = method_instructions(&built.reference, "deserialize(");
+    assert!(
+        !want.is_empty(),
+        "the reference disassembly has no deserialize body"
+    );
+    assert_eq!(
+        method_instructions(&built.krusty, "deserialize("),
+        want,
+        "Holder$$serializer.deserialize"
+    );
+}
+
+#[test]
+fn a_composed_class_writes_its_elements_exactly_as_kotlinc() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let Some(built) = compare_with_kotlinc_plugin(
+        "ComposedElementsWriteSelf",
+        COMPOSED_ELEMENTS_SRC,
+        "Holder",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = method_instructions(&built.reference, "write$Self$main(");
+    assert!(
+        !want.is_empty(),
+        "the reference disassembly has no write$Self$main body"
+    );
+    assert_eq!(
+        method_instructions(&built.krusty, "write$Self$main("),
+        want,
+        "Holder.write$Self$main"
+    );
+}
+
+#[test]
+fn a_nullable_composed_class_deserializes_exactly_as_kotlinc() {
+    let (plugin, cp) = plugin_and_runtime()
+        .expect("the serialization plugin and runtime must be available to this regression");
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let built = compare_with_kotlinc_plugin(
+        "NullableComposedElementDeserialize",
+        NULLABLE_COMPOSED_ELEMENT_SRC,
+        "NullableHolder$$serializer",
+        &cp,
+        "25",
+        &extra,
+    )
+    .expect("the reference compiler and javap must be available to this regression");
+    let want = method_instructions(&built.reference, "deserialize(");
+    assert!(
+        !want.is_empty(),
+        "the reference disassembly has no deserialize body"
+    );
+    assert_eq!(
+        method_instructions(&built.krusty, "deserialize("),
+        want,
+        "NullableHolder$$serializer.deserialize"
+    );
+}
+
+#[test]
+fn a_nullable_composed_class_writes_its_elements_exactly_as_kotlinc() {
+    let (plugin, cp) = plugin_and_runtime()
+        .expect("the serialization plugin and runtime must be available to this regression");
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let built = compare_with_kotlinc_plugin(
+        "NullableComposedElementWriteSelf",
+        NULLABLE_COMPOSED_ELEMENT_SRC,
+        "NullableHolder",
+        &cp,
+        "25",
+        &extra,
+    )
+    .expect("the reference compiler and javap must be available to this regression");
+    let want = method_instructions(&built.reference, "write$Self$main(");
+    assert!(
+        !want.is_empty(),
+        "the reference disassembly has no write$Self$main body"
+    );
+    assert_eq!(
+        method_instructions(&built.krusty, "write$Self$main("),
+        want,
+        "NullableHolder.write$Self$main"
+    );
+}
+
+/// `decodeSerializableElement`'s last argument is the PREVIOUS value: a merging serializer is handed
+/// what it is merging into. krusty passed a literal `null` there, which is unobservable from any
+/// program a user can write — only the serializers kotlinx declares internally merge — so it is
+/// pinned here as its own repository-owned expectation rather than left to a round trip.
+///
+/// The expectation is the operand shape, not kotlinc's whole body: for each of the two composed
+/// elements the value pushed before the call is the element's OWN local, and never `aconst_null`.
+#[test]
+fn a_composed_element_decodes_with_its_own_previous_value() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let Some(built) = compare_with_kotlinc_plugin(
+        "ComposedElementsPreviousValue",
+        COMPOSED_ELEMENTS_SRC,
+        "Holder$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let previous_values = |disassembly: &str| -> Vec<String> {
+        let body = method_instructions(disassembly, "deserialize(");
+        body.iter()
+            .enumerate()
+            .filter(|(_, line)| line.contains("decodeSerializableElement:"))
+            .map(|(at, _)| {
+                body[at - 1]
+                    .split_once(": ")
+                    .map(|(_, op)| op.to_string())
+                    .unwrap_or_default()
+            })
+            .collect()
+    };
+    let got = previous_values(&built.krusty);
+    assert!(
+        !got.is_empty(),
+        "the fixture no longer decodes any composed element"
+    );
+    assert!(
+        got.iter().all(|op| op.starts_with("aload")),
+        "every composed element must be decoded over its own previous value: {got:?}"
+    );
+    assert_eq!(
+        got,
+        previous_values(&built.reference),
+        "previous-value operands disagree with kotlinc"
     );
 }

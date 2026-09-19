@@ -21,9 +21,30 @@ struct ElementDecode<'a> {
     field_locals: &'a [u32],
     seen_locals: &'a [u32],
     composite_local: u32,
+    /// The local the serialized class's `$childSerializers` was loaded into, and which elements it
+    /// holds — `None` when the class has no cache. A cached element is READ from the slot instead
+    /// of rebuilt here, which is what kotlinc emits.
+    cache: Option<(
+        u32,
+        &'a super::child_serializer_cache::ChildSerializerCachePlan,
+    )>,
 }
 
 impl ElementDecode<'_> {
+    /// `cache[k].value` when element `k` is cached — narrowed from the `Lazy`'s erased `Object` to
+    /// the decode call's `DeserializationStrategy` parameter, exactly as kotlinc does.
+    fn cached_slot(&self, ir: &mut IrFile, k: usize) -> Option<ExprId> {
+        let (local, plan) = self.cache?;
+        super::child_serializer_cache::cached_strategy(
+            ir,
+            Some(plan),
+            Some(local),
+            k,
+            self.fields.len(),
+            "kotlinx/serialization/DeserializationStrategy",
+        )
+    }
+
     fn block(&self, ir: &mut IrFile, ctx: &PluginContext, k: usize) -> ExprId {
         let ty = self.fields[k].1;
         let dk = ir.add_expr(IrExpr::GetValue(self.descriptor_local));
@@ -36,7 +57,16 @@ impl ElementDecode<'_> {
         ) {
             // Contextual element: f_k = (T) c.decode[Nullable]SerializableElement(
             // desc, k, ContextualSerializer(<type>::class), null).
-            let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
+            // `decodeSerializableElement` merges into the value decoded so far, so the element's
+            // own local is what it receives — a literal `null` discards whatever a merging
+            // serializer would have built on.
+            //
+            // On the first pass that local holds its JVM zero, which for a reference element is
+            // `null`: the body declares and zero-initializes every field local before decoding
+            // begins. So the first decode of an element passes the same `null` the old code
+            // spelled out, and every LATER one passes what the previous decode produced — which is
+            // the whole difference, and the reason disassembly parity alone does not prove it.
+            let prev = ir.add_expr(IrExpr::GetValue(self.field_locals[k]));
             let method = if is_nullable(&ty) {
                 "decodeNullableSerializableElement"
             } else {
@@ -65,7 +95,16 @@ impl ElementDecode<'_> {
                 class: self.serializer_class,
                 index: fidx,
             });
-            let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
+            // `decodeSerializableElement` merges into the value decoded so far, so the element's
+            // own local is what it receives — a literal `null` discards whatever a merging
+            // serializer would have built on.
+            //
+            // On the first pass that local holds its JVM zero, which for a reference element is
+            // `null`: the body declares and zero-initializes every field local before decoding
+            // begins. So the first decode of an element passes the same `null` the old code
+            // spelled out, and every LATER one passes what the previous decode produced — which is
+            // the whole difference, and the reason disassembly parity alone does not prove it.
+            let prev = ir.add_expr(IrExpr::GetValue(self.field_locals[k]));
             let method = if is_nullable(&ty) {
                 "decodeNullableSerializableElement"
             } else {
@@ -91,9 +130,20 @@ impl ElementDecode<'_> {
             // (non-generic) / `Foo.serializer(A_ser)` (generic) / `ListSerializer(…)`
             // (collection). Same descriptor; the nullable variant yields null for a
             // JSON-null element.
-            let inst = element_serializer_expr(ir, ctx, &ty)
+            let inst = self
+                .cached_slot(ir, k)
+                .or_else(|| element_serializer_expr(ir, ctx, &ty))
                 .unwrap_or_else(|| ir.add_expr(IrExpr::Const(IrConst::Null)));
-            let prev = ir.add_expr(IrExpr::Const(IrConst::Null));
+            // `decodeSerializableElement` merges into the value decoded so far, so the element's
+            // own local is what it receives — a literal `null` discards whatever a merging
+            // serializer would have built on.
+            //
+            // On the first pass that local holds its JVM zero, which for a reference element is
+            // `null`: the body declares and zero-initializes every field local before decoding
+            // begins. So the first decode of an element passes the same `null` the old code
+            // spelled out, and every LATER one passes what the previous decode produced — which is
+            // the whole difference, and the reason disassembly parity alone does not prove it.
+            let prev = ir.add_expr(IrExpr::GetValue(self.field_locals[k]));
             let method = if is_nullable(&ty) {
                 "decodeNullableSerializableElement"
             } else {
@@ -161,6 +211,10 @@ pub(super) struct DeserializeBody<'a> {
     pub(super) fields: &'a [(String, Ty)],
     pub(super) nested_serializers: &'a [Option<ClassId>],
     pub(super) type_parameter_serializer_fields: &'a [Option<u32>],
+    /// The serialized class's `$childSerializers` plan, or `None` when it has no cache. Passed in
+    /// rather than rediscovered: the builder's answer about which properties have a slot is the
+    /// only one, so a reader cannot believe in a slot that was never written.
+    pub(super) cache: Option<super::child_serializer_cache::ChildSerializerCachePlan>,
 }
 
 impl DeserializeBody<'_> {
@@ -172,6 +226,7 @@ impl DeserializeBody<'_> {
             fields,
             nested_serializers: nested,
             type_parameter_serializer_fields: tp_field,
+            cache: cache_plan,
         } = self;
         let ser_idx = serializer_class as usize;
         let class_id = foo_id;
@@ -316,6 +371,11 @@ impl DeserializeBody<'_> {
         let seen_locals = (0..mask_count).map(|_| fresh_local()).collect::<Vec<_>>();
         let field_locals = fields.iter().map(|_| fresh_local()).collect::<Vec<_>>();
         let composite_local = fresh_local();
+        // The serialized class's cache, as the pass that built it published it — never rediscovered
+        // by searching `ir.statics` for the field's spelling, and never re-answering which
+        // properties have a slot. kotlinc numbers this local LAST, after every field and the
+        // composite decoder, although it assigns it first, right behind `beginStructure`.
+        let cache_local = cache_plan.as_ref().map(|_| fresh_local());
         let constructor = ir
             .generated_secondary_constructor(
                 foo_id,
@@ -348,6 +408,7 @@ impl DeserializeBody<'_> {
             field_locals: &field_locals,
             seen_locals: &seen_locals,
             composite_local,
+            cache: cache_local.zip(cache_plan.as_ref()),
         };
         let body = {
             let this0 = ir.add_expr(IrExpr::GetValue(0));
@@ -415,6 +476,25 @@ impl DeserializeBody<'_> {
                 init: Some(begin),
                 named: false,
             }));
+            if let (Some(local), Some(plan)) = (cache_local, cache_plan.as_ref()) {
+                // The accessor the PLAN names, by its function id — its owner is the serialized
+                // class's own interned identity, and `ClassStatic` leaves the name and the JVM
+                // descriptor to be formed at the JVM boundary from the declaration itself.
+                let read = ir.add_expr(IrExpr::Call {
+                    callee: crate::ir::Callee::ClassStatic {
+                        owner: ir.classes[foo_id as usize].fq_name_id(),
+                        function: plan.accessor,
+                    },
+                    dispatch_receiver: None,
+                    args: vec![],
+                });
+                stmts.push(ir.add_expr(IrExpr::Variable {
+                    index: local,
+                    ty: super::child_serializer_cache::lazy_cache_ty(),
+                    init: Some(read),
+                    named: false,
+                }));
+            }
             // loop body: index = composite.decodeElementIndex(serialDesc); when (index) { … }
             let didx = this_desc(ir);
             let cdi = composite(ir);
