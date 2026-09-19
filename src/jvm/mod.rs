@@ -3,6 +3,7 @@
 mod annotation_constructions;
 mod array_representation;
 pub mod backend;
+mod bridge_return_adaptations;
 pub mod bridges;
 pub mod classfile;
 pub mod classpath;
@@ -13,6 +14,7 @@ mod constructor_debug;
 mod constructor_metadata;
 mod debug_local_names;
 mod declaration_collisions;
+mod default_call_operands;
 mod external_calls;
 mod function_classifiers;
 mod function_references;

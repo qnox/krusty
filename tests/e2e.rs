@@ -92,6 +92,8 @@ mod break_continue_expr_e2e;
 mod break_continue_in_branch_e2e;
 #[path = "bridge_debug_tables_e2e.rs"]
 mod bridge_debug_tables_e2e;
+#[path = "bridge_return_unbox_e2e.rs"]
+mod bridge_return_unbox_e2e;
 #[path = "build1017_oo1_vcparam_result_takeif_e2e.rs"]
 mod build1017_oo1_vcparam_result_takeif_e2e;
 #[path = "build1018_pp1_suspend_block_firstornull_e2e.rs"]
@@ -396,6 +398,8 @@ mod context_local_fun_e2e;
 mod context_parameter_signature_order_e2e;
 #[path = "context_parameters_e2e.rs"]
 mod context_parameters_e2e;
+#[path = "continuation_spill_order_e2e.rs"]
+mod continuation_spill_order_e2e;
 #[path = "contract_calls_in_place_e2e.rs"]
 mod contract_calls_in_place_e2e;
 #[path = "contract_erasure_e2e.rs"]
@@ -1442,6 +1446,8 @@ mod suspend_return_type_recovery_e2e;
 mod suspend_single_operand_hoist_e2e;
 #[path = "suspend_spill_slot_reuse_e2e.rs"]
 mod suspend_spill_slot_reuse_e2e;
+#[path = "suspend_super_call_refusal_e2e.rs"]
+mod suspend_super_call_refusal_e2e;
 #[path = "suspend_throw_operand_e2e.rs"]
 mod suspend_throw_operand_e2e;
 #[path = "suspend_try_catch_shapes_e2e.rs"]
