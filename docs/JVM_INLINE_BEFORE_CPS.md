@@ -394,6 +394,26 @@ directly; krusty keeps the adapter:
 With a `String` channel the boxing disappears but the `checkcast` does not, and (a) remains — so
 these are two separate defects, not one.
 
+Traced with `KRUSTY_TRACE=splice`, (a) is itself two causes:
+
+```
+[splice] inline operands [(16, GetValue(1), Int), (14, Lambda { impl_fn: 2, … })]
+[splice] inline prologue descriptor=(ILkotlin/jvm/functions/Function1;)I
+         stores=[(2, istore), (3, astore)] lambda_slots={3} prologue=[istore_2]
+```
+
+* **a1 — the argument is read from a local that should not exist.** The operand is `GetValue(1)`,
+  not the parameter (`many`'s parameter is value index 0, slot 0). Something below the emitter binds
+  the inline call's argument to its own local, which is the `iload_0; istore_1` pair, and which
+  raises `base` from 1 to 2. The reference compiler stores the argument straight into the host's
+  parameter slot.
+* **a2 — the spliced-away lambda's parameter slot stays reserved.** `lambda_slots={3}` is correctly
+  skipped by the prologue, but the host body's locals are shifted by a flat `base`, so slot 3 is
+  reserved for a `Function1` that no longer exists and every host local above it sits one slot too
+  high. The reference compiler compacts it away: its `$i$f$twice` is at slot 2, krusty's at 4.
+
+So §7a is three fixes — a1, a2 and (b) — not one.
+
 Consequence for the ordering work: a coroutine machine emitted in the reference compiler's exact
 instruction order still cannot produce an identical class file while the body it wraps differs. Both
 defects must be fixed first, as their own change — they are splice-representation bugs, they affect
