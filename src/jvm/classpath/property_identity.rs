@@ -2,17 +2,6 @@
 
 use super::Classpath;
 
-/// JVM-owned realization of one provider-normalized Kotlin property. FIR carries only its opaque
-/// identity; callers read the semantic name and independently interned physical accessors here.
-#[derive(Clone, Debug)]
-pub(crate) struct ExternalPropertyRealization {
-    pub name: String,
-    pub getter: crate::fir::ExternalCallableId,
-    pub setter: Option<crate::fir::ExternalCallableId>,
-    /// The provider-normalized declaration is its value class's underlying storage property.
-    pub declares_value_class_storage: bool,
-}
-
 impl Classpath {
     /// Whether this exact getter realizes its value class's underlying storage property.
     ///

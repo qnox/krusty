@@ -5214,6 +5214,21 @@ impl JvmLibraries {
 }
 
 impl SymbolSource for JvmLibraries {
+    /// Both answered by the classpath, which is where this provider interned them.
+    fn external_callable(
+        &self,
+        identity: crate::fir::ExternalCallableId,
+    ) -> Option<crate::libraries::ExternalCallableRealization> {
+        self.cp.external_callable(identity)
+    }
+
+    fn external_property(
+        &self,
+        identity: crate::fir::ExternalPropertyId,
+    ) -> Option<crate::libraries::ExternalPropertyRealization> {
+        self.cp.external_property(identity)
+    }
+
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         JvmLibraries::package_exists(self, parent, name)
     }
