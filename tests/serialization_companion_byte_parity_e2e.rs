@@ -69,15 +69,15 @@ fn kotlinc_plugin_jar(substring: &str) -> Option<PathBuf> {
         })
 }
 
-struct ReferenceComparison {
-    reference: String,
-    krusty: String,
+pub(super) struct ReferenceComparison {
+    pub(super) reference: String,
+    pub(super) krusty: String,
     reference_bytes: Vec<u8>,
     krusty_bytes: Vec<u8>,
 }
 
 /// Build one class with the reference serialization plugin and with krusty.
-fn compare_with_kotlinc_plugin(
+pub(super) fn compare_with_kotlinc_plugin(
     name: &str,
     src: &str,
     class: &str,
@@ -242,10 +242,12 @@ fn compare_files_with_kotlinc_plugin(
 }
 
 /// The serialization runtime the generated code links against, plus the plugin jar kotlinc needs in
-/// order to produce the reference at all. `None` when either is absent from the local caches.
-fn plugin_and_runtime() -> Option<(PathBuf, Vec<PathBuf>)> {
+/// order to produce the reference at all. The runtime uses the repository's pinned dependency
+/// provisioner instead of depending on an unrelated Gradle build having populated its private
+/// cache first.
+pub(super) fn plugin_and_runtime() -> Option<(PathBuf, Vec<PathBuf>)> {
     let plugin = kotlinc_plugin_jar("kotlinx-serialization-compiler-plugin")?;
-    let core = gradle_module_jar("org.jetbrains.kotlinx", "kotlinx-serialization-core-jvm")?;
+    let core = krusty::toolchain::serialization_core_jar()?;
     Some((plugin, vec![core, common::stdlib_jar()]))
 }
 
@@ -1666,7 +1668,7 @@ fn serialize_maps_its_return_to_the_class_header_line() {
 
 /// Instruction rows for one method, with only constant-pool indices erased. javap comments retain
 /// the exact selected owner/member/descriptor identity.
-fn method_instructions(disassembly: &str, marker: &str) -> Vec<String> {
+pub(super) fn method_instructions(disassembly: &str, marker: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut inside = false;
     for raw in disassembly.lines() {
@@ -2118,6 +2120,9 @@ fn an_element_typed_by_a_serializable_enum_uses_its_accessor() {
         eprintln!("skipping: reference kotlinc or javap unavailable");
         return;
     };
+    // kotlinc's contract, spelled out so a change in the reference is visible here rather than
+    // silently agreed with: the enum's serializer is ALLOCATED, so it is cached and the element is
+    // taken out of the cache; the `String` element's singleton is not.
     let want = method_instructions(&built.reference, "childSerializers()");
     assert_eq!(
         want,
@@ -2145,23 +2150,8 @@ fn an_element_typed_by_a_serializable_enum_uses_its_accessor() {
     );
     assert_eq!(
         method_instructions(&built.krusty, "childSerializers()"),
-        vec![
-            "0: iconst_2",
-            "1: anewarray # // class kotlinx/serialization/KSerializer",
-            "4: astore_1",
-            "5: aload_1",
-            "6: iconst_0",
-            "7: getstatic # // Field Action$Type.Companion:LAction$Type$Companion;",
-            "10: invokevirtual # // Method Action$Type$Companion.serializer:()Lkotlinx/serialization/KSerializer;",
-            "13: aastore",
-            "14: aload_1",
-            "15: iconst_1",
-            "16: getstatic # // Field kotlinx/serialization/internal/StringSerializer.INSTANCE:Lkotlinx/serialization/internal/StringSerializer;",
-            "19: aastore",
-            "20: aload_1",
-            "21: areturn",
-        ],
-        "krusty enum element serializer contract"
+        want,
+        "krusty reads the enum element out of the same cache"
     );
 }
 
@@ -2221,23 +2211,9 @@ fn a_contextual_element_inside_a_collection_is_derivable() {
     );
     assert_eq!(
         method_instructions(&built.krusty, "childSerializers()"),
-        vec![
-            "0: iconst_1",
-            "1: anewarray # // class kotlinx/serialization/KSerializer",
-            "4: astore_1",
-            "5: aload_1",
-            "6: iconst_0",
-            "7: new # // class kotlinx/serialization/ContextualSerializer",
-            "10: dup",
-            "11: ldc # // class Flexible$FlexibleMap",
-            "13: invokestatic # // Method kotlin/jvm/internal/Reflection.getOrCreateKotlinClass:(Ljava/lang/Class;)Lkotlin/reflect/KClass;",
-            "16: invokespecial # // Method kotlinx/serialization/ContextualSerializer.\"<init>\":(Lkotlin/reflect/KClass;)V",
-            "19: invokestatic # // Method kotlinx/serialization/builtins/BuiltinSerializersKt.ListSerializer:(Lkotlinx/serialization/KSerializer;)Lkotlinx/serialization/KSerializer;",
-            "22: aastore",
-            "23: aload_1",
-            "24: areturn",
-        ],
-        "krusty contextual collection element contract"
+        want,
+        "krusty reads the contextual collection element out of the same cache, and wraps the \
+         property's own nullability at the use site exactly where kotlinc does"
     );
 }
 
@@ -2351,18 +2327,12 @@ fn a_nullable_serializable_element_is_actually_decoded() {
         ],
         "reference decoder contract changed"
     );
-    // krusty has no `decodeSequentially` fast path yet, so its call set is kotlinc's minus that one;
-    // what this test pins is that the nullable elements are decoded at all.
+    // krusty now makes the SAME calls, in the same order, so the two are compared directly rather
+    // than against a second written-down list that could drift from the reference.
     assert_eq!(
         decoder_calls(&built.krusty),
-        vec![
-            "decodeElementIndex",
-            "decodeNullableSerializableElement",
-            "decodeNullableSerializableElement",
-            "decodeNullableSerializableElement",
-            "endStructure",
-        ],
-        "krusty must decode all three nullable elements in declaration order"
+        decoder_calls(&built.reference),
+        "krusty must decode all three nullable elements in declaration order, on both paths"
     );
 }
 
@@ -2513,14 +2483,24 @@ fn a_serializable_class_lists_its_generated_serializer_as_nested() {
     );
 }
 
+/// Whether a javap line opens a MEMBER declaration rather than one of the attribute rows under it.
+///
+/// `descriptor:` and `Signature:` rows also end in `;` around a parenthesized descriptor, so the
+/// `:` is what separates them; constant-pool rows start with `#`. The class initializer prints as
+/// `static {};` and has no parameter list at all.
+fn opens_a_member(line: &str) -> bool {
+    line == "static {};"
+        || (line.ends_with(';')
+            && line.contains('(')
+            && !line.contains(':')
+            && !line.starts_with('#'))
+}
+
 /// The generic `Signature` of a member of a generated serializer, as javap prints the attribute.
 fn member_signature(disassembly: &str, member: &str) -> String {
     // The attribute trails the member's `Code`, so the search runs to the NEXT member declaration
-    // rather than a fixed number of lines. A declaration is an indented line ending in `;` that is
-    // not a constant-pool row (those start with `#`).
-    let declaration = |line: &str| {
-        line.ends_with(';') && line.contains('(') && !line.contains(':') && !line.starts_with('#')
-    };
+    // rather than a fixed number of lines.
+    let declaration = opens_a_member;
     let mut lines = disassembly
         .lines()
         .map(str::trim)
@@ -2547,7 +2527,8 @@ fn member_signature(disassembly: &str, member: &str) -> String {
 fn metadata_member_return(bytes: &[u8], owner: &str, member: &str) -> Ty {
     let (d1, d2) = common_core::raw_kotlin_metadata(bytes).expect("read Kotlin metadata");
     let d1 = vec![d1.into_iter().map(char::from).collect::<String>()];
-    let metadata = krusty::jvm::metadata::decode_metadata(&d1, &d2, Some(1), owner, None, &[]);
+    let metadata = krusty::jvm::metadata::decode_metadata(&d1, &d2, Some(1), owner, None, &[])
+        .expect("generated class metadata decodes");
     let matches = metadata
         .class_functions
         .iter()
@@ -2646,6 +2627,112 @@ fn metadata_d2(bytes: &[u8]) -> Vec<String> {
         .1
 }
 
+/// Kotlin-level constructor declarations decoded from one emitted class. This deliberately ignores
+/// classfile method flags: metadata publication and visibility are a separate semantic contract.
+#[derive(Debug, PartialEq)]
+struct ConstructorMetadataShape {
+    visibility: krusty::types::Visibility,
+    names: Vec<String>,
+    defaults: Vec<bool>,
+    types: Vec<Ty>,
+    jvm_name: &'static str,
+    jvm_descriptor: Option<&'static str>,
+}
+
+fn metadata_constructors(bytes: &[u8], owner: &str) -> Vec<ConstructorMetadataShape> {
+    let (d1, d2) = common_core::raw_kotlin_metadata(bytes).expect("read Kotlin metadata");
+    let d1 = vec![d1.into_iter().map(char::from).collect::<String>()];
+    krusty::jvm::metadata::decode_metadata(&d1, &d2, Some(1), owner, None, &[])
+        .expect("generated class metadata decodes")
+        .constructors
+        .iter()
+        .map(|constructor| ConstructorMetadataShape {
+            visibility: constructor.params.visibility,
+            names: constructor.params.names.clone(),
+            defaults: constructor.params.defaults.clone(),
+            types: constructor.params.types.clone(),
+            jvm_name: constructor.jvm_name,
+            jvm_descriptor: constructor.jvm_desc,
+        })
+        .collect()
+}
+
+#[test]
+fn a_serializable_class_publishes_the_exact_deserialization_constructor() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let built = compare_with_kotlinc_plugin(
+        "DeserializationConstructorMetadata",
+        SRC,
+        "Point",
+        &cp,
+        "25",
+        &extra,
+    )
+    .expect("reference kotlinc and javap are required for byte-parity tests");
+
+    let expected = vec![
+        ConstructorMetadataShape {
+            visibility: krusty::types::Visibility::Public,
+            names: vec!["x".to_string(), "y".to_string()],
+            defaults: vec![false, false],
+            types: vec![Ty::Int, Ty::String],
+            jvm_name: "<init>",
+            jvm_descriptor: Some("(ILjava/lang/String;)V"),
+        },
+        ConstructorMetadataShape {
+            visibility: krusty::types::Visibility::Internal,
+            names: vec![
+                "seen0".to_string(),
+                "x".to_string(),
+                "y".to_string(),
+                "serializationConstructorMarker".to_string(),
+            ],
+            defaults: vec![false, false, false, false],
+            types: vec![
+                Ty::Int,
+                Ty::Int,
+                Ty::nullable(Ty::String),
+                Ty::nullable(Ty::obj(
+                    "kotlinx/serialization/internal/SerializationConstructorMarker",
+                )),
+            ],
+            jvm_name: "<init>",
+            jvm_descriptor: Some(
+                "(IILjava/lang/String;Lkotlinx/serialization/internal/SerializationConstructorMarker;)V",
+            ),
+        },
+    ];
+    assert_eq!(
+        metadata_constructors(&built.reference_bytes, "Point"),
+        expected,
+        "kotlinc constructor metadata"
+    );
+    assert_eq!(
+        metadata_constructors(&built.krusty_bytes, "Point"),
+        expected,
+        "krusty constructor metadata"
+    );
+    if built.krusty_bytes != built.reference_bytes {
+        let (want, got) = (structure(&built.reference), structure(&built.krusty));
+        let first = want
+            .iter()
+            .zip(&got)
+            .position(|(expected, actual)| expected != actual)
+            .unwrap_or_else(|| want.len().min(got.len()));
+        panic!(
+            "serialized Point differs from kotlinc ({} B vs {} B); first structural difference at line {first}\n  kotlinc: {:?}\n  krusty:  {:?}",
+            built.krusty_bytes.len(),
+            built.reference_bytes.len(),
+            want.get(first),
+            got.get(first),
+        );
+    }
+}
+
 /// Everything `@Metadata` says about a generated serializer, in kotlinc's order.
 ///
 /// The record is what a Kotlin consumer reads the declaration back from, and three facts diverged:
@@ -2655,25 +2742,21 @@ fn metadata_d2(bytes: &[u8]) -> Vec<String> {
 /// `typeParametersSerializers`, which kotlinc records only for a GENERIC serializer.
 #[test]
 fn a_generated_serializer_describes_the_members_kotlinc_describes() {
-    let Some((plugin, cp)) = plugin_and_runtime() else {
-        eprintln!("skipping: serialization plugin or runtime jar not available locally");
-        return;
-    };
+    let (plugin, cp) = plugin_and_runtime()
+        .expect("serialization plugin and runtime must be available under the test harness");
     let extra = vec![format!("-Xplugin={}", plugin.display())];
     let src = "import kotlinx.serialization.Serializable\n\
                @Serializable\n\
                data class Retention(val days: Int)\n";
-    let Some(built) = compare_with_kotlinc_plugin(
+    let built = compare_with_kotlinc_plugin(
         "SerializerMemberRecords",
         src,
         "Retention$$serializer",
         &cp,
         "25",
         &extra,
-    ) else {
-        eprintln!("skipping: reference kotlinc or javap unavailable");
-        return;
-    };
+    )
+    .expect("reference kotlinc and javap must be available under the test harness");
     let want = metadata_d2(&built.reference_bytes);
     assert!(
         !want
@@ -2782,20 +2865,21 @@ fn only_an_array_of_a_star_projection_records_its_descriptor() {
 }
 
 /// One member's disassembly, from its declaration to the next one, with pool indices erased.
-fn member_body(disassembly: &str, member: &str) -> Vec<String> {
-    let declaration = |line: &str| {
-        line.ends_with(';') && line.contains('(') && !line.contains(':') && !line.starts_with('#')
-    };
+pub(super) fn member_body(disassembly: &str, member: &str) -> Vec<String> {
+    let declaration = opens_a_member;
+    // Raw lines, because INDENTATION is what separates the class body's closing `}` (column 0)
+    // from a `}` inside a member — a `tableswitch` block ends with one, and trimming first made
+    // this stop there and silently return a truncated body.
     let mut lines = disassembly
         .lines()
-        .map(str::trim)
-        .skip_while(|line| !(declaration(line) && line.contains(member)));
-    let mut body = vec![lines.next().unwrap_or_default().to_string()];
+        .skip_while(|line| !(declaration(line.trim()) && line.contains(member)));
+    let mut body = vec![lines.next().unwrap_or_default().trim().to_string()];
     for line in lines {
-        if declaration(line) || line == "}" {
+        // The LAST member ends at the class body's close, not at another declaration.
+        if line == "}" || declaration(line.trim()) {
             break;
         }
-        body.push(line.to_string());
+        body.push(line.trim().to_string());
     }
     structure(&body.join("\n"))
 }
@@ -2926,5 +3010,149 @@ fn a_deprecated_class_attribute_name_interns_after_its_source_file() {
         got.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
         want.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
         "class attribute name interning order"
+    );
+}
+
+/// The class initializer that builds a singleton serializer's `descriptor`.
+///
+/// Three divergences, all invisible to a running program:
+///
+///   * krusty read the serializer through `this`, which made the emitter hoist `INSTANCE` into a
+///     local for the class initializer — one store, one load and one extra local kotlinc does not
+///     have. kotlinc reads `INSTANCE` at the use site.
+///   * neither narrowing cast was emitted: `INSTANCE` to the `GeneratedSerializer` the descriptor's
+///     constructor takes, and the built descriptor to the `SerialDescriptor` the field holds.
+///   * a generated class has no per-statement source to map, so kotlinc gives its `<clinit>` two
+///     line entries — the body at the declaration line, the trailing `return` at the declaration's
+///     closing line. krusty emitted no `LineNumberTable` at all.
+#[test]
+fn a_singleton_serializers_class_initializer_matches_kotlinc() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    // A multi-line declaration, so the closing-brace entry is a DIFFERENT line from the header and
+    // the two cannot be confused.
+    let src = "import kotlinx.serialization.Serializable\n\
+               \n\
+               @Serializable\n\
+               data class Repo(\n\
+               \x20   val id: Long,\n\
+               \x20   val name: String,\n\
+               )\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "SerializerClassInit",
+        src,
+        "Repo$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    let want = member_body(&built.reference, "static {}");
+    assert!(
+        want.iter().any(|line| line == "line 3: 10")
+            && want.iter().any(|line| line.starts_with("line 7:")),
+        "kotlinc maps the body to the declaration and the return to its closing line: {want:?}"
+    );
+    assert_eq!(
+        member_body(&built.krusty, "static {}"),
+        want,
+        "generated serializer class initializer"
+    );
+}
+
+/// What `deserialize` opens before it decodes anything, and how it dispatches on the element index.
+///
+/// The local layout is kotlinc's: the descriptor read ONCE into a local, then the loop flag, the
+/// element index, the seen-mask, the field locals, and the composite decoder LAST — `beginStructure`
+/// runs after the rest are zeroed. krusty had kept the composite decoder at slot 2 and re-read
+/// `this.descriptor` at every use, which put every subsequent local one place off.
+///
+/// The dispatch is one `tableswitch` over `-1..=n-1` with a default, not a chain of comparisons.
+///
+/// Only the prologue is compared instruction for instruction; the rest of the method is pinned by
+/// the dispatch assertion below and by the runtime differentials in
+/// `deserialize_dispatch_shape_e2e`.
+#[test]
+fn deserialize_opens_kotlincs_locals_and_switches_on_the_index() {
+    let Some((plugin, cp)) = plugin_and_runtime() else {
+        eprintln!("skipping: serialization plugin or runtime jar not available locally");
+        return;
+    };
+    let extra = vec![format!("-Xplugin={}", plugin.display())];
+    let src = "import kotlinx.serialization.Serializable\n\
+               @Serializable\n\
+               data class Point(val x: Int, val y: String)\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "DeserializeDispatch",
+        src,
+        "Point$$serializer",
+        &cp,
+        "25",
+        &extra,
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    // Which local each value lands in, up to the `beginStructure` result — the layout every later
+    // instruction indexes into. Offsets are not compared: they shift by the one documented extra
+    // instruction below.
+    let stores = |text: &str| {
+        let body = member_body(text, "deserialize(kotlinx.serialization.encoding.Decoder)");
+        let end = body
+            .iter()
+            .position(|line| line.contains("beginStructure"))
+            .unwrap_or_else(|| panic!("no beginStructure in deserialize: {body:?}"));
+        body[..=end]
+            .iter()
+            .filter_map(|line| line.split_once(": "))
+            .map(|(_, instruction)| instruction.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|instruction| {
+                instruction.starts_with("astore") || instruction.starts_with("istore")
+            })
+            .collect::<Vec<_>>()
+    };
+    let want = stores(&built.reference);
+    assert_eq!(
+        want,
+        ["astore_2", "istore_3", "istore 5", "istore 6", "astore 7"],
+        "kotlinc's locals: the descriptor, the loop flag, the seen mask, then the fields"
+    );
+    // Slot 4 is the element index, which neither compiler initializes — it is assigned only by the
+    // loop, and the verifier frames carry `top` there until then.
+    assert_eq!(stores(&built.krusty), want, "deserialize local layout");
+
+    let dispatch = |text: &str| {
+        member_body(text, "deserialize(kotlinx.serialization.encoding.Decoder)")
+            .into_iter()
+            .filter(|line| {
+                line.contains("tableswitch")
+                    || line.contains("lookupswitch")
+                    || line.contains("UnknownFieldException")
+            })
+            .map(|line| {
+                line.split_once(": ")
+                    .map_or(line.clone(), |(_, rest)| rest.to_string())
+            })
+            .collect::<Vec<_>>()
+    };
+    let want_dispatch = dispatch(&built.reference);
+    assert!(
+        want_dispatch
+            .iter()
+            .any(|line| line.contains("tableswitch"))
+            && want_dispatch
+                .iter()
+                .any(|line| line.contains("UnknownFieldException")),
+        "kotlinc switches on the element index and throws on an unknown one: {want_dispatch:?}"
+    );
+    assert_eq!(
+        dispatch(&built.krusty),
+        want_dispatch,
+        "element-index dispatch"
     );
 }

@@ -708,7 +708,8 @@ mod tests {
             .expect("collection-transform decoder test requires the repository Kotlin stdlib");
         let libraries = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
             vec![stdlib],
-        )));
+        )))
+        .expect("JVM provider initialization");
         let callable = callable(&libraries, expected_descriptor);
         let descriptor = callable.descriptor.clone();
         let body = libraries

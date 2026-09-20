@@ -16,6 +16,7 @@ mod classifier_references;
 mod constant_folding;
 mod constructors;
 mod data_classes;
+mod delegated_properties;
 mod error;
 mod expression;
 mod external_references;
@@ -639,6 +640,9 @@ fn finish_callable_body(
             .pop()
             .ok_or(FirLoweringFailure::MissingBodyResult { origin })?;
         let return_value = ir.add_expr(crate::ir::IrExpr::Return(Some(value)));
+        if let Some(&end) = ir.expr_end_lines.get(&value) {
+            ir.implicit_return_end_lines.insert(return_value, end);
+        }
         roots.push(return_value);
         ir.add_expr(crate::ir::IrExpr::Block {
             stmts: roots,

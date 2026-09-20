@@ -3,15 +3,22 @@
 
 mod retained_defaults;
 mod return_labels;
+mod traversal;
 use crate::diag::Span;
 use crate::kt_string::{KtString, KtStringBuf};
 use crate::types::Visibility;
 use retained_defaults::{retain_class_default_spans, retain_param_default_spans};
 pub(crate) use return_labels::ReturnLabelSpans;
+use traversal::{any_class_decl_expr, any_fun_decl_expr, any_property_decl_expr};
 
 mod call_shape;
+mod constructors;
+mod operators;
+mod type_refs;
 pub(crate) use call_shape::explicit_call_receiver;
 pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
+pub use constructors::{CtorDelegation, CtorDelegationCall, SecondaryCtor};
+pub use operators::{BinOp, UnOp};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct ExprId(pub u32);
@@ -77,71 +84,6 @@ pub fn has_instance_backing_field(p: &PropDecl) -> bool {
 
 pub fn setter_param_or_value(param: Option<&String>) -> String {
     param.cloned().unwrap_or_else(|| "value".to_string())
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum BinOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Rem,
-    Eq,
-    Ne,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-    And,
-    Or,
-    RefEq,
-    RefNe, // === and !==
-}
-
-impl BinOp {
-    /// The Kotlin operator-function name an arithmetic operator desugars to (`a + b` → `a.plus(b)`),
-    /// or `None` for a non-arithmetic operator. The single source of truth shared by the checker and
-    /// the lowerer when resolving a user/library `operator fun`.
-    pub fn arith_operator_name(self) -> Option<&'static str> {
-        Some(match self {
-            BinOp::Add => "plus",
-            BinOp::Sub => "minus",
-            BinOp::Mul => "times",
-            BinOp::Div => "div",
-            BinOp::Rem => "rem",
-            _ => return None,
-        })
-    }
-
-    /// Inverse of [`arith_operator_name`](Self::arith_operator_name): the arithmetic operator a
-    /// Kotlin operator-function name (`plus`/`minus`/…) desugars from, or `None`.
-    pub fn from_arith_operator_name(name: &str) -> Option<BinOp> {
-        Some(match name {
-            "plus" => BinOp::Add,
-            "minus" => BinOp::Sub,
-            "times" => BinOp::Mul,
-            "div" => BinOp::Div,
-            "rem" => BinOp::Rem,
-            _ => return None,
-        })
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum UnOp {
-    Neg,
-    Not,
-    Plus,
-}
-
-impl UnOp {
-    pub fn operator_name(self) -> &'static str {
-        match self {
-            UnOp::Neg => "unaryMinus",
-            UnOp::Plus => "unaryPlus",
-            UnOp::Not => "not",
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -398,6 +340,10 @@ pub enum Stmt {
         name: String,
         ty: Option<TypeRef>,
         delegate: ExprId,
+        /// Span of the `by` keyword. A diagnostic about the delegate's suitability AS a delegate is
+        /// anchored here, which is where kotlinc puts it. It travels with the statement so a body
+        /// reached through another file (an inline splice) keeps its own anchor.
+        by_span: Span,
     },
     /// `val (a, b, …) = init` — destructuring; each entry binds `init.componentN()`.
     /// An entry named `_` is skipped (no binding, no `componentN` call), per Kotlin.
@@ -505,6 +451,8 @@ pub struct TypeAliasDecl {
     pub type_params: Vec<String>,
     pub target: TypeRef,
     pub span: Span,
+    /// Exact span of the alias's NAME, like [`FunDecl::name_span`].
+    pub name_span: Span,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -617,83 +565,6 @@ pub struct TypeRef {
     pub fun_context_count: u32,
 }
 
-impl TypeRef {
-    pub(crate) fn from_annotation(annotation: &AnnotationRef) -> Self {
-        Self {
-            name: annotation.name.clone(),
-            flags: TrFlags::default().with_annotation(true),
-            arg: None,
-            targs: Vec::new(),
-            span: annotation.span,
-            fun_params: Vec::new(),
-            fun_context_count: 0,
-        }
-    }
-
-    #[inline]
-    pub fn nullable(&self) -> bool {
-        self.flags.has(TrFlags::NULLABLE)
-    }
-    #[inline]
-    pub fn definitely_non_null(&self) -> bool {
-        self.flags.has(TrFlags::DEFINITELY_NON_NULL)
-    }
-    #[inline]
-    pub fn fun_has_receiver(&self) -> bool {
-        self.flags.has(TrFlags::FUN_HAS_RECEIVER)
-    }
-    #[inline]
-    pub fn fun_suspend(&self) -> bool {
-        self.flags.has(TrFlags::FUN_SUSPEND)
-    }
-    #[inline]
-    pub fn in_projection(&self) -> bool {
-        self.flags.has(TrFlags::IN_PROJECTION)
-    }
-    #[inline]
-    pub fn out_projection(&self) -> bool {
-        self.flags.has(TrFlags::OUT_PROJECTION)
-    }
-    #[inline]
-    pub fn is_import(&self) -> bool {
-        self.flags.has(TrFlags::IMPORT)
-    }
-    #[inline]
-    pub fn is_star_projection(&self) -> bool {
-        self.flags.has(TrFlags::STAR_PROJECTION)
-    }
-    #[inline]
-    pub fn is_annotation(&self) -> bool {
-        self.flags.has(TrFlags::ANNOTATION)
-    }
-    /// An underscore in a call-site type-argument list asks inference to solve this position.
-    /// It is neither an unresolved classifier nor a star projection; checked call data must replace
-    /// it with the inferred semantic argument.
-    #[inline]
-    pub fn is_inference_placeholder(&self) -> bool {
-        self.name == "_"
-            && self.arg.is_none()
-            && self.targs.is_empty()
-            && self.fun_params.is_empty()
-            && !self.is_star_projection()
-    }
-    #[inline]
-    pub fn set_nullable(&mut self, on: bool) {
-        self.flags = self.flags.with_nullable(on);
-    }
-    #[inline]
-    pub fn set_definitely_non_null(&mut self, on: bool) {
-        self.flags = self.flags.with_definitely_non_null(on);
-    }
-    #[inline]
-    pub fn set_projection(&mut self, in_projection: bool, out_projection: bool) {
-        self.flags = self
-            .flags
-            .with_in_projection(in_projection)
-            .with_out_projection(out_projection);
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct AnnotationRef {
     /// Source spelling used only as input to name resolution.
@@ -722,6 +593,12 @@ pub struct Param {
     pub is_vararg: bool,
     /// Exact span of the `vararg` modifier. Present exactly when [`Self::is_vararg`] is true.
     pub vararg_span: Option<Span>,
+    /// `true` when the parameter wrote `noinline`. Such an argument is MATERIALIZED — a real
+    /// closure with a local of its own — where an ordinary inline function parameter is spliced at
+    /// each use and owns no local. It is a MODIFIER, not a type shape: a `noinline` parameter is
+    /// function-typed exactly like the spliced one beside it. `crossinline` is not this: it only
+    /// forbids a non-local return, and such a parameter is still spliced.
+    pub is_materialized_lambda: bool,
     /// Default value (`fun f(x: Int = 5)`). Filled in at the call site for omitted arguments. A
     /// default may reference parameters declared before it, matching Kotlin's left-to-right scope.
     pub default: Option<ExprId>,
@@ -757,6 +634,8 @@ impl FdFlags {
     const IS_OPERATOR: u16 = 1 << 7;
     const IS_INFIX: u16 = 1 << 8;
     const IS_COMPANION_EXTENSION: u16 = 1 << 9;
+    const IS_EXTERNAL: u16 = 1 << 10;
+    const IS_ACTUAL: u16 = 1 << 11;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -812,6 +691,14 @@ impl FdFlags {
     pub const fn with_is_companion_extension(self, on: bool) -> Self {
         self.with(Self::IS_COMPANION_EXTENSION, on)
     }
+    #[inline]
+    pub const fn with_is_external(self, on: bool) -> Self {
+        self.with(Self::IS_EXTERNAL, on)
+    }
+    #[inline]
+    pub const fn with_is_actual(self, on: bool) -> Self {
+        self.with(Self::IS_ACTUAL, on)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -841,10 +728,16 @@ pub struct FunDecl {
     /// may use them concretely (`is T`, `as T`, `T::class`) and codegen specializes them per call.
     pub reified_type_params: std::collections::HashSet<String>,
     pub span: Span,
+    /// Exact span of the declaration's NAME. Kotlin diagnostics about a declaration as a whole
+    /// point here, not at its keyword.
+    pub name_span: Span,
     /// Source range from `fun` through the optional `where` clause, excluding the body.
     pub signature_span: Span,
     /// Exact span of the `override` modifier. Present exactly when [`Self::is_override`] is true.
     pub override_span: Option<Span>,
+    /// Span of the `context` keyword introducing a `context(…)` clause. Present exactly when
+    /// [`Self::context_count`] is non-zero; a diagnostic about the clause is anchored here.
+    pub context_span: Option<Span>,
     /// Exact span of the `operator` modifier. Present exactly when [`Self::is_operator`] is true.
     pub operator_span: Option<Span>,
     /// Source span of a `tailrec` modifier, for the diagnostic that rejects it on an open member.
@@ -953,6 +846,18 @@ impl FunDecl {
     pub fn is_companion_extension(&self) -> bool {
         self.flags.has(FdFlags::IS_COMPANION_EXTENSION)
     }
+    /// The `external` modifier. krusty does not implement an external body; the modifier is
+    /// recorded because a declaration diagnostic renders it.
+    #[inline]
+    pub fn is_external(&self) -> bool {
+        self.flags.has(FdFlags::IS_EXTERNAL)
+    }
+    /// The `actual` modifier. It is semantically inert — actualization matches by shape, not by the
+    /// keyword — and is recorded because an `actual` that actualizes nothing is an error.
+    #[inline]
+    pub fn is_actual(&self) -> bool {
+        self.flags.has(FdFlags::IS_ACTUAL)
+    }
 }
 
 /// A primary-constructor parameter that is also a property (`val`/`var name: Type`).
@@ -968,6 +873,10 @@ pub struct PropParam {
     /// `true` for a `val`/`var` parameter (a property → backing field + accessor); `false` for a
     /// plain constructor parameter (in scope for `init`/body-property initializers, but not a field).
     pub is_property: bool,
+    /// `true` for a primary-constructor property that wrote `actual`. A constructor property is a
+    /// declaration of its own, so it actualizes — or fails to actualize — independently of the
+    /// classifier whose header declares it.
+    pub is_actual: bool,
     pub is_override: bool,
     /// `open` or `override` without `final`.
     pub is_open: bool,
@@ -1129,6 +1038,8 @@ pub struct ClassDecl {
     /// same `(annotation, args)` pairing every other declaration's annotations carry.
     pub primary_ctor_annotation_args: Vec<Vec<ExprId>>,
     pub span: Span,
+    /// Exact span of the classifier's NAME, like [`FunDecl::name_span`].
+    pub name_span: Span,
     /// 1-based source line of the class declaration (from `span.lo`), for the `LineNumberTable` of
     /// kotlinc's synthesized members (ctor/accessors), which all map to the class's declaration line.
     /// 0 = unknown (no debug tables emitted). Filled by a parser post-pass.
@@ -1253,37 +1164,6 @@ impl ClassDecl {
     }
 }
 
-/// A secondary constructor `constructor(params) [: this(args) | : super(args)] [{ body }]`.
-#[derive(Clone, Debug)]
-pub struct SecondaryCtor {
-    pub annotations: Vec<AnnotationRef>,
-    pub annotation_args: Vec<Vec<ExprId>>,
-    pub params: Vec<Param>,
-    pub delegation: CtorDelegation,
-    pub body: Option<ExprId>,
-    /// Source range from `constructor` through its delegation call or body.
-    pub span: Span,
-}
-
-/// How a secondary constructor delegates: to another constructor of the same class (`this(...)`),
-/// to a base-class constructor (`super(...)`), or implicitly (none written).
-#[derive(Clone, Debug)]
-pub enum CtorDelegation {
-    None,
-    This(CtorDelegationCall),
-    Super(CtorDelegationCall),
-}
-
-#[derive(Clone, Debug)]
-pub struct CtorDelegationCall {
-    pub args: Vec<ExprId>,
-    pub names: Vec<Option<String>>,
-    /// Whether the last argument was written as a SYNTACTIC trailing lambda (`f(1) {}`). A `this(…)` /
-    /// `super(…)` delegation can never have one; a constructor CALL can, and the distinction decides
-    /// whether that argument may fill a `vararg` slot.
-    pub trailing_lambda: bool,
-}
-
 /// A class with NO primary constructor names its base class WITHOUT parentheses — `class D : Base {
 /// constructor(): super(…) }` — because the base arguments come from each secondary `super(…)`. The
 /// parser parks every parenless supertype in `supertypes` and promotes only the ones naming a class
@@ -1372,6 +1252,9 @@ pub struct PropDecl {
     pub is_external: bool,
     /// `true` if the source declaration carried the `expect` modifier.
     pub is_expect: bool,
+    /// `true` if the source declaration carried the `actual` modifier. Inert semantically, but an
+    /// `actual` that actualizes nothing is an error.
+    pub is_actual: bool,
     /// A custom getter body (`val x: T get() = expr`/`get() { … }`). With no initializer and no
     /// `field` reference it is a computed property (no backing field); with an initializer or a
     /// `field` reference it reads the backing field.
@@ -1379,6 +1262,10 @@ pub struct PropDecl {
     /// Whether a getter accessor was written at all. This distinguishes an absent accessor from an
     /// explicitly declared default/body-less accessor while keeping `getter` reserved for bodies.
     pub getter_declared: bool,
+    /// Source span of a written getter's `get`/`get()` header — the keyword through its parameter
+    /// list, excluding the body. `None` when no getter was written. An accessor is a declaration in
+    /// its own right and a diagnostic about it points here, not at the property.
+    pub getter_span: Option<Span>,
     /// The getter carries the semantic `inline` modifier and must retain checked FIR for call sites.
     pub getter_inline: bool,
     /// An explicit getter return type (`get(): T`). Kept apart from the property's annotation so
@@ -1399,8 +1286,14 @@ pub struct PropDecl {
     /// `val x: T by <expr>` — a DELEGATED property. The expression is the delegate; reads route through
     /// `delegate.getValue(thisRef, property)` (and writes through `setValue`). `None` for a plain property.
     pub delegate: Option<ExprId>,
+    /// Span of the `by` keyword introducing [`Self::delegate`]. Present exactly when that is.
+    /// A diagnostic about the delegate's suitability AS a delegate is anchored here, which is where
+    /// kotlinc puts it.
+    pub delegate_by_span: Option<Span>,
     pub explicit_backing_field: Option<ExplicitBackingField>,
     pub span: Span,
+    /// Exact span of the property's NAME, like [`FunDecl::name_span`].
+    pub name_span: Span,
 }
 
 impl PropDecl {
@@ -1425,6 +1318,9 @@ impl PropDecl {
 pub struct PropAccessor {
     /// Setter parameter name (`set(value) { … }` → `"value"`); `None` for a default-bodied setter.
     pub param: Option<String>,
+    /// Source span of the `set`/`set(v)` header — the keyword through its parameter list, excluding
+    /// the body — mirroring [`PropDecl::getter_span`].
+    pub span: Span,
     /// `None` = default accessor body (just a visibility change); `Some` = explicit body.
     pub body: Option<FunBody>,
     pub is_private: bool,
@@ -1475,6 +1371,14 @@ impl ImportPath {
     }
 }
 
+/// A top-level `expect` declaration and the keyword that introduced it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExpectDeclaration {
+    pub declaration: DeclId,
+    /// The `expect` modifier's own span, recorded where the parser consumed it.
+    pub keyword: Span,
+}
+
 /// One parsed source file: its package, and arenas for every node kind.
 #[derive(Default)]
 pub struct File {
@@ -1499,10 +1403,28 @@ pub struct File {
     pub decls: Vec<DeclId>,
     /// Kotlin script statements in source order.
     pub script_body: Option<ExprId>,
-    /// Top-level declarations carrying the `expect` modifier (multiplatform headers). A matched
-    /// `actual` in the same compiled source set replaces them (see `strip_matched_expects`); an
-    /// unmatched `expect` stays and fails checking like any body-less declaration.
-    pub expect_decls: Vec<DeclId>,
+    /// Top-level declarations carrying the `expect` modifier (multiplatform headers), each paired
+    /// with the span of the KEYWORD that introduced it. Stable compact-header actualization
+    /// excludes a matched declaration subtree before signature collection; an unmatched `expect`
+    /// is rejected by frontend validation.
+    ///
+    /// The keyword travels with the declaration because every diagnostic about an `expect` points
+    /// at it. Recovering it afterwards means searching the file's modifiers for the nearest one
+    /// that ends before the declaration — a guess that has no answer when the declaration was
+    /// synthesized, and a wrong one whenever two headers share a line.
+    pub expect_decls: Vec<ExpectDeclaration>,
+    /// Top-level declarations carrying the `actual` modifier, the mirror of [`Self::expect_decls`].
+    /// An `actual` is otherwise inert; this records it so an `actual` with no `expect` to actualize
+    /// can be rejected, which is an error in Kotlin.
+    pub actual_decls: Vec<DeclId>,
+    /// Indices into [`Self::type_alias_decls`] for aliases carrying `actual`. A `typealias` is not
+    /// a `Decl`, so it cannot ride [`Self::actual_decls`] — and `actual typealias S = String` is
+    /// exactly how an `expect class` is actualized, so it must be covered.
+    pub actual_type_aliases: Vec<usize>,
+    /// Every `expect` or `actual` MODIFIER keyword this file writes, with its own span — members
+    /// included, since the two are legal only in a multiplatform project and the diagnostic points
+    /// at the keyword rather than at the declaration it precedes.
+    pub multiplatform_modifiers: Vec<(String, crate::diag::Span)>,
     pub decl_arena: Vec<Decl>,
     pub expr_arena: Vec<Expr>,
     pub stmt_arena: Vec<Stmt>,
@@ -1517,6 +1439,10 @@ pub struct File {
     pub value_operator_spans: std::collections::HashMap<u32, Span>,
     /// Assignment lvalue spans keyed by statement ID.
     pub assignment_target_spans: std::collections::HashMap<u32, Span>,
+    /// Source span of the `init` KEYWORD introducing each initializer block, keyed by the block
+    /// expression [`ClassInit::Block`] records. A diagnostic about an `init` block points at the
+    /// keyword, which the block expression's own span (the `{`) does not cover.
+    pub init_block_keywords: std::collections::HashMap<ExprId, Span>,
     /// Labels written on declaration statements (`label@ val …`, `label@ fun …`), keyed by the
     /// declaration statement. The value retains both spelling and exact label-token span.
     pub statement_labels: std::collections::HashMap<StmtId, (String, Span)>,
@@ -1537,6 +1463,11 @@ pub struct File {
     pub expr_end_lines: Vec<u32>,
     /// 1-based source line of each statement's start (parallel to `stmt_spans`; 0 = unknown).
     pub stmt_lines: Vec<u32>,
+    /// 1-based source line of an assignment statement's LVALUE, keyed by statement ID: the line
+    /// the member being written is named on, which is where the write's accessor dispatch belongs
+    /// when the assignment spans several lines. Parallel to `assignment_target_spans`, and absent
+    /// for every other statement form.
+    pub assignment_target_lines: std::collections::HashMap<u32, u32>,
     /// Name of each NAMED annotation argument, keyed by that argument's own `ExprId`
     /// (`@Deprecated("gone", level = HIDDEN)` → the `HIDDEN` expression maps to `"level"`).
     /// Sparse: a positional argument has no entry. Annotation elements have defaults and may be
@@ -1778,10 +1709,12 @@ impl File {
         self.expr_source_lines = Vec::new();
         self.expr_end_lines = Vec::new();
         self.stmt_lines = Vec::new();
+        self.assignment_target_lines = Default::default();
         self.value_operator_spans = Default::default();
         // Both return-label span tables are keyed by the arenas released here.
         self.return_label_spans.clear();
         self.assignment_target_spans = Default::default();
+        self.init_block_keywords = Default::default();
         self.incdec_access_operands = Default::default();
         self.call_arg_names = Default::default();
         self.collection_literal_calls = Default::default();
@@ -2117,140 +2050,6 @@ impl File {
     ) -> bool {
         expr_refs_name_inner(self, e, names, true)
     }
-}
-
-fn any_fun_body_expr(body: &FunBody, predicate: &mut impl FnMut(ExprId) -> bool) -> bool {
-    match body {
-        FunBody::Expr(expression) | FunBody::Block(expression) => predicate(*expression),
-        FunBody::None => false,
-    }
-}
-
-fn any_param_expr(params: &[Param], predicate: &mut impl FnMut(ExprId) -> bool) -> bool {
-    for parameter in params {
-        if parameter.default.is_some_and(&mut *predicate)
-            || parameter
-                .annotation_args
-                .iter()
-                .flatten()
-                .copied()
-                .any(&mut *predicate)
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn any_fun_decl_expr(function: &FunDecl, predicate: &mut impl FnMut(ExprId) -> bool) -> bool {
-    function
-        .annotation_args
-        .iter()
-        .flatten()
-        .copied()
-        .any(&mut *predicate)
-        || any_param_expr(&function.params, predicate)
-        || any_fun_body_expr(&function.body, predicate)
-}
-
-fn any_property_decl_expr(property: &PropDecl, predicate: &mut impl FnMut(ExprId) -> bool) -> bool {
-    property
-        .annotation_args
-        .iter()
-        .flatten()
-        .copied()
-        .any(&mut *predicate)
-        || any_param_expr(&property.context_params, predicate)
-        || property.init.is_some_and(&mut *predicate)
-        || property.delegate.is_some_and(&mut *predicate)
-        || property
-            .getter
-            .as_ref()
-            .is_some_and(|body| any_fun_body_expr(body, predicate))
-        || property
-            .setter
-            .as_ref()
-            .and_then(|setter| setter.body.as_ref())
-            .is_some_and(|body| any_fun_body_expr(body, predicate))
-}
-
-fn any_class_decl_expr(class: &ClassDecl, predicate: &mut impl FnMut(ExprId) -> bool) -> bool {
-    if class
-        .annotation_args
-        .iter()
-        .flatten()
-        .copied()
-        .any(&mut *predicate)
-        || class.props.iter().any(|parameter| {
-            parameter.default.is_some_and(&mut *predicate)
-                || parameter
-                    .annotation_args
-                    .iter()
-                    .flatten()
-                    .copied()
-                    .any(&mut *predicate)
-        })
-        || class.base_args.iter().copied().any(&mut *predicate)
-        || class
-            .interface_delegations
-            .iter()
-            .any(|delegation| predicate(delegation.value))
-        || class.init_order.iter().any(|step| match step {
-            ClassInit::Block(body) => predicate(*body),
-            // The corresponding `body_props` entry is visited below; following the index here
-            // would report the same initializer twice.
-            ClassInit::PropInit(_) => false,
-        })
-        || class.enum_entries.iter().any(|entry| {
-            entry
-                .annotation_args
-                .iter()
-                .flatten()
-                .copied()
-                .chain(entry.args.iter().copied())
-                .any(&mut *predicate)
-                || entry.init_order.iter().any(|step| match step {
-                    ClassInit::Block(body) => predicate(*body),
-                    ClassInit::PropInit(_) => false,
-                })
-        })
-    {
-        return true;
-    }
-
-    for constructor in &class.secondary_ctors {
-        let delegation_args = match &constructor.delegation {
-            CtorDelegation::None => &[][..],
-            CtorDelegation::This(call) | CtorDelegation::Super(call) => call.args.as_slice(),
-        };
-        if any_param_expr(&constructor.params, predicate)
-            || delegation_args.iter().copied().any(&mut *predicate)
-            || constructor.body.is_some_and(&mut *predicate)
-        {
-            return true;
-        }
-    }
-
-    class
-        .methods
-        .iter()
-        .chain(
-            class
-                .enum_entries
-                .iter()
-                .flat_map(|entry| entry.methods.iter()),
-        )
-        .any(|function| any_fun_decl_expr(function, predicate))
-        || class
-            .body_props
-            .iter()
-            .chain(
-                class
-                    .enum_entries
-                    .iter()
-                    .flat_map(|entry| entry.props.iter()),
-            )
-            .any(|property| any_property_decl_expr(property, predicate))
 }
 
 fn expr_refs_name(file: &File, e: ExprId, names: &std::collections::HashSet<&str>) -> bool {

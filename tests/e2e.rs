@@ -58,6 +58,8 @@ mod arity_error_coverage_e2e;
 mod assert_intrinsic_e2e;
 #[path = "backend_rejection_coverage_e2e.rs"]
 mod backend_rejection_coverage_e2e;
+#[path = "backend_temporary_leases_e2e.rs"]
+mod backend_temporary_leases_e2e;
 #[path = "backing_field_accessor_e2e.rs"]
 mod backing_field_accessor_e2e;
 #[path = "backtick_identifier_e2e.rs"]
@@ -92,6 +94,8 @@ mod break_continue_expr_e2e;
 mod break_continue_in_branch_e2e;
 #[path = "bridge_debug_tables_e2e.rs"]
 mod bridge_debug_tables_e2e;
+#[path = "bridge_return_unbox_e2e.rs"]
+mod bridge_return_unbox_e2e;
 #[path = "build1017_oo1_vcparam_result_takeif_e2e.rs"]
 mod build1017_oo1_vcparam_result_takeif_e2e;
 #[path = "build1018_pp1_suspend_block_firstornull_e2e.rs"]
@@ -230,6 +234,8 @@ mod classpath_fun_typed_property_lambda_e2e;
 mod classpath_function_reference_e2e;
 #[path = "classpath_hidden_deprecated_e2e.rs"]
 mod classpath_hidden_deprecated_e2e;
+#[path = "classpath_inline_splice_e2e.rs"]
+mod classpath_inline_splice_e2e;
 #[path = "classpath_inner_classes_e2e.rs"]
 mod classpath_inner_classes_e2e;
 #[path = "classpath_is_smartcast_e2e.rs"]
@@ -396,6 +402,8 @@ mod context_local_fun_e2e;
 mod context_parameter_signature_order_e2e;
 #[path = "context_parameters_e2e.rs"]
 mod context_parameters_e2e;
+#[path = "continuation_spill_order_e2e.rs"]
+mod continuation_spill_order_e2e;
 #[path = "contract_calls_in_place_e2e.rs"]
 mod contract_calls_in_place_e2e;
 #[path = "contract_erasure_e2e.rs"]
@@ -462,6 +470,8 @@ mod deferred_val_init_e2e;
 mod definitely_non_null_type_e2e;
 #[path = "delegate_by_lazy_e2e.rs"]
 mod delegate_by_lazy_e2e;
+#[path = "delegate_scalar_boundary_e2e.rs"]
+mod delegate_scalar_boundary_e2e;
 #[path = "delegated_local_prop_e2e.rs"]
 mod delegated_local_prop_e2e;
 #[path = "delegated_member_prop_e2e.rs"]
@@ -474,6 +484,8 @@ mod dep_resolution;
 mod dependency_property_reference_name_e2e;
 #[path = "descriptor_arity_fails_closed_e2e.rs"]
 mod descriptor_arity_fails_closed_e2e;
+#[path = "deserialize_dispatch_shape_e2e.rs"]
+mod deserialize_dispatch_shape_e2e;
 #[path = "destructure_component_extension_e2e.rs"]
 mod destructure_component_extension_e2e;
 #[path = "destructure_e2e.rs"]
@@ -558,6 +570,8 @@ mod enum_generic_interface_e2e;
 mod enum_implements_interface_e2e;
 #[path = "enum_inner_class_chain_e2e.rs"]
 mod enum_inner_class_chain_e2e;
+#[path = "enum_secondary_constructor_e2e.rs"]
+mod enum_secondary_constructor_e2e;
 #[path = "enum_value_of_intrinsic_e2e.rs"]
 mod enum_value_of_intrinsic_e2e;
 #[path = "enum_vararg_e2e.rs"]
@@ -578,6 +592,8 @@ mod explicit_import_shadows_same_package_e2e;
 mod expr_completeness_e2e;
 #[path = "expression_compound_assignment_e2e.rs"]
 mod expression_compound_assignment_e2e;
+#[path = "expression_line_marks_e2e.rs"]
+mod expression_line_marks_e2e;
 #[path = "ext_on_subtype_receiver_e2e.rs"]
 mod ext_on_subtype_receiver_e2e;
 #[path = "ext_receiver_tparam_binding_e2e.rs"]
@@ -782,6 +798,8 @@ mod inline_return_bound_context_e2e;
 mod inline_splice_e2e;
 #[path = "inline_splice_ldc_wide_e2e.rs"]
 mod inline_splice_ldc_wide_e2e;
+#[path = "inline_tail_expansion_shape_e2e.rs"]
+mod inline_tail_expansion_shape_e2e;
 #[path = "inline_vc_suspend_coverage_e2e.rs"]
 mod inline_vc_suspend_coverage_e2e;
 #[path = "inner_class_construction_e2e.rs"]
@@ -866,6 +884,8 @@ mod jvm_name_toplevel_e2e;
 mod jvmfield_companion_e2e;
 #[path = "kclass_type_e2e.rs"]
 mod kclass_type_e2e;
+#[path = "klib_container_e2e.rs"]
+mod klib_container_e2e;
 #[path = "kotlin_fun_java_sam_param_e2e.rs"]
 mod kotlin_fun_java_sam_param_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]
@@ -930,6 +950,8 @@ mod local_fun_overload_e2e;
 mod local_fun_ref_e2e;
 #[path = "local_shadows_receiver_member_e2e.rs"]
 mod local_shadows_receiver_member_e2e;
+#[path = "loop_jump_shape_e2e.rs"]
+mod loop_jump_shape_e2e;
 #[path = "lower_bail_reason_e2e.rs"]
 mod lower_bail_reason_e2e;
 #[path = "lvt_parity_e2e.rs"]
@@ -996,6 +1018,12 @@ mod missing_return_check_e2e;
 mod module_extension_signature_result_e2e;
 #[path = "mpp_expect_actual_e2e.rs"]
 mod mpp_expect_actual_e2e;
+#[path = "mpp_requires_the_feature_e2e.rs"]
+mod mpp_requires_the_feature_e2e;
+
+#[path = "expect_declaration_body_e2e.rs"]
+mod expect_declaration_body_e2e;
+
 #[path = "multi_index_operator_e2e.rs"]
 mod multi_index_operator_e2e;
 #[path = "multiline_catch_e2e.rs"]
@@ -1092,6 +1120,8 @@ mod nested_value_class_e2e;
 mod newline_method_chain_e2e;
 #[path = "no_assertions_flags_e2e.rs"]
 mod no_assertions_flags_e2e;
+#[path = "no_expect_for_actual_e2e.rs"]
+mod no_expect_for_actual_e2e;
 #[path = "no_jdk_builtin_emit_e2e.rs"]
 mod no_jdk_builtin_emit_e2e;
 #[path = "non_field_ctor_metadata_e2e.rs"]
@@ -1158,7 +1188,15 @@ mod object_value_inference_e2e;
 mod omitted_default_generic_overload_e2e;
 #[path = "one_armed_when_fallthrough_e2e.rs"]
 mod one_armed_when_fallthrough_e2e;
+#[path = "try_debug_lines_e2e.rs"]
+mod try_debug_lines_e2e;
 
+#[path = "child_serializer_cache_e2e.rs"]
+mod child_serializer_cache_e2e;
+#[path = "class_static_signature_e2e.rs"]
+mod class_static_signature_e2e;
+#[path = "declaration_debug_lines_e2e.rs"]
+mod declaration_debug_lines_e2e;
 #[path = "extension_receiver_specificity_e2e.rs"]
 mod extension_receiver_specificity_e2e;
 #[path = "int_when_switch_e2e.rs"]
@@ -1357,6 +1395,8 @@ mod secondary_ctor_this_sibling_e2e;
 mod serialization_companion_byte_parity_e2e;
 #[path = "serialization_coverage_e2e.rs"]
 mod serialization_coverage_e2e;
+#[path = "serialization_default_member_e2e.rs"]
+mod serialization_default_member_e2e;
 #[path = "serialization_krusty_only_e2e.rs"]
 mod serialization_krusty_only_e2e;
 #[path = "serialization_roundtrip_e2e.rs"]
@@ -1470,6 +1510,8 @@ mod suspend_return_type_recovery_e2e;
 mod suspend_single_operand_hoist_e2e;
 #[path = "suspend_spill_slot_reuse_e2e.rs"]
 mod suspend_spill_slot_reuse_e2e;
+#[path = "suspend_super_call_refusal_e2e.rs"]
+mod suspend_super_call_refusal_e2e;
 #[path = "suspend_throw_operand_e2e.rs"]
 mod suspend_throw_operand_e2e;
 #[path = "suspend_try_catch_shapes_e2e.rs"]
@@ -1522,6 +1564,7 @@ mod toplevel_prop_with_companion_const_e2e;
 mod toplevel_property_inference_e2e;
 #[path = "toplevel_property_ref_e2e.rs"]
 mod toplevel_property_ref_e2e;
+
 #[path = "tparam_bound_member_e2e.rs"]
 mod tparam_bound_member_e2e;
 #[path = "tparam_bounded_by_tparam_e2e.rs"]
@@ -1618,6 +1661,8 @@ mod value_class_map_key_e2e;
 mod value_class_nullable_widen_return_e2e;
 #[path = "value_class_param_generic_return_e2e.rs"]
 mod value_class_param_generic_return_e2e;
+#[path = "value_class_property_reference_e2e.rs"]
+mod value_class_property_reference_e2e;
 #[path = "value_class_template_lambda_e2e.rs"]
 mod value_class_template_lambda_e2e;
 #[path = "var_extension_property_e2e.rs"]

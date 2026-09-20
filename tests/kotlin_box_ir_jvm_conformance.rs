@@ -288,7 +288,10 @@ fn compile_source(
     let cp = harness_classpath(cp_paths);
     progress("two-pass FIR");
     let started = std::time::Instant::now();
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
+            .expect("JVM provider initialization"),
+    );
     let inputs = [krusty::source::SourceInput::kotlin(src).with_file_stem(stem)];
     let stems = [stem.to_string()];
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
@@ -538,7 +541,10 @@ fn compile_blocks_mixed(
     let cp = harness_classpath_with_friends(cp_paths, friend_paths.to_vec());
     let _overlay = OverlayGuard::set(&cp, overlay);
     report("module two-pass FIR");
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
+            .expect("JVM provider initialization"),
+    );
     let stems: Vec<String> = blocks
         .iter()
         .chain(java_blocks)

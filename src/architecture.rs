@@ -65,6 +65,11 @@ mod tests {
     }
 
     #[test]
+    fn metadata_wire_decoders_are_target_neutral() {
+        assert_allowed_crate_modules_in_tree("src/metadata/decode", &[]);
+    }
+
+    #[test]
     fn backend_contract_uses_only_frontend_handoff_dependencies() {
         // The streaming handoff owns one common-IR unit plus a classifier-only semantic view.
         // `CheckedIrFile` cannot expose parser arenas, source maps, resolver entry points, or the
@@ -233,6 +238,7 @@ mod tests {
             "frontend",
             "ir",
             "jvm",
+            "klib",
             "kt_string",
             "libraries",
             "lru",
@@ -344,6 +350,16 @@ mod tests {
         );
     }
 
+    /// A KLIB is the library format every non-JVM target reads, and the JVM backend already reads one
+    /// for the common `expect` headers. The container reader is therefore core, and it stays core only
+    /// as long as it depends on NOTHING else in the compiler: no target spelling, no symbol tables, no
+    /// type engine. It hands out bytes and the packages they belong to; deciding what a declaration
+    /// means is the caller's.
+    #[test]
+    fn klib_container_reader_depends_on_no_compiler_module() {
+        assert_allowed_crate_modules("src/klib.rs", &[]);
+    }
+
     #[test]
     fn native_facade_has_no_crate_dependencies() {
         assert_allowed_crate_modules("src/native/mod.rs", &[]);
@@ -380,10 +396,15 @@ mod tests {
             &["backend", "diag", "frontend", "jvm"],
         );
         assert_allowed_crate_modules("src/native/codegen/lower.rs", &["ir", "jvm", "types"]);
-        // `fir` only for the checked property and callable ids the IR itself carries.
+        // `fir` only for the checked property and callable ids the IR itself carries. `names` for
+        // the same reason `statics.rs` has it, below: a `super` access to a property arrives named
+        // by its ACCESSOR, and this file recovers which property that is by deriving each
+        // candidate's accessor name with Kotlin's own rule rather than by parsing the given one
+        // back — the direction `IrSuperCallKind` documents, and the only one a `@JvmName`-mangled
+        // accessor does not break.
         assert_allowed_crate_modules(
             "src/native/codegen/lower/objects.rs",
-            &["fir", "ir", "types"],
+            &["fir", "ir", "names", "types"],
         );
         // `names` is Kotlin's own accessor-naming rule, which common lowering already applied when
         // it named a source-written accessor; reading it from the same place is what keeps the two
@@ -631,6 +652,7 @@ mod tests {
                 "ir",
                 "js",
                 "jvm",
+                "klib",
                 "lexer",
                 "native",
                 "libraries",

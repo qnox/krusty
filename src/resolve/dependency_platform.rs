@@ -417,6 +417,10 @@ impl SymbolSource for DependencyPlatform {
 }
 
 impl SemanticPlatform for DependencyPlatform {
+    fn validate_initialization(&self) -> Result<(), crate::libraries::PlatformInitializationError> {
+        self.platform.validate_initialization()
+    }
+
     fn function_type(&self, arity: usize) -> Option<Ty> {
         self.platform.function_type(arity)
     }
@@ -463,6 +467,12 @@ impl SemanticPlatform for DependencyPlatform {
     ) -> Option<String> {
         self.platform
             .external_property_diagnostic_label(property, name, ty)
+    }
+
+    /// The target is the one underneath: this wrapper adds already-compiled sibling declarations
+    /// to a platform, it is not a platform of its own.
+    fn diagnostic_target_name(&self) -> Option<&str> {
+        self.platform.diagnostic_target_name()
     }
 
     fn library_value_form(&self, ty: Ty) -> Ty {
@@ -670,6 +680,7 @@ mod tests {
             setter,
             setter_visibility: visibility,
             is_const: false,
+            implicit_integer_coercion: false,
             compile_time_constant: None,
             visibility,
             owner,

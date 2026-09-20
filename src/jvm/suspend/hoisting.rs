@@ -674,9 +674,17 @@ fn hoist_expr(
         }
         // `enumValueOf<Level>(pickName())` — the looked-up name evaluates unconditionally before the
         // lookup, so a suspension in it hoists like any other single operand.
-        IrExpr::EnumValueOf { classifier, arg } => {
+        IrExpr::EnumValueOf {
+            classifier,
+            arg,
+            declaration,
+        } => {
             let arg = hoist_expr(ir, arg, suspend_set, orig_rets, value_types, prelude);
-            ir.exprs[e as usize] = IrExpr::EnumValueOf { classifier, arg };
+            ir.exprs[e as usize] = IrExpr::EnumValueOf {
+                classifier,
+                arg,
+                declaration,
+            };
             e
         }
         // `var total = count()` where a closure captures `total`: the capture boxes the local into a
@@ -1390,6 +1398,7 @@ mod tests {
         let shared = ir.add_expr(IrExpr::EnumValueOf {
             classifier: type_name("example/Level"),
             arg: suspension,
+            declaration: crate::ir::EnumValueOfDeclaration::Member,
         });
         let concat = ir.add_expr(IrExpr::StringConcat(vec![shared, shared]));
         let returned = ir.add_expr(IrExpr::Return(Some(concat)));

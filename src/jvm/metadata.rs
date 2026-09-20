@@ -1,13 +1,11 @@
-//! Minimal Kotlin `@Metadata` reader: decode the `d1` protobuf and report which functions are
-//! `inline`, by their JVM `(name, descriptor)`. This is the complete inline-recognition the inliner
-//! needs (the body `reifiedOperationMarker` scan only finds *reified* inline functions).
+//! Kotlin `@Metadata` normalization for classpath declarations and JVM inline metadata.
 //!
-//! Schema (kotlin `core/metadata/src/metadata.proto` + `metadata.jvm/.../jvm_metadata.proto`):
-//!   Package.function = 3; Function.flags = 9 (IS_INLINE = bit 10); Function.name = 2;
-//!   Function extension method_signature = 100 → JvmMethodSignature { name = 1, desc = 2 }.
-//! String ids index the `d2` table.
+//! The `d1` protobuf is decoded against `d2` string-table identities before semantic facts publish.
 
-mod type_annotations;
+pub(super) mod klib_validation;
+mod property_identity;
+
+use property_identity::inline_underlying_property_name_id;
 
 use super::classfile::{
     ACC_ABSTRACT, ACC_ANNOTATION, ACC_ENUM, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED,
@@ -16,8 +14,32 @@ use super::classfile::{
 use super::classreader::ClassInfo;
 use super::names::method_descriptor;
 use crate::libraries::{CallSig, GenericSig, ParamList, TypeKind};
+use crate::metadata::decode::{
+    packed_varints, parse_type_node, parse_type_param, parse_value_parameter, ParameterDecodeError,
+    ParsedProjection, ParsedTypeArgument, ParsedTypeParam, ParsedValueParam, ParsedVariance, Pb,
+    QName,
+};
 use crate::types::{intern, type_name, Ty, TypeName, Visibility};
 use std::collections::HashMap;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetadataDecodeError {
+    MalformedWire,
+    MissingField(&'static str),
+    InvalidVariance(u64),
+}
+
+impl From<ParameterDecodeError> for MetadataDecodeError {
+    fn from(error: ParameterDecodeError) -> Self {
+        match error {
+            ParameterDecodeError::MalformedWire => Self::MalformedWire,
+            ParameterDecodeError::MissingField(field) => Self::MissingField(field),
+            ParameterDecodeError::InvalidVariance(value) => Self::InvalidVariance(value),
+        }
+    }
+}
+
+type MetadataResult<T> = Result<T, MetadataDecodeError>;
 
 fn primary_erasure_bounds(formals: &[String], formal_bounds: &[Vec<Ty>]) -> HashMap<String, Ty> {
     fn resolve(
@@ -59,31 +81,6 @@ fn primary_erasure_bounds(formals: &[String], formal_bounds: &[Vec<Ty>]) -> Hash
     resolved
 }
 
-/// The carrier-independent wire shape of Kotlin metadata's `Type` message. Both an annotation's
-/// `@Metadata` payload and a `.kotlin_builtins` fragment use these same fields; only the way their
-/// numeric class/string ids and type-table references are resolved differs. Keeping the protobuf walk
-/// here prevents the two decoders from acquiring subtly different nullability, type-parameter,
-/// annotation, or argument handling as either carrier evolves.
-struct ParsedTypeNode<'a> {
-    class_id: Option<u64>,
-    type_parameter_id: Option<u64>,
-    type_parameter_name_id: Option<u64>,
-    type_alias_id: Option<u64>,
-    nullable: bool,
-    definitely_non_null: bool,
-    flexible_upper_bound: Option<&'a [u8]>,
-    flexible_upper_bound_id: Option<u64>,
-    arguments: Vec<ParsedTypeArgument<'a>>,
-    annotations: Vec<type_annotations::TypeAnnotation>,
-}
-
-#[derive(Clone, Copy)]
-enum ParsedProjection {
-    In,
-    Out,
-    Invariant,
-}
-
 fn project_ty(projection: ParsedProjection, ty: Ty) -> Ty {
     match projection {
         ParsedProjection::In => Ty::in_projection(ty),
@@ -92,98 +89,20 @@ fn project_ty(projection: ParsedProjection, ty: Ty) -> Ty {
     }
 }
 
-/// A type argument is either an inline `Type`, an id into the carrier's `TypeTable`, or a star
-/// projection with no type. Projection is part of this carrier-independent wire shape: every semantic
-/// decoder must see the same `in`/`out`/invariant distinction.
-enum ParsedTypeArgument<'a> {
-    Inline(&'a [u8], ParsedProjection),
-    Table(u64, ParsedProjection),
-    Star,
+fn type_variance(variance: ParsedVariance) -> crate::types::TypeVariance {
+    match variance {
+        ParsedVariance::In => crate::types::TypeVariance::In,
+        ParsedVariance::Out => crate::types::TypeVariance::Out,
+        ParsedVariance::Invariant => crate::types::TypeVariance::Invariant,
+    }
 }
 
-fn parse_type_node(body: &[u8]) -> Option<ParsedTypeNode<'_>> {
-    let mut pb = Pb { b: body, i: 0 };
-    let mut node = ParsedTypeNode {
-        class_id: None,
-        type_parameter_id: None,
-        type_parameter_name_id: None,
-        type_alias_id: None,
-        nullable: false,
-        definitely_non_null: false,
-        flexible_upper_bound: None,
-        flexible_upper_bound_id: None,
-        arguments: Vec::new(),
-        annotations: Vec::new(),
-    };
-    while !pb.at_end() {
-        let tag = pb.varint()?;
-        match (tag >> 3, tag & 7) {
-            (1, 0) => node.definitely_non_null = pb.varint()? & 0x2 != 0,
-            (3, 0) => node.nullable = pb.varint()? != 0,
-            (5, 2) => {
-                let len = pb.varint()? as usize;
-                node.flexible_upper_bound = Some(pb.bytes(len)?);
-            }
-            (6, 0) => node.class_id = Some(pb.varint()?),
-            (7, 0) => node.type_parameter_id = Some(pb.varint()?),
-            (8, 0) => node.flexible_upper_bound_id = Some(pb.varint()?),
-            (9, 0) => node.type_parameter_name_id = Some(pb.varint()?),
-            (12, 0) => node.type_alias_id = Some(pb.varint()?),
-            (2, 2) => {
-                let n = pb.varint()? as usize;
-                let mut argument_pb = Pb {
-                    b: pb.bytes(n)?,
-                    i: 0,
-                };
-                let mut projection = ParsedProjection::Invariant;
-                let mut star = false;
-                let mut inline = None;
-                let mut table = None;
-                while !argument_pb.at_end() {
-                    let tag = argument_pb.varint()?;
-                    match (tag >> 3, tag & 7) {
-                        (1, 0) => {
-                            projection = match argument_pb.varint()? {
-                                0 => ParsedProjection::In,
-                                1 => ParsedProjection::Out,
-                                2 => ParsedProjection::Invariant,
-                                3 => {
-                                    star = true;
-                                    ParsedProjection::Invariant
-                                }
-                                _ => return None,
-                            }
-                        }
-                        (2, 2) => {
-                            let n = argument_pb.varint()? as usize;
-                            inline = Some(argument_pb.bytes(n)?);
-                        }
-                        (3, 0) => table = Some(argument_pb.varint()?),
-                        (_, wire) => argument_pb.skip(wire)?,
-                    }
-                }
-                if star {
-                    node.arguments.push(ParsedTypeArgument::Star);
-                } else {
-                    node.arguments.push(match (inline, table) {
-                        (Some(body), _) => ParsedTypeArgument::Inline(body, projection),
-                        (None, Some(id)) => ParsedTypeArgument::Table(id, projection),
-                        (None, None) => return None,
-                    });
-                }
-            }
-            (100, 2) => {
-                // `Type.annotation` is an extension carrying an `Annotation` message. Preserve its
-                // semantic arguments as well as its class id: context-function arity is carried by
-                // `ContextFunctionTypeParams.count` rather than by the function classifier.
-                let n = pb.varint()? as usize;
-                node.annotations
-                    .push(type_annotations::parse(pb.bytes(n)?)?);
-            }
-            (_, wire) => pb.skip(wire)?,
-        }
-    }
-    Some(node)
+fn parameter_has_default(parameter: &ParsedValueParam) -> bool {
+    parameter.flags & (1 << 1) != 0
+}
+
+fn parameter_is_materialized(parameter: &ParsedValueParam) -> bool {
+    parameter.flags & ((1 << 2) | (1 << 3)) != 0
 }
 
 /// A `@Metadata` class name + decoded type args → a signature [`Ty`]: a `kotlin/FunctionN` becomes a
@@ -300,71 +219,6 @@ fn kotlin_canonical_ty(internal: &str) -> Option<crate::types::Ty> {
     })
 }
 
-struct ParsedTypeParam {
-    id: u64,
-    name_id: u64,
-    reified: bool,
-    upper_bound_bodies: Vec<Vec<u8>>,
-    /// `TypeParameter.upper_bound_id` (field 6) — the type-table form a `.kotlin_builtins` fragment
-    /// uses instead of the inline `upper_bound`. Empty for the `@Metadata` carrier, which inlines.
-    upper_bound_ids: Vec<u64>,
-    variance: crate::types::TypeVariance,
-    /// Raw core/builtins `Annotation` messages declared on this type parameter. The two metadata
-    /// protocols use different field numbers but the annotation payload is identical.
-    annotation_bodies: Vec<Vec<u8>>,
-}
-
-fn parse_type_param(body: &[u8]) -> Option<ParsedTypeParam> {
-    let mut pb = Pb { b: body, i: 0 };
-    let mut id = None;
-    let mut name = None;
-    let mut upper_bound_bodies = Vec::new();
-    let mut upper_bound_ids = Vec::new();
-    let mut reified = false;
-    let mut variance = crate::types::TypeVariance::Invariant;
-    let mut annotation_bodies = Vec::new();
-    while !pb.at_end() {
-        let tag = pb.varint()?;
-        match (tag >> 3, tag & 7) {
-            (1, 0) => id = Some(pb.varint()?),
-            (2, 0) => name = Some(pb.varint()?),
-            (3, 0) => reified = pb.varint()? != 0,
-            (4, 0) => {
-                variance = match pb.varint()? {
-                    0 => crate::types::TypeVariance::In,
-                    1 => crate::types::TypeVariance::Out,
-                    _ => crate::types::TypeVariance::Invariant,
-                }
-            }
-            (5, 2) => {
-                let n = pb.varint()? as usize;
-                upper_bound_bodies.push(pb.bytes(n)?.to_vec());
-            }
-            (6, 0) => upper_bound_ids.push(pb.varint()?),
-            (6, 2) => {
-                let n = pb.varint()? as usize;
-                upper_bound_ids.extend(packed_varints(pb.bytes(n)?));
-            }
-            // `ProtoBuf.TypeParameter.annotation` and
-            // `BuiltInsProtoBuf.typeParameterAnnotation`, respectively.
-            (100, 2) | (150, 2) => {
-                let n = pb.varint()? as usize;
-                annotation_bodies.push(pb.bytes(n)?.to_vec());
-            }
-            (_, w) => pb.skip(w)?,
-        }
-    }
-    Some(ParsedTypeParam {
-        id: id?,
-        name_id: name?,
-        reified,
-        upper_bound_bodies,
-        upper_bound_ids,
-        variance,
-        annotation_bodies,
-    })
-}
-
 /// Decode the `@Metadata` `d1` string array to raw protobuf bytes. Modern metadata (since Kotlin 1.4)
 /// stores each byte as one already-UTF8-decoded char.
 fn decode_d1(d1: &[String]) -> Vec<u8> {
@@ -443,22 +297,9 @@ struct Rec {
     replace: Option<(u32, u32)>,
 }
 
-/// Read a packed (length-delimited) repeated `int32` field into a Vec of varints.
-fn packed_varints(body: &[u8]) -> Vec<u64> {
-    let mut pb = Pb { b: body, i: 0 };
-    let mut out = Vec::new();
-    while !pb.at_end() {
-        match pb.varint() {
-            Some(v) => out.push(v),
-            None => break,
-        }
-    }
-    out
-}
-
 /// Parse one `StringTableTypes.Record` → `(range, Rec)`.
 fn parse_record(body: &[u8]) -> Option<(u64, Rec)> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut range = 1u64;
     let mut rec = Rec::default();
     while !pb.at_end() {
@@ -469,14 +310,14 @@ fn parse_record(body: &[u8]) -> Option<(u64, Rec)> {
             (3, 0) => rec.operation = pb.varint()?,
             (4, 2) => {
                 let n = pb.varint()? as usize;
-                let v = packed_varints(pb.bytes(n)?);
+                let v = packed_varints(pb.bytes(n)?)?;
                 if v.len() >= 2 {
                     rec.substring = Some((v[0] as usize, v[1] as usize));
                 }
             }
             (5, 2) => {
                 let n = pb.varint()? as usize;
-                let v = packed_varints(pb.bytes(n)?);
+                let v = packed_varints(pb.bytes(n)?)?;
                 if v.len() >= 2 {
                     rec.replace = Some((v[0] as u32, v[1] as u32));
                 }
@@ -494,7 +335,7 @@ fn parse_record(body: &[u8]) -> Option<(u64, Rec)> {
 /// Parse a `StringTableTypes` message body → the flattened record list (each record repeated `range`
 /// times, so the list index is the class-name id), matching kotlinc's `JvmNameResolverBase`.
 fn parse_string_table(body: &[u8]) -> Vec<Rec> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut records = Vec::new();
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
@@ -583,9 +424,9 @@ fn resolve_class_name(records: &[Rec], d2: &[String], id: usize) -> Option<Strin
 /// Split decoded `d1` bytes into `(StringTableTypes body, Package body)`: JVM `@Metadata` prepends a
 /// length-delimited `StringTableTypes` before the `Package` message.
 fn split_d1(bytes: &[u8]) -> (&[u8], &[u8]) {
-    let mut pb = Pb { b: bytes, i: 0 };
+    let mut pb = Pb::new(bytes);
     if let Some(len) = pb.varint() {
-        let start = pb.i;
+        let start = pb.position();
         if let Some(end) = start.checked_add(len as usize) {
             if end <= bytes.len() {
                 return (&bytes[start..end], &bytes[end..]);
@@ -593,59 +434,6 @@ fn split_d1(bytes: &[u8]) -> (&[u8], &[u8]) {
         }
     }
     (&[], bytes)
-}
-
-/// A protobuf wire-format cursor over a message body.
-struct Pb<'a> {
-    b: &'a [u8],
-    i: usize,
-}
-
-impl<'a> Pb<'a> {
-    fn varint(&mut self) -> Option<u64> {
-        let mut v = 0u64;
-        let mut shift = 0;
-        loop {
-            let byte = *self.b.get(self.i)?;
-            self.i += 1;
-            v |= ((byte & 0x7f) as u64) << shift;
-            if byte & 0x80 == 0 {
-                return Some(v);
-            }
-            shift += 7;
-            if shift >= 64 {
-                return None;
-            }
-        }
-    }
-    fn bytes(&mut self, n: usize) -> Option<&'a [u8]> {
-        let s = self.b.get(self.i..self.i.checked_add(n)?)?;
-        self.i += n;
-        Some(s)
-    }
-    fn at_end(&self) -> bool {
-        self.i >= self.b.len()
-    }
-    /// Skip a field's value given its wire type; `false` on a malformed/unsupported wire type.
-    fn skip(&mut self, wire: u64) -> Option<()> {
-        match wire {
-            0 => {
-                self.varint()?;
-            }
-            1 => {
-                self.bytes(8)?;
-            }
-            2 => {
-                let n = self.varint()? as usize;
-                self.bytes(n)?;
-            }
-            5 => {
-                self.bytes(4)?;
-            }
-            _ => return None,
-        }
-        Some(())
-    }
 }
 
 /// `IS_INLINE` is bit 10 of `Function.flags` (hasAnnotations·1 + Visibility·3 + Modality·2 +
@@ -665,7 +453,7 @@ struct ParsedJvmSignature {
 }
 
 fn parse_jvm_signature(body: &[u8]) -> Option<ParsedJvmSignature> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut name = None;
     let mut desc = None;
     while !pb.at_end() {
@@ -686,7 +474,7 @@ fn parse_jvm_signature(body: &[u8]) -> Option<ParsedJvmSignature> {
 /// identity (`mutableListOf`'s return `Type` → the id whose `d2` string is `kotlin/collections/MutableList`).
 /// `None` for a non-class type (a bare type parameter, etc.).
 fn parse_type_class_name(body: &[u8]) -> Option<u64> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut class_name = None;
     while !pb.at_end() {
         let tag = pb.varint()?;
@@ -701,15 +489,6 @@ fn parse_type_class_name(body: &[u8]) -> Option<u64> {
 /// `Function.flags` bit for `suspend` (kotlin metadata `Flags.IS_SUSPEND`, function flag bit 13).
 const IS_SUSPEND_BIT: u64 = 1 << 13;
 
-/// `ValueParameter.flags` bit for `DECLARES_DEFAULT_VALUE` (bit 1; `HAS_ANNOTATIONS` is bit 0).
-const DECLARES_DEFAULT_VALUE_BIT: u64 = 1 << 1;
-/// `ValueParameter.flags` bits for `IS_CROSSINLINE` (bit 2) and `IS_NOINLINE` (bit 3) of an inline
-/// function's functional parameter. Either one means the lambda argument is MATERIALIZED into a real
-/// `FunctionN` object / nested class (not spliced into the caller frame), so a mutable local it captures
-/// must be boxed in a `Ref` holder — the same as an ordinary closure.
-const IS_CROSSINLINE_BIT: u64 = 1 << 2;
-const IS_NOINLINE_BIT: u64 = 1 << 3;
-
 /// `Visibility` enum value from a Function/Class `flags` word: `hasAnnotations` is bit 0, then
 /// `Visibility` occupies the next 3 bits (kotlin metadata `Flags.VISIBILITY`). Enum order:
 /// INTERNAL=0, PRIVATE=1, PROTECTED=2, PUBLIC=3, PRIVATE_TO_THIS=4, LOCAL=5.
@@ -717,33 +496,6 @@ fn flags_visibility(flags: u64) -> u64 {
     (flags >> 1) & 0x7
 }
 const VIS_PUBLIC: u64 = 3;
-
-/// One source `ValueParameter` decoded from metadata. Keeping these facts together avoids the parser's
-/// old parallel vectors drifting as more parameter-level facts are added.
-struct ParsedValueParam {
-    name_id: u64,
-    has_default: bool,
-    materialized: bool,
-    /// The raw inline `ValueParameter.type` (field 3) message, when present. Keeping PRESENCE rather
-    /// than an empty sentinel distinguishes an explicitly empty/default `Type` from a parameter that
-    /// instead names the enclosing type table through [`Self::type_id`].
-    type_body: Option<Vec<u8>>,
-    /// `ValueParameter.type_id` (field 5), indexing the function/container `TypeTable` when the
-    /// producer chose table-backed types.
-    type_id: Option<u64>,
-    /// The raw `ValueParameter.varargElementType` (field 4 as emitted by kotlin-stdlib 2.3.20) `Type`
-    /// body when the parameter is a `vararg`.
-    /// Present ⇒ the parameter is a vararg whose LOGICAL gsig is `Array<elem>`; kotlinc stores the element
-    /// type here (the JVM descriptor's array-ness lives only in `type`/the descriptor).
-    vararg_elem_body: Option<Vec<u8>>,
-    /// `ValueParameter.vararg_element_type_id` (field 6), the table-backed form of
-    /// [`Self::vararg_elem_body`].
-    vararg_elem_id: Option<u64>,
-    /// Compiler-known strict-equality refinement (`ValueParameter.equality_bound_type`, fields
-    /// 9/10). This is declaration semantics, not an ordinary retained annotation.
-    equality_bound_body: Option<Vec<u8>>,
-    equality_bound_id: Option<u64>,
-}
 
 /// A decoded `Function` message: whether it's `inline`, whether it's `suspend`, its name string id, its
 /// explicit JVM `(name id, desc id)` signature (if present), its operator flag, and its return type's
@@ -801,56 +553,10 @@ struct ParsedFunction {
     context_params: Vec<ParsedValueParam>,
 }
 
-fn parse_value_parameter(body: &[u8]) -> Option<ParsedValueParam> {
-    let mut pb = Pb { b: body, i: 0 };
-    let mut name_id = None;
-    let mut flags = 0u64;
-    let mut type_body = None;
-    let mut type_id = None;
-    let mut vararg_elem_body = None;
-    let mut vararg_elem_id = None;
-    let mut equality_bound_body = None;
-    let mut equality_bound_id = None;
-    while !pb.at_end() {
-        let tag = pb.varint()?;
-        match (tag >> 3, tag & 7) {
-            (1, 0) => flags = pb.varint()?,
-            (2, 0) => name_id = pb.varint(),
-            (3, 2) => {
-                let len = pb.varint()? as usize;
-                type_body = Some(pb.bytes(len)?.to_vec());
-            }
-            (4, 2) => {
-                let len = pb.varint()? as usize;
-                vararg_elem_body = Some(pb.bytes(len)?.to_vec());
-            }
-            (5, 0) => type_id = pb.varint(),
-            (6, 0) => vararg_elem_id = pb.varint(),
-            (9, 2) => {
-                let len = pb.varint()? as usize;
-                equality_bound_body = Some(pb.bytes(len)?.to_vec());
-            }
-            (10, 0) => equality_bound_id = pb.varint(),
-            (_, wire) => pb.skip(wire)?,
-        }
-    }
-    Some(ParsedValueParam {
-        name_id: name_id?,
-        has_default: flags & DECLARES_DEFAULT_VALUE_BIT != 0,
-        materialized: flags & (IS_CROSSINLINE_BIT | IS_NOINLINE_BIT) != 0,
-        type_body,
-        type_id,
-        vararg_elem_body,
-        vararg_elem_id,
-        equality_bound_body,
-        equality_bound_id,
-    })
-}
-
 /// Parse one `Function` message. The return type is `Function.return_type = 3` and the extension
 /// receiver `Function.receiver_type = 5` (both inline `Type`s in package metadata).
-fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
-    let mut pb = Pb { b: body, i: 0 };
+fn parse_function(body: &[u8]) -> MetadataResult<ParsedFunction> {
+    let mut pb = Pb::new(body);
     // Kotlin `metadata.proto` declares `Function.flags = 9 [default = 6]` — a PUBLIC FINAL declaration
     // (visibility bits 1-3 = 3, modality/memberKind = 0). protobuf OMITS a field equal to its default, so
     // the common public-final function serializes NO flags field; initializing to 0 would then decode it
@@ -876,87 +582,104 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
     let mut context_params = Vec::new();
     let mut seen_fields = Vec::new();
     while !pb.at_end() {
-        let tag = pb.varint()?;
+        let tag = pb.varint().ok_or(MetadataDecodeError::MalformedWire)?;
         seen_fields.push((tag >> 3, tag & 7));
         match (tag >> 3, tag & 7) {
             (32, 2) => {
                 // Function.contract (`Contract` message) — the declared contract's effects.
-                let n = pb.varint()? as usize;
-                contract_body = Some(pb.bytes(n)?.to_vec());
+                let n = pb.varint().ok_or(MetadataDecodeError::MalformedWire)? as usize;
+                contract_body = Some(
+                    pb.bytes(n)
+                        .ok_or(MetadataDecodeError::MalformedWire)?
+                        .to_vec(),
+                );
             }
             (30, 2) => {
                 // Function.type_table (`TypeTable` message) — contract `is_instance_type_id`
                 // references index into it.
-                let n = pb.varint()? as usize;
-                type_table_body = Some(pb.bytes(n)?.to_vec());
+                let n = pb.varint().ok_or(MetadataDecodeError::MalformedWire)? as usize;
+                type_table_body = Some(
+                    pb.bytes(n)
+                        .ok_or(MetadataDecodeError::MalformedWire)?
+                        .to_vec(),
+                );
             }
             (13, 2) => {
-                let n = pb.varint()? as usize;
-                if let Some(parameter) = parse_value_parameter(pb.bytes(n)?) {
-                    context_params.push(parameter);
-                }
+                let n = pb.varint().ok_or(MetadataDecodeError::MalformedWire)? as usize;
+                let parameter =
+                    parse_value_parameter(pb.bytes(n).ok_or(MetadataDecodeError::MalformedWire)?)?;
+                context_params.push(parameter);
             }
             (12, 2) => {
                 // Function.annotation (repeated `Annotation`) — decoded downstream (needs the string table).
-                let n = pb.varint()? as usize;
-                annotation_bodies.push(pb.bytes(n)?.to_vec());
+                let n = pb.varint().ok_or(MetadataDecodeError::MalformedWire)? as usize;
+                annotation_bodies.push(
+                    pb.bytes(n)
+                        .ok_or(MetadataDecodeError::MalformedWire)?
+                        .to_vec(),
+                );
             }
-            (1, 0) => legacy_flags = pb.varint(),
-            (9, 0) => modern_flags = pb.varint(),
-            (2, 0) => name_id = pb.varint()?, // name (name id in table)
+            (1, 0) => legacy_flags = Some(pb.varint().ok_or(MetadataDecodeError::MalformedWire)?),
+            (9, 0) => modern_flags = Some(pb.varint().ok_or(MetadataDecodeError::MalformedWire)?),
+            (2, 0) => name_id = pb.varint().ok_or(MetadataDecodeError::MalformedWire)?, // name (name id in table)
             (4, 2) => {
                 // type_parameter (repeated `TypeParameter`) — the function's own generic parameters.
-                let n = pb.varint()? as usize;
-                let tpbody = pb.bytes(n)?;
-                if let Some(tp) = parse_type_param(tpbody) {
-                    type_params.push(tp);
-                }
+                let n = pb.varint().ok_or(MetadataDecodeError::MalformedWire)? as usize;
+                let tpbody = pb.bytes(n).ok_or(MetadataDecodeError::MalformedWire)?;
+                type_params.push(parse_type_param(tpbody)?);
             }
             (3, 2) => {
                 // return_type (inline Type message)
-                let n = pb.varint()? as usize;
-                let tbody = pb.bytes(n)?;
+                let n = pb.varint().ok_or(MetadataDecodeError::MalformedWire)? as usize;
+                let tbody = pb.bytes(n).ok_or(MetadataDecodeError::MalformedWire)?;
                 return_body = Some(tbody.to_vec());
             }
             (5, 2) => {
                 // receiver_type (inline Type message) — PRESENCE marks an extension, even when the
                 // receiver is a type parameter (`fun <T> T.takeIf`) whose `class_name` is absent.
                 has_receiver = true;
-                let n = pb.varint()? as usize;
-                let tbody = pb.bytes(n)?;
+                let n = pb.varint().ok_or(MetadataDecodeError::MalformedWire)? as usize;
+                let tbody = pb.bytes(n).ok_or(MetadataDecodeError::MalformedWire)?;
                 receiver_body = Some(tbody.to_vec());
             }
-            (7, 0) => return_type_id = pb.varint(),
+            (7, 0) => return_type_id = Some(pb.varint().ok_or(MetadataDecodeError::MalformedWire)?),
             (8, 0) => {
                 has_receiver = true;
-                receiver_type_id = pb.varint();
+                receiver_type_id = Some(pb.varint().ok_or(MetadataDecodeError::MalformedWire)?);
             }
             (10, 2) => {
-                let n = pb.varint()? as usize;
-                context_receiver_bodies.push(pb.bytes(n)?.to_vec());
+                let n = pb.varint().ok_or(MetadataDecodeError::MalformedWire)? as usize;
+                context_receiver_bodies.push(
+                    pb.bytes(n)
+                        .ok_or(MetadataDecodeError::MalformedWire)?
+                        .to_vec(),
+                );
             }
-            (11, 0) => context_receiver_type_ids.push(pb.varint()?),
+            (11, 0) => context_receiver_type_ids
+                .push(pb.varint().ok_or(MetadataDecodeError::MalformedWire)?),
             (11, 2) => {
-                let n = pb.varint()? as usize;
-                context_receiver_type_ids.extend(packed_varints(pb.bytes(n)?));
+                let n = pb.varint().ok_or(MetadataDecodeError::MalformedWire)? as usize;
+                let packed = pb.bytes(n).ok_or(MetadataDecodeError::MalformedWire)?;
+                context_receiver_type_ids
+                    .extend(packed_varints(packed).ok_or(MetadataDecodeError::MalformedWire)?);
             }
             (6, 2) => {
                 // value_parameter (repeated `ValueParameter`) — the SOURCE value parameters. Their count
                 // and types are the Kotlin signature, WITHOUT the synthetic params a codegen pass appends
                 // to the JVM descriptor (a `suspend`'s `Continuation`, a `@Composable`'s `Composer`/`int`).
                 // `ValueParameter.type = 3` is an inline `Type`; recover its `class_name` id.
-                let n = pb.varint()? as usize;
-                if let Some(parameter) = parse_value_parameter(pb.bytes(n)?) {
-                    value_params.push(parameter);
-                }
+                let n = pb.varint().ok_or(MetadataDecodeError::MalformedWire)? as usize;
+                let parameter =
+                    parse_value_parameter(pb.bytes(n).ok_or(MetadataDecodeError::MalformedWire)?)?;
+                value_params.push(parameter);
             }
             (100, 2) => {
                 // method_signature extension
-                let n = pb.varint()? as usize;
-                let ext = pb.bytes(n)?;
+                let n = pb.varint().ok_or(MetadataDecodeError::MalformedWire)? as usize;
+                let ext = pb.bytes(n).ok_or(MetadataDecodeError::MalformedWire)?;
                 jvm_sig = parse_jvm_signature(ext);
             }
-            (_, w) => pb.skip(w)?,
+            (_, w) => pb.skip(w).ok_or(MetadataDecodeError::MalformedWire)?,
         }
     }
     let flags = modern_flags.or(legacy_flags).unwrap_or(6);
@@ -971,7 +694,7 @@ fn parse_function(body: &[u8]) -> Option<ParsedFunction> {
             context_params.len(),
         );
     }
-    Some(ParsedFunction {
+    Ok(ParsedFunction {
         is_inline: flags & IS_INLINE_BIT != 0,
         is_suspend: flags & IS_SUSPEND_BIT != 0,
         is_abstract: (flags >> 4) & 0x3 == 2,
@@ -1024,7 +747,7 @@ fn decode_contract(
     tparams: &HashMap<u64, String>,
     type_table: Option<&[u8]>,
 ) -> Option<crate::contracts::Contract> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut effects = Vec::new();
     while !pb.at_end() {
         let tag = pb.varint()?;
@@ -1053,7 +776,7 @@ fn decode_effect(
     type_table: Option<&[u8]>,
 ) -> Option<crate::contracts::Effect> {
     use crate::contracts::{Effect, InvocationKind};
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut effect_type = 0u64;
     let mut args: Vec<Vec<u8>> = Vec::new();
     let mut conclusion: Option<Vec<u8>> = None;
@@ -1112,7 +835,7 @@ fn returns_constant(arg: Option<&Vec<u8>>) -> crate::contracts::ReturnsValue {
     let Some(body) = arg else {
         return ReturnsValue::Any;
     };
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut constant = None;
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
@@ -1135,7 +858,7 @@ fn returns_constant(arg: Option<&Vec<u8>>) -> crate::contracts::ReturnsValue {
 
 /// The `value_parameter_reference` of an `Expression` body, when present.
 fn expression_param_ref(body: &[u8]) -> Option<u64> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
@@ -1157,7 +880,7 @@ fn decode_expression(
     type_table: Option<&[u8]>,
 ) -> Option<crate::contracts::Condition> {
     use crate::contracts::{Condition, ConditionType};
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut flags = 0u64;
     let mut vpr = None;
     let mut constant = None;
@@ -1263,7 +986,7 @@ fn decode_expression(
 /// field-12 body that isn't an `Annotation`) yields `None`, so the caller safely keeps the Kotlin name.
 fn annotation_jvm_name(bodies: &[Vec<u8>], records: &[Rec], d2: &[String]) -> Option<String> {
     for body in bodies {
-        let mut pb = Pb { b: body, i: 0 };
+        let mut pb = Pb::new(body);
         let mut id: Option<u64> = None;
         let mut string_arg: Option<u64> = None;
         while !pb.at_end() {
@@ -1274,14 +997,14 @@ fn annotation_jvm_name(bodies: &[Vec<u8>], records: &[Rec], d2: &[String]) -> Op
                     // Annotation.argument → Argument { value = 2: Value { stringValue = 5 } }.
                     let n = pb.varint()? as usize;
                     let arg = pb.bytes(n)?;
-                    let mut ap = Pb { b: arg, i: 0 };
+                    let mut ap = Pb::new(arg);
                     while !ap.at_end() {
                         let at = ap.varint()?;
                         match (at >> 3, at & 7) {
                             (2, 2) => {
                                 let vn = ap.varint()? as usize;
                                 let vb = ap.bytes(vn)?;
-                                let mut vp = Pb { b: vb, i: 0 };
+                                let mut vp = Pb::new(vb);
                                 while !vp.at_end() {
                                     let vt = vp.varint()?;
                                     match (vt >> 3, vt & 7) {
@@ -1318,7 +1041,7 @@ fn annotation_names(
     bodies
         .iter()
         .filter_map(|body| {
-            let mut pb = Pb { b: body, i: 0 };
+            let mut pb = Pb::new(body);
             let mut id = None;
             while !pb.at_end() {
                 let tag = pb.varint()?;
@@ -1345,7 +1068,7 @@ struct ParsedTypeFacts {
 }
 
 fn parse_type_facts(body: &[u8]) -> ParsedTypeFacts {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut facts = ParsedTypeFacts::default();
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
@@ -2199,6 +1922,8 @@ pub struct MetaProp {
     pub is_abstract: bool,
     /// `var` (has a setter) vs `val`.
     pub is_var: bool,
+    /// This exact property is the value class's underlying storage declaration, joined by wire id.
+    pub is_inline_underlying: bool,
     /// The EXTENSION receiver's class name (`val String.foo` → `kotlin/String`) — `None` for an
     /// ordinary member/top-level property.
     pub receiver_class: Option<TypeName>,
@@ -2310,8 +2035,9 @@ struct MetaCtx<'a> {
 }
 
 /// Decode a classfile's `@Metadata` into [`KotlinMeta`] — the ONE place the packed representation is
-/// read. `k` is the header kind: a multi-file facade (`k = 4`) lists its part class names in `d1`
-/// verbatim (no protobuf); every other kind carries the BitEncoded proto.
+/// read. `k` is the header kind: a synthetic class (`k = 3`) carries a lambda payload rather than a
+/// Class/Package message, while a multi-file facade (`k = 4`) lists its part class names in `d1`
+/// verbatim. Neither kind contributes declarations to the classpath semantic model.
 pub fn decode_metadata(
     d1: &[String],
     d2: &[String],
@@ -2319,21 +2045,27 @@ pub fn decode_metadata(
     this_class: &str,
     package_name: Option<&str>,
     methods: &[super::classreader::MethodSig],
-) -> KotlinMeta {
+) -> MetadataResult<KotlinMeta> {
     let package = package_name.map(|pn| pn.replace('.', "/"));
+    if k == Some(3) {
+        return Ok(KotlinMeta {
+            package,
+            ..KotlinMeta::default()
+        });
+    }
     if k == Some(4) {
-        return KotlinMeta {
+        return Ok(KotlinMeta {
             multifile_parts: d1.to_vec(),
             package,
             ..KotlinMeta::default()
-        };
+        });
     }
     if d1.is_empty() {
-        return KotlinMeta {
+        return Ok(KotlinMeta {
             class_visibility: (k == Some(1)).then_some(crate::types::Visibility::Public),
             package,
             ..KotlinMeta::default()
-        };
+        });
     }
     let bytes = decode_d1(d1);
     let (st_body, msg) = split_d1(&bytes);
@@ -2351,7 +2083,9 @@ pub fn decode_metadata(
     let class_tparams = if k == Some(1) {
         type_param_bodies(ctx.msg, CLASS_TYPE_PARAMETER_FIELD)
             .into_iter()
-            .filter_map(parse_type_param)
+            .map(parse_type_param)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
             .filter_map(|parameter| {
                 Some((
                     parameter.id,
@@ -2363,15 +2097,17 @@ pub fn decode_metadata(
         Vec::new()
     };
     let (class_type_params, class_type_param_bounds, class_supertypes) = if k == Some(1) {
-        decode_class_signature(&ctx)
+        decode_class_signature(&ctx)?
     } else {
         (Vec::new(), Vec::new(), Vec::new())
     };
     let class_type_param_variances = if k == Some(1) {
         type_param_bodies(ctx.msg, CLASS_TYPE_PARAMETER_FIELD)
             .into_iter()
-            .filter_map(parse_type_param)
-            .map(|parameter| parameter.variance)
+            .map(parse_type_param)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|parameter| type_variance(parameter.variance))
             .collect()
     } else {
         Vec::new()
@@ -2408,16 +2144,23 @@ pub fn decode_metadata(
         &class_tparams,
         &class_type_param_bounds,
         data_equality_bound,
-    ))
+    )?)
     .into();
-    let mut constructors = ctor_params(&ctx);
+    // A package's field 5 is `Package.type_alias`, while a class's field 5 is
+    // `Class.type_parameter`. Constructor decoding owns only the Class schema; running it over a
+    // package would feed each complete TypeAlias message to the strict type-parameter decoder.
+    let mut constructors = if k == Some(1) {
+        ctor_params(&ctx)?
+    } else {
+        Vec::new()
+    };
     for constructor in &mut constructors {
         constructor.deprecated_hidden =
             realization_hidden(constructor.jvm_name, constructor.jvm_desc);
     }
     let class_properties =
-        decode_properties(&ctx, 10, &class_tparams, &class_type_param_bounds).into();
-    KotlinMeta {
+        decode_properties(&ctx, 10, &class_tparams, &class_type_param_bounds)?.into();
+    Ok(KotlinMeta {
         class_visibility: class_flags
             .map(flags_visibility)
             .map(crate::types::Visibility::from_metadata),
@@ -2430,17 +2173,17 @@ pub fn decode_metadata(
         ),
         class_supertypes,
         class_functions,
-        package_functions: stamp_functions(decode_functions(&ctx, 3, &[], &[], None)).into(),
+        package_functions: stamp_functions(decode_functions(&ctx, 3, &[], &[], None)?).into(),
         class_properties,
-        package_properties: decode_properties(&ctx, 4, &[], &[]).into(),
-        type_aliases: decode_type_aliases(&ctx, package.as_deref(), this_class, k == Some(1)),
+        package_properties: decode_properties(&ctx, 4, &[], &[])?.into(),
+        type_aliases: decode_type_aliases(&ctx, package.as_deref(), this_class, k == Some(1))?,
         constructors: constructors.into(),
         companion_name: companion_name(&ctx),
         sealed_subclasses: sealed_subclasses(&ctx),
         inline: inline_class(&ctx),
         multifile_parts: Vec::new(),
         package,
-    }
+    })
 }
 
 fn metadata_class_kind(flags: u64) -> TypeKind {
@@ -2455,15 +2198,17 @@ fn metadata_class_kind(flags: u64) -> TypeKind {
 
 /// Decode a Kotlin class's own type parameters and direct applied supertypes from the Class proto.
 /// Both inline `supertype` (field 6) and table-backed `supertype_id` (field 2) are valid encodings.
-fn decode_class_signature(ctx: &MetaCtx<'_>) -> (Vec<String>, Vec<Vec<Ty>>, Vec<Ty>) {
+fn decode_class_signature(
+    ctx: &MetaCtx<'_>,
+) -> MetadataResult<(Vec<String>, Vec<Vec<Ty>>, Vec<Ty>)> {
     let parsed_params = type_param_bodies(ctx.msg, CLASS_TYPE_PARAMETER_FIELD)
         .into_iter()
-        .filter_map(parse_type_param)
-        .collect::<Vec<_>>();
+        .map(parse_type_param)
+        .collect::<Result<Vec<_>, _>>()?;
     let mut table = None;
     let mut inline_supertypes = Vec::new();
     let mut supertype_ids = Vec::new();
-    let mut pb = Pb { b: ctx.msg, i: 0 };
+    let mut pb = Pb::new(ctx.msg);
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -2477,7 +2222,8 @@ fn decode_class_signature(ctx: &MetaCtx<'_>) -> (Vec<String>, Vec<Vec<Ty>>, Vec<
                 let Some(body) = pb.bytes(len as usize) else {
                     break;
                 };
-                supertype_ids.extend(packed_varints(body));
+                supertype_ids
+                    .extend(packed_varints(body).ok_or(MetadataDecodeError::MalformedWire)?);
             }
             (6, 2) => {
                 let Some(len) = pb.varint() else { break };
@@ -2500,7 +2246,7 @@ fn decode_class_signature(ctx: &MetaCtx<'_>) -> (Vec<String>, Vec<Vec<Ty>>, Vec<
     let Some(parameters) =
         type_parameter_context(&[], &[], &parsed_params, ctx.records, ctx.d2, table)
     else {
-        return (Vec::new(), Vec::new(), Vec::new());
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     };
 
     let decode = |body| {
@@ -2532,7 +2278,7 @@ fn decode_class_signature(ctx: &MetaCtx<'_>) -> (Vec<String>, Vec<Vec<Ty>>, Vec<
             )
         }))
         .collect();
-    (parameters.formals, parameters.formal_bounds, supertypes)
+    Ok((parameters.formals, parameters.formal_bounds, supertypes))
 }
 
 fn decode_metadata_type(
@@ -2684,7 +2430,7 @@ fn decode_metadata_type(
 /// this boundary helper so every individual class flag uses identical wire-format defaulting.
 fn class_flags(ctx: &MetaCtx<'_>) -> u64 {
     let mut flags = 6u64;
-    let mut pb = Pb { b: ctx.msg, i: 0 };
+    let mut pb = Pb::new(ctx.msg);
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -2707,7 +2453,7 @@ fn decode_functions(
     class_tparams: &[(u64, String)],
     class_tparam_bounds: &[Vec<Ty>],
     data_equality_bound: Option<Ty>,
-) -> Vec<MetaFn> {
+) -> MetadataResult<Vec<MetaFn>> {
     let declared_classifier = |ty: Ty| match ty.non_null() {
         Ty::Obj(internal, _) => Some(internal),
         _ => None,
@@ -2720,7 +2466,7 @@ fn decode_functions(
     // functions, so pre-scan for it before the main decode loop (which decodes contracts inline).
     let mut type_table_body: Option<Vec<u8>> = None;
     {
-        let mut scan = Pb { b: ctx.msg, i: 0 };
+        let mut scan = Pb::new(ctx.msg);
         while !scan.at_end() {
             let Some(tag) = scan.varint() else { break };
             match (tag >> 3, tag & 7) {
@@ -2739,7 +2485,7 @@ fn decode_functions(
             }
         }
     }
-    let mut pb = Pb { b: ctx.msg, i: 0 };
+    let mut pb = Pb::new(ctx.msg);
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -2748,7 +2494,8 @@ fn decode_functions(
                 let Some(fbody) = pb.bytes(len as usize) else {
                     break;
                 };
-                if let Some(pf) = parse_function(fbody) {
+                {
+                    let pf = parse_function(fbody)?;
                     let Some(kotlin_name) = d2.get(pf.name_id as usize).cloned() else {
                         continue;
                     };
@@ -2834,8 +2581,8 @@ fn decode_functions(
                             name: resolve_string(records, d2, p.name_id as usize)
                                 .unwrap_or_default(),
                             flags: MvpFlags::default()
-                                .with_has_default(p.has_default)
-                                .with_materialized(p.materialized)
+                                .with_has_default(parameter_has_default(p))
+                                .with_materialized(parameter_is_materialized(p))
                                 .with_vararg(
                                     p.vararg_elem_body.is_some() || p.vararg_elem_id.is_some(),
                                 )
@@ -3046,7 +2793,7 @@ fn decode_functions(
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Functions declared in a `Class`'s `@Metadata` (member + companion functions live in their own class).
@@ -3117,7 +2864,7 @@ fn decode_type_aliases(
     package: Option<&str>,
     this_class: &str,
     classifier_owner: bool,
-) -> Vec<MetaTypeAlias> {
+) -> MetadataResult<Vec<MetaTypeAlias>> {
     // The DECLARING package: `@Metadata`'s `pn` when `@JvmPackageName` moved the facade out of it
     // (`package kotlin.test` emitted to `kotlin/test/junit5/annotations/AnnotationsKt`), the class's
     // own JVM package otherwise. Never inferred from where the class file happens to sit.
@@ -3144,7 +2891,7 @@ fn decode_type_aliases(
     let mut out = Vec::new();
     let records = ctx.records;
     let d2 = ctx.d2;
-    let mut pb = Pb { b: ctx.msg, i: 0 };
+    let mut pb = Pb::new(ctx.msg);
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -3153,7 +2900,7 @@ fn decode_type_aliases(
                 let Some(body) = pb.bytes(len as usize) else {
                     break;
                 };
-                if let Some(alias) = parse_type_alias(body, records, d2) {
+                if let Some(alias) = parse_type_alias(body, records, d2)? {
                     // Key the alias by its FULL internal name — its DECLARING package plus the alias's
                     // simple name — so `kotlin/collections/ArrayList` is distinct from any other
                     // package's `ArrayList`. `resolve_type` looks it up by that full name, and an
@@ -3172,7 +2919,7 @@ fn decode_type_aliases(
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// One public `typealias` from a file facade's `Package` metadata.
@@ -3197,8 +2944,25 @@ pub struct MetaTypeAlias {
 /// as `Ty::TyParam`. `typealias Lens<S, A> = PLens<S, S, A, A>` declares two parameters for a
 /// four-parameter target, so a use site's arguments must be substituted into the template rather
 /// than pasted onto the target — the template is the only place that mapping exists.
-fn parse_type_alias(body: &[u8], records: &[Rec], d2: &[String]) -> Option<MetaTypeAlias> {
-    let mut pb = Pb { b: body, i: 0 };
+fn parse_type_alias(
+    body: &[u8],
+    records: &[Rec],
+    d2: &[String],
+) -> MetadataResult<Option<MetaTypeAlias>> {
+    let type_parameters = type_param_bodies(body, TYPE_ALIAS_TYPE_PARAMETER_FIELD)
+        .into_iter()
+        .map(parse_type_param)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(parse_type_alias_decoded(body, records, d2, type_parameters))
+}
+
+fn parse_type_alias_decoded(
+    body: &[u8],
+    records: &[Rec],
+    d2: &[String],
+    type_parameters: Vec<ParsedTypeParam>,
+) -> Option<MetaTypeAlias> {
+    let mut pb = Pb::new(body);
     let mut flags = 6u64;
     let mut name_id: Option<u64> = None;
     let mut expanded_class: Option<u64> = None;
@@ -3235,10 +2999,7 @@ fn parse_type_alias(body: &[u8], records: &[Rec], d2: &[String]) -> Option<MetaT
     // `TyParam` rather than as unknown classifiers.
     let mut parameters: HashMap<u64, String> = HashMap::new();
     let mut formals = Vec::new();
-    for parameter in type_param_bodies(body, TYPE_ALIAS_TYPE_PARAMETER_FIELD)
-        .into_iter()
-        .filter_map(parse_type_param)
-    {
+    for parameter in type_parameters {
         if let Some(parameter_name) = resolve_string(records, d2, parameter.name_id as usize) {
             parameters.insert(parameter.id, parameter_name.clone());
             formals.push(parameter_name);
@@ -3289,7 +3050,7 @@ fn parse_type_argument_spellings(
     d2: &[String],
 ) -> Vec<crate::spelling::Spelled> {
     let mut arguments = Vec::new();
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -3321,7 +3082,7 @@ fn parse_argument_spelling(
     records: &[Rec],
     d2: &[String],
 ) -> crate::spelling::Spelled {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -3355,17 +3116,14 @@ fn parse_type_alias_name(
     records: &[Rec],
     d2: &[String],
 ) -> Option<crate::types::TypeName> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     while !pb.at_end() {
         let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
             (13, 2) => {
                 let len = pb.varint()? as usize;
                 let abbreviated = pb.bytes(len)?;
-                let mut inner = Pb {
-                    b: abbreviated,
-                    i: 0,
-                };
+                let mut inner = Pb::new(abbreviated);
                 while !inner.at_end() {
                     let tag = inner.varint()?;
                     match (tag >> 3, tag & 7) {
@@ -3386,12 +3144,12 @@ fn parse_type_alias_name(
 }
 
 /// Constructor source parameter names/default flags from `Class` `@Metadata`, in declaration order.
-fn ctor_params(ctx: &MetaCtx) -> Vec<MetaConstructor> {
+fn ctor_params(ctx: &MetaCtx) -> MetadataResult<Vec<MetaConstructor>> {
     let mut out = Vec::new();
     let records = ctx.records;
     let d2 = ctx.d2;
     let mut type_table = None;
-    let mut table_scan = Pb { b: ctx.msg, i: 0 };
+    let mut table_scan = Pb::new(ctx.msg);
     while !table_scan.at_end() {
         let Some(tag) = table_scan.varint() else {
             break;
@@ -3412,8 +3170,8 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<MetaConstructor> {
     }
     let parsed_type_params = type_param_bodies(ctx.msg, CLASS_TYPE_PARAMETER_FIELD)
         .into_iter()
-        .filter_map(parse_type_param)
-        .collect::<Vec<_>>();
+        .map(parse_type_param)
+        .collect::<Result<Vec<_>, _>>()?;
     let type_context = type_parameter_context(
         &[],
         &[],
@@ -3422,7 +3180,7 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<MetaConstructor> {
         d2,
         type_table.as_deref(),
     );
-    let mut pb = Pb { b: ctx.msg, i: 0 };
+    let mut pb = Pb::new(ctx.msg);
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -3432,7 +3190,7 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<MetaConstructor> {
                 let Some(cbody) = pb.bytes(len as usize) else {
                     break;
                 };
-                let mut cp = Pb { b: cbody, i: 0 };
+                let mut cp = Pb::new(cbody);
                 // Constructor.flags has protobuf default `6` (PUBLIC, no annotations), just like
                 // Function.flags. Kotlin omits that field for an ordinary public primary constructor.
                 let mut flags = 6u64;
@@ -3453,14 +3211,12 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<MetaConstructor> {
                             let Some(vbody) = cp.bytes(vlen as usize) else {
                                 break;
                             };
-                            let Some(parameter) = parse_value_parameter(vbody) else {
-                                continue;
-                            };
+                            let parameter = parse_value_parameter(vbody)?;
                             names.push(
                                 resolve_string(records, d2, parameter.name_id as usize)
                                     .unwrap_or_default(),
                             );
-                            defaults.push(parameter.has_default);
+                            defaults.push(parameter_has_default(&parameter));
                             let (decoded, receiver_type) = decode_value_parameter_types(
                                 &parameter,
                                 type_table.as_deref(),
@@ -3527,7 +3283,7 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<MetaConstructor> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// The simple name of a class's companion object (`Class.companion_object_name = 4`), e.g. `Companion`.
@@ -3535,7 +3291,7 @@ fn ctor_params(ctx: &MetaCtx) -> Vec<MetaConstructor> {
 fn companion_name(ctx: &MetaCtx) -> Option<String> {
     let records = ctx.records;
     let d2 = ctx.d2;
-    let mut pb = Pb { b: ctx.msg, i: 0 };
+    let mut pb = Pb::new(ctx.msg);
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -3576,7 +3332,7 @@ fn sealed_subclasses(ctx: &MetaCtx) -> Vec<String> {
             }
         }
     };
-    let mut pb = Pb { b: ctx.msg, i: 0 };
+    let mut pb = Pb::new(ctx.msg);
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -3590,7 +3346,7 @@ fn sealed_subclasses(ctx: &MetaCtx) -> Vec<String> {
             (16, 2) => {
                 if let Some(n) = pb.varint() {
                     if let Some(bytes) = pb.bytes(n as usize) {
-                        let mut ip = Pb { b: bytes, i: 0 };
+                        let mut ip = Pb::new(bytes);
                         while let Some(id) = ip.varint() {
                             push_id(id as usize, &mut out);
                         }
@@ -3613,7 +3369,7 @@ type JvmSig = Option<ParsedJvmSignature>;
 /// Parse a `JvmPropertySignature` extension body → the getter (field 3) and setter (field 4)
 /// `JvmMethodSignature`s. Either is `None` when absent.
 fn parse_jvm_property_signature(body: &[u8]) -> (JvmSig, JvmSig) {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut getter = None;
     let mut setter = None;
     while !pb.at_end() {
@@ -3651,7 +3407,8 @@ fn decode_properties(
     prop_field: u64,
     class_tparams: &[(u64, String)],
     class_tparam_bounds: &[Vec<Ty>],
-) -> Vec<MetaProp> {
+) -> MetadataResult<Vec<MetaProp>> {
+    let inline_underlying_property_name_id = inline_underlying_property_name_id(ctx.msg);
     let declared_classifier = |ty: Ty| match ty.non_null() {
         Ty::Obj(internal, _) => Some(internal),
         _ => None,
@@ -3661,7 +3418,7 @@ fn decode_properties(
     let d2 = ctx.d2;
     let mut type_table = None;
     let mut props: Vec<&[u8]> = Vec::new();
-    let mut pb = Pb { b: ctx.msg, i: 0 };
+    let mut pb = Pb::new(ctx.msg);
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
         match (tag >> 3, tag & 7) {
@@ -3702,7 +3459,7 @@ fn decode_properties(
     const LEGACY_IS_VAR: u64 = 1 << 6;
     const LEGACY_IS_CONST: u64 = 1 << 9;
     for prop in props {
-        let mut p = Pb { b: prop, i: 0 };
+        let mut p = Pb::new(prop);
         let mut name_id = None;
         let mut ret = None;
         let mut ret_nullable = false;
@@ -3737,18 +3494,14 @@ fn decode_properties(
                     let Some(body) = p.bytes(n as usize) else {
                         break;
                     };
-                    if let Some(parameter) = parse_type_param(body) {
-                        type_params.push(parameter);
-                    }
+                    type_params.push(parse_type_param(body)?);
                 }
                 (17, 2) => {
                     let Some(n) = p.varint() else { break };
                     let Some(body) = p.bytes(n as usize) else {
                         break;
                     };
-                    if let Some(parameter) = parse_value_parameter(body) {
-                        context_params.push(parameter);
-                    }
+                    context_params.push(parse_value_parameter(body)?);
                 }
                 (12, 2) => {
                     let Some(n) = p.varint() else { break };
@@ -3767,7 +3520,8 @@ fn decode_properties(
                     let Some(ids) = p.bytes(n as usize) else {
                         break;
                     };
-                    context_receiver_type_ids.extend(packed_varints(ids));
+                    context_receiver_type_ids
+                        .extend(packed_varints(ids).ok_or(MetadataDecodeError::MalformedWire)?);
                 }
                 (9, 0) => {
                     if let Some(tid) = p.varint() {
@@ -3947,26 +3701,20 @@ fn decode_properties(
             is_const: flags & is_const_bit != 0,
             is_abstract: (flags >> 4) & 0x3 == 2,
             is_var,
+            is_inline_underlying: inline_underlying_property_name_id == Some(name_id),
             receiver_class,
             is_extension: receiver_body.is_some(),
         });
     }
-    out
+    Ok(out)
 }
 
-/// A classpath `@JvmInline value class` decoded from `@Metadata`: the single underlying property and its
-/// Kotlin type. A value class erases to this underlying type on the old JVM (`UInt` → `kotlin/Int` → `int`;
-/// `Result<T>` → a type parameter → `None`, erasing to `Object`).
+/// A classpath value class's underlying property and Kotlin type decoded from `@Metadata`.
 #[derive(Clone, Debug)]
 pub struct InlineClass {
-    /// Kotlin class name of the underlying type (`kotlin/Int` for `UInt`); `None` when the underlying is a
-    /// type parameter (`Result<T>`), which erases to `kotlin/Any`/`Object`.
+    /// Underlying class name, or `None` when a type parameter erases to `Object`.
     pub underlying_class: Option<String>,
-    /// Whether the underlying type is declared NULLABLE (`value class X(val v: String?)`). Decides the
-    /// null-representation: a nullable use `X?` stays UNBOXED (null carried by the underlying reference)
-    /// only when the underlying is non-null; over a nullable underlying `X?` must box. `None` when the
-    /// metadata didn't carry the type inline or in the type table (unknown — treat as nullable,
-    /// conservative).
+    /// Declared underlying nullability; `None` when metadata omitted the type shape.
     pub underlying_nullable: Option<bool>,
     /// The sole property's name (`data` for `UInt`/`Result`).
     pub property_name: Option<String>,
@@ -3977,7 +3725,7 @@ pub struct InlineClass {
 fn inline_class(ctx: &MetaCtx) -> Option<InlineClass> {
     let records = ctx.records;
     let d2 = ctx.d2;
-    let mut pb = Pb { b: ctx.msg, i: 0 };
+    let mut pb = Pb::new(ctx.msg);
     let mut is_value = false;
     let mut underlying_class = None;
     let mut underlying_nullable = None;
@@ -4039,7 +3787,7 @@ fn inline_class(ctx: &MetaCtx) -> Option<InlineClass> {
     // (inline `Type`) or `returnTypeId` = 9 (a TypeTable id; 7 is the RECEIVER type id).
     if is_value && underlying_class.is_none() {
         if let Some(pname) = &property_name {
-            let mut pb = Pb { b: ctx.msg, i: 0 };
+            let mut pb = Pb::new(ctx.msg);
             while !pb.at_end() {
                 let Some(tag) = pb.varint() else { break };
                 match (tag >> 3, tag & 7) {
@@ -4092,7 +3840,7 @@ type PropNameAndReturn<'a> = (u64, Option<&'a [u8]>, Option<u64>);
 /// A `Property` message's `name` (field 2, string id), inline `returnType` (field 3), and
 /// `returnTypeId` (field 9, a TypeTable index — field 7 is the RECEIVER type id, unlike `Function`).
 fn parse_property_name_and_return(body: &[u8]) -> Option<PropNameAndReturn<'_>> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut name = None;
     let mut rt: Option<&[u8]> = None;
     let mut rtid = None;
@@ -4115,7 +3863,7 @@ fn parse_property_name_and_return(body: &[u8]) -> Option<PropNameAndReturn<'_>> 
 /// `firstNullable` (field 2) marks it nullable: kotlinc stores a nullable variant of type N at
 /// `firstNullable + k` positions, flagging every entry at `index >= firstNullable` nullable.
 fn type_table_entry(body: &[u8], index: usize) -> Option<(&[u8], bool)> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut types: Vec<&[u8]> = Vec::new();
     let mut first_nullable: Option<u64> = None;
     while !pb.at_end() {
@@ -4136,7 +3884,7 @@ fn type_table_entry(body: &[u8], index: usize) -> Option<(&[u8], bool)> {
 
 /// A `Type` message's `class_name` (field 6) and `nullable` flag (field 3).
 fn parse_type_class_and_nullable(body: &[u8]) -> (Option<u64>, bool) {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut class_name = None;
     let mut nullable = false;
     while !pb.at_end() {
@@ -4169,37 +3917,6 @@ fn parse_type_class_and_nullable(body: &[u8]) -> (Option<u64>, bool) {
 // (field 30 → `TypeTable.type` field 1), whose `Type.class_name` (field 6) is a `QualifiedNameTable`
 // id, resolved against the fragment's `StringTable` exactly as kotlinc's `NameResolverImpl`.
 
-/// One `QualifiedNameTable.QualifiedName`: parent id (`-1` at the root), short-name id into the
-/// `StringTable`, and kind (`0` CLASS, `1` PACKAGE, `2` LOCAL; default PACKAGE).
-struct QName {
-    parent: i64,
-    short: usize,
-    kind: u64,
-}
-
-fn parse_qname(body: &[u8]) -> QName {
-    let mut pb = Pb { b: body, i: 0 };
-    let mut q = QName {
-        parent: -1,
-        short: 0,
-        kind: 1,
-    };
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (1, 0) => q.parent = pb.varint().map(|v| v as i64).unwrap_or(-1),
-            (2, 0) => q.short = pb.varint().unwrap_or(0) as usize,
-            (3, 0) => q.kind = pb.varint().unwrap_or(1),
-            (_, w) => {
-                if pb.skip(w).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-    q
-}
-
 /// Resolve a `QualifiedNameTable` id to its internal name, mirroring `NameResolverImpl.traverseIds`:
 /// walk the parent chain, prepending each segment, joining PACKAGE segments with `/` and the relative
 /// CLASS segments with `.`, then `package/Relative.Class` (`kotlin/collections/MutableList`).
@@ -4226,12 +3943,6 @@ fn resolve_qname(qnames: &[QName], strings: &[String], mut idx: i64) -> String {
     } else {
         format!("{}/{c}", pkg.join("/"))
     }
-}
-
-/// Drop the `BuiltInsBinaryVersion` header, returning the `PackageFragment` proto bytes.
-fn strip_builtins_header(data: &[u8]) -> Option<&[u8]> {
-    let count = u32::from_be_bytes(*data.get(0..4)?.first_chunk::<4>()?) as usize;
-    data.get(4 + 4 * count..)
 }
 
 /// A type decoded from a `.kotlin_builtins` fragment. A bare internal name cannot express the two
@@ -4421,185 +4132,19 @@ pub struct BuiltinClass {
     pub nullable_member_returns: Vec<(String, usize)>,
 }
 
-/// The tables a `.kotlin_builtins` `Class` resolves its types against: the fragment's string and
-/// qualified-name tables plus the class's own `type_table` (`Class.type_table` = field 30).
-struct BuiltinTables<'a> {
-    strings: &'a [String],
-    qnames: &'a [QName],
-    types: &'a [&'a [u8]],
-}
-
-/// A `TypeParameter.id` → source name map. A builtins `Type` names a type parameter by that id
-/// (`Type.type_parameter` = field 7); without the map the type is undecodable and the whole member
-/// used to be dropped.
-type TypeParamNames = std::collections::HashMap<u64, String>;
-
-/// Decode the type of one builtins `ValueParameter`. Functions and constructors use the same
-/// message; keeping one reader prevents their accepted type-table layouts from drifting.
-fn builtin_value_parameter_type(
-    body: &[u8],
-    tables: &BuiltinTables<'_>,
-    tparams: &TypeParamNames,
-) -> Option<BuiltinTy> {
-    let mut value = Pb { b: body, i: 0 };
-    let mut ty = None;
-    while !value.at_end() {
-        let tag = value.varint()?;
-        match (tag >> 3, tag & 7) {
-            // `type_id` is field 5 in the current builtins schema and field 4 in older fragments.
-            (5, 0) | (4, 0) => {
-                ty = value
-                    .varint()
-                    .and_then(|id| tables.ty_by_id(id as usize, tparams, 0));
-            }
-            // Inline `type`.
-            (3, 2) => {
-                let len = value.varint()? as usize;
-                ty = value
-                    .bytes(len)
-                    .and_then(|type_body| tables.ty(type_body, tparams, 0));
-            }
-            (_, wire) => value.skip(wire)?,
-        }
-    }
-    ty
-}
-
-/// Decode either wire representation of a metadata type. Producers may inline the `Type` message or
-/// reference the enclosing type table; consumers must treat those as the same declaration shape.
-fn builtin_type_ref(
-    inline: Option<&[u8]>,
-    table_id: Option<u64>,
-    tables: &BuiltinTables<'_>,
-    tparams: &TypeParamNames,
-) -> Option<BuiltinTy> {
-    inline
-        .and_then(|body| tables.ty(body, tparams, 0))
-        .or_else(|| table_id.and_then(|id| tables.ty_by_id(id as usize, tparams, 0)))
-}
-
-/// How deep a `.kotlin_builtins` type may nest before the decode gives up — a type-table entry
-/// references other entries by id, so a malformed (or cyclic) fragment must not recurse forever.
+/// How deep a metadata type may nest before the decode gives up. Both `@Metadata` and the checked
+/// builtins decoder use this limit for cyclic type-table references.
 const BUILTIN_TYPE_DEPTH_LIMIT: u32 = 16;
-
-impl BuiltinTables<'_> {
-    /// Resolve the shared [`parse_type_node`] wire shape through a builtins fragment's tables. A type is
-    /// `class_name` (field 6) with `argument`s, `type_parameter` (field 7, by id), or
-    /// `type_parameter_name` (field 9, by string). An argument may carry its type inline or by table id;
-    /// builtins commonly use the latter, so those edges consume the recursion budget as well.
-    fn ty(&self, body: &[u8], tparams: &TypeParamNames, depth: u32) -> Option<BuiltinTy> {
-        if depth > BUILTIN_TYPE_DEPTH_LIMIT {
-            return None;
-        }
-        let node = parse_type_node(body)?;
-        let args = node
-            .arguments
-            .into_iter()
-            .map(|argument| match argument {
-                ParsedTypeArgument::Inline(body, projection) => self
-                    .ty(body, tparams, depth + 1)
-                    .map(|ty| project_builtin_ty(projection, ty)),
-                ParsedTypeArgument::Table(id, projection) => usize::try_from(id)
-                    .ok()
-                    .and_then(|id| self.ty_by_id(id, tparams, depth + 1))
-                    .map(|ty| project_builtin_ty(projection, ty)),
-                ParsedTypeArgument::Star => {
-                    Some(BuiltinTy::OutProjection(Box::new(BuiltinTy::Class {
-                        internal: "kotlin/Any".to_string(),
-                        args: Vec::new(),
-                        nullable: true,
-                    })))
-                }
-            })
-            .collect::<Option<Vec<_>>>()?;
-        if let Some(id) = node.class_id {
-            return Some(BuiltinTy::Class {
-                internal: resolve_qname(self.qnames, self.strings, id as i64),
-                args,
-                nullable: node.nullable,
-            });
-        }
-        let name = match (node.type_parameter_id, node.type_parameter_name_id) {
-            (Some(id), _) => tparams.get(&id).cloned()?,
-            (None, Some(sid)) => self.strings.get(sid as usize).cloned()?,
-            (None, None) => return None,
-        };
-        Some(BuiltinTy::Param {
-            name,
-            nullable: node.nullable,
-        })
-    }
-
-    fn ty_by_id(&self, id: usize, tparams: &TypeParamNames, depth: u32) -> Option<BuiltinTy> {
-        self.ty(self.types.get(id)?, tparams, depth)
-    }
-
-    /// Decode a run of `TypeParameter` messages: their names (added to `tparams` so a bound may refer
-    /// to a sibling) and their upper bounds. Bounds are decoded against the names alone — a recursive
-    /// bound (`T : Comparable<T>`) therefore terminates instead of chasing itself.
-    fn type_params(&self, bodies: &[&[u8]], tparams: &mut TypeParamNames) -> Vec<BuiltinTypeParam> {
-        let parsed: Vec<ParsedTypeParam> = bodies
-            .iter()
-            .filter_map(|b| parse_type_param(b))
-            .filter(|tp| self.strings.get(tp.name_id as usize).is_some())
-            .collect();
-        for tp in &parsed {
-            tparams.insert(tp.id, self.strings[tp.name_id as usize].clone());
-        }
-        parsed
-            .iter()
-            .map(|tp| BuiltinTypeParam {
-                name: self.strings[tp.name_id as usize].clone(),
-                variance: tp.variance,
-                only_input: tp.annotation_bodies.iter().any(|body| {
-                    let mut annotation = Pb { b: body, i: 0 };
-                    let mut class_id = None;
-                    while !annotation.at_end() {
-                        let Some(tag) = annotation.varint() else {
-                            break;
-                        };
-                        match (tag >> 3, tag & 7) {
-                            (1, 0) => class_id = annotation.varint(),
-                            (_, wire) => {
-                                if annotation.skip(wire).is_none() {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    class_id.is_some_and(|id| {
-                        resolve_qname(self.qnames, self.strings, id as i64)
-                            == "kotlin/internal/OnlyInputTypes"
-                    })
-                }),
-                bounds: tp
-                    .upper_bound_ids
-                    .iter()
-                    .filter_map(|&id| self.ty_by_id(id as usize, tparams, 0))
-                    .chain(
-                        tp.upper_bound_bodies
-                            .iter()
-                            .filter_map(|body| self.ty(body, tparams, 0)),
-                    )
-                    .collect(),
-            })
-            .collect()
-    }
-}
 
 /// `Class.type_parameter`. Field 5 on a `Class` — where a `Function`/`Property` instead carries its
 /// `receiver_type`, hence the two distinct constants.
 const CLASS_TYPE_PARAMETER_FIELD: u64 = 5;
 /// `TypeAlias.typeParameter` — the alias's OWN parameters, which its expansion refers to.
 const TYPE_ALIAS_TYPE_PARAMETER_FIELD: u64 = 3;
-/// `Function.type_parameter` / `Property.type_parameter`. Both are field 4 (matching the decoders in
-/// [`class_functions`] and [`class_properties`]); field 5 on those messages is `receiver_type`.
-const MEMBER_TYPE_PARAMETER_FIELD: u64 = 4;
-
 /// Collect a message's repeated `type_parameter` sub-message bodies. The field number differs by
-/// carrier — see [`CLASS_TYPE_PARAMETER_FIELD`] / [`MEMBER_TYPE_PARAMETER_FIELD`].
+/// carrier — callers pass the schema-owned field for their declaration kind.
 fn type_param_bodies(body: &[u8], field: u64) -> Vec<&[u8]> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut out = Vec::new();
     while !pb.at_end() {
         let Some(tag) = pb.varint() else { break };
@@ -4619,630 +4164,21 @@ fn type_param_bodies(body: &[u8], field: u64) -> Vec<&[u8]> {
     out
 }
 
-fn parse_builtin_package_functions(
-    package: &[u8],
-    strings: &[String],
-    qnames: &[QName],
-) -> Vec<BuiltinFunction> {
-    let mut functions = Vec::new();
-    let mut types = Vec::new();
-    let mut package_message = Pb { b: package, i: 0 };
-    while !package_message.at_end() {
-        let Some(tag) = package_message.varint() else {
-            break;
-        };
-        match (tag >> 3, tag & 7) {
-            (3, 2) => {
-                let Some(len) = package_message.varint() else {
-                    break;
-                };
-                let Some(body) = package_message.bytes(len as usize) else {
-                    break;
-                };
-                functions.push(body);
-            }
-            (30, 2) => {
-                let Some(len) = package_message.varint() else {
-                    break;
-                };
-                let Some(table) = package_message.bytes(len as usize) else {
-                    break;
-                };
-                let mut table = Pb { b: table, i: 0 };
-                while !table.at_end() {
-                    let Some(tag) = table.varint() else { break };
-                    match (tag >> 3, tag & 7) {
-                        (1, 2) => {
-                            let Some(len) = table.varint() else { break };
-                            let Some(ty) = table.bytes(len as usize) else {
-                                break;
-                            };
-                            types.push(ty);
-                        }
-                        (_, wire) => {
-                            if table.skip(wire).is_none() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            (_, wire) => {
-                if package_message.skip(wire).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-
-    let tables = BuiltinTables {
-        strings,
-        qnames,
-        types: &types,
-    };
-    functions
-        .into_iter()
-        .filter_map(|body| {
-            let function = parse_function(body)?;
-            let mut tparams = TypeParamNames::new();
-            let formals = tables.type_params(
-                &type_param_bodies(body, MEMBER_TYPE_PARAMETER_FIELD),
-                &mut tparams,
-            );
-            let mut params = Vec::new();
-            let mut param_names = Vec::new();
-            let mut param_defaults = Vec::new();
-            let mut vararg = None;
-            let context_count = if function.context_params.is_empty() {
-                function.context_receiver_bodies.len() + function.context_receiver_type_ids.len()
-            } else {
-                function.context_params.len()
-            };
-            if function.context_params.is_empty() {
-                for ty in function
-                    .context_receiver_bodies
-                    .iter()
-                    .map(|body| tables.ty(body, &tparams, 0))
-                    .chain(
-                        function
-                            .context_receiver_type_ids
-                            .iter()
-                            .map(|&id| tables.ty_by_id(id as usize, &tparams, 0)),
-                    )
-                {
-                    params.push(ty?);
-                    param_names.push(String::new());
-                    param_defaults.push(false);
-                }
-            }
-            let values = function.context_params.iter().chain(&function.value_params);
-            for value in values {
-                let parameter_index = params.len();
-                let vararg_element = value
-                    .vararg_elem_body
-                    .as_deref()
-                    .and_then(|body| tables.ty(body, &tparams, 0))
-                    .or_else(|| {
-                        value
-                            .vararg_elem_id
-                            .and_then(|id| tables.ty_by_id(id as usize, &tparams, 0))
-                    });
-                let ty = if let Some(element) = vararg_element {
-                    vararg = Some(parameter_index);
-                    match &element {
-                        BuiltinTy::Class {
-                            internal,
-                            args,
-                            nullable: false,
-                        } if args.is_empty()
-                            && matches!(
-                                internal.as_str(),
-                                "kotlin/Boolean"
-                                    | "kotlin/Byte"
-                                    | "kotlin/Char"
-                                    | "kotlin/Double"
-                                    | "kotlin/Float"
-                                    | "kotlin/Int"
-                                    | "kotlin/Long"
-                                    | "kotlin/Short"
-                            ) =>
-                        {
-                            BuiltinTy::class(format!("{internal}Array"))
-                        }
-                        _ => BuiltinTy::Class {
-                            internal: "kotlin/Array".to_string(),
-                            args: vec![element],
-                            nullable: false,
-                        },
-                    }
-                } else {
-                    value
-                        .type_body
-                        .as_deref()
-                        .and_then(|body| tables.ty(body, &tparams, 0))
-                        .or_else(|| {
-                            value
-                                .type_id
-                                .and_then(|id| tables.ty_by_id(id as usize, &tparams, 0))
-                        })?
-                };
-                params.push(ty);
-                param_names.push(
-                    strings
-                        .get(value.name_id as usize)
-                        .cloned()
-                        .unwrap_or_else(|| format!("p{parameter_index}")),
-                );
-                param_defaults.push(value.has_default);
-            }
-            let ret = function
-                .return_body
-                .as_deref()
-                .and_then(|body| tables.ty(body, &tparams, 0))
-                .or_else(|| {
-                    function
-                        .return_type_id
-                        .and_then(|id| tables.ty_by_id(id as usize, &tparams, 0))
-                })?;
-            let receiver = function
-                .receiver_body
-                .as_deref()
-                .and_then(|body| tables.ty(body, &tparams, 0))
-                .or_else(|| {
-                    function
-                        .receiver_type_id
-                        .and_then(|id| tables.ty_by_id(id as usize, &tparams, 0))
-                });
-            Some(BuiltinFunction {
-                name: strings.get(function.name_id as usize)?.clone(),
-                receiver,
-                params,
-                ret,
-                formals,
-                param_names,
-                param_defaults,
-                vararg,
-                visibility: function.visibility,
-                is_inline: function.is_inline,
-                has_reified_type_params: function
-                    .type_params
-                    .iter()
-                    .any(|parameter| parameter.reified),
-                is_suspend: function.is_suspend,
-                is_operator: function.is_operator,
-                is_infix: function.is_infix,
-                context_count,
-            })
-        })
-        .collect()
-}
-
 /// Parse a `.kotlin_builtins` resource → every declared `Class` (qualified name → its supertypes +
 /// members). ONE walk over the fragment's `StringTable`/`QualifiedNameTable`/`Class` tables; each
 /// class's supertypes and member types are resolved through its `type_table` (field 30 → `Type
 /// .class_name` → `QualifiedNameTable`). The single source for both the collection hierarchy and a
 /// builtin type's API — no curated/hardcoded tables.
-pub fn parse_builtins(data: &[u8]) -> BuiltinPackage {
-    let Some(pf) = strip_builtins_header(data) else {
-        return BuiltinPackage::default();
-    };
-    parse_package_fragment(pf)
-}
+pub use crate::metadata::decode::PackageFragmentDecodeError;
 
-/// Parse one raw Kotlin metadata `PackageFragment`, as stored in a KLIB `.knm` entry. Builtins use
-/// the same protobuf after a small version header; keeping the carrier split at this boundary lets
-/// both providers share the declaration decoder without fabricating a builtins header.
-pub fn parse_package_fragment(pf: &[u8]) -> BuiltinPackage {
-    let mut out = BuiltinPackage::default();
-    let mut strings: Vec<String> = Vec::new();
-    let mut qnames: Vec<QName> = Vec::new();
-    let mut package = None;
-    let mut classes: Vec<&[u8]> = Vec::new();
-    let mut pb = Pb { b: pf, i: 0 };
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (1, 2) => {
-                let Some(n) = pb.varint() else { break };
-                let Some(b) = pb.bytes(n as usize) else { break };
-                let mut sp = Pb { b, i: 0 };
-                while !sp.at_end() {
-                    let Some(t) = sp.varint() else { break };
-                    match (t >> 3, t & 7) {
-                        (1, 2) => {
-                            let Some(m) = sp.varint() else { break };
-                            let Some(s) = sp.bytes(m as usize) else { break };
-                            strings.push(String::from_utf8_lossy(s).into_owned());
-                        }
-                        (_, w) => {
-                            if sp.skip(w).is_none() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            (2, 2) => {
-                let Some(n) = pb.varint() else { break };
-                let Some(b) = pb.bytes(n as usize) else { break };
-                let mut qp = Pb { b, i: 0 };
-                while !qp.at_end() {
-                    let Some(t) = qp.varint() else { break };
-                    match (t >> 3, t & 7) {
-                        (1, 2) => {
-                            let Some(m) = qp.varint() else { break };
-                            let Some(qb) = qp.bytes(m as usize) else {
-                                break;
-                            };
-                            qnames.push(parse_qname(qb));
-                        }
-                        (_, w) => {
-                            if qp.skip(w).is_none() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            (3, 2) => {
-                let Some(n) = pb.varint() else { break };
-                package = pb.bytes(n as usize);
-            }
-            (4, 2) => {
-                let Some(n) = pb.varint() else { break };
-                let Some(b) = pb.bytes(n as usize) else { break };
-                classes.push(b);
-            }
-            (_, w) => {
-                if pb.skip(w).is_none() {
-                    break;
-                }
-            }
+pub fn parse_builtins(data: &[u8]) -> Result<BuiltinPackage, PackageFragmentDecodeError> {
+    let pf = crate::metadata::decode::strip_builtins_header(data).ok_or_else(|| {
+        PackageFragmentDecodeError {
+            offset: 0,
+            detail: "truncated Kotlin builtins version header".to_string(),
         }
-    }
-    for cb in &classes {
-        let mut cp = Pb { b: cb, i: 0 };
-        let mut fq = None;
-        let mut companion_name_id = None;
-        // `Class.flags` has the protobuf default PUBLIC FINAL (`6`). Keep wire-format defaulting at
-        // the decode boundary, as the ordinary `@Metadata` class reader does, so every consumer sees
-        // the semantic flag word. Treating omission as zero conflates it with an explicitly INTERNAL
-        // declaration and forces downstream JVM-specific code to guess which input it received.
-        let mut flags = 6u64;
-        let mut supids: Vec<u64> = Vec::new();
-        let mut types: Vec<&[u8]> = Vec::new();
-        let mut ctors: Vec<&[u8]> = Vec::new();
-        let mut funcs: Vec<&[u8]> = Vec::new();
-        let mut props: Vec<&[u8]> = Vec::new();
-        let mut class_tparam_bodies: Vec<&[u8]> = Vec::new();
-        while !cp.at_end() {
-            let Some(tag) = cp.varint() else { break };
-            match (tag >> 3, tag & 7) {
-                // Class.flags = 1 (varint). `CLASS_KIND` occupies bits 6..8 (after HAS_ANNOTATIONS,
-                // VISIBILITY[3], MODALITY[2]); 1 = INTERFACE.
-                (1, 0) => flags = cp.varint().unwrap_or(6),
-                (3, 0) => fq = cp.varint(),
-                (4, 0) => companion_name_id = cp.varint(),
-                (2, 2) => {
-                    // supertype_id (packed) — indexes the class's type_table.
-                    if let Some(n) = cp.varint() {
-                        if let Some(b) = cp.bytes(n as usize) {
-                            supids.extend(packed_varints(b));
-                        }
-                    }
-                }
-                (f, 2) if f == CLASS_TYPE_PARAMETER_FIELD => {
-                    // The names behind every `Type.type_parameter` id a member of this class references.
-                    if let Some(n) = cp.varint() {
-                        if let Some(b) = cp.bytes(n as usize) {
-                            class_tparam_bodies.push(b);
-                        }
-                    }
-                }
-                (8, 2) => {
-                    // Class.constructor.
-                    if let Some(n) = cp.varint() {
-                        if let Some(body) = cp.bytes(n as usize) {
-                            ctors.push(body);
-                        }
-                    }
-                }
-                (10, 2) => {
-                    // Class.property = 10 (each: name=2, return_type_id=7 — same shape as a function).
-                    if let Some(n) = cp.varint() {
-                        if let Some(b) = cp.bytes(n as usize) {
-                            props.push(b);
-                        }
-                    }
-                }
-                (9, 2) => {
-                    if let Some(n) = cp.varint() {
-                        if let Some(b) = cp.bytes(n as usize) {
-                            funcs.push(b);
-                        }
-                    }
-                }
-                (30, 2) => {
-                    let Some(n) = cp.varint() else { break };
-                    let Some(b) = cp.bytes(n as usize) else { break };
-                    let mut tp = Pb { b, i: 0 };
-                    while !tp.at_end() {
-                        let Some(t) = tp.varint() else { break };
-                        match (t >> 3, t & 7) {
-                            (1, 2) => {
-                                let Some(m) = tp.varint() else { break };
-                                let Some(ty) = tp.bytes(m as usize) else {
-                                    break;
-                                };
-                                types.push(ty);
-                            }
-                            (_, w) => {
-                                if tp.skip(w).is_none() {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                (_, w) => {
-                    if cp.skip(w).is_none() {
-                        break;
-                    }
-                }
-            }
-        }
-        let Some(fq) = fq else { continue };
-        let fqname = resolve_qname(&qnames, &strings, fq as i64);
-        let companion_name = companion_name_id
-            .and_then(|id| strings.get(id as usize))
-            .cloned();
-        if companion_name.is_some() {
-            crate::trace_compiler!(
-                "metadata_companions",
-                "builtin classifier {fqname} companion={companion_name:?}"
-            );
-        }
-        if ((flags >> 6) & 0x7) == 6 {
-            crate::trace_compiler!(
-                "metadata_companions",
-                "builtin companion classifier {fqname} flags={flags:#x}"
-            );
-        }
-        let tables = BuiltinTables {
-            strings: &strings,
-            qnames: &qnames,
-            types: &types,
-        };
-        // The class's own type parameters name every `Type.type_parameter` id its members reference.
-        let mut class_tparams = TypeParamNames::new();
-        let type_params = tables.type_params(&class_tparam_bodies, &mut class_tparams);
-        // A `*_type_id` indexes the class `type_table`; decode the entry in full (class + arguments,
-        // or a type-parameter reference) — a bare class name cannot express either.
-        let type_of_id = |tid: u64, tps: &TypeParamNames| -> Option<BuiltinTy> {
-            tables.ty_by_id(tid as usize, tps, 0)
-        };
-        let supertype_tys: Vec<BuiltinTy> = supids
-            .iter()
-            .filter_map(|&sid| type_of_id(sid, &class_tparams))
-            .collect();
-        let supertypes: Vec<String> = supertype_tys
-            .iter()
-            .filter_map(|t| t.internal().map(str::to_string))
-            .collect();
-        let mut members = Vec::new();
-        let constructors = ctors
-            .iter()
-            .filter_map(|constructor| {
-                let mut message = Pb {
-                    b: constructor,
-                    i: 0,
-                };
-                // Constructor.flags protobuf default is PUBLIC (`6`).
-                let mut flags = 6u64;
-                let mut params = Vec::new();
-                let mut param_names = Vec::new();
-                let mut param_defaults = Vec::new();
-                let mut vararg = None;
-                while !message.at_end() {
-                    let Some(tag) = message.varint() else {
-                        break;
-                    };
-                    match (tag >> 3, tag & 7) {
-                        (1, 0) => flags = message.varint().unwrap_or(6),
-                        (2, 2) => {
-                            let Some(len) = message.varint() else {
-                                break;
-                            };
-                            let Some(value) = message.bytes(len as usize) else {
-                                break;
-                            };
-                            let parsed = parse_value_parameter(value)?;
-                            if parsed.vararg_elem_body.is_some() || parsed.vararg_elem_id.is_some()
-                            {
-                                vararg = Some(params.len());
-                            }
-                            param_names.push(
-                                strings
-                                    .get(parsed.name_id as usize)
-                                    .cloned()
-                                    .unwrap_or_else(|| format!("p{}", params.len())),
-                            );
-                            param_defaults.push(parsed.has_default);
-                            params.push(builtin_value_parameter_type(
-                                value,
-                                &tables,
-                                &class_tparams,
-                            )?);
-                        }
-                        (_, wire) => {
-                            if message.skip(wire).is_none() {
-                                break;
-                            }
-                        }
-                    }
-                }
-                Some(BuiltinConstructor {
-                    params,
-                    param_names,
-                    param_defaults,
-                    vararg,
-                    visibility: crate::types::Visibility::from_metadata(flags_visibility(flags)),
-                })
-            })
-            .collect::<Vec<_>>();
-        let mut nullable_member_returns = Vec::new();
-        for fb in &funcs {
-            // A function may declare its OWN type parameters (`<R>` of `fold`); they shadow/extend the
-            // class's, so decode this function's types against the union.
-            let mut fn_tparams = class_tparams.clone();
-            let formals = tables.type_params(
-                &type_param_bodies(fb, MEMBER_TYPE_PARAMETER_FIELD),
-                &mut fn_tparams,
-            );
-            let type_of_id = |tid: u64| type_of_id(tid, &fn_tparams);
-            let mut p = Pb { b: fb, i: 0 };
-            let mut name_id = None;
-            let mut ret_id = None;
-            // `Function.flags` has protobuf default PUBLIC FINAL (`6`), matching `parse_function`.
-            let mut flags = 6u64;
-            let mut params = Vec::new();
-            let mut complete = true;
-            while !p.at_end() {
-                let Some(tag) = p.varint() else { break };
-                match (tag >> 3, tag & 7) {
-                    (9, 0) => flags = p.varint().unwrap_or(6),
-                    (2, 0) => name_id = p.varint(), // name
-                    (7, 0) => ret_id = p.varint(),  // return_type_id (type-table ref)
-                    (6, 2) => {
-                        // value_parameter: ValueParameter.type_id = 4 (type-table ref)
-                        if let Some(n) = p.varint() {
-                            if let Some(vb) = p.bytes(n as usize) {
-                                match builtin_value_parameter_type(vb, &tables, &fn_tparams) {
-                                    Some(parameter) => params.push(parameter),
-                                    None => complete = false,
-                                }
-                            }
-                        }
-                    }
-                    (_, w) => {
-                        if p.skip(w).is_none() {
-                            break;
-                        }
-                    }
-                }
-            }
-            if complete {
-                if let (Some(ni), Some(ri)) = (name_id, ret_id) {
-                    // The return type's nullability (`Map.get(K): V?`) lives on the type-table entry's
-                    // `Type.nullable` flag — the JVM descriptor erases it.
-                    let ret_nullable = types
-                        .get(ri as usize)
-                        .is_some_and(|tb| parse_type_nullable(tb));
-                    // Record nullable returns separately too: a call may still resolve to the ERASED
-                    // classpath method (`java/util/Map.get` → `Object`), which carries no Kotlin
-                    // nullability, and this is then the only surviving record that the source return is `T?`.
-                    if let Some(name) = strings.get(ni as usize).filter(|_| ret_nullable) {
-                        nullable_member_returns.push((name.clone(), params.len()));
-                    }
-                    if let Some((name, ret)) = strings.get(ni as usize).cloned().zip(type_of_id(ri))
-                    {
-                        members.push(BuiltinMember {
-                            name,
-                            params,
-                            ret,
-                            is_property: false,
-                            is_operator: flags & IS_OPERATOR_BIT != 0,
-                            is_infix: flags & IS_INFIX_BIT != 0,
-                            is_abstract: (flags >> 4) & 0x3 == 2,
-                            formals,
-                            ret_nullable,
-                        });
-                    }
-                }
-            }
-        }
-        for pb_ in &props {
-            let mut prop_tparams = class_tparams.clone();
-            let formals = tables.type_params(
-                &type_param_bodies(pb_, MEMBER_TYPE_PARAMETER_FIELD),
-                &mut prop_tparams,
-            );
-            let mut p = Pb { b: pb_, i: 0 };
-            let mut name_id = None;
-            let mut ret_body = None;
-            let mut ret_id = None;
-            let mut legacy_flags = None;
-            let mut modern_flags = None;
-            while !p.at_end() {
-                let Some(tag) = p.varint() else { break };
-                match (tag >> 3, tag & 7) {
-                    (1, 0) => legacy_flags = p.varint(),
-                    (2, 0) => name_id = p.varint(),
-                    (3, 2) => {
-                        let Some(len) = p.varint() else { break };
-                        ret_body = p.bytes(len as usize);
-                    }
-                    // `Property.return_type_id` is field 9 (field 7 is the receiver_type_id — distinct
-                    // from `Function`, whose return_type_id is field 7). `val length: Int` → field 9 → Int.
-                    (9, 0) => ret_id = p.varint(),
-                    (11, 0) => modern_flags = p.varint(),
-                    (_, w) => {
-                        if p.skip(w).is_none() {
-                            break;
-                        }
-                    }
-                }
-            }
-            if let Some(ni) = name_id {
-                if let (Some(name), Some(ret)) = (
-                    strings.get(ni as usize).cloned(),
-                    builtin_type_ref(ret_body, ret_id, &tables, &prop_tparams),
-                ) {
-                    let ret_nullable = ret.nullable();
-                    let flags = modern_flags
-                        .or(legacy_flags)
-                        .unwrap_or(crate::metadata::property_flags::DEFAULT);
-                    members.push(BuiltinMember {
-                        name,
-                        params: vec![],
-                        ret,
-                        is_property: true,
-                        is_operator: false,
-                        is_infix: false,
-                        is_abstract: flags & crate::metadata::property_flags::MODALITY_MASK
-                            == crate::metadata::property_flags::MODALITY_ABSTRACT,
-                        formals,
-                        ret_nullable,
-                    });
-                }
-            }
-        }
-        let is_nested = fqname
-            .rsplit('/')
-            .next()
-            .is_some_and(|tail| tail.contains('.'));
-        out.classes.insert(
-            fqname,
-            BuiltinClass {
-                supertypes,
-                supertype_tys,
-                members,
-                constructors,
-                companion_name,
-                type_params,
-                nullable_member_returns,
-                kind: builtin_class_kind(flags),
-                visibility: builtin_class_visibility(flags),
-                is_expect: flags & (1 << 12) != 0,
-                is_nested,
-                access: builtin_class_access(flags),
-            },
-        );
-    }
-    if let Some(package) = package {
-        out.functions = parse_builtin_package_functions(package, &strings, &qnames);
-    }
-    out
+    })?;
+    klib_validation::parse_package_fragment_checked(pf)
 }
 
 fn builtin_class_kind(flags: u64) -> TypeKind {
@@ -5318,10 +4254,7 @@ pub fn read_kotlin_module(bytes: &[u8]) -> Vec<(String, Vec<String>)> {
     if bytes.len() < 20 {
         return Vec::new();
     }
-    let mut pb = Pb {
-        b: &bytes[20..],
-        i: 0,
-    };
+    let mut pb = Pb::new(&bytes[20..]);
     // Two carriers matter: the `PackageParts` messages (field 1) and the module-level `jvm_package_name`
     // table (field 3) — the `@JvmPackageName` relocation targets that a `PackageParts` references by
     // index. Collect both, then parse each `PackageParts` against the table.
@@ -5365,7 +4298,7 @@ pub fn read_kotlin_module(bytes: &[u8]) -> Vec<(String, Vec<String>)> {
 /// `class_with_jvm_package_name_short_name = 5`, `class_with_jvm_package_name_package_id = 6` (packed
 /// indices into the module `jvm_package_name` table; a list shorter than field 5 repeats its last entry).
 fn parse_package_parts(body: &[u8], jvm_pkgs: &[String]) -> Option<(String, Vec<String>)> {
-    let mut pb = Pb { b: body, i: 0 };
+    let mut pb = Pb::new(body);
     let mut pkg: Option<String> = None;
     let mut parts: Vec<String> = Vec::new();
     let mut jvm_shorts: Vec<String> = Vec::new();
@@ -5387,10 +4320,7 @@ fn parse_package_parts(body: &[u8], jvm_pkgs: &[String]) -> Option<(String, Vec<
             }
             (6, 2) => {
                 let n = pb.varint()? as usize;
-                let mut packed = Pb {
-                    b: pb.bytes(n)?,
-                    i: 0,
-                };
+                let mut packed = Pb::new(pb.bytes(n)?);
                 while !packed.at_end() {
                     jvm_ids.push(packed.varint()? as usize);
                 }
@@ -5484,13 +4414,12 @@ mod builtin_class_access_tests {
 #[cfg(test)]
 mod module_reader_tests {
     use super::{
-        decode_metadata_type, decode_properties, parse_function, parse_package_fragment,
-        parse_type_alias, parse_type_facts, primary_erasure_bounds, read_kotlin_module,
-        value_parameter_type, MetaCtx, ParsedValueParam,
+        decode_metadata_type, decode_properties, klib_validation, parse_function, parse_type_alias,
+        parse_type_facts, primary_erasure_bounds, read_kotlin_module, value_parameter_type,
+        BuiltinTy, MetaCtx, ParsedValueParam,
     };
-    use crate::libraries::TypeKind;
     use crate::metadata::module::build_kotlin_module;
-    use crate::types::{Ty, Visibility};
+    use crate::types::Ty;
     use std::collections::HashMap;
 
     /// The decoded contract of a stdlib function, or `None` when the stdlib jar is not
@@ -5501,6 +4430,39 @@ mod module_reader_tests {
             .iter()
             .find(|f| f.kotlin_name == name)
             .and_then(|f| f.contract.as_deref().cloned())
+    }
+
+    #[test]
+    fn synthetic_metadata_does_not_decode_its_lambda_payload_as_a_class() {
+        let class_shaped_but_invalid_lambda_payload = [
+            0x00, // empty StringTableTypes prefix
+            0x2a, 0x06, // Class.type_parameter if interpreted with the wrong schema
+            0x08, 0x00, // id
+            0x10, 0x00, // name
+            0x20, 0x03, // invalid variance enum
+        ];
+        let d1 = std::iter::once('\0')
+            .chain(
+                class_shaped_but_invalid_lambda_payload
+                    .into_iter()
+                    .map(char::from),
+            )
+            .collect::<String>();
+
+        let metadata = super::decode_metadata(
+            &[d1],
+            &[],
+            Some(3),
+            "sample/SyntheticLambda",
+            Some("sample.redirected"),
+            &[],
+        )
+        .expect("synthetic lambda metadata uses its own protobuf schema");
+
+        assert_eq!(metadata.package.as_deref(), Some("sample/redirected"));
+        assert!(metadata.class_functions.is_empty());
+        assert!(metadata.package_functions.is_empty());
+        assert!(metadata.type_aliases.is_empty());
     }
 
     #[test]
@@ -5593,8 +4555,7 @@ mod module_reader_tests {
 
         let parameter = |type_body, type_id| ParsedValueParam {
             name_id: 0,
-            has_default: false,
-            materialized: false,
+            flags: 0,
             type_body,
             type_id,
             vararg_elem_body: None,
@@ -5673,7 +4634,8 @@ mod module_reader_tests {
             records: &[],
             d2: &d2,
         };
-        let decoded = super::decode_functions(&ctx, 3, &[], &[], None);
+        let decoded =
+            super::decode_functions(&ctx, 3, &[], &[], None).expect("function metadata decodes");
         assert_eq!(decoded.len(), 1);
         let function = &decoded[0];
         assert!(function.is_extension());
@@ -5903,13 +4865,17 @@ mod module_reader_tests {
         let omitted_flags = [0x10, 0x00, 0x32, 0x02, 0x30, 0x01];
         let internal_flags = [0x08, 0x00, 0x10, 0x00, 0x32, 0x02, 0x30, 0x01];
 
-        let public = parse_type_alias(&omitted_flags, &[], &d2).expect("public alias decodes");
+        let public = parse_type_alias(&omitted_flags, &[], &d2)
+            .expect("valid alias metadata")
+            .expect("public alias decodes");
         assert_eq!(public.name, "Alias");
         assert_eq!(public.target, "sample/Real");
         // A bare target remains an explicit expansion rather than becoming a consumer fallback.
         assert!(public.formals.is_empty());
         assert_eq!(public.expansion, Ty::obj("sample/Real"));
-        assert!(parse_type_alias(&internal_flags, &[], &d2).is_none());
+        assert!(parse_type_alias(&internal_flags, &[], &d2)
+            .expect("valid alias metadata")
+            .is_none());
     }
 
     #[test]
@@ -5969,7 +4935,7 @@ mod module_reader_tests {
             d2: &d2,
         };
 
-        let properties = decode_properties(&ctx, 4, &[], &[]);
+        let properties = decode_properties(&ctx, 4, &[], &[]).expect("property metadata decodes");
 
         assert_eq!(properties.len(), 1);
         assert_eq!(properties[0].name, "maybe");
@@ -6010,7 +4976,7 @@ mod module_reader_tests {
             d2: &d2,
         };
 
-        let properties = decode_properties(&ctx, 4, &[], &[]);
+        let properties = decode_properties(&ctx, 4, &[], &[]).expect("property metadata decodes");
 
         assert_eq!(properties.len(), 2);
         let length = &properties[0];
@@ -6088,7 +5054,7 @@ mod module_reader_tests {
             d2: &d2,
         };
 
-        let properties = decode_properties(&ctx, 4, &[], &[]);
+        let properties = decode_properties(&ctx, 4, &[], &[]).expect("property metadata decodes");
 
         assert_eq!(properties.len(), 5);
         assert_eq!(properties[0].visibility, crate::types::Visibility::Public);
@@ -6103,33 +5069,16 @@ mod module_reader_tests {
     }
 
     #[test]
-    fn raw_klib_package_fragment_exposes_js_static_annotation() {
-        let Some(library_dir) = crate::toolchain::kotlinc_lib_dir() else {
-            return;
-        };
-        let Ok(file) = std::fs::File::open(library_dir.join("kotlin-stdlib-wasm-js.klib")) else {
-            return;
-        };
-        let mut archive = zip::ZipArchive::new(file).expect("read Kotlin JS stdlib KLIB");
-        let mut entry = archive
-            .by_name("default/linkdata/package_kotlin.js/13_js.knm")
-            .expect("Kotlin common JS annotation header metadata fragment");
-        let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut entry, &mut bytes).expect("read KLIB metadata fragment");
-
-        let package = parse_package_fragment(&bytes);
-        let annotation = package
-            .classes
-            .get("kotlin/js/JsStatic")
-            .expect("JsStatic declaration from metadata, not a JVM hardcode");
-        assert_eq!(annotation.kind, TypeKind::Annotation);
-        assert_eq!(annotation.visibility, Visibility::Public);
-        assert!(
-            annotation.is_expect,
-            "JsStatic must come from common expect metadata"
-        );
-        assert!(annotation.constructors.iter().any(|constructor| {
-            constructor.params.is_empty() && constructor.visibility == Visibility::Public
-        }));
+    fn repository_owned_klib_fragment_decodes_semantic_declarations() {
+        // Exact bytes from Kotlin's checked-in `unpackedExampleKlib` fixture. Keeping them here
+        // makes semantic KLIB decoding independent of an installed Kotlin distribution.
+        let bytes = b"\x0a\x1d\x0a\x04main\x0a\x06kotlin\x0a\x04Unit\x0a\x07main.kt\x12\x0c\x0a\x02\x10\x01\x0a\x06\x08\x00\x10\x02\x18\x00\x1a\x1c\x1a\x07\x10\x00\x38\x00\xe0\x0a\x03\xf2\x01\x04\x0a\x02\x30\x01\xd8\x0a\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01\xe0\x0a\x00\xea\x0a\x00";
+        let package = klib_validation::parse_package_fragment_checked(bytes)
+            .expect("repository-owned semantic KLIB fragment");
+        assert!(package.classes.is_empty());
+        assert_eq!(package.functions.len(), 1);
+        assert_eq!(package.functions[0].name, "main");
+        assert_eq!(package.functions[0].params, Vec::<BuiltinTy>::new());
+        assert_eq!(package.functions[0].ret, BuiltinTy::class("kotlin/Unit"));
     }
 }
