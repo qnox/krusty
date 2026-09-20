@@ -26,6 +26,8 @@
 //! Bodies live under `default/ir/` in a separate, lower serialization; this module exposes those
 //! entries as bytes and stops there.
 
+pub mod ir;
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{Read as _, Seek as _};
@@ -40,7 +42,7 @@ const PACKAGE_PREFIX: &str = "default/linkdata/package_";
 /// name is not what the serializer writes. Every klib in the reference distribution has one.
 const ROOT_PACKAGE_PREFIX: &str = "default/linkdata/root_package/";
 /// Serialized Kotlin IR — the bodies. Read as opaque bytes here.
-const IR_PREFIX: &str = "default/ir/";
+pub(crate) const IR_PREFIX: &str = "default/ir/";
 /// Guard against a symlink cycle in an unpacked klib. A klib's own tree is three levels deep.
 const MAX_DIRECTORY_DEPTH: usize = 8;
 

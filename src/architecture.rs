@@ -364,6 +364,10 @@ mod tests {
     #[test]
     fn klib_container_reader_depends_on_no_compiler_module() {
         assert_allowed_crate_modules("src/klib.rs", &[]);
+        // The IR half is held to the same rule, and it is the half most likely to drift: what a
+        // decoded constant MEANS — which Kotlin type it fills, how a target materializes it — is
+        // the caller's, so this module publishes its own constant type rather than the compiler's.
+        assert_allowed_crate_modules("src/klib/ir.rs", &[]);
     }
 
     #[test]
