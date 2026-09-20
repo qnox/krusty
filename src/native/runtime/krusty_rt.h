@@ -471,6 +471,10 @@ extern const KType kt_type_string_builder;
 
 /* `StringBuilder()` and `StringBuilder(capacity)`. The capacity is a hint. */
 KRef kt_string_builder_new(void);
+
+/* `buildString { … }`: make a builder, run the block on it, answer what it built. The block is a
+   `Function1` whose single parameter is the builder — an extension lambda's receiver. */
+KRef kt_build_string(KRef block);
 KRef kt_string_builder_with_capacity(kt_int capacity);
 
 /* `StringBuilder(text)`: a builder holding a COPY of it. */

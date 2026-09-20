@@ -221,6 +221,16 @@ pub(super) fn runtime_function(owner: &str, name: &str, params: &[Ty]) -> Option
         ("kotlin", "error", [_]) => Some("kt_illegal_state".to_string()),
         ("kotlin", "require", [Ty::Boolean]) => Some("kt_require".to_string()),
         ("kotlin", "check", [Ty::Boolean]) => Some("kt_check".to_string()),
+        // `buildString { … }`. Kotlin declares it `inline`, and an inline declaration of a
+        // DEPENDENCY has no body here to splice, so it arrives as an ordinary call taking the
+        // block. The runtime makes a builder, runs the block on it, and answers what it built.
+        //
+        // Only the no-capacity form is named. The other takes an `Int` capacity first, which this
+        // builder does not reserve against, so answering it would quietly ignore an argument the
+        // program passed — it keeps declining with that argument still in sight.
+        ("kotlin/text", "buildString", [block]) if block.is_reference() => {
+            Some("kt_build_string".to_string())
+        }
         _ => None,
     }
 }

@@ -153,3 +153,33 @@ fn equal_string_literals_are_one_object() {
         "OK",
     );
 }
+
+#[test]
+fn build_string_runs_the_block_on_a_builder_it_makes() {
+    // `buildString` is declared `inline`, and an inline declaration of a DEPENDENCY has no body
+    // here to splice — the bytecode splicer is the JVM backend's. So it arrives as an ordinary
+    // call taking the block, and is realized as what it means: make a builder, run the block on
+    // it, answer what it built.
+    //
+    // The block is `StringBuilder.() -> Unit`. An extension lambda is a `Function1` whose single
+    // parameter is the receiver, so it is invoked exactly as `map`'s transform is — which is why
+    // no new calling convention was needed for it.
+    //
+    // The empty block and the capturing one are both here: the first is what proves the builder
+    // is made even when nothing appends to it, and the second that the block is a real closure
+    // rather than something spliced with its free variables resolved.
+    //
+    // Expectations are kotlinc's, taken by running this exact source under it.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val simple = buildString { append(\"a\"); append(1); append('c') }\n\
+         \x20   val empty = buildString { }\n\
+         \x20   val lines = buildString { appendLine(\"x\"); append(\"y\") }\n\
+         \x20   val captured = \"z\"\n\
+         \x20   val closure = buildString { append(captured); append(captured) }\n\
+         \x20   return \"$simple|$empty|${lines.length}|$closure\"\n\
+         }\n",
+        "BuildString",
+        "a1c||3|zz",
+    );
+}
