@@ -40088,9 +40088,14 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                 };
                 let explicit_receiver = crate::ast::explicit_call_receiver(file, expression)
                     .map(|receiver| (receiver, info.ty(receiver)));
+                let implicit_receiver = info
+                    .implicit_receiver_selections
+                    .get(&expression)
+                    .map(|selected| selected.ty);
                 Some(crate::plugins::FrontendSelectedCall {
                     expression,
                     explicit_receiver,
+                    implicit_receiver,
                     owner,
                     name,
                     params,

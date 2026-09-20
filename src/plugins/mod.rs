@@ -35,6 +35,12 @@ pub struct PluginExpressionPlan {
     pub plugin: &'static str,
     pub operation: &'static str,
     pub data: Vec<TypeName>,
+    /// Resolved semantic types required by the plugin operation. These cross checked FIR as types,
+    /// not rendered names, so type arguments and nullability cannot be lost and reconstructed.
+    pub types: Vec<Ty>,
+    /// Use the resolver-selected implicit receiver for the call as the first operand. The stable
+    /// receiver coordinate remains in `TypeInfo`; checked FIR materializes that exact selection.
+    pub implicit_receiver: bool,
     /// Checker-selected source operands in target-parameter order with their selected parameter
     /// types. Lowering evaluates/coerces exactly this list and performs no argument remapping.
     pub operands: Vec<(crate::ast::ExprId, Ty)>,
@@ -48,6 +54,9 @@ pub struct FrontendSelectedCall {
     /// Explicit source receiver and its final checked type. Plugins consume the parser coordinate
     /// while the bounded AST is live; checked FIR retains only the resulting operand.
     pub explicit_receiver: Option<(crate::ast::ExprId, Ty)>,
+    /// Semantic type of the resolver-selected implicit receiver, when the call has no explicit
+    /// source receiver. Its stable scope coordinate remains keyed by `expression` in `TypeInfo`.
+    pub implicit_receiver: Option<Ty>,
     pub owner: TypeName,
     pub name: String,
     pub params: Vec<Ty>,

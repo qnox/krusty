@@ -405,6 +405,7 @@ impl SerializeBody<'_> {
                 kind: "serialize-body",
                 exprs: Vec::new(),
                 data: vec![serialized_name],
+                types: Vec::new(),
             });
             let body = ir.add_expr(IrExpr::Block {
                 stmts: vec![unsupported],
@@ -596,7 +597,8 @@ mod tests {
                 kind: "serialize-body",
                 exprs,
                 data,
-            } if exprs.is_empty() && data == &[type_name("demo/Foo")]
+                types,
+            } if exprs.is_empty() && data == &[type_name("demo/Foo")] && types.is_empty()
         ));
         assert!(!crate::jvm::ir_emit::jvm_can_emit(&ir));
     }
