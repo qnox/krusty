@@ -46,6 +46,63 @@ fn semantic_qname(
     Ok(name)
 }
 
+/// The compile-time value a `const val` declares, decoded from the `Annotation.Argument.Value`
+/// message its property record carries.
+///
+/// A `const val` is folded at every use site, so a reader that validates this message and throws
+/// it away leaves `Int.MAX_VALUE` as a runtime property READ of a companion object — which has no
+/// storage on a target that compiles the stdlib itself, and which the native code generator
+/// declined by name 100-odd times across the box corpus.
+///
+/// `None` for a value that is not a compile-time constant of a type Kotlin can fold: a class
+/// literal, an enum entry, a nested annotation or an array. Those are annotation arguments, not
+/// `const val` initializers, and the same message carries both.
+fn semantic_constant(
+    body: &[u8],
+    strings: &[String],
+) -> Result<Option<crate::libraries::LibConst>, PackageFragmentDecodeError> {
+    let mut cursor = Cursor::new(body, 0);
+    let mut kind = None;
+    let mut integral = None;
+    let mut float = None;
+    let mut double = None;
+    let mut string = None;
+    while !cursor.at_end() {
+        let (number, wire) = field(&mut cursor, "constant value")?;
+        match (number, wire) {
+            (1, 0) => kind = Some(cursor.varint("constant value kind")?),
+            // `int_value` is a protobuf `sint64`: zigzag, so a negative constant is not a
+            // ten-byte varint. `Int.MIN_VALUE` is exactly the value that says so.
+            (2, 0) => {
+                let raw = cursor.varint("constant integral value")?;
+                integral = Some(((raw >> 1) as i64) ^ -((raw & 1) as i64));
+            }
+            (3, 5) => float = Some(f32::from_bits(cursor.fixed32("constant float value")?)),
+            (4, 1) => double = Some(f64::from_bits(cursor.fixed64("constant double value")?)),
+            (5, 0) => {
+                let id = cursor.varint("constant string value")?;
+                string = Some(semantic_string(strings, id, "constant string value")?);
+            }
+            (_, wire) => cursor.skip(wire, "constant value")?,
+        }
+    }
+    use crate::libraries::LibConst;
+    // BYTE 0, CHAR 1, SHORT 2, INT 3, LONG 4, FLOAT 5, DOUBLE 6, BOOLEAN 7, STRING 8, and past
+    // that the forms a `const val` cannot take.
+    Ok(match kind {
+        // Every sub-`Int` width, `Char` and `Boolean` alike, is carried as the `Int` the library
+        // constant model records — the same shape a classfile's `ConstantValue` arrives in.
+        Some(0 | 1 | 2 | 3 | 7) => integral
+            .and_then(|value| i32::try_from(value).ok())
+            .map(LibConst::Int),
+        Some(4) => integral.map(LibConst::Long),
+        Some(5) => float.map(LibConst::Float),
+        Some(6) => double.map(LibConst::Double),
+        Some(8) => string.map(|value| LibConst::Str(crate::kt_string::KtString::from(value))),
+        _ => None,
+    })
+}
+
 fn validate_annotation_value(
     body: &[u8],
     strings: &[String],
@@ -838,6 +895,8 @@ fn semantic_function(
         is_abstract: function.is_abstract,
         formals: formals.clone(),
         ret_nullable,
+        // A FUNCTION has no compile-time value; only a `const val` does.
+        constant: None,
     };
     let top = top_level.then_some(metadata::BuiltinFunction {
         name,
@@ -893,6 +952,7 @@ fn semantic_property(
     let mut receiver_body = None;
     let mut receiver_id = None;
     let mut context_count = 0usize;
+    let mut constant = None;
     while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "property declaration")?;
         match (number, wire) {
@@ -937,6 +997,7 @@ fn semantic_property(
             (173, 2) => {
                 let value = cursor.length_delimited("property compile-time value")?.0;
                 validate_annotation_value(value, tables.strings, tables.qnames)?;
+                constant = semantic_constant(value, tables.strings)?;
             }
             (11, 0) => modern_flags = Some(cursor.varint("property flags")?),
             (6 | 17, 2) => {
@@ -980,6 +1041,7 @@ fn semantic_property(
             == crate::metadata::property_flags::MODALITY_ABSTRACT,
         formals: formals.clone(),
         ret_nullable: ret.nullable(),
+        constant: constant.clone(),
     };
     let top = top_level.then(|| metadata::BuiltinProperty {
         name,
@@ -989,6 +1051,7 @@ fn semantic_property(
         visibility: metadata::builtin_class_visibility(flags),
         is_var: flags & crate::metadata::property_flags::IS_VAR != 0,
         context_count,
+        constant,
     });
     Ok((member, top))
 }
@@ -1310,6 +1373,7 @@ fn semantic_class(
             kind: metadata::builtin_class_kind(header.flags),
             visibility: metadata::builtin_class_visibility(header.flags),
             is_expect: header.flags & (1 << 12) != 0,
+            modality: metadata::builtin_class_modality(header.flags),
             is_nested,
             access: metadata::builtin_class_access(header.flags),
         },

@@ -4045,6 +4045,10 @@ pub struct BuiltinMember {
     /// Whether the declared return type is nullable (`V?`) — the JVM descriptor erases it, only the
     /// `.kotlin_builtins` `Type.nullable` flag carries it (`Map.get(K): V?`, `firstOrNull(): T?`).
     pub ret_nullable: bool,
+    /// The value a `const val` declares. Every use site folds it, so a member that has one is
+    /// never read at run time — which is what lets `Int.MAX_VALUE` resolve on a target whose
+    /// companion objects have no storage.
+    pub constant: Option<crate::libraries::LibConst>,
 }
 
 /// One top-level function declared by a `.kotlin_builtins` package fragment. Unlike a class member,
@@ -4093,6 +4097,8 @@ pub struct BuiltinProperty {
     /// Old unnamed context receivers followed by named context parameters, as on
     /// [`BuiltinFunction::context_count`].
     pub context_count: usize,
+    /// The value a `const val` declares, as on [`BuiltinMember::constant`].
+    pub constant: Option<crate::libraries::LibConst>,
 }
 
 /// One constructor declared by a builtin class. Unlike a function it has no return type or name;
@@ -4117,6 +4123,37 @@ pub struct BuiltinTypeParam {
 
 /// A builtin `Class` decoded from a `.kotlin_builtins` fragment: its direct supertypes and declared
 /// members — the two facets the front end needs (the read-only/mutable hierarchy AND each type's API).
+/// A declaration's Kotlin modality, as declared.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuiltinModality {
+    Final,
+    Open,
+    Abstract,
+    Sealed,
+}
+
+impl BuiltinModality {
+    /// Whether the declaration has members without implementations, so it cannot be instantiated.
+    pub fn is_abstract(self) -> bool {
+        matches!(self, Self::Abstract | Self::Sealed)
+    }
+
+    /// Whether a declaration OUTSIDE the declaring module may extend it.
+    pub fn is_extensible(self) -> bool {
+        matches!(self, Self::Open | Self::Abstract)
+    }
+}
+
+/// The modality the `Class.flags` word declares: bits 4-5, `0 FINAL, 1 OPEN, 2 ABSTRACT, 3 SEALED`.
+pub(crate) fn builtin_class_modality(flags: u64) -> BuiltinModality {
+    match (flags >> 4) & 0x3 {
+        1 => BuiltinModality::Open,
+        2 => BuiltinModality::Abstract,
+        3 => BuiltinModality::Sealed,
+        _ => BuiltinModality::Final,
+    }
+}
+
 pub struct BuiltinClass {
     pub supertypes: Vec<String>,
     /// The supertypes WITH their type arguments (`MutableList<E> : List<E>`), which the name-only
@@ -4139,6 +4176,13 @@ pub struct BuiltinClass {
     /// Kotlin metadata's `IS_EXPECT_CLASS` declaration flag. KLIB consumers use this semantic bit
     /// to distinguish common declarations from platform-only classifiers in the same archive.
     pub is_expect: bool,
+    /// Declared Kotlin MODALITY, as the two facts a consumer asks of it. Kept semantically rather
+    /// than left to be re-derived from [`Self::access`], which is a JVM word: a non-JVM provider
+    /// would have to read JVM flags to learn that `kotlin.Number` is `abstract`.
+    ///
+    /// `sealed` is abstract and NOT extensible here: a program outside the declaring module cannot
+    /// extend it, and every consumer of this decoder is outside the stdlib's.
+    pub modality: BuiltinModality,
     pub is_nested: bool,
     /// The JVM class access flags the same `Class.flags` word describes (`public static interface
     /// abstract` for `kotlin/collections/Map.Entry`) — what an `InnerClasses` entry naming this builtin

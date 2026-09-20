@@ -173,6 +173,22 @@ impl<'a> Cursor<'a> {
         self.bytes(length, context)
     }
 
+    /// A 32-bit little-endian field (wire type 5), as a `float` is written.
+    pub(crate) fn fixed32(&mut self, context: &str) -> Result<u32, PackageFragmentDecodeError> {
+        let (bytes, _) = self.bytes(4, context)?;
+        Ok(u32::from_le_bytes(
+            bytes.try_into().expect("four bytes were read"),
+        ))
+    }
+
+    /// A 64-bit little-endian field (wire type 1), as a `double` is written.
+    pub(crate) fn fixed64(&mut self, context: &str) -> Result<u64, PackageFragmentDecodeError> {
+        let (bytes, _) = self.bytes(8, context)?;
+        Ok(u64::from_le_bytes(
+            bytes.try_into().expect("eight bytes were read"),
+        ))
+    }
+
     pub(crate) fn skip(
         &mut self,
         wire: u64,

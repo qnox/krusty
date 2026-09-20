@@ -145,7 +145,13 @@ impl NativeLibraries {
                     })?;
             let package_name = package_namespace(&fragment.package_fqname);
             record_package(&mut packages, &fragment.package_fqname);
-            for (internal, declaration) in package.classes {
+            // Sorted, because the decoder hands the classes over in a `HashMap` and Rust
+            // randomizes that iteration PER PROCESS. Identities are this table's positions, so an
+            // unsorted walk numbers the same stdlib differently on every run — and a compiler
+            // whose output depends on which run it was is one whose failures cannot be reproduced.
+            let mut classes = package.classes.into_iter().collect::<Vec<_>>();
+            classes.sort_by(|(left, _), (right, _)| left.cmp(right));
+            for (internal, declaration) in classes {
                 let identity = type_name(&internal);
                 // A classifier is indexed under the namespace its identity names — its package for
                 // a top-level one, its outer classifier for a nested one — which is exactly what
@@ -472,9 +478,14 @@ fn top_level_property(
         getter,
         setter,
         setter_visibility: property.visibility,
-        is_const: false,
+        is_const: property.constant.is_some(),
         implicit_integer_coercion: false,
-        compile_time_constant: None,
+        compile_time_constant: property.constant.clone().map(|value| {
+            crate::libraries::LibraryConst {
+                ty: declared,
+                value,
+            }
+        }),
         visibility: property.visibility,
         owner: package,
         receiver_rank: 0,
@@ -624,8 +635,12 @@ fn library_type(
         });
     }
     let is_interface = declaration.kind == TypeKind::Interface;
-    let (members, declared_callables, declared_callable_order) =
-        class_members(identity, &declaration, &bounds, realizations, properties);
+    let ClassMembers {
+        members,
+        declared_callables,
+        declared_callable_order,
+        constants,
+    } = class_members(identity, &declaration, &bounds, realizations, properties);
     let mut classifier = LibraryType {
         access: declaration.visibility.into(),
         is_kotlin: true,
@@ -635,8 +650,12 @@ fn library_type(
         outer_instance: None,
         kind: declaration.kind,
         inheritance: ClassifierInheritance {
-            is_abstract: is_interface,
-            is_extensible: is_interface,
+            // The DECLARED modality, not a guess from the kind. Reading "extensible only if an
+            // interface" off the kind made `kotlin.Number`, `kotlin.Exception` and every other
+            // `open`/`abstract` stdlib class unsubclassable, which the corpus reported verbatim:
+            // "superclass 'kotlin/Number' cannot be subclassed: it is not extensible".
+            is_abstract: is_interface || declaration.modality.is_abstract(),
+            is_extensible: is_interface || declaration.modality.is_extensible(),
             has_no_arg_constructor: constructors
                 .iter()
                 .any(|constructor| constructor.params.is_empty()),
@@ -649,7 +668,7 @@ fn library_type(
         declared_callable_order,
         members,
         companion: Vec::new(),
-        constants: HashMap::new(),
+        constants,
         sam_eligible: false,
         callable_signature: None,
         callable_signatures: Vec::new(),
@@ -702,13 +721,14 @@ fn class_members(
     bounds: &HashMap<String, Ty>,
     realizations: &mut Vec<ExternalCallableRealization>,
     property_realizations: &mut Vec<ExternalPropertyRealization>,
-) -> (Vec<LibraryMember>, HashMap<String, Callables>, Vec<String>) {
+) -> ClassMembers {
     // Symbolic: the classifier's own formals stay unbound here, and core substitutes the applied
     // receiver's arguments into them once, when it specializes the family it selected from.
     let receiver = Ty::obj_name(owner);
     let mut members = Vec::new();
     let mut declared: HashMap<String, Callables> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
+    let mut constants: HashMap<String, crate::libraries::LibraryConst> = HashMap::new();
     for member in &declaration.members {
         // A member's own formals shadow the classifier's, and carry their own declared bounds.
         let member_bounds = crate::jvm::classpath::builtin_bounds(&member.formals, bounds);
@@ -763,6 +783,15 @@ fn class_members(
             });
             callable.external_property_identity = Some(identity);
             realizations[interned].callable.external_property_identity = Some(identity);
+            // A `const val` is folded at every use site. Publishing the value is what lets
+            // `Int.MAX_VALUE` resolve on a target whose companion objects have no storage to read.
+            let constant = member
+                .constant
+                .clone()
+                .map(|value| crate::libraries::LibraryConst { ty: ret, value });
+            if let Some(constant) = constant.clone() {
+                constants.insert(member.name.clone(), constant);
+            }
             properties.overloads.push(crate::libraries::PropertyInfo {
                 name: member.name.clone(),
                 kind: crate::libraries::PropKind::Member,
@@ -774,9 +803,9 @@ fn class_members(
                 getter: callable,
                 setter: None,
                 setter_visibility: crate::libraries::Visibility::Private,
-                is_const: false,
+                is_const: constant.is_some(),
                 implicit_integer_coercion: false,
-                compile_time_constant: None,
+                compile_time_constant: constant,
                 visibility: crate::libraries::Visibility::Public,
                 owner,
                 receiver_rank: 0,
@@ -836,7 +865,20 @@ fn class_members(
         }
         *family = Callables::from_parts(functions, properties);
     }
-    (members, declared, order)
+    ClassMembers {
+        members,
+        declared_callables: declared,
+        declared_callable_order: order,
+        constants,
+    }
+}
+
+/// What one classifier's declarations amount to, in the four shapes a [`LibraryType`] keeps them.
+struct ClassMembers {
+    members: Vec<LibraryMember>,
+    declared_callables: HashMap<String, Callables>,
+    declared_callable_order: Vec<String>,
+    constants: HashMap<String, crate::libraries::LibraryConst>,
 }
 
 /// The identity this provider hands out for the declaration at `position` in its realization
@@ -888,6 +930,52 @@ mod tests {
         assert!(
             decoded > 480,
             "and there are as many of them as the distribution ships: {decoded}"
+        );
+    }
+
+    /// The same stdlib reads the same way twice, in one process and across processes.
+    ///
+    /// An identity is a table POSITION, assigned as the stdlib is walked, so the walk's order is
+    /// part of the compiler's output. The decoder hands a package's classes over in a `HashMap`,
+    /// and Rust randomizes that iteration per process — so the same klib numbered itself
+    /// differently on every run, and a program compiled twice took different paths. It showed as a
+    /// program that emitted clean on one run and produced IR Cranelift's own verifier rejected on
+    /// the next, with nothing changed between them.
+    ///
+    /// Reading the stdlib twice in ONE process is the test that can be written here: both readings
+    /// share the process's hash seed, so an order that depends on anything but the data would have
+    /// to be unstable within a run too — which is exactly what was observed before the sort.
+    #[test]
+    fn the_stdlib_reads_the_same_way_every_time() {
+        let Some(root) = distribution() else {
+            eprintln!("skipping: no Kotlin/Native distribution cached");
+            return;
+        };
+        let realizations = |libraries: &NativeLibraries| {
+            (0..libraries.callable_count())
+                .map(|position| {
+                    let identity = crate::fir::ExternalCallableId::from_raw(position as u32);
+                    let realized = SymbolSource::external_callable(libraries, identity)
+                        .expect("every position this provider handed out resolves");
+                    (
+                        realized.callable.owner.render(),
+                        realized.callable.name.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let first = NativeLibraries::from_distribution(&root).expect("the stdlib loads");
+        let second = NativeLibraries::from_distribution(&root).expect("the stdlib loads");
+        let first = realizations(&first);
+        assert!(
+            first.len() > 10_000,
+            "the whole stdlib was walked: {}",
+            first.len()
+        );
+        assert_eq!(
+            first,
+            realizations(&second),
+            "the same klib numbers its declarations the same way every time it is read"
         );
     }
 
@@ -1075,6 +1163,30 @@ mod compiles_against_the_klib {
                 "fun box(): String { val r = 1..10 step 2; return \"OK\" }\n",
                 "an infix call",
             ),
+            // An EXTENSION PROPERTY, which is a top-level declaration of the package fragment
+            // rather than a member of anything. The decoder used to decode these and throw them
+            // away — `semantic_property` was called for validation and its result dropped — so
+            // `indices` resolved to nothing at all.
+            (
+                "fun box(): Int = \"abc\".indices.first\n",
+                "an extension property",
+            ),
+            // An EXTENSION PROPERTY, which is a top-level declaration of the package fragment
+            // rather than a member of anything. The decoder used to decode these and throw them
+            // away — `semantic_property` was called for validation and its result dropped — so
+            // `indices` resolved to nothing at all.
+            (
+                "fun box(): Int = \"abc\".indices.first\n",
+                "an extension property",
+            ),
+            // A `const val` on a companion. Every use site folds it, which is the only way it can
+            // work here at all: a companion object has no storage on a target that compiles the
+            // stdlib itself. The decoder used to validate the compile-time value and throw it
+            // away, leaving this a runtime property READ the code generator declined by name.
+            (
+                "fun box(): Long = Int.MAX_VALUE + Long.MIN_VALUE\n",
+                "a companion constant",
+            ),
         ] {
             let reported = diagnostics(&root, source);
             assert!(
@@ -1091,23 +1203,23 @@ mod compiles_against_the_klib {
             "a classifier that exists nowhere is reported: {unknown:?}"
         );
 
-        // And what does NOT compile yet, kept here so the gap is stated rather than left to be
-        // rediscovered. An EXTENSION PROPERTY resolves — the decoder used to decode top-level
-        // properties and throw them away, so `indices` resolved to nothing at all — and the code
-        // generator then produces IR its own verifier rejects. That is a generator defect, not a
-        // provider one, which is exactly what the shape of this diagnostic says.
-        let extension_property = diagnostics(&root, "fun box(): Int = \"abc\".indices.first\n");
-        assert!(
-            extension_property
-                .iter()
-                .any(|d| d.contains("Verifier errors")),
-            "an extension property resolves and then fails to emit: {extension_property:?}"
+        // A stdlib class that is `open` or `abstract` can be EXTENDED. It resolves — reading
+        // "extensible only if an interface" off the kind rather than the declared modality made
+        // `kotlin.Exception` unsubclassable — and the code generator declines it for its own,
+        // separate reason, which is what the shape of this diagnostic says.
+        let subclass = diagnostics(
+            &root,
+            "class E : Exception(\"x\")\nfun box(): String = \"OK\"\n",
         );
         assert!(
-            !extension_property
+            subclass
                 .iter()
-                .any(|d| d.contains("unresolved reference")),
-            "and it is the GENERATOR that fails, not resolution: {extension_property:?}"
+                .any(|d| d.contains("a superclass declared outside this file")),
+            "an open stdlib class is extensible: {subclass:?}"
+        );
+        assert!(
+            !subclass.iter().any(|d| d.contains("cannot be subclassed")),
+            "and the refusal is the GENERATOR's, not the provider's: {subclass:?}"
         );
 
         // The control for the emit stage itself: analysis alone is SILENT about an unresolved
