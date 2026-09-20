@@ -334,6 +334,17 @@ impl BodyFirChecker<'_> {
             .collect()
     }
 
+    /// Return the class field that carries one already-resolved closure value. Forwarded captures
+    /// can share a source spelling while denoting different fields, so this lookup deliberately
+    /// has no name-based recovery path.
+    fn class_capture_binding(&self, identity: ClassCaptureIdentity) -> Option<ClassCaptureBinding> {
+        self.class_capture_values
+            .iter()
+            .map(|(_, binding)| *binding)
+            .filter(|binding| binding.capture_identity == Some(identity))
+            .min_by_key(|binding| binding.enclosing_depth)
+    }
+
     pub(super) fn nested_class_receivers(
         &self,
     ) -> Result<Vec<ClassCaptureBinding>, BodyCheckFailure> {
@@ -777,16 +788,10 @@ impl BodyFirChecker<'_> {
                         } else {
                             FirLocalClassCaptureSource::Value(binding.value)
                         }
-                    } else if let Some(binding) = capture
-                        .capture_dependency
-                        .and_then(|identity| {
-                            self.class_capture_values
-                                .iter()
-                                .map(|(_, binding)| *binding)
-                                .find(|binding| binding.capture_identity == Some(identity))
-                        })
-                        .or_else(|| self.class_values.get(&capture.name).copied())
-                    {
+                    } else if let Some(identity) = capture.capture_dependency {
+                        let binding = self.class_capture_binding(identity).ok_or_else(|| {
+                            self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                        })?;
                         context.record_value(
                             capture.name.clone(),
                             ClassCaptureBinding {
@@ -832,7 +837,30 @@ impl BodyFirChecker<'_> {
                 AnonymousObjectCaptureSource::ClassStorage {
                     field: source_field,
                 } => {
-                    let source_binding = self.class_values.get(&capture.name).copied();
+                    let source_owner = self.current_storage_owner().ok_or_else(|| {
+                        self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                    })?;
+                    let source_binding = self
+                        .class_capture_values
+                        .iter()
+                        .map(|(_, binding)| *binding)
+                        .find(|binding| {
+                            binding.owner == source_owner && binding.field == source_field
+                        });
+                    if let Some(identity) = capture.capture_dependency {
+                        let Some(binding) = source_binding else {
+                            return Err(self.failure(
+                                Some(span),
+                                BodyCheckFailureKind::MissingStableCallTarget,
+                            ));
+                        };
+                        if binding.capture_identity != Some(identity) {
+                            return Err(self.failure(
+                                Some(span),
+                                BodyCheckFailureKind::MissingStableCallTarget,
+                            ));
+                        }
+                    }
                     context.record_value(
                         capture.name.clone(),
                         ClassCaptureBinding {
@@ -859,11 +887,16 @@ impl BodyFirChecker<'_> {
                         } else if let Some((receiver, path)) =
                             self.captured_class_storage_receiver(binding, origin)?
                         {
+                            // The receiver walk `captured_class_storage_receiver` builds lands on
+                            // `binding.owner`, so the field index must be that binding's own, as
+                            // both sibling outcomes use. `source_field` numbers the capture in the
+                            // anonymous object being DECLARED, and reading it from the enclosing
+                            // class addresses a field that class may not even have.
                             FirLocalClassCaptureSource::CapturedClassStorage {
                                 owner: binding.owner,
                                 receiver,
                                 path,
-                                field: source_field,
+                                field: binding.field,
                             }
                         } else {
                             FirLocalClassCaptureSource::ClassStorage {
@@ -873,16 +906,13 @@ impl BodyFirChecker<'_> {
                             }
                         }
                     } else {
-                        let owner = self.current_storage_owner().ok_or_else(|| {
-                            self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
-                        })?;
-                        if self.reads_constructor_prefix_capture(owner, 0) {
+                        if self.reads_constructor_prefix_capture(source_owner, 0) {
                             FirLocalClassCaptureSource::ConstructorCapture {
-                                owner,
+                                owner: source_owner,
                                 field: source_field,
                                 site: self.capture_constructor_prefix(
                                     ClassCaptureBinding {
-                                        owner,
+                                        owner: source_owner,
                                         field: source_field,
                                         ty,
                                         shared_cell: capture.shared_cell,
@@ -896,7 +926,7 @@ impl BodyFirChecker<'_> {
                             }
                         } else {
                             FirLocalClassCaptureSource::ClassStorage {
-                                owner,
+                                owner: source_owner,
                                 enclosing_depth: 0,
                                 field: source_field,
                             }

@@ -19445,6 +19445,7 @@ impl<'a> Checker<'a> {
                     call,
                     &self.anonymous_lexical_scope,
                     &provisional_candidates,
+                    true,
                     SelectedLocalCallableCaptures {
                         calls: &self.resolved_calls,
                         expressions: &self.expr_lowers,
@@ -19482,13 +19483,21 @@ impl<'a> Checker<'a> {
                 }
                 selected_receiver_candidates.extend(candidates);
                 candidates = selected_receiver_candidates;
-                // Remove every unused provisional receiver. This remains inside capture
-                // discovery; the authoritative body check consumes only this exact stable list.
+                // Finalize away receiver rungs the scratch body did not select. Pending inference
+                // remains provisional; the authoritative recheck below otherwise rebuilds every
+                // descendant storage coordinate against this exact list.
                 record_anonymous_construction_captures(
                     self.file,
                     call,
                     &self.anonymous_lexical_scope,
                     &candidates,
+                    self.postponed_argument_depth != 0
+                        || candidates.iter().any(|candidate| {
+                            candidate.ty.mentions_pending()
+                                || candidate
+                                    .delegate_storage
+                                    .is_some_and(|storage| storage.mentions_pending())
+                        }),
                     SelectedLocalCallableCaptures {
                         calls: &self.resolved_calls,
                         expressions: &self.expr_lowers,
@@ -19496,6 +19505,19 @@ impl<'a> Checker<'a> {
                     },
                     &mut self.discovered_anonymous_captures,
                 );
+                // The scratch check above discovered exactly which receiver identities the body
+                // selects, but descendant constructions may have recorded `ClassStorage` ordinals
+                // against its provisional all-receivers ABI. Check the class once more against the
+                // authoritative capture list so every child consumes the same final field layout.
+                // This remains frontend work at the lexical construction site; lowering never
+                // repairs or re-resolves a capture coordinate.
+                if let Decl::Class(class) = self.file.decl(declaration) {
+                    let class = class.clone();
+                    let saved = self.take_body_state();
+                    self.set_anonymous_lexical_class_context(declaration);
+                    self.check_class(scope, &class, declaration);
+                    self.restore_body_state(saved);
+                }
                 if let Some(mut captures) = self.discovered_anonymous_captures.remove(&declaration)
                 {
                     self.extend_anonymous_superclass_captures(scope, declaration, &mut captures);
@@ -38185,6 +38207,7 @@ fn record_anonymous_construction_captures(
     construction: ExprId,
     lexical_scope: &AnonymousLexicalClassScope,
     candidates: &[AnonymousCaptureCandidate],
+    preserve_missing: bool,
     selected_local_callables: SelectedLocalCallableCaptures<'_>,
     captures: &mut HashMap<DeclId, Vec<AnonymousObjectCapture>>,
 ) {
@@ -38270,31 +38293,43 @@ fn record_anonymous_construction_captures(
         "anonymous capture selection declaration={declaration:?} captures={selected:?}",
     );
     // Postponed generic-lambda checking may revisit the same construction while one receiver type
-    // is temporarily `Pending`. Capture discovery is monotonic: a provisional revisit must never
-    // replace the exact symbolic type recorded by the earlier check, because this table crosses the
-    // retained-inline boundary and no pending semantic type may reach checked FIR.
+    // is temporarily `Pending`. A provisional revisit must neither replace the exact symbolic type
+    // recorded by the earlier check nor renumber an established capture field. Descendant
+    // constructions can already carry one of these ordinals as their resolved `ClassStorage`
+    // source, so retain the established order while discovery is provisional. The authoritative
+    // pass removes receiver rungs its checked body did not use, then checks that body again against
+    // the final field layout before any checked FIR escapes. This table crosses the retained-inline
+    // boundary and no pending semantic type may reach checked FIR.
     if let Some(previous) = captures.get(&declaration) {
-        for capture in &mut selected {
-            if !capture.ty.mentions_pending()
-                && capture
+        let mut pending = selected;
+        selected = Vec::with_capacity(previous.len().max(pending.len()));
+        for exact in previous {
+            let Some(position) = pending
+                .iter()
+                .position(|capture| capture.name == exact.name && capture.source == exact.source)
+            else {
+                if preserve_missing {
+                    selected.push(exact.clone());
+                }
+                continue;
+            };
+            let mut capture = pending.remove(position);
+            capture.shared_cell |= exact.shared_cell;
+            if (capture.ty.mentions_pending()
+                || capture
+                    .storage_ty
+                    .is_some_and(|storage| storage.mentions_pending()))
+                && !exact.ty.mentions_pending()
+                && exact
                     .storage_ty
                     .is_none_or(|storage| !storage.mentions_pending())
             {
-                continue;
+                capture.ty = exact.ty;
+                capture.storage_ty = exact.storage_ty;
             }
-            let Some(exact) = previous.iter().find(|exact| {
-                exact.name == capture.name
-                    && exact.source == capture.source
-                    && !exact.ty.mentions_pending()
-                    && exact
-                        .storage_ty
-                        .is_none_or(|storage| !storage.mentions_pending())
-            }) else {
-                continue;
-            };
-            capture.ty = exact.ty;
-            capture.storage_ty = exact.storage_ty;
+            selected.push(capture);
         }
+        selected.extend(pending);
     }
     crate::trace_compiler!(
         "resolve",
@@ -41851,6 +41886,17 @@ impl<'a> Checker<'a> {
                 result.unsupported.get_or_insert(name);
                 continue;
             };
+            let source = match local.origin {
+                ReceiverFnValueOrigin::ClassStorage(field)
+                | ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } => {
+                    AnonymousObjectCaptureSource::ClassStorage { field }
+                }
+                ReceiverFnValueOrigin::Local
+                | ReceiverFnValueOrigin::DispatchProperty { .. }
+                | ReceiverFnValueOrigin::TopLevelProperty => {
+                    AnonymousObjectCaptureSource::LexicalValue
+                }
+            };
             result.values.push(AnonymousObjectCapture {
                 // Smart-cast state is a fact about this control-flow point, not the type of a
                 // mutable cell captured by a separately checked classifier body.
@@ -41869,7 +41915,7 @@ impl<'a> Checker<'a> {
                 .is_shared_cell(),
                 storage_ty: local.delegate_storage_ty,
                 name,
-                source: AnonymousObjectCaptureSource::LexicalValue,
+                source,
                 receiver_label: None,
                 lexical_shadow_depth: 0,
                 capture_dependency: None,
