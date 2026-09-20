@@ -232,7 +232,8 @@ impl SymbolSource for NativeLibraries {
         &self,
         identity: crate::fir::ExternalCallableId,
     ) -> Option<ExternalCallableRealization> {
-        self.index.callable_realizations
+        self.index
+            .callable_realizations
             .get(identity.raw() as usize)
             .cloned()
     }
@@ -243,7 +244,8 @@ impl SymbolSource for NativeLibraries {
         &self,
         identity: crate::fir::ExternalPropertyId,
     ) -> Option<ExternalPropertyRealization> {
-        self.index.property_realizations
+        self.index
+            .property_realizations
             .get(identity.raw() as usize)
             .cloned()
     }
@@ -449,6 +451,22 @@ fn library_type(
             String::new(),
         );
         member.visibility = constructor.visibility;
+        // A construction carries the constructor's identity, exactly as a call carries its
+        // callee's. Without one, checked FIR has no target to name and the whole program fails
+        // with `MissingStableCallTarget` — `StringBuilder()` alone accounted for 221 corpus cases.
+        member.owner = Some(identity);
+        member.external_identity = Some(member_identity(realizations.len()));
+        realizations.push(ExternalCallableRealization {
+            callable: crate::libraries::LibraryCallable::library(
+                identity,
+                "<init>",
+                params.clone(),
+                Ty::Unit,
+                Ty::Unit,
+                String::new(),
+            ),
+            kind: ExternalCallableKind::Constructor,
+        });
         member.call_sig = crate::libraries::CallSig::metadata_member(
             params.len(),
             constructor.param_names.clone(),
@@ -650,8 +668,7 @@ fn class_members(
                 });
             }
             functions.overloads.push(info);
-            let mut physical =
-                LibraryMember::new(member.name.clone(), params, ret, String::new());
+            let mut physical = LibraryMember::new(member.name.clone(), params, ret, String::new());
             physical.set_is_abstract(member.is_abstract);
             physical.set_ret_nullable(member.ret_nullable);
             physical.set_is_interface(declaration.kind == TypeKind::Interface);
@@ -917,6 +934,18 @@ mod compiles_against_the_klib {
                 "{source:?} resolves nothing through the provider: {reported:?}"
             );
         }
+
+        // A CONSTRUCTION compiles all the way through. Before the provider interned its
+        // constructors, checked FIR had no target to name for `StringBuilder()` and the whole
+        // program failed with `MissingStableCallTarget` — an internal error, on 221 corpus cases.
+        let constructed = diagnostics(
+            &root,
+            "fun box(): String { StringBuilder(); return \"OK\" }\n",
+        );
+        assert!(
+            constructed.is_empty(),
+            "a stdlib construction compiles: {constructed:?}"
+        );
 
         // And the control for all of them: analysis alone is SILENT about an unresolved call, so a
         // test that only ran analysis would have called every line above a success.

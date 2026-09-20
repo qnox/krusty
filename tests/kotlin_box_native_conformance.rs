@@ -522,6 +522,10 @@ fn kotlin_codegen_box_native_conformance() {
             Outcome::Pass => passed += 1,
             Outcome::Frontend(reason) => {
                 frontend += 1;
+                // Traced beside the declines, because this is now the larger backlog: a ranked
+                // reason with no case behind it cannot be reproduced, and an "internal error"
+                // line is unfollowable without the source that raised it.
+                traced.push((file.clone(), reason.clone()));
                 // Kept VERBATIM, unlike a decline. Almost every one of these is an unresolved
                 // reference, and there the name is the whole of the information: the shape says
                 // only "something was not found", while the name says which symbol the provider
