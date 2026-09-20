@@ -15908,14 +15908,23 @@ impl<'a> Emitter<'a> {
                 // failed to thread a continuation into — an unmodeled shape). Never emit the
                 // unverifiable call: the operand contract refuses, this arm bails the file (the gate
                 // SKIPS it) and pushes a typed zero so the dead code that follows still assembles.
+                let desc = method_descriptor(&param_tys, ret);
                 if let Err(mismatch) = self.emit_descriptor_virtual_operands(
-                    e, &owner, *receiver, &call_args, &param_tys, code,
+                    e,
+                    crate::jvm::ir_emit::call_operands::VirtualCallTarget {
+                        owner: &owner,
+                        name: &name,
+                        descriptor: &desc,
+                    },
+                    *receiver,
+                    &call_args,
+                    &param_tys,
+                    code,
                 ) {
                     self.bail_descriptor_arity(&mismatch, ret, code);
                     return;
                 }
                 let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
-                let desc = method_descriptor(&param_tys, ret);
                 crate::trace_compiler!(
                     "resolve",
                     "emit MethodCall {}.{} fid={fid} private={} iface={is_iface}",
@@ -16717,9 +16726,14 @@ impl<'a> Emitter<'a> {
                         self.value_ty(recv),
                     );
                     let ret = ty_from_descriptor_ret(&descriptor);
+                    let jvm_name = mapped_builtin_virtual_name(&owner, &name, &descriptor);
                     if let Err(mismatch) = self.emit_descriptor_virtual_operands(
                         e,
-                        &owner,
+                        crate::jvm::ir_emit::call_operands::VirtualCallTarget {
+                            owner: &owner,
+                            name: jvm_name,
+                            descriptor: &descriptor,
+                        },
                         recv,
                         &args,
                         &physical_params,
@@ -16729,7 +16743,6 @@ impl<'a> Emitter<'a> {
                         return;
                     }
                     let aw: i32 = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
-                    let jvm_name = mapped_builtin_virtual_name(&owner, &name, &descriptor);
                     if interface {
                         let m = self.cw.interface_methodref(&owner, jvm_name, &descriptor);
                         debug_lines::mark_expression_start(self.ir, e, code);
@@ -16757,7 +16770,11 @@ impl<'a> Emitter<'a> {
                     let ret = ty_from_descriptor_ret(&descriptor);
                     if let Err(mismatch) = self.emit_descriptor_virtual_operands(
                         e,
-                        &owner,
+                        crate::jvm::ir_emit::call_operands::VirtualCallTarget {
+                            owner: &owner,
+                            name: &name,
+                            descriptor: &descriptor,
+                        },
                         recv,
                         &args,
                         &physical_params,
