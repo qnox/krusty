@@ -2141,15 +2141,29 @@ fn build_class_metadata(
     // Every DECLARED direct nested classifier joins `Class.nestedClassName` (f7) — kotlinc records
     // them all, not only sealed subtypes. Declaration origin and the exact identity-tree relation
     // keep synthesized classes out without interpreting their backend spellings.
-    let mut nested_names: Vec<String> = ir
+    // Common IR carries the stable declaration order selected by the frontend. The IR arena and
+    // debug lines are representation facts and do not define this metadata order.
+    let mut source_nested: Vec<(u32, String)> = ir
         .classes
         .iter()
-        .filter(|candidate| {
+        .enumerate()
+        .filter(|(_, candidate)| {
             candidate.is_source_declared
                 && !candidate.is_local_class
                 && candidate.fq_name.nested_owner() == Some(c.fq_name)
         })
-        .map(|candidate| candidate.fq_name.nested_segment_ref().to_string())
+        .map(|(index, candidate)| {
+            (
+                ir.class_source_order(index as crate::ir::ClassId)
+                    .expect("a source classifier carries its stable declaration order"),
+                candidate.fq_name.nested_segment_ref().to_string(),
+            )
+        })
+        .collect();
+    source_nested.sort_by_key(|(source_order, _)| *source_order);
+    let mut nested_names: Vec<String> = source_nested
+        .into_iter()
+        .map(|(_, segment)| segment)
         .collect();
     // A producer can generate a classifier that Kotlin code names (`Foo.$serializer`) and publish
     // that fact on the owning class. Other synthesized implementation classes stay out on their
@@ -8506,16 +8520,15 @@ fn emit_annotation_equals(
     cb.ireturn();
     cb.set_needs_stackmap();
     cb.link();
+    let locals = [
+        ("this".to_string(), format!("L{fq};"), 0u16),
+        ("other".to_string(), "Ljava/lang/Object;".to_string(), 1),
+    ];
+    // Before the method, so the local names precede the class constants the frame computation
+    // interns — kotlinc's writer visits the locals first. See `reserve_method_lvt`.
+    cw.reserve_method_lvt(&locals);
     cw.add_method(0x0011, "equals", "(Ljava/lang/Object;)Z", &cb);
-    cw.set_method_debug(
-        "equals",
-        "(Ljava/lang/Object;)Z",
-        None,
-        &[
-            ("this".to_string(), format!("L{fq};"), 0),
-            ("other".to_string(), "Ljava/lang/Object;".to_string(), 1),
-        ],
-    );
+    cw.set_method_debug("equals", "(Ljava/lang/Object;)Z", None, &locals);
     // `equals(Object?)` accepts null and answers false, so its parameter is `@Nullable` — kotlinc
     // stamps it, and a Java caller reads the contract from it.
     cw.set_method_nullability(
@@ -20618,11 +20631,13 @@ mod fail_soft_tests {
         let mut outer = crate::plugins::synthetic_class("demo/Outer");
         outer.is_source_declared = true;
         let outer_id = ir.add_class(outer);
+        ir.record_class_source_order(outer_id, 0);
 
         // A digit is valid in a source identifier; the former generated-name heuristic dropped it.
         let mut declared = crate::plugins::synthetic_class("demo/Outer$Node2");
         declared.is_source_declared = true;
-        ir.add_class(declared);
+        let declared_id = ir.add_class(declared);
+        ir.record_class_source_order(declared_id, 1);
 
         // Conversely, looking nested is not sufficient: backend-generated implementation classes
         // are not declarations in Kotlin metadata.
