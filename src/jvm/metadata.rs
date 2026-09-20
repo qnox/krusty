@@ -4206,6 +4206,11 @@ pub struct BuiltinClass {
     /// The direct subclasses a `sealed` declaration names; empty for anything else. This is what
     /// lets an exhaustive `when` over a stdlib sealed type be proven exhaustive.
     pub sealed_subclasses: Vec<String>,
+    /// The sole underlying property's name, for a `value class`; `None` for anything else. This
+    /// single field is what MAKES the declaration a value class to every consumer — a value class
+    /// is erased to its underlying at run time, so a reader that drops it publishes a type that
+    /// allocates where Kotlin says nothing is allocated.
+    pub inline_class_property: Option<String>,
     /// Declared Kotlin MODALITY, as the two facts a consumer asks of it. Kept semantically rather
     /// than left to be re-derived from [`Self::access`], which is a JVM word: a non-JVM provider
     /// would have to read JVM flags to learn that `kotlin.Number` is `abstract`.

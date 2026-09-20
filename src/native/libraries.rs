@@ -937,8 +937,21 @@ fn library_type(
             .companion_name
             .as_ref()
             .map(|name| (name.clone(), nested(identity, name))),
-        value_underlying: None,
-        value_underlying_property: None,
+        // A `value class` is ERASED to its underlying at run time — that is the whole of what the
+        // declaration means — and the klib records which of its properties carries it. The name was
+        // read to check it and then dropped, so `UInt`, `Result` and every other stdlib value class
+        // was published as an ordinary class that allocates.
+        //
+        // The DECLARED underlying is published, not a JVM-erased one: a klib records the Kotlin
+        // declaration and each target erases it its own way.
+        value_underlying: declaration.inline_class_property.as_ref().and_then(|name| {
+            declaration
+                .members
+                .iter()
+                .find(|member| member.is_property && &member.name == name)
+                .map(|member| crate::jvm::classpath::builtin_ty(&member.ret, &bounds))
+        }),
+        value_underlying_property: declaration.inline_class_property.clone(),
         alias_target: None,
         own_type_parameter_count: type_parameters.type_params.len(),
         type_parameters,
@@ -1246,6 +1259,57 @@ mod tests {
             realizations(&second),
             "the same klib numbers its declarations the same way every time it is read"
         );
+    }
+
+    /// A `value class` says it is one, and names the property that carries it.
+    ///
+    /// This is the fact the declaration exists FOR: a value class is erased to its underlying at
+    /// run time, so a reader that drops it publishes a type that allocates where Kotlin says
+    /// nothing is allocated. The klib records which property carries the value; the decoder read
+    /// its name to check it and then dropped it, so `UInt` and `Result` were ordinary classes.
+    ///
+    /// The DECLARED underlying is what is published, not a JVM-erased one — a klib records the
+    /// Kotlin declaration and each target erases it its own way. `Result`'s is `Any?`, which the
+    /// JVM writes as `Any`.
+    #[test]
+    fn a_value_class_names_the_property_that_carries_it() {
+        let Some(root) = distribution() else {
+            eprintln!("skipping: no Kotlin/Native distribution cached");
+            return;
+        };
+        let libraries = NativeLibraries::from_distribution(&root).expect("the stdlib loads");
+        let underlying = |name: &str| {
+            let found = SymbolSource::symbols(
+                &libraries,
+                SymbolNamespace::Package(type_name("kotlin")),
+                name,
+            );
+            let classifier = found
+                .classifier
+                .as_ref()
+                .unwrap_or_else(|| panic!("kotlin.{name} is a stdlib classifier"));
+            (
+                classifier.value_underlying,
+                classifier.value_underlying_property.clone(),
+            )
+        };
+        assert_eq!(
+            underlying("UInt"),
+            (Some(Ty::obj("kotlin/Int")), Some("data".to_string()))
+        );
+        assert_eq!(
+            underlying("ULong"),
+            (Some(Ty::obj("kotlin/Long")), Some("data".to_string()))
+        );
+        assert_eq!(
+            underlying("Result"),
+            (
+                Some(Ty::nullable(Ty::obj("kotlin/Any"))),
+                Some("value".to_string())
+            )
+        );
+        // And the control: an ordinary class says it is not one, so the quiet above is a claim.
+        assert_eq!(underlying("String"), (None, None));
     }
 
     /// A callable resolves, and the identity it carries resolves BACK through the same provider.

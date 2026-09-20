@@ -1312,6 +1312,7 @@ fn semantic_class(
     let mut constructors = Vec::new();
     let mut enum_entries = Vec::new();
     let mut sealed_subclasses = Vec::new();
+    let mut inline_class_property = None;
     let mut functions = Vec::new();
     let mut properties = Vec::new();
     let mut type_aliases = Vec::new();
@@ -1353,7 +1354,8 @@ fn semantic_class(
             }
             (17, 0) => {
                 let id = cursor.varint("inline-class property name id")?;
-                semantic_string(strings, id, "inline-class property")?;
+                inline_class_property =
+                    Some(semantic_string(strings, id, "inline-class property")?);
             }
             (6, 2) => supertype_bodies.push(cursor.length_delimited("class supertype")?.0),
             (8, 2) => constructors.push(cursor.length_delimited("class constructor")?.0),
@@ -1438,6 +1440,7 @@ fn semantic_class(
             nullable_member_returns,
             enum_entries,
             sealed_subclasses,
+            inline_class_property,
             kind: metadata::builtin_class_kind(header.flags),
             visibility: metadata::builtin_class_visibility(header.flags),
             is_expect: header.flags & (1 << 12) != 0,
