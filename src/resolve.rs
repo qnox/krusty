@@ -28,7 +28,11 @@ use crate::types::{
 };
 use scope::{ContextReceiver, ContextValue, FlowExclusion, NarrowPath, Ns, ScopeKind};
 
+mod actualization_names;
 mod annotation_applications;
+pub(crate) use actualization_names::actualization_type_bindings;
+#[cfg(test)]
+pub(crate) use actualization_names::resolve_actualization_classifier_for_test;
 mod call_result_constraint;
 mod callable_reference_selection;
 mod capture_analysis;
@@ -41,6 +45,7 @@ mod conditional_branch;
 mod constant_evaluation;
 mod context_capture;
 mod context_sensitive_resolution;
+pub(crate) mod declaration_index;
 pub(crate) mod delegated_properties;
 pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod dependency_platform;
@@ -4333,15 +4338,6 @@ impl SymbolTable {
 
     pub fn class_by_type_name(&self, internal: TypeName) -> Option<&ClassSig> {
         self.classes.get(&internal)
-    }
-
-    pub(crate) fn class_by_stable_declaration(
-        &self,
-        declaration: crate::fir::DeclarationId,
-    ) -> Option<&ClassSig> {
-        self.classes
-            .values()
-            .find(|class| class.stable_declaration == Some(declaration))
     }
 
     /// Resolve one source file's alias spelling to its target module class. The returned class still

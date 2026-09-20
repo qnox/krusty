@@ -18,6 +18,9 @@ pub(super) fn select(
         return CandidateSelection::None;
     };
     if let FunctionScopeRef::Imports(imports) = scope {
+        if imports.explicit_is_ambiguous(name) {
+            return CandidateSelection::Ambiguous;
+        }
         if let Some((owner, declared_name)) = imports.explicit_target(name) {
             if let Some(candidate) = source.symbols(owner, &declared_name).classifier_name {
                 return CandidateSelection::Selected(candidate);

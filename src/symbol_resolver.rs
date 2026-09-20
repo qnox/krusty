@@ -110,6 +110,7 @@ impl CallableImport {
 #[derive(Clone, Debug)]
 pub(crate) struct FunctionImportScope {
     explicit: std::collections::HashMap<String, CallableImport>,
+    ambiguous_explicit: std::collections::HashSet<String>,
     levels: [Vec<TypeName>; 4],
 }
 
@@ -150,7 +151,23 @@ impl FunctionImportScope {
         explicit: std::collections::HashMap<String, CallableImport>,
         levels: [Vec<TypeName>; 4],
     ) -> Self {
-        Self { explicit, levels }
+        Self {
+            explicit,
+            ambiguous_explicit: std::collections::HashSet::new(),
+            levels,
+        }
+    }
+
+    pub(crate) fn with_ambiguous_explicit(
+        mut self,
+        names: std::collections::HashSet<String>,
+    ) -> Self {
+        self.ambiguous_explicit = names;
+        self
+    }
+
+    pub(crate) fn explicit_is_ambiguous(&self, name: &str) -> bool {
+        self.ambiguous_explicit.contains(name)
     }
 
     pub(crate) fn explicit_owner(&self, name: &str) -> Option<SymbolNamespace> {

@@ -84,6 +84,104 @@ execution **< 60s** (profile/optimize otherwise). No hacks/workarounds/bails. TD
     at **~151s**, so lower parallelism is not currently the fix. Any
     binary's non-zero exit fails the run and prints its captured log. A filter arg defers to plain
     `cargo test --profile gate` for focused runs.
+- **`NO_EXPECT_FOR_ACTUAL` — implemented.** With `MultiPlatformProjects` on, an
+  `actual` with no matching `expect` is an error in kotlinc. krusty reports it for every top-level
+  declaration — callable, property, classifier and `typealias` — and for every MEMBER that wrote
+  the modifier, in the reference compiler's exact rendering, verified by comparing the two
+  compilers' reports on the same source rather than against a transcription
+  (`tests/no_expect_for_actual_e2e.rs`). A member answers for ITSELF: it is reported when it
+  actualizes nothing, whether or not its owner did, and stays silent when it fills an `expect`
+  member of a matched owner. The member forms covered are ordinary functions and properties,
+  member EXTENSION properties, primary-constructor properties, nested classifiers, a
+  `companion object` (anonymous or named) and its own members. Each is selected by its stable
+  declaration identity, so overloads that tie on name and arity render their own parameter types
+  instead of leaving both unrendered. (Without the feature both modifiers are rejected outright —
+  that one IS implemented; see `tests/mpp_requires_the_feature_e2e.rs`.) The message is
+  `'<rendered declaration>' has no corresponding expected declaration`, reported at the declaration's
+  NAME. The rendering is the substance: it is kotlinc's own declaration renderer over the RESOLVED
+  signature, so which `actual` is unmatched is decided while every file's syntax is live, and the
+  message is not built until Pass-1 signature finalization has published the types it names (an
+  inferred return reads `<not determined>` before that point). The grammar, measured against
+  kotlinc 2.4.10 so it need not be measured again:
+
+  ```
+  <visibility> <modality> actual [external] [override] [inline] [operator] [infix] [tailrec]
+                          [suspend] <kind> <signature>
+  ```
+
+  A classifier's slot between `actual` and its kind keyword is
+  `[inner] [data] [value] [fun]`, and `enum`/`annotation` belong to the kind keyword itself
+  (`enum class`, `annotation class`). A property's is `[external] [const] [lateinit]`. The
+  modality slot is `final` by default, `abstract` for an interface (or a body-less interface
+  member), and `open`/`abstract`/`sealed` where the declaration says so — with `sealed` winning
+  over an interface's `abstract`, and an `override` of an `open` member rendering `open`.
+
+  | shape | rendering |
+  | --- | --- |
+  | `actual fun simple(): Int` | `public final actual fun simple(): Int` |
+  | `actual fun withParams(a: Int, b: String?): Long` | `… fun withParams(a: Int, b: String?): Long` |
+  | `actual fun <T> generic(t: T): T` | `… fun <T> generic(t: T): T` |
+  | `actual fun Int.receiver(): Int` | `… fun Int.receiver(): Int` |
+  | `actual fun vararged(vararg xs: Int)` | `… fun vararged(vararg xs: Int): Unit` |
+  | `actual fun defaulted(a: Int = 1)` | `… fun defaulted(a: Int = ...): Unit` — the value is literally `...` |
+  | `actual suspend fun` / `actual inline fun` | the keyword follows `actual` |
+  | `actual val prop: Int` / `actual var mutable: String` | `public final actual val prop: Int` |
+  | `actual val <T> List<T>.ext: Int` | type parameters precede the receiver |
+  | `actual class Cls` | `public final actual class Cls : Any` — the supertype is always rendered |
+  | `actual class Derived : Base()` | `… class Derived : Base` — no constructor parens |
+  | `actual class Generic<T>` | `… class Generic<T> : Any` |
+  | `actual data class Data(val x: Int)` | `… actual data class Data : Any` — no value parameters |
+  | `actual enum class Colors` | `… actual enum class Colors : Enum<Colors>` |
+  | `actual annotation class Anno` | `… actual annotation class Anno : Annotation` |
+  | `actual object Obj` | `… actual object Obj : Any` |
+  | `actual interface Iface` | `public abstract actual interface Iface : Any` |
+  | `actual open class` / `actual abstract class` / `actual sealed class` | `open` / `abstract` / `sealed` fill the modality slot |
+  | `internal actual fun` / `private actual fun` | `internal final actual fun` / `private final actual fun` |
+  | `actual fun inferred() = 1` | `… fun inferred(): Int` — the INFERRED return, which syntax cannot supply |
+  | `actual class OnlyIface : I` / `: I, J` / `: Base(), I` | `… : I` / `: I, J` / `: Base, I` — base first, then interfaces |
+  | `actual class GenericBase : GBase<String>()` | `… : GBase<String>` — supertype type arguments are kept |
+  | `actual class ViaAlias : AliasBase()` | `… : Base` — a supertype named through a typealias is EXPANDED |
+  | `actual class BoundedParams<T : Comparable<T>, U>` | `… class BoundedParams<T : Comparable<T>, U> : Any` — a declared bound is rendered, the implicit `Any?` is not |
+  | `actual sealed interface SealedIface` | `public sealed actual interface SealedIface : Any` — `sealed` beats the interface's `abstract` |
+  | `actual fun interface FunIface` | `public abstract actual fun interface FunIface : Any` |
+  | `actual value class Wrapped(val x: Int)` | `… actual value class Wrapped : Any` |
+  | `actual inner data class InnerData(val x: Int)` | `… actual inner data class InnerData : Any` — `inner` precedes `data` |
+  | `actual object ObjWithSuper : Base(), I` | `… actual object ObjWithSuper : Base, I` |
+  | `actual typealias Alias = String` | `public final actual typealias Alias = String` |
+  | `actual typealias GenericAlias<T> = List<T>` | `… typealias GenericAlias<T> = List<T>` — the alias's own parameters bind to its name |
+  | `actual typealias FunAlias = (Int) -> String` | `… typealias FunAlias = (Int) -> String` |
+  | `actual val <T> List<T>.ext: Int` | `public final actual val <T> List<T>.ext: Int` |
+  | `actual external fun` / `actual operator fun` / `actual infix fun` / `actual tailrec fun` | the word follows `actual`, before `fun` |
+  | `actual const val K: Int = 1` / `actual lateinit var v: String` | `… actual const val K: Int` / `… actual lateinit var v: String` |
+  | `actual external override fun e()` | `public open actual external override fun e(): Int` — `external` precedes `override` |
+  | `actual inline infix fun` / `actual inline suspend fun` / `actual inline operator fun` | `inline` precedes `operator`, `infix` and `suspend` |
+  | `actual suspend operator fun invoke()` | `… actual operator suspend fun invoke(): Int` — `operator` precedes `suspend` |
+  | a member `actual` | reported at its OWN name, not the class's |
+  | a member `actual override fun` of an `open` member | `public open actual override fun …` — an override renders `open` |
+  | an interface member with a body / without one | `public open actual fun …` / `public abstract actual fun …` |
+  | an UNMARKED member of an unmatched `actual` classifier | nothing: the diagnostic is about the modifier |
+  | `actual companion object` | `public final actual companion object Companion : Any`, at the `object` keyword |
+  | `actual companion object Registry` | `… actual companion object Registry : Any`, at the written name |
+  | a nested `actual class Inner` / `actual object Solo` | `… actual class Inner : Any` / `… actual object Solo : Any` — the declaration's OWN simple name |
+  | a member `actual val Tally.memberExt: Int` | `public final actual val Tally.memberExt: Int`, at the NAME — the receiver binds to it but is not underlined |
+  | `actual annotation class Anno(actual val x: Int)` | the parameter property reports `public final actual val x: Int`, at the parameter's name |
+  | a member `actual constructor(x: Int)` | `public actual constructor(x: Int): Owner` — no modality slot, the owner stands in for the return, underlined from the first MODIFIER through the delegation |
+  | `actual class A { constructor(x: Int) { } }` | nothing: an UNMARKED secondary constructor wrote no modifier to answer for |
+  | `context(tally: Tally) actual val slotted: Int` | `context(tally: Tally) public final actual val slotted: Int` — the group precedes the VISIBILITY slot, and the names are the declaration's own while the types are resolved |
+  | a member under an owner that DID actualize | reported by its OWN outcome — `expect class H { fun kept(): Int }` against `actual class H { actual fun kept() = 1; actual fun extra() = 2 }` reports `extra` alone (measured with the header passed as `-Xcommon-sources`, since the reference compiler rejects a same-module pair before reaching the question) |
+
+  Rendering from the AST is not sufficient: kotlinc renders the RESOLVED type, so an inferred return
+  (`actual fun f() = 1` → `Int`) and an expanded typealias have no written form to copy. Nor is the
+  resolved signature sufficient on its own: parameter NAMES, which parameter carries `vararg` or a
+  default, and a classifier's kind and modifier words are what the declaration WROTE. The rendering
+  is therefore a hybrid, and `src/frontend/no_expect_for_actual.rs` states which side owns what.
+  Whether an `actual` is unmatched is answered by ACTUALIZATION's own shape matcher rather than by
+  a name/arity key: the key differs on the receiver spelling for `expect val S.tag: S` against
+  `actual val String.tag: String`, which the matcher pairs by following `actual typealias
+  S = String`.
+  Two resolved facts each need a correction the naive read gets wrong: a generic callable's
+  `Signature::params`/`ret` are ERASED (the declared shape is on its `GenericSig`), and a `vararg`
+  parameter's declared type is the ARRAY it arrives as while the rendering names the element.
 - kotlinc 2.4.0 runs on JRE 25 (verified). bytediff is slow (one kotlinc JVM launch per file) — sample.
 
 - **A `super(…)` argument in an ERASED base-constructor slot is not boxed — measured, and the

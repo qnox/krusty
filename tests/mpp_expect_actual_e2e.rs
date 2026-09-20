@@ -1,6 +1,7 @@
 //! Multiplatform `expect`/`actual` (JVM model): a platform source set and its `dependsOn` chain
-//! compile as ONE set; `strip_matched_expects` drops every `expect` header a matching `actual`
-//! (or `actual typealias`) replaces. Gated on `// LANGUAGE: +MultiPlatformProjects`, like kotlinc.
+//! compile as ONE set; compact-header actualization excludes every `expect` subtree a matching
+//! `actual` (or `actual typealias`) replaces. Gated on
+//! `// LANGUAGE: +MultiPlatformProjects`, like kotlinc.
 
 use super::common;
 
