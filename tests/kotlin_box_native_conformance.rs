@@ -181,13 +181,42 @@ fn expected_failures() -> BTreeMap<&'static str, &'static str> {
         .collect()
 }
 
+/// Whether this run reads its symbols from the Kotlin/Native KLIB instead of the JVM jar.
+///
+/// Opt-in (`KRUSTY_NATIVE_KLIB=1`), because it is a MEASUREMENT of how far the klib provider has
+/// come and not yet the gate: the two providers spell an owner differently — the jar says
+/// `kotlin/collections/CollectionsKt`, the klib says `kotlin/collections` — and `intrinsics` is
+/// keyed on the jar's spelling, so a klib run declines where a jar run lowers. Running the corpus
+/// both ways is how that distance stops being a guess.
+fn reads_the_klib() -> bool {
+    std::env::var("KRUSTY_NATIVE_KLIB").is_ok_and(|value| !value.is_empty() && value != "0")
+}
+
+thread_local! {
+    /// The klib-backed provider, read once per worker thread: decoding and indexing the whole
+    /// stdlib per case would redo it thousands of times, exactly as the classpath beside it would.
+    /// The handle shares its tables, so the clone each case takes is a refcount.
+    static KLIB: Option<krusty::native::libraries::NativeLibraries> =
+        krusty::toolchain::kotlin_native_root().map(|root| {
+            krusty::native::libraries::NativeLibraries::from_distribution(&root)
+                .expect("the Kotlin/Native stdlib klib loads")
+        });
+}
+
+fn klib_libraries() -> Option<krusty::native::libraries::NativeLibraries> {
+    KLIB.with(Clone::clone)
+}
+
 /// Compile one case with the native backend; the object, or why not.
 fn compile(source: &str, stem: &str, target: NativeTarget) -> Result<Vec<u8>, Outcome> {
     let classpath = CLASSPATH.with(std::rc::Rc::clone);
-    let platform = Box::new(
-        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
-            .expect("JVM provider initialization"),
-    );
+    let platform: Box<dyn krusty::libraries::SemanticPlatform> = match reads_the_klib() {
+        true => Box::new(klib_libraries().expect("checked by `host`")),
+        false => Box::new(
+            krusty::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
+                .expect("JVM provider initialization"),
+        ),
+    };
     let prepared = krusty::conformance::prepare_test_source(source);
     let inputs = vec![SourceInput::kotlin(&prepared).with_file_stem(stem)];
     let stems = vec![stem.to_string()];
@@ -203,10 +232,13 @@ fn compile(source: &str, stem: &str, target: NativeTarget) -> Result<Vec<u8>, Ou
     // The backend asks the PROVIDER what it realized an identity as, not a classpath. This is a
     // second view over the very same `Rc<Classpath>` the frontend's provider wrapped: the interned
     // identity tables live in the classpath, so both views answer from one set of records.
-    let provider: std::rc::Rc<dyn krusty::libraries::SemanticPlatform> = std::rc::Rc::new(
-        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
-            .expect("JVM provider initialization"),
-    );
+    let provider: std::rc::Rc<dyn krusty::libraries::SemanticPlatform> = match reads_the_klib() {
+        true => std::rc::Rc::new(klib_libraries().expect("checked by `host`")),
+        false => std::rc::Rc::new(
+            krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
+    };
     let backend = CraneliftBackend::new(provider, target).with_entry(Entry::Box);
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "box", &mut diags);
     if let Some(decline) = diags

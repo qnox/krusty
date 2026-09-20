@@ -82,7 +82,18 @@ struct Namespace {
 }
 
 /// Kotlin/Native's stdlib, as a symbol source.
+///
+/// The tables are behind one [`Arc`] and the handle is [`Clone`], because reading them is the
+/// expensive part: the whole stdlib decodes once and every consumer that needs its own handle —
+/// the frontend takes an owned provider, the backend a second one — shares that work instead of
+/// repeating it. A caller that compiles many programs keeps one handle and clones it per program.
+#[derive(Clone)]
 pub struct NativeLibraries {
+    index: Arc<Index>,
+}
+
+/// What one reading of the stdlib produced. Immutable once built, which is what lets it be shared.
+struct Index {
     /// Package or classifier namespace -> what it declares. A classifier's own namespace holds its
     /// nested classifiers, which is the same shape a package has, so one map serves both.
     namespaces: HashMap<TypeName, Namespace>,
@@ -167,16 +178,18 @@ impl NativeLibraries {
             }
         }
         Ok(Self {
-            namespaces,
-            callable_realizations,
-            property_realizations,
+            index: Arc::new(Index {
+                namespaces,
+                callable_realizations,
+                property_realizations,
+            }),
         })
     }
 
     /// How many namespaces carry a declaration — for a caller that wants to say the stdlib really
     /// was read rather than silently empty.
     pub fn namespace_count(&self) -> usize {
-        self.namespaces.len()
+        self.index.namespaces.len()
     }
 }
 
@@ -198,7 +211,7 @@ impl SymbolSource for NativeLibraries {
         &self,
         identity: crate::fir::ExternalCallableId,
     ) -> Option<ExternalCallableRealization> {
-        self.callable_realizations
+        self.index.callable_realizations
             .get(identity.raw() as usize)
             .cloned()
     }
@@ -209,13 +222,13 @@ impl SymbolSource for NativeLibraries {
         &self,
         identity: crate::fir::ExternalPropertyId,
     ) -> Option<ExternalPropertyRealization> {
-        self.property_realizations
+        self.index.property_realizations
             .get(identity.raw() as usize)
             .cloned()
     }
 
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
-        let Some(found) = self.namespaces.get(&namespace.name()) else {
+        let Some(found) = self.index.namespaces.get(&namespace.name()) else {
             return std::rc::Rc::new(ResolvedSymbols::default());
         };
         let classifier = found.classifiers.get(name).cloned();
@@ -324,7 +337,7 @@ fn nested(outer: TypeName, name: &str) -> TypeName {
 impl NativeLibraries {
     /// How many declarations this provider handed identities out for.
     pub fn callable_count(&self) -> usize {
-        self.callable_realizations.len()
+        self.index.callable_realizations.len()
     }
 }
 
@@ -625,10 +638,7 @@ mod tests {
 
     /// The cached Kotlin/Native distribution, or `None` when this checkout has not provisioned one.
     fn distribution() -> Option<PathBuf> {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target/cache/kotlin-native/2.4.10")
-            .join("kotlin-native-prebuilt-linux-x86_64-2.4.10");
-        root.exists().then_some(root)
+        crate::toolchain::kotlin_native_root()
     }
 
     /// The whole Kotlin/Native stdlib decodes with the reader already in this tree.
@@ -752,10 +762,7 @@ mod compiles_against_the_klib {
     use super::*;
 
     fn distribution() -> Option<std::path::PathBuf> {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target/cache/kotlin-native/2.4.10")
-            .join("kotlin-native-prebuilt-linux-x86_64-2.4.10");
-        root.exists().then_some(root)
+        crate::toolchain::kotlin_native_root()
     }
 
     /// Compile a program with this provider and answer the diagnostics, analysis AND emission.
