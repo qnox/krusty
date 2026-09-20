@@ -9021,28 +9021,60 @@ fn emit_interface_class(
         // to the abstract method via `invokeinterface`. kotlinc emits it ON THE INTERFACE (call sites use
         // it) AND, under a mode that keeps the compatibility holder, a copy on the
         // `<Iface>$DefaultImpls` class (`public final`).
-        if let Some(defaults) = ir.param_defaults(fid) {
-            // `disable` puts NOTHING executable on the interface, the `$default` stub included: call
-            // sites go to the holder's copy instead.
-            if bodies_on_interface {
-                emit_default_stub(ir, fid, &fq_name, facade, &mut cw, defaults, env, true);
-            }
-            // `-jvm-default=no-compatibility` emits NO `$DefaultImpls` at all. Emitting one anyway
-            // would publish a holder class the build says does not exist — a downstream compilation
-            // resolving against it links to a class kotlinc would never have produced.
-            if emits_default_impls {
-                let di = default_impls.get_or_insert_with(|| {
-                    let mut w =
-                        new_writer(&format!("{fq_name}$DefaultImpls"), "java/lang/Object", opts);
-                    w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
-                    w
-                });
-                if enable_compat {
-                    // The interface owns the real default application; the holder's copy is a
-                    // thin synthetic forward to it (kotlinc's `enable` shape).
-                    emit_default_stub_forward(ir, fid, &fq_name, di);
-                } else {
-                    emit_default_stub(ir, fid, &fq_name, facade, di, defaults, env, true);
+        let deferred_suspend_declaration = ir
+            .jvm_suspend_interface_bodies
+            .values()
+            .any(|(_, declaration)| *declaration == fid);
+        let default_fid = ir
+            .jvm_suspend_interface_bodies
+            .get(&fid)
+            .map(|(_, declaration)| *declaration)
+            .unwrap_or(fid);
+        if !deferred_suspend_declaration {
+            if let Some(defaults) = ir.param_defaults(default_fid) {
+                // `disable` puts NOTHING executable on the interface, the `$default` stub included: call
+                // sites go to the holder's copy instead.
+                if bodies_on_interface {
+                    emit_default_stub(
+                        ir,
+                        default_fid,
+                        &fq_name,
+                        facade,
+                        &mut cw,
+                        defaults,
+                        env,
+                        true,
+                    );
+                }
+                // `-jvm-default=no-compatibility` emits NO `$DefaultImpls` at all. Emitting one anyway
+                // would publish a holder class the build says does not exist — a downstream compilation
+                // resolving against it links to a class kotlinc would never have produced.
+                if emits_default_impls {
+                    let di = default_impls.get_or_insert_with(|| {
+                        let mut w = new_writer(
+                            &format!("{fq_name}$DefaultImpls"),
+                            "java/lang/Object",
+                            opts,
+                        );
+                        w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
+                        w
+                    });
+                    if enable_compat {
+                        // The interface owns the real default application; the holder's copy is a
+                        // thin synthetic forward to it (kotlinc's `enable` shape).
+                        emit_default_stub_forward(ir, default_fid, &fq_name, di);
+                    } else {
+                        emit_default_stub(
+                            ir,
+                            default_fid,
+                            &fq_name,
+                            facade,
+                            di,
+                            defaults,
+                            env,
+                            true,
+                        );
+                    }
                 }
             }
         }
@@ -10797,7 +10829,16 @@ fn emit_method_inner_with_holder(
             method_sig.as_deref(),
             &method_descriptor(&param_tys, ret),
         ),
-        None => method_sig,
+        None => match ir.jvm_suspend_interface_bodies.get(&fid).copied() {
+            Some((receiver, _)) => holder_method_signature(
+                &signature_formatter,
+                ir,
+                receiver,
+                method_sig.as_deref(),
+                &method_descriptor(f.params.get(1..).unwrap_or_default(), ret),
+            ),
+            None => method_sig,
+        },
     };
     let ann_of = |t: Ty| -> Option<&'static str> {
         let d = crate::jvm::names::type_descriptor(t);
@@ -11925,6 +11966,12 @@ fn method_signature_shape(
     }
     if let Some(generic) = ir.signatures.get(&fid) {
         return jvm_method_signature(formatter, generic, f);
+    }
+    if let (Some((params, ret)), Some(_)) = (
+        ir.member_semantic_sigs.get(&fid),
+        ir.suspend_declared_sigs.get(&fid),
+    ) {
+        return suspend_method_sig(formatter, params, ret);
     }
     if let Some((params, ret)) = ir.member_semantic_sigs.get(&fid) {
         // A member using ENCLOSING-CLASS type parameters signs with bare references (`(TT;)TT;`)
@@ -16069,8 +16116,17 @@ impl<'a> Emitter<'a> {
                     let argument_words: i32 =
                         param_tys.iter().map(|ty| slot_words(*ty) as i32).sum();
                     let descriptor = method_descriptor(&param_tys, ret);
+                    let source_owner_is_interface = self.ir.classes.iter().any(|candidate| {
+                        candidate.is_interface && candidate.fq_name_id() == *owner
+                    });
                     let owner = owner.render();
-                    let method = if self.bodies.owner_is_interface(&owner) {
+                    // `owner_is_interface` answers from the CLASSPATH; a static declared on an
+                    // interface being compiled right now is not there. An `invokestatic` naming an
+                    // interface must use an InterfaceMethodref, so the file's own classes answer
+                    // too.
+                    let owner_is_interface =
+                        source_owner_is_interface || self.bodies.owner_is_interface(&owner);
+                    let method = if owner_is_interface {
                         self.cw.interface_methodref(&owner, &f.name, &descriptor)
                     } else {
                         self.cw.methodref(&owner, &f.name, &descriptor)
