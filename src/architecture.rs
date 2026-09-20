@@ -255,6 +255,12 @@ mod tests {
             "trace",
             "trace_compiler",
             "types",
+            // What Kotlin says a `@JvmInline value class` IS — its erasure, and where a box is
+            // required anyway. The rule is the language's rather than this target's, so it is read
+            // from one place by every backend; what stays under `src/jvm` is everything this target
+            // then does with the answer (the mangling, `box-impl`/`unbox-impl`, descriptors,
+            // bridges). Answering it twice is how two authorities drift apart.
+            "value_classes",
             "wide_stack",
         ];
         for path in rust_files_under("src/jvm") {
