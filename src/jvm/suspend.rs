@@ -2623,7 +2623,22 @@ fn build_state_machine(
     // kotlinc names `create-SCm-oBs`'s continuation `<Owner>$create$1`. `-` can't occur in a Kotlin
     // identifier, so it only ever separates the mangle hash — strip from the first `-`.
     let cont_fname = fname.split('-').next().unwrap_or(&fname);
-    let cont_internal = format!("{cont_owner}${cont_fname}$1");
+    // `$1` is the ordinal kotlinc gives this continuation, but the same `<owner>$<fn>$N` sequence
+    // also names the anonymous objects declared in this function's body, and those are named before
+    // the coroutine transform runs. A suspend function that returns an `object : T` therefore
+    // already owns `<owner>$<fn>$1`, and reusing it produced TWO classes with one name: the
+    // constructor call for the continuation then resolved to the anonymous object's constructor and
+    // emission aborted the whole file on the arity disagreement.
+    //
+    // Take the first free ordinal instead. kotlinc numbers the continuation FIRST and pushes the
+    // object to `$2`; krusty names the object first, so the two compilers disagree about which of
+    // the pair holds which ordinal. That is a byte-parity difference in the names, not a
+    // correctness one, and is tracked separately -- renaming a class the rest of the IR already
+    // references is not something this pass can do safely.
+    let cont_internal = (1..)
+        .map(|ordinal| format!("{cont_owner}${cont_fname}${ordinal}"))
+        .find(|candidate| !ir.classes.iter().any(|class| class.fq_name == *candidate))
+        .expect("an unused continuation ordinal always exists");
     let cont_ty = Ty::obj(&cont_internal);
 
     let base = max_value_index(ir) + 1;
