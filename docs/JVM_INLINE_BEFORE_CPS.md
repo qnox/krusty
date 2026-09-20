@@ -206,9 +206,9 @@ reached from the dispatch with an empty stack and has to reconstruct the join.
 * In the `map` shape it is `[Collection]` — the destination is pushed before the lambda body. krusty
   already models this as `RelocatedLambdaSite.stack_prefix`.
 
-**v1 requires an empty under-stack and bails otherwise** (the bail is the status quo, so this
-strictly cannot regress). **v2 spills the under-stack into scratch locals first**, as kotlinc does,
-and removes the restriction.
+**v1 (step 3) requires an empty under-stack and bails otherwise** — the bail is the status quo,
+so this strictly cannot regress. **v2 (step 5) spills the under-stack into scratch locals first**,
+as kotlinc does, and removes the restriction.
 
 ### 5.4 Non-JVM backends
 
@@ -225,16 +225,21 @@ Each step is its own PR, rebased onto `origin/master` first, green on `./run-tes
 | # | Step | Gate |
 | --- | --- | --- |
 | 0 | This note. | docs only |
-| 1 | Stdlib-free fixtures for the 13 bailing shapes (§7). They **document the bail** at first — an exact-diff diagnostics test — so the fix has a before/after. | green |
-| 2 | Bytecode CPS scaffolding: disassemble → CFG → backward liveness → reassemble, as an **identity** transform over every suspend method krusty already compiles, asserted byte-identical to today's output. No behaviour change. | green, byte-identical |
-| 3 | Suspension markers minted by `splice_unified` for a relocated suspend call; consumed and deleted by the pass. Still identity for everything else. | green |
-| 4 | Move the state machine for the **currently bailing** shapes only: gate on "this method contains a marker inside a splice". The IR machine still owns every method it owns today, so the 11270 byte-identical classes cannot move. Fixtures from step 1 flip from bail to pass, and their `box()` results are checked against kotlinc. | green + 13 shapes run correctly |
-| 5 | Continuation-class finalization: spill fields and `@DebugMetadata` become products of the bytecode pass for the new-machine methods. | green |
+| 1 | Bytecode CPS scaffolding: disassemble → CFG → backward liveness → reassemble, as an **identity** transform over every suspend method krusty already compiles, asserted byte-identical to today's output. No behaviour change, so no fixture flips. | green, byte-identical |
+| 2 | Suspension markers minted by `splice_unified` for a relocated suspend call; consumed and deleted by the pass. Still identity for everything else. | green |
+| 3 | Move the state machine for the **currently bailing** shapes only: gate on "this method contains a marker inside a splice". The IR machine still owns every method it owns today, so the 11270 byte-identical classes cannot move. Fixture A (§7) lands here, asserting `box()` against the reference compiler. | green + fixture A runs |
+| 4 | Continuation-class finalization: spill fields and `@DebugMetadata` become products of the bytecode pass for the new-machine methods. | green |
+| 5 | Under-stack spilling (§5.3 v2). Fixture B lands here. | green + fixture B runs |
 | 6 | Measure the corpus. Expect the three blocked modules to emit (≈987 classes). Report before/after. | corpus report |
 | 7 | Migrate the remaining suspend methods onto the bytecode machine, one shape family at a time, each with a byte-parity delta. Emit the `tableswitch` and kotlinc's slot numbering here — both are byte-parity changes, not correctness ones. | per-step byte delta |
 | 8 | Retire the IR machine for JVM; consider the `inline_body_plan` deletion. | measured |
 
-Step 4 is the one that pays for the work; steps 2 and 3 exist so that step 4 is small.
+Every fixture asserts the behaviour it is supposed to have, never the bail it currently gets:
+`AGENTS.md` rule 9 rejects a diagnostics test that asserts only rejection. So a shape's fixture
+lands in the step that makes it work, not before, and the "before" side of the comparison lives in
+this note (§7) rather than in a characterization test.
+
+Step 3 is the one that pays for the work; steps 1 and 2 exist so that step 3 is small.
 
 ## 7. Test strategy — no stdlib functions
 
@@ -319,8 +324,7 @@ Identical, except that the lambda result is consumed in place rather than stored
 `acc` is then on the operand stack when the suspension is reached. The reference compiler spills it
 into a scratch local before the call (`istore 8`) and reloads it after (`iload 8`), which adds a
 sixth field `I$5`. krusty at `644f8d30` rejects this one with the same
-`call arity mismatch` (measured). It lands in step 1 as a documented bail and flips only once §5.3's
-v2 under-stack spilling exists.
+`call arity mismatch` (measured). It lands in step 5, once §5.3's v2 under-stack spilling exists.
 
 Correctness is `box()` against the reference compiler, not a byte diff; byte parity is a separate,
 later measurement (step 7).
@@ -328,9 +332,9 @@ later measurement (step 7).
 ## 8. Risks
 
 * **Liveness on bytecode is a new analysis.** Getting it wrong is a miscompile, not a bail. Mitigated
-  by step 2: the analysis lands as an identity transform and is exercised over every suspend method
+  by step 1: the analysis lands as an identity transform and is exercised over every suspend method
   in the gate before it is allowed to change anything.
-* **Two machines coexist for steps 4-7.** Accepted deliberately: it is what keeps the existing
+* **Two machines coexist for steps 3-7.** Accepted deliberately: it is what keeps the existing
   byte-identical classes from moving while the new machine is unproven. The cost is a gate that must
   keep both green; the alternative is a single flag day over ~6000 lines of behaviour.
 * **`max_stack`/`max_locals` and frame re-binding** are easy to get subtly wrong and fail only at
