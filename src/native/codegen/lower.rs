@@ -47,7 +47,7 @@ use crate::ir::{
     Callee, ClassId, FunId, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic,
     IrLocalPropertyLayout, IrStatic, IrTypeOp,
 };
-use crate::jvm::classpath::Classpath;
+use crate::libraries::SemanticPlatform;
 use crate::types::Ty;
 
 use super::super::classes::{self as model, ClassModel, Slot, Symbols, ValueMember};
@@ -153,7 +153,7 @@ fn isa_for(target: NativeTarget) -> Result<cranelift_codegen::isa::OwnedTargetIs
 
 pub fn lower_file(
     ir: &IrFile,
-    classpath: &Rc<Classpath>,
+    provider: &Rc<dyn SemanticPlatform>,
     target: NativeTarget,
     stem: &str,
     entry: Entry,
@@ -171,7 +171,7 @@ pub fn lower_file(
 
     let mut lowering = FileLowering {
         ir,
-        classpath,
+        provider,
         module: &mut module,
         symbols: model::symbols(ir, super::super::linker::runtime_symbols(target.arch)),
         model: class_model,
@@ -237,7 +237,7 @@ pub fn lower_file(
 
 struct FileLowering<'a> {
     ir: &'a IrFile,
-    classpath: &'a Rc<Classpath>,
+    provider: &'a Rc<dyn SemanticPlatform>,
     module: &'a mut ObjectModule,
     /// Symbols of this file's classes and functions.
     symbols: Symbols,
@@ -1478,7 +1478,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// `Checked(ExternalPropertyRead)`, so the backlog lumped eighteen unrelated properties —
     /// `Double.Companion.MAX_VALUE`, `System.out`, `UIntArray.indices` — under one row and could
     /// not be worked from, which is exactly what `describe`'s own comment warns against. The
-    /// classpath knows the owner and the name, so they are stated the way a declining CALL already
+    /// provider knows the owner and the name, so they are stated the way a declining CALL already
     /// states its callee.
     fn describe_declined(&self, node: &IrExpr) -> String {
         let named = match node {
@@ -1492,17 +1492,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         };
         match named {
             Some((access, name)) => format!("a {access} of the property `{name}`"),
-            // A target the classpath cannot name is a different gap from an unimplemented
+            // A target the provider cannot name is a different gap from an unimplemented
             // property, so it keeps the shape-only phrasing rather than borrowing a name it does
             // not have.
             None => describe(node),
         }
     }
 
-    /// `owner.name` for a dependency property, as the classpath records them.
+    /// `owner.name` for a dependency property, as the provider records them.
     fn external_property_name(&self, target: crate::fir::ExternalPropertyId) -> Option<String> {
-        let property = self.file.classpath.external_property(target)?;
-        let getter = self.file.classpath.external_callable(property.getter)?;
+        let property = self.file.provider.external_property(target)?;
+        let getter = self.file.provider.external_callable(property.getter)?;
         Some(format!(
             "{}.{}",
             getter.callable.owner.render(),
@@ -2115,7 +2115,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 ret,
                 ..
             } => {
-                let Some(realization) = self.file.classpath.external_callable(*target) else {
+                let Some(realization) = self.file.provider.external_callable(*target) else {
                     return Err("an unresolvable dependency call".to_string());
                 };
                 let owner = realization.callable.owner.render();
@@ -2263,7 +2263,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             // sources and nothing here made them agree.
                             //
                             // They disagree today for `Number.toByte`/`toShort`, which the
-                            // classpath provider types `Int` because `desc_to_ty` reads the JVM
+                            // provider provider types `Int` because `desc_to_ty` reads the JVM
                             // descriptors `B` and `S` as `Int` — a core defect with its own fix,
                             // invisible to the JVM backend because a byte and an int share a stack
                             // slot there. Without this, the i8 the runtime answers reaches a box

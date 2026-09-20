@@ -394,19 +394,20 @@ mod tests {
 
     #[test]
     fn the_code_generator_uses_only_ir_contract_dependencies() {
-        // `jvm` for the same one reason as the retired emitter: the only symbol provider reads a
-        // JVM classpath, so a selected dependency declaration resolves through it. Phase 7 removes
-        // it; the budget keeps it from spreading meanwhile.
+        // `jvm` is GONE from both of these. It was here for one reason — the only symbol provider
+        // read a JVM classpath, so a selected dependency declaration resolved through it — and the
+        // generator now holds a `SemanticPlatform` and asks IT what it realized an identity as.
+        // That contract is `libraries`, and it names no target.
         assert_allowed_crate_modules(
             "src/native/codegen/mod.rs",
-            &["backend", "diag", "frontend", "jvm"],
+            &["backend", "diag", "frontend", "libraries"],
         );
         // `fir` for the same reason `objects.rs` has it: the checked property and callable ids
         // the IR itself carries. Here it is the `ExternalPropertyId` a declining diagnostic names
         // the property by — the generator reads the id's name, never a declaration through it.
         assert_allowed_crate_modules(
             "src/native/codegen/lower.rs",
-            &["fir", "ir", "jvm", "types"],
+            &["fir", "ir", "libraries", "types"],
         );
         // `fir` only for the checked property and callable ids the IR itself carries. `names` for
         // the same reason `statics.rs` has it, below: a `super` access to a property arrives named

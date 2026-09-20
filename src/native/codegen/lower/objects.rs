@@ -1677,10 +1677,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     /// Is this accessor `Throwable.message`?
     pub(super) fn is_throwable_message(&self, target: crate::fir::ExternalPropertyId) -> bool {
-        let Some(property) = self.file.classpath.external_property(target) else {
+        let Some(property) = self.file.provider.external_property(target) else {
             return false;
         };
-        let Some(getter) = self.file.classpath.external_callable(property.getter) else {
+        let Some(getter) = self.file.provider.external_callable(property.getter) else {
             return false;
         };
         super::super::super::intrinsics::is_throwable_message(getter.callable.owner, &property.name)

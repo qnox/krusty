@@ -18,10 +18,10 @@ impl BodyLowering<'_, '_, '_> {
     /// nothing in the runtime makes another. That is the same position the member table already
     /// takes for `CharSequence.get`, and for the same reason.
     pub(super) fn is_char_sequence_length(&self, target: crate::fir::ExternalPropertyId) -> bool {
-        let Some(property) = self.file.classpath.external_property(target) else {
+        let Some(property) = self.file.provider.external_property(target) else {
             return false;
         };
-        let Some(getter) = self.file.classpath.external_callable(property.getter) else {
+        let Some(getter) = self.file.provider.external_callable(property.getter) else {
             return false;
         };
         super::super::super::intrinsics::is_char_sequence_length(

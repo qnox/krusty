@@ -200,7 +200,14 @@ fn compile(source: &str, stem: &str, target: NativeTarget) -> Result<Vec<u8>, Ou
     if let Some(first) = diags.diags.first() {
         return Err(Outcome::Frontend(first.msg.clone()));
     }
-    let backend = CraneliftBackend::new(classpath, target).with_entry(Entry::Box);
+    // The backend asks the PROVIDER what it realized an identity as, not a classpath. This is a
+    // second view over the very same `Rc<Classpath>` the frontend's provider wrapped: the interned
+    // identity tables live in the classpath, so both views answer from one set of records.
+    let provider: std::rc::Rc<dyn krusty::libraries::SemanticPlatform> = std::rc::Rc::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
+            .expect("JVM provider initialization"),
+    );
+    let backend = CraneliftBackend::new(provider, target).with_entry(Entry::Box);
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "box", &mut diags);
     if let Some(decline) = diags
         .diags

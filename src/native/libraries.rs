@@ -5,7 +5,7 @@
 //! non-JVM target should never have seen — the JDK's own name for `kotlin.String`, and the file
 //! facades a top-level function arrives owned by — and it is why `kotlin.Result` arrives wearing
 //! the JVM's value-class erasure rather than its own.
-//! `codegen`'s own comment has said so all along: *"A JVM classpath because that is krusty's only
+//! `codegen`'s own comment has said so all along: *"A JVM provider because that is krusty's only
 //! provider today … Phase 7 removes it."* This is that provider.
 //!
 //! Nothing here decodes anything. The container reader ([`crate::klib`]) and the metadata decoder

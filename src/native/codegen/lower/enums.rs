@@ -351,8 +351,8 @@ impl BodyLowering<'_, '_, '_> {
         &self,
         target: crate::fir::ExternalPropertyId,
     ) -> Option<&'static str> {
-        let property = self.file.classpath.external_property(target)?;
-        let getter = self.file.classpath.external_callable(property.getter)?;
+        let property = self.file.provider.external_property(target)?;
+        let getter = self.file.provider.external_callable(property.getter)?;
         super::super::super::intrinsics::enum_member(
             &getter.callable.owner.render(),
             &property.name,

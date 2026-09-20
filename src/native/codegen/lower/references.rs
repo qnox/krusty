@@ -684,8 +684,8 @@ impl BodyLowering<'_, '_, '_> {
         let IrExpr::CallableReference(reference) = self.file.ir.expr(receiver) else {
             return None;
         };
-        let property = self.file.classpath.external_property(target)?;
-        let getter = self.file.classpath.external_callable(property.getter)?;
+        let property = self.file.provider.external_property(target)?;
+        let getter = self.file.provider.external_callable(property.getter)?;
         if !super::super::super::intrinsics::is_callable_name(getter.callable.owner, &property.name)
         {
             return None;
@@ -731,8 +731,8 @@ impl BodyLowering<'_, '_, '_> {
         if !self.type_of(receiver).is_some_and(is_property_reference) {
             return None;
         }
-        let property = self.file.classpath.external_property(target)?;
-        let getter = self.file.classpath.external_callable(property.getter)?;
+        let property = self.file.provider.external_property(target)?;
+        let getter = self.file.provider.external_callable(property.getter)?;
         let ret = getter.callable.ret;
         self.reference_member(&property.name, receiver, &[], ret)
     }

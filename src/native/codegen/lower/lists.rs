@@ -316,7 +316,7 @@ impl BodyLowering<'_, '_, '_> {
         if !self.type_of(receiver).is_some_and(is_lazy) {
             return None;
         }
-        let property = self.file.classpath.external_property(target)?;
+        let property = self.file.provider.external_property(target)?;
         lazy_symbol(&property.name, 0)?;
         Some(property.name.clone())
     }
@@ -363,7 +363,7 @@ impl BodyLowering<'_, '_, '_> {
         if !self.type_of(receiver).is_some_and(is_pair) {
             return None;
         }
-        let property = self.file.classpath.external_property(target)?;
+        let property = self.file.provider.external_property(target)?;
         pair_symbol(&property.name, 0)?;
         Some(property.name.clone())
     }
@@ -401,7 +401,7 @@ impl BodyLowering<'_, '_, '_> {
         if !self.type_of(receiver).is_some_and(is_indexed_value) {
             return None;
         }
-        let property = self.file.classpath.external_property(target)?;
+        let property = self.file.provider.external_property(target)?;
         indexed_value_symbol(&property.name, 0)?;
         Some(property.name.clone())
     }
@@ -414,7 +414,7 @@ impl BodyLowering<'_, '_, '_> {
         if !self.type_of(receiver).is_some_and(is_list) {
             return None;
         }
-        let property = self.file.classpath.external_property(target)?;
+        let property = self.file.provider.external_property(target)?;
         list_symbol(&property.name, 0, &[])?;
         Some(property.name.clone())
     }

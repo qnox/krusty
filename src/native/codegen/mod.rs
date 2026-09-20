@@ -23,7 +23,7 @@ use std::rc::Rc;
 
 use crate::backend::{Artifact, Backend, CheckedIrFile};
 use crate::diag::DiagSink;
-use crate::jvm::classpath::Classpath;
+use crate::libraries::SemanticPlatform;
 
 use super::target::NativeTarget;
 
@@ -42,18 +42,18 @@ pub enum Entry {
 }
 
 pub struct CraneliftBackend {
-    /// The symbol provider. A JVM classpath because that is krusty's only provider today; only
-    /// *signatures* come from it — see `super::intrinsics` for the two spellings it leaks and where
-    /// they are normalized.
-    classpath: Rc<Classpath>,
+    /// The symbol provider, as a provider and not as one target's. Only *signatures* come from
+    /// it, plus the realization of an identity it assigned — see `super::intrinsics` for the
+    /// spellings a JVM-backed one leaks and where they are normalized.
+    provider: Rc<dyn SemanticPlatform>,
     target: NativeTarget,
     entry: Entry,
 }
 
 impl CraneliftBackend {
-    pub fn new(classpath: Rc<Classpath>, target: NativeTarget) -> Self {
+    pub fn new(provider: Rc<dyn SemanticPlatform>, target: NativeTarget) -> Self {
         Self {
-            classpath,
+            provider,
             target,
             entry: Entry::Main,
         }
@@ -84,7 +84,7 @@ impl Backend for CraneliftBackend {
     ) -> Vec<Artifact> {
         let stem = file.stems[file.source.raw() as usize].clone();
         let lowered =
-            match lower::lower_file(&file.ir, &self.classpath, self.target, &stem, self.entry) {
+            match lower::lower_file(&file.ir, &self.provider, self.target, &stem, self.entry) {
                 Ok(lowered) => lowered,
                 Err(unsupported) => {
                     diags.error(

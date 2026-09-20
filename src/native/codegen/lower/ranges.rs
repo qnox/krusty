@@ -517,10 +517,10 @@ impl BodyLowering<'_, '_, '_> {
         &self,
         target: crate::fir::ExternalPropertyId,
     ) -> bool {
-        let Some(property) = self.file.classpath.external_property(target) else {
+        let Some(property) = self.file.provider.external_property(target) else {
             return false;
         };
-        let Some(getter) = self.file.classpath.external_callable(property.getter) else {
+        let Some(getter) = self.file.provider.external_callable(property.getter) else {
             return false;
         };
         // The OWNER comes from the accessor, which is a type identity and not a spelling; the NAME
@@ -587,8 +587,8 @@ impl BodyLowering<'_, '_, '_> {
         &self,
         target: crate::fir::ExternalPropertyId,
     ) -> Option<(String, String, Ty)> {
-        let property = self.file.classpath.external_property(target)?;
-        let getter = self.file.classpath.external_callable(property.getter)?;
+        let property = self.file.provider.external_property(target)?;
+        let getter = self.file.provider.external_callable(property.getter)?;
         range_element(getter.callable.owner)?;
         range_symbol(&property.name, 0)?;
         Some((

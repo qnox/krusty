@@ -72,7 +72,11 @@ fn compile(source: &str) -> (Vec<Artifact>, Vec<String>) {
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs, platform, &features, &mut diags,
     );
-    let backend = CraneliftBackend::new(classpath, target);
+    let provider: std::rc::Rc<dyn krusty::libraries::SemanticPlatform> = std::rc::Rc::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
+            .expect("JVM provider initialization"),
+    );
+    let backend = CraneliftBackend::new(provider, target);
     let artifacts = krusty::compiler::emit_analyzed(
         analysis,
         &["Main".to_string()],
