@@ -266,11 +266,6 @@ fn parse_source_set_named(
     if diags.has_errors() {
         return None;
     }
-    if sources.iter().any(|source| {
-        krusty::features::LangFeatures::from_source(source).has("MultiPlatformProjects")
-    }) {
-        krusty::frontend::strip_matched_expects(&mut files);
-    }
     Some(files)
 }
 
@@ -3441,4 +3436,81 @@ mod scratch_tests {
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.parse::<u64>().is_ok())));
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// A compiler report, as a complete ordered ledger.
+//
+// A test that greps a report for one sentence cannot see a second diagnostic the compiler started
+// or stopped producing, and a `filter_map` that skips what it cannot parse removes the line from
+// the comparison rather than failing on it. Everything here keeps every ERROR the compiler
+// printed, in order, and fails on one it cannot read.
+// ---------------------------------------------------------------------------------------------
+
+/// One reported error: where it is and what it says.
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Reported {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+    pub rendered: String,
+}
+
+impl std::fmt::Display for Reported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}:{}:{}: {}",
+            self.file, self.line, self.column, self.rendered
+        )
+    }
+}
+
+/// Every error a compiler printed, complete and in the order it printed them.
+///
+/// Severity is the only filter: a line that carries `: error: ` is kept, and one that does so and
+/// cannot be read as a position panics instead of disappearing. Only the file NAME is retained —
+/// both compilers print a path, and the directory each happened to use is not the subject of any
+/// comparison.
+#[allow(dead_code)]
+pub fn reported(report: &str) -> Vec<Reported> {
+    report
+        .lines()
+        .filter(|line| line.contains(": error: "))
+        .map(|line| {
+            let (position, message) = line
+                .split_once(": error: ")
+                .expect("an error line carries the severity it was selected by");
+            let mut position = position.rsplit(':');
+            let mut field = |what: &str| {
+                position
+                    .next()
+                    .unwrap_or_else(|| panic!("an error line states its {what}: {line}"))
+            };
+            let column = field("column");
+            let number = field("line");
+            let path = std::path::Path::new(field("file"));
+            let parse = |what: &str, text: &str| {
+                text.parse::<u32>()
+                    .unwrap_or_else(|_| panic!("an error line's {what} is a number: {line}"))
+            };
+            Reported {
+                file: path
+                    .file_name()
+                    .unwrap_or_else(|| panic!("an error line names a file: {line}"))
+                    .to_string_lossy()
+                    .into_owned(),
+                line: parse("line", number),
+                column: parse("column", column),
+                rendered: message.trim_end().to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+}
+
+/// The same ledger, rendered one entry per line — the form an expectation is written in.
+#[allow(dead_code)]
+pub fn ledger(report: &str) -> Vec<String> {
+    reported(report).iter().map(Reported::to_string).collect()
 }

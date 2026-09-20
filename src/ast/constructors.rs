@@ -17,6 +17,14 @@ pub struct SecondaryCtor {
     pub body: Option<ExprId>,
     /// Source range from `constructor` through its delegation call or body.
     pub span: Span,
+    /// `true` for a secondary constructor that wrote `actual`. Like every other member, it
+    /// actualizes — or fails to — independently of the classifier that declares it.
+    pub is_actual: bool,
+    /// Source range from the declaration's FIRST MODIFIER, or from the `constructor` keyword when
+    /// it wrote none, through the same end as [`Self::span`]. A constructor has no name, so this
+    /// is what a diagnostic about the declaration itself points at; [`Self::span`] deliberately
+    /// starts at the keyword and cannot stand in for it.
+    pub declaration_span: Span,
     /// 1-based source line of the `constructor` keyword. The parser leaves this 0 and the same
     /// post-pass that fills `ClassDecl::decl_line` rewrites it; 0 = unknown (no debug table).
     pub decl_line: u32,

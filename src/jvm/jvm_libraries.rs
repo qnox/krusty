@@ -5787,6 +5787,12 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         self.cp.validate_lazy_class_loads()
     }
 
+    /// The token the reference compiler writes for this target, as in
+    /// `expected foo has no actual declaration in module <m> for JVM`.
+    fn diagnostic_target_name(&self) -> Option<&str> {
+        Some("JVM")
+    }
+
     fn install_source_module_headers(
         &self,
         sources: &[crate::libraries::PlatformSourceHeaderInput<'_>],
