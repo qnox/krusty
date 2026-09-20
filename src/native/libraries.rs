@@ -25,8 +25,9 @@ use std::sync::Arc;
 
 use crate::klib::{KlibArchive, KlibError};
 use crate::libraries::{
-    Callables, ClassifierInheritance, LibraryMember, LibraryType, ParamList, ResolvedSymbols,
-    SemanticPlatform, TypeKind,
+    Callables, ClassifierInheritance, ExternalCallableKind, ExternalCallableRealization, FnKind,
+    FunctionInfo, LibraryMember, LibraryType, ParamList, ResolvedSymbols, SemanticPlatform,
+    TypeKind,
 };
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{type_name, Ty, TypeName, TypeNameList, TypeParameters};
@@ -72,10 +73,12 @@ impl From<KlibError> for NativeLibrariesError {
     }
 }
 
-/// The declarations one package contributes, indexed by the name a lookup asks for.
+/// The declarations one namespace contributes, indexed by the name a lookup asks for.
 #[derive(Default)]
 struct Namespace {
     classifiers: HashMap<String, Arc<LibraryType>>,
+    /// Overloads share a name, so each entry is the whole set a lookup answers with.
+    callables: HashMap<String, Vec<FunctionInfo>>,
 }
 
 /// Kotlin/Native's stdlib, as a symbol source.
@@ -83,6 +86,11 @@ pub struct NativeLibraries {
     /// Package or classifier namespace -> what it declares. A classifier's own namespace holds its
     /// nested classifiers, which is the same shape a package has, so one map serves both.
     namespaces: HashMap<TypeName, Namespace>,
+    /// What each identity this provider handed out was realized as, indexed BY that identity: the
+    /// id is this table's position, which is what makes the lookup a provider owes its consumers
+    /// an array read rather than a search. A klib has no descriptor to stand in for identity, so
+    /// the identity is the only thing a backend carries and this is the only place it resolves.
+    callable_realizations: Vec<ExternalCallableRealization>,
 }
 
 impl NativeLibraries {
@@ -100,6 +108,7 @@ impl NativeLibraries {
     pub fn from_klib(path: &Path) -> Result<Self, NativeLibrariesError> {
         let archive = KlibArchive::open(path)?;
         let mut namespaces: HashMap<TypeName, Namespace> = HashMap::new();
+        let mut callable_realizations = Vec::new();
         for fragment in archive.package_fragments() {
             let bytes = archive.read(&fragment.entry)?;
             let package =
@@ -122,10 +131,33 @@ impl NativeLibraries {
                     .entry(name.to_string())
                     .or_insert_with(|| Arc::new(library_type(identity, declaration)));
             }
-            // `package.functions` is decoded and deliberately not indexed yet; see `symbols`.
-            let _ = (&package.functions, package_name);
+            for function in &package.functions {
+                let identity = crate::fir::ExternalCallableId::from_raw(
+                    u32::try_from(callable_realizations.len())
+                        .expect("too many stdlib declarations for a packed identity"),
+                );
+                let info = top_level_function(package_name, function, identity);
+                callable_realizations.push(ExternalCallableRealization {
+                    callable: info.callable.clone(),
+                    kind: if info.kind == FnKind::Extension {
+                        ExternalCallableKind::Extension
+                    } else {
+                        ExternalCallableKind::TopLevel
+                    },
+                });
+                namespaces
+                    .entry(package_name)
+                    .or_default()
+                    .callables
+                    .entry(function.name.clone())
+                    .or_default()
+                    .push(info);
+            }
         }
-        Ok(Self { namespaces })
+        Ok(Self {
+            namespaces,
+            callable_realizations,
+        })
     }
 
     /// How many namespaces carry a declaration — for a caller that wants to say the stdlib really
@@ -146,18 +178,29 @@ fn package_namespace(fqname: &str) -> TypeName {
 }
 
 impl SymbolSource for NativeLibraries {
+    /// What this provider realized an identity as. The id is this table's position, assigned when
+    /// the declaration was read, so the answer is an array read rather than a search — and only
+    /// this provider can give it, which is what makes the identity safe to carry opaquely.
+    fn external_callable(
+        &self,
+        identity: crate::fir::ExternalCallableId,
+    ) -> Option<ExternalCallableRealization> {
+        self.callable_realizations
+            .get(identity.raw() as usize)
+            .cloned()
+    }
+
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
         let Some(found) = self.namespaces.get(&namespace.name()) else {
             return std::rc::Rc::new(ResolvedSymbols::default());
         };
         let classifier = found.classifiers.get(name).cloned();
-        // Classifiers only, so far. A callable needs more than its signature: `LibraryCallable`
-        // carries a provider-assigned `ExternalCallableId`, and the provider keeps the target
-        // realization for that id in a table of its own — which is the right model for a klib
-        // (there is no descriptor to stand in for identity) and is the next piece rather than
-        // something to approximate here. Answering a half-built callable would resolve calls this
-        // provider cannot then realize.
-        let callables = Callables::default();
+        let callables = match found.callables.get(name) {
+            Some(overloads) => Callables::Functions(crate::libraries::FunctionSet {
+                overloads: overloads.clone(),
+            }),
+            None => Callables::default(),
+        };
         std::rc::Rc::new(ResolvedSymbols {
             classifier_name: classifier.as_ref().map(|_| match namespace {
                 SymbolNamespace::Package(package) => qualified(package, name),
@@ -170,6 +213,57 @@ impl SymbolSource for NativeLibraries {
     }
 }
 
+/// One top-level declaration, as the overload a call site selects among.
+///
+/// The descriptor is deliberately EMPTY. It is a JVM emit handle, and a klib has none — which is
+/// already the convention a source declaration uses, where "the target backend derives its ABI
+/// from `params`/`ret`". The identity is what a backend carries instead, and this provider answers
+/// for it.
+fn top_level_function(
+    package: TypeName,
+    function: &crate::jvm::metadata::BuiltinFunction,
+    identity: crate::fir::ExternalCallableId,
+) -> FunctionInfo {
+    let bounds = HashMap::new();
+    let ty = |t: &crate::jvm::metadata::BuiltinTy| crate::jvm::classpath::builtin_ty(t, &bounds);
+    let receiver = function.receiver.as_ref().map(&ty);
+    // An extension's receiver is its first PHYSICAL parameter, ahead of the written ones — the
+    // same order a call site pushes them in.
+    let params = receiver
+        .iter()
+        .copied()
+        .chain(function.params.iter().map(&ty))
+        .collect::<Vec<_>>();
+    let ret = ty(&function.ret);
+    let mut callable = crate::libraries::LibraryCallable::library(
+        package,
+        function.name.clone(),
+        params,
+        ret,
+        ret,
+        String::new(),
+    );
+    callable.external_identity = Some(identity);
+    callable.suspend = function.is_suspend;
+    callable.source_receiver = receiver;
+    callable.context_count = function.context_count;
+    let kind = if receiver.is_some() {
+        FnKind::Extension
+    } else {
+        FnKind::TopLevel
+    };
+    let mut info = FunctionInfo::plain(kind, receiver, callable);
+    info.visibility = function.visibility;
+    info.context_count = function.context_count;
+    info.call_sig = crate::libraries::CallSig::metadata_member(
+        function.params.len(),
+        function.param_names.clone(),
+        function.param_defaults.clone(),
+        function.vararg,
+    );
+    info
+}
+
 fn qualified(package: TypeName, name: &str) -> TypeName {
     if package == TypeName::ROOT {
         type_name(name)
@@ -180,6 +274,13 @@ fn qualified(package: TypeName, name: &str) -> TypeName {
 
 fn nested(outer: TypeName, name: &str) -> TypeName {
     type_name(&format!("{}${name}", outer.render()))
+}
+
+impl NativeLibraries {
+    /// How many declarations this provider handed identities out for.
+    pub fn callable_count(&self) -> usize {
+        self.callable_realizations.len()
+    }
 }
 
 impl SemanticPlatform for NativeLibraries {
@@ -358,6 +459,61 @@ mod tests {
             decoded > 480,
             "and there are as many of them as the distribution ships: {decoded}"
         );
+    }
+
+    /// A callable resolves, and the identity it carries resolves BACK through the same provider.
+    ///
+    /// That round trip is the whole contract: a backend holds the identity through checking and
+    /// lowering and asks the provider what it was, at the point it finally has to emit. If the
+    /// lookup could not answer, a call would select here and have nothing to realize — which is
+    /// why the callables half was held back until the identity table existed to answer it.
+    #[test]
+    fn a_callable_resolves_and_its_identity_resolves_back() {
+        let Some(root) = distribution() else {
+            eprintln!("skipping: no Kotlin/Native distribution cached");
+            return;
+        };
+        let libraries = NativeLibraries::from_distribution(&root).expect("the stdlib loads");
+        assert!(
+            libraries.callable_count() > 1000,
+            "the stdlib declares a great many top-level callables: {}",
+            libraries.callable_count()
+        );
+
+        // `listOf` is declared several times over — that is what makes it an overload SET rather
+        // than a declaration, and each overload keeps an identity of its own.
+        let resolved = libraries.symbols(
+            SymbolNamespace::Package(type_name("kotlin/collections")),
+            "listOf",
+        );
+        let overloads = match &resolved.callables {
+            Callables::Functions(set) => &set.overloads,
+            _ => panic!("kotlin.collections.listOf resolves as functions"),
+        };
+        assert!(
+            overloads.len() > 1,
+            "listOf has more than one overload: {}",
+            overloads.len()
+        );
+
+        let mut seen = std::collections::HashSet::new();
+        for overload in overloads {
+            let identity = overload
+                .callable
+                .external_identity
+                .expect("every overload carries the identity this provider assigned it");
+            assert!(
+                seen.insert(identity),
+                "and no two overloads share one identity"
+            );
+            let realized = libraries
+                .external_callable(identity)
+                .expect("which this provider answers for");
+            assert_eq!(
+                realized.callable.name, "listOf",
+                "and answers with the declaration that identity was assigned to"
+            );
+        }
     }
 
     /// The provider answers classifier lookups out of a klib that does decode.
