@@ -434,15 +434,45 @@ value operand accompanies the inline-body lambda.
 So §7a is four fixes — a1, a2, a3 and (b) — each affecting every spliced inline call with a lambda,
 none of them coroutine-related:
 
-| | defect | effect |
-| --- | --- | --- |
-| a1 | a value operand beside an inline-body lambda is bound to its own local | one extra local + `iload/istore` pair; shifts every later slot |
-| a2 | the spliced-away lambda parameter's slot stays reserved | shifts every host local one slot up |
-| a3 | the spliced lambda body has no `$i$a$` inline-depth marker | a missing `iconst_0; istore` and a slot the reference compiler allocates |
-| b | the lambda's erased `invoke` adapter survives the splice | `valueOf` / `checkcast` / `intValue` the reference compiler does not emit |
+The debug tables are a third dimension. For the same non-suspending `many`, the reference compiler
+emits a complete `LocalVariableTable` over the inlined frame:
 
-They interact — a1, a2 and a3 all move slot numbers — so they are best fixed and measured together,
-with the corpus as the judge.
+```
+   Start  Length  Slot  Name                       Signature
+      24       5     6  $i$a$-twice-MainKt$many$1  I
+      21       8     5  it                         I
+      31       8     5  r$iv                       I
+       4      39     2  $i$f$twice                 I
+       6      37     3  acc$iv                     I
+       9      34     4  i$iv                       I
+       2      41     1  x$iv                       I
+       0      44     0  v                          I
+```
+
+krusty's table has one entry, `v`. The reference class also carries a `SourceDebugExtension` (the
+SMAP that maps inlined instructions back to the library's source); krusty emits none. The two class
+files are 1175 and 947 bytes.
+
+So §7a is six gaps, all reachable without a coroutine:
+
+| | defect | effect | status |
+| --- | --- | --- | --- |
+| a1 | a value operand beside an inline-body lambda is bound to its own local | one extra local + `iload/istore` pair; shifts every later slot | open |
+| a2 | the spliced-away lambda parameter's slot stays reserved | shifts every host local one slot up | **fixed** |
+| a3 | the spliced lambda body has no `$i$a$` inline-depth marker | a missing `iconst_0; istore` and a slot | open |
+| a4 | no `LocalVariableTable` entries for the inlined frame | the whole table, including the `$iv` names read from the dependency's own table | open |
+| a5 | no `SourceDebugExtension` | the entire SMAP attribute | open |
+| b | the lambda's erased `invoke` adapter survives the splice | `valueOf` / `checkcast` / `intValue` the reference compiler does not emit | open |
+
+a1, a2 and a3 all move slot numbers, so they are fixed and measured together, with the corpus as the
+judge. a4 and a5 are additive attributes and independent of the rest. **b** is the only one that
+needs an analysis rather than a rule: cancelling a box against the unbox that immediately consumes
+it, and the reverse, at a substituted invoke site.
+
+This is the honest size of "byte-identical" for spliced inline code. It is a parity programme of its
+own, and the coroutine ordering change depends on all of it — a machine emitted in exactly the
+reference compiler's instruction order still cannot produce an identical class file while the body
+it wraps differs by six causes.
 
 Consequence for the ordering work: a coroutine machine emitted in the reference compiler's exact
 instruction order still cannot produce an identical class file while the body it wraps differs. Both
