@@ -3,6 +3,7 @@
 mod annotation_constructions;
 mod array_representation;
 pub mod backend;
+mod bridge_return_adaptations;
 pub mod bridges;
 pub mod classfile;
 pub mod classpath;
@@ -10,11 +11,14 @@ pub mod classreader;
 mod common_metadata;
 pub mod companion;
 mod constructor_debug;
+mod constructor_metadata;
 mod debug_local_names;
 mod declaration_collisions;
+mod default_call_operands;
 mod external_calls;
 mod function_classifiers;
 mod function_references;
+mod generated_member_metadata;
 mod generic_erasure;
 pub mod inline;
 pub mod inline_class;
@@ -43,6 +47,9 @@ mod value_class_declarations;
 pub mod value_classes;
 
 pub use backend::{prepare_module_symbols, JvmBackend};
+// Public JVM clients should not need to reach through the compiler's semantic-platform ownership
+// module merely to name the initialization error returned by `JvmLibraries`.
+pub use crate::libraries::PlatformInitializationError;
 
 /// Kotlin distribution artifacts used by JVM command-line defaults.
 pub fn kotlin_stdlib_jar() -> Option<std::path::PathBuf> {

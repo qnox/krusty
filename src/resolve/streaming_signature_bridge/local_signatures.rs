@@ -1171,7 +1171,8 @@ fn publish_checked_local_signatures_selected(
                                     parameter.default.is_some(),
                                     false,
                                     false,
-                                ),
+                                )
+                                .with_materialized_lambda(parameter.is_materialized_lambda),
                             )
                         }),
                     );
@@ -1718,7 +1719,8 @@ fn publish_checked_local_signatures_selected(
                                 parameter.default.is_some(),
                                 false,
                                 false,
-                            ),
+                            )
+                            .with_materialized_lambda(parameter.is_materialized_lambda),
                         )
                     }),
                 );

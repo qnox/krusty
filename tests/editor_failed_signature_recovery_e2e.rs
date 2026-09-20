@@ -15,7 +15,9 @@ fn editor_diagnostics(source: &str) -> Vec<String> {
         common::stdlib_jar(),
         common::jdk_modules(),
     ]));
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),
+    );
     let inputs = [krusty::frontend::SourceInput::kotlin(source)];
     let mut diags = krusty::diag::DiagSink::new();
     let _ = krusty::frontend::analyze_source_set_prefix_with_features(

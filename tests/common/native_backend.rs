@@ -199,9 +199,10 @@ fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarge
             .chain(krusty::toolchain::kotlin_test_jar())
             .collect::<Vec<_>>(),
     ));
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(
-        classpath.clone(),
-    ));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
+            .expect("JVM provider initialization"),
+    );
     let inputs = vec![SourceInput::kotlin(src).with_file_stem(stem)];
     let stems = vec![stem.to_string()];
     let mut features = krusty::features::LangFeatures::new();

@@ -1269,7 +1269,8 @@ mod tests {
         };
         let libraries = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
             vec![stdlib],
-        )));
+        )))
+        .expect("JVM provider initialization");
         let symbols = libraries.symbols(SymbolNamespace::Package(type_name("kotlin/io")), "use");
         let [function] = symbols.callables.functions() else {
             panic!("kotlin.io.use must have exactly one metadata declaration")
@@ -1389,7 +1390,8 @@ mod tests {
     fn only_callable(jars: Vec<std::path::PathBuf>, package: &str, name: &str) -> LibraryCallable {
         let libraries = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
             jars,
-        )));
+        )))
+        .expect("JVM provider initialization");
         let symbols = libraries.symbols(SymbolNamespace::Package(type_name(package)), name);
         let [function] = symbols.callables.functions() else {
             panic!("{package}.{name} must have exactly one metadata declaration")
@@ -1521,7 +1523,8 @@ mod tests {
         };
         let warm = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
             vec![stdlib.clone()],
-        )));
+        )))
+        .expect("JVM provider initialization");
         let warm_symbols = warm.symbols(SymbolNamespace::Package(type_name("kotlin/io")), "use");
         let [warm_function] = warm_symbols.callables.functions() else {
             panic!("warm classpath must decode one use declaration")
@@ -1530,7 +1533,8 @@ mod tests {
 
         let current = JvmLibraries::new(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
             vec![stdlib],
-        )));
+        )))
+        .expect("JVM provider initialization");
         let symbols = current.symbols(SymbolNamespace::Package(type_name("kotlin/io")), "use");
         let [function] = symbols.callables.functions() else {
             panic!("second classpath must decode one use declaration")

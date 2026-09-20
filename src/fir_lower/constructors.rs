@@ -158,6 +158,27 @@ pub(super) fn finalize_constructors(
         .collect::<Vec<_>>();
     for (declaration, constructor) in constructors {
         let Some(delegation) = constructor.delegation else {
+            let implicit_enum_secondary = constructor.ordinal != 0
+                && index
+                    .declaration_anchor(declaration)
+                    .and_then(|anchor| anchor.owner)
+                    .and_then(|owner| index.declaration_header(owner))
+                    .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::ENUM));
+            if implicit_enum_secondary {
+                push_secondary_constructor(
+                    index,
+                    ir,
+                    declaration,
+                    constructor,
+                    SecondaryConstructorRealization {
+                        delegate_prelude: Vec::new(),
+                        arguments: Vec::new(),
+                        default_parameters: Vec::new(),
+                        delegate: crate::ir::CtorDelegateTarget::ImplicitEnumBase,
+                        external_target: None,
+                    },
+                )?;
+            }
             continue;
         };
         let (delegation, delegate_prelude) = match ir.expr(delegation) {
@@ -252,34 +273,6 @@ pub(super) fn finalize_constructors(
         } else {
             let class = &ir.classes[constructor.class as usize];
             let own = class.fq_name;
-            let classifier_context_count = index
-                .classifier_header(
-                    index
-                        .declaration_anchor(declaration)
-                        .and_then(|anchor| anchor.owner)
-                        .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?,
-                )
-                .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?
-                .context_parameters
-                .len();
-            let prefix_count = usize::try_from(class.constructor_prefix_count)
-                .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
-            let prefix_params = class
-                .ctor_args
-                .get(..prefix_count)
-                .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?
-                .iter()
-                .map(|argument| argument.ty)
-                .collect();
-            if owner == own {
-                if arguments.len() < classifier_context_count
-                    || parameters.len() < classifier_context_count
-                {
-                    return Err(FirFileLoweringFailure::MissingCallable(declaration));
-                }
-                arguments.drain(..classifier_context_count);
-                parameters.drain(..classifier_context_count);
-            }
             let delegate = if owner == own {
                 crate::ir::CtorDelegateTarget::This {
                     target_params: parameters,
@@ -293,58 +286,139 @@ pub(super) fn finalize_constructors(
                     default_masks: Vec::new(),
                 }
             };
-            let secondary_ordinal =
-                u32::try_from(ir.classes[constructor.class as usize].secondary_ctors.len())
-                    .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
-            let callable = index
-                .callable_for_declaration(declaration)
-                .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
-            let vararg_index = (classifier_context_count..constructor.parameters.len())
-                .find(|ordinal| {
-                    index
-                        .callable_parameter(callable.id, *ordinal as u32)
-                        .is_some_and(|parameter| parameter.flags().is_vararg())
-                })
-                .map(|ordinal| ordinal - classifier_context_count);
-            let named_params = constructor
-                .parameters
-                .into_iter()
-                .skip(classifier_context_count)
-                .collect::<Vec<_>>();
-            let defaults = constructor
-                .defaults
-                .into_iter()
-                .skip(classifier_context_count)
-                .collect::<Vec<_>>();
-            ir.classes[constructor.class as usize].secondary_ctors.push(
-                crate::ir::IrSecondaryCtor {
-                    annotations: constructor.annotations,
-                    source_order: index
-                        .source_order(declaration)
-                        .ok_or(FirFileLoweringFailure::MissingSourceOrder(declaration))?,
-                    prefix_params,
-                    params: named_params.iter().map(|(_, ty)| *ty).collect(),
-                    named_params,
-                    vararg_index,
-                    defaults,
+            push_secondary_constructor(
+                index,
+                ir,
+                declaration,
+                constructor,
+                SecondaryConstructorRealization {
                     delegate_prelude,
-                    delegate_args: arguments,
+                    arguments,
                     default_parameters,
-                    body: constructor.body,
                     delegate,
-                    synthetic: false,
-                    vc_params: false,
+                    external_target,
                 },
-            );
-            if let Some(external_target) = external_target {
-                ir.external_secondary_super_constructors
-                    .insert((own, secondary_ordinal), external_target);
-            }
+            )?;
         }
         ir.exprs[delegation as usize] = IrExpr::Block {
             stmts: Vec::new(),
             value: None,
         };
+    }
+    Ok(())
+}
+
+struct SecondaryConstructorRealization {
+    delegate_prelude: Vec<crate::ir::ExprId>,
+    arguments: Vec<crate::ir::ExprId>,
+    default_parameters: Vec<u32>,
+    delegate: crate::ir::CtorDelegateTarget,
+    external_target: Option<crate::ir::IrExternalConstructorTarget>,
+}
+
+fn push_secondary_constructor(
+    index: &ResolvedModuleIndex,
+    ir: &mut IrFile,
+    declaration: DeclarationId,
+    constructor: IrCheckedConstructorBody,
+    realization: SecondaryConstructorRealization,
+) -> Result<(), FirFileLoweringFailure> {
+    let SecondaryConstructorRealization {
+        delegate_prelude,
+        mut arguments,
+        default_parameters,
+        mut delegate,
+        external_target,
+    } = realization;
+    let class = &ir.classes[constructor.class as usize];
+    let own = class.fq_name;
+    let owner = index
+        .declaration_anchor(declaration)
+        .and_then(|anchor| anchor.owner)
+        .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?;
+    let classifier_context_count = index
+        .classifier_header(owner)
+        .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?
+        .context_parameters
+        .len();
+    let prefix_count = usize::try_from(class.constructor_prefix_count)
+        .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
+    let prefix_params = class
+        .ctor_args
+        .get(..prefix_count)
+        .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?
+        .iter()
+        .map(|argument| argument.ty)
+        .collect();
+    if let crate::ir::CtorDelegateTarget::This { target_params, .. } = &mut delegate {
+        if arguments.len() < classifier_context_count
+            || target_params.len() < classifier_context_count
+        {
+            return Err(FirFileLoweringFailure::MissingCallable(declaration));
+        }
+        arguments.drain(..classifier_context_count);
+        target_params.drain(..classifier_context_count);
+    }
+    let secondary_ordinal =
+        u32::try_from(ir.classes[constructor.class as usize].secondary_ctors.len())
+            .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
+    let callable = index
+        .callable_for_declaration(declaration)
+        .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
+    let vararg_index = (classifier_context_count..constructor.parameters.len())
+        .find(|ordinal| {
+            index
+                .callable_parameter(callable.id, *ordinal as u32)
+                .is_some_and(|parameter| parameter.flags().is_vararg())
+        })
+        .map(|ordinal| ordinal - classifier_context_count);
+    let named_params = constructor
+        .parameters
+        .into_iter()
+        .skip(classifier_context_count)
+        .collect::<Vec<_>>();
+    let defaults = constructor
+        .defaults
+        .into_iter()
+        .skip(classifier_context_count)
+        .collect::<Vec<_>>();
+    ir.classes[constructor.class as usize]
+        .secondary_ctors
+        .push(crate::ir::IrSecondaryCtor {
+            annotations: constructor.annotations,
+            source_order: index
+                .source_order(declaration)
+                .ok_or(FirFileLoweringFailure::MissingSourceOrder(declaration))?,
+            // Source syntax is never visible here; the declaration metadata handoff recorded this
+            // constructor's own line against its stable declaration.
+            lines: ir
+                .secondary_ctor_lines
+                .get(&declaration)
+                .cloned()
+                .unwrap_or_default(),
+            prefix_params,
+            params: named_params.iter().map(|(_, ty)| *ty).collect(),
+            named_params,
+            metadata_visibility: Some(
+                index
+                    .declaration_header(declaration)
+                    .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?
+                    .visibility,
+            ),
+            generated_debug: crate::ir::IrGeneratedDeclarationDebug::None,
+            vararg_index,
+            defaults,
+            delegate_prelude,
+            delegate_args: arguments,
+            default_parameters,
+            body: constructor.body,
+            delegate,
+            synthetic: false,
+            vc_params: false,
+        });
+    if let Some(external_target) = external_target {
+        ir.external_secondary_super_constructors
+            .insert((own, secondary_ordinal), external_target);
     }
     Ok(())
 }

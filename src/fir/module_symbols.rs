@@ -568,6 +568,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             setter,
             setter_visibility,
             is_const: header.flags.has(DeclarationFlags::CONST),
+            implicit_integer_coercion: false,
             compile_time_constant: None,
             visibility: header.visibility,
             owner,
@@ -965,6 +966,10 @@ impl<'a> StreamedModuleSymbols<'a> {
         name: &str,
     ) -> Vec<PropertyInfo> {
         let mut properties = Vec::new();
+        let owner_is_annotation = self
+            .index
+            .declaration_header(owner)
+            .is_some_and(|header| header.flags.has(DeclarationFlags::ANNOTATION_CLASS));
         for &declaration in self.index.declarations_named(name) {
             let Some(header) = self.index.declaration_header(declaration) else {
                 continue;
@@ -1014,8 +1019,13 @@ impl<'a> StreamedModuleSymbols<'a> {
             if let Some(receiver) = receiver {
                 getter_parameters.insert(context_count, receiver);
             }
+            let getter_name = if owner_is_annotation {
+                name.to_owned()
+            } else {
+                crate::names::property_getter_name(name)
+            };
             let mut getter = Self::semantic_callable(
-                name,
+                &getter_name,
                 getter_parameters.clone(),
                 public_ty,
                 receiver,
@@ -1028,8 +1038,14 @@ impl<'a> StreamedModuleSymbols<'a> {
             let mut setter = property.mutable.then(|| {
                 let mut parameters = getter_parameters.clone();
                 parameters.push(stored_value_ty(public_ty));
-                let mut setter =
-                    Self::semantic_callable(name, parameters, Ty::Unit, receiver, context_count);
+                let setter_name = crate::names::property_setter_name(name);
+                let mut setter = Self::semantic_callable(
+                    &setter_name,
+                    parameters,
+                    Ty::Unit,
+                    receiver,
+                    context_count,
+                );
                 setter.owner = internal;
                 setter.origin = Origin::Module { facade: internal };
                 setter.owner_is_interface = is_interface;
@@ -1085,6 +1101,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 setter,
                 setter_visibility,
                 is_const: header.flags.has(DeclarationFlags::CONST),
+                implicit_integer_coercion: false,
                 compile_time_constant: self.index.compile_time_constant(declaration).cloned(),
                 visibility: header.visibility,
                 owner: internal,
@@ -1403,13 +1420,15 @@ impl<'a> StreamedModuleSymbols<'a> {
                 .unwrap_or(public_ty);
             let (formals, formal_bounds) = self.declaration_formals(declaration);
 
-            // These temporary handles describe only semantic parameter/result layout. Their name is
-            // the Kotlin property identity; a target backend realizes getter/setter spelling from
-            // the stable PropertyId after checked FIR has selected the declaration.
+            // Normalize the declaration into the same accessor-shaped candidate that dependency
+            // providers publish. Selection carries this spelling with the stable PropertyId; a
+            // backend may realize target-specific mangling, but must not rebuild `get`/`set` from
+            // the property spelling after selection.
             let mut getter_parameters = receiver.into_iter().collect::<Vec<_>>();
             getter_parameters.extend(context_parameters.iter().copied());
+            let getter_name = crate::names::property_getter_name(name);
             let mut getter = Self::semantic_callable(
-                name,
+                &getter_name,
                 getter_parameters.clone(),
                 public_ty,
                 receiver,
@@ -1418,7 +1437,8 @@ impl<'a> StreamedModuleSymbols<'a> {
             let mut setter = property.mutable.then(|| {
                 let mut parameters = getter_parameters.clone();
                 parameters.push(stored_value_ty(public_ty));
-                Self::semantic_callable(name, parameters, Ty::Unit, receiver, context_count)
+                let setter_name = crate::names::property_setter_name(name);
+                Self::semantic_callable(&setter_name, parameters, Ty::Unit, receiver, context_count)
             });
             if !formals.is_empty() {
                 let generic = GenericSig {
@@ -1481,6 +1501,13 @@ impl<'a> StreamedModuleSymbols<'a> {
                 setter,
                 setter_visibility,
                 is_const: header.flags.has(DeclarationFlags::CONST),
+                implicit_integer_coercion: self
+                    .index
+                    .declaration_annotations(declaration)
+                    .iter()
+                    .any(|annotation| {
+                        annotation.matches("kotlin/internal/ImplicitIntegerCoercion")
+                    }),
                 compile_time_constant: self.index.compile_time_constant(declaration).cloned(),
                 visibility: header.visibility,
                 owner: TypeName::ROOT,

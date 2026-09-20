@@ -904,6 +904,7 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
                     &materialize.reference.member_desc,
                     materialize.use_sources,
                 )
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.message))?
                 .map(|source| {
                     let (text, span) = source.into_text_and_span(
                         &materialize.reference.member_name,
@@ -986,7 +987,7 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             },
         );
         let stub_overlay_set = set_java_stub_overlay(&classpath, &request.java_sources);
-        let platform = Box::new(JvmLibraries::new(classpath.clone()));
+        let platform = JvmLibraries::new(classpath.clone());
         let source_set = compiler_analysis::analyze_source_inputs_prefix_with_features(
             &inputs,
             request.result_count,
@@ -1182,7 +1183,7 @@ fn render_dump_request(
         .max(result_count)
         .min(sources.len());
     let stub_overlay_set = set_java_stub_overlay(&classpath, &request.analysis.java_sources);
-    let platform = Box::new(JvmLibraries::new(classpath.clone()));
+    let platform = JvmLibraries::new(classpath.clone());
     let analysis = compiler_analysis::analyze_source_inputs_prefix_with_features(
         &inputs,
         result_count,

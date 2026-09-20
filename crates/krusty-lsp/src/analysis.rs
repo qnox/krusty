@@ -5349,7 +5349,7 @@ mod tests {
 
     fn document_analysis_for(source: &str) -> DocumentAnalysis {
         let classpath = std::rc::Rc::new(krusty::toolchain::stdlib_classpath());
-        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+        let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(classpath);
         let mut frontend = crate::compiler_analysis::analyze_source_set(&[source], platform);
         let highlights = HighlightSymbols::from_source_set(&frontend.files, &frontend.symbols);
         let definitions = DefinitionSymbols::from_source_set(
@@ -8278,8 +8278,8 @@ mod tests {
             "counters[0]++\n",
             "}\n",
         );
-        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(krusty::toolchain::stdlib_classpath()),
+        let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            krusty::toolchain::stdlib_classpath(),
         ));
         let analysis = crate::compiler_analysis::analyze_source_set(&[source], platform);
         let index =
@@ -8339,8 +8339,8 @@ mod tests {
             "return State.READY.ordinal + input.value\n",
             "}\n",
         );
-        let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(krusty::toolchain::stdlib_classpath()),
+        let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            krusty::toolchain::stdlib_classpath(),
         ));
         let analysis = crate::compiler_analysis::analyze_source_set(&[source], platform);
         let index =
