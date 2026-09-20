@@ -1010,116 +1010,108 @@ mod compiles_against_the_klib {
         diags.diags.iter().map(|d| d.msg.clone()).collect()
     }
 
-    /// What a program can and cannot yet name when the provider is the klib rather than the jar.
+    /// What a program can and cannot yet do when the provider is the klib rather than the jar.
     ///
     /// This exists because the index tests beside it cannot answer the question. They push a
     /// realization into a table and read it back at the position they pushed it — self-consistency,
-    /// which is nearly a tautology. Whether the FRONTEND resolves a program's names through this
-    /// provider is a different claim, and it needs a compilation to make it.
+    /// which is nearly a tautology. Whether a PROGRAM compiles through this provider is a different
+    /// claim, and it needs a compilation to make it.
     ///
-    /// It is pinned in BOTH directions, so it fails when the provider grows as well as when it
-    /// regresses.
+    /// Every line below compiles END TO END: resolved through the klib and emitted by the native
+    /// code generator, with no diagnostic of any kind. It is pinned in BOTH directions, so it fails
+    /// when the provider regresses as well as when a line that still fails starts passing.
     #[test]
-    fn what_the_klib_provider_can_and_cannot_yet_resolve() {
+    fn what_the_klib_provider_can_and_cannot_yet_compile() {
         let Some(root) = distribution() else {
             eprintln!("skipping: no Kotlin/Native distribution cached");
             return;
         };
 
-        // CLASSIFIERS resolve, and the control is what makes that a claim rather than a silence: a
-        // classifier that exists nowhere IS reported, so the quiet on the real one means resolved.
-        assert!(
-            diagnostics(&root, "fun box(): String = \"OK\"\n").is_empty(),
-            "a program naming only builtins compiles"
-        );
-        let unknown = diagnostics(&root, "fun box(): NoSuchType = TODO()\n");
-        assert!(
-            unknown.iter().any(|d| d.contains("NoSuchType")),
-            "and a classifier that exists nowhere is reported: {unknown:?}"
-        );
-
-        // A FULLY-QUALIFIED reference gets past its leading segments. `kotlin` names no
-        // classifier, so without the provider answering that it is a package the walk stopped
-        // there and reported `unresolved reference 'kotlin'` — on 437 corpus cases.
-        let qualified = diagnostics(&root, "fun box(): kotlin.String = \"OK\"\n");
-        assert!(
-            qualified.is_empty(),
-            "a package prefix resolves: {qualified:?}"
-        );
-
-        // MEMBERS resolve now, and each line below says so by the SHAPE of what is left: a
-        // diagnostic from the native BACKEND naming the exact declaration it was handed. The
-        // frontend cannot decline a call it never resolved, so "the backend does not support
-        // `kotlin/String.length`" is only reachable once the provider answered with that property.
-        for (source, declined) in [
+        for (source, what) in [
+            // Nothing but the builtins, and the control for it is below: a classifier that exists
+            // nowhere IS reported, so the quiet here means resolved rather than unexamined.
+            (
+                "fun box(): String = \"OK\"\n",
+                "a program naming only builtins",
+            ),
+            // A fully-qualified reference, which gets past its leading segments only because the
+            // provider answers that `kotlin` is a package: it names no classifier, and a walk with
+            // nothing to ask reported `unresolved reference 'kotlin'` on 437 corpus cases.
+            (
+                "fun box(): kotlin.String = \"OK\"\n",
+                "a package-qualified name",
+            ),
+            // A member PROPERTY, read through the provider's property identity, and realized as
+            // the operation it is rather than as an accessor call.
+            ("fun box(): Int = \"abc\".length\n", "a member property"),
             // A member FUNCTION, selected among the classifier's declared families.
             (
                 "fun box(): String = \"abc\".substring(1)\n",
-                "the member `kotlin.text.substring`",
+                "a member function",
+            ),
+            // A CONSTRUCTION. Before the provider interned its constructors, checked FIR had no
+            // target to name and this failed with `MissingStableCallTarget` — an internal error,
+            // on 221 corpus cases.
+            (
+                "fun box(): String { StringBuilder(); return \"OK\" }\n",
+                "a stdlib construction",
             ),
             // A top-level declaration, with a member read on the type it returns.
             (
                 "fun box(): Int = listOf(1, 2, 3).size\n",
-                "the declaration `kotlin.collections.listOf`",
+                "a top-level call",
             ),
-            // And a GENERIC top-level declaration whose result type is inferred rather than
-            // declared: before the provider published a generic signature this line failed
-            // checking instead, with `Int` expected and the unbound `R` actual.
+            // A GENERIC top-level declaration whose result is inferred rather than declared.
+            // Before the provider published a generic signature, this failed checking with `Int`
+            // expected and the unbound `R` actual.
             (
                 "fun box(): Int = listOf(1, 2, 3).let { it.size }\n",
-                "the member `kotlin.let`",
-            ),
-            // An EXTENSION PROPERTY, which is a top-level declaration of the package fragment
-            // rather than a member of anything. The decoder used to decode these and throw them
-            // away — `semantic_property` was called for validation and its result dropped — so
-            // `indices` resolved to nothing at all.
-            (
-                "fun box(): Int = \"abc\".indices.first\n",
-                "a read of the property `kotlin/text.indices`",
+                "an inferred generic result",
             ),
             // An INFIX call, which admits only declarations carrying the modifier. Before the
-            // provider published it, this line found no `step` function at all and read the
-            // progression's `Int`-typed `step` PROPERTY instead: "expression 'step' of type 'Int'
-            // cannot be invoked as a function".
+            // provider published it, this found no `step` FUNCTION and read the progression's
+            // `Int`-typed `step` PROPERTY instead, on 254 corpus cases.
             (
                 "fun box(): String { val r = 1..10 step 2; return \"OK\" }\n",
-                "the member `kotlin.ranges.step`",
+                "an infix call",
             ),
         ] {
             let reported = diagnostics(&root, source);
             assert!(
-                reported.iter().any(|d| d.contains(declined)),
-                "{source:?} resolves and then declines in the backend on {declined}: {reported:?}"
-            );
-            assert!(
-                !reported.iter().any(|d| d.contains("unresolved reference")),
-                "{source:?} resolves nothing through the provider: {reported:?}"
+                reported.is_empty(),
+                "{what} compiles through the klib provider: {reported:?}"
             );
         }
 
-        // A member PROPERTY, read through the provider's property identity, compiles all the way
-        // through: `String.length` is one of the declarations a klib publishes as an ordinary
-        // member and no target implements by dispatching to a method.
-        let member_read = diagnostics(&root, "fun box(): Int = \"abc\".length\n");
+        // The control that makes every quiet line above a claim: a classifier that exists nowhere
+        // IS reported.
+        let unknown = diagnostics(&root, "fun box(): NoSuchType = TODO()\n");
         assert!(
-            member_read.is_empty(),
-            "a member property of a stdlib classifier compiles: {member_read:?}"
+            unknown.iter().any(|d| d.contains("NoSuchType")),
+            "a classifier that exists nowhere is reported: {unknown:?}"
         );
 
-        // A CONSTRUCTION compiles all the way through. Before the provider interned its
-        // constructors, checked FIR had no target to name for `StringBuilder()` and the whole
-        // program failed with `MissingStableCallTarget` — an internal error, on 221 corpus cases.
-        let constructed = diagnostics(
-            &root,
-            "fun box(): String { StringBuilder(); return \"OK\" }\n",
+        // And what does NOT compile yet, kept here so the gap is stated rather than left to be
+        // rediscovered. An EXTENSION PROPERTY resolves — the decoder used to decode top-level
+        // properties and throw them away, so `indices` resolved to nothing at all — and the code
+        // generator then produces IR its own verifier rejects. That is a generator defect, not a
+        // provider one, which is exactly what the shape of this diagnostic says.
+        let extension_property = diagnostics(&root, "fun box(): Int = \"abc\".indices.first\n");
+        assert!(
+            extension_property
+                .iter()
+                .any(|d| d.contains("Verifier errors")),
+            "an extension property resolves and then fails to emit: {extension_property:?}"
         );
         assert!(
-            constructed.is_empty(),
-            "a stdlib construction compiles: {constructed:?}"
+            !extension_property
+                .iter()
+                .any(|d| d.contains("unresolved reference")),
+            "and it is the GENERATOR that fails, not resolution: {extension_property:?}"
         );
 
-        // And the control for all of them: analysis alone is SILENT about an unresolved call, so a
-        // test that only ran analysis would have called every line above a success.
+        // The control for the emit stage itself: analysis alone is SILENT about an unresolved
+        // call, so a test that only ran analysis would have read every line above as a success.
         let call_only_analysis = {
             let libraries = NativeLibraries::from_distribution(&root).expect("loads");
             let inputs =

@@ -9,13 +9,14 @@
 //! That is a property of where the *signatures* come from, not of what gets emitted: the compiled
 //! program contains no JVM and links only against `krusty_rt.c`. Phase 7 of
 //! `docs/BUILD_AND_NATIVE_PLAN.md` replaces the provider with klib ingestion, at which point the
-//! owner becomes a Kotlin package and [`facade_package`] disappears with it.
+//! owner becomes a Kotlin package, which [`declaration_package`] now reads as readily as a
+//! facade — both providers exist at once while the klib one grows, so both spellings arrive.
 
 use crate::types::Ty;
 
 /// Undo the JVM provider's mapping of Kotlin built-ins onto their Java counterparts.
 ///
-/// Part of the same temporary bridge as [`facade_package`]: `kotlin.String` reaches a backend
+/// Part of the same temporary bridge as [`declaration_package`]: `kotlin.String` reaches a backend
 /// spelled `java/lang/String` because the signatures were read out of a JVM jar. Normalizing here
 /// keeps every table below written in Kotlin names, so nothing has to be rewritten when the
 /// provider becomes klib-based.
@@ -136,13 +137,22 @@ pub(super) fn throwable_message(ty: &Ty) -> Option<ThrowableMessage> {
     }
 }
 
-/// The Kotlin package a JVM file facade stands for: `kotlin/io/ConsoleKt` → `kotlin/io`.
+/// The package a TOP-LEVEL declaration belongs to, under either provider's spelling.
 ///
-/// Returns `None` for a name that is not a facade, so a member function of a real class can never
-/// be mistaken for a top-level one.
-fn facade_package(owner: &str) -> Option<&str> {
-    let (package, facade) = owner.rsplit_once('/')?;
-    facade.strip_suffix("Kt").map(|_| package)
+/// A JVM provider names the file facade the declaration was compiled into
+/// (`kotlin/collections/CollectionsKt` for `listOf`), because on the JVM a top-level function IS a
+/// static method of that class. A klib names the package itself (`kotlin/collections`): a klib has
+/// no facades, they are a JVM artifact, and a non-JVM target should never have had to know about
+/// them. So a facade's last segment is dropped and anything else is already the package.
+///
+/// Every caller asks this of a declaration it knows to be top-level, and compares the answer
+/// against a package it names. A member of a real class therefore cannot be mistaken for one: its
+/// owner comes back unchanged, and a class's qualified name is never equal to a package's.
+fn declaration_package(owner: &str) -> &str {
+    match owner.rsplit_once('/') {
+        Some((package, facade)) if facade.ends_with("Kt") => package,
+        _ => owner,
+    }
 }
 
 /// How a console overload's argument is carried.
@@ -181,7 +191,7 @@ fn console_operand(ty: Ty) -> ConsoleOperand {
 /// The runtime function realizing a selected dependency callable, or `None` when the native
 /// runtime does not implement that declaration yet.
 pub(super) fn runtime_function(owner: &str, name: &str, params: &[Ty]) -> Option<String> {
-    match (facade_package(kotlin_owner(owner))?, name, params) {
+    match (declaration_package(kotlin_owner(owner)), name, params) {
         ("kotlin/io", "println", []) => Some("kt_println_unit".to_string()),
         ("kotlin/io", name @ ("print" | "println"), [argument]) => {
             match console_operand(*argument) {
@@ -221,7 +231,7 @@ pub(super) fn assertion_call(
     name: &str,
     params: &[Ty],
 ) -> Option<(&'static str, usize)> {
-    if facade_package(kotlin_owner(owner))? != "kotlin/test" {
+    if declaration_package(kotlin_owner(owner)) != "kotlin/test" {
         return None;
     }
     let (symbol, compared) = match name {
@@ -252,7 +262,7 @@ pub(super) fn assertion_call(
 /// It takes no class operand: the reified type argument is resolved into the call's RETURN type
 /// before a backend sees it, so the caller reads the class to test against from there.
 pub(super) fn is_assert_fails_with(owner: &str, name: &str) -> bool {
-    facade_package(kotlin_owner(owner)) == Some("kotlin/test") && name == "assertFailsWithAny"
+    declaration_package(kotlin_owner(owner)) == "kotlin/test" && name == "assertFailsWithAny"
 }
 
 /// Is this `kotlin.String`, at either nullability and under either spelling?
@@ -286,12 +296,12 @@ pub(super) fn float_predicate(owner: &str, name: &str) -> Option<FloatPredicate>
     // an extension on it in the numbers facade. Which spelling reaches a backend is the provider's
     // choice, not the program's, so both are read here.
     //
-    // Only the facade one was, and `facade_package` answers `None` for an owner that does not end
+    // Only the facade one was, and the package helper used to answer `None` for an owner not ending
     // in `Kt` — so an owner of `kotlin/Double` fell through and the call declined by name. The
     // member spelling is the one the corpus actually produces.
     let owner = kotlin_owner(owner);
-    let declared_here = matches!(owner, "kotlin/Double" | "kotlin/Float")
-        || facade_package(owner) == Some("kotlin");
+    let declared_here =
+        matches!(owner, "kotlin/Double" | "kotlin/Float") || declaration_package(owner) == "kotlin";
     if !declared_here {
         return None;
     }
@@ -339,7 +349,7 @@ pub(super) enum ScopeResult {
 /// lowering splices such a block into its caller. What arrives is the call whose block is an
 /// ordinary function VALUE, which has no body to splice.
 pub(super) fn scope_function(owner: &str, name: &str) -> Option<ScopeResult> {
-    if facade_package(kotlin_owner(owner))? != "kotlin" {
+    if declaration_package(kotlin_owner(owner)) != "kotlin" {
         return None;
     }
     match name {
@@ -355,7 +365,7 @@ pub(super) fn scope_function(owner: &str, name: &str) -> Option<ScopeResult> {
 /// `a until b` — the half-open range builder, which the provider presents as an extension function
 /// of the ranges file facade rather than a member of the range it answers.
 ///
-/// Recognized here rather than where ranges are lowered, for the same reason [`facade_package`]
+/// Recognized here rather than where ranges are lowered, for the same reason [`declaration_package`]
 /// lives here: the facade is the JVM provider's spelling, not Kotlin's.
 pub(super) fn is_range_until(owner: &str, name: &str, arity: usize) -> bool {
     is_ranges_facade(owner, name, arity, "until")
@@ -375,11 +385,11 @@ pub(super) fn is_range_step(owner: &str, name: &str, arity: usize) -> bool {
 
 /// Whether a declaration is `reversed` on the ranges facade.
 pub(super) fn is_range_reversed(owner: &str, name: &str, arity: usize) -> bool {
-    facade_package(kotlin_owner(owner)) == Some("kotlin/ranges") && name == "reversed" && arity == 0
+    declaration_package(kotlin_owner(owner)) == "kotlin/ranges" && name == "reversed" && arity == 0
 }
 
 fn is_ranges_facade(owner: &str, name: &str, arity: usize, wanted: &str) -> bool {
-    facade_package(kotlin_owner(owner)) == Some("kotlin/ranges") && name == wanted && arity == 1
+    declaration_package(kotlin_owner(owner)) == "kotlin/ranges" && name == wanted && arity == 1
 }
 
 /// Whether a getter is `KCallable.name` — the one member of the reflection surface whose answer a
@@ -401,20 +411,23 @@ pub(super) fn is_callable_name(owner: crate::types::TypeName, name: &str) -> boo
 /// `KProperty0`/`KProperty1`, so they reach a backend as members of
 /// `kotlin/PropertyReferenceDelegatesKt`.
 pub(super) fn is_property_delegates_facade(owner: &str) -> bool {
-    kotlin_owner(owner) == "kotlin/PropertyReferenceDelegatesKt"
+    matches!(
+        kotlin_owner(owner),
+        "kotlin/PropertyReferenceDelegatesKt" | "kotlin/properties"
+    )
 }
 
 /// Whether a declaration's owner is the file facade `lazy` and `Lazy.getValue` live in. Both are
 /// top-level declarations of `kotlin`, so they reach a backend as members of `kotlin/LazyKt`.
 pub(super) fn is_lazy_facade(owner: &str) -> bool {
-    kotlin_owner(owner) == "kotlin/LazyKt"
+    matches!(kotlin_owner(owner), "kotlin/LazyKt" | "kotlin")
 }
 
 /// Whether a declaration's owner is the file facade `to` lives in. `kotlin.to` is a top-level
 /// extension, so it reaches a backend as a member of `kotlin/TuplesKt` — the `kotlin/io/ConsoleKt`
 /// situation again, normalized in the same place.
 pub(super) fn is_tuples_facade(owner: &str) -> bool {
-    kotlin_owner(owner) == "kotlin/TuplesKt"
+    matches!(kotlin_owner(owner), "kotlin/TuplesKt" | "kotlin")
 }
 
 /// Whether a declaration's owner is the collections file facade `listOf` and its neighbours live
@@ -422,7 +435,7 @@ pub(super) fn is_tuples_facade(owner: &str) -> bool {
 /// the facade class the stdlib declares them in — the `kotlin/io/ConsoleKt` situation again, and
 /// normalized in the same place.
 pub(super) fn is_collections_facade(owner: &str) -> bool {
-    facade_package(kotlin_owner(owner)) == Some("kotlin/collections")
+    declaration_package(kotlin_owner(owner)) == "kotlin/collections"
 }
 
 /// How a program iterates a receiver it could only type by an INTERFACE.
@@ -565,7 +578,7 @@ pub(super) fn is_array_list(internal: crate::types::TypeName) -> bool {
 /// top-level property is a global and a top-level function is a symbol, neither owned by anything.
 /// Kotlin/Native names that object `box$1`.
 ///
-/// A facade is recognized by its `Kt` suffix, which is the same test [`facade_package`] makes for
+/// A facade is recognized by its `Kt` suffix, which is the same test [`declaration_package`] makes for
 /// the same reason. That spelling is a JVM provider detail, which is why the test lives here.
 pub(super) fn without_file_facade(qualified: &str) -> Option<String> {
     let (package, tail) = match qualified.rfind('.') {
@@ -607,8 +620,8 @@ pub(super) fn is_string_builder(internal: crate::types::TypeName) -> bool {
 pub(super) fn is_indices(owner: &str, name: &str) -> bool {
     name == "indices"
         && matches!(
-            facade_package(kotlin_owner(owner)),
-            Some("kotlin/collections" | "kotlin/text")
+            declaration_package(kotlin_owner(owner)),
+            "kotlin/collections" | "kotlin/text"
         )
 }
 
@@ -627,7 +640,7 @@ pub(super) fn scalar_member(
     // `kotlin.text`'s top-level extensions on `String`, which reach a backend as members of that
     // package's file facade — the `kotlin/io/ConsoleKt` situation, read through the same helper so
     // a facade kotlinc split in two (`StringsKt__StringsKt`) is the same answer.
-    if facade_package(kotlin_owner(owner)) == Some("kotlin/text") {
+    if declaration_package(kotlin_owner(owner)) == "kotlin/text" {
         return match (name, params) {
             ("substring", [Ty::Int, Ty::Int]) => Some((
                 "kt_string_substring",
@@ -827,7 +840,7 @@ pub(super) fn class_name_accessor(
 pub(super) fn runtime_member(owner: &str, name: &str, params: &[Ty]) -> Option<&'static str> {
     // `removeSuffix` is a top-level extension of `kotlin.text`, so it arrives as a member of that
     // package's file facade; everything it takes and answers is a reference, which is this path.
-    if facade_package(kotlin_owner(owner)) == Some("kotlin/text") {
+    if declaration_package(kotlin_owner(owner)) == "kotlin/text" {
         match (name, params) {
             ("removeSuffix", [_]) => return Some("kt_string_remove_suffix"),
             // `appendLine` is Kotlin's own, declared beside the builder rather than on it, so it
@@ -861,22 +874,41 @@ pub(super) fn runtime_member(owner: &str, name: &str, params: &[Ty]) -> Option<&
 mod tests {
     use super::*;
 
+    /// Both providers' spellings of the same top-level declaration name the same package.
     #[test]
-    fn a_file_facade_names_its_package() {
-        assert_eq!(facade_package("kotlin/io/ConsoleKt"), Some("kotlin/io"));
-        assert_eq!(facade_package("kotlin/text/StringsKt"), Some("kotlin/text"));
+    fn a_top_level_declaration_names_its_package_under_either_spelling() {
+        // The JVM provider's: the file facade a top-level function was compiled into.
+        assert_eq!(declaration_package("kotlin/io/ConsoleKt"), "kotlin/io");
+        assert_eq!(declaration_package("kotlin/text/StringsKt"), "kotlin/text");
+        // The klib provider's: the package itself, because a klib has no facades.
+        assert_eq!(declaration_package("kotlin/io"), "kotlin/io");
+        assert_eq!(
+            declaration_package("kotlin/collections"),
+            "kotlin/collections"
+        );
+        assert_eq!(declaration_package("kotlin"), "kotlin");
     }
 
+    /// A class comes back unchanged, so no comparison against a package can match it. This is what
+    /// keeps a member of a real class from being read as a top-level declaration of the package
+    /// that class lives in — `kotlin/collections/AbstractMutableList` must not answer
+    /// `kotlin/collections` merely because it is declared there.
     #[test]
-    fn a_class_is_not_a_facade() {
-        // `kotlin/text/Regex` has no `Kt` suffix, and `kotlin/collections/AbstractMutableList` must
-        // not be read as a facade for `kotlin/collections` merely because its name ends in `t`.
-        assert_eq!(facade_package("kotlin/text/Regex"), None);
+    fn a_class_is_never_mistaken_for_a_package() {
         assert_eq!(
-            facade_package("kotlin/collections/AbstractMutableList"),
-            None
+            declaration_package("kotlin/text/Regex"),
+            "kotlin/text/Regex"
         );
-        assert_eq!(facade_package("Ungrouped"), None);
+        assert_eq!(
+            declaration_package("kotlin/collections/AbstractMutableList"),
+            "kotlin/collections/AbstractMutableList"
+        );
+        assert_eq!(declaration_package("Ungrouped"), "Ungrouped");
+        assert!(!is_collections_facade(
+            "kotlin/collections/AbstractMutableList"
+        ));
+        assert!(is_collections_facade("kotlin/collections"));
+        assert!(is_collections_facade("kotlin/collections/CollectionsKt"));
     }
 
     #[test]

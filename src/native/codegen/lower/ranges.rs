@@ -294,14 +294,19 @@ impl BodyLowering<'_, '_, '_> {
         let Some(argument_ty) = self.type_of(argument) else {
             return Err("`contains` of a value with no known type".to_string());
         };
-        // A NULLABLE value is declined rather than answered. Kotlin's `Int?.contains` is a null
-        // test followed by the comparison — `null in 1..3` is false — and reading the reference as
-        // a scalar without that test dereferences null: the corpus's `nullableInPrimitiveRange.kt`
-        // segfaulted, which is worse than the decline it had before.
-        if matches!(argument_ty, Ty::Nullable(_) | Ty::PlatformNullable(_)) {
+        // Only a value that IS a scalar is answered. Kotlin's `contains` over a possibly-absent
+        // element is a null test followed by the comparison — `null in 1..3` is false — and
+        // reading a reference as a scalar without that test reads whatever the reference's bits
+        // are: the corpus's `nullableInPrimitiveRange.kt` segfaulted on an `Int?` and answered
+        // TRUE for the literal `null`.
+        //
+        // Stated as what is ADMITTED rather than as a list of what is not, because the list was
+        // wrong: it named `Nullable` and `PlatformNullable`, and `null` written literally is
+        // neither — it is `Ty::Null`, the type of the literal itself, which walked straight
+        // through the guard.
+        if !argument_ty.is_jvm_scalar() {
             return Err(format!("`contains` of a `{argument_ty:?}`"));
         }
-        let argument_ty = argument_ty.non_null();
         let object = self.reference(receiver)?;
         let Some(value) = self.coerce(argument, argument_ty)? else {
             return Ok(None);

@@ -96,3 +96,19 @@ fn a_nullable_value_still_declines_because_it_needs_a_null_test() {
         "contains",
     );
 }
+
+/// And so does the literal `null`, which is NOT a nullable type.
+///
+/// The guard named `Nullable` and `PlatformNullable`; `null` written out has neither type. It has
+/// `Ty::Null`, the type of the literal itself, so it walked straight through and was read as a
+/// scalar — `null in 0..2` answered TRUE, which is the one outcome this lane treats as a failure
+/// rather than a gap. The guard now states what is ADMITTED, so no third spelling of "may be
+/// absent" can slip past a list of the other two.
+#[test]
+fn the_null_literal_declines_for_the_same_reason_a_nullable_value_does() {
+    expect_native_decline(
+        "fun box(): String = if (null in 0..2) \"bad\" else \"OK\"\n",
+        "NullConstContains",
+        "contains",
+    );
+}
