@@ -1,18 +1,22 @@
-//! The bodies half of a klib: `default/ir/`, where a parameter's DEFAULT VALUE lives.
+//! The bodies half of a klib: `default/ir/`, where a parameter's DEFAULT VALUE and an `inline`
+//! declaration's BODY live.
 //!
 //! `linkdata` describes declarations. It records THAT a parameter has a default and never what the
 //! default IS — that is an expression, and expressions live here. A call that omits a defaulted
 //! argument therefore cannot be compiled from `linkdata` alone: `assertEquals(expected, actual)`
 //! needs to know that the third parameter is `null`, and no amount of reading declarations will
-//! say so. It is the single largest thing standing between a klib-backed compilation and the
-//! corpus.
+//! say so. `inline` is the same fact twice over: `linkdata` says a declaration is one and never
+//! says what it does, so a provider that published the modifier alone would promise an expansion
+//! it has no body for.
 //!
-//! **Scope.** This reads CONSTANTS, and nothing else. A default that is a call, a reference or any
-//! other expression is reported as absent rather than approximated — a caller that cannot see the
-//! value must decline the call, not guess at it. In the Kotlin standard library the overwhelming
-//! majority are `null`, `false`, `""` and small integers, which is why so little buys so much.
+//! **Scope.** Two shapes, and nothing else. A parameter default is read when it is a CONSTANT, and
+//! a body when it is nothing but an invocation of one of the declaration's own function-typed
+//! parameters — `let`, `run`, `with`, `apply`, `also`. Anything else is reported as absent rather
+//! than approximated: a caller that cannot see a value must decline the call, not guess at it. In
+//! the Kotlin standard library the overwhelming majority of defaults are `null`, `false`, `""` and
+//! small integers, which is why so little buys so much.
 //!
-//! **Layout.** Six files, each an array with one entry per FILE of the library:
+//! **Layout.** Each of its tables is an array with one entry per FILE of the library:
 //!
 //! ```text
 //! [u32 count] [u32 size x count] [payload x count]
@@ -31,12 +35,15 @@
 //!
 //! Every integer outside a protobuf message is BIG-endian.
 //!
-//! **Encodings.** Two of them are not protobuf's. A name and a type travel together in one `int64`
-//! as a Morton code — the two indices' bits interleaved, so that a pair of small numbers stays a
-//! short varint. And a `float`/`double` constant is written as its raw bits in a fixed-width field
-//! rather than as a protobuf `float`/`double`. Everything else is ordinary protobuf, including the
-//! integer constants: they are `int32`/`int64` rather than `sint32`, so a negative default is
-//! written sign-extended to ten bytes and must not be read as a zigzag.
+//! **Encodings.** Three of them are not protobuf's. A name and a type travel together in one
+//! `int64` as a Morton code — the two indices' bits interleaved, so that a pair of small numbers
+//! stays a short varint. A `float`/`double` constant is written as its raw bits in a fixed-width
+//! field rather than as a protobuf `float`/`double`. And a SYMBOL is its signature's index in the
+//! file's own table shifted left past a one-byte kind, which is how a body says both what it
+//! invokes (`symbol >> 8` names the declaration) and which of its own parameters it read (two
+//! symbols comparing equal). Everything else is ordinary protobuf, including the integer
+//! constants: they are `int32`/`int64` rather than `sint32`, so a negative default is written
+//! sign-extended to ten bytes and must not be read as a zigzag.
 
 use std::collections::HashMap;
 
@@ -72,52 +79,98 @@ pub enum IrConstant {
 /// discrimination: two overloads sharing a name, an arity AND every parameter name are rare, and
 /// where they occur [`IrDefaults`] refuses to answer rather than choose between them.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct IrDefaultKey {
+pub struct IrDeclarationKey {
     /// The package, dotted (`kotlin.test`), empty for the root package.
     pub package: String,
     /// The enclosing classifiers, outermost first, empty for a top-level declaration.
     pub owners: Vec<String>,
     /// The declaration's own name (`assertEquals`, `<init>`).
     pub name: String,
+    /// Whether the declaration is an extension. `kotlin.run` is two declarations with one
+    /// parameter named `block` apiece, and this is the only thing that tells them apart.
+    pub receiver: bool,
     /// The value parameters' source names, in declaration order.
     pub parameters: Vec<String>,
 }
 
-/// Every declaration's parameter defaults, read out of one klib's IR.
+/// The shape of an inline declaration whose body is one invocation of its own lambda.
+///
+/// `let`, `run`, `with`, `apply` and `also` are this and nothing more. What makes reading them
+/// worth the trouble is not the call the body makes but the one a CALLER then doesn't: a spliced
+/// `with(x) { return y }` returns from the enclosing function, and a called one cannot.
+///
+/// Ordinals count the declaration's parameters as a call site pushes them — 0 is the extension
+/// receiver when there is one, and the regular parameters follow in declaration order. A
+/// declaration with a dispatch receiver or a context parameter carries parameters this module does
+/// not count, and publishes no body rather than one with shifted ordinals.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrInlineBody {
+    /// The parameter the body invokes.
+    pub lambda: usize,
+    /// The parameters it hands to that invocation, in order.
+    pub arguments: Vec<usize>,
+    /// The parameter returned INSTEAD of the invocation's result: `apply` and `also` hand back the
+    /// value they were applied to. `None` when the invocation's own result is the declaration's.
+    pub result: Option<usize>,
+}
+
+/// Every declaration's parameter defaults and inline body, read out of one klib's IR.
 #[derive(Default)]
-pub struct IrDefaults {
+pub struct IrBodies {
     /// `None` marks a key several declarations answered DIFFERENTLY. Two overloads that match on
     /// name, arity and every parameter name are indistinguishable here, so a key they disagree on
     /// is published as unknown — which makes a caller decline the call rather than pass a value
     /// taken from the wrong declaration.
-    known: HashMap<IrDefaultKey, Option<Vec<Option<IrConstant>>>>,
+    defaults: HashMap<IrDeclarationKey, Option<Vec<Option<IrConstant>>>>,
+    /// The same rule, for the declarations whose body this module reads.
+    inline: HashMap<IrDeclarationKey, Option<IrInlineBody>>,
 }
 
-impl IrDefaults {
+impl IrBodies {
     /// The defaults of the declaration this key names, parallel to its parameters, or `None` when
     /// the library does not say — a default that is not a constant, or a key more than one
     /// declaration answers differently.
-    pub fn get(&self, key: &IrDefaultKey) -> Option<&[Option<IrConstant>]> {
-        self.known.get(key)?.as_deref()
+    pub fn defaults(&self, key: &IrDeclarationKey) -> Option<&[Option<IrConstant>]> {
+        self.defaults.get(key)?.as_deref()
     }
 
-    /// How many declarations answered, for a caller that wants to say the IR really was read.
-    pub fn len(&self) -> usize {
-        self.known.len()
+    /// The body this key's declaration inlines to, or `None` when the library does not say — a
+    /// body this module does not read, or a key more than one declaration answers differently.
+    pub fn inline_body(&self, key: &IrDeclarationKey) -> Option<&IrInlineBody> {
+        self.inline.get(key)?.as_ref()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.known.is_empty()
+    /// How many declarations stated a default, for a caller that wants to say the IR really was
+    /// read.
+    pub fn defaults_len(&self) -> usize {
+        self.defaults.len()
     }
 
-    fn record(&mut self, key: IrDefaultKey, values: Vec<Option<IrConstant>>) {
-        match self.known.get(&key) {
+    /// How many stated a body this module reads.
+    pub fn inline_len(&self) -> usize {
+        self.inline.len()
+    }
+
+    fn record_defaults(&mut self, key: IrDeclarationKey, values: Vec<Option<IrConstant>>) {
+        match self.defaults.get(&key) {
             None => {
-                self.known.insert(key, Some(values));
+                self.defaults.insert(key, Some(values));
             }
             Some(Some(existing)) if *existing == values => {}
             Some(_) => {
-                self.known.insert(key, None);
+                self.defaults.insert(key, None);
+            }
+        }
+    }
+
+    fn record_inline(&mut self, key: IrDeclarationKey, body: IrInlineBody) {
+        match self.inline.get(&key) {
+            None => {
+                self.inline.insert(key, Some(body));
+            }
+            Some(Some(existing)) if *existing == body => {}
+            Some(_) => {
+                self.inline.insert(key, None);
             }
         }
     }
@@ -151,13 +204,16 @@ impl From<KlibError> for IrError {
     }
 }
 
-/// Read every parameter default this klib's IR states as a constant.
-pub fn read_defaults(archive: &KlibArchive) -> Result<IrDefaults, IrError> {
+/// Read every parameter default this klib's IR states as a constant, and every inline body it
+/// states as an invocation of the declaration's own lambda.
+pub fn read(archive: &KlibArchive) -> Result<IrBodies, IrError> {
     let files = per_file(archive, "files.knf")?;
     let strings = per_file(archive, "strings.knt")?;
+    let signatures = per_file(archive, "signatures.knt")?;
     let declarations = per_file(archive, "irDeclarations.knd")?;
     let bodies = per_file(archive, "bodies.knb")?;
     if strings.len() != files.len()
+        || signatures.len() != files.len()
         || declarations.len() != files.len()
         || bodies.len() != files.len()
     {
@@ -165,24 +221,28 @@ pub fn read_defaults(archive: &KlibArchive) -> Result<IrDefaults, IrError> {
             entry: "ir".to_string(),
             detail: format!(
                 "the per-file tables disagree on how many files there are: \
-                 {} files, {} string tables, {} declaration tables, {} body tables",
+                 {} files, {} string tables, {} signature tables, {} declaration tables, \
+                 {} body tables",
                 files.len(),
                 strings.len(),
+                signatures.len(),
                 declarations.len(),
                 bodies.len()
             ),
         });
     }
-    let mut defaults = IrDefaults::default();
+    let mut read = IrBodies::default();
     for index in 0..files.len() {
         let strings = entries(&strings[index], "strings.knt")?
             .into_iter()
             .map(|entry| String::from_utf8_lossy(entry).into_owned())
             .collect::<Vec<_>>();
+        let signatures = entries(&signatures[index], "signatures.knt")?;
         let bodies = entries(&bodies[index], "bodies.knb")?;
         let declarations = declaration_index(&declarations[index])?;
         let file = File {
             strings: &strings,
+            signatures: &signatures,
             bodies: &bodies,
         };
         // `IrFile.fq_name` is field 3: the package's segments as string ids.
@@ -192,15 +252,16 @@ pub fn read_defaults(archive: &KlibArchive) -> Result<IrDefaults, IrError> {
             let Some(body) = declarations.get(&id) else {
                 continue;
             };
-            walk(&file, body, &package, &mut Vec::new(), &mut defaults)?;
+            walk(&file, body, &package, &mut Vec::new(), &mut read)?;
         }
     }
-    Ok(defaults)
+    Ok(read)
 }
 
 /// One file's own tables. Every index a declaration carries is into THESE, not into the library's.
 struct File<'a> {
     strings: &'a [String],
+    signatures: &'a [&'a [u8]],
     bodies: &'a [&'a [u8]],
 }
 
@@ -222,6 +283,25 @@ impl File<'_> {
         }
         Ok(segments.join("."))
     }
+
+    /// The arity of the `kotlin.FunctionN.invoke` a call names, and `None` for a call to anything
+    /// else. THE way a klib spells "this declaration invokes its lambda": Kotlin's function types
+    /// are ordinary declarations, and calling one through a parameter is a call to `invoke`.
+    fn invoked_function_arity(&self, symbol: u64) -> Option<usize> {
+        let signature = self.signatures.get((symbol >> 8) as usize)?;
+        // `IdSignature.public_sig`: a `CommonIdSignature`, whose package and declaration names are
+        // both packed runs of string ids. A private or local signature names nothing global.
+        let Value::Bytes(public) = first(signature, 1)? else {
+            return None;
+        };
+        (self.qualified(&packed(public, 1)).ok()? == "kotlin").then_some(())?;
+        let declaration = self.qualified(&packed(public, 2)).ok()?;
+        let arity = declaration
+            .strip_suffix(".invoke")?
+            .strip_prefix("Function")?;
+        (!arity.is_empty() && arity.bytes().all(|digit| digit.is_ascii_digit())).then_some(())?;
+        arity.parse().ok()
+    }
 }
 
 /// Walk one declaration, recording what it and anything nested inside it default to.
@@ -230,7 +310,7 @@ fn walk(
     declaration: &[u8],
     package: &str,
     owners: &mut Vec<String>,
-    into: &mut IrDefaults,
+    into: &mut IrBodies,
 ) -> Result<(), IrError> {
     for (field, wire, value) in message(declaration) {
         let Value::Bytes(body) = value else { continue };
@@ -255,9 +335,13 @@ fn walk(
                 owners.pop();
             }
             // `ir_constructor` and `ir_function`: both a bare `IrFunctionBase` under field 1.
+            // Only a FUNCTION's body is read. A constructor and a property accessor can share a
+            // package, name and parameter list with a function they are not, and the key cannot
+            // tell them apart — so the one fact whose wrong answer is a miscompiled call site is
+            // published only where that collision cannot happen.
             3 | 6 => {
                 if let Some(Value::Bytes(base)) = first(body, 1) {
-                    function(file, base, package, owners, into)?;
+                    function(file, base, package, owners, field == 6, into)?;
                 }
             }
             // `ir_property`: its accessors are `IrFunction`s of their own.
@@ -266,7 +350,7 @@ fn walk(
                     if matches!(accessor, 4 | 5) && accessor_wire == 2 {
                         if let Value::Bytes(function_body) = value {
                             if let Some(Value::Bytes(base)) = first(function_body, 1) {
-                                function(file, base, package, owners, into)?;
+                                function(file, base, package, owners, false, into)?;
                             }
                         }
                     }
@@ -278,13 +362,14 @@ fn walk(
     Ok(())
 }
 
-/// Record one `IrFunctionBase`'s parameter defaults.
+/// Record one `IrFunctionBase`'s parameter defaults, and its body when it is one this reads.
 fn function(
     file: &File<'_>,
     base: &[u8],
     package: &str,
     owners: &[String],
-    into: &mut IrDefaults,
+    reads_body: bool,
+    into: &mut IrBodies,
 ) -> Result<(), IrError> {
     let Some(Value::Varint(name_type)) = first(base, 2) else {
         return Ok(());
@@ -292,7 +377,16 @@ fn function(
     let (name, _) = morton(name_type);
     let mut parameters = Vec::new();
     let mut values = Vec::new();
-    let mut any = false;
+    let mut defaulted = false;
+    // `IrFunctionBase.extension_receiver` is the declaration's first parameter, exactly as a call
+    // site pushes it. A dispatch receiver (field 4) and a context parameter (field 9) are
+    // parameters this module does not count, so a declaration carrying either publishes no body
+    // rather than one whose ordinals are shifted against what a caller will hand it.
+    let receiver = first(base, 5).is_some();
+    let counted = first(base, 4).is_none() && first(base, 9).is_none();
+    let mut symbols = declaration_symbol_of(first(base, 5))
+        .into_iter()
+        .collect::<Vec<_>>();
     for (field, wire, value) in message(base) {
         // `IrFunctionBase.regular_parameter`. The dispatch and extension receivers are fields 4
         // and 5 and carry no default, so only this one is read.
@@ -307,9 +401,10 @@ fn function(
         };
         let (parameter_name, _) = morton(parameter_name_type);
         parameters.push(file.name(parameter_name as usize)?.to_string());
+        symbols.extend(declaration_symbol(parameter));
         let constant = match first(parameter, 4) {
             Some(Value::Varint(body)) => {
-                any = true;
+                defaulted = true;
                 file.bodies
                     .get(body as usize)
                     .and_then(|body| constant(file, body))
@@ -318,21 +413,169 @@ fn function(
         };
         values.push(constant);
     }
+    // Every parameter must have answered with a symbol: a body names the ones it reads, and one
+    // this module could not name is one it cannot claim the body left alone.
+    let named = symbols.len() == usize::from(receiver) + parameters.len();
+    let key = IrDeclarationKey {
+        package: package.to_string(),
+        owners: owners.to_vec(),
+        name: file.name(name as usize)?.to_string(),
+        receiver,
+        parameters,
+    };
     // A declaration with no defaulted parameter at all has nothing to say; recording it would only
     // grow the table with keys no caller can ask about.
-    if !any {
-        return Ok(());
+    if defaulted {
+        into.record_defaults(key.clone(), values);
     }
-    into.record(
-        IrDefaultKey {
-            package: package.to_string(),
-            owners: owners.to_vec(),
-            name: file.name(name as usize)?.to_string(),
-            parameters,
-        },
-        values,
-    );
+    if reads_body && counted && named {
+        if let Some(body) = inline_body(file, base, &symbols) {
+            into.record_inline(key, body);
+        }
+    }
     Ok(())
+}
+
+/// One declaration's own symbol, which is how a body says it read THAT declaration.
+///
+/// `IrFunctionBase` and `IrValueParameter` both open with an `IrDeclarationBase`, whose first
+/// field it is, so the same read answers for a function and for one of its parameters.
+fn declaration_symbol(declaration: &[u8]) -> Option<u64> {
+    let Value::Bytes(base) = first(declaration, 1)? else {
+        return None;
+    };
+    first_varint(base, 1)
+}
+
+fn declaration_symbol_of(declaration: Option<Value<'_>>) -> Option<u64> {
+    match declaration? {
+        Value::Bytes(bytes) => declaration_symbol(bytes),
+        _ => None,
+    }
+}
+
+/// The body this declaration inlines to, when it is nothing but an invocation of its own lambda.
+fn inline_body(file: &File<'_>, base: &[u8], parameters: &[u64]) -> Option<IrInlineBody> {
+    let declaration = declaration_symbol(base)?;
+    // `IrFunctionBase.body` is an index into this file's own body table.
+    let body = file.bodies.get(first_varint(base, 7)? as usize)?;
+    // A function's body is an `IrStatement` carrying an `IrBlockBody` — even one written `= expr`,
+    // which the IR has already turned into a `return`. A parameter default is an
+    // `IrExpressionBody`, a bare `IrExpression`: the same table, two shapes.
+    let Value::Bytes(block) = first(body, 4)? else {
+        return None;
+    };
+    let statements = message(block)
+        .filter(|(field, wire, _)| *field == 1 && *wire == 2)
+        .filter_map(|(_, _, value)| match value {
+            Value::Bytes(bytes) => Some(bytes),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    match statements.as_slice() {
+        // `= block(this)`: the invocation IS what the declaration hands back.
+        [single] => {
+            let (lambda, arguments) = invocation(file, returned(single, declaration)?, parameters)?;
+            Some(IrInlineBody {
+                lambda,
+                arguments,
+                result: None,
+            })
+        }
+        // `{ block(); return this }`: the declaration hands back one of its own parameters.
+        [invoke, tail] => {
+            let (lambda, arguments) = invocation(file, statement_expression(invoke)?, parameters)?;
+            let result = ordinal(parameters, get_value(returned(tail, declaration)?)?)?;
+            Some(IrInlineBody {
+                lambda,
+                arguments,
+                result: Some(result),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The expression one statement is, and `None` for a statement that is a declaration or a branch.
+fn statement_expression(statement: &[u8]) -> Option<&[u8]> {
+    match first(statement, 3)? {
+        Value::Bytes(bytes) => Some(bytes),
+        _ => None,
+    }
+}
+
+/// The value a `return` to THIS declaration hands back. A return whose target is anything else —
+/// a returnable block, an enclosing lambda — is control flow this module does not read.
+fn returned(statement: &[u8], declaration: u64) -> Option<&[u8]> {
+    let (operation, value) = operation(statement_expression(statement)?)?;
+    (operation == 12).then_some(())?;
+    (first_varint(value, 1)? == declaration).then_some(())?;
+    match first(value, 2)? {
+        Value::Bytes(bytes) => Some(bytes),
+        _ => None,
+    }
+}
+
+/// The symbol of the value an expression reads, and `None` for an expression that reads none.
+fn get_value(expression: &[u8]) -> Option<u64> {
+    let (operation, value) = operation(expression)?;
+    (operation == 6).then_some(())?;
+    first_varint(value, 1)
+}
+
+fn ordinal(parameters: &[u64], symbol: u64) -> Option<usize> {
+    parameters.iter().position(|parameter| *parameter == symbol)
+}
+
+/// One `FunctionN.invoke` whose every argument reads one of this declaration's own parameters, as
+/// the parameter invoked and the ones handed to it.
+///
+/// The arity check is what keeps the shape honest: `invoke`'s first argument is the function
+/// value itself, so a call naming `Function1.invoke` must carry exactly two.
+fn invocation(
+    file: &File<'_>,
+    expression: &[u8],
+    parameters: &[u64],
+) -> Option<(usize, Vec<usize>)> {
+    let (operation, call) = operation(expression)?;
+    (operation == 8).then_some(())?;
+    // `IrCall.super`: a qualified dispatch, which an invocation of a parameter never is.
+    first(call, 3).is_none().then_some(())?;
+    let arity = file.invoked_function_arity(first_varint(call, 1)?)?;
+    let mut read = Vec::new();
+    for (field, wire, value) in message(call) {
+        if field != 5 || wire != 2 {
+            continue;
+        }
+        let Value::Bytes(argument) = value else {
+            return None;
+        };
+        read.push(ordinal(parameters, get_value(argument)?)?);
+    }
+    let (lambda, arguments) = read.split_first()?;
+    (arguments.len() == arity).then_some(())?;
+    Some((*lambda, arguments.to_vec()))
+}
+
+/// The single operation an `IrExpression` carries, as its field number and payload.
+///
+/// The field is a protobuf `oneof`, so a message carrying two is one no Kotlin toolchain wrote and
+/// none this module reads.
+fn operation(expression: &[u8]) -> Option<(u64, &[u8])> {
+    let mut found = None;
+    for (field, wire, value) in message(expression) {
+        if wire != 2 || !(5..=44).contains(&field) {
+            continue;
+        }
+        let Value::Bytes(bytes) = value else {
+            continue;
+        };
+        if found.is_some() {
+            return None;
+        }
+        found = Some((field, bytes));
+    }
+    found
 }
 
 /// The constant an expression body states, or `None` for a default that is not one.
@@ -596,12 +839,20 @@ mod tests {
         KlibArchive::open(&root.join("klib/common/stdlib")).ok()
     }
 
-    fn key(package: &str, name: &str, parameters: &[&str]) -> IrDefaultKey {
-        IrDefaultKey {
+    fn key(package: &str, name: &str, parameters: &[&str]) -> IrDeclarationKey {
+        IrDeclarationKey {
             package: package.to_string(),
             owners: Vec::new(),
             name: name.to_string(),
+            receiver: false,
             parameters: parameters.iter().map(|name| name.to_string()).collect(),
+        }
+    }
+
+    fn extension(package: &str, name: &str, parameters: &[&str]) -> IrDeclarationKey {
+        IrDeclarationKey {
+            receiver: true,
+            ..key(package, name, parameters)
         }
     }
 
@@ -616,20 +867,20 @@ mod tests {
             eprintln!("skipping: no Kotlin/Native distribution cached");
             return;
         };
-        let defaults = read_defaults(&archive).expect("the stdlib's IR reads");
+        let defaults = read(&archive).expect("the stdlib's IR reads");
         // Few, and that is the library rather than the reader: a stdlib declaration with a
         // defaulted parameter is uncommon, and most of the ones a program actually calls are in
         // `kotlin.test` and the collection joiners. 342 declarations carry one at all.
         assert!(
-            defaults.len() > 200,
+            defaults.defaults_len() > 200,
             "the whole library was walked: {}",
-            defaults.len()
+            defaults.defaults_len()
         );
 
         // `message: String? = null` — the one that blocks every `assertEquals(a, b)` in the box
         // corpus. A `null` is a distinct protobuf field from a `false`, which the line below pins.
         assert_eq!(
-            defaults.get(&key(
+            defaults.defaults(&key(
                 "kotlin.test",
                 "assertEquals",
                 &["expected", "actual", "message"]
@@ -638,7 +889,7 @@ mod tests {
         );
         // A BOOLEAN default beside a null one, on the same declaration.
         assert_eq!(
-            defaults.get(&key(
+            defaults.defaults(&key(
                 "kotlin.test",
                 "assertContains",
                 &["charSequence", "char", "ignoreCase", "message"],
@@ -657,7 +908,7 @@ mod tests {
         // declaration that reported "selected extension 'joinToString' has no callable
         // realization" rather than compiling.
         assert_eq!(
-            defaults.get(&key(
+            defaults.defaults(&extension(
                 "kotlin.collections",
                 "joinToString",
                 &[
@@ -691,24 +942,129 @@ mod tests {
     /// silently wrong argument at a call site, which is the one outcome worse than declining.
     #[test]
     fn a_key_two_declarations_disagree_on_answers_nothing() {
-        let mut defaults = IrDefaults::default();
+        let mut defaults = IrBodies::default();
         let key = key("p", "f", &["a"]);
-        defaults.record(key.clone(), vec![Some(IrConstant::Int(1))]);
+        defaults.record_defaults(key.clone(), vec![Some(IrConstant::Int(1))]);
         assert_eq!(
-            defaults.get(&key),
+            defaults.defaults(&key),
             Some([Some(IrConstant::Int(1))].as_slice())
         );
         // The same answer again is agreement, not a conflict.
-        defaults.record(key.clone(), vec![Some(IrConstant::Int(1))]);
+        defaults.record_defaults(key.clone(), vec![Some(IrConstant::Int(1))]);
         assert_eq!(
-            defaults.get(&key),
+            defaults.defaults(&key),
             Some([Some(IrConstant::Int(1))].as_slice())
         );
-        defaults.record(key.clone(), vec![Some(IrConstant::Int(2))]);
-        assert_eq!(defaults.get(&key), None);
+        defaults.record_defaults(key.clone(), vec![Some(IrConstant::Int(2))]);
+        assert_eq!(defaults.defaults(&key), None);
         // And it stays unknown: a third declaration agreeing with the first must not resurrect it.
-        defaults.record(key.clone(), vec![Some(IrConstant::Int(1))]);
-        assert_eq!(defaults.get(&key), None);
+        defaults.record_defaults(key.clone(), vec![Some(IrConstant::Int(1))]);
+        assert_eq!(defaults.defaults(&key), None);
+    }
+
+    /// The same rule for bodies, which is why an extension is part of the key at all.
+    ///
+    /// `kotlin.run` is two declarations — `run(block: () -> R)` and `T.run(block: T.() -> R)` —
+    /// with one parameter named `block` apiece. Without the receiver in the key they collide, and
+    /// what collides here is not a value a caller can decline but a SPLICE: the receiver-less one
+    /// would expand with an argument it has nowhere to take from.
+    #[test]
+    fn a_body_two_declarations_disagree_on_answers_nothing() {
+        let mut bodies = IrBodies::default();
+        let plain = IrInlineBody {
+            lambda: 0,
+            arguments: Vec::new(),
+            result: None,
+        };
+        let extended = IrInlineBody {
+            lambda: 1,
+            arguments: vec![0],
+            result: None,
+        };
+        bodies.record_inline(key("p", "f", &["a"]), plain.clone());
+        bodies.record_inline(extension("p", "f", &["a"]), extended.clone());
+        assert_eq!(bodies.inline_body(&key("p", "f", &["a"])), Some(&plain));
+        assert_eq!(
+            bodies.inline_body(&extension("p", "f", &["a"])),
+            Some(&extended)
+        );
+        // And two that really do share a key publish nothing rather than either one's body.
+        bodies.record_inline(key("p", "f", &["a"]), extended);
+        assert_eq!(bodies.inline_body(&key("p", "f", &["a"])), None);
+    }
+
+    /// The scope functions, read out of the real stdlib.
+    ///
+    /// Each is checked against what the Kotlin source declares, which is the only oracle that
+    /// matters: `T.let(block: (T) -> R): R = block(this)` invokes its second parameter with its
+    /// first, `T.apply(block: T.() -> Unit): T` does the same and then hands back the first, and
+    /// `run(block: () -> R): R = block()` invokes its only one with nothing.
+    #[test]
+    fn the_stdlib_states_what_its_scope_functions_do() {
+        let Some(archive) = stdlib() else {
+            eprintln!("skipping: no Kotlin/Native distribution cached");
+            return;
+        };
+        let bodies = read(&archive).expect("the stdlib's IR reads");
+        assert!(
+            bodies.inline_len() > 0,
+            "the whole library was walked for bodies"
+        );
+        let invoking = |lambda: usize, arguments: &[usize]| {
+            Some(IrInlineBody {
+                lambda,
+                arguments: arguments.to_vec(),
+                result: None,
+            })
+        };
+        // `T.let`, `T.run` and `with` all invoke one lambda with one value — the difference is
+        // only where that value came from, and the ordinals say so identically.
+        assert_eq!(
+            bodies
+                .inline_body(&extension("kotlin", "let", &["block"]))
+                .cloned(),
+            invoking(1, &[0])
+        );
+        assert_eq!(
+            bodies
+                .inline_body(&extension("kotlin", "run", &["block"]))
+                .cloned(),
+            invoking(1, &[0])
+        );
+        assert_eq!(
+            bodies
+                .inline_body(&key("kotlin", "with", &["receiver", "block"]))
+                .cloned(),
+            invoking(1, &[0])
+        );
+        // The receiver-less `run`, which the extension bit is the only thing separating.
+        assert_eq!(
+            bodies
+                .inline_body(&key("kotlin", "run", &["block"]))
+                .cloned(),
+            invoking(0, &[])
+        );
+        // `apply` and `also` hand back what they were applied to rather than what the lambda
+        // returned. Reading that wrong is a silently wrong VALUE at every call site.
+        for name in ["apply", "also"] {
+            assert_eq!(
+                bodies
+                    .inline_body(&extension("kotlin", name, &["block"]))
+                    .cloned(),
+                Some(IrInlineBody {
+                    lambda: 1,
+                    arguments: vec![0],
+                    result: Some(0),
+                }),
+                "kotlin.{name}"
+            );
+        }
+        // And a declaration whose body is not one invocation states nothing: `takeIf` tests its
+        // lambda's result, and approximating that would drop the test.
+        assert_eq!(
+            bodies.inline_body(&extension("kotlin", "takeIf", &["predicate"])),
+            None
+        );
     }
 
     /// The encoding that is not protobuf's own.

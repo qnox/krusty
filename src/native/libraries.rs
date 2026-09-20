@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::klib::ir::{IrConstant, IrDefaultKey, IrDefaults};
+use crate::klib::ir::{IrBodies, IrConstant, IrDeclarationKey};
 use crate::klib::{KlibArchive, KlibError};
 use crate::libraries::{
     Callables, ClassifierInheritance, ExternalCallableKind, ExternalCallableRealization,
@@ -136,12 +136,13 @@ impl NativeLibraries {
     /// so a later change can federate several klibs without reshaping the caller.
     pub fn from_klib(path: &Path) -> Result<Self, NativeLibrariesError> {
         let archive = KlibArchive::open(path)?;
-        // The bodies half, which is where a parameter's default VALUE lives. A klib that ships no
-        // IR at all is a declarations-only artifact and still usable — a call that omits a default
-        // simply cannot be compiled against it — so only a malformed one is an error.
-        let defaults = match crate::klib::ir::read_defaults(&archive) {
-            Ok(defaults) => defaults,
-            Err(crate::klib::ir::IrError::Missing { .. }) => IrDefaults::default(),
+        // The bodies half, which is where a parameter's default VALUE and an inline declaration's
+        // BODY live. A klib that ships no IR at all is a declarations-only artifact and still
+        // usable — a call that omits a default simply cannot be compiled against it, and an inline
+        // declaration is published as an ordinary one — so only a malformed one is an error.
+        let bodies = match crate::klib::ir::read(&archive) {
+            Ok(bodies) => bodies,
+            Err(crate::klib::ir::IrError::Missing { .. }) => IrBodies::default(),
             Err(error) => return Err(NativeLibrariesError::InvalidIr(error)),
         };
         let mut namespaces: HashMap<TypeName, Namespace> = HashMap::new();
@@ -193,7 +194,7 @@ impl NativeLibraries {
                     package_name,
                     function,
                     identity,
-                    &defaults,
+                    &bodies,
                     &fragment.package_fqname,
                 );
                 callable_realizations.push(ExternalCallableRealization {
@@ -337,7 +338,7 @@ fn top_level_function(
     package: TypeName,
     function: &crate::jvm::metadata::BuiltinFunction,
     identity: crate::fir::ExternalCallableId,
-    defaults: &IrDefaults,
+    bodies: &IrBodies,
     package_fqname: &str,
 ) -> FunctionInfo {
     let bounds = crate::jvm::classpath::builtin_bounds(&function.formals, &HashMap::new());
@@ -378,10 +379,17 @@ fn top_level_function(
     info.flags.operator = function.is_operator;
     info.flags.infix = function.is_infix;
     info.flags.suspend = function.is_suspend;
-    // `inline` is deliberately NOT published. It is not a modifier a call site merely records: a
-    // declaration marked inline is one the frontend will try to SPLICE, and a klib's bodies live
-    // in `default/ir/`, which this tree reads as opaque bytes. Claiming inline-ness the provider
-    // cannot then supply a body for would turn a working call into a failed expansion.
+    // `inline` travels with a BODY or not at all. It is not a modifier a call site merely records:
+    // a declaration marked inline is one the frontend will try to SPLICE, and claiming inline-ness
+    // the provider cannot then supply a body for would turn a working call into a failed
+    // expansion. So the modifier is published exactly where the library's IR said what the
+    // declaration does — see [`inline_plan`].
+    if let Some(plan) = inline_plan(bodies, package_fqname, function) {
+        info.flags.inline = crate::libraries::InlineKind::CanInline;
+        info.flags.reified = function.has_reified_type_params;
+        info.callable.inline = crate::libraries::InlineKind::CanInline;
+        info.callable.inline_body_plan = Some(Box::new(plan));
+    }
     info.call_sig = crate::libraries::CallSig::metadata_member(
         function.params.len(),
         function.param_names.clone(),
@@ -392,7 +400,7 @@ fn top_level_function(
     // default and never what it is; the value is an expression, and it lives in the library's IR.
     // Without it a call that omits one has nothing to pass: the JVM has a `$default` synthetic to
     // name, a klib has none, and 862 corpus cases reported exactly that.
-    info.default_values = parameter_defaults(defaults, package_fqname, function);
+    info.default_values = parameter_defaults(bodies, package_fqname, function);
     // Which top-level declarations the COMPILER realizes rather than calls — `println`,
     // `trimIndent`, `enumValues`, the array factories. The table is target-neutral and the JVM
     // provider reads the same one; without it this provider published `trimIndent` as an ordinary
@@ -547,19 +555,14 @@ fn top_level_property(
     }
 }
 
-/// What each of a declaration's value parameters defaults to, parallel to them.
+/// How one top-level declaration is named in the library's IR.
 ///
 /// The IR is matched by name and shape rather than by the library's own `IdSignature`, and the
-/// parameter NAMES carry most of the discrimination — see [`IrDefaultKey`]. A declaration the IR
-/// does not answer for gets an empty list, which reads as "no default is known" everywhere.
-fn parameter_defaults(
-    defaults: &IrDefaults,
+/// parameter NAMES carry most of the discrimination — see [`IrDeclarationKey`].
+fn declaration_key(
     package_fqname: &str,
     function: &crate::jvm::metadata::BuiltinFunction,
-) -> Vec<Option<crate::libraries::DefaultValue>> {
-    if !function.param_defaults.iter().any(|has| *has) {
-        return Vec::new();
-    }
+) -> IrDeclarationKey {
     // The key's parameters are the WRITTEN ones. A context parameter and an extension receiver are
     // leading physical parameters that the IR carries elsewhere — as `context_parameter` and
     // `extension_receiver` — so the names that identify the declaration start after them.
@@ -567,18 +570,78 @@ fn parameter_defaults(
         .param_names
         .len()
         .saturating_sub(function.context_count);
-    let key = IrDefaultKey {
+    IrDeclarationKey {
         package: package_fqname.to_string(),
         owners: Vec::new(),
         name: function.name.clone(),
+        receiver: function.receiver.is_some(),
         parameters: function.param_names[function.param_names.len() - written..].to_vec(),
-    };
-    let Some(values) = defaults.get(&key) else {
+    }
+}
+
+/// What each of a declaration's value parameters defaults to, parallel to them.
+///
+/// A declaration the IR does not answer for gets an empty list, which reads as "no default is
+/// known" everywhere.
+fn parameter_defaults(
+    bodies: &IrBodies,
+    package_fqname: &str,
+    function: &crate::jvm::metadata::BuiltinFunction,
+) -> Vec<Option<crate::libraries::DefaultValue>> {
+    if !function.param_defaults.iter().any(|has| *has) {
+        return Vec::new();
+    }
+    let Some(values) = bodies.defaults(&declaration_key(package_fqname, function)) else {
         return Vec::new();
     };
     let mut out = vec![None; function.context_count];
     out.extend(values.iter().map(|value| value.as_ref().map(default_value)));
     out
+}
+
+/// The expansion this declaration's `inline` modifier promises, in the terms the checker splices.
+///
+/// The whole point of publishing it is the call a spliced body does NOT make. `with(x) { return
+/// y }` returns from the ENCLOSING function, and no argument passed to a real `kotlin.with` can do
+/// that; neither can a lambda that a backend had to give a runtime object to. So this is what lets
+/// the frontend expand the scope functions instead of calling them.
+///
+/// A body the IR did not state leaves the declaration non-inline, which is the safe direction: an
+/// ordinary call compiles, and a promised expansion the provider cannot perform does not.
+fn inline_plan(
+    bodies: &IrBodies,
+    package_fqname: &str,
+    function: &crate::jvm::metadata::BuiltinFunction,
+) -> Option<crate::libraries::InlineBodyPlan> {
+    // A context parameter is a leading physical parameter the IR reader does not count, so it
+    // refuses such a declaration outright; asking for one would only ever answer `None`.
+    if !function.is_inline || function.is_suspend || function.context_count != 0 {
+        return None;
+    }
+    let body = bodies.inline_body(&declaration_key(package_fqname, function))?;
+    // The ordinals the IR counts are the ones a call site pushes, which is exactly the parameter
+    // list this provider publishes: the extension receiver, and then the written parameters.
+    let arity = function.params.len() + usize::from(function.receiver.is_some());
+    let parameter = |ordinal: &usize| {
+        (*ordinal < arity).then_some(crate::libraries::InlineBodyValue::Parameter(*ordinal))
+    };
+    Some(crate::libraries::InlineBodyPlan::InvokeLambda {
+        lambda_parameter: (body.lambda < arity).then_some(body.lambda)?,
+        arguments: body
+            .arguments
+            .iter()
+            .map(parameter)
+            .collect::<Option<Vec<_>>>()?,
+        prologue: Vec::new(),
+        cleanup: Vec::new(),
+        cause: None,
+        recovery: None,
+        defaults: Vec::new(),
+        result: match body.result.as_ref() {
+            Some(ordinal) => Some(parameter(ordinal)?),
+            None => None,
+        },
+    })
 }
 
 /// One decoded IR constant, as the literal a call site materializes.
@@ -1679,19 +1742,34 @@ mod compiles_against_the_klib {
         );
 
         // A block that returns NON-LOCALLY is valid only spliced into the function it returns
-        // from. Nothing is spliced here, so the block is an ordinary lambda — and emitted as a
-        // standalone function its `return` returns from itself, leaving the enclosing call to
-        // carry on. That is a wrong answer rather than a gap, and it was one: two corpus cases
-        // ran and printed nothing. The code generator declines such a lambda instead.
+        // from. This is the test that `inline_plan` exists for, and it is decisive precisely
+        // because there is no third outcome: either the provider read `with`'s body out of the
+        // klib and the frontend spliced it — in which case the `return` leaves `foo` and this is
+        // quiet — or `with` is an ordinary call, the block is a standalone lambda whose `return`
+        // returns from ITSELF, and the code generator declines it by name. It used to decline,
+        // and before it declined it answered WRONGLY: two corpus cases ran and printed nothing.
         let non_local = diagnostics(
             &root,
             "fun foo() { with(1) { return } }\nfun box(): String { foo(); return \"OK\" }\n",
         );
         assert!(
-            non_local
-                .iter()
-                .any(|d| d.contains("the native backend does not support")),
-            "a non-local return through an un-spliced block declines: {non_local:?}"
+            non_local.is_empty(),
+            "a non-local return splices the declaration's own body: {non_local:?}"
+        );
+
+        // And the other half of the same fact: a declaration whose body the IR did NOT state
+        // stays an ordinary call. `takeIf` is `inline` in the klib exactly as `with` is, and its
+        // body tests the lambda's result rather than merely invoking it — a shape the reader
+        // reports as absent rather than approximating. So this reaches the code generator, which
+        // refuses it for its own reason instead of a splice failing halfway.
+        let unspliced = diagnostics(&root, "fun box(): String = \"OK\".takeIf { true }!!\n");
+        assert!(
+            !unspliced.is_empty(),
+            "a declaration the IR states no body for is not claimed inline"
+        );
+        assert!(
+            !unspliced.iter().any(|d| d.contains("unresolved reference")),
+            "and it still RESOLVES — the refusal is the generator's: {unspliced:?}"
         );
 
         // An ENUM ENTRY of a stdlib enum RESOLVES. The decoder read each entry's name to check
