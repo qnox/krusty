@@ -22,12 +22,72 @@ const SRC: &str = "import kotlinx.serialization.Serializable\n\
                    @Serializable\n\
                    data class Bough(val maybe: String?, val twig: Twig, val maybeTwig: Twig?)\n";
 
+const NULLABLE_PROPERTY_SRC: &str = "import kotlinx.serialization.Serializable\n\
+                                     @Serializable\n\
+                                     data class Leaf(val id: Int)\n\
+                                     @Serializable\n\
+                                     data class Twig(val id: Int)\n\
+                                     @Serializable\n\
+                                     data class Bough(\n\
+                                         val maybeLeaf: Leaf?,\n\
+                                         val twig: Twig,\n\
+                                         val maybeTwig: Twig?,\n\
+                                     )\n";
+
+/// A NULLABLE property publishes the `.nullable` serializer, narrowed to the `KSerializer` that
+/// wrapper takes.
+///
+/// Only the explicit-`@Serializable(with = …)` arm wrapped, so every nullable property whose
+/// serializer is DERIVED from its type — a builtin, a nested class — published the NON-NULL
+/// serializer from `childSerializers()`. The whole method is compared, so the wrap, the narrowing
+/// and the slots that must NOT be wrapped are all pinned together.
+#[test]
+fn a_nullable_property_publishes_its_nullable_serializer() {
+    let (reference, krusty) = built_from(NULLABLE_PROPERTY_SRC, "Bough$$serializer");
+    let method = |text: &str| {
+        text.lines()
+            .map(str::trim)
+            .skip_while(|line| !line.contains("childSerializers()"))
+            .take_while(|line| !line.contains("typeParametersSerializers"))
+            .map(|line| {
+                let mut out = String::new();
+                let mut rest = line;
+                while let Some(at) = rest.find('#') {
+                    out.push_str(&rest[..at]);
+                    out.push('#');
+                    rest = rest[at + 1..].trim_start_matches(|c: char| c.is_ascii_digit());
+                }
+                out.push_str(rest);
+                out
+            })
+            .collect::<Vec<_>>()
+    };
+    let want = method(&reference);
+    assert!(
+        want.iter()
+            .filter(|row| row.contains("getNullable"))
+            .count()
+            == 2,
+        "the reference wraps exactly the two nullable properties:\n{want:#?}"
+    );
+    assert_eq!(
+        method(&krusty),
+        want,
+        "krusty must publish the same element serializers"
+    );
+}
+
 fn built(class: &str) -> (String, String) {
+    built_from(SRC, class)
+}
+
+fn built_from(source: &str, class: &str) -> (String, String) {
     let (plugin, cp) = plugin_and_runtime()
         .expect("the serialization plugin and runtime must be available to this regression");
     let extra = vec![format!("-Xplugin={}", plugin.display())];
-    let built = compare_with_kotlinc_plugin("SerializerOperandCast", SRC, class, &cp, "25", &extra)
-        .expect("the reference compiler and javap must be available to this regression");
+    let built =
+        compare_with_kotlinc_plugin("SerializerOperandCast", source, class, &cp, "25", &extra)
+            .expect("the reference compiler and javap must be available to this regression");
     (built.reference, built.krusty)
 }
 
