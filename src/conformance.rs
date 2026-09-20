@@ -281,17 +281,33 @@ fn k2_language_configuration_applicable(src: &str) -> bool {
 }
 
 pub fn backend_applicable(src: &str, names: &[&str]) -> bool {
-    // `ANY` names every backend (kotlinc's test runner uses it for red-code tests kept only for
-    // their diagnostic half), so it always mentions ours.
-    let mentions = |line: &str| {
-        line.split(',')
-            .any(|t| t.trim() == "ANY" || names.contains(&t.trim()))
-    };
-    if let Some(l) = src.lines().find(|l| l.starts_with("// TARGET_BACKEND:")) {
-        if !mentions(l.trim_start_matches("// TARGET_BACKEND:").trim()) {
-            return false;
-        }
+    backend_targeted(src, names) && !backend_muted(src, names)
+}
+
+/// `ANY` names every backend (kotlinc's test runner uses it for red-code tests kept only for their
+/// diagnostic half), so it always mentions ours.
+fn mentions(line: &str, names: &[&str]) -> bool {
+    line.split(',')
+        .any(|token| token.trim() == "ANY" || names.contains(&token.trim()))
+}
+
+/// Whether `// TARGET_BACKEND:` admits one of `names` — a case that names backends and none of
+/// ours is a case written for a platform this one is not.
+///
+/// Split from the mute half because the two ask different questions and a lane may answer them
+/// with different backend sets. A native lane targets `NATIVE` alone: a case marked JVM-only is
+/// JVM-only, and compiling it means compiling `java.lang.Runnable` against a target that has no
+/// JDK. But it must still honour a JVM mute, because the FRONTEND is shared — see
+/// [`backend_muted`].
+pub fn backend_targeted(src: &str, names: &[&str]) -> bool {
+    match src.lines().find(|l| l.starts_with("// TARGET_BACKEND:")) {
+        Some(line) => mentions(line.trim_start_matches("// TARGET_BACKEND:").trim(), names),
+        None => true,
     }
+}
+
+/// Whether any mute directive names one of `names`.
+pub fn backend_muted(src: &str, names: &[&str]) -> bool {
     src.lines()
         .filter(|l| {
             l.starts_with("// IGNORE_BACKEND:")
@@ -299,7 +315,7 @@ pub fn backend_applicable(src: &str, names: &[&str]) -> bool {
                 || l.starts_with("// IGNORE_BACKEND_K2_MULTI_MODULE:")
                 || l.starts_with("// DONT_TARGET_EXACT_BACKEND:")
         })
-        .all(|l| !mentions(l.split_once(':').map(|x| x.1).unwrap_or("").trim()))
+        .any(|l| mentions(l.split_once(':').map(|x| x.1).unwrap_or("").trim(), names))
 }
 
 /// Whether the test applies to krusty's backend (the common case of [`backend_applicable`]).

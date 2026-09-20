@@ -103,15 +103,23 @@ fn not_applicable(src: &str) -> Option<&'static str> {
     if src.contains("// FILE:") {
         return Some("multi-file case");
     }
-    // The corpus's JVM ignores count here too, and that is not laziness. krusty has ONE frontend
-    // and ONE common lowering; the native backend is a third consumer of the same checked IR the
-    // JVM backend consumes. A case the corpus mutes on `JVM_IR` is muted because that semantics is
-    // not reachable through this frontend at all — `null as T` for an erased `T`, say — so running
-    // it natively measures the frontend, which the JVM lane already measures, and its verdict there
-    // is the same wrong answer. When the native target grows its own frontend semantics (klib
-    // ingestion, phase 7), this widening is what should narrow back to `NATIVE` alone.
-    if !krusty::conformance::backend_applicable(src, &["NATIVE", "JVM", "JVM_IR"]) {
-        return Some("not targeted at the native backend or muted on JVM");
+    // A case that NAMES its backends and does not name this one is written for a platform this is
+    // not: `// TARGET_BACKEND: JVM` over `object : Runnable` is a program about the JDK, and
+    // compiling it here means resolving `java.lang.Runnable` for a target that has no JDK. The
+    // widening that admitted them was deliberate and its own comment said when to withdraw it —
+    // "when the native target grows its own frontend semantics (klib ingestion, phase 7)" — which
+    // is what the klib provider is.
+    if !krusty::conformance::backend_targeted(src, &["NATIVE"]) {
+        return Some("targeted at another backend");
+    }
+    // The MUTES stay wide, and that is not laziness. krusty has ONE frontend and ONE common
+    // lowering; this backend is a third consumer of the same checked IR the JVM backend consumes.
+    // A case the corpus mutes on `JVM_IR` is muted because that semantics is not reachable through
+    // this frontend at all — `null as T` for an erased `T`, say — so running it natively measures
+    // the frontend, which the JVM lane already measures, and its verdict there is the same wrong
+    // answer.
+    if krusty::conformance::backend_muted(src, &["NATIVE", "JVM", "JVM_IR"]) {
+        return Some("muted on a backend whose verdict this one shares");
     }
     if krusty::conformance::needs_unmodeled_compiler_flag(src) {
         return Some("needs a compiler flag krusty does not model");
