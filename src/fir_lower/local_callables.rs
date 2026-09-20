@@ -7,6 +7,8 @@ use crate::fir::{
 use crate::ir::{Callee, ExprId, IrExpr, IrFunction};
 use crate::types::Ty;
 
+use super::tailrec::{finish_tailrec_body, Frame as TailrecFrame};
+
 use super::checked_arguments::{
     materialize_checked_arguments, CheckedArgumentSlot, CheckedArgumentValue,
 };
@@ -28,7 +30,9 @@ impl BodyLowering<'_> {
                 declaration,
                 callable,
                 suspend,
-                tailrec,
+                // Read where it is used, once the borrow of `self.body` has ended: lowering the
+                // nested body needs `&mut self`, so the statement is matched a second time below.
+                tailrec: _,
                 body,
             } = &statement.kind
             else {
@@ -37,11 +41,6 @@ impl BodyLowering<'_> {
             let (function, owner) = self.predeclare_local_function(body, *callable)?;
             if *suspend && !self.ir.suspend_funs.contains(&function) {
                 self.ir.suspend_funs.push(function);
-            }
-            // A local `tailrec` body is never loop-transformed, so its constant-stack promise is
-            // unmet and a backend that cannot supply one itself must decline it.
-            if *tailrec {
-                self.ir.unlooped_tailrec.insert(function);
             }
             let realization = LocalCallableRealization {
                 function,
@@ -96,7 +95,7 @@ impl BodyLowering<'_> {
                         external_capture_arguments: None,
                     },
                 ))?;
-            let FirStatementKind::LocalFunction { body, .. } = &self
+            let FirStatementKind::LocalFunction { body, tailrec, .. } = &self
                 .body
                 .statement(statement)
                 .ok_or(FirLoweringFailure::MissingStatement(statement))?
@@ -104,7 +103,8 @@ impl BodyLowering<'_> {
             else {
                 unreachable!("local function declaration changed during FIR lowering")
             };
-            let lowered = self.lower_nested_function(body, function, false, false)?;
+            let tailrec = *tailrec;
+            let lowered = self.lower_nested_function(body, function, false, false, tailrec)?;
             self.ir.functions[function as usize].body = Some(lowered.callable);
         }
         Ok(())
@@ -363,7 +363,8 @@ impl BodyLowering<'_> {
             .expect("a body always has a local callable scope")
             .insert(callable, realization.clone());
         assert!(previous.is_none(), "a FIR lambda callable is declared once");
-        let lowered = self.lower_nested_function(body, function, unit_as_value, true)?;
+        // A lambda carries no `tailrec`: the modifier is a function declaration's.
+        let lowered = self.lower_nested_function(body, function, unit_as_value, true, false)?;
         if super::inline_returns::reachable_checked_returns(self.ir, lowered.callable)
             .iter()
             .any(|(_, depth)| *depth > 0)
@@ -947,6 +948,7 @@ impl BodyLowering<'_> {
         function: crate::ir::FunId,
         unit_as_value: bool,
         retain_inline_template: bool,
+        tailrec: bool,
     ) -> Result<NestedCallableBodies, FirLoweringFailure> {
         #[cfg(feature = "trace")]
         super::body_trace::trace_checked_body(body, self.index);
@@ -1000,10 +1002,17 @@ impl BodyLowering<'_> {
             *slot = Some(nested.expression(default.value)?);
         }
         if defaults.iter().any(Option::is_some) {
-            nested.ir.fn_params.insert(
-                function,
-                crate::ir::FnParamInfo::defaults(Vec::new(), defaults),
+            let parameters = nested
+                .ir
+                .fn_params
+                .get_mut(&function)
+                .expect("a lifted local function publishes its parameter identities first");
+            assert_eq!(
+                parameters.names.len(),
+                defaults.len(),
+                "local default arguments exactly match the lifted parameter contract"
             );
+            parameters.defaults = Some(defaults);
         }
         let roots = body
             .roots()
@@ -1036,14 +1045,24 @@ impl BodyLowering<'_> {
         } else {
             None
         };
-        let callable = finish_callable_body(
-            nested.ir,
-            roots,
-            result,
-            body.has_implicit_return(),
-            unit_as_value,
-            body_origin(body),
-        )?;
+        // A `tailrec` LOCAL gets the same loop transform a declared one gets in `sink.rs`. It was
+        // never applied here, so `tailrec fun` inside a function kept its self-call and overflowed
+        // the stack at the depth the modifier exists to make safe.
+        let frame = tailrec
+            .then(|| local_tailrec_frame(nested.ir, function, nested.body_slots()))
+            .transpose()?;
+        let callable = if let Some(frame) = frame {
+            finish_tailrec_body(nested.ir, roots, frame, body_origin(body))?
+        } else {
+            finish_callable_body(
+                nested.ir,
+                roots,
+                result,
+                body.has_implicit_return(),
+                unit_as_value,
+                body_origin(body),
+            )?
+        };
         let published_local_callables = std::mem::take(&mut nested.published_local_callables);
         drop(nested);
         self.published_local_callables = published_local_callables;
@@ -1188,4 +1207,42 @@ fn body_origin(body: &FirBody) -> crate::fir::OriginId {
         .map_or(crate::fir::OriginId::from_raw(0), |statement| {
             statement.origin
         })
+}
+
+/// The tail-call frame of a LOCAL function: a physical capture prefix, then its logical parameters.
+///
+/// A local function's IR parameter list leads with its CAPTURES — values the lifting added, which
+/// the declaration never wrote and a recursive call never passes — and `BodySlots::first_parameter`
+/// already points past them. Everything after that point is a logical parameter, in declaration
+/// order: the context parameters, the extension receiver where there is one, then the value
+/// parameters. A self-call passes exactly those, and the loop step must reassign every one of them
+/// and touch no capture.
+///
+/// Counting either side alone is what left whole source forms recursive. Taking the IR list's
+/// length writes a capture slot; taking the declaration's parameter count and subtracting the
+/// context values makes `is_self_call` compare the call's argument list against a smaller number,
+/// so a contextual local declined silently — and an extension receiver, which the IR carries as an
+/// ordinary parameter at its own position, was miscounted the same way. The difference between the
+/// two ends of the list is the one number that is right for all of them.
+/// A list shorter than the prefix is an invalid checked shape, so this FAILS rather than reading
+/// it as a function with no logical parameters: saturating there would silently give the loop a
+/// frame that reassigns nothing, which is exactly the "declined in silence" failure mode above.
+fn local_tailrec_frame(
+    ir: &crate::ir::IrFile,
+    function: crate::ir::FunId,
+    slots: super::BodySlots,
+) -> Result<TailrecFrame, FirLoweringFailure> {
+    let parameters = ir.functions[function as usize].params.len();
+    let logical_parameters = parameters
+        .checked_sub(slots.first_parameter as usize)
+        .ok_or(FirLoweringFailure::MalformedLocalFrame {
+            function,
+            parameters,
+            first_parameter: slots.first_parameter,
+        })?;
+    Ok(TailrecFrame::of_local_body(
+        function,
+        slots,
+        logical_parameters,
+    ))
 }

@@ -209,7 +209,8 @@ mod tests {
         };
         let libraries = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
-        ));
+        ))
+        .expect("JVM provider initialization");
         let classifier = libraries
             .classifier(type_name("kotlin/Function30"))
             .expect("semantic Function30 classifier");

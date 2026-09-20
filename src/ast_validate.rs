@@ -436,8 +436,8 @@ impl File {
         for id in &self.decls {
             decl(self, *id, "top-level declaration list")?;
         }
-        for id in &self.expect_decls {
-            decl(self, *id, "expect declaration list")?;
+        for expect in &self.expect_decls {
+            decl(self, expect.declaration, "expect declaration list")?;
         }
         for (index, alias) in self.type_alias_decls.iter().enumerate() {
             type_alias(source, alias, &format!("file type alias {index}"))?;

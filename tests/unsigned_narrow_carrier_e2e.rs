@@ -109,7 +109,10 @@ fn common_ir_keeps_the_unsigned_identity_and_chooses_no_carrier() {
         common::stdlib_jar(),
         common::jdk_modules(),
     ]));
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(classpath));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
+            .expect("JVM provider initialization"),
+    );
     let (files, diagnostics) = common::capture_common_ir(
         "fun b(v: UByte): String = v.toString()\n\
          fun s(v: UShort): String = v.toString()\n\

@@ -64,9 +64,10 @@ fn compile(source: &str) -> (Vec<Artifact>, Vec<String>) {
     let target = host().expect("checked by the caller");
     let jar = krusty::toolchain::stdlib_jar().expect("checked by the caller");
     let classpath = std::rc::Rc::new(Classpath::new(vec![jar]));
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(
-        classpath.clone(),
-    ));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
+            .expect("JVM provider initialization"),
+    );
     let inputs = vec![SourceInput::kotlin(source).with_file_stem("Main")];
     let mut diags = DiagSink::new();
     let mut features = krusty::features::LangFeatures::new();

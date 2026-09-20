@@ -8,6 +8,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod control_flow;
+mod line_numbers;
 mod method_parameters;
 
 pub const ACC_PUBLIC: u16 = 0x0001;
@@ -2086,6 +2087,22 @@ impl ClassWriter {
     }
     /// Register a `BootstrapMethods` entry — `method_handle` is a `MethodHandle` cp index, `args` are
     /// the static-argument cp indices. Returns the `bootstrap_method_attr_index` (deduped).
+    /// Intern a `CONSTANT_MethodHandle` of ANY reference kind onto an already-interned member ref.
+    /// Relocating a bootstrap method from another class needs every kind, not only `invokestatic`.
+    pub fn method_handle_ref(&mut self, kind: u8, member: u16) -> u16 {
+        self.cp.intern(Const::MethodHandle(kind, member))
+    }
+
+    /// Intern a `CONSTANT_MethodType` for `descriptor`.
+    pub fn method_type_ref(&mut self, descriptor: &str) -> u16 {
+        self.cp.method_type(descriptor)
+    }
+
+    /// Intern a `CONSTANT_InvokeDynamic` naming a `BootstrapMethods` entry already registered here.
+    pub fn invoke_dynamic_ref(&mut self, bootstrap: u16, name: &str, descriptor: &str) -> u16 {
+        self.cp.invoke_dynamic(bootstrap, name, descriptor)
+    }
+
     pub fn add_bootstrap(&mut self, method_handle: u16, args: Vec<u16>) -> u16 {
         if let Some(i) = self
             .bootstrap_methods
@@ -3255,7 +3272,7 @@ fn write_annotation_attr(out: &mut Vec<u8>, name_index: Option<u16>, anns: &[Vec
 
 // ---- CodeBuilder: opcode emission with automatic max_stack/max_locals tracking ----------------
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Label {
     builder: u64,
     index: u32,
@@ -3285,6 +3302,10 @@ pub struct CodeBuilder {
     frames: Vec<(u32, Vec<VerifType>, Vec<VerifType>)>,
     /// `LineNumberTable` marks recorded during emission: `(start_pc, line)`. See [`Self::mark_line`].
     line_marks: Vec<(u16, u16)>,
+    /// A bytecode offset whose last recorded line mark must be KEPT when another mark lands on the
+    /// same offset: the next one appends after it instead of replacing it. See
+    /// [`CodeBuilder::mark_line_retained`].
+    retained_line_mark: Option<usize>,
     /// `(start_pc, length, slot, name, descriptor)` entries in scope-close order.
     local_entries: Vec<(u16, Option<u16>, u16, String, String)>,
     /// Whether the instruction stream is currently UNREACHABLE: an unconditional terminator
@@ -3332,6 +3353,7 @@ impl CodeBuilder {
             needs_stackmap: false,
             frames: Vec::new(),
             line_marks: Vec::new(),
+            retained_line_mark: None,
             local_entries: Vec::new(),
             dead: false,
             dead_bound: Vec::new(),
@@ -3371,30 +3393,6 @@ impl CodeBuilder {
         &self.local_entries
     }
 
-    /// Record a `LineNumberTable` entry for `line` starting at the CURRENT pc. Deduped: a re-mark
-    /// of the line already in effect is dropped; a second mark at the same pc overwrites (the
-    /// statement that actually begins an instruction wins, matching kotlinc's per-statement entries).
-    pub fn mark_line(&mut self, line: u32) {
-        if self.dead {
-            return; // the statement it would mark is dropped dead code (see `dead`)
-        }
-        if self.bytes.len() > u16::MAX as usize {
-            return; // past the classfile pc range — an entry would silently wrap
-        }
-        let line = line.min(u16::MAX as u32) as u16;
-        let pc = self.bytes.len() as u16;
-        match self.line_marks.last_mut() {
-            Some((lpc, ll)) if *lpc == pc => *ll = line,
-            Some((_, ll)) if *ll == line => {}
-            _ => self.line_marks.push((pc, line)),
-        }
-    }
-
-    /// The recorded `LineNumberTable` marks (empty for a body emitted without line info).
-    pub fn line_marks(&self) -> &[(u16, u16)] {
-        &self.line_marks
-    }
-
     /// Mark that this method creates a lambda object. Causes a StackMapTable to be emitted.
     pub fn set_needs_stackmap(&mut self) {
         self.needs_stackmap = true;
@@ -3419,8 +3417,9 @@ impl CodeBuilder {
             .collect()
     }
 
-    /// Record the frame at `label` (given locals + stack) if not already recorded.
-    /// First registration wins — early callers capture the "outer" scope before inner vars appear.
+    /// Record or merge the frame at `label` (given locals + stack). A local present on only some
+    /// incoming edges merges to `top`; this matters for initializer-free locals whose first store
+    /// is inside a branch or loop body.
     /// `stack` is the operand-stack verification types at this label (empty in most cases).
     pub fn add_frame_if_new(
         &mut self,
@@ -3429,7 +3428,22 @@ impl CodeBuilder {
         stack: Vec<VerifType>,
     ) {
         let lid = self.label_index(label) as u32;
-        if !self.frames.iter().any(|(id, _, _)| *id == lid) {
+        if let Some((_, recorded_locals, _)) = self.frames.iter_mut().find(|(id, _, _)| *id == lid)
+        {
+            let len = recorded_locals.len().max(locals.len());
+            recorded_locals.resize(len, VerifType::Top);
+            for (index, incoming) in locals.iter().enumerate() {
+                if recorded_locals[index] != *incoming {
+                    recorded_locals[index] = VerifType::Top;
+                }
+            }
+            for local in &mut recorded_locals[locals.len()..] {
+                *local = VerifType::Top;
+            }
+            while recorded_locals.last() == Some(&VerifType::Top) {
+                recorded_locals.pop();
+            }
+        } else {
             self.frames.push((lid, locals, stack));
         }
     }
@@ -4494,6 +4508,32 @@ mod tests {
         code.ret_void();
         assert_eq!(code.bytes.last(), Some(&0xb1));
         assert_eq!(code.bytes.len(), terminator_end + 1);
+    }
+
+    #[test]
+    fn frame_merge_keeps_an_interior_local_top_when_either_edge_skips_its_store() {
+        for top_edge_first in [true, false] {
+            let mut code = CodeBuilder::new(3);
+            let join = code.new_label();
+            let top = vec![VerifType::Integer, VerifType::Top, VerifType::Integer];
+            let assigned = vec![VerifType::Integer, VerifType::Integer, VerifType::Integer];
+            let (first, second) = if top_edge_first {
+                (top, assigned)
+            } else {
+                (assigned, top)
+            };
+            code.add_frame_if_new(join, first, Vec::new());
+            code.add_frame_if_new(join, second, Vec::new());
+            code.bind(join);
+            code.ret_void();
+
+            let frames = code.resolved_frames();
+            let locals = &frames[0].1;
+            assert_eq!(locals.len(), 3);
+            assert!(matches!(locals[0], VerifType::Integer));
+            assert!(matches!(locals[1], VerifType::Top));
+            assert!(matches!(locals[2], VerifType::Integer));
+        }
     }
 
     #[test]

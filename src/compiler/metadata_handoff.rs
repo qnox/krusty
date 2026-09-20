@@ -114,6 +114,30 @@ pub(super) fn accept_active_debug_metadata(
             }
         }
 
+        // A secondary constructor's own declaration line. Lowering never sees source syntax, and
+        // the constructor's body carries three different source facts (its defaults, its delegation
+        // arguments, its block) on three possible lines — so the declaration line has to arrive
+        // here, joined on the stable source order the lowered constructor already records.
+        // A secondary constructor's own declaration line. Lowering never sees source syntax, and
+        // the constructor's body carries three different source facts — its defaults, its
+        // delegation arguments, its block — on three possible lines, so a backend that reads the
+        // line off whichever descendant happens to carry provenance gets a different declaration's.
+        // The constructor itself may be lowered after this unit's syntax is gone, so the line is
+        // recorded against its stable declaration and copied onto the constructor when it is built.
+        if let Some((_, _, Some(secondary))) = active.constructor(file, declaration) {
+            if secondary.decl_line != 0 {
+                ir.secondary_ctor_lines.insert(
+                    declaration,
+                    crate::ir::IrSecondaryCtorLines {
+                        decl_line: secondary.decl_line,
+                        delegation_line: secondary.delegation_line,
+                        decl_end_line: secondary.decl_end_line,
+                        defaults: secondary.default_lines.clone(),
+                    },
+                );
+            }
+        }
+
         let property_line = active
             .property(file, declaration)
             .map(|property| property.decl_line)

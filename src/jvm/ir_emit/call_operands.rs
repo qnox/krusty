@@ -42,6 +42,44 @@ impl DescriptorArityMismatch {
 }
 
 impl Emitter<'_> {
+    fn default_operand_origins(
+        &self,
+        call: u32,
+        operands: &[u32],
+        required: bool,
+    ) -> Vec<crate::jvm::default_call_operands::DefaultOperandOrigin> {
+        if let Some(plan) = self.default_call_operands.matching(call, operands) {
+            return plan.iter().map(|operand| operand.origin).collect();
+        }
+        if required || self.default_call_operands.contains(call) {
+            self.run.set_emit_error(format!(
+                "default call operand plan does not match expression {call}"
+            ));
+        }
+        vec![crate::jvm::default_call_operands::DefaultOperandOrigin::Supplied; operands.len()]
+    }
+
+    /// Where a non-virtual call to an interface member must go under `-jvm-default=disable`.
+    ///
+    /// `super.f()` and a call to a private interface member both push the receiver first and then
+    /// `invokespecial` the interface. Under `disable` the interface holds no body, so the call has to
+    /// become `invokestatic <Iface>$DefaultImpls.f(LIface;…)` — the receiver already on the stack is
+    /// exactly the holder static's parameter 0. Returns `None` when the call should stay as it is.
+    pub(super) fn holder_call(
+        &self,
+        owner: &str,
+        descriptor: &str,
+        current_source_body: bool,
+    ) -> Option<(String, String)> {
+        if self.jvm_default != JvmDefaultMode::Disable || !current_source_body {
+            return None;
+        }
+        let holder_descriptor = descriptor
+            .strip_prefix('(')
+            .map(|rest| format!("(L{owner};{rest}"))?;
+        Some((format!("{owner}$DefaultImpls"), holder_descriptor))
+    }
+
     /// Abandon a call whose operands cannot be pushed, leaving the current arm stack-correct.
     ///
     /// The caller must `return` immediately afterwards without emitting its `invoke*`. `ret` is the
@@ -85,13 +123,61 @@ impl Emitter<'_> {
         // `JVM backend inline error: call arity mismatch`. Emitting an unverifiable call is worse,
         // and so is panicking — that loses the diagnostic and takes down the whole compilation
         let mut index = 0usize;
-        self.emit_operands_adapted(ops, code, |this, source, code| {
+        self.emit_operands_adapted(None, ops, code, |this, source, code| {
             let expression = ops[index];
             let target = physical[index];
             index += 1;
             this.adapt_physical_operand_for(expression, source, target, code);
         });
         Ok(())
+    }
+
+    /// Operands of `call`, with the call's own line put back in effect at the start of every run of
+    /// operands the CALL synthesized — the placeholder for an omitted argument, and the trailing
+    /// mask/marker group. A supplied argument between two such runs puts its own line in effect, and
+    /// the next run restores the call's, which is what kotlinc records. A call that synthesizes
+    /// nothing marks nothing here and takes its line at the invoke, as before.
+    pub(super) fn emit_call_operands(&mut self, call: u32, ops: &[u32], code: &mut CodeBuilder) {
+        let origins = self.default_operand_origins(call, ops, true);
+        self.emit_operands_adapted(Some((call, &origins)), ops, code, |_, _, _| {});
+    }
+
+    /// Put `call`'s line in effect if the operand at `position` opens a run of operands the CALL
+    /// synthesized. The plan comes from the backend pass that realized them; nothing here decides
+    /// from an operand's shape whether it was written or invented.
+    pub(super) fn mark_synthesized_operand_run(
+        &mut self,
+        call: Option<(
+            u32,
+            &[crate::jvm::default_call_operands::DefaultOperandOrigin],
+        )>,
+        operand_index: usize,
+        inside_run: &mut bool,
+        code: &mut CodeBuilder,
+    ) {
+        let Some((call, origins)) = call else {
+            return;
+        };
+        let synthesized = origins.get(operand_index).is_some_and(|origin| {
+            *origin == crate::jvm::default_call_operands::DefaultOperandOrigin::Synthesized
+        });
+        self.mark_synthesized_run_start(call, synthesized, inside_run, code);
+    }
+
+    /// The same rule for a call whose synthesized operands emission realizes itself — a defaulted
+    /// CONSTRUCTOR, whose placeholders, mask words and marker are pushed directly rather than
+    /// entered into the operand vector as expressions.
+    pub(super) fn mark_synthesized_run_start(
+        &mut self,
+        call: u32,
+        synthesized: bool,
+        inside_run: &mut bool,
+        code: &mut CodeBuilder,
+    ) {
+        if synthesized && !*inside_run {
+            self.mark_dispatch_line(call, code);
+        }
+        *inside_run = synthesized;
     }
 
     pub(super) fn emit_call_descriptor_operands(
@@ -103,20 +189,28 @@ impl Emitter<'_> {
     ) -> Result<(), DescriptorArityMismatch> {
         DescriptorArityMismatch::check(None, ops.len(), physical.len())?;
         let mut index = 0usize;
-        self.emit_operands_adapted(ops, code, |this, source, code| {
-            let parameter_index = index;
-            let expression = ops[parameter_index];
-            let target = physical[parameter_index];
-            index += 1;
-            this.adapt_physical_call_operand_for(
-                call_expression,
-                parameter_index,
-                expression,
-                source,
-                target,
-                code,
-            );
-        });
+        // The call owns any operand a default-argument realization synthesized for it, so its own
+        // line goes back into effect at the start of each such run.
+        let origins = self.default_operand_origins(call_expression, ops, false);
+        self.emit_operands_adapted(
+            Some((call_expression, &origins)),
+            ops,
+            code,
+            |this, source, code| {
+                let parameter_index = index;
+                let expression = ops[parameter_index];
+                let target = physical[parameter_index];
+                index += 1;
+                this.adapt_physical_call_operand_for(
+                    call_expression,
+                    parameter_index,
+                    expression,
+                    source,
+                    target,
+                    code,
+                );
+            },
+        );
         Ok(())
     }
 
@@ -142,7 +236,7 @@ impl Emitter<'_> {
         });
         physical.extend_from_slice(physical_params);
         let mut index = 0usize;
-        self.emit_operands_adapted(&ops, code, |this, source, code| {
+        self.emit_operands_adapted(None, &ops, code, |this, source, code| {
             let operand = ops[index];
             let target = physical[index];
             if index == 0 {

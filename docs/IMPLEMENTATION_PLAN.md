@@ -4171,3 +4171,139 @@ The completed cleanup removed every alternate qualified-name reconstruction path
 lowerer's `resolve_qualified_nested`, and the shared right-to-left JVM-name candidate generator. A
 missing segment is a typed `QualifierError`; it is never retried as a package/classifier split.
 Lowering reads `TypeInfo`/resolved-call records and fails closed when a semantic identity is missing.
+
+## Classpath `suspend inline` functions are not inlined
+
+Measured 2026-09-17 against kotlinc 2.4.10, `-jvm-target 25`. This is the dominant remaining cause
+of byte divergence in the corpus the byte-parity work is measured against, which sits at 39.96%
+(11,270 of 28,201 classes).
+
+### What happens
+
+krusty emits a real call where kotlinc splices the body:
+
+```kotlin
+// library, compiled separately and placed on the classpath
+suspend inline fun twiceSuspend(x: Int, block: (Int) -> Int): Int {
+    val y = x + 1
+    val got = fetchInt(y)
+    return block(got)
+}
+// consumer
+suspend fun runSusp(n: Int): Int = twiceSuspend(n) { it * 2 }
+```
+
+kotlinc inlines the body. krusty emits `invokestatic LibKt.twiceSuspend(...)`. The program is
+correct — the library's real method exists for Java interop — but the bytecode is not kotlinc's.
+
+Three fixtures isolate the cause to `suspend` alone:
+
+| classpath inline function | `invokedynamic` in body | inlined by krusty |
+| --- | --- | --- |
+| `twice(x: Int, block)` | no | yes |
+| `tagPlain(tag: String, block)` — string concat | yes | no |
+| `twiceSuspend(x: Int, block)` — `suspend inline` | no | **no** |
+
+The third is the control: no `invokedynamic`, still not inlined. The `invokedynamic` bail is a
+separate and smaller gap, documented at `src/jvm/inline.rs:803` and `:1591` — bootstrap methods
+cannot be relocated into the host class.
+
+### Why it is a pipeline-order problem, not a missing feature
+
+Inline bodies reach krusty through two different paths:
+
+* A SAME-FILE inline function is expanded during checked lowering (`src/fir_lower/inlining.rs`,
+  `src/fir_lower/inline_body.rs`). That is before `run_backend_passes`, so its body is ordinary IR
+  by the time pass 10 `lower_suspend` builds the state machine. Same-file `suspend inline` therefore
+  works — its locals are spilled and named correctly.
+* A CLASSPATH inline function is spliced from the library's BYTECODE at emit
+  (`src/jvm/inline.rs::splice_unified`), which runs after every backend pass. By then
+  `lower_suspend` has already turned the call into a state-machine suspension point, so there is no
+  longer anywhere for a suspending body to be placed.
+
+A suspending body must exist as IR before pass 10 or its suspension points and locals cannot take
+part in the state machine at all.
+
+### Consequence in the corpus
+
+ktor's `post`, `request` and `body` are `suspend inline`, and the corpus is generated HTTP clients
+that call little else. No call site receives an inlined body, so no continuation class contains the
+expansion's locals:
+
+```
+kotlinc n=["code","url","$this$post$iv","urlString$iv","$this$post$iv$iv", …]   11 fields
+krusty  n=["code","url"]                                                          5 fields
+```
+
+All 1,239 continuation classes in `thruster-github-httpclient` differ in field COUNT for this one
+reason, and every ktor call site additionally differs in `CODE_INSNS`.
+
+### What the work requires
+
+Materializing a classpath inline body as IR before `lower_suspend`, rather than splicing its
+bytecode at emit. That is a bytecode→IR lowering for library inline bodies, distinctly harder than
+the existing bytecode→bytecode splice, and it changes where inlining sits in the pipeline described
+above.
+
+Until it exists the corpus cannot move far past its current level: a class counts only when every
+difference is gone, and every ktor call site carries this one. Attribute-level fixes to continuation
+classes measure approximately zero against it — a round of four such fixes, each verified
+byte-for-byte on fixtures, moved the corpus by 2 classes.
+
+### How much of the corpus this gates
+
+Measured 2026-09-18 over the built corpus, comparing every class present on both sides:
+
+```
+compared 26,372 (the remaining ~1,829 are modules that do not compile)
+  identical 11,270    differing 15,102
+  continuation ($N) classes: 177 identical, 3,369 differing — 22% of the gap
+
+differing by module
+   7,820  thruster-github-httpclient
+   3,321  thruster-digitalocean-httpclient
+   2,510  thruster-kubernetes-httpclient
+     192  control
+     159  mission-core
+```
+
+Three generated HTTP-client modules hold 13,651 of the 15,102 differing classes — **90%** — and their
+code is almost entirely ktor `suspend inline` calls. The gap therefore covers both the continuation
+classes and the enclosing methods' own code, and it is one cause rather than a long tail. Everything
+else fixed so far — line tables, spill order and naming, protected ranges, `@DebugMetadata` arrays —
+lives in the other 10%, which is why individually correct work has repeatedly measured zero.
+
+### Why it cannot be done incrementally
+
+kotlinc inlines at the BYTECODE level and runs its coroutine transform afterwards, on already-inlined
+bytecode. krusty's CPS is an IR→IR backend pass (`lower_suspend`, pass 10) that runs BEFORE any
+classpath body is spliced at emit. Matching kotlinc means changing that order, which is why no
+increment inside the current pipeline reaches it.
+
+Two designs, neither started:
+
+1. **Lower the library body into IR before pass 10.** A bytecode→IR translation for inline bodies,
+   run when the callee is `suspend inline` and from the classpath. The CPS pass then sees ordinary
+   IR and everything downstream — spill sets, `@DebugMetadata`, debug lines — follows for free,
+   because that is exactly what already happens for a SAME-FILE `suspend inline` function today.
+   Cost: a translator for whatever bytecode real libraries contain, with a decline path for shapes it
+   cannot model. Risk is contained by that decline path: an untranslatable body falls back to the
+   real call krusty emits now.
+2. **Move the suspend transform after splicing**, so it operates on spliced bytecode as kotlinc's
+   does. Cost: re-expressing an IR→IR pass over bytecode, losing the semantic facts the IR carries
+   (`suspend_calls`, scope lists, checked types) that the current implementation depends on.
+
+Design 1 preserves the existing CPS implementation and its tests, and its failure mode is the status
+quo rather than a miscompile. It is the one to cost out first.
+
+### Fixture note
+
+Reproducing this REQUIRES compiling the library with kotlinc first and passing it on `-classpath`. A
+same-file fixture exercises the checked-lowering path instead and will show krusty matching kotlinc
+exactly, which is what it does there.
+
+The three shapes are owned by `tests/classpath_inline_splice_e2e.rs`, which asserts the emitted call
+or splice rather than a successful run — a declined splice still runs correctly, the library's real
+method being present for Java interop. That test also pins the library's JVM target at 25: string
+concatenation compiles to `invokedynamic` only from target 9, so on a lower target the concatenating
+body contains none and krusty splices it.

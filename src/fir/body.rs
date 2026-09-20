@@ -1,4 +1,9 @@
+use super::delegate_calls::{FirDelegateCall, FirPropertyDelegatePlan};
+use super::local_callables::BodyLocalCallableDeclarationId;
 use std::collections::HashMap;
+
+pub(crate) mod debug_lines;
+pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};
 
 use crate::diag::Span;
 use crate::kt_string::KtString;
@@ -266,9 +271,17 @@ pub enum FirIntrinsic {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FirClassifierCallable {
     EnumValues,
+    /// The classifier's own implicit `valueOf` member — `E.valueOf(name)`.
     EnumValueOf,
-    ArrayConstructor { element: ResolvedTy },
-    SamConstructor { conversion: Box<FirSamConversion> },
+    /// The standard library's top-level `enumValueOf<E>(name)`. It resolves to the same lookup as
+    /// the member, but it is a different — and `inline` — declaration, so the two stay apart.
+    TopLevelEnumValueOf,
+    ArrayConstructor {
+        element: ResolvedTy,
+    },
+    SamConstructor {
+        conversion: Box<FirSamConversion>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -382,34 +395,6 @@ pub struct FirCall {
     pub substitutions: Box<[FirTypeSubstitution]>,
 }
 
-/// One checker-selected delegated-property convention. `extension` records receiver placement;
-/// the target itself is already a stable module/provider identity with its final semantic types.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FirDelegateCall {
-    pub target: FirCallTarget,
-    pub parameters: Box<[ResolvedTy]>,
-    pub result: ResolvedTy,
-    pub extension: bool,
-    pub dispatch_receiver: Option<FirDelegateDispatchReceiver>,
-}
-
-/// Stable identity of a local function within one freshly parsed source declaration stream.
-///
-/// This is deliberately not a parser-arena id or a source range. The body checker assigns the
-/// ordinal from the local-function declaration stream on both parses, allowing a retained inline
-/// FIR body to name one of its own local callables without retaining syntax coordinates.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct BodyLocalCallableDeclarationId {
-    owner: BodyOwnerId,
-    ordinal: u32,
-}
-
-impl BodyLocalCallableDeclarationId {
-    pub(crate) const fn new(owner: BodyOwnerId, ordinal: u32) -> Self {
-        Self { owner, ordinal }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct LocalBinding {
     pub(crate) value: LocalValueId,
@@ -510,38 +495,6 @@ impl ClassBodyContext {
     }
 }
 
-/// Exact implicit dispatch receiver selected for a member-extension delegate convention. The
-/// delegate storage remains the extension receiver; this coordinate identifies the independent
-/// receiver that owns the selected convention declaration.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum FirDelegateDispatchReceiver {
-    Scoped {
-        ty: ResolvedTy,
-        current: bool,
-        depth: u32,
-    },
-    ContextBinding {
-        ty: ResolvedTy,
-        name: Box<str>,
-        shadow_depth: u32,
-    },
-    Singleton {
-        ty: ResolvedTy,
-        classifier: TypeName,
-    },
-}
-
-/// Declaration-level semantics attached only to a delegated-property body unit. The ordinary body
-/// arena still owns the delegate initializer expression; this compact plan is enough for common
-/// lowering to synthesize storage and accessor bodies without retaining syntax or resolver state.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FirPropertyDelegatePlan {
-    pub storage_type: ResolvedTy,
-    pub provide_delegate: Option<FirDelegateCall>,
-    pub get_value: FirDelegateCall,
-    pub set_value: Option<FirDelegateCall>,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FirPropertyDispatch {
     Ordinary,
@@ -577,6 +530,11 @@ pub enum FirPropertyReferenceTarget {
     /// a symbolic declaration signature.
     SpecializedModule {
         property: PropertyId,
+        /// Accessor declaration spellings carried by the provider-selected property candidate.
+        /// These are declaration facts, not names reconstructed from the property spelling by a
+        /// later backend pass.
+        getter_name: Box<str>,
+        setter_name: Option<Box<str>>,
         receiver: Option<ResolvedTy>,
         extension_receiver: bool,
         property_type: ResolvedTy,
@@ -1856,10 +1814,10 @@ pub enum FirStatementKind {
         declaration: BodyLocalCallableDeclarationId,
         callable: LocalCallableId,
         suspend: bool,
-        /// The source declared this local function `tailrec`. Carried like `suspend` because a
-        /// body-local declaration has no module header to read the modifier back from, and a
-        /// consumer has to know that the constant-stack promise is unmet: no phase rewrites a
-        /// LOCAL `tailrec` body into a loop.
+        /// The source declared this local function `tailrec`. Carried like `suspend` because it is
+        /// a fact about the DECLARATION that lowering needs and cannot recover from the body: a
+        /// self-call in a tail position looks the same whether or not the author asked for the
+        /// loop, and only this says the constant-stack promise was made.
         tailrec: bool,
         body: Box<FirBody>,
     },
@@ -1884,14 +1842,6 @@ pub enum FirDestructureEntry {
 pub struct FirStatement {
     pub origin: OriginId,
     pub kind: FirStatementKind,
-}
-
-/// Line-only source metadata carried through consuming FIR lowering. These values are output facts,
-/// not source locators: they cannot be used to recover text or reparse a body.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct FirExpressionDebugLines {
-    pub source: u32,
-    pub end: u32,
 }
 
 /// One checked body unit. Its arenas are body-local and are moved as a single value into lowering;
@@ -1926,7 +1876,7 @@ pub struct FirBody {
     /// Physical source-line count for debug output; it carries no source lookup capability.
     source_line_count: u32,
     expression_debug_lines: Vec<FirExpressionDebugLines>,
-    statement_debug_lines: Vec<u32>,
+    statement_debug_lines: Vec<FirStatementDebugLines>,
     context_receiver_types: Vec<ResolvedTy>,
     context_value_count: u32,
     parameters: Vec<FirValueParameter>,
@@ -2162,93 +2112,6 @@ impl FirBody {
 
     pub fn debug_value_name(&self, value: LocalValueId) -> Option<&str> {
         self.debug_value_names.get(&value).map(Box::as_ref)
-    }
-
-    pub fn expression_debug_lines(&self, expression: FirExprId) -> FirExpressionDebugLines {
-        self.expression_debug_lines
-            .get(expression.raw() as usize)
-            .copied()
-            .unwrap_or_default()
-    }
-
-    pub fn statement_debug_line(&self, statement: FirStatementId) -> u32 {
-        self.statement_debug_lines
-            .get(statement.raw() as usize)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    pub const fn source_line_count(&self) -> u32 {
-        self.source_line_count
-    }
-
-    pub(crate) fn attach_debug_lines(
-        &mut self,
-        source: SourceFileId,
-        source_line_count: u32,
-        origins: &OriginStore,
-        expression_lines: &HashMap<Span, FirExpressionDebugLines>,
-        statement_lines: &HashMap<Span, u32>,
-    ) {
-        self.source_line_count = source_line_count;
-        let source_span = |origin| {
-            let mut current = origin;
-            loop {
-                match origins.get(current)? {
-                    Origin::Source { file, span } => return (file == source).then_some(span),
-                    Origin::Synthetic { cause, .. } => current = cause,
-                }
-            }
-        };
-        self.expression_debug_lines = self
-            .expressions
-            .iter()
-            .map(|expression| {
-                source_span(expression.origin)
-                    .and_then(|span| expression_lines.get(&span).copied())
-                    .unwrap_or_default()
-            })
-            .collect();
-        self.statement_debug_lines = self
-            .statements
-            .iter()
-            .map(|statement| {
-                source_span(statement.origin)
-                    .and_then(|span| statement_lines.get(&span).copied())
-                    .unwrap_or(0)
-            })
-            .collect();
-        for statement in &mut self.statements {
-            if let FirStatementKind::LocalFunction { body, .. } = &mut statement.kind {
-                body.attach_debug_lines(
-                    source,
-                    source_line_count,
-                    origins,
-                    expression_lines,
-                    statement_lines,
-                );
-            }
-        }
-        for expression in &mut self.expressions {
-            if let FirExprKind::Lambda { body, .. } = &mut expression.kind {
-                body.attach_debug_lines(
-                    source,
-                    source_line_count,
-                    origins,
-                    expression_lines,
-                    statement_lines,
-                );
-            }
-        }
-        for body in &mut self.inline_nested_declaration_bodies {
-            body.attach_debug_lines(
-                source,
-                source_line_count,
-                origins,
-                expression_lines,
-                statement_lines,
-            );
-        }
     }
 
     pub fn set_context_receiver_types(&mut self, receivers: Vec<ResolvedTy>) {
@@ -2693,7 +2556,8 @@ impl FirBody {
     pub fn add_statement(&mut self, statement: FirStatement) -> FirStatementId {
         let id = FirStatementId::from_raw(next_id(self.statements.len(), "FIR statements"));
         self.statements.push(statement);
-        self.statement_debug_lines.push(0);
+        self.statement_debug_lines
+            .push(FirStatementDebugLines::default());
         id
     }
 
@@ -2884,7 +2748,7 @@ impl FirBody {
                 .map(|name| std::mem::size_of::<LocalValueId>() + name.len())
                 .sum::<usize>()
             + self.expression_debug_lines.len() * std::mem::size_of::<FirExpressionDebugLines>()
-            + self.statement_debug_lines.len() * std::mem::size_of::<u32>()
+            + self.statement_debug_lines.len() * std::mem::size_of::<FirStatementDebugLines>()
             + self.default_values.len() * std::mem::size_of::<FirDefaultValue>()
             + self.context_receiver_types.len() * std::mem::size_of::<ResolvedTy>()
             + self.captures.len() * std::mem::size_of::<FirCapture>()

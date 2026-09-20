@@ -184,9 +184,10 @@ fn expected_failures() -> BTreeMap<&'static str, &'static str> {
 /// Compile one case with the native backend; the object, or why not.
 fn compile(source: &str, stem: &str, target: NativeTarget) -> Result<Vec<u8>, Outcome> {
     let classpath = CLASSPATH.with(std::rc::Rc::clone);
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(
-        classpath.clone(),
-    ));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
+            .expect("JVM provider initialization"),
+    );
     let prepared = krusty::conformance::prepare_test_source(source);
     let inputs = vec![SourceInput::kotlin(&prepared).with_file_stem(stem)];
     let stems = vec![stem.to_string()];

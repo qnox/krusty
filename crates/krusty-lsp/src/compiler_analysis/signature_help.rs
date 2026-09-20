@@ -1534,7 +1534,7 @@ mod tests {
     fn jvm_builtin_constraints_come_from_the_platform_type_oracle() {
         let analysis = super::super::analyze_source_set(
             &[""],
-            Box::new(JvmLibraries::new(Rc::new(Classpath::new(Vec::new())))),
+            JvmLibraries::new(Rc::new(Classpath::new(Vec::new()))),
         );
         let matcher = analysis.symbols.source_constructor_matcher();
         assert!(matcher.type_names_match(type_name("left/Box"), type_name("left/Box")));
@@ -1578,7 +1578,7 @@ mod tests {
         let source = "fun <T> identity(value: T): T = value\n";
         let analysis = super::super::analyze_source_set(
             &[source],
-            Box::new(JvmLibraries::new(Rc::new(Classpath::new(Vec::new())))),
+            JvmLibraries::new(Rc::new(Classpath::new(Vec::new()))),
         );
         let declaration = analysis.files[0].file.decls[0];
         let signature = analysis
