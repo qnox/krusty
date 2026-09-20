@@ -5,8 +5,7 @@ use super::{
     collection_serializer_builder, generated_serializer_accessor, is_nullable, kserializer_of,
     serializer_of_name, type_is_contextual, wrap_nullable_serializer, KSERIALIZER_FQ,
 };
-use crate::ir::{Callee, ClassId, ExprId, IrExpr, IrFile};
-use crate::libraries::InlineKind;
+use crate::ir::{ClassId, ExprId, IrExpr, IrFile};
 use crate::plugins::PluginContext;
 use crate::types::{type_name, Ty, TypeName};
 
@@ -17,7 +16,7 @@ pub(super) enum ElementSerializerPlan {
         arguments: Vec<ElementSerializerPlan>,
     },
     Collection {
-        builder: &'static str,
+        builder: TypeName,
         arguments: Vec<ElementSerializerPlan>,
     },
     Nullable(Box<ElementSerializerPlan>),
@@ -213,11 +212,9 @@ pub(super) fn element_serializer_plan(
             arguments: Vec::new(),
         });
     }
-    // A standard COLLECTION field (`List<T>`/`Set<T>`/`Map<K,V>`, read-only or mutable) serializes through
-    // the kotlinx builtin collection serializer over its element serializer(s):
-    // `ListSerializer(<T>)` / `SetSerializer(<T>)` / `MapSerializer(<K>, <V>)` (top-level functions in
-    // `BuiltinSerializersKt`). The element serializers are derived recursively; if any can't be, the whole
-    // collection can't (a clean `null`/bail, as before).
+    // A standard COLLECTION field (`List<T>`/`Set<T>`/`Map<K,V>`, read-only or mutable) serializes
+    // through the kotlinx collection serializer class over its element serializer(s). The element
+    // serializers are derived recursively; if any cannot be, the whole collection cannot.
     if let Some((builder, n)) = collection_serializer_builder(fq_name) {
         if type_args.len() >= n {
             let mut arguments = Vec::with_capacity(n);
@@ -434,16 +431,20 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
                 .into_iter()
                 .map(|argument| emit_element_serializer(ir, argument))
                 .collect();
-            let parameters = "Lkotlinx/serialization/KSerializer;".repeat(arity);
-            ir.add_expr(IrExpr::Call {
-                callee: Callee::Static {
-                    owner: type_name("kotlinx/serialization/builtins/BuiltinSerializersKt"),
-                    name: builder.to_string(),
-                    descriptor: format!("({parameters})Lkotlinx/serialization/KSerializer;"),
-                    inline: InlineKind::None,
-                },
-                dispatch_receiver: None,
+            // CONSTRUCTED, not obtained from the `BuiltinSerializersKt` factory that returns the
+            // same thing: `ListSerializer(x)` is an inline stdlib function over
+            // `ArrayListSerializer(x)`, and kotlinc's plugin emits the construction.
+            ir.add_expr(IrExpr::New {
+                internal: builder,
                 args: arguments,
+                ctor_params: Some(vec![class_ty(KSERIALIZER_FQ); arity]),
+                ctor_desc: Some(format!(
+                    "({})V",
+                    "Lkotlinx/serialization/KSerializer;".repeat(arity)
+                )),
+                external_target: None,
+                defaults: Box::new([]),
+                default_prefix_count: 0,
             })
         }
         ElementSerializerPlan::Nullable(inner) => {

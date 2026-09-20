@@ -846,9 +846,14 @@ fn wrap_nullable_serializer(ir: &mut IrFile, base: ExprId) -> ExprId {
     })
 }
 
-/// The `BuiltinSerializersKt` factory name + type-argument count for a standard collection type, or `None`.
-/// `List`/`Set`/`Collection`/`Iterable` → 1-arg `ListSerializer`/`SetSerializer`; `Map` → 2-arg `MapSerializer`.
-fn collection_serializer_builder(classifier: TypeName) -> Option<(&'static str, usize)> {
+/// The kotlinx collection serializer CLASS for a standard collection type, and its type-argument
+/// count.
+///
+/// kotlinc's plugin CONSTRUCTS these directly rather than calling the `BuiltinSerializersKt`
+/// factory that returns the same thing — `ListSerializer(x)` is an inline stdlib function over
+/// `ArrayListSerializer(x)`. The two serialize identically and differ in every byte of the method
+/// that builds them.
+fn collection_serializer_builder(classifier: TypeName) -> Option<(TypeName, usize)> {
     if [
         "kotlin/collections/List",
         "kotlin/collections/MutableList",
@@ -861,19 +866,28 @@ fn collection_serializer_builder(classifier: TypeName) -> Option<(&'static str, 
     .map(type_name)
     .any(|candidate| candidate == classifier)
     {
-        Some(("ListSerializer", 1))
+        Some((
+            type_name("kotlinx/serialization/internal/ArrayListSerializer"),
+            1,
+        ))
     } else if ["kotlin/collections/Set", "kotlin/collections/MutableSet"]
         .into_iter()
         .map(type_name)
         .any(|candidate| candidate == classifier)
     {
-        Some(("SetSerializer", 1))
+        Some((
+            type_name("kotlinx/serialization/internal/LinkedHashSetSerializer"),
+            1,
+        ))
     } else if ["kotlin/collections/Map", "kotlin/collections/MutableMap"]
         .into_iter()
         .map(type_name)
         .any(|candidate| candidate == classifier)
     {
-        Some(("MapSerializer", 2))
+        Some((
+            type_name("kotlinx/serialization/internal/LinkedHashMapSerializer"),
+            2,
+        ))
     } else {
         None
     }
