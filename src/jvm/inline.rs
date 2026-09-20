@@ -5,7 +5,7 @@
 //! local remapping, and `reifiedOperationMarker` handling layer on top in later phases.
 
 use super::classfile::ClassWriter;
-use super::classreader::{utf8_value, MethodCode, C};
+use super::classreader::{utf8_value, MethodCode, MethodLocal, C};
 use std::collections::HashMap;
 
 mod relocation;
@@ -1645,6 +1645,146 @@ fn param_offsets(descriptor: &str) -> Option<Vec<u16>> {
 /// (the former `branchless_lambda_segments`). The caller emits the non-lambda arguments first (empty
 /// baseline otherwise) and binds the returned frames + the join frame. `None` on an unsupported shape
 /// (exception handlers, reified, an unparseable body) ⇒ the caller falls back / skips, never miscompiles.
+/// Instruction indices consumed by an entry null-check triplet (`aload`/`ldc`/`invokestatic
+/// Intrinsics.checkNotNull*`), which the splice deletes. A lambda's `aload` inside one is not a use.
+pub fn null_check_deletions(insns: &[Insn], src_cp: &[C]) -> std::collections::HashSet<usize> {
+    let mut deleted = std::collections::HashSet::new();
+    for (index, insn) in insns.iter().enumerate() {
+        let Insn::Plain { op: 0xb8, operands } = insn else {
+            continue;
+        };
+        if operands.len() != 2 || index < 2 {
+            continue;
+        }
+        let pool = (operands[0] as u16) << 8 | operands[1] as u16;
+        if let Some(("kotlin/jvm/internal/Intrinsics", name)) = methodref_target(src_cp, pool) {
+            if name == "checkNotNullParameter" || name == "checkNotNullExpressionValue" {
+                deleted.extend(index - 2..=index);
+            }
+        }
+    }
+    deleted
+}
+
+/// Pair each substituted lambda with the `FunctionN.invoke` its object load owns:
+/// `(lambda index, receiver-load index, invoke index)`, in body order.
+///
+/// The receiver load owns the first `invoke` before another substituted lambda's load; arguments may
+/// sit between the two (`action.invoke(element)`), so adjacency is not required. One definition,
+/// because the splice and the slot-base calculation must agree on which site belongs to which lambda
+/// or the body and its frame would be built against different numbering.
+pub fn lambda_invoke_sites(
+    insns: &[Insn],
+    src_cp: &[C],
+    lambda_slots: &[(usize, u16)],
+    deleted: &std::collections::HashSet<usize>,
+) -> Option<Vec<(usize, usize, usize)>> {
+    let mut found = Vec::new();
+    for (load_idx, instruction) in insns.iter().enumerate() {
+        if deleted.contains(&load_idx) {
+            continue;
+        }
+        let Some(&(lambda, _)) = lambda_slots
+            .iter()
+            .find(|(_, slot)| is_aload_of(instruction, *slot))
+        else {
+            continue;
+        };
+        let site = insns
+            .iter()
+            .enumerate()
+            .skip(load_idx + 1)
+            .take_while(|(index, candidate)| {
+                deleted.contains(index)
+                    || !lambda_slots
+                        .iter()
+                        .any(|(_, slot)| is_aload_of(candidate, *slot))
+            })
+            .find_map(|(index, candidate)| {
+                let Insn::Plain { op: 0xb9, operands } = candidate else {
+                    return None;
+                };
+                let pool = (*operands.first()? as u16) << 8 | *operands.get(1)? as u16;
+                let (class, name) = methodref_target(src_cp, pool)?;
+                (name == "invoke" && class.starts_with("kotlin/jvm/functions/Function"))
+                    .then_some(index)
+            })?;
+        found.push((lambda, load_idx, site));
+    }
+    Some(found)
+}
+
+/// The first local slot free at `offset`, read from the method's own debug table: one past the
+/// highest slot whose declared range covers that point.
+///
+/// This is where an inlined lambda's own locals go. Using the host's `max_locals` instead would put
+/// them above locals the host has not reached yet — the reference compiler reuses those slots, so a
+/// body inlined at a point where a later local is not yet live lands one slot lower than krusty's.
+/// `minimum` is the parameter area, which is live throughout whether or not the table says so.
+pub fn free_local_slot_at(locals: &[MethodLocal], offset: u16, minimum: u16) -> u16 {
+    locals
+        .iter()
+        .filter(|local| {
+            offset >= local.start_pc && offset < local.start_pc.saturating_add(local.length)
+        })
+        .map(|local| local.slot + descriptor_slot_width(&local.descriptor))
+        .fold(minimum, u16::max)
+}
+
+/// Slots a local of this descriptor occupies.
+fn descriptor_slot_width(descriptor: &str) -> u16 {
+    match descriptor.as_bytes().first() {
+        Some(b'J') | Some(b'D') => 2,
+        _ => 1,
+    }
+}
+
+/// Where each substituted lambda's own locals begin, in the CALLER's slot numbering.
+///
+/// One entry per `lambda_params` position, in that order. `None` when the body cannot be decoded or
+/// a lambda parameter has no `FunctionN.invoke` this splice would replace — the caller then has no
+/// splice to perform either.
+pub fn spliced_lambda_slot_bases(
+    body: &MethodCode,
+    descriptor: &str,
+    lambda_params: &[usize],
+    base: u16,
+) -> Option<Vec<u16>> {
+    let offsets_of_param = param_offsets(descriptor)?;
+    let insns = disassemble(&body.code)?;
+    let byte_of = old_offsets(&body.code)?;
+    let deleted = null_check_deletions(&insns, &body.source_cp);
+    let lambda_slots = lambda_params
+        .iter()
+        .enumerate()
+        .map(|(lambda, &parameter)| {
+            offsets_of_param
+                .get(parameter)
+                .copied()
+                .map(|s| (lambda, s))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let removed: Vec<u16> = lambda_slots.iter().map(|&(_, slot)| slot).collect();
+    let compact = |slot: u16| -> u16 {
+        base + slot - removed.iter().filter(|&&gone| gone < slot).count() as u16
+    };
+    // The parameter area is live throughout even where the debug table does not say so.
+    let parameter_end = offsets_of_param
+        .last()
+        .map(|&last| last + 1)
+        .unwrap_or_default();
+    let sites = lambda_invoke_sites(&insns, &body.source_cp, &lambda_slots, &deleted)?;
+    let mut bases = vec![None; lambda_params.len()];
+    for (lambda, _, site) in sites {
+        let offset = u16::try_from(*byte_of.get(site)?).ok()?;
+        let free = free_local_slot_at(&body.locals, offset, parameter_end);
+        // A lambda invoked from several sites takes the highest, so one body suits them all.
+        let at = compact(free);
+        bases[lambda] = Some(bases[lambda].map_or(at, |had: u16| had.max(at)));
+    }
+    bases.into_iter().collect()
+}
+
 pub fn splice_unified(
     body: &MethodCode,
     descriptor: &str,
@@ -1783,37 +1923,9 @@ pub fn splice_unified(
     let mut lambda_sites = Vec::new(); // original invoke index per occurrence
     let mut lambda_loads = Vec::new(); // original receiver-load index per occurrence
     let mut site_lambdas = Vec::new(); // input lambda index per occurrence
-    for (load_idx, instruction) in insns.iter().enumerate() {
-        if deleted.contains(&load_idx) {
-            continue;
-        }
-        let Some(&(lambda, _)) = lambda_slots
-            .iter()
-            .find(|(_, slot)| is_aload_of(instruction, *slot))
-        else {
-            continue;
-        };
-        // The receiver load owns the first FunctionN.invoke before another substituted-lambda load.
-        // Arguments may sit between the two (`action.invoke(element)`), so adjacency is not required.
-        let site = insns
-            .iter()
-            .enumerate()
-            .skip(load_idx + 1)
-            .take_while(|(index, candidate)| {
-                deleted.contains(index)
-                    || !lambda_slots
-                        .iter()
-                        .any(|(_, slot)| is_aload_of(candidate, *slot))
-            })
-            .find_map(|(index, candidate)| {
-                let Insn::Plain { op: 0xb9, operands } = candidate else {
-                    return None;
-                };
-                let pool = (*operands.first()? as u16) << 8 | *operands.get(1)? as u16;
-                let (class, name) = methodref_target(&body.source_cp, pool)?;
-                (name == "invoke" && class.starts_with("kotlin/jvm/functions/Function"))
-                    .then_some(index)
-            })?;
+    for (lambda, load_idx, site) in
+        lambda_invoke_sites(&insns, &body.source_cp, &lambda_slots, &deleted)?
+    {
         edits.push(Edit {
             at: load_idx,
             len: 1,
@@ -2613,6 +2725,50 @@ mod tests {
         let mut t = disassemble(&[0x1a, 0xb1]).unwrap(); // iload_0; return
         shift_locals(&mut t, 10).unwrap();
         assert_eq!(assemble(&t), [0x15, 0x0a, 0xb1]); // iload 10; return
+    }
+
+    /// An inlined lambda's locals go where the host's frame is free AT THE INVOKE. Reading the
+    /// host's `max_locals` instead would put them above locals the host has not reached yet.
+    #[test]
+    fn the_free_slot_is_read_from_the_ranges_covering_that_point() {
+        let local = |start_pc, length, slot, descriptor: &str| MethodLocal {
+            start_pc,
+            length,
+            slot,
+            name: String::new(),
+            descriptor: descriptor.to_string(),
+        };
+        // f(0) is the parameter area; $i$f(1) spans the body; r(2) only starts at pc 20.
+        let locals = [
+            local(0, 40, 0, "Lkotlin/jvm/functions/Function0;"),
+            local(2, 38, 1, "I"),
+            local(20, 20, 2, "I"),
+        ];
+        assert_eq!(
+            free_local_slot_at(&locals, 10, 1),
+            2,
+            "r is not live at the invoke, so its slot is free"
+        );
+        assert_eq!(
+            free_local_slot_at(&locals, 25, 1),
+            3,
+            "past r's declaration the next free slot is above it"
+        );
+        // The parameter area counts even where no range covers the point.
+        assert_eq!(free_local_slot_at(&[], 10, 4), 4);
+    }
+
+    /// A `long`/`double` local occupies two slots, so the next free one is two above it.
+    #[test]
+    fn a_wide_local_reserves_both_of_its_slots() {
+        let locals = [MethodLocal {
+            start_pc: 0,
+            length: 40,
+            slot: 1,
+            name: String::new(),
+            descriptor: "J".to_string(),
+        }];
+        assert_eq!(free_local_slot_at(&locals, 10, 0), 3);
     }
 
     /// A substituted lambda's parameter slot is closed, not merely left reserved: every host local

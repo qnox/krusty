@@ -12974,6 +12974,29 @@ impl<'a> Emitter<'a> {
             .count() as u16;
         let top_local = base + body.max_locals.saturating_sub(spliced_away);
         self.next_slot = self.next_slot.max(top_local);
+        // Where each substituted lambda's own locals go. Not `top_local`: the reference compiler
+        // puts them at the first slot free WHERE THE INVOKE IS, reusing slots belonging to host
+        // locals that are not live yet, so a body inlined before such a local lands one slot lower.
+        let lambda_parameters: Vec<usize> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, &argument)| {
+                matches!(
+                    self.ir.expr(argument),
+                    IrExpr::Lambda {
+                        inline_body: Some(_),
+                        ..
+                    }
+                )
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let lambda_slot_bases = crate::jvm::inline::spliced_lambda_slot_bases(
+            body,
+            descriptor,
+            &lambda_parameters,
+            base,
+        );
         // Build each lambda argument's pre-relocated body (leaving its boxed result on the stack), and
         // its own (branchy-predicate) frames — resolved to byte offsets within the body, relocated below.
         let mut lam_splices: Vec<crate::jvm::inline::LambdaSplice> = Vec::new();
@@ -13068,6 +13091,17 @@ impl<'a> Emitter<'a> {
                 // type, then store it (top = last). Then run the body, then box the result to `Object`
                 // (matching the replaced `invoke`'s `Object` result).
                 scratch.set_stack(arity as u16);
+                // This lambda's own locals start where the host's frame is free at the invoke, not
+                // above every host local. `None` only when the body could not be decoded, in which
+                // case the splice below declines too.
+                let ordinal = lambda_parameters
+                    .iter()
+                    .position(|&parameter| parameter == i)
+                    .expect("a substituted lambda is one of the collected lambda parameters");
+                let mut lambda_slot = lambda_slot_bases
+                    .as_ref()
+                    .and_then(|bases| bases.get(ordinal).copied())
+                    .unwrap_or(self.next_slot);
                 let mut param_slots: Vec<(u16, Ty)> = cap_slots;
                 param_slots.extend(std::iter::repeat_n((0u16, Ty::Error), arity));
                 for j in (0..arity).rev() {
@@ -13085,11 +13119,22 @@ impl<'a> Emitter<'a> {
                         let ci = self.cw.class_ref(&internal);
                         scratch.checkcast(ci);
                     }
-                    let slot = self.next_slot;
-                    self.next_slot += slot_words(jt);
+                    let slot = lambda_slot;
+                    lambda_slot += slot_words(jt);
+                    self.next_slot = self.next_slot.max(lambda_slot);
                     store(jt, slot, &mut scratch);
                     param_slots[n_cap + j] = (slot, jt);
                 }
+                // The reference compiler opens an inlined lambda body with its own inline-depth
+                // marker — `iconst_0; istore` into a `$i$a$-<callee>-<caller>` local — exactly as it
+                // opens an inlined function body with `$i$f$<callee>`. The host's marker arrives
+                // inside the relocated host body; this one has no other source, because the lambda
+                // body is emitted from IR rather than relocated.
+                let depth_marker = lambda_slot;
+                lambda_slot += 1;
+                self.next_slot = self.next_slot.max(lambda_slot);
+                scratch.push_int(0, self.cw);
+                store(Ty::Int, depth_marker, &mut scratch);
                 let body_ret = self.emit_fn_body_inline(inline_body, &param_slots, &mut scratch);
                 if body_ret.is_jvm_scalar() {
                     // The erased `invoke` result is `Object`, so reverse the same semantic adapter

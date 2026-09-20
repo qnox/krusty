@@ -28,6 +28,11 @@ inline fun once(f: () -> Int): Int {
     val r = f()
     return r + 1
 }
+
+inline fun pair(f: (Int, Int) -> Int): Int {
+    val r = f(7, 8)
+    return r + 1
+}
 "#;
 
 #[test]
@@ -74,6 +79,42 @@ fn two_spliced_lambdas_close_two_slots() {
         }
     "#;
     let Some(output) = common::expect_box_run_against_ref("inline_splice_two_lambdas", LIB, MAIN)
+    else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// A multi-parameter lambda stores its arguments into the host frame in reverse (top = last) and
+/// then opens with its own inline-depth marker, so three locals of the spliced body land above the
+/// host's live ones. Getting that base wrong overlaps a host local that is still live.
+#[test]
+fn a_multi_parameter_lambda_takes_consecutive_slots_above_the_live_host_frame() {
+    const MAIN: &str = r#"
+        fun box(): String {
+            val v = pair { x, y -> x * y }
+            return if (v == 57) "OK" else "FAIL: " + v
+        }
+    "#;
+    let Some(output) = common::expect_box_run_against_ref("inline_splice_two_params", LIB, MAIN)
+    else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// The lambda reads a capture AND its own parameter: the capture binds to the caller's slot while
+/// the parameter belongs to the spliced frame, so the two allocations must not collide.
+#[test]
+fn a_captured_value_and_a_lambda_parameter_come_from_different_frames() {
+    const MAIN: &str = r#"
+        fun box(): String {
+            val bump = 3
+            val v = twice(10) { it + bump }
+            return if (v == 27) "OK" else "FAIL: " + v
+        }
+    "#;
+    let Some(output) = common::expect_box_run_against_ref("inline_splice_capture", LIB, MAIN)
     else {
         return;
     };
