@@ -8232,13 +8232,16 @@ fn collect_signatures_with_cp_impl(
                             // declaration set or rediscovering `reified` in individual call paths.
                             .with_requires_splice(reified)
                             .with_has_reified_type_params(reified),
-                        annotations: if compact_headers.is_some() {
-                            resolved_header_annotation_identities(
-                                &callable_header.annotations,
-                                &class_names,
+                        annotations: match compact_headers {
+                            Some(headers) => streamed_resolved_declaration_annotations(
+                                headers,
+                                stable_declaration.expect(
+                                    "a production source function has a stable declaration",
+                                ),
+                                &table.resolved_annotations,
                             )
-                        } else {
-                            resolved_annotation_identities(&f.annotations, &class_names)
+                            .expect("a production source function has compact annotation bindings"),
+                            None => resolved_annotation_identities(&f.annotations, &class_names),
                         },
                         equality_bound: None,
                         vararg_index,
@@ -9066,10 +9069,24 @@ fn collect_signatures_with_cp_impl(
                                     visibility: header.visibility,
                                     source_visible: true,
                                     is_const: false,
-                                    annotations: resolved_header_annotation_identities(
-                                        &header.annotations,
-                                        &class_names,
-                                    ),
+                                    annotations: match compact_headers {
+                                        Some(headers) => {
+                                            streamed_resolved_declaration_annotations(
+                                                headers,
+                                                header.stable_declaration.expect(
+                                                    "a production constructor property has a stable declaration",
+                                                ),
+                                                &table.resolved_annotations,
+                                            )
+                                            .expect(
+                                                "a production constructor property has compact annotation bindings",
+                                            )
+                                        }
+                                        None => resolved_header_annotation_identities(
+                                            &header.annotations,
+                                            &class_names,
+                                        ),
+                                    },
                                     getter_name: if classifier_flags.has(ClassFlags::ANNOTATION) {
                                         header.name.clone()
                                     } else {
@@ -9258,6 +9275,7 @@ fn collect_signatures_with_cp_impl(
                                 symbolic_class_tparams: &symbolic_ctp,
                                 class_type_parameters: &classifier_header.type_parameters,
                                 compact_headers,
+                                resolved_annotations: &table.resolved_annotations,
                                 compilation_id: table.compilation_id,
                                 source_file: i as u32,
                                 libraries: &*libraries,
@@ -9377,6 +9395,7 @@ fn collect_signatures_with_cp_impl(
                                         symbolic_class_tparams: &symbolic_companion_tparams,
                                         class_type_parameters: &companion_header.type_parameters,
                                         compact_headers,
+                                        resolved_annotations: &table.resolved_annotations,
                                         compilation_id: table.compilation_id,
                                         source_file: i as u32,
                                         libraries: &*libraries,
@@ -9921,10 +9940,22 @@ fn collect_signatures_with_cp_impl(
                             is_const: property_header
                                 .flags
                                 .has(crate::fir::DeclarationFlags::CONST),
-                            annotations: resolved_header_annotation_identities(
-                                &property_header.annotations,
-                                &class_names,
-                            ),
+                            annotations: match compact_headers {
+                                Some(headers) => streamed_resolved_declaration_annotations(
+                                    headers,
+                                    property_header.declaration.expect(
+                                        "a production member property has a stable declaration",
+                                    ),
+                                    &table.resolved_annotations,
+                                )
+                                .expect(
+                                    "a production member property has compact annotation bindings",
+                                ),
+                                None => resolved_header_annotation_identities(
+                                    &property_header.annotations,
+                                    &class_names,
+                                ),
+                            },
                             getter_name: property_getter_name(&property_header.name),
                             setter_name: property_header
                                 .mutable
@@ -10037,6 +10068,17 @@ fn collect_signatures_with_cp_impl(
                         let mut signature = if compact_headers.is_some() {
                             member_signature_from_header(
                                 &method_header,
+                                streamed_resolved_declaration_annotations(
+                                    compact_headers
+                                        .expect("a production member function has compact headers"),
+                                    method_header.declaration.expect(
+                                        "a production member function has a stable declaration",
+                                    ),
+                                    &table.resolved_annotations,
+                                )
+                                .expect(
+                                    "a production member function has compact annotation bindings",
+                                ),
                                 ret,
                                 &class_names,
                                 &mtp,
@@ -11474,13 +11516,22 @@ fn collect_signatures_with_cp_impl(
                                 source: (i as u32, d.0),
                                 package,
                                 visibility: property_visibility,
-                                annotations: if compact_headers.is_some() {
-                                    resolved_header_annotation_identities(
-                                        &property_header.annotations,
-                                        &class_names,
+                                annotations: match compact_headers {
+                                    Some(headers) => streamed_resolved_declaration_annotations(
+                                        headers,
+                                        compact_property
+                                            .expect(
+                                                "a production extension property has a stable declaration",
+                                            )
+                                            .id,
+                                        &table.resolved_annotations,
                                     )
-                                } else {
-                                    resolved_annotation_identities(&p.annotations, &class_names)
+                                    .expect(
+                                        "a production extension property has compact annotation bindings",
+                                    ),
+                                    None => {
+                                        resolved_annotation_identities(&p.annotations, &class_names)
+                                    }
                                 },
                                 stable_declaration: compact_property.map(|stub| stub.id),
                             };
@@ -11740,13 +11791,22 @@ fn collect_signatures_with_cp_impl(
                             } else {
                                 crate::libraries::PropertyReadStability::Stable
                             },
-                            annotations: if compact_headers.is_some() {
-                                resolved_header_annotation_identities(
-                                    &property_header.annotations,
-                                    &class_names,
+                            annotations: match compact_headers {
+                                Some(headers) => streamed_resolved_declaration_annotations(
+                                    headers,
+                                    compact_property
+                                        .expect(
+                                            "a production top-level property has a stable declaration",
+                                        )
+                                        .id,
+                                    &table.resolved_annotations,
                                 )
-                            } else {
-                                resolved_annotation_identities(&p.annotations, &class_names)
+                                .expect(
+                                    "a production top-level property has compact annotation bindings",
+                                ),
+                                None => {
+                                    resolved_annotation_identities(&p.annotations, &class_names)
+                                }
                             },
                             stable_declaration: compact_property.map(|stub| stub.id),
                         },
@@ -16828,6 +16888,7 @@ fn enum_entry_member_signature(
 
 fn member_signature_from_header(
     header: &StreamedCallableHeader,
+    annotations: Vec<TypeName>,
     ret: Ty,
     classes: &ClassNames,
     mtp: &TParams,
@@ -16879,7 +16940,7 @@ fn member_signature_from_header(
             .with_is_final(header.flags.has(crate::fir::DeclarationFlags::FINAL))
             .with_is_suspend(header.flags.has(crate::fir::DeclarationFlags::SUSPEND))
             .with_is_abstract(header.flags.has(crate::fir::DeclarationFlags::ABSTRACT)),
-        annotations: resolved_header_annotation_identities(&header.annotations, classes),
+        annotations,
         equality_bound: header.parameters.iter().find_map(|parameter| {
             parameter
                 .annotation_class_literals
@@ -16999,6 +17060,7 @@ fn legacy_member_signature_from_header(
     };
     let mut signature = member_signature_from_header(
         header,
+        resolved_header_annotation_identities(&header.annotations, classes),
         ret,
         classes,
         method_tparams,
@@ -17050,6 +17112,7 @@ struct DeclaredMemberHeaderContext<'a> {
     symbolic_class_tparams: &'a TParams,
     class_type_parameters: &'a [String],
     compact_headers: Option<&'a crate::fir::StreamedHeaderModule>,
+    resolved_annotations: &'a HashMap<(u32, u32, u32), TypeName>,
     compilation_id: u64,
     source_file: u32,
     libraries: &'a dyn SymbolSource,
@@ -17070,6 +17133,7 @@ fn declared_member_callable_headers(
         symbolic_class_tparams,
         class_type_parameters,
         compact_headers,
+        resolved_annotations,
         compilation_id,
         source_file,
         libraries,
@@ -17115,6 +17179,14 @@ fn declared_member_callable_headers(
         let mut signature = if compact_headers.is_some() {
             member_signature_from_header(
                 &header,
+                streamed_resolved_declaration_annotations(
+                    compact_headers.expect("a production member function has compact headers"),
+                    header
+                        .declaration
+                        .expect("a production member function has a stable declaration"),
+                    resolved_annotations,
+                )
+                .expect("a production member function has compact annotation bindings"),
                 ret,
                 classes,
                 &method_tparams,
