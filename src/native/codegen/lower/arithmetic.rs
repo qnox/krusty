@@ -396,6 +396,48 @@ impl BodyLowering<'_, '_, '_> {
         }))
     }
 
+    /// `kotlin.math.abs(x)`, at the width the overload was selected for.
+    ///
+    /// A float clears its sign bit, which is the whole operation and gives Kotlin's answers for the
+    /// two values a comparison would get wrong: `abs(-0.0)` is `+0.0`, and `abs(NaN)` is `NaN`
+    /// rather than the `NaN` a `< 0` test would route to negation.
+    ///
+    /// An integer negates when it is negative, and `Int.MIN_VALUE` is the case that looks like a
+    /// defect and is not: its magnitude has no representation, so two's-complement negation answers
+    /// `Int.MIN_VALUE` again. That is what Kotlin answers, so the wrapping negation is the
+    /// specification here rather than an overflow to guard.
+    pub(super) fn absolute_value(
+        &mut self,
+        ty: Ty,
+        args: &[u32],
+    ) -> Result<Option<Value>, Unsupported> {
+        let [operand] = args else {
+            return Err(format!("`abs` with {} arguments", args.len()));
+        };
+        let Some(value) = self.coerce(*operand, ty)? else {
+            return Err("`abs` of `Unit`".to_string());
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        Ok(Some(match ty {
+            Ty::Float | Ty::Double => self.builder.ins().fabs(value),
+            _ => {
+                let zero = self.builder.ins().iconst(
+                    if ty == Ty::Long {
+                        types::I64
+                    } else {
+                        types::I32
+                    },
+                    0,
+                );
+                let negative = self.builder.ins().icmp(IntCC::SignedLessThan, value, zero);
+                let negated = self.builder.ins().ineg(value);
+                self.builder.ins().select(negative, negated, value)
+            }
+        }))
+    }
+
     /// `isNaN`, `isInfinite`, `isFinite` — each one comparison on the unboxed value.
     ///
     /// `NaN` is the only value not equal to itself, and `|x| < +infinity` is false for both an

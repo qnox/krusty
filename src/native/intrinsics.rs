@@ -180,6 +180,25 @@ fn console_operand(ty: Ty) -> ConsoleOperand {
 
 /// The runtime function realizing a selected dependency callable, or `None` when the native
 /// runtime does not implement that declaration yet.
+/// `kotlin.math.abs`, and the operand width it was selected at.
+///
+/// Kotlin declares four, one per signed arithmetic type, and the selection has already happened —
+/// the parameter list says which. There is no unsigned overload, because an unsigned value is its
+/// own magnitude.
+///
+/// Answered here rather than as a runtime entry because the member/declaration paths below cross
+/// every operand as a REFERENCE, which for a `Double` means boxing the very value the question is
+/// about. That is the same reason `float_predicate` sits beside it.
+pub(super) fn absolute_value(owner: &str, name: &str, params: &[Ty]) -> Option<Ty> {
+    if facade_package(kotlin_owner(owner))? != "kotlin/math" || name != "abs" {
+        return None;
+    }
+    match params {
+        [ty @ (Ty::Int | Ty::Long | Ty::Float | Ty::Double)] => Some(*ty),
+        _ => None,
+    }
+}
+
 pub(super) fn runtime_function(owner: &str, name: &str, params: &[Ty]) -> Option<String> {
     match (facade_package(kotlin_owner(owner))?, name, params) {
         ("kotlin/io", "println", []) => Some("kt_println_unit".to_string()),
