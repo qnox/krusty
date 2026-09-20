@@ -5338,6 +5338,69 @@ fn stable_constructor_annotations_are_published_without_occurrence_coordinates()
 }
 
 #[test]
+fn stable_constructor_annotations_keep_their_lexically_bound_identity() {
+    let source = r#"
+        package sample
+
+        annotation class Marker
+
+        class Host {
+            annotation class Marker
+
+            @Marker
+            class Result @Marker constructor() {
+                @Marker constructor(value: Int) : this()
+            }
+        }
+    "#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("ConstructorAnnotationIdentity")];
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("constructor annotations must finalize in Pass 1")
+        .module
+        .index();
+    let result_identity = crate::types::type_name("sample/Host$Result");
+    let marker_identity = crate::types::type_name("sample/Host$Marker");
+    let result = (0..index.declaration_count())
+        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+        .find(|declaration| {
+            index
+                .classifier_header(*declaration)
+                .is_some_and(|classifier| classifier.classifier == result_identity)
+        })
+        .expect("stable nested Result classifier");
+    let constructors = (0..index.declaration_count())
+        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+        .filter(|declaration| {
+            index
+                .declaration_header(*declaration)
+                .is_some_and(|header| {
+                    header.owner == Some(result)
+                        && header.kind == crate::fir::DeclarationKind::Constructor
+                })
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(constructors.len(), 2);
+    for constructor in constructors {
+        assert_eq!(
+            index.declaration_annotations(constructor),
+            &[marker_identity]
+        );
+    }
+}
+
+#[test]
 fn anonymous_subclass_in_if_condition_publishes_its_local_parent() {
     assert_streaming_frontend(
         r#"fun box(): String {

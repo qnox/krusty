@@ -775,21 +775,25 @@ pub(in crate::resolve) fn streamed_constructor_declaration(
         .map(|stub| stub.id)
 }
 
-pub(in crate::resolve) fn streamed_declaration_annotations(
+/// Read one compact declaration's already-bound annotation identities without reconstructing
+/// source `TypeRef`s or repeating classifier lookup. Annotation resolution owns the occurrence
+/// binding; this temporary signature projection only associates those facts with the stable
+/// declaration that will publish them into `ResolvedModuleIndex`.
+pub(in crate::resolve) fn streamed_resolved_declaration_annotations(
     headers: &crate::fir::StreamedHeaderModule,
     declaration: crate::fir::DeclarationId,
-) -> Option<Vec<TypeRef>> {
+    bindings: &std::collections::HashMap<(u32, u32, u32), TypeName>,
+) -> Option<Vec<TypeName>> {
+    let source = headers.stub(declaration)?.source.raw();
     let declaration = headers.syntax.declaration(declaration)?;
-    headers
-        .syntax
-        .type_operands(declaration.annotations)
-        .iter()
-        .map(|annotation| {
-            headers
-                .syntax
-                .transient_type_ref(*annotation, &headers.lookup_names)
-        })
-        .collect()
+    let mut annotations = Vec::new();
+    for annotation in headers.syntax.type_operands(declaration.annotations) {
+        let span = headers.syntax.ty(*annotation)?.span;
+        if let Some(identity) = bindings.get(&(source, span.lo, span.hi)) {
+            annotations.push(*identity);
+        }
+    }
+    Some(annotations)
 }
 
 pub(in crate::resolve) fn legacy_classifier_header(class: &ClassDecl) -> StreamedClassifierHeader {
