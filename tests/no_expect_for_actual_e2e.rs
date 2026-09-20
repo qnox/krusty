@@ -1308,3 +1308,44 @@ fn an_alias_is_reported_where_the_source_writes_it() {
         "Interleaved",
     );
 }
+
+/// A stdlib classifier written as its SIMPLE name against its fully qualified one — `String`
+/// against `kotlin.String` — is one classifier, and the pair matches.
+///
+/// This is the spelling question on the one import form no source writes: `kotlin.*` is a DEFAULT
+/// import, in scope without an `import` line, so the file's own import list cannot supply it. A
+/// resolver that reaches the simple name only through a written import answers nothing for
+/// `String` here and pairs the two declarations with nothing, where
+/// `an_imported_and_a_qualified_spelling_of_one_classifier_match` — whose classifier IS reached
+/// through a written import — passes either way.
+///
+/// Both directions are asserted, because a rule that canonicalizes only the qualified side is
+/// right on one of them and wrong on the other.
+#[test]
+fn a_default_imported_classifier_matches_its_qualified_spelling() {
+    let (reference, krusty) = both_split(
+        "DefaultImportSpelling",
+        &[(
+            "DefaultImportSpellingCommon.kt",
+            "package plib\n\
+             \n\
+             expect fun takes(value: String): Int\n\
+             expect fun gives(value: kotlin.String): Int\n",
+        )],
+        &[(
+            "DefaultImportSpellingPlatform.kt",
+            "package plib\n\
+             \n\
+             actual fun takes(value: kotlin.String): Int = 1\n\
+             actual fun gives(value: String): Int = 2\n",
+        )],
+    );
+    assert!(
+        reference.is_empty(),
+        "the reference compiler accepts both pairs: {reference:?}"
+    );
+    assert!(
+        krusty.is_empty(),
+        "and so must krusty, rather than reporting either `actual`: {krusty:?}"
+    );
+}
