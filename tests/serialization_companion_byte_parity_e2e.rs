@@ -30,7 +30,7 @@ const SRC: &str = "import kotlinx.serialization.Serializable\n\
                    data class Point(val x: Int, val y: String)\n";
 
 /// The newest `<artifact>-<version>.jar` Gradle cached for one exact module coordinate.
-fn gradle_module_jar(group: &str, artifact: &str) -> Option<PathBuf> {
+pub(super) fn gradle_module_jar(group: &str, artifact: &str) -> Option<PathBuf> {
     let artifact_dir = std::env::var_os("HOME")
         .map(PathBuf::from)?
         .join(".gradle/caches/modules-2/files-2.1")

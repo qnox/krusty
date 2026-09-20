@@ -61,6 +61,11 @@ const LEAF_FIRST: &str = "import kotlinx.serialization.Serializable\n\
                           @Serializable\n\
                           data class Branch(val count: Int, val leaves: List<Leaf>)\n";
 
+/// `Branch`'s complete class initializer — the shape BOTH compilers emit.
+///
+/// It held krusty's own, eager, `LazyKt.lazyOf` form while the cache built its serializers up
+/// front; the reference's lazy-over-a-bound-factory shape was spelled out separately so the gap was
+/// visible. They agree now, so one expectation serves both and neither can drift from the other.
 fn branch_initializer() -> Vec<String> {
     [
         "0: new # // class Branch$Companion",
@@ -77,20 +82,22 @@ fn branch_initializer() -> Vec<String> {
         "19: aastore",
         "20: aload_0",
         "21: iconst_1",
-        "22: getstatic # // Field Leaf$$serializer.INSTANCE:LLeaf$$serializer;",
-        "25: invokestatic # // Method kotlinx/serialization/builtins/BuiltinSerializersKt.ListSerializer:(Lkotlinx/serialization/KSerializer;)Lkotlinx/serialization/KSerializer;",
-        "28: invokestatic # // Method kotlin/LazyKt.lazyOf:(Ljava/lang/Object;)Lkotlin/Lazy;",
-        "31: aastore",
-        "32: aload_0",
-        "33: putstatic # // Field $childSerializers:[Lkotlin/Lazy;",
-        "36: return",
+        "22: getstatic # // Field kotlin/LazyThreadSafetyMode.PUBLICATION:Lkotlin/LazyThreadSafetyMode;",
+        "25: invokedynamic # 0 // InvokeDynamic #",
+        "30: invokestatic # // Method kotlin/LazyKt.lazy:(Lkotlin/LazyThreadSafetyMode;Lkotlin/jvm/functions/Function0;)Lkotlin/Lazy;",
+        "33: aastore",
+        "34: aload_0",
+        "35: putstatic # // Field $childSerializers:[Lkotlin/Lazy;",
+        "38: return",
     ]
     .into_iter()
     .map(str::to_string)
     .collect()
 }
 
-fn cycle_initializer(owner: &str, nested: &str) -> Vec<String> {
+/// The cycle fixture's class initializer. The nested class's serializer is NOT named here — it is
+/// built inside the slot's factory — so "each caches the other" is asserted on the factory bodies.
+fn cycle_initializer(owner: &str) -> Vec<String> {
     vec![
         format!("0: new # // class {owner}$Companion"),
         "3: dup".to_string(),
@@ -104,16 +111,13 @@ fn cycle_initializer(owner: &str, nested: &str) -> Vec<String> {
         "15: astore_0".to_string(),
         "16: aload_0".to_string(),
         "17: iconst_0".to_string(),
-        format!(
-            "18: getstatic # // Field {nested}$$serializer.INSTANCE:L{nested}$$serializer;"
-        ),
-        "21: invokestatic # // Method kotlinx/serialization/builtins/BuiltinSerializersKt.ListSerializer:(Lkotlinx/serialization/KSerializer;)Lkotlinx/serialization/KSerializer;".to_string(),
-        "24: invokestatic # // Method kotlin/LazyKt.lazyOf:(Ljava/lang/Object;)Lkotlin/Lazy;"
-            .to_string(),
-        "27: aastore".to_string(),
-        "28: aload_0".to_string(),
-        "29: putstatic # // Field $childSerializers:[Lkotlin/Lazy;".to_string(),
-        "32: return".to_string(),
+        "18: getstatic # // Field kotlin/LazyThreadSafetyMode.PUBLICATION:Lkotlin/LazyThreadSafetyMode;".to_string(),
+        "21: invokedynamic # 0 // InvokeDynamic #".to_string(),
+        "26: invokestatic # // Method kotlin/LazyKt.lazy:(Lkotlin/LazyThreadSafetyMode;Lkotlin/jvm/functions/Function0;)Lkotlin/Lazy;".to_string(),
+        "29: aastore".to_string(),
+        "30: aload_0".to_string(),
+        "31: putstatic # // Field $childSerializers:[Lkotlin/Lazy;".to_string(),
+        "34: return".to_string(),
     ]
 }
 
@@ -124,29 +128,7 @@ fn a_composed_element_serializer_is_cached_rather_than_left_null() {
     let (reference, krusty) = built("ComposedCache", LEAF_FIRST, "Branch");
     assert_eq!(
         class_initializer(&reference),
-        vec![
-            "0: new # // class Branch$Companion",
-            "3: dup",
-            "4: aconst_null",
-            "5: invokespecial # // Method Branch$Companion.\"<init>\":(Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
-            "8: putstatic # // Field Companion:LBranch$Companion;",
-            "11: iconst_2",
-            "12: anewarray # // class kotlin/Lazy",
-            "15: astore_0",
-            "16: aload_0",
-            "17: iconst_0",
-            "18: aconst_null",
-            "19: aastore",
-            "20: aload_0",
-            "21: iconst_1",
-            "22: getstatic # // Field kotlin/LazyThreadSafetyMode.PUBLICATION:Lkotlin/LazyThreadSafetyMode;",
-            "25: invokedynamic # 0 // InvokeDynamic #",
-            "30: invokestatic # // Method kotlin/LazyKt.lazy:(Lkotlin/LazyThreadSafetyMode;Lkotlin/jvm/functions/Function0;)Lkotlin/Lazy;",
-            "33: aastore",
-            "34: aload_0",
-            "35: putstatic # // Field $childSerializers:[Lkotlin/Lazy;",
-            "38: return",
-        ],
+        branch_initializer(),
         "kotlinc's complete normalized initializer"
     );
     assert_eq!(
@@ -202,13 +184,21 @@ fn mutually_referential_classes_each_cache_the_other() {
     let edge_cache = class_initializer(&edge);
     assert_eq!(
         node_cache,
-        cycle_initializer("Node", "Edge"),
+        cycle_initializer("Node"),
         "`Node`'s complete cache initializer"
     );
     assert_eq!(
         edge_cache,
-        cycle_initializer("Edge", "Node"),
+        cycle_initializer("Edge"),
         "`Edge`'s complete cache initializer — neither class can be generated first"
+    );
+    assert!(
+        node.contains("Edge$$serializer"),
+        "`Node`'s factory must build over `Edge`'s serializer:\n{node}"
+    );
+    assert!(
+        edge.contains("Node$$serializer"),
+        "`Edge`'s factory must build over `Node`'s serializer:\n{edge}"
     );
 }
 
