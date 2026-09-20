@@ -350,8 +350,17 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         // precisely to say what a descriptor cannot, so concatenating descriptors would drop every
         // type argument and type variable — `constructor(values: List<String>)` would sign
         // `(Ljava/util/List;)V` where kotlinc signs `(Ljava/util/List<Ljava/lang/String;>;)V`.
+        // A COMPILER-GENERATED constructor records none, for the same reason a compiler-invented
+        // accessor does not: the attribute exists for a source or Java caller, and nothing in
+        // source can name this constructor to call it. kotlinc declares the serialization
+        // plugin's deserialization constructor with its erased descriptor alone.
+        let generated =
+            ir.is_generated_secondary_constructor(c.fq_name_id(), secondary_ordinal as u32);
         let formatter = super::JvmSignatureFormatter::new(ir, env);
         let sc_signature = (|| -> Option<String> {
+            if generated {
+                return None;
+            }
             let mut signature = String::from("(");
             for (_, semantic) in &sc.named_params {
                 signature.push_str(&formatter.method_ty(semantic, super::Wildcards::Declared)?);

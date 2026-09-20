@@ -252,6 +252,10 @@ pub(super) fn add_child_serializer_cache(
         // into a legacy second derivation.
         let mut elems: Vec<ExprId> = Vec::with_capacity(foo_fields.len());
         let mut factories = 0usize;
+        // kotlinc records ONE `LineNumberTable` entry on every member it generates for the cache,
+        // and it is the serialized class's annotation-inclusive declaration line — the line its
+        // `@Serializable` sits on.
+        let owner_decl_line = ir.classes[class_id as usize].decl_start_line;
         for (index, _) in foo_fields.iter().enumerate() {
             let Some(plan) = cached_plans[index].clone() else {
                 elems.push(ir.add_expr(IrExpr::Const(IrConst::Null)));
@@ -276,6 +280,11 @@ pub(super) fn add_child_serializer_cache(
             // plan instead of reopening and rewriting generic IR by expression shape.
             let es = emit_cached_element_serializer(ir, plan);
             let returned = ir.add_expr(IrExpr::Return(Some(es)));
+            // `implicit_return_end_lines` marks at the RETURN instruction; `expr_lines` would also
+            // open the statement at pc 0 and the later mark would collapse into it. kotlinc's
+            // factory carries a single entry, on the `areturn`.
+            ir.implicit_return_end_lines
+                .insert(returned, owner_decl_line);
             let factory_body = ir.add_expr(IrExpr::Block {
                 stmts: vec![returned],
                 value: None,
@@ -290,7 +299,7 @@ pub(super) fn add_child_serializer_cache(
                 param_checks: Vec::new(),
             });
             ir.synthetic_methods.insert(factory);
-            ir.members_after_serialization_ctor.insert(factory);
+            ir.serialization_cache_methods.insert(factory);
             // PRIVATE, as kotlinc emits it: nothing outside the class initializer that binds it may
             // call the factory, and publishing it would put a method on the class's ABI that the
             // reference compiler does not have.
@@ -338,7 +347,8 @@ pub(super) fn add_child_serializer_cache(
             setter_jvm_name: None,
             erased_declared_ty: None,
             custom_accessor: true,
-            line: 0,
+            // kotlinc's `<clinit>` maps the cache's array construction to the same declaration line.
+            line: owner_decl_line,
             source_order: u32::MAX,
         });
         // Read the static just declared rather than describing the field again: a read built from a
@@ -347,6 +357,8 @@ pub(super) fn add_child_serializer_cache(
         // accessor body is `getstatic; areturn`.
         let read = ir.add_expr(IrExpr::GetStatic(static_index));
         let ret = ir.add_expr(IrExpr::Return(Some(read)));
+        ir.expr_lines.insert(read, owner_decl_line);
+        ir.expr_lines.insert(ret, owner_decl_line);
         let body = ir.add_expr(IrExpr::Block {
             stmts: vec![ret],
             value: None,
@@ -361,7 +373,7 @@ pub(super) fn add_child_serializer_cache(
             param_checks: Vec::new(),
         });
         ir.synthetic_methods.insert(acc);
-        ir.members_after_serialization_ctor.insert(acc);
+        ir.serialization_cache_methods.insert(acc);
         ir.classes[class_id as usize].methods.push(acc);
         Some(ChildSerializerCachePlan {
             static_index,
