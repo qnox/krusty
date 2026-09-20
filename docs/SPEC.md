@@ -4535,7 +4535,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   anchors on its source range — never by name and arity, which cannot tell two overloads that tie
   on arity apart and left both of a tied pair unrendered. A member EXTENSION property is a separate
   declaration in a separate table (`ClassSig::member_ext_props`), consulted by the same identity,
-  and renders its receiver before the name while the diagnostic still points at the name. A nested
+  and renders its receiver before the name while the diagnostic still points at the name. It also
+  renders its OWN type parameters ahead of that receiver — `public final actual val <S> S.kept: S`
+  declares an `S` that shadows its owner's — with the names the source WROTE, because resolution
+  publishes those formals under internal placeholder spellings and only their bounds are readable
+  from it. A receiver written as a classifier path that the file's scope binds to NO classifier is
+  one such type parameter, not an ambiguity: the coarse child key records the category and
+  `select_actual` compares the complete type shape, which is what tells two of them apart
+  positionally. Refusing to key such a member at all left an `expect` and an `actual` written
+  identically pairing with nothing, and box
+  `multiplatform/k2/basic/expectActualFakeOverridesWithTypeParameters.kt` regressed; test
+  `no_expect_for_actual_e2e::a_member_extension_on_its_own_type_parameter_matches`. A nested
   classifier and a `companion object` are hoisted out of their owner by the parser, so neither
   rides a member list: each is recorded as an actualization target of its own where its modifier
   list is read, renders its OWN simple name, and a companion renders the word `companion` before

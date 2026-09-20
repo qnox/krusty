@@ -832,6 +832,15 @@ pub fn actualization(
         /// A receiver that names no classifier — a function type. The coarse key records only the
         /// semantic category; `select_actual` compares its complete type shape.
         Structural,
+        /// A receiver written as a classifier path that the scope binds to no classifier: a type
+        /// PARAMETER, whose identity is positional within the declaration rather than a classifier
+        /// at all — `actual val <S> S.p: S` declares its own `S`, shadowing its owner's.
+        ///
+        /// Refusing to key such a member at all left `expect val <S> S.p: S` and the `actual`
+        /// written exactly like it pairing with nothing, and the implementation reported as
+        /// actualizing nothing. The coarse key records the category, and `select_actual` compares
+        /// the complete type shape — which is what tells two of them apart, positionally.
+        Unbound,
     }
 
     fn child_key(
@@ -862,7 +871,9 @@ pub fn actualization(
             if !matches!(ty.kind, HeaderTypeKind::Classifier { .. }) {
                 return Some(ReceiverKey::Structural);
             };
-            let identity = bindings.type_classifier(stub.source, receiver)?;
+            let Some(identity) = bindings.type_classifier(stub.source, receiver) else {
+                return Some(ReceiverKey::Unbound);
+            };
             for (name, target, source) in actualized_aliases {
                 if *name != identity {
                     continue;
