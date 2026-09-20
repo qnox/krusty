@@ -180,25 +180,6 @@ fn console_operand(ty: Ty) -> ConsoleOperand {
 
 /// The runtime function realizing a selected dependency callable, or `None` when the native
 /// runtime does not implement that declaration yet.
-/// `kotlin.math.abs`, and the operand width it was selected at.
-///
-/// Kotlin declares four, one per signed arithmetic type, and the selection has already happened —
-/// the parameter list says which. There is no unsigned overload, because an unsigned value is its
-/// own magnitude.
-///
-/// Answered here rather than as a runtime entry because the member/declaration paths below cross
-/// every operand as a REFERENCE, which for a `Double` means boxing the very value the question is
-/// about. That is the same reason `float_predicate` sits beside it.
-pub(super) fn absolute_value(owner: &str, name: &str, params: &[Ty]) -> Option<Ty> {
-    if facade_package(kotlin_owner(owner))? != "kotlin/math" || name != "abs" {
-        return None;
-    }
-    match params {
-        [ty @ (Ty::Int | Ty::Long | Ty::Float | Ty::Double)] => Some(*ty),
-        _ => None,
-    }
-}
-
 pub(super) fn runtime_function(owner: &str, name: &str, params: &[Ty]) -> Option<String> {
     match (facade_package(kotlin_owner(owner))?, name, params) {
         ("kotlin/io", "println", []) => Some("kt_println_unit".to_string()),
@@ -221,16 +202,6 @@ pub(super) fn runtime_function(owner: &str, name: &str, params: &[Ty]) -> Option
         ("kotlin", "error", [_]) => Some("kt_illegal_state".to_string()),
         ("kotlin", "require", [Ty::Boolean]) => Some("kt_require".to_string()),
         ("kotlin", "check", [Ty::Boolean]) => Some("kt_check".to_string()),
-        // `buildString { … }`. Kotlin declares it `inline`, and an inline declaration of a
-        // DEPENDENCY has no body here to splice, so it arrives as an ordinary call taking the
-        // block. The runtime makes a builder, runs the block on it, and answers what it built.
-        //
-        // Only the no-capacity form is named. The other takes an `Int` capacity first, which this
-        // builder does not reserve against, so answering it would quietly ignore an argument the
-        // program passed — it keeps declining with that argument still in sight.
-        ("kotlin/text", "buildString", [block]) if block.is_reference() => {
-            Some("kt_build_string".to_string())
-        }
         _ => None,
     }
 }

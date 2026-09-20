@@ -2321,19 +2321,6 @@ KRef kt_iterable_map(KRef iterable, KRef transform) {
     return result;
 }
 
-/* `buildString { … }`. Kotlin declares it `inline`, and an inline declaration of a DEPENDENCY has
-   no body here to splice — so it arrives as an ordinary call whose argument is the block, and is
-   realized as what it means: make a builder, run the block on it, answer what it built.
-
-   The block is `StringBuilder.() -> Unit`, and an extension lambda is a `Function1` whose single
-   parameter is the receiver, so it is invoked exactly as `map`'s transform is. Its answer is
-   `Unit` and is discarded: everything the block did, it did to the builder. */
-KRef kt_build_string(KRef block) {
-    KRef builder = kt_string_builder_new();
-    kt_invoke_one(block, builder);
-    return kt_to_string(builder);
-}
-
 KRef kt_iterable_join_to_string(KRef iterable) {
     KRef separator = kt_string_utf8(", ", 2);
     KRef joined = kt_string_utf8("", 0);

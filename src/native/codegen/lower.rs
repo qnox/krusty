@@ -2321,14 +2321,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         if super::super::intrinsics::is_assert_fails_with(&owner, &name) {
                             return self.assert_fails_with(args, params, *ret);
                         }
-                        // `abs` is arithmetic, not a runtime entry: the table below crosses every
-                        // operand as a reference, which would box the `Double` the question is
-                        // about. Same reason `float_predicate` is realized in place.
-                        if let Some(ty) =
-                            super::super::intrinsics::absolute_value(&owner, &name, params)
-                        {
-                            return self.absolute_value(ty, args);
-                        }
                         let Some(symbol) =
                             super::super::intrinsics::runtime_function(&owner, &name, params)
                         else {
