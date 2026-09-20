@@ -120,3 +120,31 @@ fn a_captured_value_and_a_lambda_parameter_come_from_different_frames() {
     };
     assert_eq!(output, "OK");
 }
+
+/// The whole point of §7a: the spliced method's instructions must be the reference compiler's, in
+/// the same order, over the same slots. This is the shape from the design note — a classpath inline
+/// function with a loop, a value parameter and a lambda parameter.
+#[test]
+fn a_spliced_inline_body_emits_the_reference_compiler_s_instructions() {
+    const MAIN: &str = r#"
+fun one(v: Int): Int = v + 1
+fun many(v: Int): Int = twice(v) { one(it) }
+"#;
+    match common::method_code_diff_against_kotlinc_lib(
+        "InlineSpliceParity",
+        LIB,
+        MAIN,
+        "InlineSpliceParityKt",
+        "public static final int many(int)",
+    ) {
+        None => eprintln!("skip (InlineSpliceParity: reference toolchain unavailable)"),
+        Some(Ok(())) => {}
+        Some(Err(difference)) => panic!("{difference}"),
+    }
+}
+
+// A lambda with no parameters is NOT pinned against the reference compiler here. Its host local
+// declared after the call lands one slot higher there than the slot rule reproduces — the open
+// question in `docs/JVM_INLINE_BEFORE_CPS.md` §7b. The behaviour is covered by
+// `a_lambda_only_inline_call_reserves_no_slot_for_it` above; pinning the instructions would assert
+// a shape that is known not to match yet.

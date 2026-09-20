@@ -264,6 +264,30 @@ impl ConstPool {
             _ => None,
         }
     }
+    /// The `Utf8` at `idx`, if it is one.
+    fn utf8_at(&self, idx: u16) -> Option<&str> {
+        match self.entry_at(idx)? {
+            Const::Utf8(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The `(owner, name, descriptor)` a Methodref/InterfaceMethodref at `idx` names.
+    fn methodref_parts(&self, idx: u16) -> Option<(&str, &str, &str)> {
+        let (class_idx, name_and_type) = match self.entry_at(idx)? {
+            Const::Methodref(c, nt) | Const::InterfaceMethodref(c, nt) => (*c, *nt),
+            _ => return None,
+        };
+        let Const::NameAndType(name_idx, descriptor_idx) = self.entry_at(name_and_type)? else {
+            return None;
+        };
+        Some((
+            self.class_name(class_idx)?,
+            self.utf8_at(*name_idx)?,
+            self.utf8_at(*descriptor_idx)?,
+        ))
+    }
+
     fn class(&mut self, internal_name: &str) -> u16 {
         // Ty→bytecode boundary: a built-in type may reach here under its Kotlin name (`kotlin/Any`);
         // a `CONSTANT_Class` must carry the JVM name (`java/lang/Object`). Every bare class reference
@@ -1635,6 +1659,20 @@ impl ClassWriter {
     }
 
     /// Intern helpers exposed for the emitter (Phase 4) to reference pool entries while building code.
+    /// Read back the `(owner, name, descriptor)` of a method reference already in the pool.
+    ///
+    /// A transform that runs over instructions ALREADY relocated into this class has no source pool
+    /// left to consult, and interning every method it might want to recognize would add entries the
+    /// class does not otherwise carry. `None` when the index is not a method reference.
+    pub fn methodref_parts(&self, index: u16) -> Option<(&str, &str, &str)> {
+        self.cp.methodref_parts(index)
+    }
+
+    /// The internal name of the `CONSTANT_Class` at `index`, for the same reason.
+    pub fn class_name_at(&self, index: u16) -> Option<&str> {
+        self.cp.class_name(index)
+    }
+
     pub fn methodref(&mut self, class: &str, name: &str, desc: &str) -> u16 {
         self.cp.methodref(class, name, desc)
     }

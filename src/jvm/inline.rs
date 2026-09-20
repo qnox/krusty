@@ -1645,6 +1645,124 @@ fn param_offsets(descriptor: &str) -> Option<Vec<u16>> {
 /// (the former `branchless_lambda_segments`). The caller emits the non-lambda arguments first (empty
 /// baseline otherwise) and binds the returned frames + the join frame. `None` on an unsupported shape
 /// (exception handlers, reified, an unparseable body) ⇒ the caller falls back / skips, never miscompiles.
+/// The primitive descriptor a `Wrapper.valueOf(p)LWrapper;` boxing call consumes, if `insn` is one.
+/// Read from the HOST's own pool, where the instruction still lives.
+fn boxing_call_primitive(src_cp: &[C], insn: &Insn) -> Option<char> {
+    let Insn::Plain { op: 0xb8, operands } = insn else {
+        return None;
+    };
+    let index = (*operands.first()? as u16) << 8 | *operands.get(1)? as u16;
+    let (class, name) = methodref_target(src_cp, index)?;
+    if name != "valueOf" {
+        return None;
+    }
+    wrapper_primitive(class)
+}
+
+/// The primitive a boxed wrapper carries: `java/lang/Integer` → `I`.
+fn wrapper_primitive(class: &str) -> Option<char> {
+    Some(match class {
+        "java/lang/Integer" => 'I',
+        "java/lang/Long" => 'J',
+        "java/lang/Short" => 'S',
+        "java/lang/Byte" => 'B',
+        "java/lang/Character" => 'C',
+        "java/lang/Boolean" => 'Z',
+        "java/lang/Float" => 'F',
+        "java/lang/Double" => 'D',
+        _ => return None,
+    })
+}
+
+/// How many leading instructions of `insns` form an unboxing of `primitive` — an optional
+/// `checkcast` onto the wrapper followed by its `xxxValue()` call — in the TARGET pool.
+///
+/// `0` when the head is not an unboxing.
+fn leading_unboxing(cw: &ClassWriter, insns: &[Insn], primitive: char) -> usize {
+    let mut at = 0;
+    if let Some(Insn::Plain { op: 0xc0, operands }) = insns.first() {
+        if let Some((high, low)) = operands.first().zip(operands.get(1)) {
+            let index = (u16::from(*high) << 8) | u16::from(*low);
+            if cw
+                .class_name_at(index)
+                .and_then(wrapper_primitive)
+                .is_some_and(|carried| carried == primitive)
+            {
+                at = 1;
+            }
+        }
+    }
+    let Some(Insn::Plain { op: 0xb6, operands }) = insns.get(at) else {
+        return 0;
+    };
+    let Some((high, low)) = operands.first().zip(operands.get(1)) else {
+        return 0;
+    };
+    let index = (u16::from(*high) << 8) | u16::from(*low);
+    let Some((class, _, descriptor)) = cw.methodref_parts(index) else {
+        return 0;
+    };
+    let unboxes = wrapper_primitive(class).is_some_and(|carried| carried == primitive)
+        && descriptor.starts_with("()")
+        && descriptor[2..].starts_with(primitive);
+    if unboxes {
+        at + 1
+    } else {
+        0
+    }
+}
+
+/// Whether `insn` boxes `primitive`, read from the TARGET pool (the lambda body's own).
+fn is_target_boxing(cw: &ClassWriter, insn: &Insn, primitive: char) -> bool {
+    let Insn::Plain { op: 0xb8, operands } = insn else {
+        return false;
+    };
+    let Some((high, low)) = operands.first().zip(operands.get(1)) else {
+        return false;
+    };
+    let index = (u16::from(*high) << 8) | u16::from(*low);
+    cw.methodref_parts(index).is_some_and(|(class, name, _)| {
+        name == "valueOf" && wrapper_primitive(class).is_some_and(|carried| carried == primitive)
+    })
+}
+
+/// The unboxing at the head of `insns` in the HOST's pool: an optional `checkcast` onto a wrapper
+/// or `java/lang/Number`, then an `xxxValue()` call. Returns the primitive it yields and how many
+/// instructions it spans.
+fn host_unboxing(src_cp: &[C], insns: &[Insn]) -> Option<(char, usize)> {
+    let mut at = 0;
+    if let Some(Insn::Plain { op: 0xc0, operands }) = insns.first() {
+        if let Some((high, low)) = operands.first().zip(operands.get(1)) {
+            let index = (u16::from(*high) << 8) | u16::from(*low);
+            if class_name(src_cp, index)
+                .is_some_and(|name| name == "java/lang/Number" || wrapper_primitive(name).is_some())
+            {
+                at = 1;
+            }
+        }
+    }
+    let Insn::Plain { op: 0xb6, operands } = insns.get(at)? else {
+        return None;
+    };
+    let index = (u16::from(*operands.first()?) << 8) | u16::from(*operands.get(1)?);
+    let (class, _, descriptor) = methodref_signature(src_cp, index)?;
+    if class != "java/lang/Number" && wrapper_primitive(class).is_none() {
+        return None;
+    }
+    let primitive = descriptor.strip_prefix("()")?.chars().next()?;
+    (descriptor.len() == 3 && "IJSBCZFD".contains(primitive)).then_some((primitive, at + 1))
+}
+
+/// `(class, name, descriptor)` of a method reference in a SOURCE pool.
+fn methodref_signature(src_cp: &[C], idx: u16) -> Option<(&str, &str, &str)> {
+    let (c, nt) = match src_cp.get(idx as usize)? {
+        C::Methodref(c, nt) | C::InterfaceMethodref(c, nt) => (*c, *nt),
+        _ => return None,
+    };
+    let (name, descriptor) = name_and_type(src_cp, nt)?;
+    Some((class_name(src_cp, c)?, name, descriptor))
+}
+
 /// Instruction indices consumed by an entry null-check triplet (`aload`/`ldc`/`invokestatic
 /// Intrinsics.checkNotNull*`), which the splice deletes. A lambda's `aload` inside one is not a use.
 pub fn null_check_deletions(insns: &[Insn], src_cp: &[C]) -> std::collections::HashSet<usize> {
@@ -1923,6 +2041,10 @@ pub fn splice_unified(
     let mut lambda_sites = Vec::new(); // original invoke index per occurrence
     let mut lambda_loads = Vec::new(); // original receiver-load index per occurrence
     let mut site_lambdas = Vec::new(); // input lambda index per occurrence
+                                       // Bytes of the lambda body dropped from its FRONT by argument cancellation. The body's own
+                                       // frames are offsets into the body as it was built, so the base they are bound against has to
+                                       // move back by exactly what no longer precedes them.
+    let mut dropped_prefix = Vec::new();
     for (lambda, load_idx, site) in
         lambda_invoke_sites(&insns, &body.source_cp, &lambda_slots, &deleted)?
     {
@@ -1931,14 +2053,55 @@ pub fn splice_unified(
             len: 1,
             repl: Vec::new(),
         }); // delete the dead lambda-object load
+            // `FunctionN.invoke` is erased to `(Object)Object`, so the host boxes each argument and
+            // unboxes the result, and the lambda body undoes both. Once the body is spliced there is no
+            // `invoke` left and no reason for any of it: cancel each adjacent box/unbox pair, exactly as
+            // the reference compiler's inliner does. Only an ADJACENT pair is cancelled here, which is
+            // every argument of a zero- or one-parameter lambda and the result of any lambda; an earlier
+            // argument of a multi-parameter lambda is separated from its unboxing by the next argument's
+            // evaluation and needs a stack walk this does not attempt.
+        let mut replacement = lambdas[lambda].body.clone();
+        let mut at = site;
+        let mut len = 1;
+        let mut dropped = 0usize;
+        // The frames inside a cancelled region would describe a stack that no longer exists.
+        let frame_inside = |from: usize, to: usize| {
+            host_frames
+                .iter()
+                .any(|(index, _)| *index > from && *index <= to)
+        };
+        if site > load_idx + 1 && !deleted.contains(&(site - 1)) && !frame_inside(site - 1, site) {
+            if let Some(primitive) = boxing_call_primitive(&body.source_cp, &insns[site - 1]) {
+                let unboxing = leading_unboxing(cw, &replacement, primitive);
+                if unboxing > 0 {
+                    let removed: Vec<Insn> = replacement.drain(..unboxing).collect();
+                    dropped = assemble(&removed).len();
+                    at = site - 1;
+                    len += 1;
+                }
+            }
+        }
+        if let Some((primitive, spans)) = host_unboxing(&body.source_cp, &insns[site + 1..]) {
+            let boxes_result = replacement
+                .last()
+                .is_some_and(|last| is_target_boxing(cw, last, primitive));
+            if boxes_result
+                && !(site + 1..=site + spans).any(|index| deleted.contains(&index))
+                && !frame_inside(site, site + spans)
+            {
+                replacement.pop();
+                len += spans;
+            }
+        }
         edits.push(Edit {
-            at: site,
-            len: 1,
-            repl: lambdas[lambda].body.clone(),
-        }); // replace the invoke with the lambda body
+            at,
+            len,
+            repl: replacement,
+        }); // replace the invoke (and any cancelled adapter) with the lambda body
         lambda_sites.push(site);
         lambda_loads.push(load_idx);
         site_lambdas.push(lambda);
+        dropped_prefix.push(dropped);
     }
     if !lambdas.is_empty()
         && (invoke_count != lambda_sites.len()
@@ -2331,7 +2494,8 @@ pub fn splice_unified(
         };
         relocated_lambda_sites.push(RelocatedLambdaSite {
             lambda_index: site_lambdas[occurrence],
-            byte_start: offs[p + old2new[lambda_sites[occurrence]]],
+            byte_start: offs[p + old2new[lambda_sites[occurrence]]]
+                .saturating_sub(dropped_prefix[occurrence]),
             host_locals,
             stack_prefix,
         });
