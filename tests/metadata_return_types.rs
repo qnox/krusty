@@ -72,7 +72,9 @@ fn builtins_decode_collection_hierarchy() {
         .expect("collections.kotlin_builtins in stdlib jar");
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
-    let h = parse_builtins(&bytes).classes;
+    let h = parse_builtins(&bytes)
+        .expect("valid collections builtins")
+        .classes;
     assert_eq!(
         h.get("kotlin/collections/MutableList")
             .map(|c| c.supertypes.as_slice()),
@@ -107,6 +109,7 @@ fn builtins_string_members_from_metadata() {
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
     let string = krusty::jvm::metadata::parse_builtins(&bytes)
+        .expect("valid kotlin builtins")
         .classes
         .remove("kotlin/String")
         .expect("String builtin class");
@@ -154,7 +157,9 @@ fn builtins_fragment(jar: &std::path::Path, path: &str) -> Vec<u8> {
 fn builtins_decode_type_parameters_and_arguments() {
     let jar = common::stdlib_jar();
     let bytes = builtins_fragment(&jar, "kotlin/collections/collections.kotlin_builtins");
-    let classes = parse_builtins(&bytes).classes;
+    let classes = parse_builtins(&bytes)
+        .expect("valid collections builtins")
+        .classes;
 
     let list = classes
         .get("kotlin/collections/List")
@@ -198,7 +203,8 @@ fn builtins_decode_type_parameters_and_arguments() {
 fn builtin_generic_member_binds_receiver_argument_without_jdk() {
     let jar = common::stdlib_jar();
     // Only the stdlib jar: no JDK, so `java/util/List` is absent and the builtins fallback is taken.
-    let libs = JvmLibraries::new(Rc::new(Classpath::new(vec![jar])));
+    let libs =
+        JvmLibraries::new(Rc::new(Classpath::new(vec![jar]))).expect("JVM provider initialization");
     let scope = [type_name("kotlin/collections")];
     let resolver = SymbolResolver::new_scoped(&libs, &scope);
     let call = resolver
@@ -331,7 +337,8 @@ fn kotlin_collection_subtyping() {
 #[test]
 fn plus_assign_receiver_is_mutable() {
     let jar = common::stdlib_jar();
-    let libs = JvmLibraries::new(Rc::new(Classpath::new(vec![jar])));
+    let libs =
+        JvmLibraries::new(Rc::new(Classpath::new(vec![jar]))).expect("JVM provider initialization");
     let scope = [type_name("kotlin/collections")];
     let resolver = SymbolResolver::new_scoped(&libs, &scope);
     let mutable = resolver

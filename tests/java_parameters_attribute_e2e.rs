@@ -98,9 +98,10 @@ fn compile_java_parameters(
     let stems = vec![source_name.to_string()];
     let inputs = vec![SourceInput::kotlin(source).with_file_stem(source_name)];
     let classpath = common::cached_classpath(cp_jars, jdk_modules);
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(
-        classpath.clone(),
-    ));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
+            .expect("JVM provider initialization"),
+    );
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
         platform,
@@ -158,6 +159,16 @@ const GENERATED_SOURCE: &str = "package demo\n\
     }\n\
     fun anonymousFactory(seed: String): Any = object { fun text(): String = seed }\n\
     interface Face { fun declared(name: String): String = name }\n";
+
+const ENUM_CONSTRUCTOR_SOURCE: &str = "package demo\n\
+    enum class Shape(val label: String, val sides: Int) {\n\
+    \x20 BOX(\"box\", 4),\n\
+    \x20 BLANK,\n\
+    \x20 NAMED(\"named\"),\n\
+    \x20 SIDED(6);\n\
+    \x20 constructor(label: String) : this(label, 1)\n\
+    \x20 constructor(sides: Int = 0) : this(\"auto\", sides)\n\
+    }\n";
 
 fn assert_parameter_parity(source_name: &str, source: &str, expected_classes: &[&str]) {
     let jdk = common::jdk_modules();
@@ -248,6 +259,24 @@ fn java_parameters_names_generated_and_prefixed_parameters() {
             "demo/Face",
             "demo/Face$DefaultImpls",
         ],
+    );
+}
+
+/// An enum's SECONDARY constructors carry the same synthetic `(String, int)` prefix its primary
+/// does, and kotlinc describes it: `$enum$name`, `$enum$ordinal`, then the source parameters, the
+/// two synthetics flagged. krusty threaded the prefix into the DESCRIPTOR only, so the identity
+/// description still counted the declared parameters alone and this path asserted out —
+/// "secondary constructor identities must match its physical JVM parameters" — the moment
+/// `-java-parameters` was on. Both an argument-less and a parameterized secondary are covered,
+/// because only the second distinguishes "the prefix is described" from "the table is empty" — and
+/// a DEFAULTED one, whose synthetic overload carries the prefix in its descriptor while kotlinc
+/// gives it no `MethodParameters` at all.
+#[test]
+fn java_parameters_names_an_enum_secondary_constructors_prefix() {
+    assert_parameter_parity(
+        "JavaParametersEnumSecondary",
+        ENUM_CONSTRUCTOR_SOURCE,
+        &["demo/Shape"],
     );
 }
 

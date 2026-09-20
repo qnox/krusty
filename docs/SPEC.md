@@ -3315,6 +3315,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `ACC_PRIVATE` method/field is never spliced (the member is legal only inside the defining class;
   kotlinc rewrites to a synthetic `access$…` bridge krusty does not model — the fallback real call
   stays in the class).
+  **An `invokedynamic` relocates with its whole bootstrap entry, and only if that entry may move.**
+  The instruction names a `BootstrapMethods` entry of its DEFINING class by index, not a pool entry,
+  so relocation re-interns the entry — its method handle, its static arguments and its name/type —
+  in the host (`ClassWriter::add_bootstrap` dedupes). Whether it may move is decided from the
+  entry's dependency graph, never from the factory's spelling: the relocation inventory reports
+  every member and class the handle, its descriptors, its static arguments, and the call-site
+  descriptor reach, `None` for a
+  constant kind or descriptor relocation cannot carry (`CONSTANT_Dynamic`, a handle onto a
+  non-member, an index past the pool), and `references_private_member` refuses a splice unless each
+  bootstrap dependency is provably public — a stricter question than it asks of an ordinary
+  instruction operand, because bootstrap linkage has no verifier-visible use site. That is
+  what separates a `StringConcatFactory` entry (a public factory, a recipe string, constants) from a
+  `LambdaMetafactory` one (an implementation handle in the declaring class, usually private and
+  synthetic), without either name appearing in the rule. An inaccessible entry that relocated would
+  throw `BootstrapMethodError` when its instruction first executes — after verification, so only a
+  RUN observes it: `classpath_inline_splice_e2e::the_relocated_concatenation_bootstrap_links_and_runs`
+  executes the spliced concatenation for that reason, beside the emitted-form assertions.
   **Cross-file source calls to `inline fun`s link as facade statics.** A same-file call
   splices the body; a call from ANOTHER file of the same module has no AST to splice, so the
   defining file lowers + emits the inline fun as a facade static (kotlinc's `public static
@@ -3744,6 +3761,152 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type.** Lowering consumes the property type recorded by the checker. The backend unboxes a
   primitive result or checkcasts a narrower reference result at the accessor boundary. Tests:
   `lambda_result_inference_e2e`, `delegated_prop_e2e`.
+
+- **A delegated property crosses the scalar/reference boundary at FOUR places, and each was
+  emitting unverifiable bytecode.** Found by bucketing the box corpus, not by reading the code; box
+  total 6333 → 6344.
+  - The DELEGATE reaches the operator's receiver slot. A delegate is stored at its own type, so
+    `val s: String by impl` (an `Int`) pushed a raw `int` where `operator fun Any?.getValue(…)`
+    declares `Object` — `Type integer … is not assignable to 'java/lang/Object'`. It is boxed
+    against the DECLARED slot, not unconditionally: `operator fun Int.getValue(…)` keeps its
+    receiver unboxed, and boxing every scalar delegate would break that.
+  - The RESULT reaches the accessor's own return. The accessor returns the PROPERTY's type while
+    the operator returns the DECLARATION's, so `val age: Int by map` returned the `Object` that
+    `Map<K, out V>.getValue` leaves on the stack from `getAge()I`. The coercion goes on the
+    accessor body, which is the boundary the accessor owns and where the emitter reads the value's
+    own physical type — so a matching type costs nothing, a reference result gets its cast, and a
+    scalar one its unbox. It is skipped where the delegated call already coerced to that same
+    type, so the non-external arms keep their single coercion node
+    (`fir_lower::tests::generic_member_delegate_result_keeps_its_erased_call_boundary` asserts
+    exactly one). Putting it on the delegated CALL instead (coercing the external target's
+    declared result to the selected one) fixed the reference case and not the scalar one, because
+    a stdlib `getValue` is spliced rather than called.
+  - The DELEGATE EXPRESSION reaches `provideDelegate`'s receiver slot, which is the same boundary
+    one phase earlier: `val byInt by 42` pushed a raw `int` into
+    `provideDelegate(Object, Object, KProperty)`. The adaptation fact comes from the CHECKED
+    delegate call — `FirDelegateCall` now carries the call's own `receiver` and the selected
+    callable's `declared_receiver` — because the caller had nothing to compare against for a
+    `provideDelegate`, which is what left this hole after the accessor receiver was fixed (box
+    `delegatedProperty/provideDelegate/genericProvideDelegateOnNumberLiteral.kt`).
+  - The WRITTEN VALUE reaches the operator's declared parameter: `var x: Long by …` handed a raw
+    `long` to `setValue(Object, Object, Object)`. Arguments are adapted against the slots the
+    callable DECLARES, tail-aligned with its parameter list (a callable's own value parameters
+    follow any context parameters), so a `setValue(…, newValue: Long)` keeps the value unboxed and
+    an extension operator on a scalar owner gets its `thisRef` boxed for the same reason. Only the
+    CROSS-FILE shape was broken — a same-file operator is a method of the file's own IR and the
+    write reached it already adapted (box
+    `delegatedProperty/genericSetValueViaSyntheticAccessor.kt`, whose operator is `protected` and
+    inherited; that case now advances past the `VerifyError` to the separate
+    super-constructor-argument boxing gap below).
+
+  The slots each value reaches come from the CHECKED PLAN, not from a signature read back in
+  lowering. `FirDelegateCall` publishes the operator's applied value parameters and the slots the
+  declaration spells for the same call, in the same order and always the same length. The declared
+  side is UN-ERASED — `setValue(…, newValue: T)` reads `T`, not `Object` — because what a `T` slot
+  costs a value is a target's answer and differs between targets; lowering states only that two
+  semantic types differ. The type of the `KProperty` operand is published the same way, so
+  resolution's applicability classifier and the value lowering builds are one answer. A plan
+  whose lengths disagree is a broken contract between two phases and fails as
+  `InvalidDelegatedCallShape`; it never lets an argument through unadapted, which is how a raw
+  `long` reached an `Object` slot in the first place. There is no prefix for lowering to find the
+  end of: a CONTEXT-PREFIXED convention operator is not a delegate convention at all, because the
+  operator is called from a generated accessor with no scope to fill an implicit context from.
+  kotlinc rejects such a declaration outright ("context parameters on delegation operators are
+  unsupported") and then reports the property as having no applicable `getValue`; krusty emits the
+  same declaration diagnostic, from the SAME rule that excludes the candidate during selection, so
+  the two answers cannot drift apart, and on the same `context(…)` clause kotlinc anchors it on.
+
+  A property whose delegate supplies no convention is reported by the FRONT END, never as a checked-
+  FIR failure: that is an ordinary source mistake, and an internal error is not a diagnostic. The
+  report is anchored on the `by` keyword, which is what kotlinc anchors it on, and it is made once
+  per convention the property needs — a `var` is told about `getValue` AND `setValue`, even though
+  the first already failed. kotlinc has two shapes for it and krusty reproduces both: with no
+  function of that name in reach, `type 'Plain' has no method 'getValue(Holder,
+  KMutableProperty1<*, *>)', so it cannot serve as a delegate.` (and `… for var (read-write
+  property).` for `setValue`); with functions of that name that are none of them applicable,
+  `property delegate must have a '…' method. None of the following functions is applicable:` and
+  the candidates, each rendered with its context prefix, its parameter names and its result. The
+  candidate list is every function of that name the delegate's scope offers, whatever excluded it —
+  an inapplicable overload, a missing `operator` modifier and a context prefix alike, because each
+  is a thing the author plausibly meant to be the convention. The second slot of the demanded
+  signature is the property reference the accessors would pass: `KProperty`/`KMutableProperty` by
+  mutability, numbered by receiver count (none, member or extension, member extension), and
+  star-projected UNLESS exactly one candidate is to blame, which is when kotlinc names the
+  receivers and the property type outright. `thisRef` follows the same shape, printing `Nothing?`
+  where the accessor passes null. For an inferred property this same convention report belongs to
+  signature finalization: the compact delegate site retains its declaration kind, mutability,
+  receivers and exact `by` origin, so a failed convention carries a source diagnostic into recovery
+  and cannot suppress independent body errors in the rest of the file.
+
+  All four are stated the SAME way, and it is a SEMANTIC statement: lowering compares the two
+  checked types and, where they differ, records one `ImplicitCoercion` to the one the other side
+  declares. What that costs — a box, an unbox, a widening, a `checkcast`, a value class's own
+  `box-impl`/`unbox-impl`, or no instruction — is read off the PHYSICAL types by the backend when
+  it emits the coercion. Asking `Ty::is_jvm_scalar()` in lowering instead would put a
+  representation choice in the wrong phase and still leave the backend to re-derive it; it also
+  gets the cases wrong that are references without being scalars, which is every nullable carrier
+  (`var x: Int? by …` must pass through untouched) and every value class (`var id: Id by …` must
+  cross through `Id.box-impl`, not `Integer.valueOf`). Both are pinned against kotlinc.
+
+  The accessor's own return coercion is likewise stated once, by the CALLER, which knows whether
+  the value in hand is a source-written body (already the property's type) or the checked result of
+  a delegate operator (the declaration's). Reading it back off the generated node's shape guessed
+  wrong in both directions — a missing coercion does not verify, a duplicated one wraps a coercion
+  in a coercion.
+
+  Still open next door, and NOT part of this boundary: a generic SUPER-CONSTRUCTOR argument
+  (`class C : PVar<Long>(42L)` calls `PVar.<init>(Object)` with a raw `long`, so the class links to
+  a `<init>(long)` that does not exist — a `NoSuchMethodError`, not a `VerifyError`).
+
+  Recorded gaps the same ledgers make visible, all outside this boundary and none affecting the
+  adaptation instructions: a `var`'s delegate `KProperty` is a `PropertyReference*Impl` where
+  kotlinc uses `MutablePropertyReference*Impl`; a member-extension delegate's reference names the
+  EXTENSION receiver's class where kotlinc names the owner; the reference's signature string omits
+  a value class accessor's mangled name and carries the boxed return (`getId()LId;` where kotlinc
+  writes `getId-eEFUqEU()I`); and a non-null reference setter parameter is not
+  `checkNotNullParameter`-checked.
+
+  Tests: `tests/delegate_scalar_boundary_e2e.rs` (cases covering top-level, member,
+  member-extension, `provideDelegate`, cross-file and classpath operators, nullable carriers and
+  both value-class carrier kinds; each either RUN or pinned instruction-for-instruction against
+  kotlinc), `fir_lower::tests::a_delegated_accessor_result_crosses_exactly_one_coercion`.
+  The lowering lives in `src/fir_lower/delegated_properties.rs`.
+
+- **A delegate convention resolves `kotlin.reflect.KProperty`; it does not assume it.** The operand
+  type the `getValue`/`setValue` lookup passes is obtained from the symbol source that answers
+  applicability, so a dependency set declaring no `KProperty` reports the ordinary convention failure
+  instead of selecting against a classifier name that denotes nothing. Because the `by` clause is a
+  LANGUAGE construct, `EmptySymbolSource` publishes the declaration the way it already publishes
+  `Enum` and `Function`: a target with no stdlib artifact still has it. Tests:
+  `streaming_signature_bridge::delegates::tests::a_dependency_set_without_kproperty_refuses_the_convention_instead_of_assuming_it`
+  (the same source accepted with the declaration present, refused without it) and the delegate
+  ledgers in `tests/delegate_scalar_boundary_e2e.rs`.
+
+- **Signature finalization names the convention it could not find, and does not suppress the file.**
+  A delegated property with NO declared type has nothing to infer its type from once `getValue` is
+  missing, so its signature cannot finalize — and the body check that would have reported it never
+  runs for that declaration. Declining silently made finalization fail with no cause named, which
+  skipped body checking for the WHOLE file: the file then reported nothing at all, its unrelated
+  diagnostics included. `select_delegate_signature` records the refusal instead, in the same wording
+  the checker uses, so the two collapse wherever both reach the sink. Three rules the differential
+  pinned:
+
+  * it points at the `by` keyword, as kotlinc does, so the delegate operation carries its own origin
+    rather than the delegate expression's (`by` is column 13 where `Plain()` is column 16);
+  * a candidate whose own return is still undetermined is RESOLVED before it is rendered, through
+    the same `demand` a selected convention's result goes through. Rendering `<not determined>`
+    produced a second, differently worded message for one mistake once the body check reported it;
+  * with exactly one candidate to blame and no declared type, the reference names that candidate's
+    result — `getValue(Nothing?, KProperty0<Int>)`, not `KProperty0<*>` — which is the type kotlinc
+    reports the property as having.
+
+  Measured divergence, pinned by both complete ordered ledgers: for `var untyped by Plain()` kotlinc
+  reports THREE errors and krusty two. kotlinc cascades a second `setValue` refusal whose value slot
+  renders the failed inference itself (`??? (Unresolved name: getValue)`); krusty suppresses every
+  delegate-convention message whose operand types are already errors, which is what stops one failure
+  being repeated under a second heading. Both compilers report the missing `getValue` at the `by`
+  keyword and the file's unrelated diagnostic. Test:
+  `delegate_scalar_boundary_e2e::an_untyped_delegated_property_names_its_missing_convention_and_the_rest_of_the_file`.
 
 - **String-template interpolation allows line breaks around the expression.** `"${" NL* expression
   NL* "}"` per the Kotlin grammar — a multiline lambda inside `${…}` (common in raw strings) parses.
@@ -4801,6 +4964,201 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same-file). Tests: `mpp_expect_actual_e2e`; corpus `multiplatform/` 75 PASS / 0 FAIL
   (box total 2744 → 2825).
 
+- **`expect`/`actual` requires the multiplatform feature, and an `expect` declaration may not carry
+  a body.** Two independent checks, both syntactic and both measured against the reference
+  compiler. (1) Without `+MultiPlatformProjects`, every `expect`/`actual` MODIFIER is an error
+  (`'expect' and 'actual' declarations can be used only in multiplatform projects. Learn more about
+  Kotlin Multiplatform: https://kotl.in/multiplatform-setup`), reported at the keyword, members
+  included; the sentence does not vary with which modifier was written. Accepting it emitted an
+  artifact that could not link — a call to an unmatched `expect fun` was written as an
+  `invokestatic` of a method the facade does not declare. (2) An `expect` declaration that carries
+  an implementation is an error regardless of the feature, so a file without the feature gets BOTH
+  sentences, the gate first. `expected declaration cannot have a body.` covers a function with an
+  expression or block body, a property ACCESSOR with a body, an `init` block, and any of these on a
+  member of an `expect` classifier; `expected property cannot have an initializer.` covers an
+  initializer; `expected property cannot be delegated.` covers a `by` delegate. Positions are
+  measured, not derived: a top-level declaration is reported at its
+  `expect` keyword, a member at its own declaration, an accessor at its header (`get()` / `set(v)`,
+  hence `PropDecl::getter_span` and `PropAccessor::span`), an `init` block at the KEYWORD (hence
+  `File::init_block_keywords` — the block expression's own span starts at `{`), and a property
+  initializer under the INITIALIZER EXPRESSION (`expect val x: Int = 3` → column 31), and a
+  delegate under the DELEGATE EXPRESSION (`by lazy { 1 }` → under `lazy`). A secondary
+  constructor with a body inside an `expect class` is NOT reported, though an `init` block in the
+  same position is. Once any body error exists the reference compiler never reaches actualization,
+  so the unmatched-expect report is suppressed for the WHOLE compilation, not per file (measured
+  with two files: a body error in one silenced a clean unmatched `expect` in the other). An
+  unmatched `expect` with the feature ON reports `expected <name> has no actual declaration in
+  module <name> for JVM` at the `expect` keyword, naming the `-module-name` it looked in. Tests:
+  `mpp_requires_the_feature_e2e`, `expect_declaration_body_e2e`.
+
+- **An `actual` with no `expect` to actualize is an error, named by a declaration renderer.** With
+  `+MultiPlatformProjects` on, a top-level `actual` that actualizes nothing reports
+  `'<rendered declaration>' has no corresponding expected declaration` at the declaration's NAME
+  (`actual fun simple(): Int = 1` → column 12, under `simple`). krusty used to accept it and emit.
+  The message names the declaration the way the reference compiler's own renderer does — the full
+  measured grammar is in `docs/PARITY_PROTOCOL.md` — and that rendering is a HYBRID by necessity:
+  source syntax owns what the declaration WROTE (kind, name, parameter names, which parameter
+  carries `vararg` or a default, and a classifier's modifier words), while resolution owns every
+  TYPE, because an inferred return (`actual fun f() = 1` → `Int`) and a supertype named through a
+  typealias (`class ViaAlias : AliasBase()` → `: Base`) have no written form to copy. The two
+  halves are read at different TIMES: which `actual` is unmatched is a source-set question,
+  answerable only while every file's syntax is live, and the rendering is not built until Pass-1
+  signature finalization has published the types it names. Three resolved facts each need a
+  correction the naive read gets wrong: a generic callable's `Signature::params`/`ret` are ERASED
+  (its declared shape is on `GenericSig`), a `vararg` parameter's declared type is the ARRAY it
+  arrives as while the rendering names the ELEMENT, and a classifier's type parameters are stored
+  as semantic identities whose source spelling is what gets rendered. The modifier words a
+  declaration wrote are rendered in the reference compiler's measured order —
+  `external override inline operator infix tailrec suspend` for a callable,
+  `external const lateinit` for a property, `inner data value fun` for a classifier — and omitting
+  them silently dropped `const val`, `lateinit var`, `operator fun` and `external fun` from the
+  message until the fixture was widened to include them. An unmatched `actual` is
+  found by ACTUALIZATION ITSELF, not by a name/arity key: that matcher compares resolved type
+  shapes and follows an `actual typealias`, so it pairs `expect val S.tag: S` with
+  `actual val String.tag: String` where a key differing on the receiver spelling cannot (reporting
+  those was a real regression the harness caught). Actualization's pairing is the ONLY
+  authority: a name/arity key differs on the receiver spelling exactly where actualization follows
+  an `actual typealias`, so consulting it as a second answer reported pairs that had matched. An
+  `actual typealias` publishes a type EXPANSION rather than a callable or classifier signature, so
+  nothing resolved carries its identity; it is found in the compact header inventory by the
+  inventory's own EXACT anchor — this file, the alias's range, no owner, the type-alias kind, and
+  its position in the list a file keeps aliases in. A range alone is not an identity, because a
+  constructor property and the class declaring it share one and so do a property and its accessor,
+  so identity and coordinate are taken together where the declaration's syntax is read (a file
+  declaration through the inventory's positional record of what it interned each parsed
+  declaration as, a member through the same exact anchor under its owner) and travel together
+  afterwards. A declaration this check can find no stable identity for reports an internal error
+  at its own name rather than falling back to a key. A declaration with CONTEXT PARAMETERS renders them before the visibility
+  slot (`context(tally: Tally) public final actual val slotted: Int`), with the names the
+  declaration wrote and the types resolution published; such a property used to be passed over
+  entirely.
+
+  A MEMBER that wrote `actual` is reported at its own name by its OWN outcome, independently of
+  its owner's. Actualization pairs a matched classifier's members individually
+  (`actualized_declaration_pairs` walks each matched pair's children and pairs them by kind, name,
+  receiver and arity), so `expect class Holder { fun kept(): Int }` with
+  `actual class Holder { actual fun kept() = 1; actual fun extra() = 2 }` reports `extra` and
+  nothing else — the owner and `kept` both actualized something. Measuring this needs a real
+  source-set split, because the reference compiler rejects an `expect` and its `actual` in the same
+  module before reaching the question; the header is passed as `-Xcommon-sources`. A member's
+  modality slot is the part that is not `final`: an `override` of an `open` member renders `open`,
+  and an interface member renders `abstract` without a body and `open` with one. A member's
+  resolved record is selected by the STABLE DECLARATION IDENTITY the compact header inventory
+  anchors on its source range — never by name and arity, which cannot tell two overloads that tie
+  on arity apart and left both of a tied pair unrendered. A member EXTENSION property is a separate
+  declaration in a separate table (`ClassSig::member_ext_props`), consulted by the same identity,
+  and renders its receiver before the name while the diagnostic still points at the name. A nested
+  classifier and a `companion object` are hoisted out of their owner by the parser, so neither
+  rides a member list: each is recorded as an actualization target of its own where its modifier
+  list is read, renders its OWN simple name, and a companion renders the word `companion` before
+  `object` — an edge its owner records. An anonymous `companion object` is named by its `object`
+  keyword, which is where the reference compiler points. A primary-constructor property carries
+  `actual` on the parameter and renders like any other `val`/`var` member. Nothing that wrote
+  `actual` is passed over in silence: a member whose resolved record cannot be reached reports an
+  internal error at its own name rather than disappearing.
+
+  **Which classifier a written path names is the FILE's ordinary resolver scope, not its
+  spelling.** Actualization runs before full signature solving because it decides which compact
+  declaration subtree survives. Before it does, resolution binds every classifier type it may
+  compare through the same module + provider scope tower used by ordinary signatures: own package,
+  explicit imports and aliases, wildcard imports, Kotlin defaults and platform defaults.
+  Actualization consumes only the resulting `(source, header type) -> TypeName` table; it cannot
+  inspect imports, query a provider, render a name, or intern an unresolved spelling. `import
+  plib.model.Tally` against `plib.model.Tally` written out is one classifier;
+  `import plib.model.Tally as Ledger` puts that classifier under the name `Ledger`; `import
+  plib.left.Tally` against `import plib.right.Tally` are two. A simple name more than one
+  import CLAIMS is AMBIGUOUS — two wildcard imports that could each supply it, or two explicit
+  imports written under it: the file has not said which classifier it means, so it names none
+  and pairs with nothing. Answering with the first match, or with whichever import came last,
+  would pair two declarations that name different classifiers. What is not a choice is spared:
+  one classifier imported twice, or one package wildcard-imported twice, still names that
+  classifier, which is why the wildcard scan counts DISTINCT classifiers rather than occurrences.
+  Every answer is an interned `TypeName`, so a comparison is identity equality and a spelling is
+  lookup input exactly once. An unresolved or ambiguous type has no binding and cannot match even
+  another unresolved spelling. Dependency wildcard candidates participate through their provider,
+  so two dependency classifiers named alike do not collapse to one bare name. Tests:
+  `fir::header::actualization::tests` for each import form, the two ambiguous pairs and the
+  repetitions they spare, `resolve::actualization_names::tests` for dependency-provider wildcard
+  identity, and
+  `no_expect_for_actual_e2e::a_star_imported_classifier_of_another_package_does_not_pair`,
+  `::an_import_alias_names_the_classifier_it_renames`,
+  `::a_star_import_supplies_the_classifier_it_brings_into_scope`,
+  `::identical_simple_names_from_different_packages_do_not_match`.
+
+  **The target a diagnostic names is the PLATFORM's name for itself.** `expected <name> has no
+  actual declaration in module <m> for JVM` had `JVM` as a constant in the common frontend, which
+  would still say `for JVM` under another backend. `SemanticPlatform::diagnostic_target_name` is
+  the provider's answer, beside `external_property_diagnostic_label`; a provider that takes no
+  part in source-set diagnostics answers `None`, and the check reports an internal error rather
+  than inventing a name. Test:
+  `mpp_requires_the_feature_e2e::an_unmatched_expect_names_the_module_it_looked_in` and
+  `no_expect_for_actual_e2e::the_check_needs_the_multiplatform_feature`, which runs the reference
+  compiler without `-Xmulti-platform` too and compares complete ledgers.
+
+  **What a declaration resolved to is published by RESOLUTION, once.**
+  `resolve::declaration_index` walks each published table one time and enters each record under
+  the identity it already carries; every reader does lookups. A reader that rescanned `funs`,
+  `ext_funs`, `source_props`, `ext_props` and four more tables per classifier depended on how many
+  tables a declaration may appear in and on which order to try them. Two records claiming one
+  identity is a contract failure recorded as a conflict, not a last-writer-wins `insert`: the
+  check reports an internal error at the declaration rather than rendering whichever arrived
+  second.
+
+  **An implementation is a declaration that WROTE `actual`.** A declaration sharing an `expect`'s
+  package, kind, name, receiver and arity is the implementation that header was written for, and
+  the reference compiler says so AT THE DECLARATION — `declaration must be marked with 'actual'.`
+  at its own name — while leaving the header matched. Accepting such a declaration as a valid
+  implementation instead let it suppress the unmatched-`expect` error, exclude the `expect`
+  subtree and inherit the header's defaults from a coincidence; reporting the header as
+  unactualized instead would name the same mismatch from the side that did not get it wrong. The
+  modifier is unrecoverable afterwards — it is gone by the time headers are compacted, and a
+  declaration's shape says nothing about what it claimed — so the parser's record of it is
+  published as `DeclarationFlags::ACTUAL`.
+  (`an_ordinary_declaration_of_the_same_shape_does_not_actualize`.)
+
+  **What a pair compares is a classifier IDENTITY, not a spelling.** Actualization runs before
+  signatures are resolved, so the identity is the one each file's package and imports establish
+  over the classifiers the module declares: `plib.model.Tally` written out and `Tally` under
+  `import plib.model.Tally` are one classifier, and `Tally` imported from `plib.left` and from
+  `plib.right` are two. A path nothing claims keeps its own spelling, which is a canonical form
+  both sides reach the same way rather than a fallback to the text. A TYPE PARAMETER is matched by
+  POSITION, the owners' before the declaration's own — `expect class A<B, C> { fun o(b: B): C }`
+  against `actual class A<C, B> { actual fun o(b: C): B }` is one legal pair, and a member that
+  started from an empty scope could not see it. An `actual typealias` is followed by the QUALIFIED
+  identity of the `expect class` it actualizes, in the member-extension receiver key as well as in
+  the type comparison. There is no lone-candidate fallback: every kind answers — a callable, a
+  constructor and a property by their input shapes, and the kinds that declare no inputs by the
+  coarse key that bucketed them — where accepting a single coarse candidate paired declarations
+  whose shapes had already been compared and rejected.
+  (`an_imported_and_a_qualified_spelling_of_one_classifier_match`,
+  `identical_simple_names_from_different_packages_do_not_match`,
+  `a_member_extension_on_an_actualized_alias_matches`.)
+
+  **Syntax meets resolution at ONE identity.** The check holds parser declarations — names,
+  modifiers, spans — and has to find what each resolved to. It asks the compact header inventory
+  for the identity it anchored on that declaration's own range, through a map the inventory
+  publishes once, rather than walking the stub list comparing ranges; and it asks one published
+  index for the resolved record, rather than entering a name-keyed table and filtering what comes
+  back. Every member table a classifier keeps — its methods, its member extension functions, its
+  declared properties, its member extension properties — is in that index, so a name shared
+  between two of them cannot answer with the wrong record, because no name is consulted. A
+  `typealias` is the one declaration whose resolved expansion is keyed by a qualified TYPE name
+  rather than by a declaration; that name is published once from the inventory beside the alias's
+  declaration identity, so a reader asks by the declaration it holds.
+
+  A file's `actual typealias`es are reported where the SOURCE writes them: they live in their own
+  parser list, and a report that emptied one list after the other put every alias last however the
+  source interleaved them. (`an_alias_is_reported_where_the_source_writes_it`.)
+
+  Note the deliberate model
+  difference this check makes visible: the reference compiler rejects an `expect` and its `actual`
+  in the same module, while krusty compiles a platform module and its `dependsOn` chain as one
+  source set, so a pair in one file is matched here and unmatched there. Tests:
+  `no_expect_for_actual_e2e` — differential against the reference compiler on the same source,
+  because a rendering this detailed is exactly what a transcription gets wrong, and comparing each
+  compiler's COMPLETE ordered ledger of errors: a comparison that keeps only this check's own
+  sentence cannot see a second diagnostic either compiler started or stopped reporting.
+
 - **Operator extensions on nullable PRIMITIVE receivers dispatch by call-site nullability.**
   `operator fun Int?.inc()`, `Long?.compareTo(Long?)`, `Int?.times(Int)` (the dispatchable set:
   `plus`/`minus`/`times`/`div`/`rem`/`compareTo`/`inc`/`dec`) are accepted and routed: a receiver
@@ -5096,13 +5454,44 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   business. Being conservative costs only a missed rewrite, and a missed rewrite is the program that
   was compiled before.
 
-  A CONTEXT PARAMETER is still left recursing: it takes slots between the receiver and the
-  parameters, and nothing here tests that layout.
+  **A LOCAL function's frame is a physical capture prefix and then its logical parameters.** The
+  rewrite is driven from declaration lowering, and a local function reaches the IR by another path
+  that never ran it, so every `tailrec fun` inside a function kept its self-call and overflowed at
+  the depth the modifier exists to make safe. Lifting gives a local its captures as LEADING
+  parameters, and every call to it — the recursive one included — passes them; `BodySlots::
+  first_parameter` already points past them. Everything after that point is a logical parameter in
+  declaration order: the context parameters, an extension receiver where there is one, then the
+  declared value parameters. The loop reassigns exactly those and leaves the capture slots alone,
+  which is sound because a self-call's capture arguments re-read the frame's own capture
+  parameters — checked, not assumed, so a call whose prefix is anything else stays an ordinary
+  call.
+
+  Counting either end of the list alone is what left whole source forms recursive, each a normal
+  Kotlin program that kotlinc runs flat: taking the IR list's length writes a capture slot, and
+  taking the declaration's parameters minus its context values makes the self-call test compare the
+  call's whole argument list against a smaller number, so a CONTEXTUAL local declined in silence —
+  and a local EXTENSION, whose receiver the IR carries as an ordinary parameter at its own
+  position, was miscounted the same way. A capture is an implementation detail of lifting, not a
+  Kotlin reason to revoke the constant-stack contract. A physical list SHORTER than that prefix is
+  an invalid checked shape rather than a frame with no logical parameters, so it fails closed
+  (`FirLoweringFailure::MalformedLocalFrame`): saturating there would hand the loop a frame that
+  reassigns nothing, which is the same silent decline in a different disguise.
+
+  **A local declared inside a class MEMBER is lifted onto that class**, as a private static, so its
+  self-call is a `Callee::ClassStatic` rather than a `Callee::Local` — the same declaration reached
+  through the owner it was lifted onto. The self-call test recognized only `Local`, so this shape,
+  which is ordinary Kotlin and which kotlinc runs flat, recursed until `StackOverflowError`. The
+  callee IDENTITY answers it; the owner's spelling is not consulted. Test:
+  `a_class_member_local_tailrec_runs_flat` — a plain member's local, one that captures a property,
+  and one in a companion, each a million deep and each compared against the reference compiler.
   Tests: `tests/tailrec_e2e.rs` (`a_member_tailrec_runs_flat`, `an_extension_tailrec_runs_flat`,
-  `a_member_call_on_another_instance_still_recurses`, and
-  `member_and_extension_tailrec_agree_with_kotlinc`, which asks the reference compiler the same
-  questions — a `StackOverflowError` on one side and an answer on the other is the divergence it
-  reports).
+  `a_member_call_on_another_instance_still_recurses`, `a_local_tailrec_runs_flat`,
+  `a_class_member_local_tailrec_runs_flat`,
+  `a_capturing_local_tailrec_runs_flat` — read-only, mutated, and both at once —
+  `a_contextual_local_tailrec_runs_flat`, `an_extension_local_tailrec_runs_flat`, each a million
+  deep and each asking the reference compiler the same question, and
+  `member_and_extension_tailrec_agree_with_kotlinc` — a `StackOverflowError` on one side and an
+  answer on the other is the divergence they report).
 
 - **A `return` is a tail position wherever it stands.** `tailrec` rewrites a tail self-call into a
   loop step, and the tail positions of a function are not only its last expression: nothing of the
@@ -5675,11 +6064,102 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type is built with the property's own type (`[V]` at arity 0, `[Recv, V]` at arity 1). Two things
   are deliberately NOT asserted, because a wrong type is worse than none: a type still mentioning a
   type parameter (the use site's substitution is not applied here), and an EXTENSION property's value
-  type (written in terms of the property's own parameters). A VALUE-CLASS-typed property reference
-  declines outright — kotlinc emits those accessors under the value-class name mangle, which the
-  reference does not yet carry. Tests: `tests/toplevel_property_ref_e2e.rs::toplevel_property_refs_run`,
-  box `callableReference/property/extensionPropertyWithExtensionType.kt`,
-  `inlineClasses/callableReferences/inlineClassTypeMemberVar.kt`.
+  type (written in terms of the property's own parameters). Tests:
+  `tests/toplevel_property_ref_e2e.rs::toplevel_property_refs_run`,
+  box `callableReference/property/extensionPropertyWithExtensionType.kt`.
+
+- **A property reference names the accessor the declaration actually realizes, value classes
+  included.** krusty emitted a reference class that called an accessor declared nowhere, so the
+  program failed at its first `get` with a `NoSuchMethodError` — an unlinkable artifact emitted
+  without a diagnostic. Four rules, each measured against the reference compiler's own emitted body
+  (box `inlineClasses/callableReferences/*`, 14 cases; box total 6317 → 6337, twenty cases moving
+  and none regressing — the `annotations/instances/annotationInstances*` pair flips run to run on
+  any commit and is excluded):
+  - A **member** of a value class is realized statically over the erased carrier, so the reference
+    casts its receiver, unboxes it, and calls statically: `checkcast Z; Z.unbox-impl()I;
+    Z.getXx-impl(I)I`. The `-impl` suffix is the structural form the declaration side uses when the
+    signature needs no value-class hash of its own.
+  - An **extension on** a value class is the same shape through its facade, with the hash-mangled
+    name the declaration carries: `ExtKt.getXx-IQRRRT4(I)I`, not `getXx(LZ;)I`.
+  - Which of those two a reference is, is RECORDED, never inferred. `PropRef::ext_facade` is `Some`
+    for an extension AND for a private member reached through an `access$…` bridge — the bridge's
+    accessor is static in the same way, so it names an owner there rather than a facade. Reading it
+    as "this is an extension" rebuilt `getXx-IQRRRT4(I)I` for a private member whose declaration is
+    `getXx-impl(I)I`, and `(this::xx).get()` on a value class failed with
+    `NoSuchMethodError: 'int Z.getXx-IQRRRT4(int)'`. `PropertyReferenceRealization::accessor_role`
+    now carries the selection made where the three cases are distinguishable, and a private member
+    of a value class
+    takes the member rule with kotlinc's bridge in front of it: `Z` declares
+    `private static final getXx-impl(I)I` and publishes `public static final access$getXx-impl(I)I`
+    beside it, and the reference calls the bridge. Publishing the accessor ITSELF was a declaration
+    bug one layer below references, and not value-class-specific: `materialize_member_property` —
+    the path a member property with a CUSTOM accessor takes — recorded its accessors' source order
+    but never entered them in `ir.private_methods`, unlike the two sibling paths that handle
+    backing-field properties, so every private computed member property was emitted `ACC_PUBLIC`. A
+    value class made it visible because there the accessor is also renamed and called from a
+    separate class. The bridge is the existing function-reference access-bridge emitter, which had
+    no populating caller and assumed an instance target; a value class's accessor is already
+    callable without an instance, so it takes a STATIC target too — the bridge carries exactly its
+    parameters and `invokestatic`s it.
+  - The value class's own **underlying** property is the exception and takes no rewrite: reading it
+    is the unbox, and its accessor stays an ordinary instance getter on the box (`Z.getX()I` —
+    which is also the signature the reference reports, exactly as kotlinc's does, even though
+    kotlinc's body shortcuts to `unbox-impl`). WHICH property that is, is the declaration's own
+    storage position — a value class has exactly one field, and the property that owns it is the
+    underlying one — or, for a dependency, the underlying property its `@Metadata` names. It is not
+    a spelling: `x` names the underlying property of `Z`, of `S`, and of any unrelated class that
+    happens to declare one, so comparing the reference's property name against a list of underlying
+    names answers for the wrong declaration as readily as the right one.
+  - A property whose **TYPE** is a value class already carried the mangled accessor name, but a
+    member or top-level property has no written descriptor, so the one synthesized from its
+    semantic type (`()LZ;`) named a method the declaration does not have: it exchanges the carrier
+    (`()I`, `(I)V`). The descriptor is now synthesized from the carrier, which also gives
+    `box-impl`/`unbox-impl` at the `KProperty` boundary their correct signatures.
+
+  A **top-level** property of value-class type is realized over the CARRIER as well, so the rule
+  above has no exception left to carve out. kotlinc emits `private static int topLevel`,
+  `public static final int getTopLevel()` and `public static final void setTopLevel-IQRRRT4(int)`,
+  and krusty emits that surface now. The setter's name mangles and the getter's does not, which is
+  `vc_mangle`'s standing rule read at a file facade: a value-class PARAMETER always contributes to
+  the hash, a value-class RESULT contributes only outside a file class (`is_file_class` suppresses
+  the return contribution — a member keeps its `getZ-a_XrcN0()I`, the facade's `getTopLevel()I` has
+  no hash at all). Both halves of that realization are RECORDED on the declaration rather than
+  recomputed at each site that has to agree with it: `IrStatic::erased_value_class` names the class
+  the storage was erased over (`None` ⇒ the boxed convention) and `IrStatic::setter_jvm_name` the
+  setter's spelling (`None` ⇒ the ordinary `set<X>`), and the set of erased facade properties is
+  handed to the reference pass. A reader that re-decides is a reader that can disagree: while the
+  declared type still said `LZ;` and the field said `I`, the value-class boxing analysis read
+  `getstatic gz:I` as a BOXED value and a defaulted parameter `fun test(z: Z = gz)` got
+  `Integer.valueOf; checkcast Z; unbox-impl` over a carrier that was never boxed — a
+  `ClassCastException` at the first call. The decision is therefore taken once, before any boxing
+  analysis runs, and the storage erased afterwards, where the initializer rewrites that still speak
+  in the declared type are already done. A COMPANION property's
+  field stays BOXED (`LX;`) with its initializer boxed to match: only the top-level one lives on
+  the facade kotlinc erases, and holding both under one rule is what named a `getTopLevel()LZ;` no
+  declaration had. The reference's reflection owner and top-level flag keep reading `ext_facade`
+  alone: a member of a value class is still a MEMBER reference (`ldc Z.class`, flags 0), and only
+  the physical call shape changes. A RECEIVERLESS accessor's descriptor stays the property's own
+  type rather than the `PropRef`'s recorded one, which for a companion-block or access-bridged
+  property names the owner it is called with — a descriptor this reference passes nothing for (it
+  emitted an `invokestatic` on an empty stack). Tests:
+  Every one of these answers is a JVM realization fact, so it is recorded where the selection is
+  made — in `jvm::property_references::PropertyReferenceRealization`, keyed by the synthesized
+  reference class's own internal name — and not on the common-IR `PropRef`, which says which
+  property a reference names and what its `KProperty` surface is. The record carries the accessor
+  names the declaration wrote, the realization shape, whether the storage is a facade's own,
+  whether the property IS its value class's storage, the PHYSICAL return the selected getter
+  declares, and the exact module functions the accessors are. The last two are what a later pass
+  would otherwise rebuild from a rendering: reading a return back out of a descriptor this compiler
+  itself synthesized makes a spelling the authority over a declaration, and an `access$…` bridge
+  found by rebuilding a mangled name and looking for a method that answers to it is a bridge to
+  whatever happens to be spelled that way. The bridge is now named after the function the selection
+  recorded, and a reference with no recorded accessor refuses the file rather than naming something
+  nothing declares. Tests:
+  `tests/value_class_property_reference_e2e.rs` — the member, private-member, underlying and
+  top-level cases each compare krusty's COMPLETE emitted class list and method surface against the
+  reference compiler's, and name each reference class rather than searching the dump for one whose
+  body looks right — and
+  `companion_e2e::companion_block_mutable_property_reference_is_receiverless`.
 - **A property on a BUILTIN receiver is one table, read by both phases.** `String.length`, `Char.code`
   and an array's `size` have no class file to resolve against. The body checker knew them; the
   SIGNATURE phase did not, so `const val code = a.code` reported "cannot infer the type of property"
@@ -7481,6 +7961,209 @@ and behavior is checked by RUNNING the emitted program.
   immediately followed by `:` for the name parse (a genuine modifier never precedes a colon) — which also
   handles an annotated modifier-keyword name (`@Anno open: Int`). (`build840_jj1_param_soft_keyword_e2e`)
 
+- **A `super` call to a `suspend` member is refused by the CHECKER, at the `super` keyword.**
+  Threading a continuation through a NON-VIRTUAL dispatch and resuming back into it is not modeled
+  (the corpus's `coroutines/suspendFunctionAsCoroutine/superCall*`), and the project's rule for a
+  construct it does not model is to decline the source. Emitting it anyway produced
+  `invokespecial A.f:()Ljava/lang/String;` — the SOURCE descriptor, fixed when `module_calls`
+  realized the super call — against a declaration that is
+  `A.f:(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;`, so the class could not link
+  (`NoSuchMethodError: 'java.lang.String A.suspendHere()'`): an unlinkable artifact emitted with no
+  diagnostic. The refusal belongs to the phase that SELECTED the target and has its suspend shape
+  in hand. A backend guard has to rediscover that fact from a realization which no longer names it,
+  and can then only recognize the call shapes reaching one particular node: the identical source
+  with its superclass in a SIBLING FILE or in a DEPENDENCY has no same-file predeclaration to
+  recover from, and an `@Outer`-labeled ENCLOSING dispatch is wrapped in a generated bridge that is
+  not itself recorded as suspend — all three compiled and emitted the unlinkable call. One check,
+  where `ResolvedSuperCall` is built, covers every spelling and every origin. A `super` call to an
+  ORDINARY member and an ordinary virtual suspend call are both untouched: the rule keys on the
+  TARGET being suspend, not on the dispatch being non-virtual. Test:
+  `tests/suspend_super_call_refusal_e2e.rs`, which asserts the complete ordered ledger with
+  positions for the direct, parameterized, typed, labeled-enclosing, sibling-file and dependency
+  spellings, plus both negative controls.
+
+- **A bridge method unboxes its RETURN value, and that adapter is not the ordinary unbox cast.** A
+  bridge exists because a supertype's erased signature differs from the override's, and `emit_bridges`
+  adapts both ends: it boxes a primitive argument, `checkcast`s a reference one, converts numeric
+  widths, and boxes a primitive RESULT for a reference-returning supertype. The INVERSE of that last
+  one was absent. When the delegated override hands back the erased generic REFERENCE
+  (`getSize()Ljava/lang/Object;` for `var size: T`) while the supertype the bridge serves declares the
+  PRIMITIVE (`interface C { var size: Int }`), the bridge pushed the reference and emitted `ireturn` —
+  `VerifyError: Bad type on operand stack … Type 'java/lang/Object' is not assignable to integer`, an
+  unverifiable artifact emitted with no diagnostic. (The setter direction was already right: an
+  argument box was there from the start.) Measured from the reference compiler, the adapter is NOT
+  `unbox_prim`'s: a NUMERIC goes through `java/lang/Number` — `checkcast java/lang/Number;
+  Number.intValue()I`, and likewise `byteValue`/`shortValue`/`longValue`/`floatValue`/`doubleValue` —
+  never through `java/lang/Integer`; `Boolean` and `Char` go through `java/lang/Boolean` and
+  `java/lang/Character`; and the `checkcast` is OMITTED when the override's static return type already
+  IS that owner (a `T : Number` base returns `()Ljava/lang/Number;` and kotlinc casts nothing, while a
+  `T : Comparable<T>` bound keeps the cast). A bridge whose supertype declares a VALUE CLASS in its
+  unboxed form takes the carrier out of that class's own `unbox-impl` (`checkcast IC;
+  IC.unbox-impl()I`) — the class identity is unknowable from the bridge at emission time, because the
+  value-class pass rewrites `erased_ret` to the carrier in the same step, so the JVM pass records it
+  in `bridge_return_adaptations` — a backend-owned physical realization plan passed directly to
+  bridge emission and keyed by the owning class and bridge ordinal. No classifier identity for a JVM
+  boxing decision sits on common `Bridge` or `IrFile`. That holds for a
+  REFERENCE carrier too (`checkcast Text; Text.unbox-impl()Ljava/lang/String;`): keying the adapter
+  on the carrier alone sent a reference carrier down the ordinary `Object`-to-`String` narrowing,
+  which never unboxed and handed the caller a `Text` where a `String` was declared. Nor may the two
+  JVM types decide WHETHER to unbox: an `Any`-CARRIER value class (`@JvmInline value class
+  Ref(val x: Any)`) has `Object` on both sides of the boundary, so a `concrete != erased` guard
+  found them equal, emitted nothing and handed the caller the boxed `Ref` where the declaration says
+  the carrier. The PLAN decides; the types only say what to write. And a NULLABLE value class whose
+  carrier itself carries null (`Text?` over a non-null `String`) stays unboxed, so the delegated
+  generic override may legally return `null` — `unbox-impl` is an instance call, and reaching it
+  with null throws where the declaration says the bridge returns null. kotlinc branches around it
+  (`checkcast Text; dup; ifnull → pop; aconst_null`, else `unbox-impl`) and so does krusty; the
+  regression asserts both the instruction ledger and that the interface call really answers null.
+  A BUILT-IN unsigned value class stays out of the global expression-rewrite map, but the dedicated
+  callable-boundary value-class map retains its wrapper identity because boxed `kotlin.UInt` is not
+  a `java.lang.Number`. That map therefore owns both its `unbox-impl` adapter and mangled bridge
+  identity (`foo-pVg5ArA()I` for `UInt`). Tests exercise every unsigned bridge through its interface,
+  in addition to comparing the instruction ledger.
+  Test: `tests/bridge_return_unbox_e2e.rs`, an instruction ledger against the reference compiler for
+  every signed primitive, both bounds, both value-class carriers and all four unsigned forms, plus
+  runtime interface dispatch.
+
+- **A `var` whose type is a BOUNDED type parameter emits an invalid `LineNumberTable` (open).**
+  `open class P<T : Number> { var c: T? = null }` emits `setC` with a single line entry at
+  `pc == code_length`, which the JVM rejects with `ClassFormatError: Invalid pc in LineNumberTable`.
+  An UNBOUNDED `T` puts the same entry at pc 0, so the bound is what moves it. Found while fixture-
+  reducing the bridge-return unbox above (whose test therefore holds its slot as `Any?`); it accounts
+  for the corpus's `ClassFormatError:Invalid pc in LineNumberTable` bucket and is not fixed here.
+
+- **A `try` and a `return` own their own `LineNumberTable` entries.** Four rules, each measured
+  against the reference compiler and each previously absent, so a debugger stepping through a
+  guarded region saw the finalizer's line where the source says otherwise:
+  - A protected region OPENS on a `nop` carrying the `try` keyword's line, and the exception
+    table's `from` is that `nop`. Starting the region on the body's first instruction shifted every
+    offset in the method and lost the `try` line entirely — and, because a mark at an existing
+    offset replaces the one already there, the body's own first mark overwrote it.
+  - A `return` restores its own line at the PHYSICAL return instruction, after the parked value is
+    reloaded (`iload_0` at one offset, `line 5` on the `ireturn` at the next) — not before the
+    reload. A BARE `return` emits nothing of its own, so with a finalizer active its line would be
+    claimed by the finalizer's first instruction; kotlinc anchors it on a `nop` ahead of the
+    transfer and restores it again at the return. Both a value return and a void one therefore
+    carry provenance, and the void arm simply had none.
+  - The `goto` leaving an inlined `finally` on the normal path carries the `finally` block's
+    CLOSING line: the jump belongs to the end of the finalizer, not to the statement after the
+    `try`. Missing it costs two entries, not one — the finalizer's own line stays in effect into
+    the catch-all handler, whose identical mark then deduplicates away.
+  - The catch-all handler's entry — the `astore` parking the in-flight exception — belongs to the
+    finalizer copy it introduces, so it opens on the finalizer's FIRST line rather than the
+    `finally` keyword's.
+
+  Tests: `tests/expression_line_marks_e2e.rs` (a bare return, a value return and an implicit `Unit`
+  return each through a `finally`, plus an explicit return whose call is a constructor) and
+  `tests/try_debug_lines_e2e.rs`.
+
+- **A `try` with a `finally` reserves its two parked slots where it OPENS, and nested `try`s share
+  them.** Such a `try` parks two things while a finalizer runs: the value a `return` out of it
+  computed before leaving, and the exception its catch-all caught. kotlinc reserves both with the
+  `try` itself, so every local an inlined copy of the finalizer declares sits ABOVE them; krusty
+  allocated each where it was first used, which put the first copy's locals underneath and moved
+  everything the `try` parks one slot up. The cost was not a name: a slot-higher parked exception
+  is an extra `top` in every StackMapTable frame recorded while the finalizer runs, and a longer
+  store in every copy, so the frames and the exception table's offsets both diverged.
+
+  Nested `try`s SHARE both slots, which is also what kotlinc emits. Only one return is ever in
+  flight, and a `try` inside the body runs its handler strictly before the enclosing one is
+  entered — so the enclosing slots are free for it. The parked-exception slot stays in the reuse
+  pool while the body is emitted and is taken back out before the handler, where it holds the
+  exception across the whole inlined finalizer and a `try` inside that copy must not be given it.
+
+  A TYPED catch's parameter takes the same slot the catch-all parks in, which is also what kotlinc
+  emits: the two are never live at once — a catch body runs because its type MATCHED, and the
+  catch-all parks only while unwinding past it — and the parked value is dead the moment the
+  handler rethrows. A slot of its own pushed the parameter above the reserved one and cost a wide
+  `astore` at every catch. A `return` written in a catch body is the other half of that scope: the
+  slot the TRY reserved is live there, so it takes one of its own, as kotlinc's does.
+
+  The LAST catch of a `try` with no `finally` falls through to the join instead of jumping to it:
+  nothing stands between them, so the jump would be to the next instruction. Every other catch has
+  the next handler, or its own copy of the finalizer, in the way and still needs it.
+
+  Tests: `a_finally_with_its_own_handler_types_the_parked_exception`, which compares the complete
+  exception table and the complete frame list — offsets, `top` padding and all — against kotlinc;
+  `a_nested_finally_copy_stays_inside_the_outer_region`, which compares the complete code; and
+  `a_typed_catch_does_not_guard_its_own_finalizer_copy`, whose complete table is the reference
+  compiler's rather than a pinning of krusty's own.
+
+- **A `catch` parameter is a debug local like any other.** It is DECLARED by its `IrCatch` rather
+  than by a variable node, so it has no declaration expression the source-name and provenance
+  tables can be keyed by; it carries the same two facts in the record that declares it
+  (`IrCatchBinding`) and is rendered through the same JVM debug-name boundary as every other local.
+  Writing the source spelling straight into the local variable table cost the `$iv` suffixes: the
+  reference compiler names an inlined catch parameter `e$iv` at one expansion deep and `e$iv$iv` at
+  two, exactly as it names an ordinary copied local, and krusty wrote a bare `e` at every depth. An
+  expansion that clones a `try` nests the binding's provenance as it nests a local's.
+  (`a_catch_parameter_is_named_where_it_is_declared`,
+  `an_inlined_catch_parameter_is_named_at_its_expansion_depth`.)
+
+- **A CALL's `LineNumberTable` entries: which physical operation is a dispatch, and which operands
+  the call invented.** A multi-line call's operands each mark their own line as they are pushed, so
+  by the time the `invoke*` is reached the line in effect is the last operand's. kotlinc puts the
+  call's own line back at the dispatch. Getting this right is one question asked per physical
+  operation, and every answer is pinned by a complete-table differential in
+  `tests/expression_line_marks_e2e.rs` — the table from kotlinc and the table from krusty, offsets
+  included, with kotlinc's own spelled out so a change in it is visible in the diff.
+  - **A dispatch restores the call's line.** Every `IrExpr::Call` callee form, `IrExpr::New`,
+    `IrExpr::MethodCall`, `IrExpr::InvokeFunction` (a function value's `FunctionN.invoke`),
+    `IrExpr::EnumValueOf`, a property read or write realized as an ACCESSOR, and the intrinsics
+    whose lowering IS a call — `PrimitiveCompare`'s `Integer.compare`, `String.get`'s `charAt`.
+  - **An operation that dispatches nothing does not.** An array read or write, a field read or
+    write, an arithmetic or comparison instruction: the operand's line stays in effect through it,
+    and marking there would add an entry kotlinc does not have. So the rule cannot be "mark every
+    intrinsic" — `x.compareTo(\n y\n)` and `a.get(\n i\n)` are the same source shape and take
+    opposite answers. Both are asserted.
+  - **Operands the CALL synthesized carry the call's line, not the last supplied argument's.**
+    kotlinc returns to the call's line at the FIRST synthetic `$default` operand — the omitted-
+    parameter placeholder — rather than at the `invokestatic`, because the placeholders, mask words
+    and marker realize the ABI and not anything the source wrote. A supplied argument between two
+    such runs puts its own line in effect and the next run restores the call's. With every
+    parameter supplied, the mask push is that first synthetic operand. A defaulted CONSTRUCTOR
+    takes the identical rule: it previously restored the line only at the `invokespecial`, three
+    bytes late.
+  - **Which operands those are is RECORDED, never recognized by shape.** A realized `Const(0)` and
+    a source `0` are the same node, so the pass that invents them records their physical positions
+    against the call (`jvm::default_call_operands::DefaultCallOperands`, the backend-owned table the
+    default-call realization already fills). Nothing about JVM synthetic operands is persisted
+    in common IR.
+
+- **`enumValueOf<E>(name)` and `E.valueOf(name)` are different declarations, and are kept apart.**
+  Both reach the same entry lookup and emit the same `invokestatic`, and kotlinc gives them
+  opposite line tables: the classifier's own MEMBER is an ordinary dispatch, so the call's line
+  returns at the invoke (`line 4: 6, line 3: 7`); the standard library's top-level `enumValueOf` is
+  `inline`, so what follows is its expansion and kotlinc marks the call SITE, keeping the call's
+  line and its argument's line as TWO entries at one offset (`line 3: 6, line 4: 6`). Checking
+  collapsed both onto one `FirClassifierCallable::EnumValueOf`, so krusty could only pick one
+  answer; `TopLevelEnumValueOf` and `IrExpr::EnumValueOf::declaration` now carry the selection to
+  the backend. Two entries at one offset needed a debug-line operation of its own
+  (`CodeBuilder::mark_line_retained`): ordinary marking replaces at a repeated offset, which is
+  correct everywhere else and here would lose one of the two positions. The same operation opens an
+  emitted `inline fun` TEMPLATE on its own body line, which kotlinc records beside the body's first
+  instruction line. Tests: `a_multi_line_enum_value_of_keeps_both_entries_at_its_dispatch`,
+  `a_multi_line_enum_member_value_of_returns_to_its_line`,
+  `a_reified_enum_value_of_template_marks_its_call_site`.
+
+- **An assignment's write dispatches where its LVALUE is named.** `b\n    .value =\n    x` puts the
+  setter call on the `.value` line, the way a multi-line call's dispatch returns to its selector's
+  line — kotlinc records `line 4: 6, line 6: 7, line 5: 8, line 7: 11`, and krusty had no entry for
+  the accessor at all. A member assignment is a STATEMENT, whose only line was its first, so the
+  lvalue's line is now carried from the parser (`assignment_target_lines`, parallel to the existing
+  `assignment_target_spans`) through `FirStatementDebugLines::target` to the lowered write. Test:
+  `a_multi_line_property_write_returns_to_its_accessor_line`, with
+  `a_multi_line_property_read_returns_to_its_accessor_line` for the read.
+
+- **A labeled `break`/`continue` leaves the loop it NAMES, or the file is refused.** The emitter
+  looked the label up on its loop stack and fell back to the innermost loop when it found nothing,
+  so a transfer and its loop that disagreed about which loop this is produced a jump the source
+  never wrote — silently. There is no fallback now: an unmatched label is an emit error and the
+  file is skipped, which is the same fail-closed answer the operand-arity contract gives. Tests:
+  `break_continue_e2e::labeled_break_and_continue_leave_the_loop_they_name` (a labeled `break` and
+  a labeled `continue` out of a nested loop, each through a `finally` that must run on the way),
+  and `jvm::ir_emit::try_emission::tests::a_break_naming_a_loop_that_is_not_open_is_refused_not_redirected`.
+
 - **An inline HOF lambda may call an ENCLOSING-class member (build.840 kk1).** `class H { fun f(es) =
   es.find { same(it.v, 3) }; fun same(a, b) = … }` — the inline-spliced `find` lambda calls `same`, a method
   of the enclosing class. krusty cleared `cur_class` for a spliced lambda's body (only a REAL closure
@@ -7528,6 +8211,53 @@ and behavior is checked by RUNNING the emitted program.
 - **A `suspend` function type erases to the arity+1 `FunctionN`.** `suspend () -> Unit` is a `Function1`
   at runtime (trailing `Continuation` parameter), so `as`/`is` against a suspend fn type checkcast/test
   `Function{n+1}` (KT-66093). (`suspend_fn_type_cast_targets_arity_plus_one_interface`.)
+
+- **An inline expansion's parameters are locals OF THAT EXPANSION, named by their ROLE.** A spilled
+  local's debug name is what a debugger shows while stepping through an inlined body, and krusty
+  produced the wrong one in three distinct ways:
+  - An argument that was already a local read reused the CALLER's slot, so the inline parameter had
+    no identity of its own and vanished from the spill names. kotlinc copies it; the expansion's
+    parameter gets its own slot, name and lifetime. A FUNCTION-typed argument is the exception and
+    keeps the caller's slot: an inline function parameter is SPLICED at each of its call sites
+    rather than stored, so there is no local to name. Copying one hid the lambda from the splicer,
+    so a forwarded `p` — `inline fun block(p: () -> Unit) { blockImpl(p) }` — materialized a
+    `Function0` whose implementation method was never emitted and the program died at its first
+    call with `NoSuchMethodError` (box `labels/nestedInlineLabels.kt`, reduced into
+    `a_forwarded_inline_lambda_parameter_is_still_spliced`).
+  - A member inline EXTENSION binds two receivers at once, and Kotlin keeps them distinct: the
+    containing class's `this` and the receiver being extended are different values. One role could
+    not stand for both, so `IrInlineLocalRole` has `DispatchReceiver` and `ExtensionReceiver`, and
+    the JVM boundary owns their spellings — `this_` for the callable's own `this`,
+    `$this$<callable>` for the receiver it extends, each with one `$iv` per inline depth.
+  - WHERE the extension receiver sits is a semantic coordinate, not position zero: Kotlin signs a
+    context extension `(contexts…, receiver, values…)`, so it follows the context parameters the
+    callable declares.
+  - A spliced lambda's own VALUE parameters are locals of the splice and keep their source names;
+    its CAPTURES are not — they are the enclosing locals, already named where they were declared.
+
+  - WHICH function-typed parameters splice is a MODIFIER, not a type shape. `noinline` marks the
+    one function-typed parameter whose argument is a real closure: it owns a local, a name and a
+    lifetime of its own, exactly like a value parameter, and forwarding it into a second expansion
+    copies it rather than handing on the caller's slot. `crossinline` is NOT this — it only forbids
+    a non-local return from the lambda, and the reference compiler still inlines the body — so a
+    `crossinline` parameter owns no local either. Both are function-typed exactly like the spliced
+    parameter beside them, so the role is carried from the declaration that wrote it: the parser
+    records it on the value parameter, the compact header publishes it, and the expansion reads the
+    callee's published parameter rather than inspecting the argument's type. A parameter whose role
+    was never published declines the expansion instead of guessing, because either guess silently
+    erases something — the parameter's identity, or the splice.
+    (`a_noinline_parameter_keeps_its_own_local_where_a_spliced_one_has_none`.)
+
+  Nothing is recovered from a name here: the role and the coordinate are recorded where the
+  expansion is built, and the `$this$`/`$iv` spellings exist only at the JVM boundary. Tests:
+  `an_inline_expansions_parameters_and_receiver_are_named_spills`,
+  `a_member_inline_extension_names_both_of_its_receivers`,
+  `a_context_parameter_does_not_displace_the_inline_receiver`,
+  `a_spliced_lambdas_value_parameters_keep_their_names`,
+  `a_spliced_lambda_names_each_of_its_value_parameters`,
+  `a_lambda_declared_inside_an_inline_function_gains_its_frame`,
+  `a_noinline_parameter_keeps_its_own_local_where_a_spliced_one_has_none`, and the naming unit tests
+  in `jvm::debug_local_names`.
 
 - **A suspend fn carries NO `checkNotNullParameter` on its value parameters.** kotlinc's state-machine
   RE-ENTRY call (`foo(null, continuation)`) passes null for every value parameter — the real values live
@@ -7623,6 +8353,33 @@ and behavior is checked by RUNNING the emitted program.
   (`tests/trailing_lambda_middle_default_e2e.rs`; unblocks the checker for corpus
   `fakeInlinerVariables.kt`-class `expectFailure(msg) { … }` calls — their remaining gap is the
   omitted fn-typed default's lowering.)
+
+- **A TAIL-ONLY inline expansion produces its value; it does not loop to carry one out.** An
+  expansion of a non-`Unit` inline function lowers to `var result = zero; loop@ while (true) { body;
+  break@loop }; result`, because a non-local `return` from the middle of the body has to carry a
+  value out past everything after it. When the only `return` IS the body's tail, none of that is
+  needed: the value is simply the body's, which is what kotlinc emits — it leaves it on the operand
+  stack. The loop form costs an unnamed local, and when the expansion crosses a suspension that
+  local takes a continuation field kotlinc has no counterpart for, so the spill arrays diverged.
+  - The shape is PROVED before anything changes, and proving it cannot change anything: the chain
+    of statement blocks from the expansion's root down to the rewritten return is collected from a
+    SHARED reference, and only then is the `Unit` placeholder allocated and the blocks rewritten.
+    Allocating first left an orphan `UnitInstance` in the arena whenever the answer turned out to
+    be no — the block shapes were restored, the allocation was not, and a refused optimization
+    still shifted every expression identity after it.
+  - A statement-bodied inline function wraps its body one level deeper, so the promotion descends,
+    and EVERY block on that path becomes value-producing; one left ending in a statement discards
+    the value.
+  - Refusal is the common case and must be total: a statement after the return, a refusal one level
+    down, and a block that already produces a value each keep the loop form with the arena
+    untouched.
+
+  Tests: `fir_lower::inlining::tail_promotion_tests` — seven, including
+  `a_refused_unit_return_allocates_nothing`, which compares the arena's LENGTH as well as its nodes
+  and is the one that fails if the allocation moves back ahead of the proof — and
+  `tests/inline_tail_expansion_shape_e2e.rs`, which reads the lowered IR: a sole tail return expands
+  with no exit loop, an early return keeps one, a non-tail `Unit` return keeps one, and a `Unit` tail
+  return is compiled and RUN to show its returned expression is evaluated exactly once.
 
 - **The inline expansion's argument slotting honors the trailing-lambda rule.** A syntactic
   trailing lambda binds the LAST parameter; omitted middles take their default expressions
@@ -8137,6 +8894,90 @@ and behavior is checked by RUNNING the emitted program.
   private `(String, I)` one (byte-identity test pins this). Value classes with secondary
   constructors keep declining (static `constructor-impl` overloads unmodeled). Test:
   `tests/classpath_ctor_receiver_lambda_e2e.rs` (krusty-built dependency by default).
+
+- **An enum EMITS its secondary constructors, with the synthetic prefix forwarded.** The enum
+  writer is a separate path from the ordinary class writer and emitted none of them, so
+  `enum class My(val s: String) { ENTRY; constructor(): this("OK") }` produced a class whose
+  `ENTRY` called an `<init>` declared nowhere — `NoSuchMethodError: My: method
+  'void <init>(java.lang.String, int)' not found`, an artifact that could not link, emitted without
+  a diagnostic. Three facts, each measured against the reference compiler:
+  - Every constructor of a Kotlin enum carries the synthetic `(String name, int ordinal)` ahead of
+    what the declaration wrote. Those slots are forwarded verbatim to a `this(…)` delegation and
+    spliced into the target's descriptor, and they are NOT value parameters, so the body's value
+    ids still start at the first declared one — the same split the primary already made, now
+    shared through `SecondaryConstructorEmitter`'s `owner_prefix`. The emitted body is
+    byte-identical to kotlinc's (`aload_0; aload_1; iload_2; ldc "OK"; invokespecial
+    <init>:(Ljava/lang/String;ILjava/lang/String;)V`).
+  - An enum's constructors are PRIVATE, secondary ones included. Emitting one public would expose
+    a way to construct an enum instance the source never granted.
+  - The prefix is part of the constructor's PHYSICAL PARAMETER DESCRIPTION, not a detail of the
+    descriptor. `method_parameters::OwnerConstructorPrefix` carries the types and the reflected
+    identities together, so `-java-parameters` describes an enum secondary as kotlinc does —
+    `$enum$name` and `$enum$ordinal`, both `ACC_SYNTHETIC`, then the source parameters — and the
+    default stub carries it too: `constructor(k: Int = 5)` on `enum class My(val s: String, val n:
+    Int)` is `(Ljava/lang/String;IIILkotlin/jvm/internal/DefaultConstructorMarker;)V`, the owner
+    prefix, the declared parameters, the mask, the marker. Adding the prefix at the emitter's call
+    site alone left `method_parameters::secondary_constructor` asserting on an arity two short and
+    the stub emitting an overload every entry that omits an argument calls and no declaration
+    provides.
+  - A secondary constructor records its SOURCE shape in a generic `Signature` whenever that differs
+    from its descriptor — kotlinc's own rule for the attribute. It is formatted from the SEMANTIC
+    parameter types, never by concatenating descriptors or retrying formatter failure with erased
+    JVM types: a `Signature` exists precisely to say what a descriptor cannot, so the fixture-owned
+    `constructor(values: Envelope<String>)` signs `(LEnvelope<Ljava/lang/String;>;)V`, not
+    `(LEnvelope;)V`. An owner prefix makes the descriptor differ by itself (`()V` for an enum's
+    `constructor()`), so every enum secondary carries one; without it reflection reports the ABI
+    prefix as if the source had declared it, and two constructors differing only by the prefix
+    become indistinguishable.
+  - The synthetic default overload takes the CONSTRUCTOR's own access, not a fixed
+    `PUBLIC|SYNTHETIC`. An enum's constructors are private, and kotlinc marks their overload
+    `ACC_SYNTHETIC` alone (`0x1000`); publishing it public would grant a way to build the class
+    that the declaration does not.
+  - The declared access is the CONSTRUCTOR's own visibility. A `private constructor` is
+    `ACC_PRIVATE`, a `protected` one `ACC_PROTECTED`; a secondary constructor's modifiers used to be
+    dropped by the parser outright, which published every one of them as `public`. Sealed, value-
+    class-parametered and enum constructors stay private regardless, for the reasons above.
+  - A secondary constructor's `LineNumberTable` is built from lines its own DECLARATION owns, each
+    recorded where the syntax was live and carried to the constructor on
+    `IrSecondaryCtor::lines`: the `constructor` keyword, each parameter's default expression, the
+    `this`/`super` keyword, and the declaration's closing line. They are four different source facts
+    and can be four different lines, so none may stand in for another — the stub used to take "the
+    declaration" from the first default expression, then the delegation, then the PRIMARY's
+    class/field/closing-paren provenance, which attributed the secondary's code to another
+    declaration entirely. kotlinc enters the synthetic overload on the `constructor` keyword, fills
+    each masked parameter on that parameter's default, returns to the keyword for the branch, and
+    delegates on the declaration's closing line; krusty's table is identical, pinned by a multiline
+    ledger in `tests/enum_secondary_constructor_e2e.rs` whose three facts are on three lines.
+  - Still open: a NON-private secondary constructor's own single entry sits at pc 0 where kotlinc
+    puts it at pc 6. kotlinc enters such a constructor through an `Intrinsics.checkNotNullParameter`
+    guard per non-null reference parameter; krusty emits those only for PRIMARY constructor
+    parameters. The line is the same on both sides — only the prologue it follows differs — and the
+    synthetic overload, which has no such prologue, matches exactly. Pinned to that exact size by
+    `a_non_private_secondary_constructor_differs_only_by_its_missing_null_check`.
+  - Still open: the declared constructor's table is one entry even when its delegation spans lines,
+    where kotlinc marks each argument's own line and returns to the delegation's. That is
+    expression-line provenance for a constructor body, the same boundary as an ordinary call's
+    dispatch line, not a declaration fact.
+  - An enum declaring ONLY secondary constructors has no primary to emit: every entry names one of
+    the secondaries, and registering the synthesized primary anyway collided with a no-argument
+    secondary — both are `(String, int)V` — failing to load with `ClassFormatError: Duplicate
+    method name "<init>"`. Its bytes are still built so the constant pool interns in kotlinc's
+    order.
+  - A body-only enum secondary has an `ImplicitEnumBase` delegation in common IR. It is not dropped
+    merely because the source wrote no `this(…)` call: the JVM backend supplies `java/lang/Enum` and
+    forwards the backend-owned name/ordinal prefix, while property/init initialization runs in this
+    direct-base constructor before its body. Those physical prefix slots remain typed across frames
+    recorded by branchy delegation arguments.
+  - A bodied entry is a separate subclass. Krusty does not emit nestmate attributes yet, so an enum
+    secondary selected by such an entry uses the same package-private synthetic accessibility
+    bridge as a selected primary constructor; leaving the source constructor physically private
+    makes the subclass fail with `IllegalAccessError`.
+
+  Still failing, recorded rather than guessed at: an enum with ZERO entries loses every synthesized
+  member because the JVM IR carries no `is_enum` flag — enum-ness is read as
+  `!enum_entries.is_empty()` (`emptyEnumValuesValueOf.kt`). Test:
+  `tests/enum_secondary_constructor_e2e.rs` and the enum fixture in
+  `tests/java_parameters_attribute_e2e.rs`.
 
 - **Primary-ctor varargs and non-derivable member descriptors survive into class `@Metadata`.** A
   `vararg` primary-constructor parameter records `ValueParameter.vararg_element_type` (f4) — without

@@ -14,7 +14,10 @@ fn compile_sources(sources: &[(&str, &str)], class_major: Option<u16>) -> Vec<(S
         .map(|(_, stem)| (*stem).to_string())
         .collect::<Vec<_>>();
     let cp = Rc::new(Classpath::new(Vec::new()));
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
+            .expect("JVM provider initialization"),
+    );
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
         platform,

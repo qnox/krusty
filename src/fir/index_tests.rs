@@ -285,7 +285,10 @@ fn anonymous_object_inferred_override_stays_deferred_until_its_checked_body() {
              }\n",
         )
         .with_file_stem("AnonymousContext")],
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -610,9 +613,10 @@ fn mapped_interface_override_publishes_external_declaration_identity() {
              }\n",
         )
         .with_file_stem("MappedInterfaceOverride")],
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            classpath.clone(),
-        )),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -677,9 +681,10 @@ fn a_dependency_property_publishes_its_kotlin_name() {
              fun h(s: String): IntRange = s.indices\n",
         )
         .with_file_stem("DependencyPropertyName")],
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            classpath.clone(),
-        )),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -760,9 +765,10 @@ fn a_dependency_extension_publishes_its_kotlin_name() {
              fun s(x: List<Int>): Int = x.sum()\n",
         )
         .with_file_stem("DependencyExtensionName")],
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            classpath.clone(),
-        )),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         &mut diagnostics,
     );
@@ -831,9 +837,10 @@ fn value_class_override_publishes_the_generic_interface_edge() {
              }\n",
         )
         .with_file_stem("ValueClassComparableOverride")],
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            classpath.clone(),
-        )),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         &mut diagnostics,
     );

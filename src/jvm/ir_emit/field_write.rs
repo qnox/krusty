@@ -40,7 +40,7 @@ impl Emitter<'_> {
             if self.records_frame(value) {
                 let temps = self.spill_to_temps(&[receiver], code);
                 self.emit_value(value, code);
-                self.slots.remove(&temps[0].2);
+                self.release_temporary(temps[0].2);
             } else {
                 self.emit_value(receiver, code);
                 self.emit_value(value, code);
@@ -52,13 +52,14 @@ impl Emitter<'_> {
         if self.records_frame(value) {
             let temps = self.spill_to_temps(&[value], code);
             self.emit_value(receiver, code);
-            let (slot, ty, key) = temps[0];
+            let (slot, ty, lease) = temps[0];
             load(ty, slot, code);
-            self.slots.remove(&key);
+            self.release_temporary(lease);
         } else {
             self.emit_value(receiver, code);
             self.emit_value(value, code);
         }
+        self.adapt_generated_initializer_reference(value, self.value_ty(value), field_ty, code);
         let field_ref = self.cw.fieldref(&owner, &name, &type_descriptor(field_ty));
         code.putfield(field_ref, slot_words(field_ty) as i32);
     }
@@ -82,6 +83,7 @@ impl Emitter<'_> {
         if self.diverges(value) {
             return;
         }
+        self.adapt_generated_initializer_reference(value, self.value_ty(value), field_ty, code);
         let field_ref = self.cw.fieldref(owner, name, &type_descriptor(field_ty));
         code.putstatic(field_ref, slot_words(field_ty) as i32);
     }

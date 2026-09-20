@@ -278,6 +278,12 @@ pub(super) struct Frame {
     /// Slots that hold this frame's own instance — `receiver` plus the generated temporaries a call
     /// spills it into. Empty for a static frame. Filled by [`finish_tailrec_body`].
     this_slots: std::collections::HashSet<u32>,
+    /// Arguments a self-call passes AHEAD of the logical parameters: a LOCAL function's captures,
+    /// which lifting added to its declaration and therefore to every call to it. The loop must
+    /// leave those slots exactly as they are — a self-call re-reads the frame's own capture
+    /// parameters, so the values are already what the next turn needs — and reassign only what
+    /// follows. 0 for any frame that has no such prefix.
+    capture_prefix: usize,
 }
 
 impl Frame {
@@ -294,6 +300,17 @@ impl Frame {
             count,
             receiver: slots.dispatch_receiver,
             this_slots: slots.dispatch_receiver.into_iter().collect(),
+            capture_prefix: 0,
+        }
+    }
+
+    /// The frame of a LOCAL function, whose parameter list — and every call to it — leads with the
+    /// values lifting captured. `count` is the LOGICAL parameters that follow: the context
+    /// parameters, an extension receiver where there is one, then the declared value parameters.
+    pub(super) fn of_local_body(function: FunId, slots: super::BodySlots, count: usize) -> Self {
+        Self {
+            capture_prefix: slots.first_parameter as usize,
+            ..Self::of_body(function, slots, count)
         }
     }
 }
@@ -306,11 +323,24 @@ impl Frame {
 /// while `Other().count(n - 1)` is a different one and has to stay a call.
 fn is_self_call(ir: &IrFile, call: ExprId, frame: &Frame) -> bool {
     match ir.expr(call) {
+        // A local function declared inside a class member is lifted onto that class as a private
+        // STATIC, so its self-call is a `ClassStatic` rather than a `Local`. It is the same
+        // declaration and the same frame — the callee identity says so, not the owner's spelling —
+        // and recognizing only `Local` left that shape recursing until `StackOverflowError`.
         IrExpr::Call {
-            callee: Callee::Local(target),
+            callee:
+                Callee::Local(target)
+                | Callee::ClassStatic {
+                    function: target, ..
+                },
             dispatch_receiver: None,
             args,
-        } => frame.receiver.is_none() && *target == frame.function && args.len() == frame.count,
+        } => {
+            frame.receiver.is_none()
+                && *target == frame.function
+                && args.len() == frame.capture_prefix + frame.count
+                && passes_its_own_captures(ir, args, frame)
+        }
         IrExpr::MethodCall {
             class,
             index,
@@ -325,11 +355,23 @@ fn is_self_call(ir: &IrFile, call: ExprId, frame: &Frame) -> bool {
                 .and_then(|class| class.methods.get(*index as usize))
                 == Some(&frame.function)
                 && matches!(ir.expr(*receiver), IrExpr::GetValue(slot) if frame.this_slots.contains(slot))
-                && args.len() == frame.count
+                && args.len() == frame.capture_prefix + frame.count
                 && args.iter().all(Option::is_some)
         }
         _ => false,
     }
+}
+
+/// Whether a self-call's capture prefix re-reads this frame's OWN capture parameters.
+///
+/// It always does when the call is what it looks like: inside the lifted function the captured
+/// values ARE its leading parameters, and the call site reloads them. Checking it is what makes
+/// dropping those arguments sound — the loop step does not reassign a capture slot, so an argument
+/// that was anything but a re-read of the slot it fills would be lost.
+fn passes_its_own_captures(ir: &IrFile, args: &[ExprId], frame: &Frame) -> bool {
+    args.iter().take(frame.capture_prefix).enumerate().all(
+        |(slot, argument)| matches!(ir.expr(*argument), IrExpr::GetValue(source) if *source as usize == slot),
+    )
 }
 
 /// The arguments a self-call passes, in parameter order. `call` must satisfy [`is_self_call`],
@@ -499,7 +541,9 @@ fn distribute_coercion(
 fn loop_step(ir: &mut IrFile, call: ExprId, frame: &Frame, origin: OriginId) -> IrExpr {
     let args = self_call_arguments(ir, call);
     let mut updates = Vec::with_capacity(frame.count + 1);
-    for (parameter, value) in args.into_iter().enumerate() {
+    // The capture prefix is skipped, not written: those slots already hold what the next turn
+    // reads, and `is_self_call` established that the dropped arguments are re-reads of them.
+    for (parameter, value) in args.into_iter().skip(frame.capture_prefix).enumerate() {
         let parameter =
             u32::try_from(parameter).expect("tailrec parameter count exceeds packed value ids");
         updates.push(generated(

@@ -78,6 +78,7 @@ mod tests {
             stackmap: None,
             handlers: vec![],
             locals: vec![],
+            bootstrap_methods: Vec::new(),
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         let bs = super::super::splice_unified(&body, "(I)I", 3, &[], 0, &mut cw, &HashMap::new())
@@ -101,6 +102,7 @@ mod tests {
             stackmap: None,
             handlers: vec![],
             locals: vec![],
+            bootstrap_methods: Vec::new(),
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
         let splice = super::super::splice_unified(

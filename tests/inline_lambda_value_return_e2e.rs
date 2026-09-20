@@ -48,3 +48,63 @@ fn classpath_inline_lambda_boxes_primitive_body_for_erased_result() {
         Some("OK")
     );
 }
+
+/// A function-typed argument FORWARDED from one inline expansion into another keeps the caller's
+/// slot. An ordinary argument that is already a local read is copied into a local of the expansion,
+/// so the inline parameter has its own name and lifetime; a function-typed one must not be, because
+/// an inline function parameter is SPLICED at each call site rather than stored. Copying it hid the
+/// lambda from the splicer, so `block { … }` materialized a `Function0` whose implementation method
+/// was never emitted and the program died at its first call with `NoSuchMethodError`.
+///
+/// Reduced from box `labels/nestedInlineLabels.kt`, which is what caught it.
+#[test]
+fn a_forwarded_inline_lambda_parameter_is_still_spliced() {
+    let sources: &[(&str, &str)] = &[
+        (
+            "lib",
+            "package fwd\n\
+             \n\
+             var state = false\n\
+             \n\
+             inline fun blockImpl(p: () -> Unit) {\n\
+             \x20   if (state) return\n\
+             \x20   p()\n\
+             }\n\
+             \n\
+             inline fun block(p: () -> Unit) {\n\
+             \x20   if (state) return\n\
+             \x20   blockImpl(p)\n\
+             }\n",
+        ),
+        (
+            "main",
+            "package fwd\n\
+             \n\
+             fun test(x: Int): Int {\n\
+             \x20   block outer@ {\n\
+             \x20       block inner@ {\n\
+             \x20           if (x < 10) return@inner\n\
+             \x20           if (x == 10) return@outer\n\
+             \x20           return x\n\
+             \x20       }\n\
+             \x20       if (x < 5) return@outer\n\
+             \x20       return x + 10\n\
+             \x20   }\n\
+             \x20   return x + 100\n\
+             }\n\
+             \n\
+             fun box(): String {\n\
+             \x20   if (test(6) != 16) return \"six=\" + test(6)\n\
+             \x20   if (test(4) != 104) return \"four=\" + test(4)\n\
+             \x20   if (test(10) != 110) return \"ten=\" + test(10)\n\
+             \x20   if (test(11) != 11) return \"eleven=\" + test(11)\n\
+             \x20   return \"OK\"\n\
+             }\n",
+        ),
+    ];
+    let jdk = common::jdk_modules();
+    let out =
+        common::compile_and_run_box_files(sources, &[common::stdlib_jar()], Some(jdk.as_path()))
+            .expect("a JVM runner is required to observe that the forwarded lambda was spliced");
+    assert_eq!(out.trim(), "OK");
+}

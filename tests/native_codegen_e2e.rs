@@ -57,9 +57,10 @@ fn host() -> Option<NativeTarget> {
 fn compile(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Artifact>, Vec<String>) {
     let jar = krusty::toolchain::stdlib_jar().expect("checked by the caller");
     let classpath = std::rc::Rc::new(Classpath::new(vec![jar]));
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(
-        classpath.clone(),
-    ));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
+            .expect("JVM provider initialization"),
+    );
     let inputs = sources
         .iter()
         .map(|(stem, source)| SourceInput::kotlin(source).with_file_stem(stem))
@@ -1354,39 +1355,6 @@ fn a_unit_tail_call_before_a_bare_return_becomes_a_loop() {
              }\n"),
         "500000\ndeep\n"
     );
-}
-
-#[test]
-fn a_tailrec_the_checked_lowering_leaves_recursive_is_declined() {
-    let Some(target) = host() else {
-        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
-        return;
-    };
-    // `tailrec` is a promise about STACK, and the source wrote the modifier because the function
-    // recurses past any stack — so accepting one the rewrite did not take means emitting a program
-    // that dies on a guard page at a depth the source expects to survive. How deep a native stack
-    // goes is the machine's business, and a gate must not depend on it, so the generator declines
-    // these instead of compiling them into a crash.
-    //
-    // A member and an extension used to be on this list. They are rewritten now — the rewrite is a
-    // question about the FRAME rather than about where a function was declared — and
-    // `native_tailrec_e2e` asserts they run flat. What is left is the LOCAL `tailrec`, whose
-    // captures take slots the step does not reassign.
-    for (label, source) in [(
-        "a local",
-        "fun main() {\n\
-         \x20   tailrec fun down(n: Int) { if (n > 0) down(n - 1) }\n\
-         \x20   down(1000000)\n\
-         }\n",
-    )] {
-        let (_, diagnostics) = compile(&[("Main", source)], target);
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.contains("common lowering leaves recursive")),
-            "expected {label} `tailrec` to be declined, got {diagnostics:?}"
-        );
-    }
 }
 
 #[test]

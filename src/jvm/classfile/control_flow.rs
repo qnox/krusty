@@ -3,6 +3,17 @@
 use super::{CodeBuilder, Label};
 
 impl CodeBuilder {
+    /// `nop`: occupies an offset and touches nothing. Its use is the caller's business — an
+    /// exception table's bounds are one, since a range delimited by a real instruction of its own
+    /// does not depend on what happens to sit next to it.
+    pub fn nop(&mut self) {
+        self.op(0x00, 0);
+    }
+
+    pub(crate) fn is_dead(&self) -> bool {
+        self.dead
+    }
+
     pub fn new_label(&mut self) -> Label {
         let id = self.labels.len() as u32;
         self.labels.push(usize::MAX);

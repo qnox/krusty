@@ -169,7 +169,9 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         effective_classpath,
         opts.friend_paths.clone(),
     ));
-    let platform = Box::new(JvmLibraries::new(cp.clone()));
+    // Construction is fallible: a corrupt selected dependency remains a terminal frontend
+    // diagnostic and never becomes a queryable provider with an empty symbol index.
+    let platform = JvmLibraries::new(cp.clone());
     let source_inputs = opts
         .sources
         .iter()
@@ -184,10 +186,13 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
             .with_file_stem(stem)
         })
         .collect::<Vec<_>>();
-    let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
+    // The module name reaches diagnostics that spell it (an `expect` with no `actual` names the
+    // module it looked in), never resolution.
+    let analysis = krusty::frontend::analyze_source_set_streaming_with_module(
         &source_inputs,
         platform,
         &opts.features,
+        &opts.module_name,
         &mut diags,
     );
 
