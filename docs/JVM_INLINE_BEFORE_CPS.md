@@ -186,12 +186,23 @@ computed over locals that only exist because the splice put them there. The pass
 body's `max_locals`, which fixes where the machine's own slots go.
 
 **Pass 2 — emission.** Emit the real method: the machine's slots (`$continuation`, `$result`,
-`$suspended`) are placed at `max_locals..`, above every body and inline local, which is also how
-kotlinc numbers them. The entry prologue, the `tableswitch` dispatch, the per-suspension spill block,
-the `COROUTINE_SUSPENDED` check and the resume blocks are all emitted through the ordinary
-`CodeBuilder` label and frame API, so frames are produced the way every other method's frames are
-produced. The body emission itself is identical to pass 1, which is what makes pass 1's slot
-numbering and spill sets valid for pass 2.
+`$suspended`) are placed at `max_locals..`, above every body and inline local, which is how kotlinc
+numbers them. The entry prologue, the `tableswitch` dispatch, the per-suspension spill block, the
+`COROUTINE_SUSPENDED` check and the resume blocks are all emitted through the ordinary `CodeBuilder`
+label and frame API, so frames are produced the way every other method's frames are produced. The
+body emission itself is identical to pass 1, which is what makes pass 1's slot numbering and spill
+sets valid for pass 2.
+
+The emitted order inside a suspension is kotlinc's, not a convenient one: the call's operands are
+pushed first (including the continuation), *then* the spill block runs stack-neutrally underneath
+them, then `label` is stored, then the call. §3 and §7 both show that order in the reference output.
+
+Nothing synthetic may survive into the method. The resume rejoin point cannot be recorded as a byte
+offset before the splice — relocation widens `ldc` to `ldc_w`, so sizes move — so it is recovered by
+stepping the known instruction index from the splice's `byte_start` through the *relocated*
+instructions. A marker instruction erased to `nop`s would be simpler and is available
+(`classfile::CoroutineMarker`), but `nop`s the reference compiler does not emit are a byte
+difference, so they are used only where the bytes are thrown away.
 
 The continuation class is written after the method, because its spill fields and its
 `@DebugMetadata` `l`/`n`/`s` vectors are products of the analysis.
@@ -231,12 +242,15 @@ Each step is its own PR, rebased onto `origin/master` first, green on `./run-tes
 | 0 | This note. | docs only |
 | 1 | The two analyses: control-flow graph and backward local liveness over decoded bytecode (`src/jvm/suspend/cps/`). | green |
 | 2 | Pass 1 and the analysis wiring: emit a declined suspend body into a scratch builder, record each suspension's offset, and read its spill set. No emitted output changes yet. | green |
-| 3 | Pass 2 — the state machine, for the **currently bailing** shapes only. The IR machine still owns every method it owns today, so the 11270 byte-identical classes cannot move. Fixture A (§7) lands here, asserting `box()` against the reference compiler. | green + fixture A runs |
+| 3 | Pass 2 — the state machine, for the **currently bailing** shapes only, in kotlinc's instruction order. The IR machine still owns every method it owns today, so the 11270 byte-identical classes cannot move. Fixture A (§7) lands here, asserting `box()` against the reference compiler and a class-file diff against it. | green + fixture A runs + byte-identical |
 | 4 | Continuation-class finalization: spill fields and `@DebugMetadata` become products of the bytecode pass for the new-machine methods. | green |
 | 5 | Under-stack spilling (§5.3 v2). Fixture B lands here. | green + fixture B runs |
 | 6 | Measure the corpus. Expect the three blocked modules to emit (≈987 classes). Report before/after. | corpus report |
-| 7 | Migrate the remaining suspend methods onto the bytecode machine, one shape family at a time, each with a byte-parity delta. Emit the `tableswitch` and kotlinc's slot numbering here — both are byte-parity changes, not correctness ones. | per-step byte delta |
+| 7 | Migrate the remaining suspend methods onto the emit-time machine, one shape family at a time, each with a byte-parity delta. | per-step byte delta |
 | 8 | Retire the IR machine for JVM; consider the `inline_body_plan` deletion. | measured |
+
+Steps 3 and 5 can only be *correct* until §7a lands; they become byte-identical once it does. §7a is
+independent of everything else here and can go first.
 
 Every fixture asserts the behaviour it is supposed to have, never the bail it currently gets:
 `AGENTS.md` rule 9 rejects a diagnostics test that asserts only rejection. So a shape's fixture
@@ -333,6 +347,59 @@ sixth field `I$5`. krusty at `644f8d30` rejects this one with the same
 Correctness is `box()` against the reference compiler, not a byte diff; byte parity is a separate,
 later measurement (step 7).
 
+## 7a. Prerequisite: the splice is not byte-identical without any suspension
+
+Byte-identity for these shapes is gated on a defect that has nothing to do with coroutines. Take
+fixture A's library and make `one` an ordinary function, so no suspension is involved at all:
+
+```kotlin
+fun one(v: Int): Int = v + 1
+fun many(v: Int): Int = twice(v) { one(it) }
+```
+
+krusty compiles this today, and the class file differs from the reference compiler's. Two
+independent causes, both in the existing splice path, both reproducible with reference types as
+well as primitives:
+
+**(a) An extra copy of the inline parameter.** The reference compiler stores the argument once:
+
+```
+   0: iload_0 ; istore_1        // x, the inline parameter
+   2: iconst_0; istore_2        // $i$f$twice
+```
+
+krusty stores it twice, into a caller slot and then into the host's parameter slot:
+
+```
+   0: iload_0 ; istore_1
+   2: iload_1 ; istore_2        // a second copy
+   4: iconst_0; istore 4        // the marker, now two slots higher
+```
+
+Every later local is shifted, so every subsequent instruction that names a slot differs.
+
+**(b) The lambda's `invoke` adapter survives the splice.** `FunctionN.invoke` is erased to
+`(Object)Object`, so an argument is boxed and cast on the way in and unboxed on the way out. Once
+the lambda is spliced there is no `invoke` left and the reference compiler passes the value
+directly; krusty keeps the adapter:
+
+```
+  reference:  iload 5 ; invokestatic one:(I)I ; istore 5
+  krusty:     iload_2 ; iload 6 ; iadd
+              invokestatic Integer.valueOf ; checkcast Integer ; invokevirtual intValue
+              istore 8 ; iload 8 ; invokestatic one:(I)I
+              invokestatic Integer.valueOf ; checkcast Number ; invokevirtual intValue ; istore 7
+```
+
+With a `String` channel the boxing disappears but the `checkcast` does not, and (a) remains — so
+these are two separate defects, not one.
+
+Consequence for the ordering work: a coroutine machine emitted in the reference compiler's exact
+instruction order still cannot produce an identical class file while the body it wraps differs. Both
+defects must be fixed first, as their own change — they are splice-representation bugs, they affect
+every spliced inline call with a lambda whether or not it suspends, and fixing them moves byte
+parity on code that compiles today. The coroutine machine then lands on a body that already matches.
+
 ## 8. Risks
 
 * **Liveness on bytecode is a new analysis.** Getting it wrong is a miscompile, not a bail. Mitigated
@@ -363,4 +430,16 @@ Baselines on the same 28201-class corpus: master `644f8d30` = 11270 byte-identic
 master plus the 22 open PRs = 17481 (61.99%).
 
 Success is: the three blocked modules emit, the 13 shapes compile **and run correctly**, no gate
-regressions, and the emitted suspend functions move toward kotlinc's spill sets.
+regressions, and the emitted suspend functions are **byte-identical to the reference compiler** —
+not merely correct. That is the bar for this work, so the machine is built to kotlinc's instruction
+order from the first landing rather than refined toward it: these classes emit nothing today, so
+there is no byte-parity baseline to protect and no reason to accept a shape that would have to be
+redone.
+
+Byte-identity pins down more than the instruction order. The spill set must match exactly, which
+means the liveness analysis has to agree with the reference compiler's own examiner — including its
+rematerialization of constant locals (the `$i$f$…` inline-depth markers are re-established with
+`iconst_0; istore` on resume rather than spilled, §3 and §7), the reverse restore order, and which
+spilled references get `nullOutSpilledVariable`. That agreement is the part most likely to need
+iteration against the corpus; it is also the part the analysis in `src/jvm/suspend/cps/` exists to
+make measurable rather than guessed.
