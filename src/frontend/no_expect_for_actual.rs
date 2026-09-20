@@ -476,7 +476,7 @@ fn visibility(visibility: Visibility) -> &'static str {
 /// `<T, U : Bound> `, or nothing when the declaration is not generic. A bound is rendered only
 /// where one was declared: a bare `<T>` carries Kotlin's implicit `Any?`, which the reference
 /// compiler omits.
-fn type_parameters(names: &[String], bound: &dyn Fn(usize) -> Option<Ty>) -> String {
+pub(super) fn type_parameters(names: &[String], bound: &dyn Fn(usize) -> Option<Ty>) -> String {
     if names.is_empty() {
         return String::new();
     }
@@ -596,7 +596,7 @@ fn declared_formal_bound(signature: &Signature, index: usize) -> Option<Ty> {
 /// Kotlin's implicit upper bound is nullable `Any`, which the reference compiler never writes; any
 /// other bound it renders. Providers spell the implicit one either as an absent bound or as `Any?`,
 /// so both are folded here.
-fn declared_bound(bound: Ty) -> Option<Ty> {
+pub(super) fn declared_bound(bound: Ty) -> Option<Ty> {
     (bound != Ty::nullable(Ty::obj("kotlin/Any"))).then_some(bound)
 }
 

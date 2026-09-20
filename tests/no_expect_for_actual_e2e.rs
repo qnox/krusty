@@ -1217,6 +1217,45 @@ fn a_star_imported_classifier_of_another_package_does_not_pair() {
     );
 }
 
+/// A member EXTENSION whose receiver is the member's OWN type parameter still pairs.
+///
+/// `val <S> S.kept: S` declares an `S` that shadows its owner's, so the receiver names no
+/// classifier at all — its identity is positional within the declaration. Refusing to key such a
+/// member left the `expect` and an `actual` written exactly like it pairing with nothing, and the
+/// implementation reported as actualizing nothing; box
+/// `multiplatform/k2/basic/expectActualFakeOverridesWithTypeParameters.kt` caught it.
+///
+/// `stray` actualizes nothing, so the complete ledger this compares is not empty and `kept`'s
+/// silence is its absence from a report that names something else.
+#[test]
+fn a_member_extension_on_its_own_type_parameter_matches() {
+    let (reference, krusty) = both_split(
+        "OwnTypeParameterReceiver",
+        &[(
+            "OwnTypeParameterReceiverCommon.kt",
+            "package plib\n\
+             \n\
+             expect class Holder<O> {\n\
+             \x20   val <S> S.kept: S\n\
+             }\n",
+        )],
+        &[(
+            "OwnTypeParameterReceiverPlatform.kt",
+            "package plib\n\
+             \n\
+             actual class Holder<O> {\n\
+             \x20   actual val <S> S.kept: S get() = this\n\
+             \x20   actual val <S> S.stray: S get() = this\n\
+             }\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert!(
+        !reference.is_empty(),
+        "the fixture must make the reference compiler report something"
+    );
+}
+
 /// A `typealias` that actualizes an `expect class` also answers for the members keyed on it.
 ///
 /// A member EXTENSION on the expect classifier is keyed by its receiver, and the platform fragment

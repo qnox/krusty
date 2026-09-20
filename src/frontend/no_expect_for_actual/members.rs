@@ -43,6 +43,12 @@ enum MemberKind {
     Property {
         is_var: bool,
         modifiers: String,
+        /// The property's OWN type-parameter names, in declaration order. A member EXTENSION
+        /// property may declare them — `val <S> S.kept: S` declares an `S` that shadows its
+        /// owner's — and the reference compiler renders them before the receiver. The names are
+        /// what the source WROTE; resolution publishes only their bounds, under internal
+        /// placeholder spellings.
+        type_parameters: Vec<String>,
     },
     /// A SECONDARY constructor. It has no name of its own, no modality slot, and the classifier
     /// that declares it stands in for its result type.
@@ -133,6 +139,8 @@ pub(super) fn actual_members(
                 // `external`, `const` and `lateinit` are all illegal on a constructor property,
                 // so its modifier slot is always empty.
                 modifiers: String::new(),
+                // A constructor property declares none of its own.
+                type_parameters: Vec::new(),
             },
         });
     }
@@ -153,6 +161,7 @@ pub(super) fn actual_members(
             kind: MemberKind::Property {
                 is_var: property.is_var,
                 modifiers: property_modifiers(property),
+                type_parameters: property.type_params.clone(),
             },
         });
     }
@@ -333,7 +342,11 @@ fn render_member(
                 visibility(*declared)
             )))
         }
-        MemberKind::Property { is_var, modifiers } => {
+        MemberKind::Property {
+            is_var,
+            modifiers,
+            type_parameters,
+        } => {
             let property = member_property(declarations, stable)
                 .ok_or("has no resolved property under its declaring classifier")?;
             if property.ty.mentions_pending() {
@@ -348,8 +361,15 @@ fn render_member(
                 Some(_) => return Err("has an extension receiver that did not resolve"),
                 None => String::new(),
             };
+            let formals = super::type_parameters(type_parameters, &|index| {
+                property
+                    .formal_bounds
+                    .get(index)
+                    .copied()
+                    .and_then(super::declared_bound)
+            });
             Ok(Rendered::Unmatched(format!(
-                "{} {} actual {modifiers}{} {receiver}{}: {}",
+                "{} {} actual {modifiers}{} {formals}{receiver}{}: {}",
                 visibility(property.visibility),
                 member.modality,
                 if *is_var { "var" } else { "val" },
@@ -385,11 +405,15 @@ fn member_constructor(
 /// What a resolved member property contributes to its rendering, whichever of the classifier's
 /// two property tables holds it. An ordinary member and a member EXTENSION property are separate
 /// declarations with separate semantic records; the rendering differs only by the receiver.
-struct ResolvedMemberProperty {
+struct ResolvedMemberProperty<'symbols> {
     visibility: Visibility,
     ty: Ty,
     /// The declared extension receiver, for a member extension property.
     receiver: Option<Ty>,
+    /// The DECLARED upper bounds of the property's own type parameters, parallel to the names the
+    /// source wrote. Resolution publishes the bounds under internal placeholder spellings, so only
+    /// the bounds are taken from here.
+    formal_bounds: &'symbols [Ty],
 }
 
 /// The resolved property this diagnostic is about, by its declaration identity alone.
@@ -397,20 +421,22 @@ struct ResolvedMemberProperty {
 /// Both of a classifier's property tables are published under that identity, so this neither picks
 /// a table to try first nor enters one by name: a name shared between the two cannot answer with
 /// the wrong record because no name is consulted.
-fn member_property(
-    declarations: &ResolvedDeclarations<'_>,
+fn member_property<'symbols>(
+    declarations: &ResolvedDeclarations<'symbols>,
     stable: crate::fir::DeclarationId,
-) -> Option<ResolvedMemberProperty> {
+) -> Option<ResolvedMemberProperty<'symbols>> {
     match declarations.get(stable)? {
         Resolved::MemberProperty(property) => Some(ResolvedMemberProperty {
             visibility: property.visibility,
             ty: property.ty,
             receiver: None,
+            formal_bounds: &[],
         }),
         Resolved::MemberExtensionProperty(property) => Some(ResolvedMemberProperty {
             visibility: property.visibility(),
             ty: property.ret(),
             receiver: Some(property.receiver_ty()),
+            formal_bounds: property.type_param_bounds(),
         }),
         Resolved::Function(_)
         | Resolved::Property(_)
