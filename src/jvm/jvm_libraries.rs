@@ -5997,46 +5997,11 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn property_reference_type(&self, arity: usize, mutable: bool, args: &[Ty]) -> Option<Ty> {
-        let internal = match (arity, mutable) {
-            (0, false) => "kotlin/reflect/KProperty0",
-            (0, true) => "kotlin/reflect/KMutableProperty0",
-            (1, false) => "kotlin/reflect/KProperty1",
-            (1, true) => "kotlin/reflect/KMutableProperty1",
-            _ => return None,
-        };
-        // `KProperty0<V>` / `KProperty1<T, V>` has no useful raw semantic form: raw `get()` exposes
-        // the declaration's unbound `V` to the checker. Require the complete source signature.
-        if args.len() != arity + 1 || args.contains(&Ty::Error) {
-            return None;
-        }
-        Some(Ty::obj_args(internal, args))
+        crate::libraries::builtin_realization::property_reference_classifier(arity, mutable, args)
     }
 
     fn function_reference_type(&self, function: Ty) -> Option<Ty> {
-        let Ty::Fun(signature) = function else {
-            return None;
-        };
-        if signature.context_count != 0 {
-            return None;
-        }
-        // An extension receiver is already the first semantic parameter of `FnSig`; `has_receiver`
-        // describes invocation syntax, not a different reflective arity. Thus `Int::extension` has
-        // the ordinary reflection type `KFunction1<Int, R>`.
-        let mut arguments = signature.params.to_vec();
-        arguments.push(signature.ret);
-        let classifier = crate::types::type_name_child(
-            type_name("kotlin/reflect"),
-            &format!(
-                "{}{}",
-                if signature.suspend {
-                    "KSuspendFunction"
-                } else {
-                    "KFunction"
-                },
-                signature.params.len()
-            ),
-        );
-        Some(Ty::obj_args_name(classifier, &arguments))
+        crate::libraries::builtin_realization::function_reference_classifier(function)
     }
 
     fn class_literal_type(&self) -> Option<Ty> {

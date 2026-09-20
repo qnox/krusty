@@ -264,6 +264,66 @@ pub(crate) fn top_level_property_intrinsic(
     None
 }
 
+/// The reflection classifier a PROPERTY reference has, given its arity and mutability.
+///
+/// `A::x` is a `kotlin.reflect.KProperty1<A, Int>`. The name is Kotlin's own on every target —
+/// nothing about `KProperty1` is the JVM's — so this is stated once rather than per provider. A
+/// provider that did not answer gave a property reference no type at all, and the reference read
+/// as an unresolved name: `A::x` reported "unresolved reference 'x'".
+///
+/// `args` are the classifier's own type arguments in declaration order: `[V]` for a `KProperty0`,
+/// `[Recv, V]` for a `KProperty1`. They are required, because a RAW `KProperty0` exposes the
+/// declaration's unbound `V` to the checker instead of the property's own type.
+pub(crate) fn property_reference_classifier(
+    arity: usize,
+    mutable: bool,
+    args: &[Ty],
+) -> Option<Ty> {
+    let internal = match (arity, mutable) {
+        (0, false) => "kotlin/reflect/KProperty0",
+        (0, true) => "kotlin/reflect/KMutableProperty0",
+        (1, false) => "kotlin/reflect/KProperty1",
+        (1, true) => "kotlin/reflect/KMutableProperty1",
+        _ => return None,
+    };
+    if args.len() != arity + 1 || args.contains(&Ty::Error) {
+        return None;
+    }
+    Some(Ty::obj_args(internal, args))
+}
+
+/// The reflection classifier a FUNCTION reference has, from its already-resolved signature.
+///
+/// The direction matters and is the same one [`property_reference_classifier`] takes: the
+/// signature selects the classifier, and no consumer parses a classifier name to reconstruct a
+/// signature.
+pub(crate) fn function_reference_classifier(function: Ty) -> Option<Ty> {
+    let Ty::Fun(signature) = function else {
+        return None;
+    };
+    if signature.context_count != 0 {
+        return None;
+    }
+    // An extension receiver is already the first semantic parameter of `FnSig`; `has_receiver`
+    // describes invocation syntax, not a different reflective arity. So `Int::extension` has the
+    // ordinary reflection type `KFunction1<Int, R>`.
+    let mut arguments = signature.params.to_vec();
+    arguments.push(signature.ret);
+    let classifier = crate::types::type_name_child(
+        crate::types::type_name("kotlin/reflect"),
+        &format!(
+            "{}{}",
+            if signature.suspend {
+                "KSuspendFunction"
+            } else {
+                "KFunction"
+            },
+            signature.params.len()
+        ),
+    );
+    Some(Ty::obj_args_name(classifier, &arguments))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

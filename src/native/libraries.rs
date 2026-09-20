@@ -228,6 +228,7 @@ impl NativeLibraries {
                     .push(info);
             }
         }
+        declare_function_classifiers(&mut namespaces, &mut callable_realizations);
         Ok(Self {
             index: Arc::new(Index {
                 namespaces,
@@ -602,6 +603,151 @@ fn default_value(constant: &IrConstant) -> crate::libraries::DefaultValue {
     }
 }
 
+/// `kotlin.FunctionN` and `kotlin.reflect.KFunctionN`, which no library declares.
+///
+/// Kotlin's function types are a family the COMPILER mints: `FunctionN` exists for every N a
+/// program writes, so no artifact enumerates them all. A JVM provider happens to find
+/// `Function0`..`Function22` in the stdlib jar's builtins file — kotlinc's own cut-off, because
+/// that is how many classes it ships — and a klib's `linkdata` declares none at all, so
+/// `Function0` was simply an unresolved reference.
+///
+/// The same cut-off is taken here, and for the same reason it is a cut-off at all: past it is a
+/// program nobody wrote. Each is published like any other classifier, with its `invoke` INTERNED,
+/// because a class may implement a function type (`class B : Function0<Boolean>`) and an override
+/// of a member with no identity is an override of nothing — the code generator's guard against
+/// overriding a dependency method never fired, and the program compiled and segfaulted where the
+/// jar-backed lane declines it.
+const FUNCTION_ARITIES: usize = 22;
+
+fn declare_function_classifiers(
+    namespaces: &mut HashMap<TypeName, Namespace>,
+    realizations: &mut Vec<ExternalCallableRealization>,
+) {
+    for reflective in [false, true] {
+        let package = type_name(if reflective {
+            "kotlin/reflect"
+        } else {
+            "kotlin"
+        });
+        for arity in 0..=FUNCTION_ARITIES {
+            let name = format!(
+                "{}{arity}",
+                if reflective { "KFunction" } else { "Function" }
+            );
+            let classifier = function_classifier(package, &name, arity, reflective, realizations);
+            namespaces
+                .entry(package)
+                .or_default()
+                .classifiers
+                .entry(name)
+                .or_insert(classifier);
+        }
+    }
+}
+
+/// One member of that family.
+///
+/// What MAKES a classifier a function type, to everything downstream, is that it extends
+/// `kotlin.Function` and carries a callable signature. Both are stated here rather than assumed.
+fn function_classifier(
+    package: TypeName,
+    name: &str,
+    arity: usize,
+    reflective: bool,
+    realizations: &mut Vec<ExternalCallableRealization>,
+) -> Arc<LibraryType> {
+    let any = Ty::nullable(Ty::obj("kotlin/Any"));
+    let mut names = (1..=arity)
+        .map(|index| format!("P{index}"))
+        .collect::<Vec<_>>();
+    names.push("R".to_string());
+    // A function is contravariant in what it takes and covariant in what it answers, which is what
+    // lets `(Any) -> Unit` stand in for `(String) -> Unit`.
+    let variances = (0..=arity)
+        .map(|index| {
+            if index == arity {
+                crate::types::TypeVariance::Out
+            } else {
+                crate::types::TypeVariance::In
+            }
+        })
+        .collect::<Vec<_>>();
+    let parameters = names
+        .iter()
+        .take(arity)
+        .map(|name| Ty::ty_param(name, any))
+        .collect::<Vec<_>>();
+    let result = Ty::ty_param("R", any);
+    let signature = Ty::fun(parameters.clone(), result);
+    let identity = qualified(package, name);
+    let mut classifier = LibraryType::declaration_header();
+    classifier.is_kotlin = true;
+    classifier.kind = TypeKind::Interface;
+    classifier.inheritance = ClassifierInheritance {
+        is_abstract: true,
+        is_extensible: true,
+        has_no_arg_constructor: false,
+    };
+    classifier.type_parameters = TypeParameters::new(
+        names,
+        std::iter::repeat_n(vec![any], arity + 1).collect(),
+        variances,
+    );
+    classifier.own_type_parameter_count = arity + 1;
+    // The supertype is what makes it a function classifier downstream. A reflective one is a
+    // `KFunction` as well, which is the classifier a `::f` reference reads its `name` on.
+    let supertypes: &[&str] = if reflective {
+        &["kotlin/reflect/KFunction", "kotlin/Function"]
+    } else {
+        &["kotlin/Function"]
+    };
+    classifier.supertypes = supertypes
+        .iter()
+        .map(|supertype| type_name(supertype))
+        .collect::<Vec<_>>()
+        .into();
+    classifier.supertype_templates = supertypes
+        .iter()
+        .map(|supertype| Ty::obj_args(supertype, &[result]))
+        .collect();
+    classifier.callable_signature = Some(signature);
+    classifier.callable_signatures = vec![signature];
+    let mut invoke = crate::libraries::LibraryCallable::library(
+        identity,
+        "invoke",
+        parameters.clone(),
+        result,
+        result,
+        String::new(),
+    );
+    invoke.owner_is_interface = true;
+    invoke.external_identity = Some(member_identity(realizations.len()));
+    realizations.push(ExternalCallableRealization {
+        callable: invoke.clone(),
+        kind: ExternalCallableKind::Member,
+    });
+    let mut declaration =
+        FunctionInfo::plain(FnKind::Member, Some(Ty::obj_name(identity)), invoke.clone());
+    declaration.flags.operator = true;
+    declaration.flags.is_abstract = true;
+    declaration.call_sig = crate::libraries::CallSig::metadata_plain(arity);
+    classifier.insert_declared_callables(
+        "invoke".to_string(),
+        Callables::Functions(crate::libraries::FunctionSet {
+            overloads: vec![declaration],
+        }),
+    );
+    let mut member = LibraryMember::new("invoke".to_string(), parameters, result, String::new());
+    member.owner = Some(identity);
+    member.external_identity = invoke.external_identity;
+    member.set_is_abstract(true);
+    member.set_is_interface(true);
+    member.set_is_operator(true);
+    member.call_sig = crate::libraries::CallSig::metadata_plain(arity);
+    classifier.members.push(member);
+    Arc::new(classifier)
+}
+
 fn qualified(package: TypeName, name: &str) -> TypeName {
     if package == TypeName::ROOT {
         type_name(name)
@@ -632,6 +778,18 @@ impl SemanticPlatform for NativeLibraries {
     /// `.java` unwrapping is, and that is a member of the JVM's own declaration.
     fn class_literal_type(&self) -> Option<Ty> {
         Some(Ty::obj("kotlin/reflect/KClass"))
+    }
+
+    /// `A::x` is a `kotlin.reflect.KProperty1<A, Int>` here as it is everywhere: the classifier is
+    /// Kotlin's own, the klib declares it, and nothing about it is the JVM's. Without an answer a
+    /// property reference had no type at all and read as an unresolved name.
+    fn property_reference_type(&self, arity: usize, mutable: bool, args: &[Ty]) -> Option<Ty> {
+        crate::libraries::builtin_realization::property_reference_classifier(arity, mutable, args)
+    }
+
+    /// The same for a function reference, whose signature selects its `KFunctionN`.
+    fn function_reference_type(&self, function: Ty) -> Option<Ty> {
+        crate::libraries::builtin_realization::function_reference_classifier(function)
     }
 
     /// Kotlin/Native's own default-import addition, as the JVM contributes `java.lang` and
@@ -1331,6 +1489,20 @@ mod compiles_against_the_klib {
                 "import kotlin.jvm.JvmInline\n@JvmInline value class W(val x: Int)\n\
                  fun box(): String = \"OK\"\n",
                 "a value class with the JVM's annotation imported",
+            ),
+            // A FUNCTION TYPE by name. Kotlin's `FunctionN` is a family with no upper bound, so
+            // no artifact enumerates it and every compiler synthesizes the one a program writes —
+            // a klib's `linkdata` declares none at all.
+            (
+                "fun box(): String { val f: Function1<Int, Int> = { it }; return \"OK\" }\n",
+                "a function type named by its classifier",
+            ),
+            // A PROPERTY REFERENCE, whose type is `kotlin.reflect.KProperty1<A, Int>` — a Kotlin
+            // classifier the klib declares, chosen by a rule that lived in the JVM provider. With
+            // no answer the reference had no type and read as an unresolved name.
+            (
+                "class A(val x: Int)\nfun box(): String { val p = A::x; return \"OK\" }\n",
+                "a property reference",
             ),
             // A `const val` on a companion. Every use site folds it, which is the only way it can
             // work here at all: a companion object has no storage on a target that compiles the
