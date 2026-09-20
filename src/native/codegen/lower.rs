@@ -313,7 +313,18 @@ impl<'a> FileLowering<'a> {
 
     fn declare_functions(&mut self) -> Result<(), Unsupported> {
         for (index, function) in self.ir.functions.iter().enumerate() {
-            if function.body.is_none() {
+            // A lambda whose body returns NON-LOCALLY is valid only spliced into the caller it
+            // returns from. Emitted as a standalone function its `return` returns from itself, and
+            // the enclosing call then carries on — `with(1) { return … }` ran the block, ignored
+            // the return and fell through, which is a wrong answer rather than a decline. Common
+            // lowering marks these; leaving one undeclared is how a call site that names it comes
+            // to decline, which is the same mechanism the branch below relies on.
+            if self
+                .ir
+                .inline_only_fns
+                .contains(&(index as crate::ir::FunId))
+                || function.body.is_none()
+            {
                 // Nothing to emit, and therefore nothing to DECLARE: an exported symbol that is
                 // never defined fails the object's own consistency check, not the link. Two shapes
                 // reach here — an abstract method, whose vtable entry is the runtime's loud
@@ -2318,8 +2329,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // `assertFailsWith<T> { … }`. Not one of the comparisons above: it runs a
                         // block and answers what that block threw, so it is the `try` machinery
                         // rather than a runtime call.
-                        if super::super::intrinsics::is_assert_fails_with(&owner, &name) {
+                        if super::super::intrinsics::is_assert_fails_with(&owner, &name, params) {
                             return self.assert_fails_with(args, params, *ret);
+                        }
+                        // `run { … }` and `with(x) { … }`: the scope functions with no receiver to
+                        // arrive on, so they reach this path rather than the member one.
+                        if let Some(realized) =
+                            self.top_level_scope_function(&owner, &name, args, params, *ret)
+                        {
+                            return realized;
                         }
                         let Some(symbol) =
                             super::super::intrinsics::runtime_function(&owner, &name, params)

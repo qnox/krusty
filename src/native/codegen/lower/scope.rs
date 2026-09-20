@@ -19,7 +19,7 @@
 //! The receiver is evaluated ONCE — it is the whole point of `let` that `x` is computed once —
 //! and before the block, which is the order they are written in.
 
-use super::super::super::intrinsics::ScopeResult;
+use super::super::super::intrinsics::{ScopeResult, TopLevelScope};
 use super::*;
 
 impl BodyLowering<'_, '_, '_> {
@@ -35,6 +35,42 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let yields = super::super::super::intrinsics::scope_function(owner, name)?;
         Some(self.call_with_receiver(yields, receiver, args, ret))
+    }
+
+    /// The same, for the two that take their subject as an ARGUMENT rather than as a receiver.
+    ///
+    /// `run { … }` invokes its block with nothing; `with(x) { … }` invokes it with `x`, which is
+    /// the same call `x.run { … }` makes — the two differ only in where the subject is written.
+    pub(super) fn top_level_scope_function(
+        &mut self,
+        owner: &str,
+        name: &str,
+        args: &[u32],
+        params: &[Ty],
+        ret: Ty,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        let scope = super::super::super::intrinsics::top_level_scope(owner, name, params)?;
+        Some(match (scope, args) {
+            (TopLevelScope::Block, [block]) => self.invoke_block(*block, &[], ret),
+            (TopLevelScope::WithReceiver, [receiver, block]) => {
+                self.call_with_receiver(ScopeResult::BlockResult, *receiver, &[*block], ret)
+            }
+            _ => Err("a receiverless scope function with an unexpected argument shape".to_string()),
+        })
+    }
+
+    /// Evaluate a block value and invoke it.
+    fn invoke_block(
+        &mut self,
+        block: u32,
+        arguments: &[Value],
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let function = self.reference(block)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.invoke_value(function, arguments, ret)
     }
 
     fn call_with_receiver(

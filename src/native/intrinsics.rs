@@ -256,13 +256,61 @@ pub(super) fn assertion_call(
     Some((symbol, compared))
 }
 
-/// Whether this names `assertFailsWith`, which reaches a backend under the name kotlin-test
-/// gives its non-inline half.
+/// The scope functions that have NO receiver to arrive on: `run { … }` and `with(x) { … }`.
 ///
-/// It takes no class operand: the reified type argument is resolved into the call's RETURN type
-/// before a backend sees it, so the caller reads the class to test against from there.
-pub(super) fn is_assert_fails_with(owner: &str, name: &str) -> bool {
-    declaration_package(kotlin_owner(owner)) == "kotlin/test" && name == "assertFailsWithAny"
+/// The same rearrangement as the member ones beside them, reached by the other path because these
+/// take their subject as an argument rather than as a receiver. Like the others they are `inline`,
+/// so what arrives here is the shape with no body to splice — a block that is an ordinary function
+/// value — which is exactly what a klib-backed compilation produces for every one of them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum TopLevelScope {
+    /// `run(block: () -> R): R` — the block takes nothing.
+    Block,
+    /// `with(receiver: T, block: T.() -> R): R` — the block takes the value written before it.
+    WithReceiver,
+}
+
+/// Which of the two a selected top-level declaration is, or `None` for anything else.
+///
+/// Keyed on the SHAPE as well as the name, because `kotlin.run` is two declarations: this one and
+/// `T.run(block: T.() -> R): R`, which has a receiver and is handled as a member.
+pub(super) fn top_level_scope(owner: &str, name: &str, params: &[Ty]) -> Option<TopLevelScope> {
+    if declaration_package(kotlin_owner(owner)) != "kotlin" {
+        return None;
+    }
+    match (name, params) {
+        ("run", [Ty::Fun(_)]) => Some(TopLevelScope::Block),
+        ("with", [_, Ty::Fun(_)]) => Some(TopLevelScope::WithReceiver),
+        _ => None,
+    }
+}
+
+/// Whether this names the REIFIED `assertFailsWith`, whose class operand is its type argument.
+///
+/// Two spellings arrive, because two providers do different things with the same declaration. A
+/// JVM provider splices the inline body, and what reaches a backend is the non-inline half
+/// kotlin-test names `assertFailsWithAny`. A klib provider publishes no inline-ness it has no body
+/// for, so the declaration arrives under its own name.
+///
+/// The SHAPE is what separates the reified overload from its siblings, and it has to: the others
+/// take a `KClass` operand and this one takes none — its type argument is resolved into the call's
+/// RETURN type before a backend sees it, which is where the caller reads the class to test against.
+/// So only `(block)` and `(message, block)` are admitted, and an `(exceptionClass, …)` overload
+/// falls through to the ordinary declining path rather than silently ignoring its first argument.
+pub(super) fn is_assert_fails_with(owner: &str, name: &str, params: &[Ty]) -> bool {
+    if declaration_package(kotlin_owner(owner)) != "kotlin/test" {
+        return false;
+    }
+    if name == "assertFailsWithAny" {
+        return true;
+    }
+    name == "assertFailsWith"
+        && matches!(params.last(), Some(Ty::Fun(_)))
+        && match params {
+            [_] => true,
+            [message, _] => is_string_type(message),
+            _ => false,
+        }
 }
 
 /// Is this `kotlin.String`, at either nullability and under either spelling?

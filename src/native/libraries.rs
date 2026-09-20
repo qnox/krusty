@@ -1278,6 +1278,13 @@ mod compiles_against_the_klib {
                 "fun box(): String { val r: UIntRange = 1u..5u; return \"OK\" }\n",
                 "an unsigned range as a value",
             ),
+            // A RECEIVERLESS scope function. `run { … }` is `inline`, and this provider publishes
+            // no inline-ness it has no body for, so the call survives to the code generator with
+            // its block as an ordinary function value — which is one rearrangement, not a gap.
+            (
+                "fun box(): String = run { \"OK\" }\n",
+                "a receiverless scope function",
+            ),
             // A `const val` on a companion. Every use site folds it, which is the only way it can
             // work here at all: a companion object has no storage on a target that compiles the
             // stdlib itself. The decoder used to validate the compile-time value and throw it
@@ -1319,6 +1326,22 @@ mod compiles_against_the_klib {
         assert!(
             !joined.iter().any(|d| d.contains("no callable realization")),
             "and the refusal is the GENERATOR's, not resolution's: {joined:?}"
+        );
+
+        // A block that returns NON-LOCALLY is valid only spliced into the function it returns
+        // from. Nothing is spliced here, so the block is an ordinary lambda — and emitted as a
+        // standalone function its `return` returns from itself, leaving the enclosing call to
+        // carry on. That is a wrong answer rather than a gap, and it was one: two corpus cases
+        // ran and printed nothing. The code generator declines such a lambda instead.
+        let non_local = diagnostics(
+            &root,
+            "fun foo() { with(1) { return } }\nfun box(): String { foo(); return \"OK\" }\n",
+        );
+        assert!(
+            non_local
+                .iter()
+                .any(|d| d.contains("the native backend does not support")),
+            "a non-local return through an un-spliced block declines: {non_local:?}"
         );
 
         // A stdlib class that is `open` or `abstract` can be EXTENDED. It resolves — reading
