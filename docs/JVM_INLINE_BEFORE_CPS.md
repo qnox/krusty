@@ -412,7 +412,37 @@ Traced with `KRUSTY_TRACE=splice`, (a) is itself two causes:
   reserved for a `Function1` that no longer exists and every host local above it sits one slot too
   high. The reference compiler compacts it away: its `$i$f$twice` is at slot 2, krusty's at 4.
 
-So §7a is three fixes — a1, a2 and (b) — not one.
+A third shows up in a call with **no** value argument, `fun a(v: Int) = once { v }`:
+
+```
+  reference:  iconst_0; istore_1     // $i$f$once      (host depth marker)
+              iconst_0; istore_2     // $i$a$-once-…   (LAMBDA depth marker)
+              iload_0 ; istore_3     // r
+  krusty:     iconst_0; istore_2     // one marker only, and two slots up
+              …boxed lambda result…  ; istore_3
+```
+
+* **a3 — the spliced lambda's own inline-depth marker is missing.** The reference compiler opens an
+  inlined lambda body with `iconst_0; istore` into a `$i$a$-<callee>-<caller>` local, exactly as it
+  opens an inlined function body with `$i$f$<callee>`. krusty emits the host's marker (it comes
+  along inside the relocated host body) but never the lambda's, because the lambda body is emitted
+  from IR, not relocated.
+
+Note that `a` shows a1 does *not* fire without a value argument: the extra local appears only when a
+value operand accompanies the inline-body lambda.
+
+So §7a is four fixes — a1, a2, a3 and (b) — each affecting every spliced inline call with a lambda,
+none of them coroutine-related:
+
+| | defect | effect |
+| --- | --- | --- |
+| a1 | a value operand beside an inline-body lambda is bound to its own local | one extra local + `iload/istore` pair; shifts every later slot |
+| a2 | the spliced-away lambda parameter's slot stays reserved | shifts every host local one slot up |
+| a3 | the spliced lambda body has no `$i$a$` inline-depth marker | a missing `iconst_0; istore` and a slot the reference compiler allocates |
+| b | the lambda's erased `invoke` adapter survives the splice | `valueOf` / `checkcast` / `intValue` the reference compiler does not emit |
+
+They interact — a1, a2 and a3 all move slot numbers — so they are best fixed and measured together,
+with the corpus as the judge.
 
 Consequence for the ordering work: a coroutine machine emitted in the reference compiler's exact
 instruction order still cannot produce an identical class file while the body it wraps differs. Both
