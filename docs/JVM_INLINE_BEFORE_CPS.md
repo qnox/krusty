@@ -457,12 +457,34 @@ So §7a is six gaps, all reachable without a coroutine:
 
 | | defect | effect | status |
 | --- | --- | --- | --- |
-| a1 | a value operand beside an inline-body lambda is bound to its own local | one extra local + `iload/istore` pair; shifts every later slot | open |
+| a1 | a value operand beside an inline-body lambda is bound to its own local | one extra local + `iload/istore` pair; shifts every later slot | **fixed** |
 | a2 | the spliced-away lambda parameter's slot stays reserved | shifts every host local one slot up | **fixed** |
-| a3 | the spliced lambda body has no `$i$a$` inline-depth marker | a missing `iconst_0; istore` and a slot | open |
+| a3 | the spliced lambda body has no `$i$a$` inline-depth marker | a missing `iconst_0; istore` and a slot | **fixed** |
 | a4 | no `LocalVariableTable` entries for the inlined frame | the whole table, including the `$iv` names read from the dependency's own table | open |
 | a5 | no `SourceDebugExtension` | the entire SMAP attribute | open |
-| b | the lambda's erased `invoke` adapter survives the splice | `valueOf` / `checkcast` / `intValue` the reference compiler does not emit | open |
+| b | the lambda's erased `invoke` adapter survives the splice | `valueOf` / `checkcast` / `intValue` the reference compiler does not emit | **fixed** (adjacent pairs) |
+
+**Result of the four code-level fixes.** For the shape this note is built around — a classpath
+`inline fun twice(x, f)` with a loop, called with a lambda — the emitted method is now the reference
+compiler's exact instruction sequence, over the same slots:
+
+```
+   0: iload_0 ; istore_1        // x
+   2: iconst_0; istore_2        // $i$f$twice
+   4: iconst_0; istore_3        // acc
+   6: iconst_0; istore 4        // i
+   9: iload 4 ; iconst_2 ; if_icmpge 42
+  15: iload_1 ; iload 4 ; iadd ; istore 5     // it
+  21: iconst_0; istore 6        // $i$a$
+  24: iload 5 ; invokestatic one:(I)I ; istore 5
+  31: iload_3 ; iload 5 ; iadd ; istore_3
+  36: iinc 4, 1 ; goto 9
+  42: iload_3 ; ireturn
+```
+
+`classpath_inline_splice_parity_e2e` pins it, comparing one method's disassembly against the
+reference compiler's with pool indices normalized away. What still separates the two class files is
+a4, a5, and the constant pool's interning order.
 
 a1, a2 and a3 all move slot numbers, so they are fixed and measured together, with the corpus as the
 judge. a4 and a5 are additive attributes and independent of the rest. **b** is the only one that
@@ -506,10 +528,15 @@ that code rather than of the bytecode it produces. Deriving it from more samples
 it should be read from the implementation.
 
 What is implemented today is "the first slot free at the invoke, from the dependency's own
-`LocalVariableTable`". That reproduces the reference result for the shapes where the lambda's locals
-sit above every live host local — including the whole of §7a's motivating case — and is off by one
-where a host local declared after the call does not reuse the marker's slot. It is recorded here as
-an approximation, not as the rule.
+`LocalVariableTable`". That reproduces the reference result for §7a's motivating case and for
+`pre`, and is off by the lambda's local count for the `p0`/`p1`/`p2` family, where the inline
+function's only local is declared after the call. It is recorded here as an approximation, not as
+the rule; `classpath_inline_splice_parity_e2e` deliberately does not pin that family's instructions,
+because asserting a shape known not to match yet is not a test.
+
+The approximation is safe, not merely close: the lambda's locals occupy slots no host local holds at
+the invoke, and any host local declared later is declared after the inlined body has ended, so a
+shared slot is always dead at the point it is reused.
 
 ## 8. Risks
 
