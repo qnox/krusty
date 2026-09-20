@@ -723,9 +723,17 @@ fn semantic_function(
         return Err(semantic_error("duplicate function contract"));
     }
     if let Some(contract) = contracts.first() {
+        // A contract's `is-instance` type may be written INLINE or as an id, and an id indexes the
+        // table of the declaration container this function belongs to — its package or its class —
+        // not the function. A function carries a table of its own only sometimes; when it does it
+        // is the nearer one and wins, and when it does not the container's is the only one there
+        // is. Reading the function's own unconditionally made "absent" of every id a contract
+        // wrote: in the Kotlin/Native stdlib's `kotlin.test` fragment, ten functions declare
+        // contracts and not one of them declares a type table, while the package declares eighty
+        // types for them to mean.
         let (types, first_nullable) = match contract_type_table {
             Some(table) => (table.types, table.first_nullable),
-            None => (Vec::new(), None),
+            None => (tables.types.clone(), tables.first_nullable),
         };
         let contract_tables = SemanticTables {
             strings: tables.strings,

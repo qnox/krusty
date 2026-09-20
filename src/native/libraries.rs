@@ -325,14 +325,18 @@ mod tests {
         root.exists().then_some(root)
     }
 
-    /// How much of the Kotlin/Native stdlib the reader already in this tree can decode.
+    /// The whole Kotlin/Native stdlib decodes with the reader already in this tree.
     ///
     /// This is the measurement the klib question turns on, so it is a test rather than something
     /// someone has to re-derive: the container reader and the metadata decoder were written for
     /// the JVM's `@Metadata`, and whether they read Kotlin/Native's own `linkdata` decides whether
     /// this target can compile against the real stdlib or must keep reimplementing it.
+    ///
+    /// It is asserted as ALL of them, not as a count above a threshold. A stdlib with a package
+    /// missing is the failure this whole provider exists to avoid, and a threshold is exactly the
+    /// shape of assertion that would let one go quiet.
     #[test]
-    fn the_kotlin_native_stdlib_very_nearly_all_decodes() {
+    fn the_whole_kotlin_native_stdlib_decodes() {
         let Some(root) = distribution() else {
             eprintln!("skipping: no Kotlin/Native distribution cached");
             return;
@@ -343,36 +347,16 @@ mod tests {
             let bytes = archive.read(&fragment.entry).expect("read a fragment");
             match crate::jvm::metadata::klib_validation::parse_package_fragment_checked(&bytes) {
                 Ok(_) => decoded += 1,
-                Err(error) => rejected.push((fragment.entry.clone(), format!("{error:?}"))),
+                Err(error) => rejected.push(format!("{}: {error:?}", fragment.entry)),
             }
         }
-        // The one fragment that does not. Pinned by NAME and by REASON rather than by a count, so
-        // a different fragment failing, or this one failing differently, is a test failure and not
-        // a number that quietly drifts.
-        //
-        // Its class declares a contract whose `is-instance` type id does not index that class's
-        // own type table — the table has two entries and the contract asks for the seventh. Every
-        // other class in the stdlib resolves against its own table, so this is a scoping rule for
-        // contract type ids rather than a missing table, and it is its own piece of work.
-        let names = rejected
-            .iter()
-            .map(|(entry, _)| entry.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            names,
-            ["default/linkdata/package_kotlin.test/4_test.knm"],
-            "exactly one stdlib fragment is known not to decode"
-        );
         assert!(
-            rejected[0]
-                .1
-                .contains("contract is-instance type references absent type"),
-            "and for the reason this test names: {}",
-            rejected[0].1
+            rejected.is_empty(),
+            "every stdlib fragment decodes; these did not: {rejected:#?}"
         );
         assert!(
             decoded > 480,
-            "the rest of the stdlib decodes: {decoded} fragments"
+            "and there are as many of them as the distribution ships: {decoded}"
         );
     }
 
