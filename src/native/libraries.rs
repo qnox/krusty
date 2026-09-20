@@ -106,6 +106,11 @@ struct Index {
     /// call to a name a consumer could re-derive, so the declaration's accessors are interned here
     /// and the read carries only this position.
     property_realizations: Vec<ExternalPropertyRealization>,
+    /// Every package name the stdlib declares, INCLUDING the prefixes that declare nothing of
+    /// their own. A qualified reference is resolved one segment at a time, and a segment that
+    /// names neither a classifier nor a package is unresolved — so `kotlin.text.Regex` needs
+    /// `kotlin` to be answerable as a package, and a fragment list alone does not answer it.
+    packages: std::collections::HashSet<TypeName>,
 }
 
 impl NativeLibraries {
@@ -125,6 +130,7 @@ impl NativeLibraries {
         let mut namespaces: HashMap<TypeName, Namespace> = HashMap::new();
         let mut callable_realizations = Vec::new();
         let mut property_realizations = Vec::new();
+        let mut packages = std::collections::HashSet::new();
         for fragment in archive.package_fragments() {
             let bytes = archive.read(&fragment.entry)?;
             let package =
@@ -134,6 +140,7 @@ impl NativeLibraries {
                         source,
                     })?;
             let package_name = package_namespace(&fragment.package_fqname);
+            record_package(&mut packages, &fragment.package_fqname);
             for (internal, declaration) in package.classes {
                 let identity = type_name(&internal);
                 // A classifier is indexed under the namespace its identity names — its package for
@@ -182,6 +189,7 @@ impl NativeLibraries {
                 namespaces,
                 callable_realizations,
                 property_realizations,
+                packages,
             }),
         })
     }
@@ -190,6 +198,19 @@ impl NativeLibraries {
     /// was read rather than silently empty.
     pub fn namespace_count(&self) -> usize {
         self.index.namespaces.len()
+    }
+}
+
+/// Record a package and every prefix of it. `kotlin.collections` implies `kotlin`, which may
+/// itself declare nothing and still has to answer a qualified walk.
+fn record_package(into: &mut std::collections::HashSet<TypeName>, fqname: &str) {
+    let mut prefix = String::new();
+    for segment in fqname.split('.').filter(|segment| !segment.is_empty()) {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(segment);
+        into.insert(type_name(&prefix));
     }
 }
 
@@ -225,6 +246,13 @@ impl SymbolSource for NativeLibraries {
         self.index.property_realizations
             .get(identity.raw() as usize)
             .cloned()
+    }
+
+    /// Whether `parent.name` is one of the stdlib's packages. Without this a fully-qualified
+    /// reference cannot get past its first segment: `kotlin` names no classifier, so a walk with
+    /// nothing to ask about packages reports `unresolved reference 'kotlin'` and stops.
+    fn package_exists(&self, parent: TypeName, name: &str) -> bool {
+        self.index.packages.contains(&qualified(parent, name))
     }
 
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
@@ -292,6 +320,17 @@ fn top_level_function(
     let mut info = FunctionInfo::plain(kind, receiver, callable);
     info.visibility = function.visibility;
     info.context_count = function.context_count;
+    // `infix` and `operator` are not decoration: a call written in infix or operator form admits
+    // ONLY declarations carrying them. Without `infix`, `1..10 step 2` did not find
+    // `IntProgression.step(Int)` at all and read `step` as the progression's `Int`-typed property
+    // instead — "expression 'step' of type 'Int' cannot be invoked as a function", on 254 cases.
+    info.flags.operator = function.is_operator;
+    info.flags.infix = function.is_infix;
+    info.flags.suspend = function.is_suspend;
+    // `inline` is deliberately NOT published. It is not a modifier a call site merely records: a
+    // declaration marked inline is one the frontend will try to SPLICE, and a klib's bodies live
+    // in `default/ir/`, which this tree reads as opaque bytes. Claiming inline-ness the provider
+    // cannot then supply a body for would turn a working call into a failed expansion.
     info.call_sig = crate::libraries::CallSig::metadata_member(
         function.params.len(),
         function.param_names.clone(),
@@ -823,6 +862,15 @@ mod compiles_against_the_klib {
             "and a classifier that exists nowhere is reported: {unknown:?}"
         );
 
+        // A FULLY-QUALIFIED reference gets past its leading segments. `kotlin` names no
+        // classifier, so without the provider answering that it is a package the walk stopped
+        // there and reported `unresolved reference 'kotlin'` — on 437 corpus cases.
+        let qualified = diagnostics(&root, "fun box(): kotlin.String = \"OK\"\n");
+        assert!(
+            qualified.is_empty(),
+            "a package prefix resolves: {qualified:?}"
+        );
+
         // MEMBERS resolve now, and each line below says so by the SHAPE of what is left: a
         // diagnostic from the native BACKEND naming the exact declaration it was handed. The
         // frontend cannot decline a call it never resolved, so "the backend does not support
@@ -849,6 +897,14 @@ mod compiles_against_the_klib {
             (
                 "fun box(): Int = listOf(1, 2, 3).let { it.size }\n",
                 "the member `kotlin.let`",
+            ),
+            // An INFIX call, which admits only declarations carrying the modifier. Before the
+            // provider published it, this line found no `step` function at all and read the
+            // progression's `Int`-typed `step` PROPERTY instead: "expression 'step' of type 'Int'
+            // cannot be invoked as a function".
+            (
+                "fun box(): String { val r = 1..10 step 2; return \"OK\" }\n",
+                "the member `kotlin.ranges.step`",
             ),
         ] {
             let reported = diagnostics(&root, source);
