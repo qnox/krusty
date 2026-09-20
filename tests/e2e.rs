@@ -1409,6 +1409,8 @@ mod superclass_bridge_e2e;
 mod supertype_cycle_e2e;
 #[path = "supertype_scan_arrow_e2e.rs"]
 mod supertype_scan_arrow_e2e;
+#[path = "suspend_anonymous_object_naming_e2e.rs"]
+mod suspend_anonymous_object_naming_e2e;
 #[path = "suspend_arg_order_e2e.rs"]
 mod suspend_arg_order_e2e;
 #[path = "suspend_class_implements_interface_e2e.rs"]

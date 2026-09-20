@@ -1439,7 +1439,7 @@ fn name_anonymous_classes_with_counters(
     anons.sort_by_key(|(construction, _)| file.expr_spans[construction.0 as usize].lo);
     for (construction, decl) in anons {
         let span = file.expr_spans[construction.0 as usize];
-        let mut best: Option<(u32, String, crate::ast::AnonymousEnclosingFunction)> = None;
+        let mut best: Option<(u32, String, crate::ast::AnonymousEnclosingFunction, bool)> = None;
         for &candidate in &file.decls {
             match file.decl(candidate) {
                 Decl::Fun(function) => {
@@ -1447,12 +1447,13 @@ fn name_anonymous_classes_with_counters(
                         let size = function.span.hi - function.span.lo;
                         if best
                             .as_ref()
-                            .is_none_or(|(smallest, _, _)| size < *smallest)
+                            .is_none_or(|(smallest, _, _, _)| size < *smallest)
                         {
                             best = Some((
                                 size,
                                 format!("{facade_simple}${}", function.name),
                                 crate::ast::AnonymousEnclosingFunction::TopLevel(candidate),
+                                function.is_suspend(),
                             ));
                         }
                     }
@@ -1467,7 +1468,7 @@ fn name_anonymous_classes_with_counters(
                             let size = method.span.hi - method.span.lo;
                             if best
                                 .as_ref()
-                                .is_none_or(|(smallest, _, _)| size < *smallest)
+                                .is_none_or(|(smallest, _, _, _)| size < *smallest)
                             {
                                 best = Some((
                                     size,
@@ -1476,6 +1477,7 @@ fn name_anonymous_classes_with_counters(
                                         class: candidate,
                                         method: method_index as u32,
                                     },
+                                    method.is_suspend(),
                                 ));
                             }
                         }
@@ -1484,8 +1486,8 @@ fn name_anonymous_classes_with_counters(
                 _ => {}
             }
         }
-        let (scope, enclosing) = match best {
-            Some((_, scope, enclosing)) => (scope, Some(enclosing)),
+        let (scope, enclosing, suspend_scope) = match best {
+            Some((_, scope, enclosing, suspend)) => (scope, Some(enclosing), suspend),
             None => {
                 let classifier_scope = file
                     .decls
@@ -1503,14 +1505,21 @@ fn name_anonymous_classes_with_counters(
                     .min_by_key(|(size, _)| *size)
                     .map(|(_, scope)| scope)
                     .unwrap_or_else(|| facade_simple.to_string());
-                (classifier_scope, None)
+                (classifier_scope, None, false)
             }
         };
         if let Some(enclosing) = enclosing {
             file.anonymous_object_enclosing_functions
                 .insert(decl, enclosing);
         }
-        let ordinal = counters.entry(scope.clone()).or_insert(0);
+        // A `suspend` function's first numbered slot belongs to its continuation class, whose name
+        // comes from the same per-function sequence. kotlinc reserves it whether or not a
+        // continuation is ultimately emitted — a suspend function with no suspension point still
+        // names its first anonymous object `…$fn$2` — so the reservation is decided here, where
+        // only the declaration is known, and not by any later backend decision.
+        let ordinal = counters
+            .entry(scope.clone())
+            .or_insert(u32::from(suspend_scope));
         *ordinal += 1;
         let fresh = format!("{scope}${ordinal}");
         let Expr::Call { callee, .. } = file.expr(construction) else {
