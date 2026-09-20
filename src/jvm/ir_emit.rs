@@ -20,6 +20,7 @@ use crate::jvm::names::{
 use crate::kt_string::{KtString, KtStringBuf};
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
 
+mod access_bridges;
 mod backend_temporaries;
 mod block_scope;
 mod bottom_values;
@@ -27,6 +28,7 @@ mod bridge_emission;
 mod call_operands;
 mod constructor_defaults;
 mod debug_lines;
+mod enum_entry_subclass;
 mod enum_metadata;
 mod field_write;
 mod function_debug;
@@ -35,6 +37,7 @@ mod interface_compatibility;
 mod member_schedule;
 mod operand_stack;
 mod property_access;
+mod property_reference_values;
 mod return_emission;
 mod try_emission;
 use try_emission::FinallyRegion;
@@ -45,6 +48,7 @@ mod when;
 use super::method_parameters::OwnerConstructorPrefix;
 use inline_body_emission::collect_body_var_types;
 use member_schedule::{source_ordered_members, SourceOrderedMember};
+use property_reference_values::{box_property_reference_value, value_class_boundary_conversion};
 use secondary_constructor::SecondaryConstructorEmitter;
 
 struct InlineStaticTarget<'a> {
@@ -284,6 +288,10 @@ pub(super) struct EmitEnv<'a> {
     /// JVM-only realizations for already-resolved current-module property operations. Kept beside
     /// the emitter rather than on common IR so a backend field/accessor choice cannot leak into FIR.
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
+    /// JVM carrier and accessor realization selected for each synthesized property-reference
+    /// class. Common IR deliberately carries none of these representation facts.
+    property_reference_realizations:
+        &'a crate::jvm::property_references::PropertyReferenceRealizations,
     /// Per-call JVM placeholder/mask/marker plans produced during default-call realization.
     default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
     /// File-wide `InnerClasses` candidates prepared once from stable classifier identities.
@@ -3810,6 +3818,8 @@ pub(crate) struct CheckedEmitFacts<'a> {
     pub(crate) metadata: EmitMetadata<'a>,
     pub(crate) signature_symbols: &'a dyn BackendClassifierSource,
     pub(crate) property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
+    pub(crate) property_reference_realizations:
+        &'a crate::jvm::property_references::PropertyReferenceRealizations,
     pub(crate) default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
 }
 
@@ -3831,6 +3841,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         lambda_modes: opts.lambda_modes,
         java_parameters: opts.java_parameters,
         property_realizations: facts.property_realizations,
+        property_reference_realizations: facts.property_reference_realizations,
         default_call_operands: facts.default_call_operands,
         inner_classes: crate::jvm::inner_classes::InnerClasses::new(ir),
     };
@@ -5043,7 +5054,13 @@ fn emit_statics(
         }
         // kotlinc visits the accessor's name, descriptor, and nullability annotation BEFORE its
         // body's field cluster; the accessor maps to the property's declaration line.
-        let nullability = field_nullability_kind(ir, facade, &s.name, s.ty);
+        //
+        // An accessor's nullability is the PROPERTY's, which for a value-class-typed static whose
+        // storage was erased is no longer readable off `s.ty` — that holds the carrier now. Reading
+        // it there published a non-null `String` setter for a `var x: Label?` and refused the null
+        // the property accepts, so the declaration's own recorded type answers instead.
+        let accessor_ty = s.erased_declared_ty.unwrap_or(s.ty);
+        let nullability = field_nullability_kind(ir, facade, &s.name, accessor_ty);
         let acc_ann = match nullability {
             1 => Some("Lorg/jetbrains/annotations/NotNull;"),
             2 => Some("Lorg/jetbrains/annotations/Nullable;"),
@@ -5081,7 +5098,12 @@ fn emit_statics(
         );
         cw.set_method_nullability(&gname, &format!("(){desc}"), acc_ann, &[None]);
         if s.is_var {
-            let sname = property_setter_name(&s.name);
+            // A value-class-typed property's setter carries the value-class mangle: the parameter
+            // it takes is the carrier, and a value-class PARAMETER always mangles.
+            let sname = s
+                .setter_jvm_name
+                .clone()
+                .unwrap_or_else(|| property_setter_name(&s.name));
             cw.reserve_method_name(&sname);
             cw.seed_utf8(&format!("({desc})V"));
             if let Some(signature) = &signatures.setter {
@@ -5771,7 +5793,7 @@ fn emit_class(
         return emit_interface_class(ir, c, facade, env, opts, class_meta, extra);
     }
     if let Some(user_tys) = &c.enum_entry_of {
-        return emit_enum_entry_subclass(ir, c, facade, env, opts, user_tys);
+        return enum_entry_subclass::emit_enum_entry_subclass(ir, c, facade, env, opts, user_tys);
     }
     if c.prop_ref.is_some() {
         return emit_prop_ref_class(c, facade, env, opts);
@@ -6539,10 +6561,14 @@ fn emit_class(
                 .borrow()
                 .contains(&fid)
             {
-                emit_private_member_access_bridge(ir, fid, &fq_name, &mut cw, false);
+                access_bridges::emit_private_member_access_bridge(
+                    ir, fid, &fq_name, &mut cw, false,
+                );
             }
             if ir.function_reference_access_bridges.contains(&fid) {
-                emit_function_reference_access_bridge(ir, fid, &fq_name, &mut cw, false);
+                access_bridges::emit_function_reference_access_bridge(
+                    ir, fid, &fq_name, &mut cw, false,
+                );
             }
         } else {
             cw.add_abstract_method_sig(
@@ -7023,177 +7049,6 @@ fn emit_class(
     cw.finish()
 }
 
-/// Emit a synthesized enum-entry subclass (`Enum$ENTRY extends Enum`) for an entry with a body: a
-/// package-private `final` class with one constructor `(String name, int ordinal, <user fields>)V`
-/// that delegates to the enum's `(String,int,<user>)V` constructor, plus the entry's overriding
-/// methods. It has no fields of its own — overrides read the enum's fields via the inherited `this`.
-fn emit_enum_entry_subclass(
-    ir: &IrFile,
-    c: &crate::ir::IrClass,
-    facade: &str,
-    env: &EmitEnv,
-    opts: &EmitOptions,
-    user_tys: &[Ty],
-) -> Vec<u8> {
-    let superclass = c.superclass();
-    let fq_name = c.fq_name();
-    let signature_formatter = JvmSignatureFormatter::new(ir, env);
-    let mut cw = new_writer(&fq_name, &superclass, opts);
-    cw.set_access(0x0010 | 0x0020); // FINAL | SUPER (package-private)
-
-    // Entry-body PROPERTIES are private backing fields (read via synthesized getters, like kotlinc).
-    for field in c.fields.iter() {
-        let acc = 0x0002 | if field.is_final() { 0x0010 } else { 0 };
-        cw.add_field(acc, &field.name, &ir_type_desc(&field.ty));
-    }
-
-    // Constructor: `(String, int, <user>)V` → `super(name, ordinal, <user>)`, then the property
-    // initializers (`this.<prop> = <init>`, from `init_body`).
-    let user_jvm = jvm_tys(user_tys);
-    let ctor_params: Vec<Ty> = [Ty::String, Ty::Int]
-        .into_iter()
-        .chain(user_jvm.iter().copied())
-        .collect();
-    let ctor_words: u16 = ctor_params.iter().map(|t| slot_words(*t)).sum();
-    let mut ctor = CodeBuilder::new(1 + ctor_words);
-    ctor.aload(0);
-    let mut slot = 1u16;
-    for t in &ctor_params {
-        load(*t, slot, &mut ctor);
-        slot += slot_words(*t);
-    }
-    let super_init = cw.methodref(
-        &superclass,
-        "<init>",
-        &method_descriptor(&ctor_params, Ty::Unit),
-    );
-    let argw: i32 = ctor_params.iter().map(|t| slot_words(*t) as i32).sum();
-    ctor.invokespecial(super_init, argw, 0);
-    let mut ctor_max = 1 + ctor_words;
-    if let Some(init_body) = c.init_body {
-        let mut e = Emitter::new(ir, &mut cw, env, &fq_name, facade, Ty::Unit, [init_body]);
-        e.next_slot = 1 + ctor_words;
-        e.slots.insert(0, (0, Ty::obj(&fq_name))); // `this`
-        e.emit(init_body, &mut ctor);
-        ctor_max = e.next_slot;
-    }
-    ctor.ret_void();
-    ctor.ensure_locals(ctor_max);
-    ctor.link();
-    cw.add_method(
-        0x0000,
-        "<init>",
-        &method_descriptor(&ctor_params, Ty::Unit),
-        &ctor,
-    );
-    if let Some(defaults) = ir
-        .class_ctor_defaults(&superclass)
-        .filter(|defaults| defaults.iter().any(Option::is_some))
-    {
-        constructor_defaults::emit_ctor_default_stub_with_prefix(
-            ir,
-            &fq_name,
-            facade,
-            &[Ty::String, Ty::Int],
-            0,
-            &user_jvm,
-            defaults,
-            None,
-            false,
-            0x1000,
-            &mut cw,
-            env,
-        );
-    }
-
-    // The overriding methods + synthesized property getters.
-    emit_declared_property_accessors(
-        ir,
-        c,
-        &mut cw,
-        &PropertyAccessorEmit {
-            fq_name: &fq_name,
-            facade,
-            formatter: &signature_formatter,
-            param_assertions: opts.param_assertions,
-            env,
-        },
-    );
-    let markers = property_annotation_marker_fids(ir, c);
-    for &fid in &c.methods {
-        if markers.contains(&fid) || standalone_method_is_elided(ir, fid, env) {
-            continue; // already emitted beside its property's accessors
-        }
-        // Lambda implementation helpers reparented into an enum-entry subclass remain static; only
-        // source member overrides consume an instance receiver. The ordinary class/enum writers
-        // already honor this IR bit, and entry subclasses must use the same rule.
-        let function = &ir.functions[fid as usize];
-        emit_method(ir, fid, &fq_name, facade, &mut cw, !function.is_static, env);
-        if ir.function_reference_access_bridges.contains(&fid) {
-            emit_function_reference_access_bridge(ir, fid, &fq_name, &mut cw, false);
-        }
-        if let Some(defaults) = ir.param_defaults(fid) {
-            if function.is_static {
-                emit_facade_default_stub(
-                    ir,
-                    fid,
-                    &fq_name,
-                    &mut cw,
-                    defaults,
-                    env,
-                    Ty::obj("java/lang/Object"),
-                );
-            } else {
-                emit_default_stub(ir, fid, &fq_name, facade, &mut cw, defaults, env, false);
-            }
-        }
-    }
-    // Entry-body override edges are checked and frozen in Pass 1 like ordinary class overrides.
-    // Their anonymous subclass still needs the JVM descriptor adapters derived from those edges
-    // (for example `apply(Object)` forwarding to `apply(String)`).
-    bridge_emission::emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
-    cw.finish()
-}
-
-fn emit_function_reference_access_bridge(
-    ir: &IrFile,
-    fid: u32,
-    owner: &str,
-    cw: &mut ClassWriter,
-    owner_is_interface: bool,
-) {
-    let function = &ir.functions[fid as usize];
-    let parameters = jvm_function_params(ir, fid);
-    let result = jvm_declared_ty(&function.ret);
-    let mut bridge_parameters = Vec::with_capacity(parameters.len() + 1);
-    bridge_parameters.push(Ty::obj(owner));
-    bridge_parameters.extend(parameters.iter().copied());
-    let mut code = CodeBuilder::new(bridge_parameters.iter().map(|ty| slot_words(*ty)).sum());
-    code.aload(0);
-    let mut slot = 1u16;
-    for &parameter in &parameters {
-        load(parameter, slot, &mut code);
-        slot += slot_words(parameter);
-    }
-    let descriptor = method_descriptor(&parameters, result);
-    let method = if owner_is_interface {
-        cw.interface_methodref(owner, &function.name, &descriptor)
-    } else {
-        cw.methodref(owner, &function.name, &descriptor)
-    };
-    let argument_words = parameters.iter().map(|ty| slot_words(*ty) as i32).sum();
-    code.invokespecial(method, argument_words, slot_words(result) as i32);
-    emit_return(result, &mut code);
-    code.ensure_locals(slot);
-    code.link();
-    cw.add_method(
-        0x1019, // PUBLIC | STATIC | FINAL | SYNTHETIC
-        &format!("access${}", function.name),
-        &method_descriptor(&bridge_parameters, result),
-        &code,
-    );
-}
-
 /// Emit a synthesized property-reference singleton (`Type$prop$N extends PropertyReference1Impl`):
 /// a package-private `final` class with a `public static final INSTANCE`, a constructor
 /// `super(owner.class, name, "getName()desc", 0)`, a `get(Object)Object` override that reads
@@ -7242,26 +7097,6 @@ fn property_setter_target(pr: &crate::ir::PropRef, ext: bool) -> (String, String
     (name, descriptor)
 }
 
-fn box_property_reference_value(
-    cw: &mut ClassWriter,
-    code: &mut CodeBuilder,
-    property: &crate::ir::PropRef,
-    physical: Ty,
-) {
-    if let Some(value_class) = property.boxed_value_class {
-        let owner = value_class.render();
-        let descriptor = format!("({})L{owner};", type_descriptor(ir_ty_to_jvm(&physical)));
-        let method = cw.methodref(&owner, "box-impl", &descriptor);
-        code.invokestatic(method, slot_words(ir_ty_to_jvm(&physical)) as i32, 1);
-    } else if physical.is_jvm_scalar() {
-        box_prim_free(
-            cw,
-            code,
-            semantic_scalar_adapter(property.prop_ty, physical),
-        );
-    }
-}
-
 struct PropertyCallTarget<'a> {
     owner: &'a str,
     facade: Option<&'a str>,
@@ -7271,6 +7106,8 @@ struct PropertyCallTarget<'a> {
     params: &'a [Ty],
     owner_is_interface: bool,
     boxed_value_class: Option<TypeName>,
+    /// The receiver is a value class's boxed object while the accessor takes its carrier.
+    unboxed_receiver_value_class: Option<TypeName>,
     field_access: Option<&'a crate::jvm::inline::PropertyAccess>,
 }
 
@@ -7285,10 +7122,17 @@ struct PropertyReferenceTarget {
     signature: String,
     getter_field: Option<crate::jvm::inline::PropertyAccess>,
     setter_field: Option<crate::jvm::inline::PropertyAccess>,
+    boxed_value_class: Option<TypeName>,
+    unboxed_receiver_value_class: Option<TypeName>,
 }
 
 impl PropertyReferenceTarget {
-    fn new(property: &crate::ir::PropRef, facade: &str, bodies: &dyn MethodBodies) -> Self {
+    fn new(
+        property: &crate::ir::PropRef,
+        realization: &crate::jvm::property_references::PropertyReferenceRealization,
+        facade: &str,
+        bodies: &dyn MethodBodies,
+    ) -> Self {
         let semantic_owner = property.owner().expect("property reference owner");
         let array_owner = crate::jvm::names::array_class_descriptor(&semantic_owner);
         let owner = array_owner.clone().unwrap_or_else(|| {
@@ -7324,6 +7168,8 @@ impl PropertyReferenceTarget {
             getter_ret: ir_ty_to_jvm(&getter_ret),
             getter_field,
             setter_field,
+            boxed_value_class: realization.boxed_value_class,
+            unboxed_receiver_value_class: realization.unboxed_receiver_value_class,
         }
     }
 
@@ -7336,7 +7182,8 @@ impl PropertyReferenceTarget {
             descriptor: &self.getter_descriptor,
             params: &self.getter_params,
             owner_is_interface: property.owner_is_interface,
-            boxed_value_class: property.boxed_value_class,
+            boxed_value_class: self.boxed_value_class,
+            unboxed_receiver_value_class: self.unboxed_receiver_value_class,
             field_access: self.getter_field.as_ref(),
         }
     }
@@ -7356,7 +7203,8 @@ impl PropertyReferenceTarget {
             descriptor,
             params,
             owner_is_interface: property.owner_is_interface,
-            boxed_value_class: property.boxed_value_class,
+            boxed_value_class: self.boxed_value_class,
+            unboxed_receiver_value_class: self.unboxed_receiver_value_class,
             field_access: self.setter_field.as_ref(),
         }
     }
@@ -7426,8 +7274,23 @@ impl PropertyCallTarget<'_> {
             code.checkcast(class);
             code.arraylength();
         } else if let Some(facade) = self.facade {
-            emit_object_as(cw, code, self.params[0]);
+            adapt_property_reference_value(
+                cw,
+                code,
+                self.unboxed_receiver_value_class,
+                self.params[0],
+            );
             let method = cw.methodref(facade, self.name, self.descriptor);
+            code.invokestatic(
+                method,
+                slot_words(ir_ty_to_jvm(&self.params[0])) as i32,
+                slot_words(ret) as i32,
+            );
+        } else if let Some(value_class) = self.unboxed_receiver_value_class {
+            // A MEMBER of a value class: its accessor is realized as a static method over the
+            // carrier on the value class itself, so the receiver is unboxed and the call is static.
+            adapt_property_reference_value(cw, code, Some(value_class), self.params[0]);
+            let method = cw.methodref(self.owner, self.name, self.descriptor);
             code.invokestatic(
                 method,
                 slot_words(ir_ty_to_jvm(&self.params[0])) as i32,
@@ -7470,7 +7333,12 @@ impl PropertyCallTarget<'_> {
             return;
         }
         if let Some(facade) = self.facade {
-            emit_object_as(cw, code, self.params[0]);
+            adapt_property_reference_value(
+                cw,
+                code,
+                self.unboxed_receiver_value_class,
+                self.params[0],
+            );
             code.aload(value_local);
             self.emit_property_value(cw, code, self.params[1]);
             let arg_words = self
@@ -7479,6 +7347,17 @@ impl PropertyCallTarget<'_> {
                 .map(|param| slot_words(ir_ty_to_jvm(param)) as i32)
                 .sum();
             let method = cw.methodref(facade, self.name, self.descriptor);
+            code.invokestatic(method, arg_words, 0);
+        } else if let Some(value_class) = self.unboxed_receiver_value_class {
+            adapt_property_reference_value(cw, code, Some(value_class), self.params[0]);
+            code.aload(value_local);
+            self.emit_property_value(cw, code, self.params[1]);
+            let arg_words = self
+                .params
+                .iter()
+                .map(|param| slot_words(ir_ty_to_jvm(param)) as i32)
+                .sum();
+            let method = cw.methodref(self.owner, self.name, self.descriptor);
             code.invokestatic(method, arg_words, 0);
         } else {
             emit_object_as(cw, code, Ty::obj(self.owner));
@@ -7496,17 +7375,28 @@ impl PropertyCallTarget<'_> {
     }
 
     fn emit_property_value(&self, cw: &mut ClassWriter, code: &mut CodeBuilder, physical: Ty) {
-        let Some(value_class) = self.boxed_value_class else {
-            emit_object_as(cw, code, physical);
-            return;
-        };
-        let owner = value_class.render();
-        let class = cw.class_ref(&owner);
-        code.checkcast(class);
-        let descriptor = format!("(){}", type_descriptor(ir_ty_to_jvm(&physical)));
-        let method = cw.methodref(&owner, "unbox-impl", &descriptor);
-        code.invokevirtual(method, 0, slot_words(ir_ty_to_jvm(&physical)) as i32);
+        adapt_property_reference_value(cw, code, self.boxed_value_class, physical);
     }
+}
+
+/// Bring an erased `Object` on the stack to the accessor's PHYSICAL parameter type: a value class's
+/// boxed object is cast and unboxed to its carrier, anything else is cast or unboxed as usual.
+fn adapt_property_reference_value(
+    cw: &mut ClassWriter,
+    code: &mut CodeBuilder,
+    boxed_value_class: Option<TypeName>,
+    physical: Ty,
+) {
+    let Some(value_class) = boxed_value_class else {
+        emit_object_as(cw, code, physical);
+        return;
+    };
+    let owner = value_class.render();
+    let class = cw.class_ref(&owner);
+    code.checkcast(class);
+    let descriptor = format!("(){}", type_descriptor(ir_ty_to_jvm(&physical)));
+    let method = cw.methodref(&owner, "unbox-impl", &descriptor);
+    code.invokevirtual(method, 0, slot_words(ir_ty_to_jvm(&physical)) as i32);
 }
 
 fn emit_prop_ref_class(
@@ -7516,8 +7406,12 @@ fn emit_prop_ref_class(
     opts: &EmitOptions,
 ) -> Vec<u8> {
     let pr = c.prop_ref.as_ref().unwrap();
+    let realization = env
+        .property_reference_realizations
+        .get(c.fq_name_id())
+        .expect("a synthesized property reference must retain its JVM realization");
     if pr.static_dispatch {
-        return emit_toplevel_prop_ref_class(c, pr, facade, opts);
+        return emit_toplevel_prop_ref_class(c, pr, realization, facade, opts);
     }
     if pr.bound {
         return emit_bound_prop_ref_class(c, pr, facade, env, opts);
@@ -7528,7 +7422,7 @@ fn emit_prop_ref_class(
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER (package-private)
     add_singleton_instance_field(&mut cw, &fq);
 
-    let target = PropertyReferenceTarget::new(pr, facade, env.bodies);
+    let target = PropertyReferenceTarget::new(pr, realization, facade, env.bodies);
     emit_property_reference_constructor(&mut cw, &superclass, pr, &target, false);
 
     let mut get = CodeBuilder::new(2);
@@ -7536,7 +7430,18 @@ fn emit_prop_ref_class(
     target
         .getter(pr)
         .emit_get(&mut cw, &mut get, target.getter_ret);
-    box_property_reference_value(&mut cw, &mut get, pr, target.getter_ret);
+    let get_locals = vec![
+        VerifType::ObjectName(fq.clone()),
+        VerifType::ObjectName("java/lang/Object".to_string()),
+    ];
+    box_property_reference_value(
+        &mut cw,
+        &mut get,
+        pr,
+        realization.boxed_value_class,
+        target.getter_ret,
+        get_locals,
+    );
     get.areturn();
     finish_code::<0x0001>(
         &mut cw,
@@ -7585,7 +7490,11 @@ fn emit_bound_prop_ref_class(
     let mut cw = new_writer(&fq, &superclass, opts);
     cw.set_access(0x0010 | 0x0020); // FINAL | SUPER
 
-    let target = PropertyReferenceTarget::new(pr, facade, env.bodies);
+    let realization = env
+        .property_reference_realizations
+        .get(c.fq_name_id())
+        .expect("a synthesized property reference must retain its JVM realization");
+    let target = PropertyReferenceTarget::new(pr, realization, facade, env.bodies);
     emit_property_reference_constructor(&mut cw, &superclass, pr, &target, true);
 
     // `get()Object`: for a member ref `((Owner) this.receiver).getName()`; for an extension ref
@@ -7597,7 +7506,15 @@ fn emit_bound_prop_ref_class(
     target
         .getter(pr)
         .emit_get(&mut cw, &mut get, target.getter_ret);
-    box_property_reference_value(&mut cw, &mut get, pr, target.getter_ret);
+    let get_locals = vec![VerifType::ObjectName(fq.clone())];
+    box_property_reference_value(
+        &mut cw,
+        &mut get,
+        pr,
+        realization.boxed_value_class,
+        target.getter_ret,
+        get_locals,
+    );
     get.areturn();
     finish_code::<0x0001>(&mut cw, "get", "()Ljava/lang/Object;", &mut get, 1);
 
@@ -7628,6 +7545,7 @@ fn emit_bound_prop_ref_class(
 fn emit_toplevel_prop_ref_class(
     c: &crate::ir::IrClass,
     pr: &crate::ir::PropRef,
+    realization: &crate::jvm::property_references::PropertyReferenceRealization,
     facade: &str,
     opts: &EmitOptions,
 ) -> Vec<u8> {
@@ -7641,7 +7559,23 @@ fn emit_toplevel_prop_ref_class(
 
     let prop_jvm = ir_ty_to_jvm(&pr.prop_ty);
     let prop_desc = type_descriptor(prop_jvm);
-    let getter_desc = format!("(){prop_desc}");
+    // A receiverless accessor's descriptor is its property's own type. The PropRef's recorded
+    // descriptor is not it: for a companion-block or access-bridged property that descriptor names
+    // the owner it is called with, which this reference does not pass.
+    //
+    // A VALUE-CLASS-typed one is the exception, and the only one: its accessors exchange the
+    // class's CARRIER, which is what the reference realization recorded on this exact target. The
+    // boxed convention this path used to keep named `getTopLevel()LZ;` where the declaration is
+    // `getTopLevel()I`.
+    let carrier = realization.boxed_value_class.is_some();
+    let getter_desc = match (&pr.getter_descriptor, carrier) {
+        (Some(descriptor), true) => descriptor.clone(),
+        _ => format!("(){prop_desc}"),
+    };
+    let getter_jvm = getter_desc
+        .rsplit_once(')')
+        .map(|(_, ret)| ty_from_field_descriptor(ret))
+        .unwrap_or(prop_jvm);
     let signature = format!("{}{}", pr.getter_name, getter_desc); // e.g. "getFoo()LBox;"
 
     // `<init>()V`: super(owner.class, "name", "getName()desc", 1).
@@ -7663,8 +7597,18 @@ fn emit_toplevel_prop_ref_class(
     // `get()Object`: invokestatic <facade>.getName(), boxed if primitive.
     let mut get = CodeBuilder::new(1);
     let gref = cw.methodref(&call_owner, &pr.getter_name, &getter_desc);
-    get.invokestatic(gref, 0, slot_words(prop_jvm) as i32);
-    if prop_jvm.is_jvm_scalar() {
+    get.invokestatic(gref, 0, slot_words(getter_jvm) as i32);
+    if carrier {
+        let get_locals = vec![VerifType::ObjectName(fq.clone())];
+        box_property_reference_value(
+            &mut cw,
+            &mut get,
+            pr,
+            realization.boxed_value_class,
+            getter_jvm,
+            get_locals,
+        );
+    } else if prop_jvm.is_jvm_scalar() {
         box_prim_free(
             &mut cw,
             &mut get,
@@ -7676,11 +7620,53 @@ fn emit_toplevel_prop_ref_class(
 
     // `set(Object)V` (a `var`): invokestatic <facade>.setName(v) after casting/unboxing the argument.
     if pr.mutable {
-        let setter = property_setter_name(&pr.prop_name);
-        let setter_desc = format!("({prop_desc})V");
+        // The NAME is always the one the reference recorded, exactly as the getter's is: the
+        // realization that chose it is the only thing that knows a `@JvmName`, an access bridge or
+        // a value-class mangle. Only the DESCRIPTOR depends on whether the accessors exchange the
+        // carrier. Pairing the two made a boxed-storage value-class property — `var x: Z?`, whose
+        // setter still mangles because its PARAMETER does — fall back to the plain spelling and
+        // name a method the facade does not declare.
+        let setter = pr
+            .setter_name
+            .clone()
+            .unwrap_or_else(|| property_setter_name(&pr.prop_name));
+        let setter_desc = match (&pr.setter_descriptor, carrier) {
+            (Some(descriptor), true) => descriptor.clone(),
+            _ => format!("({prop_desc})V"),
+        };
+        let setter_jvm = setter_desc
+            .strip_prefix('(')
+            .and_then(|rest| rest.split_once(')'))
+            .map(|(parameter, _)| ty_from_field_descriptor(parameter))
+            .unwrap_or(prop_jvm);
         let mut set = CodeBuilder::new(2);
         set.aload(1);
-        if prop_jvm.is_jvm_scalar() {
+        if carrier {
+            // The argument arrives as the BOXED value class through the erased `set(Object)`; the
+            // accessor takes the carrier.
+            if let Some(value_class) = realization.boxed_value_class {
+                let owner = value_class.render();
+                let cref = cw.class_ref(&owner);
+                set.checkcast(cref);
+                let unbox = cw.methodref(
+                    &owner,
+                    "unbox-impl",
+                    &format!("(){}", type_descriptor(setter_jvm)),
+                );
+                value_class_boundary_conversion(
+                    &mut cw,
+                    &mut set,
+                    pr.prop_ty.is_nullable(),
+                    vec![
+                        VerifType::ObjectName(fq.clone()),
+                        VerifType::ObjectName("java/lang/Object".to_string()),
+                    ],
+                    VerifType::ObjectName(owner.clone()),
+                    setter_jvm,
+                    |_, set| set.invokevirtual(unbox, 0, slot_words(setter_jvm) as i32),
+                );
+            }
+        } else if prop_jvm.is_jvm_scalar() {
             let adapter = semantic_scalar_adapter(pr.prop_ty, prop_jvm);
             let wref = cw.class_ref(
                 crate::jvm::jvm_class_map::wrapper_internal(adapter).unwrap_or("java/lang/Object"),
@@ -7692,7 +7678,7 @@ fn emit_toplevel_prop_ref_class(
             set.checkcast(cref);
         }
         let sref = cw.methodref(&call_owner, &setter, &setter_desc);
-        set.invokestatic(sref, slot_words(prop_jvm) as i32, 0);
+        set.invokestatic(sref, slot_words(setter_jvm) as i32, 0);
         set.ret_void();
         finish_code::<0x0001>(&mut cw, "set", "(Ljava/lang/Object;)V", &mut set, 2);
     }
@@ -9185,10 +9171,12 @@ fn emit_interface_class(
                 .borrow()
                 .contains(&fid)
             {
-                emit_private_member_access_bridge(ir, fid, &fq_name, &mut cw, true);
+                access_bridges::emit_private_member_access_bridge(ir, fid, &fq_name, &mut cw, true);
             }
             if ir.function_reference_access_bridges.contains(&fid) {
-                emit_function_reference_access_bridge(ir, fid, &fq_name, &mut cw, true);
+                access_bridges::emit_function_reference_access_bridge(
+                    ir, fid, &fq_name, &mut cw, true,
+                );
             }
             // A PRIVATE default stays a plain private instance method: kotlinc gives it no bridge,
             // no holder entry, and no forwarders anywhere (measured: an interface whose only body
@@ -9800,7 +9788,7 @@ fn emit_enum_class(
                 // static call (`IncompatibleClassChangeError`).
                 emit_method(ir, fid, &fq, facade, cw, !f.is_static, env);
                 if ir.function_reference_access_bridges.contains(&fid) {
-                    emit_function_reference_access_bridge(ir, fid, &fq, cw, false);
+                    access_bridges::emit_function_reference_access_bridge(ir, fid, &fq, cw, false);
                 }
                 // A defaulted member needs its `<name>$default` synthetic here too. The enum writer is a
                 // separate path from `emit_class`, so a member declared `fun m(a: Int = 1)` on an enum
@@ -10114,63 +10102,6 @@ fn emit_enum_class(
     // in the finished table's sorted order — the same seeding every other classifier path does.
     cw.seed_inner_class_names();
     cw.finish()
-}
-
-/// Emit the Java-8 realization of a Kotlin private member used by a lexically related class.
-/// The bridge takes the semantic dispatch receiver as its leading static operand, then forwards to
-/// the already-selected declaration. No lookup or overload selection occurs here.
-fn emit_private_member_access_bridge(
-    ir: &IrFile,
-    fid: u32,
-    owner: &str,
-    cw: &mut ClassWriter,
-    owner_is_interface: bool,
-) {
-    let function = &ir.functions[fid as usize];
-    debug_assert!(!function.is_static);
-    let parameters = jvm_function_params(ir, fid);
-    let result = jvm_declared_ty(&function.ret);
-    let target_descriptor = method_descriptor(&parameters, result);
-    let mut bridge_parameters = Vec::with_capacity(parameters.len() + 1);
-    bridge_parameters.push(Ty::obj(owner));
-    bridge_parameters.extend(parameters.iter().copied());
-    let bridge_descriptor = method_descriptor(&bridge_parameters, result);
-    let bridge_name = format!("access${}", function.name);
-    let mut code = CodeBuilder::new(
-        bridge_parameters
-            .iter()
-            .map(|parameter| slot_words(*parameter))
-            .sum(),
-    );
-    code.aload(0);
-    let mut slot = 1;
-    for parameter in &parameters {
-        load(*parameter, slot, &mut code);
-        slot += slot_words(*parameter);
-    }
-    let target = if owner_is_interface {
-        cw.interface_methodref(owner, &function.name, &target_descriptor)
-    } else {
-        cw.methodref(owner, &function.name, &target_descriptor)
-    };
-    let argument_words = parameters
-        .iter()
-        .map(|parameter| slot_words(*parameter) as i32)
-        .sum();
-    code.invokespecial(target, argument_words, slot_words(result) as i32);
-    emit_return(result, &mut code);
-    code.ensure_locals(slot);
-    code.link();
-    cw.add_method(
-        if owner_is_interface {
-            0x1009 // PUBLIC | STATIC | SYNTHETIC (FINAL is illegal on an interface method)
-        } else {
-            0x1019 // PUBLIC | STATIC | FINAL | SYNTHETIC
-        },
-        &bridge_name,
-        &bridge_descriptor,
-        &code,
-    );
 }
 
 /// Emit function `fid` as a method on `owner`. `instance` = an instance method (`this` in slot 0).
@@ -20010,6 +19941,8 @@ mod fail_soft_tests {
         let continuations = crate::jvm::suspend::ContinuationMetadataMap::default();
         let property_realizations =
             crate::jvm::property_realizations::PropertyRealizations::default();
+        let property_reference_realizations =
+            crate::jvm::property_references::PropertyReferenceRealizations::default();
         let default_call_operands =
             crate::jvm::default_call_operands::DefaultCallOperands::default();
         let bridge_returns =
@@ -20026,6 +19959,7 @@ mod fail_soft_tests {
                 },
                 signature_symbols: &NoClassifiers,
                 property_realizations: &property_realizations,
+                property_reference_realizations: &property_reference_realizations,
                 default_call_operands: &default_call_operands,
             },
             &EmitOptions::default(),

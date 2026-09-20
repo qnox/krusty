@@ -662,6 +662,8 @@ fn push_delegate_static(
         is_const: false,
         owner,
         visibility: crate::types::Visibility::Private,
+        setter_jvm_name: None,
+        erased_declared_ty: None,
         custom_accessor: true,
         line: 0,
         source_order,

@@ -422,15 +422,13 @@ pub(super) fn realize_super_calls(ir: &mut IrFile) -> Result<(), ModuleRealizati
                     ModuleRealizationTarget::Callable,
                 ));
             }
-            let name = match kind {
-                crate::ir::IrSuperCallKind::Function => name,
-                crate::ir::IrSuperCallKind::PropertyGetter => {
-                    crate::names::property_getter_name(&name)
-                }
-                crate::ir::IrSuperCallKind::PropertySetter => {
-                    crate::names::property_setter_name(&name)
-                }
-            };
+            // The accessor's own name, as selection resolved it. Property accessors are published
+            // accessor-shaped now — `getValue`/`setValue`, the same shape a dependency provider
+            // publishes — so rebuilding `get`/`set` from it here named `getGetValue`, which no
+            // class declares: `super<Base>@Outer.value` died at its first read with a
+            // `NoSuchMethodError`. `kind` remains the semantic fact for targets that need it;
+            // nothing about the JVM spelling is derived from it.
+            let _ = kind;
             let descriptor = if descriptor.is_empty() {
                 crate::jvm::names::method_descriptor(&params, ret)
             } else {

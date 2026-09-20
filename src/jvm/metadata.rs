@@ -1,13 +1,11 @@
-//! Minimal Kotlin `@Metadata` reader: decode the `d1` protobuf and report which functions are
-//! `inline`, by their JVM `(name, descriptor)`. This is the complete inline-recognition the inliner
-//! needs (the body `reifiedOperationMarker` scan only finds *reified* inline functions).
+//! Kotlin `@Metadata` normalization for classpath declarations and JVM inline metadata.
 //!
-//! Schema (kotlin `core/metadata/src/metadata.proto` + `metadata.jvm/.../jvm_metadata.proto`):
-//!   Package.function = 3; Function.flags = 9 (IS_INLINE = bit 10); Function.name = 2;
-//!   Function extension method_signature = 100 → JvmMethodSignature { name = 1, desc = 2 }.
-//! String ids index the `d2` table.
+//! The `d1` protobuf is decoded against `d2` string-table identities before semantic facts publish.
 
 pub(super) mod klib_validation;
+mod property_identity;
+
+use property_identity::inline_underlying_property_name_id;
 
 use super::classfile::{
     ACC_ABSTRACT, ACC_ANNOTATION, ACC_ENUM, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED,
@@ -1924,6 +1922,8 @@ pub struct MetaProp {
     pub is_abstract: bool,
     /// `var` (has a setter) vs `val`.
     pub is_var: bool,
+    /// This exact property is the value class's underlying storage declaration, joined by wire id.
+    pub is_inline_underlying: bool,
     /// The EXTENSION receiver's class name (`val String.foo` → `kotlin/String`) — `None` for an
     /// ordinary member/top-level property.
     pub receiver_class: Option<TypeName>,
@@ -3408,6 +3408,7 @@ fn decode_properties(
     class_tparams: &[(u64, String)],
     class_tparam_bounds: &[Vec<Ty>],
 ) -> MetadataResult<Vec<MetaProp>> {
+    let inline_underlying_property_name_id = inline_underlying_property_name_id(ctx.msg);
     let declared_classifier = |ty: Ty| match ty.non_null() {
         Ty::Obj(internal, _) => Some(internal),
         _ => None,
@@ -3700,6 +3701,7 @@ fn decode_properties(
             is_const: flags & is_const_bit != 0,
             is_abstract: (flags >> 4) & 0x3 == 2,
             is_var,
+            is_inline_underlying: inline_underlying_property_name_id == Some(name_id),
             receiver_class,
             is_extension: receiver_body.is_some(),
         });
@@ -3707,19 +3709,12 @@ fn decode_properties(
     Ok(out)
 }
 
-/// A classpath `@JvmInline value class` decoded from `@Metadata`: the single underlying property and its
-/// Kotlin type. A value class erases to this underlying type on the old JVM (`UInt` → `kotlin/Int` → `int`;
-/// `Result<T>` → a type parameter → `None`, erasing to `Object`).
+/// A classpath value class's underlying property and Kotlin type decoded from `@Metadata`.
 #[derive(Clone, Debug)]
 pub struct InlineClass {
-    /// Kotlin class name of the underlying type (`kotlin/Int` for `UInt`); `None` when the underlying is a
-    /// type parameter (`Result<T>`), which erases to `kotlin/Any`/`Object`.
+    /// Underlying class name, or `None` when a type parameter erases to `Object`.
     pub underlying_class: Option<String>,
-    /// Whether the underlying type is declared NULLABLE (`value class X(val v: String?)`). Decides the
-    /// null-representation: a nullable use `X?` stays UNBOXED (null carried by the underlying reference)
-    /// only when the underlying is non-null; over a nullable underlying `X?` must box. `None` when the
-    /// metadata didn't carry the type inline or in the type table (unknown — treat as nullable,
-    /// conservative).
+    /// Declared underlying nullability; `None` when metadata omitted the type shape.
     pub underlying_nullable: Option<bool>,
     /// The sole property's name (`data` for `UInt`/`Result`).
     pub property_name: Option<String>,
