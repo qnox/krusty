@@ -541,3 +541,111 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod compiles_against_the_klib {
+    use super::*;
+
+    fn distribution() -> Option<std::path::PathBuf> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/cache/kotlin-native/2.4.10")
+            .join("kotlin-native-prebuilt-linux-x86_64-2.4.10");
+        root.exists().then_some(root)
+    }
+
+    /// Compile a program with this provider and answer the diagnostics, analysis AND emission.
+    ///
+    /// Both stages, because analysis alone does not report an unresolved CALL — which the control
+    /// below proves rather than assumes.
+    fn diagnostics(root: &Path, source: &str) -> Vec<String> {
+        let libraries = NativeLibraries::from_distribution(root).expect("the stdlib loads");
+        let provider: std::rc::Rc<dyn SemanticPlatform> =
+            std::rc::Rc::new(NativeLibraries::from_distribution(root).expect("the stdlib loads"));
+        let inputs = vec![crate::frontend::SourceInput::kotlin(source).with_file_stem("KlibOnly")];
+        let features = crate::features::LangFeatures::new();
+        let mut diags = crate::diag::DiagSink::new();
+        let analysis = crate::frontend::analyze_source_set_streaming_with_features(
+            &inputs,
+            Box::new(libraries),
+            &features,
+            &mut diags,
+        );
+        if let Some(target) = crate::native::target::NativeTarget::host() {
+            let backend = crate::native::CraneliftBackend::new(provider, target);
+            let _ = crate::compiler::emit_analyzed(
+                analysis,
+                &["KlibOnly".to_string()],
+                &backend,
+                "KlibOnly",
+                &mut diags,
+            );
+        }
+        diags.diags.iter().map(|d| d.msg.clone()).collect()
+    }
+
+    /// What a program can and cannot yet name when the provider is the klib rather than the jar.
+    ///
+    /// This exists because the index tests beside it cannot answer the question. They push a
+    /// realization into a table and read it back at the position they pushed it — self-consistency,
+    /// which is nearly a tautology. Whether the FRONTEND resolves a program's names through this
+    /// provider is a different claim, and it needs a compilation to make it.
+    ///
+    /// It is pinned in BOTH directions, so it fails when the provider grows as well as when it
+    /// regresses.
+    #[test]
+    fn what_the_klib_provider_can_and_cannot_yet_resolve() {
+        let Some(root) = distribution() else {
+            eprintln!("skipping: no Kotlin/Native distribution cached");
+            return;
+        };
+
+        // CLASSIFIERS resolve, and the control is what makes that a claim rather than a silence: a
+        // classifier that exists nowhere IS reported, so the quiet on the real one means resolved.
+        assert!(
+            diagnostics(&root, "fun box(): String = \"OK\"\n").is_empty(),
+            "a program naming only builtins compiles"
+        );
+        let unknown = diagnostics(&root, "fun box(): NoSuchType = TODO()\n");
+        assert!(
+            unknown.iter().any(|d| d.contains("NoSuchType")),
+            "and a classifier that exists nowhere is reported: {unknown:?}"
+        );
+
+        // MEMBERS do not. `library_type` publishes no members — the conversion fills supertypes,
+        // constructors and type parameters, and leaves `members` empty — so `List.size` has
+        // nothing to resolve to even though `List` itself resolves. This is the next piece of the
+        // provider, and until it lands this test says so out loud rather than letting the gap read
+        // as success.
+        let member = diagnostics(&root, "fun box(): Int = listOf(1, 2, 3).size\n");
+        assert!(
+            member
+                .iter()
+                .any(|d| d.contains("unresolved reference 'size'")),
+            "a member of a stdlib classifier does not resolve yet: {member:?}"
+        );
+
+        // And the control for that one: analysis alone is SILENT about an unresolved call, so a
+        // test that only ran analysis would have called the line above a success.
+        let call_only_analysis = {
+            let libraries = NativeLibraries::from_distribution(&root).expect("loads");
+            let inputs =
+                vec![
+                    crate::frontend::SourceInput::kotlin("fun box(): Int = totallyNotAThing()\n")
+                        .with_file_stem("KlibOnly"),
+                ];
+            let features = crate::features::LangFeatures::new();
+            let mut diags = crate::diag::DiagSink::new();
+            let _ = crate::frontend::analyze_source_set_streaming_with_features(
+                &inputs,
+                Box::new(libraries),
+                &features,
+                &mut diags,
+            );
+            diags.diags.len()
+        };
+        assert_eq!(
+            call_only_analysis, 0,
+            "analysis alone reports no unresolved CALL, which is why this test emits too"
+        );
+    }
+}
