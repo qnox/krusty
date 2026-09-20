@@ -4199,6 +4199,13 @@ pub struct BuiltinClass {
     /// Kotlin metadata's `IS_EXPECT_CLASS` declaration flag. KLIB consumers use this semantic bit
     /// to distinguish common declarations from platform-only classifiers in the same archive.
     pub is_expect: bool,
+    /// The entry names an `enum class` declares, in declaration order; empty for anything else.
+    /// `AnnotationTarget.FUNCTION` is an ordinary reference a program writes, and a classifier
+    /// publishing no entries answers none of them.
+    pub enum_entries: Vec<String>,
+    /// The direct subclasses a `sealed` declaration names; empty for anything else. This is what
+    /// lets an exhaustive `when` over a stdlib sealed type be proven exhaustive.
+    pub sealed_subclasses: Vec<String>,
     /// Declared Kotlin MODALITY, as the two facts a consumer asks of it. Kept semantically rather
     /// than left to be re-derived from [`Self::access`], which is a JVM word: a non-JVM provider
     /// would have to read JVM flags to learn that `kotlin.Number` is `abstract`.

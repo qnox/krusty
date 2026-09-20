@@ -942,8 +942,16 @@ fn library_type(
         alias_target: None,
         own_type_parameter_count: type_parameters.type_params.len(),
         type_parameters,
-        sealed_subclasses: TypeNameList::new(),
-        enum_entries: Vec::new(),
+        // Both were decoded and thrown away: `validate_enum_entry` read a name to check it and
+        // dropped it, so `AnnotationTarget.FUNCTION` and `InvocationKind.EXACTLY_ONCE` resolved to
+        // nothing, and no `when` over a stdlib sealed type could be proven exhaustive.
+        sealed_subclasses: declaration
+            .sealed_subclasses
+            .iter()
+            .map(|subclass| type_name(subclass))
+            .collect::<Vec<_>>()
+            .into(),
+        enum_entries: declaration.enum_entries.clone(),
         enum_entries_accessor: None,
         named_parameter_lists,
         annotations: Vec::new(),
@@ -1561,6 +1569,24 @@ mod compiles_against_the_klib {
                 .iter()
                 .any(|d| d.contains("the native backend does not support")),
             "a non-local return through an un-spliced block declines: {non_local:?}"
+        );
+
+        // An ENUM ENTRY of a stdlib enum RESOLVES. The decoder read each entry's name to check
+        // it and then dropped it, so `AnnotationTarget.FUNCTION` and `InvocationKind.EXACTLY_ONCE`
+        // resolved to nothing at all; the code generator declines it for its own, later reason.
+        let entry = diagnostics(
+            &root,
+            "fun box(): String = kotlin.annotation.AnnotationTarget.FUNCTION.name\n",
+        );
+        assert!(
+            entry
+                .iter()
+                .any(|d| d.contains("the enum `kotlin/annotation/AnnotationTarget`")),
+            "an enum entry of a stdlib enum resolves: {entry:?}"
+        );
+        assert!(
+            !entry.iter().any(|d| d.contains("unresolved reference")),
+            "and the refusal is the GENERATOR's, not resolution's: {entry:?}"
         );
 
         // A stdlib class that is `open` or `abstract` can be EXTENDED. It resolves — reading

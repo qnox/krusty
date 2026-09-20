@@ -1168,20 +1168,26 @@ fn validate_type_alias(
     Ok(())
 }
 
-fn validate_enum_entry(
+/// One enum entry's NAME.
+///
+/// Kept rather than merely validated: `AnnotationTarget.FUNCTION` and
+/// `InvocationKind.EXACTLY_ONCE` are ordinary references a program writes, and a classifier that
+/// publishes no entries answers none of them.
+fn semantic_enum_entry(
     body: &[u8],
     strings: &[String],
     qnames: &[QName],
-) -> Result<(), PackageFragmentDecodeError> {
+) -> Result<String, PackageFragmentDecodeError> {
     validate_annotation_fields(body, &[2, 170], strings, qnames, "enum entry")?;
     let mut cursor = Cursor::new(body, 0);
+    let mut name = None;
     let mut names = 0;
     while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "enum entry")?;
         if number == 1 {
             require_wire(&cursor, wire, 0, "enum entry")?;
             let id = cursor.varint("enum-entry name id")?;
-            semantic_string(strings, id, "enum entry")?;
+            name = Some(semantic_string(strings, id, "enum entry")?);
             names += 1;
         } else {
             cursor.skip(wire, "enum entry")?;
@@ -1192,7 +1198,7 @@ fn validate_enum_entry(
             "enum entry has {names} name fields"
         )));
     }
-    Ok(())
+    name.ok_or_else(|| semantic_error("enum entry has no name"))
 }
 
 fn semantic_constructor(
@@ -1304,6 +1310,8 @@ fn semantic_class(
     let mut supertype_ids = Vec::new();
     let mut supertype_bodies = Vec::new();
     let mut constructors = Vec::new();
+    let mut enum_entries = Vec::new();
+    let mut sealed_subclasses = Vec::new();
     let mut functions = Vec::new();
     let mut properties = Vec::new();
     let mut type_aliases = Vec::new();
@@ -1333,14 +1341,14 @@ fn semantic_class(
             }
             (16, 0) => {
                 let id = cursor.varint("sealed-subclass qualified-name id")?;
-                semantic_qname(strings, qnames, id, "sealed subclass")?;
+                sealed_subclasses.push(semantic_qname(strings, qnames, id, "sealed subclass")?);
             }
             (16, 2) => {
                 let (packed, base) = cursor.length_delimited("sealed-subclass names")?;
                 let mut packed = Cursor::new(packed, base);
                 while !packed.at_end() {
                     let id = packed.varint("sealed-subclass qualified-name id")?;
-                    semantic_qname(strings, qnames, id, "sealed subclass")?;
+                    sealed_subclasses.push(semantic_qname(strings, qnames, id, "sealed subclass")?);
                 }
             }
             (17, 0) => {
@@ -1354,7 +1362,7 @@ fn semantic_class(
             (11, 2) => type_aliases.push(cursor.length_delimited("class type alias")?.0),
             (13, 2) => {
                 let entry = cursor.length_delimited("enum entry")?.0;
-                validate_enum_entry(entry, strings, qnames)?;
+                enum_entries.push(semantic_enum_entry(entry, strings, qnames)?);
             }
             (18 | 20, 2) => {
                 let nested = cursor.length_delimited("class semantic type")?.0;
@@ -1428,6 +1436,8 @@ fn semantic_class(
             companion_name,
             type_params,
             nullable_member_returns,
+            enum_entries,
+            sealed_subclasses,
             kind: metadata::builtin_class_kind(header.flags),
             visibility: metadata::builtin_class_visibility(header.flags),
             is_expect: header.flags & (1 << 12) != 0,
