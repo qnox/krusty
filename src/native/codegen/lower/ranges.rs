@@ -99,28 +99,6 @@ fn is_text(internal: TypeName) -> bool {
         .any(|candidate| internal.matches(candidate))
 }
 
-/// The element of a CLOSED range — never a progression.
-///
-/// A progression's membership is not a bounds test. `10 downTo 1` is an `IntProgression`, and
-/// Kotlin answers `x in it` by WALKING it, so `5 in (10 downTo 1 step 2)` is false though 5 lies
-/// between the ends. `kt_range_contains` compares against `first`/`last` and would answer true —
-/// and for a descending progression it compares the wrong way round as well, since `first` is the
-/// larger end.
-///
-/// So the facade `contains` path takes this and not [`range_element`], which accepts both: sending
-/// a progression to a bounds test turned six declining cases into WRONG answers.
-fn closed_range_element(owner: TypeName) -> Option<Ty> {
-    [
-        ("kotlin/ranges/IntRange", Ty::Int),
-        ("kotlin/ranges/LongRange", Ty::Long),
-        ("kotlin/ranges/CharRange", Ty::Char),
-        ("kotlin/ranges/UIntRange", Ty::UInt),
-        ("kotlin/ranges/ULongRange", Ty::ULong),
-    ]
-    .into_iter()
-    .find_map(|(candidate, element)| owner.matches(candidate).then_some(element))
-}
-
 /// The runtime function answering one range member, and the width it answers at. Every bound is
 /// kept at 64 bits, so a member that answers one is a truncation of what the runtime returns.
 fn range_symbol(name: &str, arity: usize) -> Option<(&'static str, Ty)> {

@@ -1467,7 +1467,7 @@ fn builtin_descriptor(sig: &GenericSig) -> String {
 /// A decoded `.kotlin_builtins` type as a semantic [`Ty`]. `bounds` supplies each in-scope type
 /// parameter's declared upper bound; an unlisted one is `Any?`, matching the `@Metadata`
 /// generic-signature decoder. JVM erasure is derived separately by [`builtin_erased`].
-pub(super) fn builtin_ty(t: &super::metadata::BuiltinTy, bounds: &HashMap<String, Ty>) -> Ty {
+pub(crate) fn builtin_ty(t: &super::metadata::BuiltinTy, bounds: &HashMap<String, Ty>) -> Ty {
     use super::metadata::BuiltinTy;
     let ty = match t {
         BuiltinTy::Class { internal, args, .. } => {
@@ -1496,7 +1496,7 @@ pub(super) fn builtin_ty(t: &super::metadata::BuiltinTy, bounds: &HashMap<String
 
 /// The declared upper bound of each type parameter, keyed by name. Bounds are decoded with an EMPTY
 /// bound map so a recursive bound (`E : Comparable<E>`) terminates.
-pub(super) fn builtin_bounds(
+pub(crate) fn builtin_bounds(
     params: &[super::metadata::BuiltinTypeParam],
     inherited: &HashMap<String, Ty>,
 ) -> HashMap<String, Ty> {

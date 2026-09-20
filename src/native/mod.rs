@@ -22,6 +22,7 @@ mod classes;
 mod codegen;
 pub mod gc;
 mod intrinsics;
+pub mod libraries;
 mod linker;
 mod prebuilt;
 pub mod runtime;

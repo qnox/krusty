@@ -2,7 +2,7 @@
 //!
 //! The `d1` protobuf is decoded against `d2` string-table identities before semantic facts publish.
 
-pub(super) mod klib_validation;
+pub(crate) mod klib_validation;
 mod property_identity;
 
 use property_identity::inline_underlying_property_name_id;
