@@ -161,7 +161,7 @@ fn is_kotlin_function_classifier(internal: &str) -> bool {
 /// Metadata represents `suspend R.(P) -> T` as a function whose final parameter is
 /// `Continuation<T>` and whose physical return is `Any?`, plus the suspend-type flag. The
 /// continuation is not a source parameter: its argument is the source return type.
-fn source_suspend_function_type(ty: Ty) -> Ty {
+pub(super) fn source_suspend_function_type(ty: Ty) -> Ty {
     let Ty::Fun(signature) = ty else {
         return ty;
     };
@@ -3949,12 +3949,33 @@ fn resolve_qname(qnames: &[QName], strings: &[String], mut idx: i64) -> String {
 /// facets the fragment actually records — a class's type ARGUMENTS (`Set<Map.Entry<K, V>>`) and a
 /// reference to a declared type PARAMETER (`E` of `List<E>`) — so both are modelled here. Class names
 /// are Kotlin internal names (`kotlin/Int`, `kotlin/collections/Map.Entry`).
+/// The facts a Kotlin function TYPE carries beyond its classifier and arguments.
+///
+/// `(T) -> R`, `T.() -> R`, `context(C) (T) -> R` and `suspend (T) -> R` are all `Function`
+/// classifiers with the same argument list. Kotlin records the difference as annotations on the
+/// type — `kotlin.ExtensionFunctionType`, `kotlin.ContextFunctionTypeParams` — and a suspend flag,
+/// and a reader that drops them publishes a block with no `this`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FunctionTypeShape {
+    /// `T.() -> R`: the first argument is a RECEIVER, not a parameter.
+    pub receiver: bool,
+    /// Leading arguments that are context parameters.
+    pub context_count: usize,
+    /// `suspend (T) -> R`: the physical shape appends a `Continuation` and erases the return.
+    pub suspend: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BuiltinTy {
     Class {
         internal: String,
         args: Vec<BuiltinTy>,
         nullable: bool,
+        /// What a `kotlin/FunctionN` classifier MEANS beyond its arity, from the annotations the
+        /// declaration's type carries. Kept on the decoded type because it is the only place it
+        /// survives: `T.() -> R` and `(T) -> R` are the same classifier with the same arguments,
+        /// and only this tells them apart.
+        shape: FunctionTypeShape,
     },
     Param {
         name: String,
@@ -3970,6 +3991,7 @@ impl BuiltinTy {
             internal: internal.into(),
             args: Vec::new(),
             nullable: false,
+            shape: FunctionTypeShape::default(),
         }
     }
 
@@ -3997,6 +4019,7 @@ impl BuiltinTy {
                 internal,
                 args,
                 nullable,
+                ..
             } => (internal.clone(), args.as_slice(), *nullable),
             BuiltinTy::Param { name, nullable } => (name.clone(), &[][..], *nullable),
             BuiltinTy::InProjection(inner) => return format!("in {}", inner.render()),

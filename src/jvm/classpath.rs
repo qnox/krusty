@@ -1475,12 +1475,30 @@ fn builtin_descriptor(sig: &GenericSig) -> String {
 pub(crate) fn builtin_ty(t: &super::metadata::BuiltinTy, bounds: &HashMap<String, Ty>) -> Ty {
     use super::metadata::BuiltinTy;
     let ty = match t {
-        BuiltinTy::Class { internal, args, .. } => {
+        BuiltinTy::Class {
+            internal,
+            args,
+            shape,
+            ..
+        } => {
             let args = args
                 .iter()
                 .map(|argument| builtin_ty(argument, bounds))
                 .collect();
-            super::metadata::gsig_from_kotlin_class(internal, args, false, 0)
+            // The function-type shape the decoder kept. `T.() -> R` and `(T) -> R` are the same
+            // classifier with the same arguments, so dropping it here published a block with no
+            // receiver — and its body with no `this`.
+            let decoded = super::metadata::gsig_from_kotlin_class(
+                internal,
+                args,
+                shape.receiver,
+                shape.context_count,
+            );
+            if shape.suspend {
+                super::metadata::source_suspend_function_type(decoded)
+            } else {
+                decoded
+            }
         }
         BuiltinTy::Param { name, .. } => {
             let bound = bounds

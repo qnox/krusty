@@ -1285,6 +1285,15 @@ mod compiles_against_the_klib {
                 "fun box(): String = run { \"OK\" }\n",
                 "a receiverless scope function",
             ),
+            // A block with a RECEIVER. `with(receiver: T, block: T.() -> R): R` and
+            // `(T) -> R` are the same `Function1` with the same arguments; only the type's
+            // `kotlin.ExtensionFunctionType` annotation tells them apart. The decoder validated
+            // that annotation and dropped it, so the block had no `this`: "'this' is not defined
+            // in this context".
+            (
+                "fun box(): String = with(\"OK\") { this }\n",
+                "a block with a receiver",
+            ),
             // A `const val` on a companion. Every use site folds it, which is the only way it can
             // work here at all: a companion object has no storage on a target that compiles the
             // stdlib itself. The decoder used to validate the compile-time value and throw it

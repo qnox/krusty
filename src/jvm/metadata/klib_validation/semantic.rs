@@ -410,6 +410,9 @@ impl SemanticTables<'_> {
         let node = parse_type_node(body)
             .ok_or_else(|| semantic_error(format!("invalid semantic type in {context}")))?;
         let flexible_upper = self.validate_type_edges(body, type_parameters, depth, context)?;
+        // Read before the arguments are consumed: what the annotations say about this type is a
+        // fact about the whole node, and the loop below moves part of it.
+        let shape = self.function_type_shape(&node, body, context)?;
         let mut arguments = Vec::with_capacity(node.arguments.len());
         for argument in node.arguments {
             let argument = match argument {
@@ -426,6 +429,7 @@ impl SemanticTables<'_> {
                         internal: "kotlin/Any".to_string(),
                         args: Vec::new(),
                         nullable: true,
+                        shape: metadata::FunctionTypeShape::default(),
                     }))
                 }
             };
@@ -450,6 +454,7 @@ impl SemanticTables<'_> {
                 internal: semantic_qname(self.strings, self.qnames, id, context)?,
                 args: arguments,
                 nullable,
+                shape,
             });
         }
         let name = if let Some(id) = node.type_parameter_id {
@@ -464,6 +469,53 @@ impl SemanticTables<'_> {
             )));
         };
         Ok(metadata::BuiltinTy::Param { name, nullable })
+    }
+
+    /// What the annotations on this type say it MEANS beyond its classifier and arguments.
+    ///
+    /// `(T) -> R` and `T.() -> R` are the same `Function1` with the same arguments; only
+    /// `kotlin.ExtensionFunctionType` tells them apart, and a reader that validated the annotation
+    /// and dropped it published a block with no `this` — `with("OK") { this }` reported "'this' is
+    /// not defined in this context".
+    fn function_type_shape(
+        &self,
+        node: &ParsedTypeNode<'_>,
+        body: &[u8],
+        context: &str,
+    ) -> Result<metadata::FunctionTypeShape, PackageFragmentDecodeError> {
+        let mut shape = metadata::FunctionTypeShape {
+            suspend: metadata::parse_type_facts(body).suspend_fun,
+            ..Default::default()
+        };
+        for annotation in &node.annotations {
+            let Some(id) = annotation.class_id() else {
+                continue;
+            };
+            match semantic_qname(self.strings, self.qnames, id, context)?.as_str() {
+                "kotlin/ExtensionFunctionType" => shape.receiver = true,
+                "kotlin/ContextFunctionTypeParams" => {
+                    let count = annotation
+                        .int_arguments()
+                        .find_map(|(name, value)| {
+                            (semantic_string(self.strings, name, context).ok().as_deref()
+                                == Some("count"))
+                            .then_some(value)
+                        })
+                        .ok_or_else(|| {
+                            semantic_error(format!(
+                                "a context function type in {context} declares no count"
+                            ))
+                        })?;
+                    shape.context_count = usize::try_from(count).map_err(|_| {
+                        semantic_error(format!(
+                            "a context function type in {context} declares {count} parameters"
+                        ))
+                    })?;
+                }
+                _ => {}
+            }
+        }
+        Ok(shape)
     }
 
     fn ty_by_id(
@@ -488,10 +540,16 @@ impl SemanticTables<'_> {
             .is_some_and(|first| id >= first && !definitely_non_null)
         {
             Ok(match ty {
-                metadata::BuiltinTy::Class { internal, args, .. } => metadata::BuiltinTy::Class {
+                metadata::BuiltinTy::Class {
+                    internal,
+                    args,
+                    shape,
+                    ..
+                } => metadata::BuiltinTy::Class {
                     internal,
                     args,
                     nullable: true,
+                    shape,
                 },
                 metadata::BuiltinTy::Param { name, .. } => metadata::BuiltinTy::Param {
                     name,

@@ -132,7 +132,12 @@ pub(crate) fn parse_type_node(body: &[u8]) -> Option<ParsedTypeNode<'_>> {
                     });
                 }
             }
-            (100, 2) => {
+            // `Type.annotation` is an EXTENSION field, and the two metadata dialects number it
+            // differently: 100 in the JVM one, 170 in the common one a klib carries. Reading only
+            // the JVM's made every `T.() -> R` in a klib decode as a plain `(T) -> R`, because
+            // `kotlin.ExtensionFunctionType` is the only thing that tells them apart — and a block
+            // decoded without its receiver has no `this`.
+            (100 | 170, 2) => {
                 let length = protobuf.varint()? as usize;
                 node.annotations
                     .push(parse_type_annotation(protobuf.bytes(length)?)?);
