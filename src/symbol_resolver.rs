@@ -24,6 +24,7 @@ mod generic_inference;
 mod hierarchy_projection;
 mod member_hierarchy;
 mod member_specialization;
+mod overload_selection;
 mod qualified_classifiers;
 mod sam;
 mod selected_call_instantiation;
@@ -56,6 +57,11 @@ use member_specialization::{
     specialize_call_sig, specialize_callable, specialize_final_signature_output_type,
     specialize_member_type,
 };
+use overload_selection::{
+    integer_literal_overload, integer_literal_overload_with_ties, unique_most_specific,
+    unique_most_specific_with_conflicts, unique_most_specific_with_conflicts_and_ties,
+};
+pub(crate) use overload_selection::{CandidateSelectionWithTies, ReceiverFunctionSelection};
 pub(crate) use sam::{semantic_sam_signature, SamSignature};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -104,6 +110,7 @@ impl CallableImport {
 #[derive(Clone, Debug)]
 pub(crate) struct FunctionImportScope {
     explicit: std::collections::HashMap<String, CallableImport>,
+    ambiguous_explicit: std::collections::HashSet<String>,
     levels: [Vec<TypeName>; 4],
 }
 
@@ -144,7 +151,23 @@ impl FunctionImportScope {
         explicit: std::collections::HashMap<String, CallableImport>,
         levels: [Vec<TypeName>; 4],
     ) -> Self {
-        Self { explicit, levels }
+        Self {
+            explicit,
+            ambiguous_explicit: std::collections::HashSet::new(),
+            levels,
+        }
+    }
+
+    pub(crate) fn with_ambiguous_explicit(
+        mut self,
+        names: std::collections::HashSet<String>,
+    ) -> Self {
+        self.ambiguous_explicit = names;
+        self
+    }
+
+    pub(crate) fn explicit_is_ambiguous(&self, name: &str) -> bool {
+        self.ambiguous_explicit.contains(name)
     }
 
     pub(crate) fn explicit_owner(&self, name: &str) -> Option<SymbolNamespace> {
@@ -1075,54 +1098,6 @@ pub(crate) enum CandidateSelection<T> {
     Ambiguous,
 }
 
-fn unique_most_specific<T>(
-    candidates: impl IntoIterator<Item = (Vec<Ty>, T)>,
-    at_least_as_specific: impl Fn(usize, Ty, Ty) -> bool,
-) -> CandidateSelection<T> {
-    unique_most_specific_with_conflicts(candidates, at_least_as_specific, |_, _| false)
-}
-
-/// Select the unique most-specific candidate.
-fn unique_most_specific_with_conflicts<T>(
-    candidates: impl IntoIterator<Item = (Vec<Ty>, T)>,
-    at_least_as_specific: impl Fn(usize, Ty, Ty) -> bool,
-    equivalent_conflicts: impl Fn(&T, &T) -> bool,
-) -> CandidateSelection<T> {
-    let mut applicable = Vec::new();
-    for (params, candidate) in candidates {
-        let equivalent =
-            applicable.iter().find(|(existing, _): &&(Vec<Ty>, T)| {
-                existing.len() == params.len()
-                    && existing.iter().zip(&params).enumerate().all(
-                        |(position, (&left, &right))| {
-                            at_least_as_specific(position, left, right)
-                                && at_least_as_specific(position, right, left)
-                        },
-                    )
-            });
-        if let Some((_, existing_candidate)) = equivalent {
-            if !equivalent_conflicts(existing_candidate, &candidate) {
-                continue;
-            }
-        }
-        applicable.push((params, candidate));
-    }
-    if applicable.is_empty() {
-        return CandidateSelection::None;
-    }
-
-    let parameter_shapes = applicable
-        .iter()
-        .map(|(parameters, _)| parameters.as_slice())
-        .collect::<Vec<_>>();
-    let most_specific =
-        declaration_specificity::most_specific_indices(&parameter_shapes, at_least_as_specific);
-    let [selected] = most_specific.as_slice() else {
-        return CandidateSelection::Ambiguous;
-    };
-    CandidateSelection::Selected(applicable.swap_remove(*selected).1)
-}
-
 fn fixed_parameter_shape(
     params: &[Ty],
     args: &[CallArgKind],
@@ -1256,31 +1231,6 @@ fn vararg_parameter_shape_at(
     Some(expanded)
 }
 
-fn integer_literal_call_applies(
-    params: &[Ty],
-    args: &[CallArgKind],
-    mut fits: impl FnMut(usize, &Ty, &CallArgKind) -> bool,
-) -> Option<bool> {
-    if params.len() != args.len() {
-        return None;
-    }
-    params
-        .iter()
-        .zip(args)
-        .enumerate()
-        .try_fold(false, |adapted, (i, (&param, arg))| {
-            if param == arg.ty() {
-                Some(adapted)
-            } else if arg.adapts_integer_literal_to(param) {
-                Some(true)
-            } else if fits(i, &param, arg) {
-                Some(adapted)
-            } else {
-                None
-            }
-        })
-}
-
 fn parameter_at_least_as_specific(
     src: &dyn SymbolSource,
     left: Ty,
@@ -1311,52 +1261,6 @@ pub(crate) fn most_specific_parameter_shape_index(
             })
         },
         |_, _| true,
-    )
-}
-
-fn integer_literal_overload<T>(
-    candidates: impl Iterator<Item = (Vec<Ty>, T)>,
-    args: &[CallArgKind],
-    mut fits: impl FnMut(usize, &Ty, &CallArgKind) -> bool,
-    at_least_as_specific: impl Fn(usize, Ty, Ty, CallArgKind) -> bool,
-    equivalent_conflicts: impl Fn(&T, &T) -> bool,
-) -> CandidateSelection<T> {
-    if !args.iter().any(|arg| arg.is_integer_literal()) {
-        return CandidateSelection::None;
-    }
-    let mut applicable = Vec::new();
-    let mut has_adaptation = false;
-    for (params, candidate) in candidates {
-        let Some(adapted) = integer_literal_call_applies(&params, args, &mut fits) else {
-            continue;
-        };
-        has_adaptation |= adapted;
-        if let Some((_, existing_candidate)) = applicable
-            .iter()
-            .find(|(existing, _): &&(Vec<Ty>, T)| existing == &params)
-        {
-            if !equivalent_conflicts(existing_candidate, &candidate) {
-                continue;
-            }
-        }
-        applicable.push((params, candidate));
-    }
-    if !has_adaptation {
-        return CandidateSelection::None;
-    }
-    unique_most_specific_with_conflicts(
-        applicable,
-        |position, left, right| {
-            at_least_as_specific(
-                position,
-                left,
-                right,
-                args.get(position)
-                    .unwrap_or(&CallArgKind::Typed(Ty::Error))
-                    .clone(),
-            )
-        },
-        equivalent_conflicts,
     )
 }
 
@@ -2486,9 +2390,9 @@ impl<'a> SymbolResolver<'a> {
             callables.functions(),
             IndexedConvention::Get,
         ) {
-            CandidateSelection::Selected(selected) => selected,
-            CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
-            CandidateSelection::None => return CandidateSelection::None,
+            CandidateSelectionWithTies::Selected(selected) => selected,
+            CandidateSelectionWithTies::Ambiguous(_) => return CandidateSelection::Ambiguous,
+            CandidateSelectionWithTies::None => return CandidateSelection::None,
         };
         let binding_receiver = selected
             .semantic_receiver()
@@ -2568,6 +2472,7 @@ impl<'a> SymbolResolver<'a> {
             callables.functions(),
             IndexedConvention::Set,
         )
+        .collapse()
     }
 
     pub(crate) fn select_receiver_indexed_set_function_with_params(
@@ -2696,11 +2601,11 @@ impl<'a> SymbolResolver<'a> {
             callables,
             expected_result,
         ) {
-            CandidateSelection::Selected((selected, params, ret, _)) => {
+            ReceiverFunctionSelection::Selected((selected, params, ret, _)) => {
                 CandidateSelection::Selected((selected, params, ret))
             }
-            CandidateSelection::None => CandidateSelection::None,
-            CandidateSelection::Ambiguous => CandidateSelection::Ambiguous,
+            ReceiverFunctionSelection::None => CandidateSelection::None,
+            ReceiverFunctionSelection::Ambiguous(_) => CandidateSelection::Ambiguous,
         }
     }
 
@@ -3484,6 +3389,7 @@ impl<'a> SymbolResolver<'a> {
                     },
                     Some(callables.functions()),
                     &mut call_ambiguous,
+                    None,
                     IndexedConvention::Ordinary,
                 );
                 let call = selected_call
@@ -5806,8 +5712,9 @@ fn select_receiver_overload_from_functions_tracking(
     ext: ExtCtx<'_>,
     functions: &[FunctionInfo],
     indexed: IndexedConvention,
-) -> CandidateSelection<FunctionInfo> {
+) -> CandidateSelectionWithTies<FunctionInfo> {
     let mut ambiguous = false;
+    let mut ambiguous_candidates = Vec::new();
     let selected = select_overload_tracking_with_functions(
         lib,
         recv,
@@ -5818,14 +5725,15 @@ fn select_receiver_overload_from_functions_tracking(
         ext,
         Some(functions),
         &mut ambiguous,
+        Some(&mut ambiguous_candidates),
         indexed,
     );
     if ambiguous {
-        CandidateSelection::Ambiguous
+        CandidateSelectionWithTies::Ambiguous(ambiguous_candidates)
     } else if let Some(selected) = selected {
-        CandidateSelection::Selected(selected)
+        CandidateSelectionWithTies::Selected(selected)
     } else {
-        CandidateSelection::None
+        CandidateSelectionWithTies::None
     }
 }
 
@@ -5849,6 +5757,7 @@ fn select_overload_tracking(
         ext,
         None,
         ambiguous,
+        None,
         IndexedConvention::Ordinary,
     )
 }
@@ -5864,6 +5773,7 @@ fn select_overload_tracking_with_functions(
     ext: ExtCtx<'_>,
     provided_functions: Option<&[FunctionInfo]>,
     ambiguous: &mut bool,
+    mut ambiguous_candidates: Option<&mut Vec<FunctionInfo>>,
     indexed: IndexedConvention,
 ) -> Option<FunctionInfo> {
     let src = ext.source;
@@ -6102,13 +6012,16 @@ fn select_overload_tracking_with_functions(
         return None;
     }
     for cands in by_rank.values() {
-        match best_by_args(lib, assign_src, cands, args) {
-            CandidateSelection::Selected(overload) => return Some(overload.clone()),
-            CandidateSelection::Ambiguous => {
+        match best_by_args_with_ties(lib, assign_src, cands, args) {
+            CandidateSelectionWithTies::Selected(overload) => return Some(overload.clone()),
+            CandidateSelectionWithTies::Ambiguous(candidates) => {
                 *ambiguous = true;
+                if let Some(ambiguous_candidates) = &mut ambiguous_candidates {
+                    ambiguous_candidates.extend(candidates.into_iter().cloned());
+                }
                 return None;
             }
-            CandidateSelection::None => {}
+            CandidateSelectionWithTies::None => {}
         }
     }
     // Vararg ELEMENT-expansion pass: a call passing loose elements (or nothing) where a
@@ -6118,22 +6031,22 @@ fn select_overload_tracking_with_functions(
     // only by name, so they must be defaulted). Two tiers per rank: EXACT element matches
     // first (`Char` argument selects the `Char` vararg over the `String` one, mirroring
     // most-specific selection), then platform/source-assignable elements.
-    let vararg_applicable = |o: &FunctionInfo, lp: &[Ty], exact: bool| -> bool {
+    let vararg_shape = |o: &FunctionInfo, lp: &[Ty], exact: bool| -> Option<Vec<Ty>> {
         // A suspend callee's element-form vararg call would route the $default emission
         // outside the CPS pass's coverage — skip (unresolved), never ICE.
         if o.flags.suspend {
-            return false;
+            return None;
         }
         let Some(vararg_index) = o.call_sig.vararg_index else {
-            return false;
+            return None;
         };
         let Some(array) = lp.get(vararg_index).copied() else {
-            return false;
+            return None;
         };
         let Some(elem) = array.array_read_elem() else {
-            return false;
+            return None;
         };
-        args.len() >= vararg_index
+        let applicable = args.len() >= vararg_index
             && lp[..vararg_index].iter().zip(args).all(|(p, a)| {
                 let ty = a.ty();
                 fun_arg_matches(assign_src, p, &ty, a.is_lambda_literal())
@@ -6149,19 +6062,37 @@ fn select_overload_tracking_with_functions(
                         && (semantic_arg_assignable(assign_src, &expected, &ty)
                             || a.binds_result_to(assign_src, expected)))
             })
-            && (vararg_index + 1..lp.len()).all(|index| o.call_sig.param_has_default(index))
+            && (vararg_index + 1..lp.len()).all(|index| o.call_sig.param_has_default(index));
+        applicable.then(|| {
+            let mut shape = lp[..vararg_index].to_vec();
+            shape.extend(args[vararg_index..].iter().map(|argument| {
+                if argument.is_spread() {
+                    array
+                } else {
+                    elem
+                }
+            }));
+            shape
+        })
     };
     for exact in [true, false] {
         for cands in by_rank.values() {
-            let mut applicable = cands
+            let applicable = cands
                 .iter()
-                .filter(|(o, lp)| vararg_applicable(o, lp, exact));
-            if let Some((o, _)) = applicable.next() {
-                if applicable.next().is_some() {
+                .filter_map(|(candidate, parameters)| {
+                    vararg_shape(candidate, parameters, exact).map(|shape| (*candidate, shape))
+                })
+                .collect::<Vec<_>>();
+            match best_by_args_with_ties(lib, assign_src, &applicable, args) {
+                CandidateSelectionWithTies::Selected(candidate) => return Some(candidate.clone()),
+                CandidateSelectionWithTies::Ambiguous(candidates) => {
                     *ambiguous = true;
+                    if let Some(ambiguous_candidates) = &mut ambiguous_candidates {
+                        ambiguous_candidates.extend(candidates.into_iter().cloned());
+                    }
                     return None;
                 }
-                return Some((*o).clone());
+                CandidateSelectionWithTies::None => {}
             }
         }
     }
@@ -6583,14 +6514,14 @@ fn distinct_source_declarations(left: &FunctionInfo, right: &FunctionInfo) -> bo
     }
 }
 
-fn source_aware_most_specific<'a, I>(
+fn source_aware_most_specific_with_ties<'a, I>(
     candidates: I,
     at_least_as_specific: impl Fn(usize, Ty, Ty) -> bool,
-) -> CandidateSelection<&'a FunctionInfo>
+) -> CandidateSelectionWithTies<&'a FunctionInfo>
 where
     I: Iterator<Item = (Vec<Ty>, &'a FunctionInfo)> + Clone,
 {
-    unique_most_specific_with_conflicts(candidates, at_least_as_specific, |left, right| {
+    unique_most_specific_with_conflicts_and_ties(candidates, at_least_as_specific, |left, right| {
         distinct_source_declarations(left, right)
     })
 }
@@ -6614,6 +6545,15 @@ pub(crate) fn best_by_args<'a>(
     cands: &[(&'a FunctionInfo, Vec<Ty>)],
     args: &[CallArgKind],
 ) -> CandidateSelection<&'a FunctionInfo> {
+    best_by_args_with_ties(lib, src, cands, args).collapse()
+}
+
+fn best_by_args_with_ties<'a>(
+    lib: &dyn SemanticPlatform,
+    src: &dyn SymbolSource,
+    cands: &[(&'a FunctionInfo, Vec<Ty>)],
+    args: &[CallArgKind],
+) -> CandidateSelectionWithTies<&'a FunctionInfo> {
     let ordinary = cands
         .iter()
         .filter(|(candidate, _)| {
@@ -6623,8 +6563,8 @@ pub(crate) fn best_by_args<'a>(
         })
         .cloned()
         .collect::<Vec<_>>();
-    match best_by_args_at_priority(lib, src, &ordinary, args) {
-        CandidateSelection::None => {
+    match best_by_args_at_priority_with_ties(lib, src, &ordinary, args) {
+        CandidateSelectionWithTies::None => {
             let low = cands
                 .iter()
                 .filter(|(candidate, _)| {
@@ -6634,7 +6574,7 @@ pub(crate) fn best_by_args<'a>(
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            best_by_args_at_priority(lib, src, &low, args)
+            best_by_args_at_priority_with_ties(lib, src, &low, args)
         }
         selected => selected,
     }
@@ -6643,12 +6583,12 @@ pub(crate) fn best_by_args<'a>(
 /// Select within one declaration-priority tier. Applicability and specificity deliberately know
 /// nothing about `@LowPriorityInOverloadResolution`; the outer tiering step invokes this same selector
 /// first for ordinary declarations and only then for low-priority declarations.
-fn best_by_args_at_priority<'a>(
+fn best_by_args_at_priority_with_ties<'a>(
     lib: &dyn SemanticPlatform,
     src: &dyn SymbolSource,
     cands: &[(&'a FunctionInfo, Vec<Ty>)],
     args: &[CallArgKind],
-) -> CandidateSelection<&'a FunctionInfo> {
+) -> CandidateSelectionWithTies<&'a FunctionInfo> {
     // Exact passes see runtime types; literal provenance only drives the adaptation passes.
     let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
     let adapts = |p: &Ty, arg: &CallArgKind, _i: usize| arg.adapts_integer_literal_to(*p);
@@ -6679,7 +6619,7 @@ fn best_by_args_at_priority<'a>(
             || function_like_fits(p, arg)
             || arg.binds_result_to(src, *p)
     };
-    match source_aware_most_specific(
+    match source_aware_most_specific_with_ties(
         cands
             .iter()
             .filter(|(_, params)| params.as_slice() == arg_tys)
@@ -6688,13 +6628,15 @@ fn best_by_args_at_priority<'a>(
             parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
         },
     ) {
-        CandidateSelection::Selected(candidate) => {
-            return CandidateSelection::Selected(candidate);
+        CandidateSelectionWithTies::Selected(candidate) => {
+            return CandidateSelectionWithTies::Selected(candidate);
         }
-        CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
-        CandidateSelection::None => {}
+        CandidateSelectionWithTies::Ambiguous(candidates) => {
+            return CandidateSelectionWithTies::Ambiguous(candidates)
+        }
+        CandidateSelectionWithTies::None => {}
     }
-    match integer_literal_overload(
+    match integer_literal_overload_with_ties(
         cands
             .iter()
             .map(|(candidate, params)| (params.clone(), *candidate)),
@@ -6703,11 +6645,13 @@ fn best_by_args_at_priority<'a>(
         |_position, left, right, arg| parameter_at_least_as_specific(src, left, right, arg),
         |left, right| distinct_source_declarations(left, right),
     ) {
-        CandidateSelection::Selected(candidate) => {
-            return CandidateSelection::Selected(candidate);
+        CandidateSelectionWithTies::Selected(candidate) => {
+            return CandidateSelectionWithTies::Selected(candidate);
         }
-        CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
-        CandidateSelection::None => {}
+        CandidateSelectionWithTies::Ambiguous(candidates) => {
+            return CandidateSelectionWithTies::Ambiguous(candidates)
+        }
+        CandidateSelectionWithTies::None => {}
     }
     let specificity = |_: usize, left: Ty, right: Ty| {
         parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
@@ -6718,7 +6662,7 @@ fn best_by_args_at_priority<'a>(
     // result would then depend on provider iteration order. Run the same unique-most-specific rule
     // used for source declarations and report incomparable maxima as an ambiguity.
     if args.iter().any(CallArgKind::is_expected_type_callable) {
-        match unique_most_specific_with_conflicts(
+        match unique_most_specific_with_conflicts_and_ties(
             cands.iter().filter_map(|(candidate, params)| {
                 fixed_parameter_shape(params, args, |position, param, arg| {
                     fits(position, param, arg)
@@ -6728,17 +6672,19 @@ fn best_by_args_at_priority<'a>(
             specificity,
             |left, right| distinct_source_declarations(left, right),
         ) {
-            CandidateSelection::Selected(candidate) => {
-                return CandidateSelection::Selected(candidate);
+            CandidateSelectionWithTies::Selected(candidate) => {
+                return CandidateSelectionWithTies::Selected(candidate);
             }
-            CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
-            CandidateSelection::None => {}
+            CandidateSelectionWithTies::Ambiguous(candidates) => {
+                return CandidateSelectionWithTies::Ambiguous(candidates)
+            }
+            CandidateSelectionWithTies::None => {}
         }
     }
 
     // Exact arity is judged by the one semantic assignability relation. Every applicable overload
     // competes in the same most-specific selection; there is no later descriptor/erasure retry.
-    match source_aware_most_specific(
+    match source_aware_most_specific_with_ties(
         cands.iter().filter_map(|(candidate, params)| {
             fixed_parameter_shape(params, args, |position, param, arg| {
                 fits(position, param, arg)
@@ -6747,14 +6693,16 @@ fn best_by_args_at_priority<'a>(
         }),
         specificity,
     ) {
-        CandidateSelection::Selected(candidate) => {
-            return CandidateSelection::Selected(candidate);
+        CandidateSelectionWithTies::Selected(candidate) => {
+            return CandidateSelectionWithTies::Selected(candidate);
         }
-        CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
-        CandidateSelection::None => {}
+        CandidateSelectionWithTies::Ambiguous(candidates) => {
+            return CandidateSelectionWithTies::Ambiguous(candidates)
+        }
+        CandidateSelectionWithTies::None => {}
     }
 
-    match source_aware_most_specific(
+    match source_aware_most_specific_with_ties(
         cands.iter().filter_map(|(candidate, params)| {
             (candidate.call_sig.required == 0 || candidate.call_sig.required <= args.len())
                 .then(|| {
@@ -6767,15 +6715,17 @@ fn best_by_args_at_priority<'a>(
         }),
         specificity,
     ) {
-        CandidateSelection::Selected(candidate) => {
-            return CandidateSelection::Selected(candidate);
+        CandidateSelectionWithTies::Selected(candidate) => {
+            return CandidateSelectionWithTies::Selected(candidate);
         }
-        CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
-        CandidateSelection::None => {}
+        CandidateSelectionWithTies::Ambiguous(candidates) => {
+            return CandidateSelectionWithTies::Ambiguous(candidates)
+        }
+        CandidateSelectionWithTies::None => {}
     }
 
     if matches!(args.last(), Some(arg) if arg.ty().fun_arity().is_some()) {
-        match source_aware_most_specific(
+        match source_aware_most_specific_with_ties(
             cands.iter().filter_map(|(candidate, params)| {
                 let last = params.len().checked_sub(1)?;
                 let prefix = args.len().checked_sub(1)?;
@@ -6802,18 +6752,20 @@ fn best_by_args_at_priority<'a>(
             }),
             specificity,
         ) {
-            CandidateSelection::Selected(candidate) => {
-                return CandidateSelection::Selected(candidate);
+            CandidateSelectionWithTies::Selected(candidate) => {
+                return CandidateSelectionWithTies::Selected(candidate);
             }
-            CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
-            CandidateSelection::None => {}
+            CandidateSelectionWithTies::Ambiguous(candidates) => {
+                return CandidateSelectionWithTies::Ambiguous(candidates)
+            }
+            CandidateSelectionWithTies::None => {}
         }
     }
 
     // At the candidate's OWN vararg slot: a slot-mapped call (`split(",", ignoreCase = false)`
     // against `split(vararg String, Boolean, Int)`) keeps the element at that slot, and a
     // non-final vararg is not the last parameter.
-    source_aware_most_specific(
+    source_aware_most_specific_with_ties(
         cands.iter().filter_map(|(candidate, params)| {
             candidate.call_sig.vararg.then(|| {
                 candidate_vararg_shape(candidate, params, args, |position, param, arg| {
@@ -8192,7 +8144,6 @@ mod tests {
         assert_eq!(functions.overloads.len(), 1);
         assert_eq!(source.queries.get(), 1);
     }
-
     #[test]
     fn mapped_mutable_list_inherits_the_mutable_iterator_declaration() {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
@@ -8200,7 +8151,8 @@ mod tests {
         };
         let source = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
-        ));
+        ))
+        .expect("provider");
         let receiver = Ty::obj_args("kotlin/collections/MutableList", &[Ty::Int]);
         let functions = members_in_hierarchy(&source, receiver, "iterator")
             .into_parts()

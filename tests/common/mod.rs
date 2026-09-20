@@ -303,11 +303,6 @@ fn parse_source_set_named(
     if diags.has_errors() {
         return None;
     }
-    if sources.iter().any(|source| {
-        krusty::features::LangFeatures::from_source(source).has("MultiPlatformProjects")
-    }) {
-        krusty::frontend::strip_matched_expects(&mut files);
-    }
     Some(files)
 }
 
@@ -440,7 +435,10 @@ fn compile_in_process_report(
     jdk_modules: Option<&std::path::Path>,
 ) -> InProcessCompileReport {
     let cp = cached_classpath(cp_jars, jdk_modules);
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
+            .expect("JVM provider initialization"),
+    );
     let backend = krusty::jvm::JvmBackend::new(cp);
     let report = emit_in_process(src, stem, platform, &backend);
     let classes = report
@@ -507,7 +505,10 @@ pub fn compile_in_process_metadata_cp_module_target(
     let _pg = ProfGuard::new("krusty");
     let mut diags = DiagSink::new();
     let cp = std::rc::Rc::new(Classpath::new(cp_jars.to_vec()));
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
+            .expect("JVM provider initialization"),
+    );
     let inputs = [SourceInput::kotlin(src).with_file_stem(stem)];
     let stems = [stem.to_string()];
     let features = krusty::features::LangFeatures::from_source(src);
@@ -717,7 +718,9 @@ fn front_end_diagnostics_files_with_classpath<F>(
 where
     F: FnOnce(&[krusty::ast::File], &mut krusty::frontend::FrontendSymbols),
 {
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),
+    );
     let inputs = sources
         .iter()
         .map(|source| krusty::frontend::SourceInput::kotlin(source))
@@ -1093,30 +1096,30 @@ pub fn java_home() -> String {
 
 /// Compile `BoxRunner.java` once into a stable cache dir keyed by the source hash; return its dir.
 fn setup_runner(java_home: &str) -> Option<PathBuf> {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for b in BOX_RUNNER_SRC.bytes() {
-        hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
-    }
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/box_runner_{hash:016x}"));
-    if dir.join("BoxRunner.class").is_file() {
-        return Some(dir);
-    }
-    std::fs::create_dir_all(&dir).ok()?;
-    let src_path = dir.join("BoxRunner.java");
-    std::fs::write(&src_path, BOX_RUNNER_SRC).ok()?;
-    let javac = format!("{java_home}/bin/javac");
-    if !Path::new(&javac).exists() {
-        return None;
-    }
-    let out = Command::new(&javac)
-        .args(["-source", "8", "-target", "8", "-d", dir.to_str().unwrap()])
-        .arg(&src_path)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(dir)
+    static SETUP: OnceLock<Option<PathBuf>> = OnceLock::new();
+    SETUP
+        .get_or_init(|| {
+            let mut hash: u64 = 0xcbf29ce484222325;
+            for b in BOX_RUNNER_SRC.bytes() {
+                hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
+            }
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("target/box_runner_{hash:016x}"));
+            if dir.join("BoxRunner.class").is_file() {
+                return Some(dir);
+            }
+            std::fs::create_dir_all(&dir).ok()?;
+            let src_path = dir.join("BoxRunner.java");
+            std::fs::write(&src_path, BOX_RUNNER_SRC).ok()?;
+            let javac = format!("{java_home}/bin/javac");
+            let out = Command::new(&javac)
+                .args(["-source", "8", "-target", "8", "-d", dir.to_str().unwrap()])
+                .arg(&src_path)
+                .output()
+                .ok()?;
+            out.status.success().then_some(dir)
+        })
+        .clone()
 }
 
 /// A persistent JVM subprocess that runs `box()` calls CONCURRENTLY. Requests are tagged with an id
@@ -2016,7 +2019,10 @@ fn krusty_lib_out(sources: &[(&str, &str)]) -> Result<Option<PathBuf>, String> {
         .collect::<Vec<_>>();
     let jdk = krusty::toolchain::jdk_modules();
     let cp = cached_classpath(&[stdlib_jar()], jdk.as_deref());
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone()));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
+            .expect("JVM provider initialization"),
+    );
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
         platform,
@@ -2501,7 +2507,9 @@ pub fn inspect_checker_with_classpath<T>(
         main, &toks, &mut diags, &features,
     )];
     let cp = std::rc::Rc::new(Classpath::new(classpath));
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),
+    );
     let mut syms = collect_signatures_with_cp(&files, platform, &mut diags);
     let info = check_file(&files[0], &mut syms, &mut diags);
     let inspected = inspect(&files[0], &info, &syms);
@@ -3564,4 +3572,81 @@ mod scratch_tests {
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.parse::<u64>().is_ok())));
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// A compiler report, as a complete ordered ledger.
+//
+// A test that greps a report for one sentence cannot see a second diagnostic the compiler started
+// or stopped producing, and a `filter_map` that skips what it cannot parse removes the line from
+// the comparison rather than failing on it. Everything here keeps every ERROR the compiler
+// printed, in order, and fails on one it cannot read.
+// ---------------------------------------------------------------------------------------------
+
+/// One reported error: where it is and what it says.
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Reported {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+    pub rendered: String,
+}
+
+impl std::fmt::Display for Reported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}:{}:{}: {}",
+            self.file, self.line, self.column, self.rendered
+        )
+    }
+}
+
+/// Every error a compiler printed, complete and in the order it printed them.
+///
+/// Severity is the only filter: a line that carries `: error: ` is kept, and one that does so and
+/// cannot be read as a position panics instead of disappearing. Only the file NAME is retained —
+/// both compilers print a path, and the directory each happened to use is not the subject of any
+/// comparison.
+#[allow(dead_code)]
+pub fn reported(report: &str) -> Vec<Reported> {
+    report
+        .lines()
+        .filter(|line| line.contains(": error: "))
+        .map(|line| {
+            let (position, message) = line
+                .split_once(": error: ")
+                .expect("an error line carries the severity it was selected by");
+            let mut position = position.rsplit(':');
+            let mut field = |what: &str| {
+                position
+                    .next()
+                    .unwrap_or_else(|| panic!("an error line states its {what}: {line}"))
+            };
+            let column = field("column");
+            let number = field("line");
+            let path = std::path::Path::new(field("file"));
+            let parse = |what: &str, text: &str| {
+                text.parse::<u32>()
+                    .unwrap_or_else(|_| panic!("an error line's {what} is a number: {line}"))
+            };
+            Reported {
+                file: path
+                    .file_name()
+                    .unwrap_or_else(|| panic!("an error line names a file: {line}"))
+                    .to_string_lossy()
+                    .into_owned(),
+                line: parse("line", number),
+                column: parse("column", column),
+                rendered: message.trim_end().to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+}
+
+/// The same ledger, rendered one entry per line — the form an expectation is written in.
+#[allow(dead_code)]
+pub fn ledger(report: &str) -> Vec<String> {
+    reported(report).iter().map(Reported::to_string).collect()
 }

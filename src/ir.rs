@@ -32,8 +32,17 @@ pub enum IrNodeOrigin {
 }
 
 mod bottom_values;
+mod bridges;
+mod constants;
+mod constructors;
+mod references;
 pub(crate) use bottom_values::complete_bottom_value;
 pub use bottom_values::IrBottomValueCompletion;
+pub use bridges::{Bridge, BridgeKind};
+pub use constants::IrConst;
+pub(crate) use constructors::IrSecondaryConstructorRole;
+pub use constructors::{IrJvmValueClassSecondaryCtor, IrSecondaryCtor, IrSecondaryCtorLines};
+pub use references::{FuncRef, PropRef};
 
 /// A compiler-supplied operation selected from a real semantic declaration. This is an operation
 /// identity, not a library name: backends implement it without recovering signature facts from text.
@@ -236,7 +245,7 @@ pub enum Callee {
         /// The call appears in a different lexical classifier and therefore needs a target-specific
         /// owner bridge; emitting `invokespecial` directly from the inner class is verifier-invalid.
         enclosing_dispatch: bool,
-        kind: crate::fir::FirSuperCallKind,
+        kind: IrSuperCallKind,
         name: String,
         params: Vec<Ty>,
         ret: Ty,
@@ -272,6 +281,15 @@ pub enum Callee {
     },
 }
 
+/// Source-level member operation selected for a semantic `super` dispatch. This common-IR identity
+/// is target-neutral; backends realize the getter/setter spelling and physical invocation shape.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrSuperCallKind {
+    Function,
+    PropertyGetter,
+    PropertySetter,
+}
+
 impl Callee {
     /// The function declaration stored in this IR file that owns this call's semantic signature.
     ///
@@ -289,39 +307,6 @@ impl Callee {
             _ => None,
         }
     }
-}
-
-/// A compile-time constant (`IrConst` in Kotlin IR).
-#[derive(Clone, Debug, PartialEq)]
-pub enum IrConst {
-    Boolean(bool),
-    Byte(i8),
-    Short(i16),
-    Int(i32),
-    Long(i64),
-    Float(f32),
-    Double(f64),
-    /// A Kotlin `Char` — one UTF-16 code UNIT, not a code point. Lone surrogates (D800..DFFF) are
-    /// legal `Char` values (`Char.MIN_HIGH_SURROGATE`), so this cannot be a Rust `char`: converting
-    /// through `char::from_u32` rejects them and silently folds them to NUL.
-    Char(u16),
-    /// A Kotlin `String` — a sequence of UTF-16 code units. Same reason as `Char`: `"\uD800"` and
-    /// `"😀"` have no Rust `String` spelling one code unit at a time.
-    String(crate::kt_string::KtString),
-    /// An unsigned constant, as the VALUE it stands for: `200u` is 200 here, never the byte -56
-    /// that a JVM carries a `UByte` in.
-    ///
-    /// These exist because the unsigned type is the constant's checked IDENTITY and a backend
-    /// cannot choose a representation for what it cannot see. Folding them into `Int` lost that:
-    /// `value_ty` then answers `Int` from the constant's shape, and every backend inherited
-    /// whatever width the number happened to carry. Which primitive holds the value is a
-    /// representation decision, and representation belongs to backends. Matching widths do not
-    /// make `UInt` semantically identical to `Int`, or `ULong` to `Long`.
-    UByte(u8),
-    UShort(u16),
-    UInt(u32),
-    ULong(u64),
-    Null,
 }
 
 /// One checker-selected argument after source-order evaluation has been preserved. Parameter
@@ -684,26 +669,6 @@ pub struct IrCallableReference {
     pub adaptation: Option<Box<crate::fir::FirReferenceAdaptation>>,
 }
 
-impl IrConst {
-    pub fn zero_for_value_type(ty: Ty) -> IrConst {
-        match ty.canonical_semantic() {
-            Ty::Boolean => IrConst::Boolean(false),
-            Ty::Byte => IrConst::Byte(0),
-            Ty::UByte => IrConst::UByte(0),
-            Ty::Short => IrConst::Short(0),
-            Ty::UShort => IrConst::UShort(0),
-            Ty::Int => IrConst::Int(0),
-            Ty::UInt => IrConst::UInt(0),
-            Ty::Long => IrConst::Long(0),
-            Ty::ULong => IrConst::ULong(0),
-            Ty::Float => IrConst::Float(0.0),
-            Ty::Double => IrConst::Double(0.0),
-            Ty::Char => IrConst::Char(0),
-            _ => IrConst::Null,
-        }
-    }
-}
-
 /// Checked semantic shape of an annotation constructor call. The common IR retains the annotation
 /// interface and lexical scope; a backend chooses the concrete runtime implementation and name.
 #[derive(Clone, Debug)]
@@ -714,6 +679,16 @@ pub struct IrAnnotationConstruction {
     pub defaults: Vec<Option<ExprId>>,
     /// Lexical classifier containing this call. `None` means a top-level/file-facade scope.
     pub enclosing_class: Option<TypeName>,
+}
+
+/// Which declaration a checked enum `valueOf` operation selected. Both name the same lookup by
+/// entry name; they are different declarations, and only one of them is `inline`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EnumValueOfDeclaration {
+    /// The classifier's own implicit member — `E.valueOf(name)`.
+    Member,
+    /// The standard library's top-level `enumValueOf<E>(name)`, whose body expands at the call.
+    StandardLibraryTopLevel,
 }
 
 /// An IR expression node (a subset of Kotlin IR's `IrExpression` hierarchy). Operands reference
@@ -1002,6 +977,11 @@ pub enum IrExpr {
     EnumValueOf {
         classifier: TypeName,
         arg: ExprId,
+        /// Which of the two declarations that spell this lookup the checker selected. They are not
+        /// interchangeable: one is the classifier's own member, the other the standard library's
+        /// INLINE top-level function, and a consumer that records source positions attributes an
+        /// inline expansion to its call site rather than to a dispatch.
+        declaration: EnumValueOfDeclaration,
     },
     EnumEntries {
         classifier: TypeName,
@@ -1174,11 +1154,19 @@ pub struct IrSamTarget {
 pub struct IrCatch {
     /// Value index the caught exception is bound to.
     pub var: u32,
-    /// Source parameter name, absent for compiler-generated handlers.
-    pub name: Option<String>,
+    /// The debug-visible binding, absent for a compiler-generated handler — which binds no source
+    /// name and must not appear in a local variable table.
+    pub binding: Option<IrCatchBinding>,
     /// JVM internal name of the caught exception type.
     pub exc_internal: TypeName,
     pub body: ExprId,
+}
+
+impl IrCatch {
+    /// The source spelling of the binding, absent for a compiler-generated handler.
+    pub fn binding_name(&self) -> Option<&str> {
+        self.binding.as_ref().map(|binding| binding.name.as_str())
+    }
 }
 
 /// Built-in binary operators carried by `IrExpr::PrimitiveBinOp`.
@@ -1670,18 +1658,6 @@ pub struct IrClass {
     /// their own [`IrClass`] ownership; this list is only for generated declarations whose producer
     /// explicitly owns the language-level publication contract (for example `$serializer`).
     pub published_nested_classifiers: Vec<String>,
-    /// For a class a producer GENERATED: the functions Kotlin metadata describes, in the order they
-    /// are declared. The producer owns the whole function record of such a class — a generated
-    /// function absent from this list is not described at all, which is how a non-generic
-    /// `$serializer` omits `typeParametersSerializers`. `None` on a source-declared class, whose
-    /// members are described from their own declarations; `Some([])` remains meaningful for a
-    /// generated class whose producer deliberately publishes no functions.
-    ///
-    /// Held apart from `IrFile::fn_source_order` because the two orders genuinely differ: the
-    /// backend EMITS a serializer's members in kotlinc's class-file order while kotlinc DECLARES
-    /// them in another, and `fn_source_order` drives emission. A generated PROPERTY states its own
-    /// position through [`IrProperty::source_order`], in the same numbering as this list's indices.
-    pub published_generated_functions: Option<Vec<FunId>>,
     /// Secondary constructors — each an extra `<init>(params)` that delegates to the primary
     /// constructor (`constructor(…) : this(args)`) then runs its body. Empty for most classes.
     pub secondary_ctors: Vec<IrSecondaryCtor>,
@@ -1844,164 +1820,6 @@ pub enum FrDispatch {
     SuspendConvert,
 }
 
-/// A synthesized function-reference subclass of `kotlin/jvm/internal/FunctionReferenceImpl`. See
-/// `emit_func_ref_class`. `param_tys`/`ret_ty` are the LOGICAL `invoke` signature (for `VirtualUnbound`,
-/// `param_tys[0]` is the receiver); the SAM interface erases them to `Object`, so `invoke` casts.
-#[derive(Clone, Debug)]
-pub struct FuncRef {
-    /// Adapted callable references use Kotlin's `AdaptedFunctionReference` carrier so equality and
-    /// hashing include the checked adaptation arity/flags instead of lambda identity.
-    pub adapted: bool,
-    pub bound: bool,
-    /// Leading adapter parameters stored as subclass fields rather than in the runtime callable
-    /// reference's semantic receiver slot. This is fixed by JVM realization from the common
-    /// reference's explicit ordinary captures; emission never infers it from capture cardinality.
-    pub field_capture_count: u32,
-    /// Kotlin source-level function arity. Backends add any representation parameters, such as a
-    /// suspend continuation, when selecting their callable carrier.
-    pub arity: u8,
-    /// The referenced declaration is suspend. The generated reference carries Kotlin's semantic
-    /// suspend-function identity; each backend owns its physical calling convention.
-    pub is_suspend: bool,
-    /// Exact current-module declaration selected by the frontend when this carrier invokes a
-    /// source callable directly. A backend uses the stable identity only to realize physical
-    /// naming/layout; reflection continues to expose `fn_name`, the Kotlin declaration name.
-    pub module_target: Option<crate::fir::CallableId>,
-    /// Exact common-IR helper invoked by this carrier when callable-reference adaptation generated
-    /// a local wrapper. This is a stable IR identity, so backend liveness and access-bridge planning
-    /// never rediscover the helper from its synthesized name and arity.
-    pub local_target: Option<FunId>,
-    /// Class passed to `super(...)` (the reference's declaring class); `None` = the file facade.
-    pub owner_class: Option<TypeName>,
-    pub fn_name: String,
-    pub flags: i32,
-    pub dispatch: FrDispatch,
-    /// Class the target method is invoked on; `None` = the file facade.
-    pub call_owner: Option<TypeName>,
-    pub call_name: String,
-    pub reflection_name: Option<String>,
-    /// The physical static bridge takes the original dispatch receiver as parameter zero, while
-    /// reflection still describes the referenced instance declaration without that receiver.
-    pub reflection_receiver_parameter: bool,
-    /// Reflection declaration return when the invoked helper has a different ABI. Constructor
-    /// adapters return the constructed value, while their reflected declaration returns JVM void.
-    pub reflection_target_ret_ty: Option<Ty>,
-    /// Declaration parameters used only for callable-reference identity. An adapted reference
-    /// invokes a generated wrapper whose ABI is in `target_param_tys`, while equality/reflection
-    /// must retain the original declaration descriptor.
-    pub reflection_target_param_tys: Option<Vec<Ty>>,
-    /// The target method is declared on an INTERFACE (`invokeinterface`, not `invokevirtual`).
-    pub call_interface: bool,
-    /// The LOGICAL `invoke` parameter types. For `VirtualUnbound`, `param_tys[0]` is the receiver
-    /// (excluded from the method descriptor / signature). The emitter derives the JVM signature and
-    /// reference metadata signature from these + `ret_ty`.
-    pub param_tys: Vec<Ty>,
-    pub ret_ty: Ty,
-    /// The PHYSICAL target-call parameter/return types after backend lowerings such as JVM value-class
-    /// erasure. Same shape as `param_tys` (including the unbound receiver slot when present).
-    pub target_param_tys: Vec<Ty>,
-    pub target_ret_ty: Ty,
-    /// Per logical invoke parameter: `Some(value_class_internal)` means the erased Object argument is a
-    /// boxed value-class instance and must be unboxed before the physical target call.
-    pub unbox_params: Vec<Option<TypeName>>,
-    /// Parallel to `unbox_params`: nullable value-class parameters unbox `null` to a null underlying.
-    pub unbox_param_nullable: Vec<bool>,
-    /// `Some(value_class_internal)` means the physical target returns the value-class underlying and the
-    /// function-reference `invoke` must box it back before returning Object.
-    pub box_ret: Option<TypeName>,
-    /// `StaticBound` only: `Some(value_class_internal)` when the CAPTURED receiver is a value class
-    /// (`Z(42)::ext`). The receiver is stored boxed as `Object`; the emitter `checkcast`s it to the box
-    /// class then `unbox-impl`s it to the underlying before the mangled `invokestatic ext-<hash>(under)`.
-    pub staticbound_recv_unbox: Option<TypeName>,
-}
-
-/// A synthesized property-reference class's metadata (`Type::prop` → `Type$prop$N`): the referenced
-/// property's owner, name, getter, and value type. The backend emits the `PropertyReference1Impl`
-/// subclass from this.
-#[derive(Clone, Debug)]
-pub struct PropRef {
-    /// Referenced property's owner class; `None` = the file facade.
-    pub owner_internal: Option<TypeName>,
-    /// Physical owner of a member accessor. This differs from `owner_internal` for an inherited
-    /// property reference (`Derived::p` reflects on `Derived` but may invoke `Base.getP`).
-    pub call_owner_internal: Option<TypeName>,
-    pub prop_name: String,
-    pub getter_name: String,
-    pub getter_descriptor: Option<String>,
-    pub setter_name: Option<String>,
-    pub setter_descriptor: Option<String>,
-    /// JVM-only property-reference boundary: the accessor uses this value class's erased carrier,
-    /// while `KProperty.get`/`set` exchange the boxed value-class object through `Object`.
-    pub boxed_value_class: Option<TypeName>,
-    /// The selected member accessor is declared by an interface. Static extension/top-level
-    /// accessors ignore this bit; instance references use it to choose `invokeinterface` without
-    /// querying a class model again during emission.
-    pub owner_is_interface: bool,
-    pub prop_ty: Ty,
-    /// `false` = an unbound `Type::prop` (a `PropertyReference1Impl` singleton with `get(Object)`);
-    /// `true` = a bound `obj::prop` (a `PropertyReference0Impl` constructed with the captured receiver,
-    /// whose `get()` reads `this.receiver`).
-    pub bound: bool,
-    /// A top-level property reference `::foo` (a `(Mutable)PropertyReference0Impl` singleton): the
-    /// getter/setter are STATIC on the file facade, so `get`/`set` dispatch via `invokestatic`
-    /// (`owner_internal = None` is resolved at emit). No receiver is captured.
-    pub static_dispatch: bool,
-    /// The referenced property is a `var` — emit a `set(Object)` override (calls `setName`). Only
-    /// meaningful with `static_dispatch` (a `MutablePropertyReference0Impl`).
-    pub mutable: bool,
-    /// An EXTENSION property reference (`obj::ext`, `Type::ext` where `val Recv.ext`): the getter/setter
-    /// are STATIC methods on this facade taking the receiver as the first argument (`getExt(Recv)` /
-    /// `setExt(Recv, v)`), unlike a member reference's instance `getExt()`. `None` for member/top-level
-    /// references. The reference's receiver-class metadata still lives in `owner_internal`.
-    pub ext_facade: Option<Option<TypeName>>,
-}
-
-impl FuncRef {
-    pub fn owner_class_or_facade(&self, facade: &str) -> String {
-        self.owner_class
-            .map(TypeName::render)
-            .unwrap_or_else(|| facade.to_string())
-    }
-
-    pub fn call_owner_or_facade(&self, facade: &str) -> String {
-        self.call_owner
-            .map(TypeName::render)
-            .unwrap_or_else(|| facade.to_string())
-    }
-
-    pub fn call_owner_key(&self) -> String {
-        self.call_owner.map(TypeName::render).unwrap_or_default()
-    }
-
-    pub fn call_owner_is_facade(&self) -> bool {
-        self.call_owner.is_none()
-    }
-}
-
-impl PropRef {
-    pub fn owner_or_facade(&self, facade: &str) -> String {
-        self.owner_internal
-            .map(TypeName::render)
-            .unwrap_or_else(|| facade.to_string())
-    }
-
-    pub fn owner(&self) -> Option<String> {
-        self.owner_internal.map(TypeName::render)
-    }
-
-    pub fn call_owner(&self) -> Option<String> {
-        self.call_owner_internal.map(TypeName::render)
-    }
-
-    pub fn ext_facade_or_facade(&self, facade: &str) -> Option<String> {
-        self.ext_facade.as_ref().map(|f| {
-            f.as_ref()
-                .map(|facade| facade.render())
-                .unwrap_or_else(|| facade.to_string())
-        })
-    }
-}
-
 impl IrClass {
     /// Minimal backend-neutral shape for a compiler-generated class. The producer sets only the
     /// semantic payload it owns (for example `prop_ref`); target passes choose representation.
@@ -2054,7 +1872,6 @@ impl IrClass {
             is_companion: false,
             companion_class: None,
             published_nested_classifiers: Vec::new(),
-            published_generated_functions: None,
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             applied_annotations: DeclarationAnnotations::default(),
@@ -2165,7 +1982,6 @@ impl IrClass {
             is_companion: flags.has(crate::fir::DeclarationFlags::COMPANION),
             companion_class: None,
             published_nested_classifiers: Vec::new(),
-            published_generated_functions: None,
             secondary_ctors: Vec::new(),
             has_primary_ctor: true,
             applied_annotations: DeclarationAnnotations::default(),
@@ -2239,66 +2055,6 @@ impl IrClass {
     }
 }
 
-/// A secondary constructor: `<init>(params)` runs `delegate_prelude`, loads `delegate_args`, calls the
-/// delegate target, then runs `body`. `this` is value 0 and parameters are values `1..=params.len()`.
-#[derive(Clone, Debug)]
-pub struct IrSecondaryCtor {
-    /// User annotations declared on this constructor, split by JVM retention — the constructor
-    /// analogue of [`IrFile::function_annotations`] (a secondary constructor is not an
-    /// [`IrFunction`], so it carries them directly).
-    pub annotations: DeclarationAnnotations,
-    /// Stable source byte offset of a declared constructor. Generated constructors use
-    /// `u32::MAX`; their producer records any later placement rule by exact identity.
-    pub source_order: u32,
-    /// Compiler-supplied leading parameters shared by every constructor of the class. These occupy
-    /// body value slots before `params`, but are absent from Kotlin source metadata and default masks.
-    pub prefix_params: Vec<Ty>,
-    pub params: Vec<Ty>,
-    /// SOURCE parameter names paired with SEMANTIC (checker-resolved) types — what the class
-    /// `@Metadata` `Constructor` record describes (`params` above are the erased IR realization,
-    /// which loses fun-type shapes and generic arguments). Empty for a synthesized constructor.
-    pub named_params: Vec<(String, Ty)>,
-    /// Index into `named_params` of a `vararg` parameter, for the `Constructor` metadata record.
-    pub vararg_index: Option<usize>,
-    pub defaults: Vec<Option<ExprId>>,
-    /// Source-ordered temp declarations for delegation arguments.
-    pub delegate_prelude: Vec<ExprId>,
-    pub delegate_args: Vec<ExprId>,
-    /// Semantic target-parameter ordinals omitted at this delegation site. A backend derives its
-    /// own default-constructor ABI (for example JVM masks and marker) from these checked ordinals.
-    pub default_parameters: Vec<u32>,
-    pub body: Option<ExprId>,
-    /// Which `<init>` this constructor delegates to, and whether it runs the class init body.
-    pub delegate: CtorDelegateTarget,
-    /// kotlinc marks this ctor `ACC_SYNTHETIC` (0x1000) — e.g. a `@Serializable` deserialization ctor.
-    pub synthetic: bool,
-    /// A DECLARED parameter was value-class-typed (recorded by the value-class pass before erasure):
-    /// the ctor gets kotlinc's PRIVATE + public synthetic `(…, DefaultConstructorMarker)` ABI, and
-    /// its metadata record names the marker form.
-    pub vc_params: bool,
-}
-
-/// A compiler-generated secondary constructor's semantic role. Producers record this exact class
-/// and ordinal edge once; later plugin/backend phases must not recover the constructor from
-/// `synthetic`, its parameter arity, descriptor, or generated spelling.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum IrSecondaryConstructorRole {
-    SerializationDeserialization,
-}
-
-/// Semantic declaration metadata retained when the JVM value-class pass replaces a secondary
-/// constructor with a static `constructor-impl` realization. The backend owns the physical handle;
-/// Kotlin metadata must still describe the original source parameters/defaults and link them to that
-/// exact handle for downstream frontend resolution.
-#[derive(Clone, Debug)]
-pub struct IrJvmValueClassSecondaryCtor {
-    pub params: Vec<(String, Ty)>,
-    pub param_defaults: Vec<bool>,
-    pub vararg_index: Option<usize>,
-    pub annotations: DeclarationAnnotations,
-    pub descriptor: String,
-}
-
 /// The delegation target of a secondary constructor.
 #[derive(Clone, Debug)]
 pub enum CtorDelegateTarget {
@@ -2315,49 +2071,10 @@ pub enum CtorDelegateTarget {
         target_params: Vec<Ty>,
         default_masks: Vec<i32>,
     },
-}
-
-/// A JVM declaration adapter (`name(erased_params)erased_ret` → a selected concrete target).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BridgeKind {
-    Function,
-    PropertyGetter,
-    PropertySetter,
-    /// The ordinary public instance entry through which a boxed value class implements an interface;
-    /// it delegates to the selected static carrier implementation but is not `ACC_BRIDGE|SYNTHETIC`.
-    ValueClassInterfaceEntry,
-}
-
-#[derive(Clone, Debug)]
-pub struct Bridge {
-    pub kind: BridgeKind,
-    /// Exact same-module function this bridge delegates to. Backend realization uses this stable
-    /// identity for representation decisions; `target_name` is emitted spelling, never lookup input.
-    pub target_function: Option<u32>,
-    pub name: String,
-    pub erased_params: Vec<Ty>,
-    pub erased_ret: Ty,
-    pub concrete_params: Vec<Ty>,
-    pub concrete_ret: Ty,
-    /// Physical return in the delegated target's descriptor when it differs from the value the bridge
-    /// adapts. A suspend target always returns `Object`; a generic bridge may still need to cast that
-    /// object to a reference carrier and box it as a value class for the erased supertype boundary.
-    pub target_ret: Option<Ty>,
-    /// Whether incompatible erased arguments return the collection operation's neutral result.
-    pub type_safe_barrier: bool,
-    /// The method this bridge delegates to, when it differs from `name` — a value-class-returning
-    /// override is emitted under a mangled name (`foo-<hash>`), so the unmangled bridge (`foo`, the
-    /// supertype's erased signature) must call the mangled one. `None` ⇒ same as `name`.
-    pub target_name: Option<String>,
-    /// When set, the bridge boxes its (unboxed value-class) result with `<owner>.box-impl` before
-    /// returning — a value-class-returning override seen through a supertype hands back a boxed `X`.
-    pub box_ret: Option<TypeName>,
-    /// Per concrete parameter, the boxed value class to `checkcast` + `unbox-impl` before the target
-    /// call — a generic supertype method (`B.f(T,U)` → erased `f(Object,Object)`) delegates to a
-    /// mangled concrete override taking the value class's UNDERLYING, while the incoming arg is a
-    /// boxed `X`. Empty (or all-`None`) ⇒ plain checkcast/convert (the common case). JVM/value-class
-    /// concern, populated by the value-class pass; the front end leaves it empty.
-    pub unbox_params: Vec<Option<TypeName>>,
+    /// An enum secondary constructor with no written `this(…)` delegation. Kotlin implicitly
+    /// initializes the language enum base with the compiler-supplied entry name and ordinal; a
+    /// target backend chooses that base and its physical constructor prefix.
+    ImplicitEnumBase,
 }
 
 /// A top-level (module) property: a static field on the file facade, initialized in `<clinit>`.
@@ -2380,6 +2097,19 @@ pub struct IrStatic {
     /// accessors; cross-class reads inside the file go through a synthesized `access$get<X>$p` bridge
     /// (kotlinc's shape).
     pub visibility: crate::types::Visibility,
+    /// The setter's JVM name when it is not the ordinary `set<X>` spelling — a value-class-typed
+    /// property mangles it, because a value-class PARAMETER always does. `None` ⇒ the ordinary name.
+    pub setter_jvm_name: Option<String>,
+    /// The type this static was DECLARED with, when the JVM pass erased its storage to a value
+    /// class's carrier (a file facade's property, which kotlinc erases the same way). `None` ⇒ the
+    /// storage keeps the boxed value-class object, or holds no value class at all.
+    ///
+    /// The whole declared type, not just the classifier: once `ty` holds the carrier, every fact
+    /// the accessors still need — which value class it is AND whether it was nullable — is only
+    /// here. Reading them back off the erased type made a `var x: Label?` publish a non-null
+    /// `String` setter, which then refused the `null` the property accepts. Every reader consults
+    /// this rather than re-deciding, so a read of the field and the field itself cannot disagree.
+    pub erased_declared_ty: Option<Ty>,
     /// `true` when this backing field has a CUSTOM accessor (`val x = init get() = field…`): the field
     /// is still emitted + initialized in `<clinit>`, but the trivial `getX`/`setX` accessors are NOT
     /// auto-generated here — the custom `getX`/`setX` are emitted as ordinary facade methods (their
@@ -2416,6 +2146,10 @@ pub struct IrFile {
     /// Guards the active-unit metadata handoff when a source is checked in several body groups.
     pub(crate) file_annotations_attached: bool,
     pub functions: Vec<IrFunction>,
+    /// Exact generated function metadata/debug contracts, keyed by semantic owning classifier.
+    /// Producers publish once; backends consume function identities without name/descriptor scans.
+    generated_member_publications:
+        std::collections::HashMap<TypeName, IrGeneratedMemberPublication>,
     /// Stable checked-FIR callable identity to its realization in this file's function arena.
     /// Common lowering publishes the edge once; checked-operation realization consumes it without
     /// name lookup or overload reconstruction.
@@ -2587,6 +2321,13 @@ pub struct IrFile {
     pub expr_source_lines: std::collections::HashMap<u32, u32>,
     /// Source end line for every lowered expression whose AST node has a source location.
     pub expr_end_lines: std::collections::HashMap<u32, u32>,
+    /// Implicit return identity → the expression body's closing source line.
+    ///
+    /// An explicit `return expression` keeps the call/return line already in effect. An
+    /// expression-bodied callable instead maps its generated return instruction to the end of the
+    /// body expression. Common lowering records that semantic distinction once; backends must not
+    /// infer it from a synthetic origin or expression shape.
+    pub(crate) implicit_return_end_lines: std::collections::HashMap<ExprId, u32>,
     /// Source names for `IrExpr::Variable` nodes included in `LocalVariableTable`.
     /// Compiler-generated temporaries are omitted.
     pub value_names: std::collections::HashMap<u32, String>,
@@ -2862,6 +2603,11 @@ pub struct IrFile {
     /// 1-based source line of a class's primary-ctor closing `)` — kotlinc maps the ctor
     /// `$default` overload's `return` to it. Absent = single-line/unknown (the one-entry table).
     pub ctor_close_lines: std::collections::HashMap<TypeName, u32>,
+    /// The declaration-owned source lines of each SECONDARY constructor, by its stable declaration.
+    /// The declaration metadata handoff records them while the parser unit is live; lowering copies
+    /// them onto the constructor it builds, which happens after that unit's syntax is gone.
+    pub secondary_ctor_lines:
+        std::collections::HashMap<crate::fir::DeclarationId, IrSecondaryCtorLines>,
     /// Function ids of `internal` members — `@Metadata` `Function.flags` visibility 0 (the JVM
     /// method stays public; only metadata carries the module boundary). `private_methods` keeps
     /// its own set because privacy ALSO changes dispatch (`invokespecial`).
@@ -3732,8 +3478,14 @@ impl IrFile {
 }
 
 mod debug_locals;
+mod generated_members;
+pub use debug_locals::IrCatchBinding;
 pub use debug_locals::IrLambdaOrigin;
 pub(crate) use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
+pub use generated_members::{
+    IrGeneratedDeclarationDebug, IrGeneratedFunctionMetadata, IrGeneratedFunctionMetadataScope,
+    IrGeneratedFunctionPublication, IrGeneratedMemberPublication,
+};
 mod function_parameters;
 pub use function_parameters::FnParamInfo;
 mod traversal;

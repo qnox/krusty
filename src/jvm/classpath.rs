@@ -12,6 +12,14 @@
 
 mod candidate_union;
 mod mapped_builtin_realizations;
+mod metadata_indexes;
+mod property_identity;
+
+pub(crate) use property_identity::ExternalPropertyRealization;
+
+use self::metadata_indexes::{
+    build_entry_ext, build_entry_package_types, build_entry_types, ClassMetadataLoadError,
+};
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -19,7 +27,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::jvm::classreader::{parse_class, read_method_code, ClassInfo, MethodCode};
+use crate::jvm::classreader::{parse_class, read_method_code, ClassInfo, MethodCode, ReadError};
 use crate::jvm::names::type_descriptor;
 use crate::libraries::{CallSig, GenericSig, LibraryCallable, ReturnInfo};
 use crate::name_tree::{NameId, NameTree};
@@ -689,6 +697,24 @@ impl<T> EntryCache<T> {
         }
         v
     }
+
+    /// Build transactionally: failures are returned and never published as a partial entry value.
+    fn get_or_try_build<E>(
+        &self,
+        key: &EntryKey,
+        build: impl FnOnce() -> Result<T, E>,
+    ) -> Result<std::sync::Arc<T>, E> {
+        if let Some(value) = self.map.read().unwrap().get(key).cloned() {
+            return Ok(value);
+        }
+        let mut map = self.map.write().unwrap();
+        if let Some(value) = map.get(key).cloned() {
+            return Ok(value);
+        }
+        let value = std::sync::Arc::new(build()?);
+        map.insert(key.clone(), value.clone());
+        Ok(value)
+    }
 }
 
 fn push_id_dedup(m: &mut HashMap<String, Vec<NameId>>, key: &str, id: NameId) {
@@ -919,15 +945,16 @@ impl ClassCacheData {
         self.classes.read().unwrap().get(&internal).cloned()
     }
 
-    /// Build one immutable entry-local class fact at most once. Locks are keyed by class so two
-    /// unrelated cold classes in the same jar still parse concurrently.
+    /// Build one immutable entry-local class fact at most once. An authoritative parse failure is
+    /// returned to the caller and never collapsed into the cached "absent" state. Locks are keyed by
+    /// class so two unrelated cold classes in the same jar still parse concurrently.
     fn get_or_build(
         &self,
         internal: TypeName,
-        build: impl FnOnce() -> Option<std::sync::Arc<ClassInfo>>,
-    ) -> Option<std::sync::Arc<ClassInfo>> {
+        build: impl FnOnce() -> Result<Option<std::sync::Arc<ClassInfo>>, ReadError>,
+    ) -> Result<Option<std::sync::Arc<ClassInfo>>, ReadError> {
         if let Some(cached) = self.cached(internal) {
-            return cached;
+            return Ok(cached);
         }
         let build_lock = self
             .build_locks
@@ -938,14 +965,14 @@ impl ClassCacheData {
             .clone();
         let _building = build_lock.lock().unwrap();
         if let Some(cached) = self.cached(internal) {
-            return cached;
+            return Ok(cached);
         }
-        let built = build();
+        let built = build()?;
         self.classes
             .write()
             .unwrap()
             .insert(internal, built.clone());
-        built
+        Ok(built)
     }
 }
 
@@ -999,9 +1026,10 @@ fn global_entry_class_bytes_cache(key: &EntryKey) -> ClassBytesCache {
 
 /// Process-global cache of parsed `.kotlin_builtins` fragments, one [`EntryCache`] slot per entry.
 /// The inner mutex serializes the ONE cold read for a package across compiler workers; its outer
-/// `None` means "not initialized/retry after a failed read", while `Some(None)` records that this
-/// entry PERMANENTLY has no fragment for the package.
-type BuiltinsValue = Option<std::sync::Arc<BuiltinsFile>>;
+/// `None` means "not initialized/retry after a transient read failure". The inner result retains an
+/// immutable decode failure exactly, while `Ok(None)` records that this entry has no fragment.
+type BuiltinsValue =
+    Result<Option<std::sync::Arc<BuiltinsFile>>, std::sync::Arc<BuiltinsLoadError>>;
 type BuiltinsSlot = std::sync::Arc<std::sync::Mutex<Option<BuiltinsValue>>>;
 type BuiltinsMap = HashMap<TypeName, BuiltinsSlot>;
 type BuiltinsCache = std::sync::Arc<std::sync::RwLock<BuiltinsMap>>;
@@ -1019,7 +1047,55 @@ fn global_entry_builtins_cache(key: &EntryKey) -> BuiltinsCache {
 enum EntryReadResult {
     Data(Vec<u8>),
     Absent,
-    Failed,
+    Failed(String),
+}
+
+#[derive(Debug)]
+pub(super) enum BuiltinsLoadError {
+    Read {
+        entry: PathBuf,
+        resource: String,
+        detail: String,
+    },
+    Decode {
+        entry: PathBuf,
+        resource: String,
+        source: super::metadata::PackageFragmentDecodeError,
+    },
+}
+
+impl std::fmt::Display for BuiltinsLoadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read {
+                entry,
+                resource,
+                detail,
+            } => write!(
+                formatter,
+                "cannot read {resource} from {}: {detail}",
+                entry.display()
+            ),
+            Self::Decode {
+                entry,
+                resource,
+                source,
+            } => write!(
+                formatter,
+                "cannot decode {resource} from {}: {source}",
+                entry.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BuiltinsLoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Decode { source, .. } => Some(source),
+            Self::Read { .. } => None,
+        }
+    }
 }
 
 /// One resolved extension-function candidate: the owner class (internal name), the JVM method
@@ -1817,30 +1893,6 @@ pub(crate) struct ExternalCallableRealization {
     pub kind: ExternalCallableKind,
 }
 
-/// JVM-owned realization of one provider-normalized Kotlin property. FIR carries only the
-/// `ExternalPropertyId`; the read/write node determines which optional accessor is requested here.
-/// Each accessor may itself realize as a JVM field or method, but that distinction never crosses
-/// into the semantic provider interface.
-#[derive(Clone, Debug)]
-pub(crate) struct ExternalPropertyRealization {
-    /// The property's own Kotlin name, as its declaration's metadata published it.
-    ///
-    /// It is here because an accessor cannot answer for it, and a backend must not try to make one.
-    /// An accessor's name is a physical call target: a JVM realization may RENAME it
-    /// (`MutableList.removeAt` is realized as `java/util/List.remove`) and, where the signature
-    /// mentions a value class, kotlinc MANGLES it with a hash of the erasure (`UIntRange.start` is
-    /// `getStart-pVg5ArA`). Neither is recoverable from the spelling, and recovering is not merely
-    /// lossy but unsound: nothing in a name says the declaration came from Kotlin metadata, so a
-    /// `-` in it may belong to a Java accessor rather than to kotlinc.
-    ///
-    /// Nor is recovery needed. Metadata carries the source name and the provider decoded it before
-    /// interning. A consumer that wants the property reads this; one that wants to CALL an accessor
-    /// reads that accessor. Neither learns the other target's emit conventions.
-    pub name: String,
-    pub getter: crate::fir::ExternalCallableId,
-    pub setter: Option<crate::fir::ExternalCallableId>,
-}
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct ExternalPropertyKey {
     getter: crate::fir::ExternalCallableId,
@@ -1907,6 +1959,9 @@ pub struct Classpath {
     // class is PARSED once per process — shared across worker threads AND across classpaths that
     // include the same jar. L1 miss → per-entry L2 walk in classpath order → parse.
     local_cache: RefCell<crate::lru::LruCache<TypeName, Option<std::sync::Arc<ClassInfo>>>>,
+    /// First authoritative class parse failure observed by lazy lookup. Lookup stops at that entry;
+    /// post-resolution platform validation turns it into one terminal frontend diagnostic.
+    class_load_error: RefCell<Option<(TypeName, ReadError)>>,
     entry_caches: Vec<ClassCache>,
     /// Per-entry global body/class-bytes/builtins cache slots, resolved once at construction
     /// (parallel to `entries`); `None` for directory entries, which are per-test/module-local and
@@ -2003,6 +2058,40 @@ pub struct Classpath {
 }
 
 impl Classpath {
+    fn record_class_load_error(&self, internal: TypeName, error: ReadError) {
+        let mut first = self.class_load_error.borrow_mut();
+        if first.is_none() {
+            *first = Some((internal, error));
+        }
+    }
+
+    fn record_metadata_load_error(&self, failure: ClassMetadataLoadError) {
+        self.record_class_load_error(failure.0, failure.1);
+    }
+
+    pub(super) fn validate_lazy_class_loads(
+        &self,
+    ) -> Result<(), crate::libraries::PlatformInitializationError> {
+        let failure = self.class_load_error.borrow();
+        let Some((internal, error)) = failure.as_ref() else {
+            return Ok(());
+        };
+        let detail = match error {
+            ReadError::BadKotlinMetadata(error) => {
+                format!("invalid Kotlin metadata: {error:?}")
+            }
+            ReadError::NotAClass => "entry is not a JVM class".to_string(),
+            ReadError::Truncated => "truncated JVM class".to_string(),
+            ReadError::BadConstant(tag) => format!("invalid constant-pool tag {tag}"),
+        };
+        Err(crate::libraries::PlatformInitializationError {
+            message: format!(
+                "cannot load classpath declaration {}: {detail}",
+                internal.render()
+            ),
+        })
+    }
+
     /// Common declaration metadata distributed beside the selected Kotlin stdlib. The JVM stdlib
     /// intentionally omits optional expectations with no JVM actual; the sibling KLIB retains their
     /// common `expect` headers. Discovery is anchored to the explicit classpath entry, never to an
@@ -2085,7 +2174,7 @@ impl Classpath {
                 return None;
             }
             let klib = stdlib.parent()?.join("kotlin-stdlib-wasm-js.klib");
-            klib.is_file().then_some(klib)
+            klib.exists().then_some(klib)
         });
         // Per-cache LRU caps (entry counts). Sized ABOVE the conformance working set: entries are
         // Rc-shared records, so the practical bound is the queried vocabulary, and an undersized cap
@@ -2148,6 +2237,7 @@ impl Classpath {
             cache_key: cache_key.clone(),
             common_expectation_klib,
             local_cache: RefCell::new(crate::lru::LruCache::new(CLASS_CAP)),
+            class_load_error: RefCell::new(None),
             entry_caches: cache_key.iter().map(global_entry_class_cache).collect(),
             entry_body_caches,
             entry_class_bytes_caches,
@@ -2277,6 +2367,7 @@ impl Classpath {
         if let Some(identity) = self.external_property_ids.borrow().get(&key).copied() {
             return identity;
         }
+        let declares_value_class_storage = self.getter_declares_value_class_storage(getter);
         let mut properties = self.external_properties.borrow_mut();
         let identity = crate::fir::ExternalPropertyId::from_raw(
             u32::try_from(properties.len())
@@ -2286,6 +2377,7 @@ impl Classpath {
             name: name.to_string(),
             getter,
             setter,
+            declares_value_class_storage,
         });
         self.external_property_ids
             .borrow_mut()
@@ -2934,18 +3026,22 @@ impl Classpath {
     /// A parsed `.kotlin_builtins` fragment by package id (class internal-name id → supertypes+members),
     /// read once and cached. The single builtins entry point — both the collection hierarchy and a
     /// type's member API derive from it.
-    fn builtins_file_for_package(&self, package: TypeName) -> std::sync::Arc<BuiltinsFile> {
+    fn try_builtins_file_for_package(
+        &self,
+        package: TypeName,
+    ) -> Result<std::sync::Arc<BuiltinsFile>, std::sync::Arc<BuiltinsLoadError>> {
         let tree = self.package_tree();
         let catalog_complete = tree.incomplete_entries.is_empty();
         if catalog_complete {
             if let Some(m) = self.builtins.borrow().get(&package) {
-                return m.clone();
+                return Ok(m.clone());
             }
         }
         let path = Self::builtins_path_for_package(package);
-        let mut indices = tree
+        let declared_indices = tree
             .node_for_name(package)
             .map_or_else(Vec::new, |node| node.builtins_jars.clone());
+        let mut indices = declared_indices.clone();
         indices.extend(tree.incomplete_entries.iter().copied());
         indices.sort_unstable();
         indices.dedup();
@@ -2954,6 +3050,7 @@ impl Classpath {
             let Some(entry) = self.entries.get(i) else {
                 continue;
             };
+            let declared = declared_indices.contains(&i);
             // Per-entry global cache first: the parse of one entry's fragment is independent of the
             // classpath composition, so per-test classpath sets share it (see
             // [`global_entry_builtins_cache`]). The classpath-order walk still decides WHICH entry's
@@ -2982,21 +3079,51 @@ impl Classpath {
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                             EntryReadResult::Absent
                         }
-                        Err(_) => EntryReadResult::Failed,
+                        Err(error) => EntryReadResult::Failed(error.to_string()),
                     },
                     Entry::Jar(jar) => self.jar_entry_read(jar, &path),
                     // `.kotlin_builtins` fragments never live in the JDK jimage.
                     Entry::Jimage(_) | Entry::CtSym { .. } => EntryReadResult::Absent,
                 };
                 match read {
-                    EntryReadResult::Data(bytes) => (
-                        Some(std::sync::Arc::new(BuiltinsFile::from_package(
-                            super::metadata::parse_builtins(&bytes),
-                        ))),
-                        true,
+                    EntryReadResult::Data(bytes) => match super::metadata::parse_builtins(&bytes) {
+                        Ok(package) => (
+                            Ok(Some(std::sync::Arc::new(BuiltinsFile::from_package(
+                                package,
+                            )))),
+                            true,
+                        ),
+                        Err(error) => (
+                            Err(std::sync::Arc::new(BuiltinsLoadError::Decode {
+                                entry: entry.path().to_path_buf(),
+                                resource: path.clone(),
+                                source: error,
+                            })),
+                            true,
+                        ),
+                    },
+                    EntryReadResult::Absent if declared => (
+                        Err(std::sync::Arc::new(BuiltinsLoadError::Read {
+                            entry: entry.path().to_path_buf(),
+                            resource: path.clone(),
+                            detail: "selected builtins resource is absent".to_string(),
+                        })),
+                        false,
                     ),
-                    EntryReadResult::Absent => (None, true),
-                    EntryReadResult::Failed => (None, false),
+                    EntryReadResult::Absent => (Ok(None), true),
+                    EntryReadResult::Failed(error) if declared => (
+                        Err(std::sync::Arc::new(BuiltinsLoadError::Read {
+                            entry: entry.path().to_path_buf(),
+                            resource: path.clone(),
+                            detail: error,
+                        })),
+                        false,
+                    ),
+                    // An entry whose catalog could not be read is probed because it *might* own
+                    // this package. Failure to perform that speculative probe is already reported
+                    // by the classpath-entry diagnostic; it is not evidence that this particular
+                    // builtins resource was selected and then became unreadable.
+                    EntryReadResult::Failed(_) => (Ok(None), false),
                 }
             };
             let parsed = match global_slot {
@@ -3017,9 +3144,12 @@ impl Classpath {
                 }
                 None => read_and_parse().0,
             };
-            if let Some(file) = parsed {
-                found = Some(file);
-                break;
+            match parsed? {
+                Some(file) => {
+                    found = Some(file);
+                    break;
+                }
+                None => continue,
             }
         }
         let rc = found.unwrap_or_else(|| {
@@ -3030,7 +3160,28 @@ impl Classpath {
         if catalog_complete {
             self.builtins.borrow_mut().insert(package, rc.clone());
         }
-        rc
+        Ok(rc)
+    }
+
+    fn builtins_file_for_package(&self, package: TypeName) -> std::sync::Arc<BuiltinsFile> {
+        self.try_builtins_file_for_package(package)
+            .unwrap_or_else(|error| panic!("validated Kotlin builtins became unreadable: {error}"))
+    }
+
+    pub(super) fn validate_builtins(&self) -> Result<(), std::sync::Arc<BuiltinsLoadError>> {
+        let tree = self.package_tree();
+        let mut packages = tree
+            .packages
+            .iter()
+            .filter(|(_, node)| !node.builtins_jars.is_empty())
+            .map(|(&package, _)| crate::types::type_name_from(&tree.names, package))
+            .collect::<Vec<_>>();
+        packages.sort_by(|left, right| left.path_cmp(*right));
+        drop(tree);
+        for package in packages {
+            self.try_builtins_file_for_package(package)?;
+        }
+        Ok(())
     }
 
     pub(super) fn builtin_package_functions(
@@ -3545,6 +3696,9 @@ impl Classpath {
     }
 
     pub fn type_alias_target_name(&self, internal: TypeName) -> Option<TypeName> {
+        if self.class_load_error.borrow().is_some() {
+            return None;
+        }
         if let Some((target, _, _, _)) = self.nested_type_alias(internal) {
             return Some(target);
         }
@@ -3561,6 +3715,9 @@ impl Classpath {
         if let Some(node) = tree.node_for_name(package) {
             for &entry_id in &node.jars {
                 merge_alias_part(&mut index, &self.entry_package_types(entry_id, package));
+                if self.class_load_error.borrow().is_some() {
+                    return None;
+                }
             }
         }
         let index = std::sync::Arc::new(index);
@@ -3651,6 +3808,9 @@ impl Classpath {
     /// internalized; the leaf spelling is compared against actual alias declarations, so querying a
     /// unique property/function name cannot pollute the global type-name tree.
     pub fn type_alias_target_text(&self, internal: &str) -> Option<TypeName> {
+        if self.class_load_error.borrow().is_some() {
+            return None;
+        }
         if let Some(internal) = crate::types::existing_type_name(internal) {
             if let Some(target) = self.type_alias_target_name(internal) {
                 return Some(target);
@@ -3667,6 +3827,9 @@ impl Classpath {
             if let Some(node) = self.package_tree().node_for_name(package) {
                 for &entry_id in &node.jars {
                     merge_alias_part(&mut aliases, &self.entry_package_types(entry_id, package));
+                    if self.class_load_error.borrow().is_some() {
+                        return None;
+                    }
                 }
             }
             self.aliases
@@ -3694,9 +3857,15 @@ impl Classpath {
             // central-directory passes. Build the entry's authoritative alias table once, then project
             // the requested package by interned identity. `EntryCache` serializes the one cold build
             // across workers; subsequent package misses are an in-memory map filter.
-            let all = global_entry_types().get_or_build(&self.cache_key[entry_id], || {
+            let all = match global_entry_types().get_or_try_build(&self.cache_key[entry_id], || {
                 build_entry_types(&self.entries[entry_id], &packages)
-            });
+            }) {
+                Ok(index) => index,
+                Err(failure) => {
+                    self.record_metadata_load_error(failure);
+                    return std::sync::Arc::new(TypeIndex::default());
+                }
+            };
             std::sync::Arc::new(TypeIndex {
                 type_aliases: all
                     .type_aliases
@@ -3713,11 +3882,14 @@ impl Classpath {
                     .collect(),
             })
         } else {
-            std::sync::Arc::new(build_entry_package_types(
-                &self.entries[entry_id],
-                &packages,
-                package,
-            ))
+            let built = build_entry_package_types(&self.entries[entry_id], &packages, package);
+            match built {
+                Ok(index) => std::sync::Arc::new(index),
+                Err(failure) => {
+                    self.record_metadata_load_error(failure);
+                    return std::sync::Arc::new(TypeIndex::default());
+                }
+            }
         };
         if packages.complete {
             global_entry_pkg_types()
@@ -3829,6 +4001,9 @@ impl Classpath {
     /// The classpath's type index, shared via `Arc` so per-file callers pay a pointer bump, not a
     /// deep clone of the (large) class-name/alias maps. Cached per-instance and process-globally.
     pub fn scan_types(&self) -> std::sync::Arc<TypeIndex> {
+        if self.class_load_error.borrow().is_some() {
+            return std::sync::Arc::new(TypeIndex::default());
+        }
         let tree = self.package_tree();
         let catalog_complete = tree.incomplete_entries.is_empty();
         if catalog_complete {
@@ -3853,11 +4028,18 @@ impl Classpath {
         for (entry_id, e) in self.entries.iter().enumerate() {
             let packages = self.entry_packages(entry_id);
             let part = if tree.incomplete_entries.contains(&entry_id) {
-                std::sync::Arc::new(build_entry_types(e, &packages))
+                build_entry_types(e, &packages).map(std::sync::Arc::new)
             } else {
-                global_entry_types().get_or_build(&self.cache_key[entry_id], || {
+                global_entry_types().get_or_try_build(&self.cache_key[entry_id], || {
                     build_entry_types(e, &packages)
                 })
+            };
+            let part = match part {
+                Ok(part) => part,
+                Err(failure) => {
+                    self.record_metadata_load_error(failure);
+                    return std::sync::Arc::new(TypeIndex::default());
+                }
             };
             for (&alias, &target) in &part.type_aliases {
                 // First entry on the classpath wins — kotlinc/java class-resolution order (and this doc's
@@ -3940,7 +4122,7 @@ impl Classpath {
     fn jar_entry(&self, jar: &Path, name: &str) -> Option<Vec<u8>> {
         match self.jar_entry_read(jar, name) {
             EntryReadResult::Data(bytes) => Some(bytes),
-            EntryReadResult::Absent | EntryReadResult::Failed => None,
+            EntryReadResult::Absent | EntryReadResult::Failed(_) => None,
         }
     }
 
@@ -3949,25 +4131,27 @@ impl Classpath {
     fn jar_entry_read(&self, jar: &Path, name: &str) -> EntryReadResult {
         let mut archives = self.archives.borrow_mut();
         if !archives.contains_key(jar) {
-            let Ok(file) = File::open(jar) else {
-                return EntryReadResult::Failed;
+            let file = match File::open(jar) {
+                Ok(file) => file,
+                Err(error) => return EntryReadResult::Failed(error.to_string()),
             };
-            let Ok(archive) = zip::ZipArchive::new(file) else {
-                return EntryReadResult::Failed;
+            let archive = match zip::ZipArchive::new(file) {
+                Ok(archive) => archive,
+                Err(error) => return EntryReadResult::Failed(error.to_string()),
             };
             archives.insert(jar.to_path_buf(), archive);
         }
         let Some(archive) = archives.get_mut(jar) else {
-            return EntryReadResult::Failed;
+            return EntryReadResult::Failed("archive cache rejected the opened jar".to_string());
         };
         let mut entry = match archive.by_name(name) {
             Ok(entry) => entry,
             Err(zip::result::ZipError::FileNotFound) => return EntryReadResult::Absent,
-            Err(_) => return EntryReadResult::Failed,
+            Err(error) => return EntryReadResult::Failed(error.to_string()),
         };
         let mut buf = Vec::with_capacity(entry.size() as usize);
-        if entry.read_to_end(&mut buf).is_err() {
-            return EntryReadResult::Failed;
+        if let Err(error) = entry.read_to_end(&mut buf) {
+            return EntryReadResult::Failed(error.to_string());
         }
         EntryReadResult::Data(buf)
     }
@@ -4014,9 +4198,15 @@ impl Classpath {
                 Some(Entry::CtSym { path, release }) => self.ct_sym_bytes(path, *release, mapped),
                 None => None,
             };
-            bytes
-                .and_then(|bytes| parse_class(&bytes).ok())
-                .is_some_and(|class| class.this_class_matches(mapped))
+            match bytes.map(|bytes| parse_class(&bytes)) {
+                Some(Ok(class)) => class.this_class_matches(mapped),
+                Some(Err(error @ ReadError::BadKotlinMetadata(_))) => {
+                    self.record_class_load_error(type_name(mapped), error);
+                    true
+                }
+                Some(Err(_)) => false,
+                None => false,
+            }
         })
     }
 
@@ -4041,6 +4231,9 @@ impl Classpath {
         // a real JVM class, so map to the JVM name (`java/lang/Object`) before looking it up. The parsed
         // class is shared behind an `Arc`: L1↔L2 and every caller clone is a refcount bump, never a deep
         // copy of the (large) `ClassInfo`.
+        if self.class_load_error.borrow().is_some() {
+            return None;
+        }
         let internal_id = super::jvm_class_map::to_jvm_type_name(internal);
         if let Some(hit) = self.stub_overlay.borrow().get(&internal_id) {
             return Some(hit.clone());
@@ -4078,7 +4271,7 @@ impl Classpath {
                 None | Some(_) => {}
             }
             all_cached = false;
-            let read_and_parse = || {
+            let read_and_parse = || -> Result<Option<std::sync::Arc<ClassInfo>>, ReadError> {
                 let bytes = match e {
                     Entry::Dir(d) => std::fs::read(d.join(&name)).ok(),
                     Entry::Jar(j) => self.jar_entry(j, &name),
@@ -4090,28 +4283,40 @@ impl Classpath {
                 // A DIRECTORY entry on a case-INSENSITIVE filesystem (macOS APFS) happily serves
                 // `java/lang/error.class` for `Error.class` — verify the parsed class IS the
                 // requested one (JVM names are case-sensitive; `error` must not resolve to `Error`).
-                bytes
-                    .and_then(|b| parse_class(&b).ok())
-                    .filter(|ci| ci.this_class_matches(&internal))
-                    .map(std::sync::Arc::new)
+                let Some(bytes) = bytes else { return Ok(None) };
+                let class = match parse_class(&bytes) {
+                    Ok(class) => class,
+                    Err(error @ ReadError::BadKotlinMetadata(_)) => return Err(error),
+                    Err(_) => return Ok(None),
+                };
+                Ok(class
+                    .this_class_matches(&internal)
+                    .then(|| std::sync::Arc::new(class)))
             };
             let parsed = if incomplete {
                 let parsed = read_and_parse();
                 // Do not memoize an absence from an incomplete/recoverable entry. A successful
                 // parse is still recorded so `owning_entry` can identify its physical owner.
-                if parsed.is_some() {
+                if matches!(&parsed, Ok(Some(_))) {
                     l2.classes
                         .write()
                         .unwrap()
-                        .insert(internal_id, parsed.clone());
+                        .insert(internal_id, parsed.as_ref().ok().cloned().flatten());
                 }
                 parsed
             } else {
                 l2.get_or_build(internal_id, read_and_parse)
             };
-            if let Some(ci) = parsed {
-                found = Some(ci);
-                break;
+            match parsed {
+                Ok(Some(class)) => {
+                    found = Some(class);
+                    break;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.record_class_load_error(internal_id, error);
+                    break;
+                }
             }
         }
         cache_stat!(l2_class, all_cached);
@@ -4986,6 +5191,9 @@ impl Classpath {
     /// The per-entry ext contributions, each scanned once per process (cached by entry path via
     /// `global_entry_ext`) and fetched once per instance.
     fn ext_parts(&self) -> std::rc::Rc<Vec<std::sync::Arc<EntryExt>>> {
+        if self.class_load_error.borrow().is_some() {
+            return std::rc::Rc::new(Vec::new());
+        }
         let tree = self.package_tree();
         let catalog_complete = tree.incomplete_entries.is_empty();
         if catalog_complete {
@@ -4993,22 +5201,25 @@ impl Classpath {
                 return parts.clone();
             }
         }
-        let parts: std::rc::Rc<Vec<std::sync::Arc<EntryExt>>> = std::rc::Rc::new(
-            self.entries
-                .iter()
-                .enumerate()
-                .map(|(entry_id, e)| {
-                    let packages = self.entry_packages(entry_id);
-                    if tree.incomplete_entries.contains(&entry_id) {
-                        std::sync::Arc::new(build_entry_ext(e, &packages))
-                    } else {
-                        global_entry_ext().get_or_build(&self.cache_key[entry_id], || {
-                            build_entry_ext(e, &packages)
-                        })
-                    }
+        let mut built_parts = Vec::with_capacity(self.entries.len());
+        for (entry_id, entry) in self.entries.iter().enumerate() {
+            let packages = self.entry_packages(entry_id);
+            let part = if tree.incomplete_entries.contains(&entry_id) {
+                build_entry_ext(entry, &packages).map(std::sync::Arc::new)
+            } else {
+                global_entry_ext().get_or_try_build(&self.cache_key[entry_id], || {
+                    build_entry_ext(entry, &packages)
                 })
-                .collect(),
-        );
+            };
+            match part {
+                Ok(part) => built_parts.push(part),
+                Err(failure) => {
+                    self.record_metadata_load_error(failure);
+                    return std::rc::Rc::new(Vec::new());
+                }
+            }
+        }
+        let parts = std::rc::Rc::new(built_parts);
         if catalog_complete {
             *self.ext.borrow_mut() = Some(parts.clone());
         }
@@ -5029,64 +5240,6 @@ impl Default for Classpath {
     fn default() -> Self {
         Self::empty()
     }
-}
-
-/// Scan ONE classpath entry into its [`EntryExt`] contribution: collect each class's lean record, then
-/// index the statics reachable via each class's super-walk WITHIN this entry (a Kotlin multifile facade
-/// and its `*___*Kt` part classes are compiled into the same jar, so the chain never crosses entries).
-/// The `toplevel_only` filter is a whole-classpath decision, so it is deferred to the per-name lookup
-/// ([`Classpath::ext_toplevel_only`]) — here every receiver-taking static is recorded raw in `by_recv_raw`.
-fn build_entry_ext(entry: &Entry, packages: &JarPackages) -> EntryExt {
-    let mut names = NameTree::default();
-    let mut all: HashMap<NameId, ClassLite> = HashMap::new();
-    match entry {
-        Entry::Dir(d) => collect_dir(d, &mut names, &mut all),
-        Entry::Jar(j) => collect_jar(j, packages, &mut names, &mut all),
-        // No Kotlin extensions live in the JDK.
-        Entry::Jimage(_) | Entry::CtSym { .. } => {}
-    }
-    let mut ext = EntryExt::default();
-    for lite in all.values() {
-        ext.toplevel_names
-            .extend(lite.toplevel_names.iter().cloned());
-        ext.ext_names.extend(lite.ext_names.iter().cloned());
-    }
-    for (&root, lite) in &all {
-        let mut root_id = None;
-        let mut cur = Some(root);
-        let mut visited = std::collections::HashSet::new();
-        while let Some(cn) = cur {
-            if !visited.insert(cn) {
-                break;
-            }
-            let Some(c) = all.get(&cn) else { break };
-            for (mname, mdesc, _msig, public) in &c.statics {
-                if !lite.is_public && *public {
-                    continue;
-                }
-                let Some((first_param, _ret_desc)) = descriptor_parts(mdesc) else {
-                    continue;
-                };
-                let owner = match root_id {
-                    Some(id) => id,
-                    None => {
-                        let id = ext.owner_names.insert_from(&names, root);
-                        root_id = Some(id);
-                        id
-                    }
-                };
-                push_id_dedup(&mut ext.by_name, mname, owner);
-                if let Some(recv) = first_param {
-                    ext.by_recv_raw
-                        .entry(recv)
-                        .or_default()
-                        .push((mname.clone(), owner));
-                }
-            }
-            cur = c.super_class;
-        }
-    }
-    ext
 }
 
 /// A classpath entry's index into `Classpath::entries` — the jar/dir a package or class comes from,
@@ -5756,6 +5909,25 @@ impl super::inline::MethodBodies for Classpath {
                     .any(|f| f.name == name && f.descriptor == descriptor && f.is_private())
         })
     }
+    fn member_is_publicly_reachable(&self, owner: &str, name: &str, descriptor: &str) -> bool {
+        self.find(owner).is_some_and(|ci| {
+            // The OWNER must be public too. A public member of a package-private class is
+            // reachable only from that package, and a relocated bootstrap entry has no package.
+            ci.access & crate::jvm::classreader::ACC_PUBLIC != 0
+                && (ci
+                    .methods
+                    .iter()
+                    .any(|m| m.name == name && m.descriptor == descriptor && m.is_public())
+                    || ci
+                        .fields
+                        .iter()
+                        .any(|f| f.name == name && f.descriptor == descriptor && f.is_public()))
+        })
+    }
+    fn class_is_publicly_reachable(&self, class: &str) -> bool {
+        self.find(class)
+            .is_some_and(|ci| ci.access & crate::jvm::classreader::ACC_PUBLIC != 0)
+    }
     fn property_read_access(
         &self,
         owner: &str,
@@ -6031,128 +6203,6 @@ fn capitalize(name: &str) -> String {
     }
 }
 
-/// A lean per-class record for building the extension index — only what's needed to follow facade
-/// superclass chains and index static methods (no fields, no instance methods).
-struct ClassLite {
-    is_public: bool,
-    super_class: Option<NameId>,
-    /// `(name, descriptor, generic-signature, is_public)` of each static method (excl `<init>`/`<clinit>`).
-    /// Non-public ones (`@InlineOnly`) are kept for the inliner; the flag gates normal resolution.
-    statics: Vec<(String, String, Option<String>, bool)>,
-    /// JVM names of functions `@Metadata` marks as genuine TOP-LEVEL (NO extension receiver). A top-level
-    /// generic whose first parameter erases to `Object` (`assertEquals<T>(T, T, String)`) is otherwise
-    /// indistinguishable in bytecode from an extension, so a name that is ONLY ever top-level must NOT be
-    /// keyed by its first parameter in `by_recv`. Name-keyed (not name+desc): `@Metadata` often omits the
-    /// method descriptor (`jvm_desc=None`).
-    toplevel_names: std::collections::HashSet<String>,
-    /// JVM names `@Metadata` marks as EXTENSIONS (receiver of any kind — class OR type parameter). A name
-    /// that is an extension anywhere is NEVER excluded from `by_recv` (so `takeIf`/`uppercase` stay indexed).
-    ext_names: std::collections::HashSet<String>,
-}
-
-fn collect_class_bytes(bytes: &[u8], names: &mut NameTree, all: &mut HashMap<NameId, ClassLite>) {
-    let Ok(ci) = parse_class(bytes) else { return };
-    let this_class = names.insert(&ci.this_class());
-    let super_class = ci.super_class().map(|s| names.insert(&s));
-    let statics = ci
-        .methods
-        .iter()
-        .filter(|m| m.is_static() && !m.name.starts_with('<'))
-        .map(|m| {
-            (
-                m.name.clone(),
-                m.descriptor.clone(),
-                m.signature.clone(),
-                m.is_public(),
-            )
-        })
-        .collect();
-    // `@Metadata`-declared functions of this facade/part, split by whether they have an extension receiver
-    // (of any kind — class or type parameter). Lets the ext index keep a genuine top-level generic out of
-    // `by_recv` (its first JVM param looks like a receiver) without excluding a real extension.
-    let mut toplevel_names = std::collections::HashSet::new();
-    let mut ext_names = std::collections::HashSet::new();
-    for mf in super::metadata::package_functions(&ci)
-        .iter()
-        .chain(super::metadata::class_functions(&ci).iter())
-    {
-        if mf.is_extension() {
-            ext_names.insert(mf.jvm_name.clone());
-        } else {
-            toplevel_names.insert(mf.jvm_name.clone());
-        }
-    }
-    all.insert(
-        this_class,
-        ClassLite {
-            is_public: ci.is_public(),
-            super_class,
-            statics,
-            toplevel_names,
-            ext_names,
-        },
-    );
-}
-
-fn collect_dir(dir: &Path, names: &mut NameTree, all: &mut HashMap<NameId, ClassLite>) {
-    let mut ancestors = HashSet::new();
-    collect_dir_visited(dir, names, all, &mut ancestors);
-}
-
-fn collect_dir_visited(
-    dir: &Path,
-    names: &mut NameTree,
-    all: &mut HashMap<NameId, ClassLite>,
-    ancestors: &mut HashSet<PathBuf>,
-) {
-    let Ok(Some(canonical)) = enter_directory(dir, ancestors) else {
-        return;
-    };
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        ancestors.remove(&canonical);
-        return;
-    };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            collect_dir_visited(&p, names, all, ancestors);
-        } else if p.extension().map_or(false, |x| x == "class") {
-            if let Ok(b) = std::fs::read(&p) {
-                collect_class_bytes(&b, names, all);
-            }
-        }
-    }
-    ancestors.remove(&canonical);
-}
-
-fn collect_jar(
-    jar: &Path,
-    packages: &JarPackages,
-    names: &mut NameTree,
-    all: &mut HashMap<NameId, ClassLite>,
-) {
-    let Ok(f) = File::open(jar) else { return };
-    let Ok(mut archive) = zip::ZipArchive::new(f) else {
-        return;
-    };
-    for i in 0..archive.len() {
-        let wanted = archive
-            .name_for_index(i)
-            .and_then(class_internal_from_entry)
-            .is_some_and(|internal| ext_scan_wanted(internal, packages));
-        if !wanted {
-            continue;
-        }
-        let Ok(mut entry) = archive.by_index(i) else {
-            continue;
-        };
-        let mut buf = Vec::new();
-        if entry.read_to_end(&mut buf).is_ok() {
-            collect_class_bytes(&buf, names, all);
-        }
-    }
-}
-
 fn descriptor_parts(desc: &str) -> Option<(Option<String>, String)> {
     let params = desc.strip_prefix('(')?;
     let ret = params.find(')')?;
@@ -6185,196 +6235,6 @@ fn read_one_type<'a>(s: &mut &'a str) -> &'a str {
             t
         }
         None => "",
-    }
-}
-
-/// `Xxx.class` entry name (jar/jimage path) → internal name, or `None` if not an indexable class.
-fn class_internal_from_entry(name: &str) -> Option<&str> {
-    name.strip_suffix(".class").filter(|s| !s.is_empty())
-}
-
-fn ext_scan_wanted(internal: &str, packages: &JarPackages) -> bool {
-    if packages.contains_facade(internal) {
-        return true;
-    }
-    internal
-        .rsplit('/')
-        .next()
-        .unwrap_or(internal)
-        .contains("Kt")
-}
-
-fn type_alias_scan_wanted(internal: &str, packages: &JarPackages) -> bool {
-    packages.contains_facade(internal) || is_type_aliases_kt(internal)
-}
-
-/// Parse Kotlin type aliases from one metadata-bearing classfile. Package facades contribute
-/// top-level aliases; classifier files contribute aliases declared directly in that classifier.
-fn parse_aliases_from_bytes(bytes: &[u8], idx: &mut TypeIndex) {
-    let Ok(ci) = parse_class(bytes) else { return };
-    for alias in super::metadata::metadata_type_aliases(&ci) {
-        let name = type_name(&alias.name);
-        idx.type_aliases.insert(name, type_name(&alias.target));
-        idx.alias_expansions.insert(
-            name,
-            (
-                type_name(&alias.target),
-                alias.formals.clone(),
-                alias.expansion,
-                alias.expansion_spelling.clone(),
-            ),
-        );
-    }
-}
-
-/// A Kotlin FILE FACADE (`*Kt`) — where a top-level `typealias` is recorded. Parsed for aliases; every
-/// other class is indexed by name alone. (`TypeAliasesKt` is just the stdlib's conventional facade name;
-/// a general library's alias lives in its own `<File>Kt` facade.)
-fn is_type_aliases_kt(internal: &str) -> bool {
-    internal
-        .rsplit('/')
-        .next()
-        .unwrap_or(internal)
-        .ends_with("Kt")
-}
-
-/// Build ONE classpath entry's type-alias table — the per-entry unit `EntryCache` memoizes (built once
-/// per jar, race-free). The JDK jimage carries no Kotlin metadata, so it contributes nothing.
-fn build_entry_types(entry: &Entry, packages: &JarPackages) -> TypeIndex {
-    let mut idx = TypeIndex::default();
-    match entry {
-        Entry::Dir(d) => scan_types_dir(d, &mut idx),
-        Entry::Jar(j) => scan_types_jar(j, packages, &mut idx),
-        Entry::Jimage(_) | Entry::CtSym { .. } => {}
-    }
-    idx
-}
-
-fn build_entry_package_types(
-    entry: &Entry,
-    packages: &JarPackages,
-    package: TypeName,
-) -> TypeIndex {
-    let mut index = TypeIndex::default();
-    match entry {
-        Entry::Dir(directory) => {
-            if let Some(entry) = packages.entry_name(package) {
-                for &facade in &entry.facades {
-                    let path = directory.join(format!("{}.class", packages.names.render(facade)));
-                    if let Ok(bytes) = std::fs::read(path) {
-                        parse_aliases_from_bytes(&bytes, &mut index);
-                    }
-                }
-            }
-        }
-        Entry::Jar(jar) => {
-            // Archive entry names are an external classfile format and therefore require text.
-            scan_types_jar_package(jar, packages, &package.render(), &mut index)
-        }
-        Entry::Jimage(_) | Entry::CtSym { .. } => {}
-    }
-    index
-}
-
-fn scan_types_dir(dir: &Path, idx: &mut TypeIndex) {
-    let mut ancestors = HashSet::new();
-    scan_types_dir_rooted(dir, dir, idx, &mut ancestors);
-}
-
-/// Walk `dir` for `*TypeAliasesKt.class` files and decode their Kotlin type aliases. Other classes are
-/// skipped — the classpath no longer builds a name → internal map (it was dead; import-driven resolution
-/// goes through `resolve_type` / the ext index).
-fn scan_types_dir_rooted(
-    root: &Path,
-    dir: &Path,
-    idx: &mut TypeIndex,
-    ancestors: &mut HashSet<PathBuf>,
-) {
-    let Ok(Some(canonical)) = enter_directory(dir, ancestors) else {
-        return;
-    };
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        ancestors.remove(&canonical);
-        return;
-    };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            scan_types_dir_rooted(root, &p, idx, ancestors);
-        } else if p.extension().map_or(false, |x| x == "class") {
-            let Ok(rel) = p.strip_prefix(root) else {
-                continue;
-            };
-            let rel = rel.to_string_lossy().replace('\\', "/");
-            let Some(internal) = class_internal_from_entry(&rel) else {
-                continue;
-            };
-            if is_type_aliases_kt(internal) {
-                if let Ok(b) = std::fs::read(&p) {
-                    parse_aliases_from_bytes(&b, idx);
-                }
-            }
-        }
-    }
-    ancestors.remove(&canonical);
-}
-
-fn scan_types_jar(jar: &Path, packages: &JarPackages, idx: &mut TypeIndex) {
-    let Ok(f) = File::open(jar) else { return };
-    let Ok(mut archive) = zip::ZipArchive::new(f) else {
-        return;
-    };
-    for i in 0..archive.len() {
-        let wanted = archive
-            .name_for_index(i)
-            .and_then(class_internal_from_entry)
-            .is_some_and(|internal| type_alias_scan_wanted(internal, packages));
-        if !wanted {
-            continue;
-        }
-        let Ok(mut entry) = archive.by_index(i) else {
-            continue;
-        };
-        let mut buf = Vec::new();
-        if entry.read_to_end(&mut buf).is_ok() {
-            parse_aliases_from_bytes(&buf, idx);
-        }
-    }
-}
-
-fn scan_types_jar_package(
-    jar: &Path,
-    packages: &JarPackages,
-    package: &str,
-    index: &mut TypeIndex,
-) {
-    let Ok(file) = File::open(jar) else { return };
-    let Ok(mut archive) = zip::ZipArchive::new(file) else {
-        return;
-    };
-    for entry_id in 0..archive.len() {
-        let wanted = archive
-            .name_for_index(entry_id)
-            .and_then(class_internal_from_entry)
-            .is_some_and(|internal| {
-                // A facade the catalog attributes to this package is in scope wherever its class
-                // file sits — `@JvmPackageName` emits `package kotlin.test`'s facade into
-                // `kotlin/test/junit5/annotations/`. The name-shape rung stays for a package whose
-                // facades were never cataloged (an entry with no `kotlin_module`).
-                packages.declares_facade(package, internal)
-                    || (internal.rsplit_once('/').map_or("", |(parent, _)| parent) == package
-                        && is_type_aliases_kt(internal))
-            });
-        if !wanted {
-            continue;
-        }
-        let Ok(mut entry) = archive.by_index(entry_id) else {
-            continue;
-        };
-        let mut bytes = Vec::new();
-        if entry.read_to_end(&mut bytes).is_ok() {
-            parse_aliases_from_bytes(&bytes, index);
-        }
     }
 }
 
@@ -6594,7 +6454,7 @@ mod fq_tests {
     }
 
     #[test]
-    fn package_catalog_selects_jvmname_facades_for_entry_indexes() {
+    fn package_catalog_records_jvmname_facades() {
         let module = crate::metadata::module::build_kotlin_module(&[(
             "p".to_string(),
             vec!["Utils".to_string(), "HelpersKt".to_string()],
@@ -6603,14 +6463,7 @@ mod fq_tests {
         record_kotlin_module(&module, &mut packages);
 
         assert!(packages.contains_facade("p/Utils"));
-        assert!(ext_scan_wanted("p/Utils", &packages));
-        assert!(type_alias_scan_wanted("p/Utils", &packages));
-        assert!(ext_scan_wanted("p/HelpersKt", &packages));
-        assert!(!ext_scan_wanted("p/Regular", &packages));
-
-        let empty = JarPackages::default();
-        assert!(ext_scan_wanted("p/HelpersKt", &empty));
-        assert!(!ext_scan_wanted("p/Regular", &empty));
+        assert!(packages.contains_facade("p/HelpersKt"));
     }
 
     #[test]
@@ -6716,11 +6569,15 @@ mod fq_tests {
         assert!(cache
             .get_or_build(missing, || {
                 builds.set(builds.get() + 1);
-                None
+                Ok(None)
             })
+            .expect("cache build succeeds")
             .is_none());
         assert!(cache
-            .get_or_build(missing, || panic!("cached absence must not rebuild"))
+            .get_or_build(missing, || -> Result<_, ReadError> {
+                panic!("cached absence must not rebuild")
+            })
+            .expect("cached lookup succeeds")
             .is_none());
         assert_eq!(builds.get(), 1);
     }
@@ -7127,6 +6984,25 @@ mod fq_tests {
         directory
     }
 
+    fn write_invalid_package_facade(directory: &Path, internal: &str) {
+        let malformed_type_parameter = [
+            0x00, // empty StringTableTypes prefix
+            0x1a, 0x08, // Package.function
+            0x22, 0x06, // Function.type_parameter
+            0x08, 0x00, // id
+            0x10, 0x00, // name
+            0x20, 0x03, // invalid variance enum
+        ];
+        let d1 = std::iter::once('\0')
+            .chain(malformed_type_parameter.into_iter().map(char::from))
+            .collect::<String>();
+        let mut class = crate::jvm::classfile::ClassWriter::new(internal, "java/lang/Object");
+        class.set_kotlin_metadata(2, &[2, 2, 0], 0, &[d1], &[]);
+        let file = directory.join(format!("{internal}.class"));
+        std::fs::create_dir_all(file.parent().expect("facade package")).expect("create package");
+        std::fs::write(file, class.finish()).expect("write invalid Kotlin facade");
+    }
+
     #[test]
     fn open_jar_cache_is_bounded_and_skips_unknown_packages() {
         let directory = test_temp_dir("open-jar-cache");
@@ -7308,6 +7184,101 @@ mod fq_tests {
     }
 
     #[test]
+    fn invalid_kotlin_metadata_stops_before_a_shadowed_class() {
+        let root = test_temp_dir("invalid-metadata-shadow");
+        let earlier = root.join("earlier");
+        let later = root.join("later");
+        std::fs::create_dir_all(earlier.join("shadow")).expect("create earlier package");
+        std::fs::create_dir_all(later.join("shadow")).expect("create later package");
+
+        let malformed_type_parameter = [
+            0x00, // empty StringTableTypes prefix
+            0x2a, 0x06, // Class.type_parameter
+            0x08, 0x00, // id
+            0x10, 0x00, // name
+            0x20, 0x03, // invalid variance enum
+        ];
+        let d1 = std::iter::once('\0')
+            .chain(malformed_type_parameter.into_iter().map(char::from))
+            .collect::<String>();
+        let mut invalid =
+            crate::jvm::classfile::ClassWriter::new("shadow/Chosen", "java/lang/Object");
+        invalid.set_kotlin_metadata(1, &[2, 2, 0], 0, &[d1], &[]);
+        std::fs::write(earlier.join("shadow/Chosen.class"), invalid.finish())
+            .expect("write invalid Kotlin class");
+        let valid =
+            crate::jvm::classfile::ClassWriter::new("shadow/Chosen", "java/lang/Object").finish();
+        std::fs::write(later.join("shadow/Chosen.class"), valid)
+            .expect("write shadowed valid class");
+
+        let classpath = Classpath::new(vec![earlier, later]);
+        assert!(classpath.find("shadow/Chosen").is_none());
+        assert_eq!(
+            classpath.validate_lazy_class_loads(),
+            Err(crate::libraries::PlatformInitializationError {
+                message: "cannot load classpath declaration shadow/Chosen: invalid Kotlin metadata: InvalidVariance(3)".to_string(),
+            })
+        );
+
+        drop(classpath);
+        std::fs::remove_dir_all(root).expect("remove classpath directories");
+    }
+
+    #[test]
+    fn invalid_alias_metadata_is_not_published_to_the_global_index() {
+        let directory = test_temp_dir("invalid-alias-metadata");
+        write_invalid_package_facade(&directory, "shadow/TypeAliasesKt");
+        let classpath = Classpath::new(vec![directory.clone()]);
+        let cache_key = classpath.cache_key[0].clone();
+
+        assert!(classpath.scan_types().is_empty());
+        assert_eq!(
+            classpath.validate_lazy_class_loads(),
+            Err(crate::libraries::PlatformInitializationError {
+                message: "cannot load classpath declaration shadow/TypeAliasesKt: invalid Kotlin metadata: InvalidVariance(3)".to_string(),
+            })
+        );
+        assert!(
+            !global_entry_types()
+                .map
+                .read()
+                .unwrap()
+                .contains_key(&cache_key),
+            "a failed alias scan must not publish an empty process-global index"
+        );
+
+        drop(classpath);
+        std::fs::remove_dir_all(directory).expect("remove classpath directory");
+    }
+
+    #[test]
+    fn invalid_extension_metadata_is_not_published_to_the_global_index() {
+        let directory = test_temp_dir("invalid-extension-metadata");
+        write_invalid_package_facade(&directory, "shadow/ExtensionsKt");
+        let classpath = Classpath::new(vec![directory.clone()]);
+        let cache_key = classpath.cache_key[0].clone();
+
+        assert!(classpath.ext_parts().is_empty());
+        assert_eq!(
+            classpath.validate_lazy_class_loads(),
+            Err(crate::libraries::PlatformInitializationError {
+                message: "cannot load classpath declaration shadow/ExtensionsKt: invalid Kotlin metadata: InvalidVariance(3)".to_string(),
+            })
+        );
+        assert!(
+            !global_entry_ext()
+                .map
+                .read()
+                .unwrap()
+                .contains_key(&cache_key),
+            "a failed extension scan must not publish an empty process-global index"
+        );
+
+        drop(classpath);
+        std::fs::remove_dir_all(directory).expect("remove classpath directory");
+    }
+
+    #[test]
     fn incomplete_entry_reloads_a_positive_class_probe() {
         let directory = test_temp_dir("incomplete-positive-recovery");
         let broken_package = directory.join("broken");
@@ -7392,8 +7363,8 @@ mod fq_tests {
         invalid[0] = 0;
         std::fs::write(&class_file, invalid).expect("write incomplete class");
         let classpath = std::rc::Rc::new(Classpath::new(vec![directory.clone()]));
-        let libraries = crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone());
-
+        let libraries =
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone()).expect("provider");
         let namespace = SymbolNamespace::Package(type_name("recovered"));
         assert!(libraries.symbols(namespace, "Later").classifier.is_none());
         std::fs::write(&class_file, valid).expect("recover class");
@@ -7661,13 +7632,14 @@ mod fq_tests {
             .entry(pkg)
             .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(None)))
             .clone();
-        *slot.lock().unwrap() = Some(Some(file.clone()));
+        *slot.lock().unwrap() = Some(Ok(Some(file.clone())));
         let hit = global_entry_builtins_cache(&b.cache_key[1])
             .read()
             .unwrap()
             .get(&pkg)
             .cloned()
             .and_then(|slot| slot.lock().unwrap().clone())
+            .and_then(Result::ok)
             .flatten()
             .expect("builtins fragment shared across classpath sets");
         assert!(std::sync::Arc::ptr_eq(&hit, &file));
@@ -7675,6 +7647,56 @@ mod fq_tests {
         assert!(b.entry_body_caches[0].is_none());
         assert!(b.entry_class_bytes_caches[0].is_none());
         assert!(b.entry_builtins_caches[0].is_none());
+    }
+
+    #[test]
+    fn selected_corrupt_builtins_fail_platform_initialization_exactly() {
+        let directory = test_temp_dir("corrupt-builtins");
+        let package = directory.join("broken");
+        std::fs::create_dir(&package).expect("create builtins package");
+        let fragment = package.join("broken.kotlin_builtins");
+        std::fs::write(&fragment, [0, 0, 0, 0, 0x0a]).expect("write corrupt builtins");
+
+        let result =
+            crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(Classpath::new(vec![
+                directory.clone(),
+            ])));
+        assert_eq!(
+            result.map(|_| ()),
+            Err(crate::libraries::PlatformInitializationError {
+                message: format!(
+                    "cannot load Kotlin builtins dependency: cannot decode broken/broken.kotlin_builtins from {}: truncated package-fragment string table length at byte 1",
+                    directory.display()
+                ),
+            })
+        );
+
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn selected_unreadable_builtins_fail_platform_initialization_exactly() {
+        let directory = test_temp_dir("unreadable-builtins");
+        let package = directory.join("broken");
+        std::fs::create_dir(&package).expect("create builtins package");
+        let fragment = package.join("broken.kotlin_builtins");
+        std::fs::write(&fragment, [0, 0, 0, 0]).expect("write indexed builtins");
+        let classpath = std::rc::Rc::new(Classpath::new(vec![directory.clone()]));
+        let _ = classpath.package_tree();
+        std::fs::remove_file(&fragment).expect("make indexed builtins unreadable");
+
+        let result = crate::jvm::jvm_libraries::JvmLibraries::new(classpath);
+        assert_eq!(
+            result.map(|_| ()),
+            Err(crate::libraries::PlatformInitializationError {
+                message: format!(
+                    "cannot load Kotlin builtins dependency: cannot read broken/broken.kotlin_builtins from {}: selected builtins resource is absent",
+                    directory.display()
+                ),
+            })
+        );
+
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]
@@ -8084,7 +8106,7 @@ mod fq_tests {
             return;
         };
         let cp = std::rc::Rc::new(Classpath::new(vec![jar]));
-        let libs = crate::jvm::jvm_libraries::JvmLibraries::new(cp.clone());
+        let libs = crate::jvm::jvm_libraries::JvmLibraries::new(cp.clone()).expect("provider");
         let kotlin = SymbolNamespace::Package(type_name("kotlin"));
         let inline_only = libs.symbols(kotlin, "run");
         assert!(
@@ -8173,10 +8195,12 @@ mod fq_tests {
         let cp = Classpath::new(vec![jar]);
         // In scope: emptyList (kotlin/collections) resolves via the tree-driven per-package lookup.
         let coll = vec![type_name("kotlin/collections")];
-        assert!(cp
-            .functions_in_scope("emptyList", &coll)
-            .iter()
-            .any(|c| c.name == "emptyList"));
+        let empty_list = cp.functions_in_scope("emptyList", &coll);
+        assert!(
+            empty_list.iter().any(|c| c.name == "emptyList"),
+            "classpath initialization: {:?}",
+            cp.validate_lazy_class_loads()
+        );
         // Out of scope: the same name does NOT resolve (kotlinc import visibility) — the lookup only
         // consults the given packages' facades, never the whole classpath.
         let text = vec![type_name("kotlin/text")];
@@ -8207,7 +8231,11 @@ mod fq_tests {
             .collect();
         eager.sort();
         lazy.sort();
-        assert!(!lazy.is_empty(), "map is an Iterable extension in scope");
+        assert!(
+            !lazy.is_empty(),
+            "map is an Iterable extension in scope; classpath initialization: {:?}",
+            cp.validate_lazy_class_loads()
+        );
         assert_eq!(lazy, eager, "tree-scoped == scope-filtered eager index");
         // Owner query agrees on the PUBLIC facade: the eager index records the multifile PART
         // (`…Kt__…`), the tree the `__`-stripped public facade (`…Kt`) — the form `meta_functions` and
@@ -8313,7 +8341,8 @@ mod fq_tests {
         let lib =
             crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(Classpath::new(vec![
                 jar,
-            ])));
+            ])))
+            .expect("provider");
         // Classifier namespace: a class fqn resolves its classifier, no callables.
         let c = lib.symbols(SymbolNamespace::Package(type_name("kotlin")), "Pair");
         assert!(c.classifier.is_some(), "kotlin/Pair is a classifier");
@@ -8340,7 +8369,6 @@ mod fq_tests {
             "map resolves as an extension callable"
         );
     }
-
     #[test]
     fn builtin_member_misses_are_cached() {
         let cp = Classpath::empty();

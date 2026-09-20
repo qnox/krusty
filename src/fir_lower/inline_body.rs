@@ -240,7 +240,7 @@ impl BodyLowering<'_> {
             body: normal,
             catches: vec![crate::ir::IrCatch {
                 var: caught,
-                name: None,
+                binding: None,
                 exc_internal: caught_internal,
                 body: failed,
             }],
@@ -620,7 +620,7 @@ impl BodyLowering<'_> {
                 let rethrow = self.ir.add_expr(IrExpr::Throw { operand: rethrown });
                 vec![crate::ir::IrCatch {
                     var: caught,
-                    name: None,
+                    binding: None,
                     exc_internal: cause_ty.non_null().obj_internal()?,
                     body: self.ir.add_expr(IrExpr::Block {
                         stmts: vec![record, rethrow],

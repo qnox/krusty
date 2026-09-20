@@ -20,6 +20,7 @@ impl ResolvedValueParameterFlags {
     const IMPLICIT_INTEGER_COERCION: u8 = 1 << 4;
     const EXACT: u8 = 1 << 5;
     const NO_INFER: u8 = 1 << 6;
+    const MATERIALIZED_LAMBDA: u8 = 1 << 7;
 
     pub const fn new(vararg: bool, default: bool, property: bool, mutable_property: bool) -> Self {
         let mut bits = 0;
@@ -85,6 +86,21 @@ impl ResolvedValueParameterFlags {
 
     pub const fn is_no_infer(self) -> bool {
         self.0 & Self::NO_INFER != 0
+    }
+
+    pub const fn with_materialized_lambda(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.0 |= Self::MATERIALIZED_LAMBDA;
+        }
+        self
+    }
+
+    /// The declaration wrote `noinline` on this parameter, so its argument is a real closure with
+    /// a local of its own. An ordinary inline function parameter is spliced at each use inside the
+    /// body and owns no local at all. The two are indistinguishable by TYPE — both are
+    /// function-typed — so an expansion that needs the difference must read it here.
+    pub const fn materializes_its_lambda(self) -> bool {
+        self.0 & Self::MATERIALIZED_LAMBDA != 0
     }
 }
 

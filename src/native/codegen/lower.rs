@@ -1267,7 +1267,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             } => self.ref_set(holder, elem, value),
             IrExpr::EnumEntry { classifier, name } => self.enum_entry(classifier, &name),
             IrExpr::EnumValues { classifier } => self.enum_values(classifier),
-            IrExpr::EnumValueOf { classifier, arg } => self.enum_value_of(classifier, arg),
+            // `declaration` separates the classifier's own `E.valueOf(name)` from the standard
+            // library's INLINE `enumValueOf<E>(name)`. Both name the same lookup by entry name, and
+            // the two differ only in what a consumer that records SOURCE POSITIONS attributes an
+            // inline expansion to. This generator records none, so the lookup it emits is the same
+            // one either way; the distinction is read where it is meaningful, not repeated here.
+            IrExpr::EnumValueOf {
+                classifier,
+                arg,
+                declaration: _,
+            } => self.enum_value_of(classifier, arg),
             IrExpr::EnclosingInstance {
                 receiver, inner, ..
             } => self.enclosing_instance(receiver, inner),
@@ -2016,6 +2025,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             Callee::Super {
                 owner,
                 name,
+                kind,
                 source,
                 params,
                 ..
@@ -2023,7 +2033,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let Some(receiver) = dispatch_receiver else {
                     return Err(format!("a `super` call without a receiver (`{name}`)"));
                 };
-                self.direct_call(*owner, name, *source, Some(params), receiver, args)
+                self.direct_call(*owner, name, *kind, *source, Some(params), receiver, args)
             }
             Callee::Virtual {
                 owner,
@@ -2045,7 +2055,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let Some(receiver) = dispatch_receiver else {
                     return Err(format!("a `super` call without a receiver (`{name}`)"));
                 };
-                self.direct_call(*owner, name, *source, None, receiver, args)
+                // A diamond `super.f()` to a superinterface's DEFAULT METHOD. `Callee::Special`
+                // carries no accessor kind because it never names one.
+                self.direct_call(
+                    *owner,
+                    name,
+                    crate::ir::IrSuperCallKind::Function,
+                    *source,
+                    None,
+                    receiver,
+                    args,
+                )
             }
             Callee::Intrinsic { operation, ret } => {
                 self.intrinsic(*operation, *ret, dispatch_receiver, args)
