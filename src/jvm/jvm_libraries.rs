@@ -5807,16 +5807,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn is_erased_contract_callable(&self, callable: &crate::libraries::LibraryCallable) -> bool {
-        // Contract erasure is a source-language decision, but the physical declaration owner is a
-        // JVM-library fact. Keep that fact here: target-neutral resolve code sees only the selected
-        // callable and never embeds or reports the runtime facade class name. Requiring both the
-        // source name and declaring package prevents an unrelated library callable from acquiring
-        // intrinsic behavior merely because one component happens to match.
-        callable.name == "contract"
-            && callable
-                .owner
-                .parent()
-                .is_some_and(|package| package.matches("kotlin/contracts"))
+        crate::libraries::builtin_realization::is_erased_contract_callable(callable)
     }
 
     fn implicit_common_supertypes(&self, types: &[Ty]) -> Vec<crate::libraries::SemanticSupertype> {

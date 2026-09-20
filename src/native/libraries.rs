@@ -782,6 +782,20 @@ impl SemanticPlatform for NativeLibraries {
         Some(Ty::obj("kotlin/reflect/KClass"))
     }
 
+    /// The classifier a function value of this ARITY is, for an applicability test that has to
+    /// decide before the value has a type of its own: a bare `{ … }` records `Ty::Error` until an
+    /// expected type types it, so a parameter is admitted by its SHAPE. The JVM answers with its
+    /// own `kotlin.jvm.functions.FunctionN` realization; this target's is Kotlin's declaration.
+    fn function_type(&self, arity: usize) -> Option<Ty> {
+        Some(Ty::obj(&format!("kotlin/Function{arity}")))
+    }
+
+    /// `contract { … }` states a fact about the function it appears in and emits nothing on any
+    /// target, so its call is erased rather than lowered.
+    fn is_erased_contract_callable(&self, callable: &crate::libraries::LibraryCallable) -> bool {
+        crate::libraries::builtin_realization::is_erased_contract_callable(callable)
+    }
+
     /// `A::x` is a `kotlin.reflect.KProperty1<A, Int>` here as it is everywhere: the classifier is
     /// Kotlin's own, the klib declares it, and nothing about it is the JVM's. Without an answer a
     /// property reference had no type at all and read as an unresolved name.
@@ -1116,6 +1130,16 @@ fn class_members(
             info.flags.operator = member.is_operator;
             info.flags.infix = member.is_infix;
             info.flags.is_abstract = member.is_abstract;
+            // The SOURCE call shape: how many parameters are required, what each is named, which
+            // declare a default. Without it a call site could neither name an argument nor be told
+            // which it omitted — `ContractBuilder.callsInPlace(b)` reported "no value passed for
+            // parameter 'p1'", naming a parameter the declaration never had.
+            info.call_sig = crate::libraries::CallSig::metadata_member(
+                member.params.len(),
+                member.param_names.clone(),
+                member.param_defaults.clone(),
+                member.vararg,
+            );
             if !formals.is_empty() {
                 info.generic_sig = Some(crate::libraries::GenericSig {
                     formal_bounds: member
@@ -1584,6 +1608,32 @@ mod compiles_against_the_klib {
             (
                 "fun box(): String { val s: String? = null; return s + \"OK\" }\n",
                 "string concatenation through its declaration",
+            ),
+            // A CONTRACT. `contract { … }` states a fact about its enclosing function and emits
+            // nothing on any target, so its call is erased; the rule identifying it read only the
+            // JVM's facade spelling of the owner. `callsInPlace` inside it needs three more
+            // things at once: the block's receiver, the member's own call shape (its second
+            // parameter has a default), and a lambda being assignable to `Function<R>`.
+            (
+                "import kotlin.contracts.*\n@OptIn(ExperimentalContracts::class)\n\
+                 inline fun f(b: () -> Unit) {\n\
+                 \x20   contract { callsInPlace(b, InvocationKind.EXACTLY_ONCE) }\n\
+                 \x20   b()\n\
+                 }\n\
+                 fun box(): String { var s = \"\"; f { s = \"OK\" }; return s }\n",
+                "a contract",
+            ),
+            // A lambda passed where the ARITY-INDEPENDENT `kotlin.Function<R>` is expected. A
+            // function type names no classifier of its own, so the supertype walk had nowhere to
+            // start and answered that it was assignable to nothing.
+            (
+                "fun h(f: Function<Unit>) {}\nfun box(): String { h({ }); return \"OK\" }\n",
+                "a lambda as the root function type",
+            ),
+            // A named argument on a stdlib MEMBER, which needs the member's own parameter names.
+            (
+                "fun box(): String = \"abc\".substring(startIndex = 1)\n",
+                "a named argument on a stdlib member",
             ),
             // A `const val` on a companion. Every use site folds it, which is the only way it can
             // work here at all: a companion object has no storage on a target that compiles the

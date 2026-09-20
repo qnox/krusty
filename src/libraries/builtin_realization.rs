@@ -334,6 +334,27 @@ pub(crate) fn function_reference_classifier(function: Ty) -> Option<Ty> {
     Some(Ty::obj_args_name(classifier, &arguments))
 }
 
+/// Whether a selected callable is the CONTRACT declaration, whose call a target erases.
+///
+/// `contract { … }` states a fact about the function it appears in; nothing is emitted for it on
+/// any target. The rule is the declaration's identity — its name and its package — and the two
+/// providers spell the owner differently: a JVM provider names the file facade the declaration
+/// was compiled into (`kotlin/contracts/ContractsKt`), a klib names the package itself. Both are
+/// read, so a target-neutral caller sees one rule.
+///
+/// Requiring the package as well as the name is what keeps an unrelated `contract` from acquiring
+/// intrinsic behaviour because one component happened to match.
+pub(crate) fn is_erased_contract_callable(callable: &crate::libraries::LibraryCallable) -> bool {
+    if callable.name != "contract" {
+        return false;
+    }
+    let owner = callable.owner;
+    owner.matches("kotlin/contracts")
+        || owner
+            .parent()
+            .is_some_and(|package| package.matches("kotlin/contracts"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -4072,6 +4072,15 @@ pub struct BuiltinMember {
     /// never read at run time — which is what lets `Int.MAX_VALUE` resolve on a target whose
     /// companion objects have no storage.
     pub constant: Option<crate::libraries::LibConst>,
+    /// The value parameters' source names, parallel to [`Self::params`]. Without them a call site
+    /// can neither name an argument nor be told which one it omitted: the checker reported "no
+    /// value passed for parameter 'p1'" for `ContractBuilder.callsInPlace(b)`, naming a parameter
+    /// the declaration never had.
+    pub param_names: Vec<String>,
+    /// Which of them declare a default, parallel to [`Self::params`].
+    pub param_defaults: Vec<bool>,
+    /// The `vararg` parameter's position, if the member has one.
+    pub vararg: Option<usize>,
 }
 
 /// One top-level function declared by a `.kotlin_builtins` package fragment. Unlike a class member,

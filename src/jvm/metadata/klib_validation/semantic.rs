@@ -943,6 +943,9 @@ fn semantic_function(
     } else {
         None
     };
+    // The WRITTEN parameter count, before `member_params` is moved into the member below.
+    let written = member_params.len();
+    let leading = top_params.len() - written;
     let member = metadata::BuiltinMember {
         name: name.clone(),
         params: member_params,
@@ -955,6 +958,11 @@ fn semantic_function(
         ret_nullable,
         // A FUNCTION has no compile-time value; only a `const val` does.
         constant: None,
+        // The WRITTEN parameters only: a member's leading context parameters belong to the
+        // top-level shape below, where they are physical, and `member_params` excludes them.
+        param_names: param_names[param_names.len() - written..].to_vec(),
+        param_defaults: param_defaults[param_defaults.len() - written..].to_vec(),
+        vararg: vararg.and_then(|index| index.checked_sub(leading)),
     };
     let top = top_level.then_some(metadata::BuiltinFunction {
         name,
@@ -1100,6 +1108,10 @@ fn semantic_property(
         formals: formals.clone(),
         ret_nullable: ret.nullable(),
         constant: constant.clone(),
+        // A property takes no value parameters; its setter's is not a source parameter list.
+        param_names: Vec::new(),
+        param_defaults: Vec::new(),
+        vararg: None,
     };
     let top = top_level.then(|| metadata::BuiltinProperty {
         name,
