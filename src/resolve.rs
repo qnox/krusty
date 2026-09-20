@@ -18140,6 +18140,16 @@ pub struct TypeInfo {
     /// For a resolved classpath member, extension, or top-level call, maps callee parameter slots to
     /// source arguments. `None` means the target default-call ABI fills that slot.
     pub resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
+    /// The LITERAL a call site passes for an omitted defaulted parameter, for a dependency callable
+    /// whose provider states the default as a constant.
+    ///
+    /// A target default-call ABI is one way to realize an omitted default and not the only one. The
+    /// JVM has a `$default` synthetic to name; a klib has none, and its default lives in the
+    /// library's IR as an expression. When that expression is a CONSTANT the call site can simply
+    /// pass it — a constant has no side effects and depends on no other argument, which is exactly
+    /// what makes this equivalent to the callee filling it in. Anything else stays unrealizable.
+    pub resolved_library_default_literals:
+        HashMap<ExprId, Vec<(usize, crate::libraries::DefaultValue)>>,
     /// Plain named arguments that the selected call mapping bound as an ENTIRE vararg array. This is
     /// a semantic call fact, not something lowering may infer by comparing instantiated `Ty` values:
     /// generic inference can represent the call-site array and selected parameter with different type
@@ -45099,6 +45109,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_constant_receivers: HashMap::new(),
         resolved_enum_entries: HashMap::new(),
         resolved_call_arg_slots: HashMap::new(),
+        resolved_library_default_literals: HashMap::new(),
         resolved_whole_array_vararg_args: std::collections::HashSet::new(),
         platform_narrowings: HashMap::new(),
         synthetic_ext_calls: HashMap::new(),
@@ -46874,6 +46885,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_constant_receivers,
         resolved_enum_entries,
         resolved_call_arg_slots,
+        resolved_library_default_literals,
         resolved_whole_array_vararg_args,
         platform_narrowings,
         synthetic_ext_calls,
@@ -47209,6 +47221,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_constant_receivers,
         resolved_enum_entries,
         resolved_call_arg_slots,
+        resolved_library_default_literals,
         resolved_whole_array_vararg_args,
         platform_narrowings,
         synthetic_ext_calls,
@@ -48199,6 +48212,9 @@ struct Checker<'a> {
     resolved_constant_receivers: HashMap<ExprId, ExprId>,
     resolved_enum_entries: HashMap<ExprId, ResolvedEnumEntry>,
     resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
+    /// See [`TypeInfo::resolved_library_default_literals`].
+    resolved_library_default_literals:
+        HashMap<ExprId, Vec<(usize, crate::libraries::DefaultValue)>>,
     resolved_whole_array_vararg_args: std::collections::HashSet<ExprId>,
     /// See [`TypeInfo::platform_narrowings`].
     platform_narrowings: HashMap<ExprId, PlatformNarrowing>,
@@ -56363,6 +56379,34 @@ impl<'a> Checker<'a> {
         Span::new(span.hi.saturating_sub(name.len() as u32), span.hi)
     }
 
+    /// The literal each omitted defaulted parameter takes, or `None` when the provider cannot say.
+    ///
+    /// Every omitted slot must be answered: a call that can fill three of four omitted parameters
+    /// is a call that cannot be made, and half an answer here would pass the callee a value it
+    /// never declared. The value must also FIT the parameter it fills — a provider that decoded a
+    /// constant of the wrong shape is a provider that is wrong about the declaration, and passing
+    /// it would be a silently miscompiled argument rather than a diagnosis.
+    fn library_default_literals(
+        &self,
+        call: ExprId,
+        selected: &crate::libraries::FunctionInfo,
+    ) -> Option<Vec<(usize, crate::libraries::DefaultValue)>> {
+        let slots = self.resolved_call_arg_slots.get(&call)?;
+        let parameters = selected.semantic_params();
+        let mut literals = Vec::new();
+        for (parameter, argument) in slots.iter().enumerate() {
+            if argument.is_some() || selected.call_sig.vararg_index == Some(parameter) {
+                continue;
+            }
+            let value = selected.default_values.get(parameter)?.clone()?;
+            if !value.fills_param_ty(*parameters.get(parameter)?) {
+                return None;
+            }
+            literals.push((parameter, value));
+        }
+        (!literals.is_empty()).then_some(literals)
+    }
+
     fn call_callee_name_span(&self, call: ExprId) -> Span {
         let Expr::Call { callee, .. } = self.file.expr(call) else {
             return self.span(call);
@@ -56996,6 +57040,13 @@ impl<'a> Checker<'a> {
             } else if selected.flags.inline.can_inline() {
                 selected.callable.default_call = true;
                 selected.callable.inline = crate::libraries::InlineKind::MustInline;
+            } else if let Some(literals) = self.library_default_literals(call, &selected) {
+                // The provider states each omitted default as a CONSTANT, so the call site passes
+                // it. A constant has no side effects and depends on no other argument, which is
+                // what makes this the same call the callee's own default-filling would have made —
+                // and it needs no `$default` symbol, which is the one thing a klib cannot name.
+                self.resolved_library_default_literals
+                    .insert(call, literals);
             } else {
                 self.diags.error(
                     self.call_callee_name_span(call),

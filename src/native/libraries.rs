@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::klib::ir::{IrConstant, IrDefaultKey, IrDefaults};
 use crate::klib::{KlibArchive, KlibError};
 use crate::libraries::{
     Callables, ClassifierInheritance, ExternalCallableKind, ExternalCallableRealization,
@@ -44,6 +45,9 @@ pub enum NativeLibrariesError {
     MissingStdlib { path: PathBuf },
     /// The container would not open, or an entry would not read.
     Container(KlibError),
+    /// The serialized IR would not read. This is a separate failure from a `linkdata` one: the
+    /// two halves of a klib are decoded independently, and only this one carries default VALUES.
+    InvalidIr(crate::klib::ir::IrError),
     /// A `linkdata` fragment did not decode.
     InvalidFragment {
         entry: String,
@@ -60,6 +64,7 @@ impl std::fmt::Display for NativeLibrariesError {
                 path.display()
             ),
             Self::Container(error) => write!(f, "invalid Kotlin/Native stdlib klib: {error}"),
+            Self::InvalidIr(error) => write!(f, "invalid Kotlin/Native stdlib IR: {error}"),
             Self::InvalidFragment { entry, source } => {
                 write!(f, "invalid stdlib linkdata fragment {entry}: {source:?}")
             }
@@ -131,6 +136,14 @@ impl NativeLibraries {
     /// so a later change can federate several klibs without reshaping the caller.
     pub fn from_klib(path: &Path) -> Result<Self, NativeLibrariesError> {
         let archive = KlibArchive::open(path)?;
+        // The bodies half, which is where a parameter's default VALUE lives. A klib that ships no
+        // IR at all is a declarations-only artifact and still usable — a call that omits a default
+        // simply cannot be compiled against it — so only a malformed one is an error.
+        let defaults = match crate::klib::ir::read_defaults(&archive) {
+            Ok(defaults) => defaults,
+            Err(crate::klib::ir::IrError::Missing { .. }) => IrDefaults::default(),
+            Err(error) => return Err(NativeLibrariesError::InvalidIr(error)),
+        };
         let mut namespaces: HashMap<TypeName, Namespace> = HashMap::new();
         let mut callable_realizations = Vec::new();
         let mut property_realizations = Vec::new();
@@ -176,7 +189,13 @@ impl NativeLibraries {
                     u32::try_from(callable_realizations.len())
                         .expect("too many stdlib declarations for a packed identity"),
                 );
-                let info = top_level_function(package_name, function, identity);
+                let info = top_level_function(
+                    package_name,
+                    function,
+                    identity,
+                    &defaults,
+                    &fragment.package_fqname,
+                );
                 callable_realizations.push(ExternalCallableRealization {
                     callable: info.callable.clone(),
                     kind: if info.kind == FnKind::Extension {
@@ -317,6 +336,8 @@ fn top_level_function(
     package: TypeName,
     function: &crate::jvm::metadata::BuiltinFunction,
     identity: crate::fir::ExternalCallableId,
+    defaults: &IrDefaults,
+    package_fqname: &str,
 ) -> FunctionInfo {
     let bounds = crate::jvm::classpath::builtin_bounds(&function.formals, &HashMap::new());
     let ty = |t: &crate::jvm::metadata::BuiltinTy| crate::jvm::classpath::builtin_ty(t, &bounds);
@@ -366,6 +387,11 @@ fn top_level_function(
         function.param_defaults.clone(),
         function.vararg,
     );
+    // What the declaration's omitted parameters take. `linkdata` records THAT a parameter has a
+    // default and never what it is; the value is an expression, and it lives in the library's IR.
+    // Without it a call that omits one has nothing to pass: the JVM has a `$default` synthetic to
+    // name, a klib has none, and 862 corpus cases reported exactly that.
+    info.default_values = parameter_defaults(defaults, package_fqname, function);
     // The declaration's own type parameters, with the receiver kept apart from the written
     // parameters. Without this a generic declaration resolves but never INFERS: `listOf(1).let { }`
     // reported its result as the unbound `R` it was declared with.
@@ -496,6 +522,64 @@ fn top_level_property(
         source_member: None,
         accessor_derived: false,
         read_stability: crate::libraries::PropertyReadStability::Unstable,
+    }
+}
+
+/// What each of a declaration's value parameters defaults to, parallel to them.
+///
+/// The IR is matched by name and shape rather than by the library's own `IdSignature`, and the
+/// parameter NAMES carry most of the discrimination — see [`IrDefaultKey`]. A declaration the IR
+/// does not answer for gets an empty list, which reads as "no default is known" everywhere.
+fn parameter_defaults(
+    defaults: &IrDefaults,
+    package_fqname: &str,
+    function: &crate::jvm::metadata::BuiltinFunction,
+) -> Vec<Option<crate::libraries::DefaultValue>> {
+    if !function.param_defaults.iter().any(|has| *has) {
+        return Vec::new();
+    }
+    // The key's parameters are the WRITTEN ones. A context parameter and an extension receiver are
+    // leading physical parameters that the IR carries elsewhere — as `context_parameter` and
+    // `extension_receiver` — so the names that identify the declaration start after them.
+    let written = function
+        .param_names
+        .len()
+        .saturating_sub(function.context_count);
+    let key = IrDefaultKey {
+        package: package_fqname.to_string(),
+        owners: Vec::new(),
+        name: function.name.clone(),
+        parameters: function.param_names[function.param_names.len() - written..].to_vec(),
+    };
+    let Some(values) = defaults.get(&key) else {
+        return Vec::new();
+    };
+    let mut out = vec![None; function.context_count];
+    out.extend(values.iter().map(|value| value.as_ref().map(default_value)));
+    out
+}
+
+/// One decoded IR constant, as the literal a call site materializes.
+///
+/// The container reader publishes its own constant type on purpose — what a constant MEANS is the
+/// caller's — and this is that decision, made once.
+fn default_value(constant: &IrConstant) -> crate::libraries::DefaultValue {
+    use crate::libraries::DefaultValue;
+    match constant {
+        IrConstant::Null => DefaultValue::Null,
+        IrConstant::Boolean(value) => DefaultValue::Bool(*value),
+        IrConstant::Char(value) => DefaultValue::Char(*value),
+        // Every sub-`Int` width is carried as the `Int` the library model records, which is the
+        // same shape a classfile constant arrives in.
+        IrConstant::Byte(value) => DefaultValue::Int(i64::from(*value)),
+        IrConstant::Short(value) => DefaultValue::Int(i64::from(*value)),
+        IrConstant::Int(value) => DefaultValue::Int(i64::from(*value)),
+        IrConstant::Long(value) => DefaultValue::Long(*value),
+        IrConstant::Float(value) => DefaultValue::Float(*value),
+        IrConstant::Double(value) => DefaultValue::Double(*value),
+        IrConstant::String(value) => {
+            DefaultValue::Str(crate::kt_string::KtString::from(value.clone()))
+        }
     }
 }
 
@@ -1178,6 +1262,14 @@ mod compiles_against_the_klib {
             (
                 "fun box(): Int = \"abc\".indices.first\n",
                 "an extension property",
+            ),
+            // A call that OMITS a defaulted argument. `assertEquals(expected, actual, message:
+            // String? = null)` needs the `null`, and `linkdata` records only THAT the parameter
+            // has a default — the value is an expression in the library's IR. 862 corpus cases
+            // reported "default-argument realization is unavailable" before that was read.
+            (
+                "import kotlin.test.*\nfun box(): String { assertEquals(1, 1); return \"OK\" }\n",
+                "a call omitting a defaulted argument",
             ),
             // A `const val` on a companion. Every use site folds it, which is the only way it can
             // work here at all: a companion object has no storage on a target that compiles the
