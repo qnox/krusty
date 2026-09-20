@@ -16,7 +16,7 @@
 //! This module is that rule, stated once, over the signature every provider already has.
 
 use crate::libraries::{
-    CompilerIntrinsic, MemberRealization, PrimitiveBinaryIntrinsic, PrimitiveUnaryIntrinsic,
+    CompilerIntrinsic, FnKind, MemberRealization, PrimitiveBinaryIntrinsic, PrimitiveUnaryIntrinsic,
 };
 use crate::types::{Ty, TypeName};
 
@@ -134,6 +134,134 @@ pub(crate) fn member_realization(
         _ => return MemberRealization::Dispatch,
     };
     MemberRealization::Intrinsic(intrinsic)
+}
+
+/// Which compiler intrinsic a TOP-LEVEL declaration of this package and name is, or `None` for an
+/// ordinary one.
+///
+/// Like [`member_realization`], a fact about what Kotlin DECLARES and not about any artifact:
+/// `kotlin.io.println` is realized by the compiler on every target, and `String.trimIndent()` is
+/// folded rather than called on every target. It lived in the JVM provider because that was the
+/// only provider, so a klib-backed compilation declined `trimIndent` 57 times over the box corpus
+/// while the jar-backed one folded it.
+pub(crate) fn top_level_intrinsic(package: TypeName, name: &str) -> Option<CompilerIntrinsic> {
+    if package.matches("kotlin/coroutines") {
+        return match name {
+            "suspendCoroutine" => Some(CompilerIntrinsic::SuspendCoroutine),
+            "startCoroutine" => Some(CompilerIntrinsic::StartCoroutine),
+            _ => None,
+        };
+    }
+    if package.matches("kotlin/coroutines/intrinsics") {
+        return (name == "suspendCoroutineUninterceptedOrReturn")
+            .then_some(CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn);
+    }
+    if package.matches("kotlin/io") {
+        return match name {
+            "print" => Some(CompilerIntrinsic::Print),
+            "println" => Some(CompilerIntrinsic::Println),
+            _ => None,
+        };
+    }
+    if package.matches("kotlin") {
+        return match name {
+            "assert" => Some(CompilerIntrinsic::Assert),
+            "enumValues" => Some(CompilerIntrinsic::EnumValues),
+            "enumValueOf" => Some(CompilerIntrinsic::EnumValueOf),
+            _ => crate::libraries::kotlin_array_factory_kind(name)
+                .map(CompilerIntrinsic::ArrayFactory),
+        };
+    }
+    if package.matches("kotlin/test") {
+        return (name == "assertFailsWith").then_some(CompilerIntrinsic::AssertFailsWith);
+    }
+    if package.matches("kotlin/collections") {
+        return match name {
+            "isEmpty" => Some(CompilerIntrinsic::IsEmpty),
+            "isNotEmpty" => Some(CompilerIntrinsic::IsNotEmpty),
+            "count" => Some(CompilerIntrinsic::Count),
+            "trimIndent" => Some(CompilerIntrinsic::TrimIndent),
+            "trimMargin" => Some(CompilerIntrinsic::TrimMargin),
+            _ => None,
+        };
+    }
+    if package.matches("kotlin/text") {
+        return match name {
+            "trimIndent" => Some(CompilerIntrinsic::TrimIndent),
+            "trimMargin" => Some(CompilerIntrinsic::TrimMargin),
+            _ => None,
+        };
+    }
+    None
+}
+
+/// The declaration KIND [`top_level_intrinsic`]'s answer applies to.
+///
+/// A name can be declared twice — `kotlin.collections.count()` is an extension on a collection and
+/// `kotlin.text.count()` one on a `CharSequence`, while `println` is receiverless — so the
+/// intrinsic is stamped only on the overload that has the right shape. `None` marks an intrinsic
+/// that is never a top-level declaration at all: a scalar member's, which
+/// [`member_realization`] answers for instead.
+pub(crate) fn intrinsic_declaration_kind(intrinsic: CompilerIntrinsic) -> Option<FnKind> {
+    Some(match intrinsic {
+        CompilerIntrinsic::ArrayFactory(_)
+        | CompilerIntrinsic::Print
+        | CompilerIntrinsic::Println
+        | CompilerIntrinsic::Assert
+        | CompilerIntrinsic::AssertFailsWith
+        | CompilerIntrinsic::CoroutineContext
+        | CompilerIntrinsic::CoroutineSuspended
+        | CompilerIntrinsic::SuspendCoroutine
+        | CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
+        | CompilerIntrinsic::EnumValues
+        | CompilerIntrinsic::EnumValueOf => FnKind::TopLevel,
+        CompilerIntrinsic::StartCoroutine
+        | CompilerIntrinsic::IsEmpty
+        | CompilerIntrinsic::IsNotEmpty
+        | CompilerIntrinsic::Count
+        | CompilerIntrinsic::TrimIndent
+        | CompilerIntrinsic::TrimMargin
+        | CompilerIntrinsic::StringPlus
+        | CompilerIntrinsic::NullableAnyToString => FnKind::Extension,
+        CompilerIntrinsic::ArraySize
+        | CompilerIntrinsic::CharCode
+        | CompilerIntrinsic::StringLength
+        | CompilerIntrinsic::NumericConversion
+        | CompilerIntrinsic::PrimitiveUnary(_)
+        | CompilerIntrinsic::PrimitiveCompare
+        | CompilerIntrinsic::PrimitiveBitAnd
+        | CompilerIntrinsic::PrimitiveBitOr
+        | CompilerIntrinsic::PrimitiveBitXor
+        | CompilerIntrinsic::PrimitiveShiftLeft
+        | CompilerIntrinsic::PrimitiveShiftRight
+        | CompilerIntrinsic::PrimitiveUnsignedShiftRight
+        | CompilerIntrinsic::BooleanNot
+        | CompilerIntrinsic::PrimitiveBitNot
+        | CompilerIntrinsic::PrimitiveBinary(_) => return None,
+    })
+}
+
+/// Which compiler intrinsic a top-level or extension PROPERTY of this package and name is.
+///
+/// Both of them are extensions and both are told by their receiver as well as their name:
+/// `kotlin.code` is a property of `Char` and of nothing else.
+pub(crate) fn top_level_property_intrinsic(
+    package: TypeName,
+    name: &str,
+    receiver: Option<Ty>,
+) -> Option<CompilerIntrinsic> {
+    // Receiverless: the suspension sentinel is a top-level property, and an extension of the same
+    // name would be a different declaration.
+    if package.matches("kotlin/coroutines/intrinsics")
+        && name == "COROUTINE_SUSPENDED"
+        && receiver.is_none()
+    {
+        return Some(CompilerIntrinsic::CoroutineSuspended);
+    }
+    if package.matches("kotlin") && name == "code" && receiver == Some(Ty::Char) {
+        return Some(CompilerIntrinsic::CharCode);
+    }
+    None
 }
 
 #[cfg(test)]

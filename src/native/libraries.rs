@@ -392,6 +392,19 @@ fn top_level_function(
     // Without it a call that omits one has nothing to pass: the JVM has a `$default` synthetic to
     // name, a klib has none, and 862 corpus cases reported exactly that.
     info.default_values = parameter_defaults(defaults, package_fqname, function);
+    // Which top-level declarations the COMPILER realizes rather than calls — `println`,
+    // `trimIndent`, `enumValues`, the array factories. The table is target-neutral and the JVM
+    // provider reads the same one; without it this provider published `trimIndent` as an ordinary
+    // call, which the code generator declined 57 times across the box corpus.
+    if let Some(intrinsic) =
+        crate::libraries::builtin_realization::top_level_intrinsic(package, &function.name)
+    {
+        if crate::libraries::builtin_realization::intrinsic_declaration_kind(intrinsic)
+            == Some(info.kind)
+        {
+            info.callable.compiler_intrinsic = Some(intrinsic);
+        }
+    }
     // The declaration's own type parameters, with the receiver kept apart from the written
     // parameters. Without this a generic declaration resolves but never INFERS: `listOf(1).let { }`
     // reported its result as the unbound `R` it was declared with.
@@ -486,6 +499,12 @@ fn top_level_property(
     if let Some(setter) = setter.as_mut() {
         setter.external_property_identity = Some(identity);
     }
+    // The same, for a property: `Char.code` and the coroutine suspension sentinel.
+    getter.compiler_intrinsic = crate::libraries::builtin_realization::top_level_property_intrinsic(
+        package,
+        &property.name,
+        receiver,
+    );
     crate::libraries::PropertyInfo {
         name: property.name.clone(),
         kind: match receiver {
@@ -1293,6 +1312,13 @@ mod compiles_against_the_klib {
             (
                 "fun box(): String = with(\"OK\") { this }\n",
                 "a block with a receiver",
+            ),
+            // A declaration the COMPILER realizes rather than calls. `trimIndent` is folded, not
+            // emitted, on every target — the table that says so lived in the JVM provider, so this
+            // one published an ordinary call and the code generator declined it 57 times.
+            (
+                "fun box(): String = \"\"\"\n    OK\n    \"\"\".trimIndent()\n",
+                "a compiler-realized declaration",
             ),
             // A `const val` on a companion. Every use site folds it, which is the only way it can
             // work here at all: a companion object has no storage on a target that compiles the
