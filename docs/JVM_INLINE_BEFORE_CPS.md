@@ -13,16 +13,17 @@ Give the JVM backend kotlinc's ordering:
   ───────────────────                    ──────────────                  ──────────────
   IR                                     IR                              IR
    → realize InlineBodyPlan (IR)          → lower_suspend_abi (IR)        → realize InlineBodyPlan
-   → lower_suspend  (IR → IR CPS)         → ir_emit                       → lower_suspend (IR → IR)
-   → ir_emit                                 └ splice_unified (bytes)     → emit
-      └ splice_unified (bytes)            → cps_transform  (bytes → bytes)
+   → lower_suspend  (IR → IR CPS)         → ir_emit pass 1 (discovery)     → lower_suspend (IR → IR)
+   → ir_emit                                 └ splice_unified (bytes)      → emit
+      └ splice_unified (bytes)            → liveness over those bytes
+                                          → ir_emit pass 2 (state machine)
 ```
 
 The coroutine (CPS) state machine moves from an **IR → IR** pass that runs *before* inline
 expansion to a **bytecode → bytecode** pass that runs *after* it. This is the same split kotlinc
-uses: its IR lowering fixes the suspend ABI and inserts markers, and
-`CoroutineTransformerMethodVisitor` does the state machine, the liveness analysis and the spilling
-on the already-inlined `MethodNode`.
+uses: its IR lowering fixes the suspend ABI, and `CoroutineTransformerMethodVisitor` does the state
+machine, the liveness analysis and the spilling on the already-inlined `MethodNode`. krusty reaches
+the same ordering by emitting the body twice (§5.2) rather than by editing a finished method.
 
 ## 2. The symptom this exists to fix
 
@@ -152,48 +153,51 @@ The part of today's `lower_suspend` that does **not** depend on the spill set:
 * thread the caller's continuation into each suspend call it can see at IR level;
 * classify leaf (no suspension point) vs state-machine functions;
 * declare the continuation class (`Facade$fn$1 extends ContinuationImpl`) with its `label`,
-  `result`, and captured-receiver fields — **but not its spill fields**;
-* mark each suspension call site so the bytecode pass can find it without re-deriving semantics.
+  `result`, and captured-receiver fields — **but not its spill fields**.
 
-Marking is the load-bearing detail. kotlinc uses synthetic `invokestatic` markers
-(`beforeSuspensionMarker` / `afterSuspensionMarker`) that the transform deletes. krusty should do
-the same rather than sniffing descriptors: a suspend call reached *through a spliced body* has no
-IR node at all, so the marker has to be minted by the splicer, and a marker is the only thing that
-survives relocation. Concretely: `splice_unified` already rewrites every call in the body it
-relocates; when it relocates a call to a suspend function it emits the marker pair around it.
+For a function whose machine moves to emit, `lower_suspend` stops there: it does not flatten the
+body, does not allocate spill scopes, and does not synthesize the state machine. It records the
+function as emit-time-machine and leaves the body alone.
 
-### 5.2 What becomes a bytecode pass (`src/jvm/suspend/cps/`)
+Suspension sites need no in-stream marker instruction. Pass 1 (§5.2) records each suspension's byte
+offset as it emits it, and pass 2 re-emits the body rather than editing it, so nothing has to travel
+with relocated code. This is the one place krusty can be simpler than kotlinc, which must mark
+because it edits a finished `MethodNode` in place.
 
-Input: one finished method — `bytes`, resolved frames, exception table, `LineNumberTable`,
-`LocalVariableTable`, `max_stack`/`max_locals` — plus the marker positions. That is exactly what a
-`CodeBuilder` holds at `ClassWriter::add_method_sig` (`src/jvm/classfile.rs:2285`), which is the
-single choke point every method passes through.
+### 5.2 What becomes a bytecode-informed pass: two-pass emission
 
-Output: the transformed method, plus the **spill field layout** and the `@DebugMetadata` name/index
-vectors, handed back so the continuation class can be finalized.
+The obvious realization — emit the method, then rewrite the finished `Code` attribute — was tried on
+paper and rejected. Inserting the dispatch, the spill blocks and the resume blocks shifts every byte
+offset, so every `StackMapTable` frame has to be re-derived; deriving them from bytecode alone means
+writing a type-inferring verifier. That is a far larger and riskier component than the transform it
+would serve.
 
-Steps:
+Two-pass emission reaches the same ordering without it:
 
-1. **Disassemble.** `crate::jvm::inline::disassemble` already yields `Vec<Insn>` with branch targets
-   as *instruction indices*, not byte offsets. Inserting instructions therefore cannot invalidate a
-   jump; `assemble_at` recomputes every offset and `insn_offsets_at` gives the index→offset map
-   needed to re-bind frames, handlers, line marks and LVT entries afterwards. This is the single
-   biggest reason the change is tractable at all — the representation already exists.
-2. **Build the CFG and run backward live-variable analysis.** `loaded_local`, `stored_local`,
-   `instruction_len` and `BranchTarget` are the primitives; exception edges come from the relocated
-   handler table. A local is spilled at a suspension iff it is live across it *and* not
-   rematerializable (a known constant, or a known null).
-3. **Type each spilled local** at the suspension from the frame at that point, so the resume path
-   can emit the right `checkcast`. Frames already reach the pass; `decode_stackmap` /
-   `VType` / `relocate_vtype` are in `inline.rs`.
-4. **Assign spill fields** by representation kind, grouped and ordered as
-   `spill_layout::SpillLayout` does today, but over the *post-splice* local set.
-5. **Rewrite**: the entry `instanceof`/`label` prologue, the `tableswitch` dispatch
-   (`control_flow.rs` already has `new_label`, `bind`, `bind_at`, `tableswitch`), a spill block plus
-   `label = N` before each suspension call, the `dup; aload SUSPENDED; if_acmpne` normal-path check,
-   and a resume block per suspension that restores the spills and rejoins.
-6. **Re-bind** frames, handlers, lines, LVT through the index→offset map; recompute `max_stack` and
-   `max_locals`.
+**Pass 1 — discovery.** Emit the suspend function's body into a scratch `CodeBuilder` with no state
+machine at all: classpath inline bodies are spliced exactly as they are today, and each suspension
+call is emitted as an ordinary call whose byte offset is recorded against its suspension index.
+What comes out is precisely the post-splice bytecode kotlinc's `CoroutineTransformerMethodVisitor`
+would see.
+
+**Analysis.** Over those bytes: `disassemble` → `ControlGraph` → `LocalLiveness`
+(`src/jvm/suspend/cps/`). For each recorded suspension, the locals live across it are the spill set —
+computed over locals that only exist because the splice put them there. The pass also yields the
+body's `max_locals`, which fixes where the machine's own slots go.
+
+**Pass 2 — emission.** Emit the real method: the machine's slots (`$continuation`, `$result`,
+`$suspended`) are placed at `max_locals..`, above every body and inline local, which is also how
+kotlinc numbers them. The entry prologue, the `tableswitch` dispatch, the per-suspension spill block,
+the `COROUTINE_SUSPENDED` check and the resume blocks are all emitted through the ordinary
+`CodeBuilder` label and frame API, so frames are produced the way every other method's frames are
+produced. The body emission itself is identical to pass 1, which is what makes pass 1's slot
+numbering and spill sets valid for pass 2.
+
+The continuation class is written after the method, because its spill fields and its
+`@DebugMetadata` `l`/`n`/`s` vectors are products of the analysis.
+
+The cost is emitting a suspend method body twice. That is paid only by suspend functions, only on
+the JVM, and it buys the whole ordering.
 
 ### 5.3 The stack invariant
 
@@ -225,9 +229,9 @@ Each step is its own PR, rebased onto `origin/master` first, green on `./run-tes
 | # | Step | Gate |
 | --- | --- | --- |
 | 0 | This note. | docs only |
-| 1 | Bytecode CPS scaffolding: disassemble → CFG → backward liveness → reassemble, as an **identity** transform over every suspend method krusty already compiles, asserted byte-identical to today's output. No behaviour change, so no fixture flips. | green, byte-identical |
-| 2 | Suspension markers minted by `splice_unified` for a relocated suspend call; consumed and deleted by the pass. Still identity for everything else. | green |
-| 3 | Move the state machine for the **currently bailing** shapes only: gate on "this method contains a marker inside a splice". The IR machine still owns every method it owns today, so the 11270 byte-identical classes cannot move. Fixture A (§7) lands here, asserting `box()` against the reference compiler. | green + fixture A runs |
+| 1 | The two analyses: control-flow graph and backward local liveness over decoded bytecode (`src/jvm/suspend/cps/`). | green |
+| 2 | Pass 1 and the analysis wiring: emit a declined suspend body into a scratch builder, record each suspension's offset, and read its spill set. No emitted output changes yet. | green |
+| 3 | Pass 2 — the state machine, for the **currently bailing** shapes only. The IR machine still owns every method it owns today, so the 11270 byte-identical classes cannot move. Fixture A (§7) lands here, asserting `box()` against the reference compiler. | green + fixture A runs |
 | 4 | Continuation-class finalization: spill fields and `@DebugMetadata` become products of the bytecode pass for the new-machine methods. | green |
 | 5 | Under-stack spilling (§5.3 v2). Fixture B lands here. | green + fixture B runs |
 | 6 | Measure the corpus. Expect the three blocked modules to emit (≈987 classes). Report before/after. | corpus report |
