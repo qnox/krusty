@@ -480,6 +480,37 @@ defects must be fixed first, as their own change — they are splice-representat
 every spliced inline call with a lambda whether or not it suspends, and fixing them moves byte
 parity on code that compiles today. The coroutine machine then lands on a body that already matches.
 
+## 7b. The reference compiler's inline slot allocation is not a remap
+
+a2 and a3 both need to know which slot an inlined local gets, and the answer is not a function of
+the host's numbering. Four probes, each `inline fun … { val r = f(…); return r + 1 }` with a
+different lambda arity, plus one with a host local declared before the call
+(`pre(a) { … }`, body `val b = a + 1; val r = f()`):
+
+| probe | host locals | reference result |
+| --- | --- | --- |
+| `p0 { v }` | `f`, `$i$f`, `r` | `$i$f`=1, `$i$a$`=2, **`r`=3** |
+| `p1 { it + v }` | same | `$i$f`=1, `it`=2, `$i$a$`=3, **`r`=4** |
+| `p2 { x, y -> … }` | same | `$i$f`=1, `y`=2, `x`=3, `$i$a$`=4, **`r`=5** |
+| `pre(v) { v }` | `a`, `f`, `$i$f`, `b`, `r` | `a`=1, `$i$f`=2, `b`=3, `$i$a$`=4, **`r`=4** |
+
+The first three are consistent with "assign in first-store order" — the host local declared after the
+call lands above the lambda's locals. The fourth is not: there `r` **reuses** the marker's slot, and
+the two share slot 4 with disjoint ranges ([11,12) and [14,18)), exactly as `it` and `r$iv` share
+slot 5 in the `twice` case of §7a. Yet `p0` has the same structure as `pre` — one lambda local, a
+host local declared after the call — and does *not* reuse.
+
+So it is neither a flat shift, nor a compaction, nor a plain live-range reuse. The remaining
+candidate is the reference implementation's own remapper, whose allocation order is a property of
+that code rather than of the bytecode it produces. Deriving it from more samples is guesswork;
+it should be read from the implementation.
+
+What is implemented today is "the first slot free at the invoke, from the dependency's own
+`LocalVariableTable`". That reproduces the reference result for the shapes where the lambda's locals
+sit above every live host local — including the whole of §7a's motivating case — and is off by one
+where a host local declared after the call does not reuse the marker's slot. It is recorded here as
+an approximation, not as the rule.
+
 ## 8. Risks
 
 * **Liveness on bytecode is a new analysis.** Getting it wrong is a miscompile, not a bail. Mitigated
