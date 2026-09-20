@@ -95,6 +95,12 @@ pub fn instruction_len(code: &[u8], pc: usize) -> Option<usize> {
         | 0xc7 => 3,
         // multianewarray: 2-byte index + 1 dim byte.
         0xc5 => 4,
+        // krusty's coroutine-site marker (JVMS reserves `impdep1` for an implementation's own use):
+        // a 1-byte kind and a 2-byte ordinal. It marks a position that must survive relocation into
+        // a spliced inline body, where no offset recorded before the splice would still be valid.
+        // The emitter overwrites every one of them with `nop`s once it has bound its labels, so none
+        // can reach a class file. See `docs/JVM_INLINE_BEFORE_CPS.md`.
+        0xfe => 4,
         // invokeinterface / invokedynamic: 2-byte index + 2 trailing bytes.
         0xb9 | 0xba => 5,
         // goto_w / jsr_w.

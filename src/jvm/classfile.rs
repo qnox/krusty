@@ -8,8 +8,11 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod control_flow;
+mod coroutine_markers;
 mod line_numbers;
 mod method_parameters;
+
+pub use coroutine_markers::CoroutineMarker;
 
 pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PRIVATE: u16 = 0x0002;
