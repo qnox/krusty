@@ -56399,7 +56399,10 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let value = selected.default_values.get(parameter)?.clone()?;
-            if !value.fills_param_ty(*parameters.get(parameter)?) {
+            if !self
+                .resolver()
+                .default_literal_fits(&value, *parameters.get(parameter)?)
+            {
                 return None;
             }
             literals.push((parameter, value));
@@ -81095,6 +81098,12 @@ impl<'a> Checker<'a> {
             // return here from rechecked operands erased `Set<String>` back to raw `Set` whenever a
             // postponed nested producer still exposed its private type variable.
             callable.ret = selected.callable.ret;
+            // The realization above may have been direct only because the provider states each
+            // omitted default as a constant. Record them, so checked FIR materializes the same
+            // values the direct shape was built on.
+            if let Some(literals) = self.library_default_literals(e, &selected) {
+                self.resolved_library_default_literals.insert(e, literals);
+            }
             let collection_types = callable.inline_body_plan.as_deref().and_then(|plan| {
                 let crate::libraries::InlineBodyPlan::CollectionTransform {
                     lambda_parameter, ..

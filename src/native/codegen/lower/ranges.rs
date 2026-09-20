@@ -159,7 +159,13 @@ impl BodyLowering<'_, '_, '_> {
         end_type: Ty,
         result: Ty,
     ) -> Result<Option<Value>, Unsupported> {
-        let Some((kind, element)) = element(start_type.non_null(), end_type.non_null()) else {
+        // The RESULT says which range to build, which is the position `until` and `downTo` below
+        // already take: `1u..5u` answers a `UIntRange`, whose bounds are read UNSIGNED, and the
+        // two operands alone cannot say so — an unsigned pair reads as a plain integer one. The
+        // operands remain the fallback, for a result typed more loosely than they are.
+        let Some((kind, element)) =
+            range_type(result).or_else(|| element(start_type.non_null(), end_type.non_null()))
+        else {
             return Err(format!(
                 "a range of `{start_type:?}`..`{end_type:?}` as a value"
             ));

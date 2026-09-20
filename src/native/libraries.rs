@@ -1271,6 +1271,13 @@ mod compiles_against_the_klib {
                 "import kotlin.test.*\nfun box(): String { assertEquals(1, 1); return \"OK\" }\n",
                 "a call omitting a defaulted argument",
             ),
+            // An UNSIGNED range kept as a value. Which range to build is a fact about the RESULT
+            // (`1u..5u` answers a `UIntRange`, read unsigned) and not about the operands, which
+            // read as a plain integer pair.
+            (
+                "fun box(): String { val r: UIntRange = 1u..5u; return \"OK\" }\n",
+                "an unsigned range as a value",
+            ),
             // A `const val` on a companion. Every use site folds it, which is the only way it can
             // work here at all: a companion object has no storage on a target that compiles the
             // stdlib itself. The decoder used to validate the compile-time value and throw it
@@ -1293,6 +1300,25 @@ mod compiles_against_the_klib {
         assert!(
             unknown.iter().any(|d| d.contains("NoSuchType")),
             "a classifier that exists nowhere is reported: {unknown:?}"
+        );
+
+        // An extension with SIX defaulted parameters, four of them strings and one a negative
+        // integer, all omitted. It REALIZES — the declaration that reported "selected extension
+        // 'joinToString' has no callable realization" — and the code generator declines it for its
+        // own reason. Each default reaches its parameter by ASSIGNABILITY, which is how a default
+        // is written in Kotlin and how it must be checked: `separator: CharSequence = ", "` fills
+        // a `CharSequence` with a `String`, and `transform: ((T) -> String)? = null` fills a
+        // function type with a `null`. An exact match rejected both.
+        let joined = diagnostics(&root, "fun box(): String = listOf(1, 2).joinToString()\n");
+        assert!(
+            joined
+                .iter()
+                .any(|d| d.contains("the member `kotlin.collections.joinToString`")),
+            "an extension omitting every defaulted argument realizes: {joined:?}"
+        );
+        assert!(
+            !joined.iter().any(|d| d.contains("no callable realization")),
+            "and the refusal is the GENERATOR's, not resolution's: {joined:?}"
         );
 
         // A stdlib class that is `open` or `abstract` can be EXTENDED. It resolves — reading
