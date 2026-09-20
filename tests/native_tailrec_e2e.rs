@@ -45,6 +45,26 @@ fn a_tailrec_still_holding_a_self_call_is_declined() {
 }
 
 #[test]
+fn a_tailrec_local_function_runs_flat() {
+    // The LOCAL counterpart, and the last of the three to be rewritten. It was declined on the
+    // premise that no phase loops a body-local `tailrec` — true when this backend was written, and
+    // no longer: common lowering gives a local the same frame a declared one gets, computing its
+    // logical parameter count from the slots its captures occupy rather than assuming the list
+    // starts at zero.
+    //
+    // A million deep is the observable, as for the sibling cases: an emitted call would exhaust any
+    // stack this target has, so the program answering at all is the assertion.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   tailrec fun count(n: Int, acc: Int): Int = if (n == 0) acc else count(n - 1, acc + 1)\n\
+         \x20   return if (count(1000000, 0) == 1000000) \"OK\" else \"fail\"\n\
+         }\n",
+        "LocalTailrec",
+        "OK",
+    );
+}
+
+#[test]
 fn a_tailrec_extension_rebinds_its_receiver_and_runs_flat() {
     // This was declined on the premise that an extension's receiver is not a parameter the step can
     // assign. It is one: the receiver is inserted into the parameter list at its own position and

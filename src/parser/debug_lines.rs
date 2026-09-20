@@ -74,6 +74,15 @@ pub(super) fn attach(file: &mut File, src: &str) {
         .iter()
         .map(|&span| span_line_at(span, span.lo))
         .collect();
+    // An assignment's accessor line. A call anchors on its selector name; a WRITE anchors the same
+    // way, on the member it assigns, so `b\n    .value =\n    x` puts the setter dispatch on the
+    // `.value` line rather than on the receiver's.
+    file.assignment_target_lines = file
+        .assignment_target_spans
+        .iter()
+        .map(|(&statement, &span)| (statement, span_line_at(span, span.lo)))
+        .filter(|&(_, line)| line != 0)
+        .collect();
     // Snapshot each expression's start offset before the mutable walk of `decl_arena` (a disjoint
     // field, but only borrowck's field-splitting sees that — a helper can't).
     let expr_lo: Vec<u32> = file.expr_spans.iter().map(|s| s.lo).collect();
@@ -153,6 +162,32 @@ pub(super) fn attach(file: &mut File, src: &str) {
                 for e in &mut c.enum_entries {
                     e.decl_line = line_at(e.span.lo);
                 }
+                // A secondary constructor is a declaration of its own, and its lines are its own:
+                // kotlinc anchors the synthetic `$default` overload on the `constructor` keyword,
+                // each masked fill on that parameter's default expression, and the delegation on
+                // the `this`/`super` keyword. Three different source facts on three lines — which
+                // is why none of them may be recovered from another later.
+                for constructor in &mut c.secondary_ctors {
+                    constructor.decl_line = line_at(constructor.span.lo);
+                    constructor.decl_end_line = if constructor.span.hi == 0 {
+                        0
+                    } else {
+                        line_at(constructor.span.hi.saturating_sub(1))
+                    };
+                    if constructor.delegation_line != 0 {
+                        constructor.delegation_line = line_at(constructor.delegation_line);
+                    }
+                    constructor.default_lines = constructor
+                        .params
+                        .iter()
+                        .map(|parameter| {
+                            parameter
+                                .default
+                                .and_then(|default| expr_lo.get(default.0 as usize).copied())
+                                .map_or(0, line_at)
+                        })
+                        .collect();
+                }
             }
             Decl::Fun(f) => {
                 f.sig_line = line_at(f.span.lo);
@@ -169,10 +204,10 @@ pub(super) fn attach(file: &mut File, src: &str) {
 
 #[cfg(test)]
 mod tests {
-    use crate::ast::Decl;
+    use crate::ast::{ClassDecl, Decl};
     use crate::diag::DiagSink;
 
-    fn class_lines(source: &str, name: &str) -> (u32, u32, u32) {
+    fn parsed_class(source: &str, name: &str) -> ClassDecl {
         let mut diagnostics = DiagSink::new();
         let tokens = crate::lexer::lex(source, &mut diagnostics);
         let file = crate::parser::parse(source, &tokens, &mut diagnostics);
@@ -184,12 +219,15 @@ mod tests {
         file.decl_arena
             .iter()
             .find_map(|declaration| match declaration {
-                Decl::Class(class) if class.name == name => {
-                    Some((class.decl_start_line, class.decl_line, class.decl_end_line))
-                }
+                Decl::Class(class) if class.name == name => Some(class.clone()),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("{name} parsed"))
+    }
+
+    fn class_lines(source: &str, name: &str) -> (u32, u32, u32) {
+        let class = parsed_class(source, name);
+        (class.decl_start_line, class.decl_line, class.decl_end_line)
     }
 
     /// Annotation, header, and closing brace are distinct stable source facts.
@@ -205,5 +243,39 @@ mod tests {
     fn bodyless_class_declaration_lines_match_the_header() {
         let source = "package a\n\ndata class Plain(val x: Int)\n";
         assert_eq!(class_lines(source, "Plain"), (3, 3, 3));
+    }
+
+    /// Optional-body lookahead must not attach following trivia or a sibling to a bodyless
+    /// declaration. The span itself is the ownership fact; line metadata is derived from it.
+    #[test]
+    fn bodyless_declaration_span_stops_before_sibling_trivia() {
+        let source = "data class First(val x: Int)\n\n/* between\n   declarations */\ninterface Second\n\nobject Third\n\nenum class Fourth\n\nclass Fifth\n";
+        for (name, end, line) in [
+            ("First", "data class First(val x: Int)".len(), 1),
+            (
+                "Second",
+                source.find("interface Second").unwrap() + "interface Second".len(),
+                5,
+            ),
+            (
+                "Third",
+                source.find("object Third").unwrap() + "object Third".len(),
+                7,
+            ),
+            (
+                "Fourth",
+                source.find("enum class Fourth").unwrap() + "enum class Fourth".len(),
+                9,
+            ),
+            (
+                "Fifth",
+                source.find("class Fifth").unwrap() + "class Fifth".len(),
+                11,
+            ),
+        ] {
+            let class = parsed_class(source, name);
+            assert_eq!(class.span.hi as usize, end, "{name} exact span");
+            assert_eq!(class.decl_end_line, line, "{name} end line");
+        }
     }
 }

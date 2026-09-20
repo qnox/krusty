@@ -16,9 +16,12 @@ fn reflective_function_join_uses_the_declared_kfunction_supertype() {
     let files = vec![file];
     let symbols = collect_signatures_with_cp(
         &files,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(vec![stdlib])),
-        )),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+                crate::jvm::classpath::Classpath::new(vec![stdlib]),
+            ))
+            .expect("JVM provider initialization"),
+        ),
         &mut diagnostics,
     );
     assert!(diagnostics.diags.is_empty(), "{:#?}", diagnostics.diags);

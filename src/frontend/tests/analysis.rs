@@ -90,6 +90,7 @@ impl ExistingLibrary {
                             setter: None,
                             setter_visibility: crate::types::Visibility::Public,
                             is_const: false,
+                            implicit_integer_coercion: false,
                             compile_time_constant: None,
                             visibility: Visibility::Private,
                             owner: internal,
@@ -238,6 +239,7 @@ impl crate::symbol_source::SymbolSource for ExistingLibrary {
                         setter: None,
                         setter_visibility: Visibility::Public,
                         is_const: false,
+                        implicit_integer_coercion: false,
                         compile_time_constant: None,
                         visibility: Visibility::Public,
                         owner,
@@ -351,6 +353,7 @@ impl SemanticPlatform for ExistingLibrary {
                 setter: None,
                 setter_visibility: crate::types::Visibility::Public,
                 is_const: false,
+                implicit_integer_coercion: false,
                 compile_time_constant: None,
                 visibility: crate::types::Visibility::Public,
                 owner: internal,
@@ -1878,4 +1881,74 @@ fn preexisting_warning_does_not_mark_a_source_as_unparseable() {
         &mut diags,
     );
     assert!(analysis.types[0].is_some());
+}
+
+#[test]
+fn invalid_dependency_metadata_is_one_terminal_frontend_diagnostic() {
+    use crate::diag::{DiagnosticKind, Severity};
+    use crate::jvm::classfile::ClassWriter;
+    use crate::jvm::classpath::Classpath;
+    use crate::jvm::jvm_libraries::JvmLibraries;
+
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "krusty-invalid-metadata-frontend-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let earlier = root.join("earlier/shadow");
+    let later = root.join("later/shadow");
+    std::fs::create_dir_all(&earlier).expect("create earlier package");
+    std::fs::create_dir_all(&later).expect("create later package");
+
+    let malformed_type_parameter = [
+        0x00, // empty StringTableTypes prefix
+        0x2a, 0x06, // Class.type_parameter
+        0x08, 0x00, // id
+        0x10, 0x00, // name
+        0x20, 0x03, // invalid variance enum
+    ];
+    let d1 = std::iter::once('\0')
+        .chain(malformed_type_parameter.into_iter().map(char::from))
+        .collect::<String>();
+    let mut invalid = ClassWriter::new("shadow/Chosen", "java/lang/Object");
+    invalid.set_kotlin_metadata(1, &[2, 2, 0], 0, &[d1], &[]);
+    std::fs::write(earlier.join("Chosen.class"), invalid.finish())
+        .expect("write invalid Kotlin class");
+    std::fs::write(
+        later.join("Chosen.class"),
+        ClassWriter::new("shadow/Chosen", "java/lang/Object").finish(),
+    )
+    .expect("write shadowed valid class");
+
+    let classpath = std::rc::Rc::new(Classpath::new(vec![
+        root.join("earlier"),
+        root.join("later"),
+    ]));
+    let platform = JvmLibraries::new(classpath).expect("initialize JVM provider");
+    let input = [SourceInput::kotlin(
+        "fun use(value: shadow.Chosen?): shadow.Chosen? = value",
+    )];
+    let mut diagnostics = DiagSink::new();
+    analyze_source_set_with_features(
+        &input,
+        Box::new(platform),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    assert_eq!(diagnostics.diags.len(), 1, "{:?}", diagnostics.diags);
+    let diagnostic = &diagnostics.diags[0];
+    assert_eq!(diagnostic.file, 0);
+    assert_eq!(diagnostic.span, Span::new(0, 0));
+    assert_eq!(diagnostic.editor_span, None);
+    assert_eq!(diagnostic.severity, Severity::Error);
+    assert_eq!(diagnostic.kind, DiagnosticKind::Compiler);
+    assert_eq!(diagnostic.identity, None);
+    assert_eq!(
+        diagnostic.msg,
+        "cannot load classpath declaration shadow/Chosen: invalid Kotlin metadata: InvalidVariance(3)"
+    );
+
+    std::fs::remove_dir_all(root).expect("remove classpath directories");
 }

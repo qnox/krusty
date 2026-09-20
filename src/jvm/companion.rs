@@ -260,6 +260,8 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
             is_const: false,
             owner: Some(ir.classes[candidate.outer as usize].fq_name),
             visibility: candidate.visibility,
+            setter_jvm_name: None,
+            erased_declared_ty: None,
             custom_accessor: false,
             line: candidate.decl_line,
             source_order: candidate.source_order,

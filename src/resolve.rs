@@ -28,7 +28,11 @@ use crate::types::{
 };
 use scope::{ContextReceiver, ContextValue, FlowExclusion, NarrowPath, Ns, ScopeKind};
 
+mod actualization_names;
 mod annotation_applications;
+pub(crate) use actualization_names::actualization_type_bindings;
+#[cfg(test)]
+pub(crate) use actualization_names::resolve_actualization_classifier_for_test;
 mod call_result_constraint;
 mod callable_reference_selection;
 mod capture_analysis;
@@ -41,7 +45,9 @@ mod conditional_branch;
 mod constant_evaluation;
 mod context_capture;
 mod context_sensitive_resolution;
-mod delegated_properties;
+pub(crate) mod declaration_index;
+pub(crate) mod delegated_properties;
+pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod dependency_platform;
 mod finalized_projection;
 mod generic_call_bindings;
@@ -54,6 +60,7 @@ mod local_capture_dependencies;
 mod local_class_scope;
 mod local_method_dependencies;
 mod loop_flow;
+mod member_extension_selection;
 mod operator_calls;
 mod overload_diagnostics;
 mod override_plans;
@@ -73,6 +80,8 @@ mod stable_path;
 mod streaming_signature_bridge;
 #[cfg(test)]
 mod streaming_signature_tests;
+mod super_calls;
+pub use super_calls::ResolvedSuperCall;
 mod tailrec_declarations;
 mod type_join;
 
@@ -92,7 +101,9 @@ use constant_evaluation::{
 };
 pub(crate) use context_capture::{selected_context_values, SelectedContextSources};
 use context_sensitive_resolution::{expected_nested_classifier, parameterized_class_literal_type};
-use delegated_properties::{select_delegate_operator, select_delegate_operator_return};
+use delegated_properties::{
+    select_delegate_operator, select_delegate_operator_return, DelegateConventionSite,
+};
 pub(crate) use dependency_platform::DependencyPlatform;
 pub(crate) use finalized_projection::{
     project_finalized_signatures, publish_stable_declaration_metadata,
@@ -107,6 +118,9 @@ use local_class_scope::{
     local_class_enclosing_tparams, local_class_sibling_names, EnclosingTypeParameterDeclaration,
 };
 use loop_flow::collect_all_reassigned;
+pub(crate) use member_extension_selection::{
+    MemberExtensionFunctionSelection, MemberExtensionSelection,
+};
 pub(crate) use override_plans::publish_override_plans;
 use postponed_diagnostics::PostponedDiagnostics;
 use sam_constructors::{select_fixed_sam_constructor, select_sam_constructor};
@@ -4324,15 +4338,6 @@ impl SymbolTable {
 
     pub fn class_by_type_name(&self, internal: TypeName) -> Option<&ClassSig> {
         self.classes.get(&internal)
-    }
-
-    pub(crate) fn class_by_stable_declaration(
-        &self,
-        declaration: crate::fir::DeclarationId,
-    ) -> Option<&ClassSig> {
-        self.classes
-            .values()
-            .find(|class| class.stable_declaration == Some(declaration))
     }
 
     /// Resolve one source file's alias spelling to its target module class. The returned class still
@@ -10541,6 +10546,11 @@ fn collect_signatures_with_cp_impl(
                     let mut contributed_companion_order = Vec::new();
                     for member in contributed_members {
                         let required = member.params.len();
+                        assert_eq!(
+                            member.param_names.len(),
+                            required,
+                            "a frontend plugin declaration publishes one identity per parameter"
+                        );
                         let signature = Signature {
                             params: member.params,
                             ret: member.ret,
@@ -10556,7 +10566,7 @@ fn collect_signatures_with_cp_impl(
                             no_infer_params: vec![],
                             implicit_integer_coercion: vec![],
                             param_default_values: Vec::new(),
-                            param_names: vec![],
+                            param_names: member.param_names,
                             lambda_param_types: vec![],
                             lambda_recv: vec![],
                             visibility: Visibility::Public,
@@ -10836,12 +10846,16 @@ fn collect_signatures_with_cp_impl(
                         compact_headers,
                         primary_constructor_declaration,
                     ) {
-                        (Some(headers), Some(declaration)) => resolved_header_annotation_identities(
-                            &streamed_declaration_annotations(headers, declaration).expect(
+                        (Some(headers), Some(declaration)) => {
+                            streamed_resolved_declaration_annotations(
+                                headers,
+                                declaration,
+                                &table.resolved_annotations,
+                            )
+                            .expect(
                                 "a production primary constructor must have compact annotations",
-                            ),
-                            &class_names,
-                        ),
+                            )
+                        }
                         _ => c
                             .primary_ctor_annotations
                             .iter()
@@ -10858,14 +10872,14 @@ fn collect_signatures_with_cp_impl(
                                 let declaration = declaration.expect(
                                     "a production secondary constructor has a stable identity",
                                 );
-                                let annotations = streamed_declaration_annotations(
+                                streamed_resolved_declaration_annotations(
                                     headers,
                                     declaration,
+                                    &table.resolved_annotations,
                                 )
                                 .expect(
                                     "a production secondary constructor has compact annotations",
-                                );
-                                resolved_header_annotation_identities(&annotations, &class_names)
+                                )
                             })
                             .collect(),
                         None => c
@@ -12145,7 +12159,7 @@ fn collect_stable_visibility_suppressions(
             };
             if !table
                 .resolved_annotation(stub.source.raw(), &annotation)
-                .is_some_and(|identity| identity.matches("kotlin/Suppress"))
+                .is_some_and(|identity| identity == type_name("kotlin/Suppress"))
             {
                 continue;
             }
@@ -13463,8 +13477,12 @@ fn delegated_getvalue_ret_for_signature(
     let resolver = crate::symbol_resolver::SymbolResolver::new_import_scoped_with_module(
         libraries, &module, &scope,
     );
-    let kproperty = Ty::obj("kotlin/reflect/KProperty");
-    let convention_args = [this_ref, kproperty];
+    // Without `kotlin.reflect.KProperty` no convention can apply, so this probe answers `None` for
+    // the same reason a missing `getValue` does, rather than assuming the classifier exists.
+    let convention_args = [
+        this_ref,
+        crate::resolve::delegated_properties::delegate_property_reference_type(&resolver)?,
+    ];
     // `provideDelegate` read from the TABLE, whose return may still be the marker — its body is an
     // expression nothing has typed yet. The caller has already resolved that step and passes the
     // stored type in, so an undetermined answer here is not an answer: it would make the delegate
@@ -18150,6 +18168,11 @@ pub struct TypeInfo {
     /// Selected `provideDelegate` conventions. Lowering stores the selected call's semantic result
     /// type and consumes this exact target to emit the initialization call.
     pub delegate_provide_targets: HashMap<ExprId, DelegateGetValueTarget>,
+    /// The `KProperty` classifier the ordinary symbol source answered with when a delegated
+    /// property's conventions were selected against it. Recorded once, here, so the checked plan
+    /// and every value built from it carry the resolution actually used rather than each phase
+    /// spelling the name again.
+    pub delegate_property_reference_type: Option<Ty>,
     /// For a call to a function with CONTEXT PARAMETERS (`context(a: A) fun f()`) where the context
     /// arguments are supplied IMPLICITLY, the checker-selected source for each leading context
     /// parameter. Keyed by the call `ExprId`; lowering consumes this identity without repeating scope
@@ -18662,80 +18685,6 @@ fn constructor_delegation_cycles(edges: &[Option<usize>]) -> Vec<Vec<usize>> {
 }
 
 #[derive(Clone, Debug)]
-pub struct ResolvedSuperCall {
-    /// Exact dispatch receiver selected by `super` / `super@Label`. A labeled super may target an
-    /// enclosing class instance, so the callable target alone is not enough for lowering.
-    pub receiver: ImplicitReceiverSelection,
-    pub owner: TypeName,
-    pub name: String,
-    pub params: Vec<Ty>,
-    pub ret: Ty,
-    pub physical_ret: Ty,
-    /// Empty for a source signature whose descriptor is derived from the semantic parameter types.
-    pub descriptor: String,
-    pub interface: bool,
-    /// Provider-owned physical realization of the selected semantic declaration. A JVM-default
-    /// holder is an ordinary direct realization; lowering does not rediscover it from a mode or
-    /// owner spelling.
-    pub realization: crate::libraries::MemberRealization,
-    /// Stable source declaration selected for this call. Dependency declarations leave this unset;
-    /// current-compilation defaults use it to retain their exact checked default-expression owner.
-    pub stable_declaration: Option<crate::fir::DeclarationId>,
-    /// Kotlin property declaration selected by property syntax. The callable declaration above is
-    /// still the exact accessor target used by FIR; editor/navigation consumers use this identity
-    /// to reach the source property rather than its generated getter or setter.
-    pub property_declaration: Option<crate::fir::DeclarationId>,
-    pub source_member: Option<crate::libraries::SourceMember>,
-    /// Exact semantic dependency property when this selection came from property syntax. The
-    /// callable identity remains available for ordinary accessor calls, but checked FIR uses this
-    /// declaration identity to retain property semantics through target-independent lowering.
-    pub external_property: Option<crate::fir::ExternalPropertyId>,
-}
-
-impl ResolvedSuperCall {
-    fn selected(
-        receiver: ImplicitReceiverSelection,
-        dispatch_owner: TypeName,
-        interface: bool,
-        member: crate::libraries::LibraryMember,
-    ) -> Option<Self> {
-        let realization = member.realization;
-        let stable_declaration = member.stable_declaration;
-        let source_member = member.source_member;
-        let external_property = member.external_property_identity;
-        let physical_owner = member.owner?;
-        let owner = match realization {
-            // A selected class declaration remains the exact non-virtual target even when it was
-            // inherited through another class. An interface declaration reached through a class
-            // supertype must instead name that direct class in the InterfaceMethodref search path;
-            // the normalized declaration kind, not its symbol-source origin, decides the shape.
-            crate::libraries::MemberRealization::Dispatch if member.is_interface() => {
-                dispatch_owner
-            }
-            crate::libraries::MemberRealization::Dispatch => physical_owner,
-            crate::libraries::MemberRealization::Direct { .. } => physical_owner,
-            crate::libraries::MemberRealization::Intrinsic(_)
-            | crate::libraries::MemberRealization::RangeConstruction { .. } => return None,
-        };
-        Some(Self {
-            receiver,
-            owner,
-            name: member.physical_name.unwrap_or(member.name),
-            params: member.params,
-            ret: member.ret,
-            physical_ret: member.physical_ret,
-            descriptor: member.descriptor,
-            interface,
-            realization,
-            stable_declaration,
-            property_declaration: None,
-            source_member,
-            external_property,
-        })
-    }
-}
-
-#[derive(Clone, Debug)]
 pub struct ResolvedDefaultMemberCall {
     pub owner: TypeName,
     pub name: String,
@@ -18894,86 +18843,6 @@ pub struct ResolvedTopLevelCall {
     /// The callee's declared contract (from same-module source or classpath `@Metadata`) — the
     /// effects the checker applies at this call site.
     pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
-}
-
-#[derive(Clone, Debug)]
-pub enum DelegateGetValueTarget {
-    Member {
-        applied_receiver: Ty,
-        declared_receiver: Ty,
-        declared_ret: Ty,
-        stable_declaration: Option<crate::fir::DeclarationId>,
-        external_identity: Option<crate::fir::ExternalCallableId>,
-        external_default_provider: Option<crate::fir::ExternalCallableId>,
-        owner: TypeName,
-        name: String,
-        params: Vec<Ty>,
-        ret: Ty,
-        physical_params: Vec<Ty>,
-        physical_ret: Ty,
-        descriptor: String,
-        interface: bool,
-    },
-    Extension {
-        callable: Box<crate::libraries::LibraryCallable>,
-        stable_declaration: Option<crate::fir::DeclarationId>,
-    },
-    MemberExtension {
-        stable_declaration: Option<crate::fir::DeclarationId>,
-        external_identity: Option<crate::fir::ExternalCallableId>,
-        external_default_provider: Option<crate::fir::ExternalCallableId>,
-        owner: TypeName,
-        name: String,
-        extension_receiver: Ty,
-        dispatch_receiver: ImplicitReceiverSelection,
-        context_count: usize,
-        params: Vec<Ty>,
-        ret: Ty,
-        physical_params: Vec<Ty>,
-        physical_ret: Ty,
-        inline: InlineKind,
-        inline_body_plan: Option<Box<crate::libraries::InlineBodyPlan>>,
-        suspend: bool,
-        declared_ret: Option<Ty>,
-        interface: bool,
-    },
-}
-
-impl DelegateGetValueTarget {
-    pub fn ret(&self) -> Ty {
-        match self {
-            Self::Member { ret, .. } => *ret,
-            Self::Extension { callable, .. } => callable.ret,
-            Self::MemberExtension { ret, .. } => *ret,
-        }
-    }
-
-    fn applied_receiver(&self) -> Option<Ty> {
-        match self {
-            Self::Member {
-                applied_receiver, ..
-            } => Some(*applied_receiver),
-            Self::Extension { callable, .. } => callable.source_receiver,
-            Self::MemberExtension {
-                extension_receiver, ..
-            } => Some(*extension_receiver),
-        }
-    }
-
-    fn receiver_constrained_by_result(&self, expected: Ty) -> Option<Ty> {
-        let Self::Member {
-            declared_receiver,
-            declared_ret,
-            ..
-        } = self
-        else {
-            return None;
-        };
-        let mut bindings = crate::symbol_resolver::GSigBinds::new();
-        crate::symbol_resolver::unify_inferred_ty(*declared_ret, expected, &mut bindings);
-        (!bindings.is_empty())
-            .then(|| crate::symbol_resolver::ty_subst_keep_unbound(*declared_receiver, &bindings))
-    }
 }
 
 impl TypeInfo {
@@ -19322,6 +19191,10 @@ impl TypeInfo {
     }
     pub fn delegate_provide(&self, delegate: ExprId) -> Option<&DelegateGetValueTarget> {
         self.delegate_provide_targets.get(&delegate)
+    }
+    /// The resolved `KProperty` classifier; `None` when this file checked no delegated property.
+    pub fn delegate_property_reference_type(&self) -> Option<Ty> {
+        self.delegate_property_reference_type
     }
 }
 
@@ -27413,6 +27286,9 @@ impl<'a> Checker<'a> {
                                 ) {
                                     return Ty::Error;
                                 }
+                                if self.reject_suspend_super_call(m.suspend(), span, &name) {
+                                    return Ty::Error;
+                                }
                                 let ret = m.ret;
                                 if let Some(target) = ResolvedSuperCall::selected(
                                     dispatch_receiver.clone(),
@@ -27472,6 +27348,9 @@ impl<'a> Checker<'a> {
                                 &member.call_sig,
                                 None,
                             ) {
+                                return Ty::Error;
+                            }
+                            if self.reject_suspend_super_call(member.suspend(), span, &name) {
                                 return Ty::Error;
                             }
                             let ret = member.ret;
@@ -31476,7 +31355,7 @@ impl<'a> Checker<'a> {
                     .into_iter()
                     .filter(|candidate| candidate.kind == crate::libraries::FnKind::TopLevel)
                     .collect::<Vec<_>>();
-                if !self.invisible_reference_suppressed(self.call_callee_name_span(call))
+                if !self.suppresses_diagnostic("INVISIBLE_REFERENCE")
                     && top_level_candidates.iter().any(|candidate| {
                         candidate.visibility == Visibility::Private
                             && candidate
@@ -31995,7 +31874,7 @@ impl<'a> Checker<'a> {
                 } else if let Some((internal, access)) = self.inaccessible_classifier(scope, &fname)
                 {
                     let reference = self.call_callee_name_span(call);
-                    if self.invisible_reference_suppressed(reference) {
+                    if self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
                         (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None, span)
                     } else {
                         (
@@ -32158,7 +32037,15 @@ impl<'a> Checker<'a> {
                 name,
                 ty,
                 delegate,
-            } => self.stmt_local_delegate(scope, s, is_var, name, ty, delegate),
+                by_span,
+            } => self.stmt_local_delegate(
+                scope,
+                s,
+                name,
+                ty,
+                delegate,
+                DelegateConventionSite::local(by_span, is_var),
+            ),
             Stmt::LocalLateinit { name, ty } => {
                 if self.declared_in_current_scope(scope, &name) {
                     self.diags.error(
@@ -32686,10 +32573,10 @@ impl<'a> Checker<'a> {
         &mut self,
         scope: &CheckerScope<'_>,
         s: StmtId,
-        is_var: bool,
         name: String,
         ty: Option<TypeRef>,
         delegate: ExprId,
+        site: DelegateConventionSite,
     ) {
         if self.declared_in_current_scope(scope, &name) {
             self.diags.error(
@@ -32708,17 +32595,23 @@ impl<'a> Checker<'a> {
             }
             t
         });
-        let (dt, delegate_ret) =
-            self.check_delegate_getvalue(scope, delegate, Ty::Null, Ty::Null, explicit_property_ty);
+        let (dt, delegate_ret) = self.check_delegate_getvalue(
+            scope,
+            delegate,
+            Ty::Null,
+            Ty::Null,
+            explicit_property_ty,
+            site.clone(),
+        );
         let prop_ty = match explicit_property_ty {
             Some(t) => t,
             None => delegate_ret.unwrap_or(Ty::Error),
         };
-        if is_var {
-            self.record_delegate_setvalue(scope, delegate, dt, Ty::Null, prop_ty);
+        if site.is_var {
+            self.record_delegate_setvalue(scope, delegate, dt, Ty::Null, prop_ty, site.clone());
         }
         self.local_decl_types.insert(s, prop_ty);
-        self.declare(scope, &name, prop_ty, is_var);
+        self.declare(scope, &name, prop_ty, site.is_var);
         let storage_ty = self
             .delegate_provide_targets
             .get(&delegate)
@@ -34783,6 +34676,13 @@ mod tests {
     use crate::lexer::lex;
     use crate::parser::{parse, parse_script_with_features, parse_with_features};
 
+    fn initialized_jvm_libraries(
+        classpath: std::rc::Rc<crate::jvm::classpath::Classpath>,
+    ) -> crate::jvm::jvm_libraries::JvmLibraries {
+        crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+            .expect("JVM provider initialization")
+    }
+
     #[test]
     fn package_only_qualified_classifier_failure_reports_the_missing_tail() {
         let result = walk_qualifier_namespace_facets(
@@ -35659,6 +35559,73 @@ val result = object { fun value(): String = captured }
     }
 
     #[test]
+    fn legacy_visibility_suppression_uses_the_lexical_annotation_identity() {
+        let (file_errors, _) = check_with_annotation_fixtures(
+            r#"
+@file:KotlinSuppress("INVISIBLE_REFERENCE")
+import kotlin.Suppress as KotlinSuppress
+
+class FileOwner { private fun hidden(): Int = 1 }
+fun fileAllowed(owner: FileOwner): Int = owner.hidden()
+"#,
+            false,
+        );
+        assert_eq!(file_errors, Vec::<String>::new());
+
+        let (errors, _) = check_with_annotation_fixtures(
+            r#"
+// LANGUAGE: +ExplicitBackingFields
+import kotlin.Suppress as KotlinSuppress
+
+annotation class Suppress(vararg val names: String)
+class Owner { private fun hidden(): Int = 1 }
+
+@KotlinSuppress("INVISIBLE_REFERENCE")
+fun allowed(owner: Owner) { owner.hidden() }
+
+class MemberProperty {
+    @KotlinSuppress("INVISIBLE_REFERENCE")
+    val value: Int = Owner().hidden()
+}
+
+class Primary @KotlinSuppress("INVISIBLE_REFERENCE") constructor(
+    val value: Int = Owner().hidden(),
+)
+
+class Secondary {
+    @KotlinSuppress("INVISIBLE_REFERENCE")
+    constructor() { Owner().hidden() }
+}
+
+fun outer() {
+    @KotlinSuppress("INVISIBLE_REFERENCE")
+    fun local(): Int = Owner().hidden()
+    local()
+
+    class LocalInferred {
+        @KotlinSuppress("INVISIBLE_REFERENCE")
+        val value = Owner().hidden()
+    }
+    LocalInferred().value
+
+    class LocalBacking {
+        @KotlinSuppress("INVISIBLE_REFERENCE")
+        val value: Any
+            field = Owner().hidden()
+    }
+    LocalBacking().value
+}
+
+@Suppress("INVISIBLE_REFERENCE")
+fun rejected(owner: Owner) { owner.hidden() }
+"#,
+            true,
+        );
+
+        assert_eq!(errors, ["cannot access 'hidden': it is private in 'Owner'"]);
+    }
+
+    #[test]
     fn bare_type_parameter_does_not_admit_null_from_its_upper_bound() {
         for source in [
             "fun <T> take(value: T) {}\nfun <T> invalid() { take<T>(null) }",
@@ -35871,7 +35838,7 @@ val result = object { fun value(): String = captured }
             })
             .expect("generic function declaration");
         let files = vec![file];
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+        let platform = initialized_jvm_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(Vec::new()),
         ));
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
@@ -35931,9 +35898,8 @@ val result = object { fun value(): String = captured }
             })
             .expect("generic extension declaration");
         let files = vec![file];
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::toolchain::stdlib_classpath(),
-        ));
+        let platform =
+            initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
         let info = check_file(&files[0], &mut symbols, &mut diagnostics);
 
@@ -36453,9 +36419,8 @@ fun use() {
             })
             .expect("type check expression");
         let files = vec![file];
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::toolchain::stdlib_classpath(),
-        ));
+        let platform =
+            initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
         let info = check_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
@@ -38238,6 +38203,7 @@ fun box(): String {
                             setter: None,
                             setter_visibility: Visibility::Private,
                             is_const: false,
+                            implicit_integer_coercion: false,
                             compile_time_constant: None,
                             visibility: Visibility::Public,
                             owner: foo,
@@ -38896,7 +38862,7 @@ fun box(): String {
         if let Some(jdk) = crate::toolchain::jdk_modules() {
             classpath.push(jdk);
         }
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+        let platform = initialized_jvm_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(classpath),
         ));
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
@@ -38955,7 +38921,7 @@ fun box(): String {
         if let Some(jdk) = crate::toolchain::jdk_modules() {
             classpath.push(jdk);
         }
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+        let platform = initialized_jvm_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(classpath),
         ));
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
@@ -38986,7 +38952,7 @@ fun box(): String {
         if let Some(jdk) = crate::toolchain::jdk_modules() {
             classpath.push(jdk);
         }
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+        let platform = initialized_jvm_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(classpath),
         ));
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
@@ -39243,11 +39209,8 @@ fun box(): String {
         );
         let files = vec![file];
         let cp = std::rc::Rc::new(crate::toolchain::stdlib_classpath());
-        let mut syms = collect_signatures_with_cp(
-            &files,
-            Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(cp)),
-            &mut d,
-        );
+        let mut syms =
+            collect_signatures_with_cp(&files, Box::new(initialized_jvm_libraries(cp)), &mut d);
         let string = syms
             .libraries
             .classifier(type_name("kotlin/String"))
@@ -39332,9 +39295,8 @@ fun box(): String {
             .collect::<Vec<_>>();
         assert_eq!(reads.len(), 2);
         let files = vec![file];
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::toolchain::stdlib_classpath(),
-        ));
+        let platform =
+            initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
         let info = check_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
@@ -39407,9 +39369,8 @@ fun box(): String {
             &mut diagnostics,
         );
         let files = vec![file];
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::toolchain::stdlib_classpath(),
-        ));
+        let platform =
+            initialized_jvm_libraries(std::rc::Rc::new(crate::toolchain::stdlib_classpath()));
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
         let info = check_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
@@ -41198,7 +41159,7 @@ fun box(): String {
         if let Some(jdk) = crate::toolchain::jdk_modules() {
             classpath.push(jdk);
         }
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+        let platform = initialized_jvm_libraries(std::rc::Rc::new(
             crate::jvm::classpath::Classpath::new(classpath),
         ));
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
@@ -43649,7 +43610,7 @@ fun use(counter: Counter) {
         let mut classpath_entries = crate::toolchain::classpath_jars_for("");
         classpath_entries.push(jdk_modules);
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath_entries));
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(classpath);
+        let platform = initialized_jvm_libraries(classpath);
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
         let info = check_file(&files[0], &mut symbols, &mut diagnostics);
         assert_no_diags(&diagnostics);
@@ -43697,7 +43658,7 @@ fun use(counter: Counter) {
         );
         let files = vec![file];
         let classpath = std::rc::Rc::new(crate::jvm::classpath::Classpath::new(vec![stdlib]));
-        let platform = crate::jvm::jvm_libraries::JvmLibraries::new(classpath);
+        let platform = initialized_jvm_libraries(classpath);
         let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
         {
             let module = crate::module_symbols::ModuleSymbols::new(&symbols);
@@ -44716,8 +44677,7 @@ impl<'a> Checker<'a> {
     }
 }
 
-/// Select one member-extension function for a call. Every lookup it needs is passed in, so signature
-/// solving in Pass 1 calls it with a symbol source and a receiver list instead of a `Checker`.
+/// Select one member-extension function using caller-owned source, receivers, and call probes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn member_extension_function_with(
     source: &dyn SymbolSource,
@@ -44730,7 +44690,7 @@ pub(crate) fn member_extension_function_with(
     score_candidate: &dyn Fn(&[Ty], &CallSig, ArgSlots<'_>) -> Option<CallCandidateScore>,
     call: MemberExtensionFunctionCall<'_>,
     selection: MemberExtensionSelection,
-) -> Result<Option<MemberExtensionFunctionCandidate>, ()> {
+) -> MemberExtensionFunctionSelection {
     let MemberExtensionFunctionCall {
         extension_receiver,
         result_constraint,
@@ -44741,9 +44701,13 @@ pub(crate) fn member_extension_function_with(
         explicit_type_args,
         trailing_lambda,
     } = call;
-    let mut candidates = Vec::new();
+    let (mut candidates, mut excluded) = (Vec::new(), Vec::new());
     let full_arg_tys = arg_tys.iter().copied().map(Some).collect::<Vec<_>>();
     for shape in member_extension_function_shapes_in(source, receivers, extension_receiver, name) {
+        if member_extension_selection::exclude_delegate_convention(&shape, selection, &mut excluded)
+        {
+            continue;
+        }
         let Some(instantiated) = instantiate_member_extension_with(
             explicit_context_arguments,
             select_context_arguments,
@@ -44762,6 +44726,11 @@ pub(crate) fn member_extension_function_with(
                 trailing_lambda,
             },
         ) else {
+            member_extension_selection::retain_inapplicable_delegate_convention(
+                &shape,
+                selection,
+                &mut excluded,
+            );
             continue;
         };
         candidates.push(MemberExtensionFunctionCandidate {
@@ -44777,9 +44746,11 @@ pub(crate) fn member_extension_function_with(
             visible_params: instantiated.visible_params,
             physical_params: shape.function.physical_params.clone(),
             context_args: instantiated.context_sources,
+            context_count: shape.function.signature.context_count,
             ret: instantiated.ret,
             physical_ret: shape.function.signature.ret,
             call_sig: instantiated.call_sig,
+            diagnostic_param_names: shape.function.signature.call_sig().param_names,
             physical_vararg_index: instantiated.physical_vararg_index,
             argument_parameters: instantiated.argument_parameters,
             visibility: shape.function.signature.visibility,
@@ -44790,18 +44761,23 @@ pub(crate) fn member_extension_function_with(
             ),
             inline_body_plan: shape.function.inline_body_plan.clone(),
             suspend: shape.function.signature.is_suspend(),
+            declared_params: shape
+                .function
+                .signature
+                .generic_sig
+                .as_ref()
+                .map(|signature| signature.params.clone())
+                .unwrap_or_else(|| shape.function.signature.params.clone()),
             declared_ret: shape.function.declared_ret,
             owner: shape.owner,
             physical_name: shape.function.physical_name.clone(),
         });
     }
-    if selection == MemberExtensionSelection::Operators {
-        candidates.retain(|candidate| candidate.is_operator);
-    }
+    member_extension_selection::retain_selected(&mut candidates, selection);
     let mut maximal =
         maximal_member_extensions(oracle, &candidates, |candidate| candidate.priority);
     if maximal.is_empty() {
-        return Ok(None);
+        return MemberExtensionFunctionSelection::None(excluded);
     }
     let best = maximal
         .iter()
@@ -44810,8 +44786,13 @@ pub(crate) fn member_extension_function_with(
         .unwrap_or_default();
     maximal.retain(|index| candidates[*index].score == best);
     match maximal.as_slice() {
-        [index] => Ok(Some(candidates[*index].clone())),
-        _ => Err(()),
+        [index] => MemberExtensionFunctionSelection::Selected(candidates[*index].clone()),
+        _ => MemberExtensionFunctionSelection::Ambiguous(
+            maximal
+                .into_iter()
+                .map(|index| candidates[index].clone())
+                .collect(),
+        ),
     }
 }
 
@@ -44975,28 +44956,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         },
     );
     let import_levels = function_import_scope.levels().clone();
-    let active_statement_suppressions = if resolved_index.is_some() {
-        // Production seeds file/declaration visibility policy from stable declaration facts after
-        // the active body set is selected below. The occurrence map is a legacy same-parse aid and
-        // is deliberately unavailable in Pass 2.
-        Vec::new()
-    } else {
-        let pass_one = syms
-            .pass_one_symbols()
-            .expect("legacy checking requires Pass-1 symbols");
-        file.file_annotations
-            .iter()
-            .filter(|(annotation, _)| {
-                pass_one
-                    .resolved_annotation(file_index, annotation)
-                    .is_some_and(|identity| identity.matches("kotlin/Suppress"))
-            })
-            .flat_map(|(_, arguments)| arguments)
-            .filter_map(|argument| file.const_string_value(*argument))
-            .map(|value| value.to_lossy())
-            .collect()
-    };
-    Checker {
+    let mut checker = Checker {
         file,
         libraries: syms.libraries(),
         compilation_id: syms.compilation_id(),
@@ -45047,7 +45007,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         reflective_callable_references: std::collections::HashSet::new(),
         resolved_type_tys: HashMap::new(),
         unresolved_type_segments: HashMap::new(),
-        active_statement_suppressions,
+        active_statement_suppressions: Vec::new(),
         resolved_type_bounds: HashMap::new(),
         resolved_declaration_types: HashMap::new(),
         resolved_declaration_type_parameters: HashMap::new(),
@@ -45145,6 +45105,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         delegate_getvalue_targets: HashMap::new(),
         delegate_setvalue_targets: HashMap::new(),
         delegate_provide_targets: HashMap::new(),
+        delegate_property_reference_type: None,
         super_ctor_params: HashMap::new(),
         context_args: HashMap::new(),
         fn_reassigned: std::collections::HashSet::new(),
@@ -45171,7 +45132,13 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         loop_depth: 0,
         return_allowed: true,
         lambda_returns: LambdaReturnScopes::default(),
+    };
+    if resolved_index.is_none() {
+        let (annotations, arguments): (Vec<_>, Vec<_>) =
+            file.file_annotations.iter().cloned().unzip();
+        checker.push_declaration_suppressions(&CheckerScope::root(), &annotations, &arguments);
     }
+    checker
 }
 
 fn class_declaration_label(name: &str) -> &str {
@@ -46913,6 +46880,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         delegate_getvalue_targets,
         delegate_setvalue_targets,
         delegate_provide_targets,
+        delegate_property_reference_type,
         context_args,
         super_ctor_params,
         discovered_anonymous_captures,
@@ -47247,6 +47215,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         delegate_getvalue_targets,
         delegate_setvalue_targets,
         delegate_provide_targets,
+        delegate_property_reference_type,
         context_args,
     };
     if !capture_discovery {
@@ -47705,15 +47674,16 @@ pub(crate) struct MemberExtensionFunctionCandidate {
     score: (usize, std::cmp::Reverse<usize>, bool),
     physical_receiver: Ty,
     extension_receiver: Ty,
-    /// Full semantic parameter list: leading contexts followed by value parameters.
+    /// Full semantic parameters (contexts first) and the source-visible subset.
     params: Vec<Ty>,
-    /// Source-visible parameters after implicit contexts have been removed.
     visible_params: Vec<Ty>,
     physical_params: Vec<Ty>,
     context_args: Vec<Option<ResolvedContextArgument>>,
+    context_count: usize,
     ret: Ty,
     physical_ret: Ty,
     call_sig: crate::libraries::CallSig,
+    diagnostic_param_names: Vec<String>,
     physical_vararg_index: Option<usize>,
     argument_parameters: Vec<(usize, usize)>,
     visibility: Visibility,
@@ -47721,43 +47691,11 @@ pub(crate) struct MemberExtensionFunctionCandidate {
     inline: InlineKind,
     inline_body_plan: Option<Box<crate::libraries::InlineBodyPlan>>,
     suspend: bool,
+    /// Un-erased declaration parameters before call substitution; ordinary when non-generic.
+    declared_params: Vec<Ty>,
     declared_ret: Option<Ty>,
     owner: TypeName,
     physical_name: String,
-}
-
-impl MemberExtensionFunctionCandidate {
-    fn resolved_call(
-        &self,
-        dispatch_receiver: ImplicitReceiverSelection,
-        extension_receiver: Ty,
-        interface: bool,
-    ) -> ResolvedCall {
-        ResolvedCall::MemberExtension {
-            stable_declaration: self.stable_declaration,
-            external_identity: self.external_identity,
-            external_default_provider: self.external_default_provider,
-            owner: self.owner,
-            dispatch_receiver,
-            extension_receiver,
-            physical_receiver: self.physical_receiver,
-            // Selection and diagnostics used the Kotlin source name. Only the finalized emit target
-            // receives this provider-owned spelling, so a mangled dependency method cannot leak back
-            // into a diagnostic or become a parallel lookup key.
-            name: self.physical_name.clone(),
-            params: self.params.clone(),
-            physical_params: self.physical_params.clone(),
-            context_args: self.context_args.clone(),
-            ret: self.ret,
-            physical_ret: self.physical_ret,
-            inline: self.inline,
-            inline_body_plan: self.inline_body_plan.clone(),
-            suspend: self.suspend,
-            declared_ret: self.declared_ret,
-            interface,
-            vararg_index: self.physical_vararg_index,
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -47818,12 +47756,6 @@ pub(crate) struct MemberExtensionFunctionCall<'a> {
     arg_names: Option<&'a [Option<String>]>,
     explicit_type_args: &'a [Ty],
     trailing_lambda: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MemberExtensionSelection {
-    All,
-    Operators,
 }
 
 #[derive(Clone, Copy)]
@@ -48274,6 +48206,8 @@ struct Checker<'a> {
     delegate_getvalue_targets: HashMap<ExprId, DelegateGetValueTarget>,
     delegate_setvalue_targets: HashMap<ExprId, DelegateGetValueTarget>,
     delegate_provide_targets: HashMap<ExprId, DelegateGetValueTarget>,
+    /// See [`TypeInfo::delegate_property_reference_type`].
+    delegate_property_reference_type: Option<Ty>,
     /// Implicit context arguments per call (see [`TypeInfo::context_args`]).
     context_args: HashMap<ExprId, Vec<ResolvedContextArgument>>,
     /// Names reassigned anywhere in the function body currently being checked (including inside its
@@ -49339,28 +49273,6 @@ impl<'a> Checker<'a> {
         index.property(property)?.storage_type.map(|ty| ty.get())
     }
 
-    /// Whether a selected current-module constant carries Kotlin's compiler-known unsigned
-    /// integer-coercion marker. Both pieces are stable declaration-header facts. `None` means this
-    /// checker has no finalized index and is reserved for legacy same-parse entry points.
-    fn stable_const_has_implicit_integer_coercion(
-        &self,
-        declaration: Option<crate::fir::DeclarationId>,
-    ) -> Option<bool> {
-        let index = self.resolved_index?;
-        let declaration = declaration?;
-        Some(
-            index
-                .declaration_header(declaration)
-                .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::CONST))
-                && index
-                    .declaration_annotations(declaration)
-                    .iter()
-                    .any(|annotation| {
-                        annotation.matches("kotlin/internal/ImplicitIntegerCoercion")
-                    }),
-        )
-    }
-
     fn has_low_priority_annotation(
         &self,
         scope: &CheckerScope<'_>,
@@ -49409,14 +49321,7 @@ impl<'a> Checker<'a> {
         else {
             return false;
         };
-        self.stable_const_has_implicit_integer_coercion(access.property.stable_declaration)
-            .unwrap_or_else(|| {
-                access
-                    .property
-                    .source_key
-                    .and_then(|source| self.module.legacy_symbols()?.source_props.get(&source))
-                    .is_some_and(|property| property.is_const && property.implicit_integer_coercion)
-            })
+        access.property.is_const && access.property.implicit_integer_coercion
     }
 
     /// Declaration shape shared by semantic member-property reads and writes. The federated source
@@ -56397,36 +56302,8 @@ impl<'a> Checker<'a> {
         expression: ExprId,
         property: &crate::libraries::PropertyInfo,
     ) -> Option<Ty> {
-        let constant = property
-            .compile_time_constant
-            .clone()
-            .or_else(|| {
-                property.stable_declaration.and_then(|declaration| {
-                    self.resolved_index?
-                        .compile_time_constant(declaration)
-                        .cloned()
-                })
-            })
-            .or_else(|| {
-                self.resolved_index.is_none().then(|| {
-                    property.source_key.and_then(|source| {
-                        self.module
-                            .legacy_symbols()?
-                            .source_props
-                            .get(&source)
-                            .and_then(|property| property.compile_time_constant.clone())
-                    })
-                })?
-            })?;
-        let implicit_integer_coercion = self
-            .stable_const_has_implicit_integer_coercion(property.stable_declaration)
-            .unwrap_or_else(|| {
-                property
-                    .source_key
-                    .and_then(|source| self.module.legacy_symbols()?.source_props.get(&source))
-                    .is_some_and(|property| property.is_const && property.implicit_integer_coercion)
-            });
-        if implicit_integer_coercion {
+        let constant = property.compile_time_constant.clone()?;
+        if property.is_const && property.implicit_integer_coercion {
             self.constant_integer_coercion_reads.insert(expression);
         }
         let ty = constant.ty;
@@ -61574,7 +61451,7 @@ impl<'a> Checker<'a> {
         if !scope.tparam_contains(&r.name) {
             if let Some(internal) = resolved.non_null().kotlin_class_internal() {
                 if !r.is_import() {
-                    if !self.invisible_reference_suppressed(r.span) {
+                    if !self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
                         if let Some(access) =
                             self.resolver().inaccessible_classifier_access(internal)
                         {
@@ -63956,6 +63833,25 @@ impl<'a> Checker<'a> {
     }
 
     fn check_operator_declaration(&mut self, function: &FunDecl, ret: Ty) {
+        // A delegated-property convention is called from a GENERATED accessor, which has no scope
+        // to fill an implicit context from. The declaration is rejected here, so the property that
+        // uses it reports no applicable convention rather than reaching a call whose argument list
+        // cannot be mapped onto the declaration's slots.
+        if function.is_operator()
+            && crate::resolve::delegated_properties::DELEGATE_CONVENTION_NAMES
+                .contains(&function.name.as_str())
+            && !crate::resolve::delegated_properties::is_usable_delegate_convention(
+                true,
+                function.context_count,
+            )
+        {
+            self.diags.error(
+                function
+                    .context_span
+                    .expect("a function with context parameters must retain its clause span"),
+                "context parameters on delegation operators are unsupported.".to_string(),
+            );
+        }
         if function.is_operator()
             && function.name == "hasNext"
             && !matches!(ret.canonical_semantic(), Ty::Boolean | Ty::Error)
@@ -65244,15 +65140,17 @@ impl<'a> Checker<'a> {
         // (and its sub-expressions') types are recorded for the lowering of `x$delegate`.
         if let Some(de) = p.delegate.filter(|_| check_ordinary_property_body) {
             let this_ref = recv_ty.unwrap_or(Ty::Null);
+            let site = DelegateConventionSite::of(p, None, recv_ty);
             let (dt, _) = self.check_delegate_getvalue(
                 scope,
                 de,
                 Ty::Null,
                 this_ref,
                 Some(resolved_property_ty),
+                site.clone(),
             );
             if p.is_var {
-                self.record_delegate_setvalue(scope, de, dt, this_ref, resolved_property_ty);
+                self.record_delegate_setvalue(scope, de, dt, this_ref, resolved_property_ty, site);
             }
         }
         if let Some(init) = p.init.filter(|_| check_ordinary_property_body) {
@@ -66804,6 +66702,11 @@ impl<'a> Checker<'a> {
                     } else {
                         property_scope
                     };
+                    let property_suppression_depth = self.push_declaration_suppressions(
+                        property_scope,
+                        &property.annotations,
+                        &property.annotation_args,
+                    );
                     // A self-recursive inferred property can still have a concrete constraint from
                     // another branch (`val index = left?.index ?: 0`). Publish that constraint only
                     // as a provisional, identity-keyed result, then run the ordinary checker against
@@ -66855,6 +66758,8 @@ impl<'a> Checker<'a> {
                         })
                         .filter(|ty| *ty != Ty::Error)
                         .map(inferred_declaration_ty);
+                    self.active_statement_suppressions
+                        .truncate(property_suppression_depth);
                     crate::trace_compiler!(
                         "signature",
                         "local property inference owner={d:?} name={} initializer={:?} inferred={inferred:?}",
@@ -66954,6 +66859,11 @@ impl<'a> Checker<'a> {
                     if !selected {
                         continue;
                     }
+                    let property_suppression_depth = self.push_declaration_suppressions(
+                        field_scope,
+                        &property.annotations,
+                        &property.annotation_args,
+                    );
                     let initializer_scope = field_scope.child(ScopeKind::Block);
                     if body_local_class {
                         self.declare_property_initializer_class_storage_capture(
@@ -66967,25 +66877,24 @@ impl<'a> Checker<'a> {
                         (None, Some(initializer)) => self.expr(&initializer_scope, initializer),
                         (None, None) => Ty::Error,
                     };
-                    if storage.mentions_error() || storage.mentions_pending() {
-                        continue;
-                    }
-                    self.explicit_backing_field_types
-                        .insert((property.span.lo, property.span.hi), storage);
-                    if let Some(scoped) = props
-                        .iter_mut()
-                        .find(|candidate| candidate.name == property.name)
-                    {
-                        let declared = scoped.ty;
-                        scoped.owner_storage_ty = Some(storage);
-                        self.declare_scoped_property(field_scope, scoped, true);
-                        if field.ty.is_none() {
-                            if !crate::assignable::is_subtype(
-                                &crate::assignable::TyCtx::new(),
-                                self,
-                                storage,
-                                declared,
-                            ) {
+                    if !storage.mentions_error() && !storage.mentions_pending() {
+                        self.explicit_backing_field_types
+                            .insert((property.span.lo, property.span.hi), storage);
+                        if let Some(scoped) = props
+                            .iter_mut()
+                            .find(|candidate| candidate.name == property.name)
+                        {
+                            let declared = scoped.ty;
+                            scoped.owner_storage_ty = Some(storage);
+                            self.declare_scoped_property(field_scope, scoped, true);
+                            if field.ty.is_none()
+                                && !crate::assignable::is_subtype(
+                                    &crate::assignable::TyCtx::new(),
+                                    self,
+                                    storage,
+                                    declared,
+                                )
+                            {
                                 self.diags.error(
                                     property.span,
                                     format!(
@@ -66998,6 +66907,8 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
+                    self.active_statement_suppressions
+                        .truncate(property_suppression_depth);
                 }
             }
             // Push only this declaration's semantic class chain. A local or anonymous declaration is
@@ -68081,6 +67992,14 @@ impl<'a> Checker<'a> {
             // for a subclass or a typed `companion object : A()`). Mirrors `check_fun`'s param-default
             // pass so a function-typed parameter's lambda default types concretely.
             if check_primary_constructor {
+                let constructor_suppression_depth = self.active_statement_suppressions.len();
+                if let Some(annotations) = cl.primary_ctor_annotations.as_deref() {
+                    self.push_declaration_suppressions(
+                        scope,
+                        annotations,
+                        &cl.primary_ctor_annotation_args,
+                    );
+                }
                 let defaults_scope = scope.child(ScopeKind::Block);
                 let scope = &defaults_scope;
                 self.with_this_unavailable(|checker| {
@@ -68092,6 +68011,8 @@ impl<'a> Checker<'a> {
                         &source_primary_params,
                     );
                 });
+                self.active_statement_suppressions
+                    .truncate(constructor_suppression_depth);
             }
             // A signature-owned default declared by a local classifier must be checked from the
             // lexical expression that introduces that classifier. A class-header lambda is one
@@ -68445,6 +68366,11 @@ impl<'a> Checker<'a> {
                     if !selected_property {
                         continue;
                     }
+                    let property_suppression_depth = self.push_declaration_suppressions(
+                        scope,
+                        &bp.annotations,
+                        &bp.annotation_args,
+                    );
                     let check_ordinary_property_body = self
                         .selected_body_declarations
                         .as_ref()
@@ -68660,12 +68586,22 @@ impl<'a> Checker<'a> {
                             .declared_ty()
                             .map(|declared| self.check_declaration_type(scope, declared))
                             .filter(|ty| !ty.mentions_error() && !ty.mentions_pending());
+                        let mut site =
+                            DelegateConventionSite::of(bp, Some(owner_ref), extension_receiver);
+                        site.dispatch_diagnostic_name = Some(if is_anonymous_object {
+                            delegated_properties::DelegateDispatchDiagnosticName::Anonymous
+                        } else {
+                            delegated_properties::DelegateDispatchDiagnosticName::Source(
+                                class_declaration_label(&cl.name).into(),
+                            )
+                        });
                         let (dt, delegate_ret) = self.check_delegate_getvalue(
                             &initializer_scope,
                             de,
                             owner_ref,
                             this_ref,
                             expected_property,
+                            site.clone(),
                         );
                         if expected_property.is_none() {
                             body_inferred_property_type = delegate_ret
@@ -68687,6 +68623,7 @@ impl<'a> Checker<'a> {
                                 dt,
                                 this_ref,
                                 property_ty,
+                                site,
                             );
                         }
                     }
@@ -68858,6 +68795,8 @@ impl<'a> Checker<'a> {
                     }
                     self.this_extension_receiver = dispatch_extension_receiver;
                     self.symbolic_signature_inference = outer_symbolic_signature_inference;
+                    self.active_statement_suppressions
+                        .truncate(property_suppression_depth);
                 }
                 for step in &cl.init_order {
                     if let ClassInit::Block(b) = step {
@@ -81680,7 +81619,7 @@ impl<'a> Checker<'a> {
     ) -> Option<Ty> {
         let owner = selected.member.owner?;
         if !self.selected_member_accessible(&selected, owner)
-            && !self.invisible_reference_suppressed(self.call_callee_name_span(call))
+            && !self.suppresses_diagnostic("INVISIBLE_REFERENCE")
         {
             if matches!(
                 selected.member.visibility,
@@ -82208,7 +82147,7 @@ impl<'a> Checker<'a> {
                 .expect("a selected convention member has a declaring classifier");
             if !self.selected_member_accessible(&resolved, owner)
                 && !diagnostic_spans
-                    .is_some_and(|(_, span)| self.invisible_reference_suppressed(span))
+                    .is_some_and(|_| self.suppresses_diagnostic("INVISIBLE_REFERENCE"))
             {
                 if let Some((_, span)) = diagnostic_spans {
                     let visibility = match selected.visibility {
@@ -84232,7 +84171,7 @@ impl<'a> Checker<'a> {
             None
         };
         if !self.member_accessible(member.visibility, internal)
-            && !self.invisible_reference_suppressed(self.call_callee_name_span(call))
+            && !self.suppresses_diagnostic("INVISIBLE_REFERENCE")
         {
             self.diags.error(
                 self.call_callee_name_span(call),
@@ -85181,7 +85120,7 @@ impl<'a> Checker<'a> {
         expression: ExprId,
         internal: TypeName,
     ) -> bool {
-        if self.invisible_reference_suppressed(self.span(expression)) {
+        if self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
             return false;
         }
         let Some(access) = self.resolver().inaccessible_classifier_access(internal) else {
@@ -85221,140 +85160,6 @@ impl<'a> Checker<'a> {
         true
     }
 
-    fn invisible_reference_suppressed(&self, span: Span) -> bool {
-        if self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
-            return true;
-        }
-        self.file
-            .file_annotations
-            .iter()
-            .any(|(annotation, arguments)| {
-                self.annotation_is_kotlin_suppress(annotation)
-                    && arguments.iter().any(|argument| {
-                        self.file
-                            .const_string_value(*argument)
-                            .is_some_and(|value| value.to_lossy() == "INVISIBLE_REFERENCE")
-                    })
-            })
-            || self
-                .file
-                .decls
-                .iter()
-                .any(|&declaration| self.decl_suppresses_invisible_reference(declaration, span))
-            || self.file.stmt_arena.iter().any(|statement| {
-                matches!(statement, Stmt::LocalFun(function)
-                    if self.fun_suppresses_invisible_reference(function, span))
-            })
-    }
-
-    fn annotation_is_kotlin_suppress(&self, annotation: &AnnotationRef) -> bool {
-        self.applied_annotations
-            .get(&(annotation.span.lo, annotation.span.hi))
-            .map(|applied| applied.internal)
-            .or_else(|| {
-                self.module
-                    .legacy_symbols()
-                    .and_then(|symbols| symbols.resolved_annotation(self.file_index, annotation))
-            })
-            .or_else(|| {
-                self.select_classifier(&CheckerScope::root(), &annotation.name)
-                    .found()
-            })
-            .is_some_and(|identity| identity.matches("kotlin/Suppress"))
-    }
-
-    fn annotations_suppress_invisible_reference(
-        &self,
-        annotations: &[AnnotationRef],
-        annotation_args: &[Vec<ExprId>],
-    ) -> bool {
-        annotations
-            .iter()
-            .zip(annotation_args)
-            .any(|(annotation, arguments)| {
-                self.annotation_is_kotlin_suppress(annotation)
-                    && arguments.iter().any(|argument| {
-                        self.file
-                            .const_string_value(*argument)
-                            .is_some_and(|value| value.to_lossy() == "INVISIBLE_REFERENCE")
-                    })
-            })
-    }
-
-    fn span_contains(outer: Span, inner: Span) -> bool {
-        inner.lo >= outer.lo && inner.hi <= outer.hi
-    }
-
-    fn fun_suppresses_invisible_reference(&self, function: &FunDecl, span: Span) -> bool {
-        Self::span_contains(function.span, span)
-            && self.annotations_suppress_invisible_reference(
-                &function.annotations,
-                &function.annotation_args,
-            )
-    }
-
-    fn property_suppresses_invisible_reference(&self, property: &PropDecl, span: Span) -> bool {
-        Self::span_contains(property.span, span)
-            && self.annotations_suppress_invisible_reference(
-                &property.annotations,
-                &property.annotation_args,
-            )
-    }
-
-    fn primary_constructor_suppresses_invisible_reference(
-        &self,
-        class: &ClassDecl,
-        span: Span,
-    ) -> bool {
-        let Some(annotations) = class.primary_ctor_annotations.as_deref() else {
-            return false;
-        };
-        self.annotations_suppress_invisible_reference(
-            annotations,
-            &class.primary_ctor_annotation_args,
-        ) && class.props.iter().any(|parameter| {
-            Self::span_contains(parameter.ty.span, span)
-                || parameter
-                    .default
-                    .is_some_and(|default| Self::span_contains(self.span(default), span))
-        })
-    }
-
-    fn decl_suppresses_invisible_reference(&self, declaration: DeclId, span: Span) -> bool {
-        match self.file.decl(declaration) {
-            Decl::Fun(function) => self.fun_suppresses_invisible_reference(function, span),
-            Decl::Property(property) => {
-                self.property_suppresses_invisible_reference(property, span)
-            }
-            Decl::Class(class) => {
-                if !Self::span_contains(class.span, span) {
-                    return false;
-                }
-                self.annotations_suppress_invisible_reference(
-                    &class.annotations,
-                    &class.annotation_args,
-                ) || class
-                    .methods
-                    .iter()
-                    .any(|method| self.fun_suppresses_invisible_reference(method, span))
-                    || self.primary_constructor_suppresses_invisible_reference(class, span)
-                    || class.body_props.iter().any(|property| {
-                        self.property_suppresses_invisible_reference(property, span)
-                    })
-                    || class.secondary_ctors.iter().any(|constructor| {
-                        Self::span_contains(constructor.span, span)
-                            && self.annotations_suppress_invisible_reference(
-                                &constructor.annotations,
-                                &constructor.annotation_args,
-                            )
-                    })
-                    || class.companion.is_some_and(|companion| {
-                        self.decl_suppresses_invisible_reference(companion, span)
-                    })
-            }
-        }
-    }
-
     /// Emit kotlinc's access diagnostic when a member of `owner` with visibility `vis` is NOT reachable
     /// from the current site. Shared by the property-read and member-call checks.
     fn reject_if_inaccessible(
@@ -85364,7 +85169,8 @@ impl<'a> Checker<'a> {
         owner: TypeName,
         span: Span,
     ) -> bool {
-        if !self.member_accessible(vis, owner) && !self.invisible_reference_suppressed(span) {
+        if !self.member_accessible(vis, owner) && !self.suppresses_diagnostic("INVISIBLE_REFERENCE")
+        {
             let kind = match vis {
                 Visibility::Private => "private",
                 Visibility::Protected => "protected",
@@ -85412,7 +85218,7 @@ impl<'a> Checker<'a> {
         property: Option<crate::fir::ExternalPropertyId>,
         span: Span,
     ) {
-        if self.visibility_access_suppressed() || self.invisible_reference_suppressed(span) {
+        if self.visibility_access_suppressed() {
             return;
         }
         let label = property.and_then(|property| {
@@ -85477,7 +85283,7 @@ impl<'a> Checker<'a> {
         for (annotation, arguments) in annotations.iter().zip(arguments) {
             if !self
                 .annotation_identity_in_scope(scope, annotation)
-                .is_some_and(|identity| identity.matches("kotlin/Suppress"))
+                .is_some_and(|identity| identity == type_name("kotlin/Suppress"))
             {
                 continue;
             }
@@ -85872,5 +85678,6 @@ impl<'a> Checker<'a> {
             call,
             selection,
         )
+        .into_checker_result()
     }
 }

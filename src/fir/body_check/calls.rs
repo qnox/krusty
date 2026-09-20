@@ -1718,8 +1718,12 @@ impl BodyFirChecker<'_> {
                 .and_then(concrete_classifier)
                 .map(|classifier| (classifier, crate::fir::FirClassifierCallable::EnumValues)),
             Some(crate::libraries::CompilerIntrinsic::EnumValueOf) => {
-                concrete_classifier(selected.callable.ret)
-                    .map(|classifier| (classifier, crate::fir::FirClassifierCallable::EnumValueOf))
+                concrete_classifier(selected.callable.ret).map(|classifier| {
+                    (
+                        classifier,
+                        crate::fir::FirClassifierCallable::TopLevelEnumValueOf,
+                    )
+                })
             }
             _ => None,
         };

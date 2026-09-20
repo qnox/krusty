@@ -148,11 +148,14 @@ pub(super) fn root_expression(body: &FirBody) -> FirExprId {
 }
 
 pub(super) fn jvm_semantics() -> Box<dyn SemanticPlatform> {
-    Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-        std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-            crate::toolchain::classpath_jars_for("// WITH_REFLECT"),
-        )),
-    ))
+    Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+                "// WITH_REFLECT",
+            )),
+        ))
+        .expect("JVM provider initialization"),
+    )
 }
 
 pub(super) fn jvm_stdlib_semantics() -> Box<dyn SemanticPlatform> {
@@ -160,7 +163,10 @@ pub(super) fn jvm_stdlib_semantics() -> Box<dyn SemanticPlatform> {
     if let Some(jdk) = crate::toolchain::jdk_modules() {
         classpath.push(jdk);
     }
-    Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-        std::rc::Rc::new(crate::jvm::classpath::Classpath::new(classpath)),
-    ))
+    Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(classpath),
+        ))
+        .expect("JVM provider initialization"),
+    )
 }

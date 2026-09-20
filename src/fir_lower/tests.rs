@@ -153,101 +153,7 @@ fn catch_parameter_name_survives_checked_fir_lowering() {
             _ => None,
         })
         .expect("checked try expression must retain its catch clause");
-    assert_eq!(catch.name.as_deref(), Some("failure"));
-}
-
-#[test]
-fn local_delegate_storage_name_survives_checked_fir_lowering() {
-    let ir = lower_single_source(
-        "class Delegate { operator fun getValue(owner: Any?, property: Any?): Int = 1 }\n\
-         fun read(): Int { val value: Int by Delegate(); return value }\n",
-        "LocalDelegateName",
-    );
-    assert!(
-        ir.value_names.values().any(|name| name == "value$delegate"),
-        "common IR must retain the checked delegate-storage debug identity: {:?}",
-        ir.value_names
-    );
-}
-
-#[test]
-fn generic_member_delegate_result_keeps_its_erased_call_boundary() {
-    let ir = lower_single_source(
-        "class Delegate<T>(val value: T) {\n\
-             operator fun getValue(owner: Any?, property: Any?): T = value\n\
-         }\n\
-         class Owner { val number: Int by Delegate(1) }\n",
-        "GenericDelegateResult",
-    );
-    let getter = ir
-        .functions
-        .iter()
-        .find(|function| function.name == "getNumber")
-        .expect("generated delegated-property getter");
-    let IrExpr::Block { stmts, value: None } = ir.expr(getter.body.expect("concrete getter body"))
-    else {
-        panic!("getter body must be a statement block");
-    };
-    let [returned] = stmts.as_slice() else {
-        panic!("getter body must contain one return");
-    };
-    let IrExpr::Return(Some(converted)) = ir.expr(*returned) else {
-        panic!("getter must return its delegated call");
-    };
-    let IrExpr::TypeOp {
-        op: IrTypeOp::ImplicitCoercion,
-        arg: call,
-        type_operand: Ty::Int,
-    } = ir.expr(*converted)
-    else {
-        panic!("generic getValue result must cross an explicit Int coercion");
-    };
-    assert!(matches!(ir.expr(*call), IrExpr::MethodCall { .. }));
-    assert_eq!(
-        ir.physical_types.get(call),
-        Some(&Ty::obj("kotlin/Any")),
-        "the declaration returns its erased T slot before the selected Int result"
-    );
-}
-
-#[test]
-fn sibling_extension_provide_delegate_keeps_receiver_in_module_call_shape() {
-    let ir = lower_source_from_set(
-        &[
-            (
-                "inline operator fun String.provideDelegate(owner: Any?, property: Any): String = this",
-                "Delegate",
-            ),
-            (
-                "operator fun String.getValue(owner: Any?, property: Any): String = this\n\
-                 val value by \"OK\"",
-                "Consumer",
-            ),
-        ],
-        1,
-    );
-
-    let (parameters, arguments) = ir
-        .exprs
-        .iter()
-        .find_map(|expression| match expression {
-            IrExpr::Call {
-                callee: Callee::Module { name, params, .. },
-                args,
-                ..
-            } if name == "provideDelegate" => Some((params, args)),
-            _ => None,
-        })
-        .expect("sibling provideDelegate call");
-    assert_eq!(
-        parameters,
-        &[
-            Ty::String,
-            Ty::nullable(Ty::obj("kotlin/Any")),
-            Ty::obj("kotlin/Any"),
-        ]
-    );
-    assert_eq!(arguments.len(), parameters.len());
+    assert_eq!(catch.binding_name(), Some("failure"));
 }
 
 #[test]
@@ -1951,12 +1857,14 @@ fn interface_property_accessors_share_source_order_with_functions() {
 
 #[test]
 fn consuming_lowering_retains_constructor_initialized_storage_read_by_custom_getter() {
-    let platform: Box<dyn crate::libraries::SemanticPlatform> =
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-                crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
+    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+                "// WITH_STDLIB",
             )),
-        ));
+        ))
+        .expect("JVM provider initialization"),
+    );
     let ir = lower_single_source_with_platform(
         "class A {\n\
              val value: String\n\
@@ -2076,12 +1984,14 @@ fn consuming_lowering_preserves_class_literal_without_checked_placeholder() {
 
 #[test]
 fn same_file_inline_call_specializes_reified_types_fixed_by_callable_argument() {
-    let platform: Box<dyn crate::libraries::SemanticPlatform> =
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-                crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
+    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+                "// WITH_STDLIB",
             )),
-        ));
+        ))
+        .expect("JVM provider initialization"),
+    );
     let ir = lower_single_source_with_platform(
         "fun <T, R> generic(value: T): R = value as R\n\
          inline fun <reified T, reified R> inspect(\n\
@@ -2109,12 +2019,14 @@ fn same_file_inline_call_specializes_reified_types_fixed_by_callable_argument() 
 
 #[test]
 fn same_file_inline_call_specializes_reified_type_inside_nested_inline_lambda() {
-    let platform: Box<dyn crate::libraries::SemanticPlatform> =
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-                crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
+    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+                "// WITH_STDLIB",
             )),
-        ));
+        ))
+        .expect("JVM provider initialization"),
+    );
     let ir = lower_single_source_with_platform(
         "inline fun <reified T> countOfType(values: List<Any>): Int =\n\
              values.count { it is T }\n\
@@ -2135,12 +2047,14 @@ fn same_file_inline_call_specializes_reified_type_inside_nested_inline_lambda() 
 
 #[test]
 fn same_file_inline_call_specializes_sized_array_allocation_type() {
-    let platform: Box<dyn crate::libraries::SemanticPlatform> =
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(
-            std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
-                crate::toolchain::classpath_jars_for("// WITH_STDLIB"),
+    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+                "// WITH_STDLIB",
             )),
-        ));
+        ))
+        .expect("JVM provider initialization"),
+    );
     let ir = lower_single_source_with_platform(
         "inline fun <reified T> pair(first: T, second: T): Array<T> =\n\
              Array<T>(2) { if (it == 0) first else second }\n\
@@ -3397,7 +3311,7 @@ fn unsigned_range_containment_stays_semantic_until_backend_realization() {
     ));
 }
 
-fn lower_single_source(source: &str, stem: &str) -> IrFile {
+pub(super) fn lower_single_source(source: &str, stem: &str) -> IrFile {
     lower_single_source_with_platform(source, stem, Box::new(crate::libraries::EmptySymbolSource))
 }
 
@@ -3465,7 +3379,7 @@ fn lower_single_source_with_platform(
     ir
 }
 
-fn lower_source_from_set(sources: &[(&str, &str)], active_source: usize) -> IrFile {
+pub(super) fn lower_source_from_set(sources: &[(&str, &str)], active_source: usize) -> IrFile {
     #[derive(Default)]
     struct DeferredBodies(Vec<(crate::fir::BodyOwnerId, FirBody)>);
 

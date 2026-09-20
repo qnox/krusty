@@ -21,7 +21,8 @@ fn declared(lib: &JvmLibraries, receiver: Ty, name: &str) -> krusty::libraries::
 
 #[test]
 fn core_inherits_mapped_string_length_property() {
-    let lib = JvmLibraries::new(Rc::new(Classpath::new(vec![common::stdlib_jar()])));
+    let lib = JvmLibraries::new(Rc::new(Classpath::new(vec![common::stdlib_jar()])))
+        .expect("JVM provider initialization");
     let resolver = krusty::symbol_resolver::SymbolResolver::new(&lib);
     let length = resolver
         .select_member_property(Ty::String, "length")
@@ -47,7 +48,7 @@ fn member_property_getter_and_setter_from_metadata() {
         return;
     };
     let cp = Rc::new(Classpath::new(vec![dir, stdlib]));
-    let lib = JvmLibraries::new(cp.clone());
+    let lib = JvmLibraries::new(cp.clone()).expect("JVM provider initialization");
 
     // `val label` — a getter, no setter; the getter name comes from metadata, not a `get`+cap guess.
     let props = declared(&lib, Ty::obj("Holder"), "label").into_parts().1;

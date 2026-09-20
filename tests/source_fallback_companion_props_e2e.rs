@@ -21,7 +21,9 @@ fn fallback_diagnostics(checked: &str, dependency: &str) -> Vec<String> {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let cp = std::rc::Rc::new(Classpath::new(vec![stdlib, jdk]));
-    let platform = Box::new(krusty::jvm::jvm_libraries::JvmLibraries::new(cp));
+    let platform = Box::new(
+        krusty::jvm::jvm_libraries::JvmLibraries::new(cp).expect("JVM provider initialization"),
+    );
     let inputs = [
         krusty::frontend::SourceInput::kotlin(checked),
         krusty::frontend::SourceInput::kotlin(dependency),

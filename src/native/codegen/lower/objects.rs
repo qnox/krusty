@@ -670,6 +670,19 @@ impl<'a> FileLowering<'a> {
                 ))
                 }
             },
+            // An enum secondary constructor with no written `this(…)`: Kotlin initializes the
+            // language enum base with the compiler-supplied entry name and ordinal, which this
+            // generator has no base to initialize and no prefix storage to put them in. It is the
+            // same shape the constructor SELECTION path already declines a line at a time
+            // ("a secondary constructor with compiler-supplied parameters"), so it declines by
+            // name here rather than emitting a constructor that leaves `name` and `ordinal`
+            // unwritten.
+            crate::ir::CtorDelegateTarget::ImplicitEnumBase => {
+                return Err(format!(
+                    "an enum secondary constructor initializing the implicit enum base (`{}`)",
+                    declaration.fq_name()
+                ))
+            }
         };
         // A delegation argument may call a companion member (`constructor() : this(foo() + prop)`),
         // and those run before the primary constructor this delegates to would have created the
@@ -2247,13 +2260,29 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         &mut self,
         class: ClassId,
         name: &str,
+        kind: crate::ir::IrSuperCallKind,
         receiver: u32,
         args: &[u32],
     ) -> Option<Result<Option<Value>, Unsupported>> {
+        // `name` is the ACCESSOR's own name as selection resolved it — `getB`, not `b` — because a
+        // property's accessors are published accessor-shaped. `IrSuperCallKind` is the semantic
+        // fact that says which accessor, and its contract is that a backend REALIZES the spelling
+        // rather than recovering a property from one: so each candidate property's own accessor
+        // name is derived here and compared forwards. Parsing `getB` back into `b` would be the
+        // same inversion that named `getGetValue` on the JVM side, and it cannot be right for a
+        // property whose accessor carries a `@JvmName` the spelling does not encode.
         let index = self.file.ir.classes[class as usize]
             .properties
             .iter()
-            .position(|property| property.name == name)?;
+            .position(|property| match kind {
+                crate::ir::IrSuperCallKind::Function => property.name == name,
+                crate::ir::IrSuperCallKind::PropertyGetter => {
+                    crate::names::property_getter_name(&property.name) == name
+                }
+                crate::ir::IrSuperCallKind::PropertySetter => {
+                    crate::names::property_setter_name(&property.name) == name
+                }
+            })?;
         Some(match args {
             [] => self.direct_property_read(class, index, receiver),
             [value] => self
@@ -2349,6 +2378,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         &mut self,
         owner: TypeName,
         name: &str,
+        kind: crate::ir::IrSuperCallKind,
         source: Option<crate::fir::CallableId>,
         params: Option<&[Ty]>,
         receiver: u32,
@@ -2391,7 +2421,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // nothing to call. What the program asked for is still perfectly well defined: the named
         // class's own realization, reached without dispatch.
         let Some(fid) = found else {
-            if let Some(realized) = self.direct_property(class, name, receiver, args) {
+            if let Some(realized) = self.direct_property(class, name, kind, receiver, args) {
                 return realized;
             }
             return Err(format!("a `super` call to an unknown method (`{name}`)"));

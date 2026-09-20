@@ -200,7 +200,10 @@ fn local_classifier_property_reference_streams_with_captured_type_arguments() {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &inputs,
-        Box::new(crate::jvm::jvm_libraries::JvmLibraries::new(classpath)),
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(classpath)
+                .expect("JVM provider initialization"),
+        ),
         &LangFeatures::new(),
         &mut diagnostics,
     );

@@ -288,7 +288,9 @@ fn actualization_excludes_the_compact_expect_subtree_before_signatures() {
     );
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
 
-    let matched = matched_expect_declarations(&module);
+    let bindings =
+        crate::resolve::actualization_type_bindings(&module, &crate::libraries::EmptySymbolSource);
+    let matched = matched_expect_declarations(&module, &bindings);
     assert_eq!(matched.len(), 1, "only the expect class root is selected");
     let expect = *matched.iter().next().unwrap();
     assert!(module.stubs.iter().any(|stub| {
@@ -342,7 +344,9 @@ fn actualization_preserves_later_source_declaration_positions() {
     let before = module.source_declarations(common).to_vec();
     assert_eq!(before.len(), 2);
     let kept = before[1];
-    let matched = matched_expect_declarations(&module);
+    let bindings =
+        crate::resolve::actualization_type_bindings(&module, &crate::libraries::EmptySymbolSource);
+    let matched = matched_expect_declarations(&module, &bindings);
     module.exclude_declaration_subtrees(&matched);
 
     assert_eq!(module.source_declarations(common), before.as_slice());
@@ -2442,11 +2446,9 @@ impl SignatureSemantics for TestSignatureSemantics {
 
     fn select_delegate(
         &self,
-        _declaration: DeclarationId,
         _scope: SignatureScope,
-        _origin: OriginId,
         delegate: ResolvedTy,
-        _local: bool,
+        _site: ResolvedSignatureDelegateSite,
         _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedTy, DiagnosticId> {
         self.operations.borrow_mut().push("delegate".into());

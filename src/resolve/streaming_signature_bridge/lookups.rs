@@ -818,7 +818,7 @@ impl ProductionSignatureSemantics<'_> {
         call: SignatureMemberExtensionArguments<'_>,
         expected_result: Option<Ty>,
         selection: super::super::MemberExtensionSelection,
-    ) -> Option<(Ty, Option<crate::fir::DeclarationId>)> {
+    ) -> SignatureMemberExtensionCallSelection {
         let SignatureMemberExtensionArguments {
             types: arguments,
             names,
@@ -909,13 +909,25 @@ impl ProductionSignatureSemantics<'_> {
             "signature",
             "member extension call name={name} extension={extension_receiver:?} dispatch={dispatch_receiver:?} arguments={arguments:?} result={}",
             match &selected {
-                Ok(Some(_)) => "selected",
-                Ok(None) => "none",
-                Err(()) => "ambiguous",
+                super::super::MemberExtensionFunctionSelection::Selected(_) => "selected",
+                super::super::MemberExtensionFunctionSelection::None(_) => "none",
+                super::super::MemberExtensionFunctionSelection::Ambiguous(_) => "ambiguous",
             },
         );
-        let selected = selected.ok()??;
-        Some((selected.ret, selected.stable_declaration))
+        match selected {
+            super::super::MemberExtensionFunctionSelection::Selected(selected) => {
+                SignatureMemberExtensionCallSelection::Selected {
+                    result: selected.ret,
+                    declaration: selected.stable_declaration,
+                }
+            }
+            super::super::MemberExtensionFunctionSelection::None(candidates) => {
+                SignatureMemberExtensionCallSelection::None(candidates)
+            }
+            super::super::MemberExtensionFunctionSelection::Ambiguous(candidates) => {
+                SignatureMemberExtensionCallSelection::Ambiguous(candidates)
+            }
+        }
     }
 
     /// Lambda expectations for a bare call that resolves to a MEMBER of one of the implicit
@@ -1272,6 +1284,17 @@ impl ProductionSignatureSemantics<'_> {
         )?;
         Ok(selected.map(|selected| (selected.ty, selected.stable_declaration)))
     }
+}
+
+pub(super) enum SignatureMemberExtensionCallSelection {
+    Selected {
+        result: Ty,
+        declaration: Option<crate::fir::DeclarationId>,
+    },
+    None(
+        Vec<super::super::member_extension_selection::MemberExtensionConventionDiagnosticCandidate>,
+    ),
+    Ambiguous(Vec<super::super::MemberExtensionFunctionCandidate>),
 }
 
 #[derive(Clone, Copy, Default)]
