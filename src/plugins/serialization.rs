@@ -548,6 +548,59 @@ fn call_external_companion_serializer(
     }))
 }
 
+/// The serialized type a reified round-trip call names, flattened into the placeholder's name
+/// payload. A `@Serializable` classifier is one name; a supported collection over `@Serializable`
+/// arguments is its own classifier followed by them. That is as much shape as `Vec<TypeName>`
+/// carries, so a deeper nesting (`List<List<Foo>>`) has no spelling here and keeps the generic
+/// inline path.
+fn serialized_type_spelling(
+    ctx: &FrontendExpressionContext,
+    serializable: TypeName,
+    ty: Ty,
+) -> Option<Vec<TypeName>> {
+    let classifier = ty.kotlin_class_internal()?;
+    if ctx.has_classifier_annotation(classifier, serializable) {
+        return Some(vec![classifier]);
+    }
+    // Only a collection whose every argument is itself annotated is planned. A wider gate would
+    // capture calls the generic path already compiles correctly and turn a working file into a
+    // declined placeholder.
+    let (_, arity) = collection_serializer_builder(classifier)?;
+    let Ty::Obj(_, arguments) = ty.non_null() else {
+        return None;
+    };
+    if arguments.len() != arity {
+        return None;
+    }
+    let mut spelling = vec![classifier];
+    for argument in arguments {
+        let argument = argument.kotlin_class_internal()?;
+        if !ctx.has_classifier_annotation(argument, serializable) {
+            return None;
+        }
+        spelling.push(argument);
+    }
+    Some(spelling)
+}
+
+/// Rebuild the serialized type from the flattened spelling the planner recorded.
+fn serialized_ty(spelling: &[TypeName]) -> Option<Ty> {
+    match spelling {
+        [classifier] => Some(Ty::obj_name(*classifier)),
+        [classifier, arguments @ ..] => Some(Ty::Obj(
+            *classifier,
+            crate::types::intern_tys(
+                &arguments
+                    .iter()
+                    .copied()
+                    .map(Ty::obj_name)
+                    .collect::<Vec<_>>(),
+            ),
+        )),
+        [] => None,
+    }
+}
+
 /// Rewrite every `PluginPlaceholder { plugin: "serialization" }` core emitted for a reified
 /// `StringFormat` round-trip into the concrete 2-arg member call. Core recorded the operands
 /// (`exprs = [receiver, serializer, value-or-string]`) and the resolved name ids (`data = [format
@@ -606,16 +659,17 @@ fn specialize_reified_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
         }
         // Operand/name layout is fixed by the plugin planner; a malformed node is left untouched
         // (`jvm_can_emit` then declines the file rather than miscompiling).
-        let [fmt, class_internal] = data.as_slice() else {
+        let [fmt, spelling @ ..] = data.as_slice() else {
             continue;
         };
-        let (fmt, class_internal) = (*fmt, *class_internal);
+        let fmt = *fmt;
+        let Some(serialized) = serialized_ty(spelling) else {
+            continue;
+        };
         let (recv, ser, arg) = match exprs.as_slice() {
             [recv, ser, arg] => (*recv, *ser, *arg),
             [recv, arg] => {
-                let Some(serializer) =
-                    element_serializer_expr(ir, ctx, &Ty::obj_name(class_internal))
-                else {
+                let Some(serializer) = element_serializer_expr(ir, ctx, &serialized) else {
                     continue;
                 };
                 (*recv, serializer, *arg)
@@ -640,7 +694,7 @@ fn specialize_reified_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
                 ir.exprs[mid] = IrExpr::TypeOp {
                     op: IrTypeOp::Cast,
                     arg: decoded,
-                    type_operand: Ty::obj_name(class_internal),
+                    type_operand: serialized,
                 };
             }
             _ => {}
@@ -1449,19 +1503,19 @@ impl IrPlugin for SerializationPlugin {
                 let [Some(argument)] = call.argument_slots.as_slice() else {
                     return None;
                 };
-                let classifier = match call.type_arguments.as_slice() {
-                    [Some(argument)] => argument.kotlin_class_internal(),
-                    _ if operation == "encodeToString" => call.params[0].kotlin_class_internal(),
-                    _ => None,
-                }?;
-                if !ctx.has_classifier_annotation(classifier, serializable_annotation) {
-                    return None;
-                }
+                let serialized = match call.type_arguments.as_slice() {
+                    [Some(argument)] => *argument,
+                    _ if operation == "encodeToString" => call.params[0],
+                    _ => return None,
+                };
+                let spelling = serialized_type_spelling(ctx, serializable_annotation, serialized)?;
                 let format = receiver_ty.kotlin_class_internal()?;
+                let mut data = vec![format];
+                data.extend(spelling);
                 Some(PluginExpressionPlan {
                     plugin: "serialization",
                     operation,
-                    data: vec![format, classifier],
+                    data,
                     operands: vec![(receiver, receiver_ty), (*argument, call.params[0])],
                 })
             })();
