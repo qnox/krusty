@@ -397,9 +397,11 @@ fn top_level_function(
     // `trimIndent`, `enumValues`, the array factories. The table is target-neutral and the JVM
     // provider reads the same one; without it this provider published `trimIndent` as an ordinary
     // call, which the code generator declined 57 times across the box corpus.
-    if let Some(intrinsic) =
-        crate::libraries::builtin_realization::top_level_intrinsic(package, &function.name)
-    {
+    if let Some(intrinsic) = crate::libraries::builtin_realization::top_level_intrinsic(
+        package,
+        &function.name,
+        info.receiver,
+    ) {
         if crate::libraries::builtin_realization::intrinsic_declaration_kind(intrinsic)
             == Some(info.kind)
         {
@@ -1575,6 +1577,13 @@ mod compiles_against_the_klib {
             (
                 "class A(val x: Int)\nfun box(): String { val p = A::x; return \"OK\" }\n",
                 "a property reference",
+            ),
+            // Concatenation, which Kotlin declares as the extension `String?.plus(Any?)` — a
+            // top-level declaration of `kotlin`, not a member of `String`, so the member rule
+            // beside it never saw it.
+            (
+                "fun box(): String { val s: String? = null; return s + \"OK\" }\n",
+                "string concatenation through its declaration",
             ),
             // A `const val` on a companion. Every use site folds it, which is the only way it can
             // work here at all: a companion object has no storage on a target that compiles the

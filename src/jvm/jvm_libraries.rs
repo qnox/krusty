@@ -5050,16 +5050,18 @@ impl JvmLibraries {
         // Which top-level declarations the COMPILER realizes rather than calls. The table is a
         // fact about what Kotlin declares, not about this provider's artifact, so it is stated
         // once for every provider.
-        let compiler_intrinsic = match namespace {
-            SymbolNamespace::Package(package) => {
-                crate::libraries::builtin_realization::top_level_intrinsic(package, name)
-            }
-            SymbolNamespace::Classifier(_) => None,
-        };
-        if let Some(intrinsic) = compiler_intrinsic {
-            let kind = crate::libraries::builtin_realization::intrinsic_declaration_kind(intrinsic);
+        if let SymbolNamespace::Package(package) = namespace {
             for overload in &mut overloads {
-                if Some(overload.kind) == kind {
+                let Some(intrinsic) = crate::libraries::builtin_realization::top_level_intrinsic(
+                    package,
+                    name,
+                    overload.receiver,
+                ) else {
+                    continue;
+                };
+                if Some(overload.kind)
+                    == crate::libraries::builtin_realization::intrinsic_declaration_kind(intrinsic)
+                {
                     overload.callable.compiler_intrinsic = Some(intrinsic);
                 }
             }

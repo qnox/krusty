@@ -144,7 +144,11 @@ pub(crate) fn member_realization(
 /// folded rather than called on every target. It lived in the JVM provider because that was the
 /// only provider, so a klib-backed compilation declined `trimIndent` 57 times over the box corpus
 /// while the jar-backed one folded it.
-pub(crate) fn top_level_intrinsic(package: TypeName, name: &str) -> Option<CompilerIntrinsic> {
+pub(crate) fn top_level_intrinsic(
+    package: TypeName,
+    name: &str,
+    receiver: Option<Ty>,
+) -> Option<CompilerIntrinsic> {
     if package.matches("kotlin/coroutines") {
         return match name {
             "suspendCoroutine" => Some(CompilerIntrinsic::SuspendCoroutine),
@@ -168,6 +172,12 @@ pub(crate) fn top_level_intrinsic(package: TypeName, name: &str) -> Option<Compi
             "assert" => Some(CompilerIntrinsic::Assert),
             "enumValues" => Some(CompilerIntrinsic::EnumValues),
             "enumValueOf" => Some(CompilerIntrinsic::EnumValueOf),
+            // String concatenation, which Kotlin declares as `String?.plus(Any?)`. The receiver is
+            // checked because `plus` is a name any package may declare on anything, and a target
+            // realizes THIS one as a concatenation rather than a call.
+            "plus" if receiver.map(Ty::non_null) == Some(Ty::String) => {
+                Some(CompilerIntrinsic::StringPlus)
+            }
             _ => crate::libraries::kotlin_array_factory_kind(name)
                 .map(CompilerIntrinsic::ArrayFactory),
         };
