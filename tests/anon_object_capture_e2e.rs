@@ -387,3 +387,35 @@ fn an_anonymous_object_two_callables_deep_writes_through_the_shared_cell() {
     assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
     run_ok("AnonSharedCellWriteThrough", SOURCE);
 }
+
+/// An anonymous object nested inside a LAMBDA inside another anonymous object's member, capturing
+/// a value the enclosing object already holds as a capture field.
+///
+/// The innermost class captures the lambda parameter first and `xs` second, so `xs` sits at a
+/// different ordinal in each of the two classes. The capture argument passed at the construction
+/// site addressed the enclosing object's storage — correctly — but with the ordinal the capture
+/// takes on the class being CONSTRUCTED, so it read one field past the end and emission panicked
+/// (`index out of bounds` resolving a `GetField`). The two ordinals agree unless the new class
+/// captures something ahead of the shared value, which is why a single level of nesting, or a
+/// nested object with no lambda between, both stayed correct.
+///
+/// Asserted by VALUE as well as by compiling: `xs.size` read through the miscounted field would
+/// have been a different capture, not a crash, had the ordinal landed inside the list.
+#[test]
+fn an_anonymous_object_inside_a_lambda_inside_an_anonymous_object_captures_transitively() {
+    const SOURCE: &str = "interface Inner { fun get(): String }\n\
+         interface Outer { val inner: Inner }\n\
+         fun make(xs: List<String>): Outer = object : Outer {\n\
+         \x20   override val inner: Inner = object : Inner {\n\
+         \x20       override fun get(): String =\n\
+         \x20           xs.map { object : Inner { override fun get(): String = it + \"/\" + xs.size } }\n\
+         \x20               .first().get()\n\
+         \x20   }\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val got = make(listOf(\"OK\", \"second\")).inner.get()\n\
+         \x20   return if (got == \"OK/2\") \"OK\" else got\n\
+         }\n";
+    assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
+    run_ok("AnonObjectInLambdaInAnonObject", SOURCE);
+}

@@ -859,11 +859,20 @@ impl BodyFirChecker<'_> {
                         } else if let Some((receiver, path)) =
                             self.captured_class_storage_receiver(binding, origin)?
                         {
+                            // `binding.field`, NOT `source_field`. `source_field` is the ordinal
+                            // the capture takes on the class being CONSTRUCTED; the read emitted
+                            // here runs at the construction site and addresses the storage of the
+                            // classifier that already holds it, which is what `binding` names. The
+                            // two agree whenever the capture lands at the same position in both
+                            // lists and disagree as soon as the new class captures anything ahead
+                            // of it — a lambda parameter, say — which is why only a doubly nested
+                            // object reached this. Every sibling arm here already reads
+                            // `binding.field`.
                             FirLocalClassCaptureSource::CapturedClassStorage {
                                 owner: binding.owner,
                                 receiver,
                                 path,
-                                field: source_field,
+                                field: binding.field,
                             }
                         } else {
                             FirLocalClassCaptureSource::ClassStorage {
