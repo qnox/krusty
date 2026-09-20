@@ -79,6 +79,10 @@ struct Namespace {
     classifiers: HashMap<String, Arc<LibraryType>>,
     /// Overloads share a name, so each entry is the whole set a lookup answers with.
     callables: HashMap<String, Vec<FunctionInfo>>,
+    /// Top-level and extension PROPERTIES of this namespace. A name may carry both — `kotlin.text`
+    /// declares `fun String.count()` and `val CharSequence.indices` alike — so the two live side by
+    /// side and a lookup answers with whichever of them exists.
+    properties: HashMap<String, Vec<crate::libraries::PropertyInfo>>,
 }
 
 /// Kotlin/Native's stdlib, as a symbol source.
@@ -183,6 +187,21 @@ impl NativeLibraries {
                     .or_default()
                     .push(info);
             }
+            for property in &package.properties {
+                let info = top_level_property(
+                    package_name,
+                    property,
+                    &mut callable_realizations,
+                    &mut property_realizations,
+                );
+                namespaces
+                    .entry(package_name)
+                    .or_default()
+                    .properties
+                    .entry(property.name.clone())
+                    .or_default()
+                    .push(info);
+            }
         }
         Ok(Self {
             index: Arc::new(Index {
@@ -262,12 +281,14 @@ impl SymbolSource for NativeLibraries {
             return std::rc::Rc::new(ResolvedSymbols::default());
         };
         let classifier = found.classifiers.get(name).cloned();
-        let callables = match found.callables.get(name) {
-            Some(overloads) => Callables::Functions(crate::libraries::FunctionSet {
-                overloads: overloads.clone(),
-            }),
-            None => Callables::default(),
-        };
+        let callables = Callables::from_parts(
+            crate::libraries::FunctionSet {
+                overloads: found.callables.get(name).cloned().unwrap_or_default(),
+            },
+            crate::libraries::PropertySet {
+                overloads: found.properties.get(name).cloned().unwrap_or_default(),
+            },
+        );
         std::rc::Rc::new(ResolvedSymbols {
             classifier_name: classifier.as_ref().map(|_| match namespace {
                 SymbolNamespace::Package(package) => qualified(package, name),
@@ -363,6 +384,110 @@ fn top_level_function(
     info
 }
 
+/// One top-level or extension property, as the declaration a read selects.
+///
+/// The accessors are interned as callables and the declaration itself as a property, because a
+/// read carries the PROPERTY's identity: there is no accessor name for a consumer to rebuild, and
+/// a klib does not have one to rebuild it from.
+fn top_level_property(
+    package: TypeName,
+    property: &crate::jvm::metadata::BuiltinProperty,
+    realizations: &mut Vec<ExternalCallableRealization>,
+    properties: &mut Vec<ExternalPropertyRealization>,
+) -> crate::libraries::PropertyInfo {
+    let bounds = crate::jvm::classpath::builtin_bounds(&property.formals, &HashMap::new());
+    let ty = |t: &crate::jvm::metadata::BuiltinTy| crate::jvm::classpath::builtin_ty(t, &bounds);
+    let receiver = property.receiver.as_ref().map(&ty);
+    let declared = ty(&property.ty);
+    // An extension's receiver is its first PHYSICAL parameter, ahead of the context ones; a plain
+    // top-level property's accessors take nothing at all.
+    let accessor_params = receiver.iter().copied().collect::<Vec<_>>();
+    let mut getter = crate::libraries::LibraryCallable::library(
+        package,
+        property.name.clone(),
+        accessor_params.clone(),
+        declared,
+        declared,
+        String::new(),
+    );
+    getter.external_identity = Some(member_identity(realizations.len()));
+    getter.source_receiver = receiver;
+    getter.context_count = property.context_count;
+    realizations.push(ExternalCallableRealization {
+        callable: getter.clone(),
+        kind: ExternalCallableKind::Member,
+    });
+    let setter = property.is_var.then(|| {
+        let mut setter = crate::libraries::LibraryCallable::library(
+            package,
+            property.name.clone(),
+            accessor_params
+                .iter()
+                .copied()
+                .chain(std::iter::once(declared))
+                .collect::<Vec<_>>(),
+            Ty::Unit,
+            Ty::Unit,
+            String::new(),
+        );
+        setter.external_identity = Some(member_identity(realizations.len()));
+        setter.source_receiver = receiver;
+        setter.context_count = property.context_count;
+        realizations.push(ExternalCallableRealization {
+            callable: setter.clone(),
+            kind: ExternalCallableKind::Member,
+        });
+        setter
+    });
+    let identity = crate::fir::ExternalPropertyId::from_raw(
+        u32::try_from(properties.len())
+            .expect("too many stdlib declarations for a packed identity"),
+    );
+    properties.push(ExternalPropertyRealization {
+        name: property.name.clone(),
+        getter: getter.external_identity.expect("just assigned"),
+        setter: setter.as_ref().and_then(|setter| setter.external_identity),
+        declares_value_class_storage: false,
+    });
+    getter.external_property_identity = Some(identity);
+    let mut setter = setter;
+    if let Some(setter) = setter.as_mut() {
+        setter.external_property_identity = Some(identity);
+    }
+    crate::libraries::PropertyInfo {
+        name: property.name.clone(),
+        kind: match receiver {
+            Some(_) => crate::libraries::PropKind::Extension,
+            None => crate::libraries::PropKind::TopLevel,
+        },
+        receiver,
+        formals: property
+            .formals
+            .iter()
+            .map(|formal| formal.name.clone())
+            .collect(),
+        ty: declared,
+        context_count: property.context_count,
+        context_param_names: Vec::new(),
+        getter,
+        setter,
+        setter_visibility: property.visibility,
+        is_const: false,
+        implicit_integer_coercion: false,
+        compile_time_constant: None,
+        visibility: property.visibility,
+        owner: package,
+        receiver_rank: 0,
+        source_key: None,
+        stable_declaration: None,
+        getter_declaration: None,
+        setter_declaration: None,
+        source_member: None,
+        accessor_derived: false,
+        read_stability: crate::libraries::PropertyReadStability::Unstable,
+    }
+}
+
 fn qualified(package: TypeName, name: &str) -> TypeName {
     if package == TypeName::ROOT {
         type_name(name)
@@ -386,6 +511,20 @@ impl SemanticPlatform for NativeLibraries {
     /// The token the reference compiler writes in a source-set diagnostic for this target.
     fn diagnostic_target_name(&self) -> Option<&str> {
         Some("Native")
+    }
+
+    /// `X::class` is a `kotlin.reflect.KClass` here as it is everywhere — the type is Kotlin's own,
+    /// declared in the stdlib this provider reads, and nothing about it is the JVM's. Only its
+    /// `.java` unwrapping is, and that is a member of the JVM's own declaration.
+    fn class_literal_type(&self) -> Option<Ty> {
+        Some(Ty::obj("kotlin/reflect/KClass"))
+    }
+
+    /// Kotlin/Native's own default-import addition, as the JVM contributes `java.lang` and
+    /// `kotlin.jvm`. It is NOT `kotlin.jvm`: a native program that writes `@JvmInline` without
+    /// importing it is one the reference compiler rejects too.
+    fn platform_default_import_packages(&self) -> &'static [&'static str] {
+        &["kotlin.native"]
     }
 }
 
@@ -914,6 +1053,14 @@ mod compiles_against_the_klib {
             (
                 "fun box(): Int = listOf(1, 2, 3).let { it.size }\n",
                 "the member `kotlin.let`",
+            ),
+            // An EXTENSION PROPERTY, which is a top-level declaration of the package fragment
+            // rather than a member of anything. The decoder used to decode these and throw them
+            // away — `semantic_property` was called for validation and its result dropped — so
+            // `indices` resolved to nothing at all.
+            (
+                "fun box(): Int = \"abc\".indices.first\n",
+                "a read of the property `kotlin/text.indices`",
             ),
             // An INFIX call, which admits only declarations carrying the modifier. Before the
             // provider published it, this line found no `step` function at all and read the

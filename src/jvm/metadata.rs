@@ -4074,6 +4074,25 @@ pub struct BuiltinFunction {
 pub struct BuiltinPackage {
     pub classes: std::collections::HashMap<String, BuiltinClass>,
     pub functions: Vec<BuiltinFunction>,
+    pub properties: Vec<BuiltinProperty>,
+}
+
+/// One TOP-LEVEL property a package fragment declares — `val Collection<*>.indices`, `val PI`.
+///
+/// Distinct from [`BuiltinMember`], which is the member shape and carries no receiver: an extension
+/// property's receiver is the fact that makes it findable at all, and a member has none to record.
+pub struct BuiltinProperty {
+    pub name: String,
+    /// The extension receiver, for `val Collection<*>.indices`; `None` for a plain top-level one.
+    pub receiver: Option<BuiltinTy>,
+    pub ty: BuiltinTy,
+    pub formals: Vec<BuiltinTypeParam>,
+    pub visibility: crate::types::Visibility,
+    /// A `var`, so the declaration has a setter as well as a getter.
+    pub is_var: bool,
+    /// Old unnamed context receivers followed by named context parameters, as on
+    /// [`BuiltinFunction::context_count`].
+    pub context_count: usize,
 }
 
 /// One constructor declared by a builtin class. Unlike a function it has no return type or name;

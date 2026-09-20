@@ -868,7 +868,9 @@ fn semantic_property(
     body: &[u8],
     tables: &SemanticTables<'_>,
     inherited: &std::collections::HashMap<u64, String>,
-) -> Result<metadata::BuiltinMember, PackageFragmentDecodeError> {
+    top_level: bool,
+) -> Result<(metadata::BuiltinMember, Option<metadata::BuiltinProperty>), PackageFragmentDecodeError>
+{
     validate_annotation_fields(
         body,
         &[14, 15, 16, 33, 34, 35, 170, 177, 178, 181, 182, 183],
@@ -885,6 +887,12 @@ fn semantic_property(
     let mut return_id = None;
     let mut legacy_flags = None;
     let mut modern_flags = None;
+    // The extension receiver is separated from the other semantic types this loop validates,
+    // because it is the one that DECIDES what the declaration is: `val Collection<*>.indices` is
+    // findable only through its receiver, while a member property has none at all.
+    let mut receiver_body = None;
+    let mut receiver_id = None;
+    let mut context_count = 0usize;
     while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "property declaration")?;
         match (number, wire) {
@@ -892,17 +900,29 @@ fn semantic_property(
             (2, 0) => name = Some(cursor.varint("property name")?),
             (3, 2) => return_body = Some(cursor.length_delimited("property return type")?.0),
             (9, 0) => return_id = Some(cursor.varint("property return type id")?),
-            (5 | 12 | 18, 2) => {
+            (5, 2) => {
+                let nested = cursor.length_delimited("property receiver type")?.0;
+                tables.ty(nested, &type_parameters, 0, "property receiver type")?;
+                receiver_body = Some(nested);
+            }
+            (10, 0) => {
+                let id = cursor.varint("property receiver type id")?;
+                tables.ty_by_id(id, &type_parameters, 0, "property receiver")?;
+                receiver_id = Some(id);
+            }
+            (12 | 18, 2) => {
                 let nested = cursor.length_delimited("property semantic type")?.0;
                 tables.ty(nested, &type_parameters, 0, "property semantic type")?;
+                context_count += usize::from(number == 12);
             }
-            (10 | 19, 0) => {
+            (19, 0) => {
                 let id = cursor.varint("property semantic type id")?;
-                tables.ty_by_id(id, &type_parameters, 0, "property receiver")?;
+                tables.ty_by_id(id, &type_parameters, 0, "property semantic type")?;
             }
             (13, 0) => {
                 let id = cursor.varint("property context receiver type id")?;
                 tables.ty_by_id(id, &type_parameters, 0, "property context receiver")?;
+                context_count += 1;
             }
             (13, 2) => {
                 let (packed, base) =
@@ -911,6 +931,7 @@ fn semantic_property(
                 while !packed.at_end() {
                     let id = packed.varint("property context receiver type id")?;
                     tables.ty_by_id(id, &type_parameters, 0, "property context receiver")?;
+                    context_count += 1;
                 }
             }
             (173, 2) => {
@@ -944,8 +965,12 @@ fn semantic_property(
     let flags = modern_flags
         .or(legacy_flags)
         .unwrap_or(crate::metadata::property_flags::DEFAULT);
-    Ok(metadata::BuiltinMember {
-        name,
+    let receiver = match (receiver_body, receiver_id) {
+        (None, None) => None,
+        (body, id) => Some(tables.type_ref(body, id, &type_parameters, "property receiver")?),
+    };
+    let member = metadata::BuiltinMember {
+        name: name.clone(),
         params: Vec::new(),
         ret: ret.clone(),
         is_property: true,
@@ -953,9 +978,19 @@ fn semantic_property(
         is_infix: false,
         is_abstract: flags & crate::metadata::property_flags::MODALITY_MASK
             == crate::metadata::property_flags::MODALITY_ABSTRACT,
-        formals,
+        formals: formals.clone(),
         ret_nullable: ret.nullable(),
-    })
+    };
+    let top = top_level.then(|| metadata::BuiltinProperty {
+        name,
+        receiver,
+        ty: ret,
+        formals,
+        visibility: metadata::builtin_class_visibility(flags),
+        is_var: flags & crate::metadata::property_flags::IS_VAR != 0,
+        context_count,
+    });
+    Ok((member, top))
 }
 
 fn validate_type_alias(
@@ -1253,7 +1288,7 @@ fn semantic_class(
         members.push(member);
     }
     for body in properties {
-        members.push(semantic_property(body, &tables, &type_parameters)?);
+        members.push(semantic_property(body, &tables, &type_parameters, false)?.0);
     }
     for body in type_aliases {
         validate_type_alias(body, &tables, &type_parameters)?;
@@ -1319,7 +1354,11 @@ pub(super) fn parse(
             );
         }
         for body in message_bodies(package, 4, "package declaration")? {
-            semantic_property(body, &tables, &std::collections::HashMap::new())?;
+            let (_, property) =
+                semantic_property(body, &tables, &std::collections::HashMap::new(), true)?;
+            result.properties.push(
+                property.ok_or_else(|| semantic_error("top-level property lost its identity"))?,
+            );
         }
         for body in message_bodies(package, 5, "package declaration")? {
             validate_type_alias(body, &tables, &std::collections::HashMap::new())?;
