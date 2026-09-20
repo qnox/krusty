@@ -819,12 +819,12 @@ pub(super) fn unsigned_owner(owner: &str) -> Option<Ty> {
 /// reinterpreted — it saturates at zero for a negative, where the signed rule would answer a huge
 /// positive — so it belongs to its own change rather than to this rule.
 pub(super) fn unsigned_conversion(owner: &str, name: &str) -> Option<Ty> {
-    let owner = kotlin_owner(owner);
-    let facade = matches!(
-        owner,
-        "kotlin/UByteKt" | "kotlin/UShortKt" | "kotlin/UIntKt" | "kotlin/ULongKt"
-    );
-    if !facade {
+    // A top-level extension of `kotlin`, under either provider's spelling: a JVM provider names
+    // the file facade kotlinc split them across, a klib names the package. The declarations these
+    // four names can denote in `kotlin` are exactly these, so the package is discrimination
+    // enough; `UInt.toUInt()` is a MEMBER of its own type and answers `kotlin/UInt`, which is not
+    // this package and is handled by `unsigned_owner`.
+    if declaration_package(kotlin_owner(owner)) != "kotlin" {
         return None;
     }
     Some(match name {

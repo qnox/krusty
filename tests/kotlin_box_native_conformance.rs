@@ -217,7 +217,8 @@ fn compile(source: &str, stem: &str, target: NativeTarget) -> Result<Vec<u8>, Ou
                 .expect("JVM provider initialization"),
         ),
     };
-    let prepared = krusty::conformance::prepare_test_source(source);
+    let prepared =
+        krusty::conformance::prepare_test_source(source, krusty::conformance::TestTarget::Native);
     let inputs = vec![SourceInput::kotlin(&prepared).with_file_stem(stem)];
     let stems = vec![stem.to_string()];
     let mut features = krusty::features::LangFeatures::new();

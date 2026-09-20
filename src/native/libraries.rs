@@ -1320,6 +1320,18 @@ mod compiles_against_the_klib {
                 "fun box(): String = \"\"\"\n    OK\n    \"\"\".trimIndent()\n",
                 "a compiler-realized declaration",
             ),
+            // A `value class`. A Kotlin/Native one needs no annotation — `@JvmInline` is the
+            // JVM's, and `kotlin.jvm.*` is not among this target's default imports — and the klib
+            // does declare `kotlin.jvm.JvmInline` for a program that imports it.
+            (
+                "value class V(val x: Int)\nfun box(): String = \"OK\"\n",
+                "a value class",
+            ),
+            (
+                "import kotlin.jvm.JvmInline\n@JvmInline value class W(val x: Int)\n\
+                 fun box(): String = \"OK\"\n",
+                "a value class with the JVM's annotation imported",
+            ),
             // A `const val` on a companion. Every use site folds it, which is the only way it can
             // work here at all: a companion object has no storage on a target that compiles the
             // stdlib itself. The decoder used to validate the compile-time value and throw it
