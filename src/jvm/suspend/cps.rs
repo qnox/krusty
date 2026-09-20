@@ -1,16 +1,22 @@
-//! The JVM coroutine transform as a **bytecode → bytecode** pass.
+//! The JVM coroutine transform for suspensions the IR machine cannot see.
 //!
 //! The state machine a `suspend fun` needs is built from facts that only exist once every classpath
 //! `inline` body reached from it has been spliced: at a suspension inside a spliced inline lambda,
 //! kotlinc spills locals that the inline body itself introduced. A pass that runs before the splice
 //! cannot see them. See `docs/JVM_INLINE_BEFORE_CPS.md` for the measurement and the staging.
 //!
-//! This module owns the analyses that transform needs over already-emitted bytecode. It decides
-//! nothing about Kotlin semantics; its input is a decoded instruction list plus the method's
-//! exception table, both of which the emitter already produces.
+//! So the machine for those functions is built during emission, from bytecode facts: the body is
+//! emitted once with its inline bodies spliced, the spill set is read off those bytes, and the real
+//! method is emitted with the machine around it. This module owns the analyses that answers needs —
+//! which suspensions are affected, and which locals are live across each one. It decides nothing
+//! about Kotlin semantics.
 
 mod control_graph;
+mod inline_suspension;
 mod liveness;
 
 pub(crate) use control_graph::{ControlGraph, Handler};
+pub(crate) use inline_suspension::{
+    spliced_inline_suspensions, suspends_inside_a_spliced_inline_body,
+};
 pub(crate) use liveness::LocalLiveness;
