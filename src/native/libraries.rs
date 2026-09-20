@@ -25,9 +25,9 @@ use std::sync::Arc;
 
 use crate::klib::{KlibArchive, KlibError};
 use crate::libraries::{
-    Callables, ClassifierInheritance, ExternalCallableKind, ExternalCallableRealization, FnKind,
-    FunctionInfo, LibraryMember, LibraryType, ParamList, ResolvedSymbols, SemanticPlatform,
-    TypeKind,
+    Callables, ClassifierInheritance, ExternalCallableKind, ExternalCallableRealization,
+    ExternalPropertyRealization, FnKind, FunctionInfo, LibraryMember, LibraryType, ParamList,
+    ResolvedSymbols, SemanticPlatform, TypeKind,
 };
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{type_name, Ty, TypeName, TypeNameList, TypeParameters};
@@ -91,6 +91,10 @@ pub struct NativeLibraries {
     /// an array read rather than a search. A klib has no descriptor to stand in for identity, so
     /// the identity is the only thing a backend carries and this is the only place it resolves.
     callable_realizations: Vec<ExternalCallableRealization>,
+    /// The same arrangement for PROPERTIES, which carry an identity of their own: a read is not a
+    /// call to a name a consumer could re-derive, so the declaration's accessors are interned here
+    /// and the read carries only this position.
+    property_realizations: Vec<ExternalPropertyRealization>,
 }
 
 impl NativeLibraries {
@@ -109,6 +113,7 @@ impl NativeLibraries {
         let archive = KlibArchive::open(path)?;
         let mut namespaces: HashMap<TypeName, Namespace> = HashMap::new();
         let mut callable_realizations = Vec::new();
+        let mut property_realizations = Vec::new();
         for fragment in archive.package_fragments() {
             let bytes = archive.read(&fragment.entry)?;
             let package =
@@ -129,7 +134,14 @@ impl NativeLibraries {
                     .or_default()
                     .classifiers
                     .entry(name.to_string())
-                    .or_insert_with(|| Arc::new(library_type(identity, declaration)));
+                    .or_insert_with(|| {
+                        Arc::new(library_type(
+                            identity,
+                            declaration,
+                            &mut callable_realizations,
+                            &mut property_realizations,
+                        ))
+                    });
             }
             for function in &package.functions {
                 let identity = crate::fir::ExternalCallableId::from_raw(
@@ -157,6 +169,7 @@ impl NativeLibraries {
         Ok(Self {
             namespaces,
             callable_realizations,
+            property_realizations,
         })
     }
 
@@ -186,6 +199,17 @@ impl SymbolSource for NativeLibraries {
         identity: crate::fir::ExternalCallableId,
     ) -> Option<ExternalCallableRealization> {
         self.callable_realizations
+            .get(identity.raw() as usize)
+            .cloned()
+    }
+
+    /// The same, for a property. A read carries this identity rather than an accessor name, so
+    /// this is the only place a consumer can learn what the declaration behind it was.
+    fn external_property(
+        &self,
+        identity: crate::fir::ExternalPropertyId,
+    ) -> Option<ExternalPropertyRealization> {
+        self.property_realizations
             .get(identity.raw() as usize)
             .cloned()
     }
@@ -224,7 +248,7 @@ fn top_level_function(
     function: &crate::jvm::metadata::BuiltinFunction,
     identity: crate::fir::ExternalCallableId,
 ) -> FunctionInfo {
-    let bounds = HashMap::new();
+    let bounds = crate::jvm::classpath::builtin_bounds(&function.formals, &HashMap::new());
     let ty = |t: &crate::jvm::metadata::BuiltinTy| crate::jvm::classpath::builtin_ty(t, &bounds);
     let receiver = function.receiver.as_ref().map(&ty);
     // An extension's receiver is its first PHYSICAL parameter, ahead of the written ones — the
@@ -261,6 +285,27 @@ fn top_level_function(
         function.param_defaults.clone(),
         function.vararg,
     );
+    // The declaration's own type parameters, with the receiver kept apart from the written
+    // parameters. Without this a generic declaration resolves but never INFERS: `listOf(1).let { }`
+    // reported its result as the unbound `R` it was declared with.
+    if !function.formals.is_empty() {
+        info.generic_sig = Some(crate::libraries::GenericSig {
+            formals: function
+                .formals
+                .iter()
+                .map(|formal| formal.name.clone())
+                .collect(),
+            formal_bounds: function
+                .formals
+                .iter()
+                .map(|formal| formal.bounds.iter().map(&ty).collect())
+                .collect(),
+            receiver,
+            params: function.params.iter().map(&ty).collect(),
+            ret,
+            return_policy: crate::libraries::GenericReturnPolicy::Exact,
+        });
+    }
     info
 }
 
@@ -299,6 +344,8 @@ impl SemanticPlatform for NativeLibraries {
 fn library_type(
     identity: TypeName,
     declaration: crate::jvm::metadata::BuiltinClass,
+    realizations: &mut Vec<ExternalCallableRealization>,
+    properties: &mut Vec<ExternalPropertyRealization>,
 ) -> LibraryType {
     let bounds = crate::jvm::classpath::builtin_bounds(&declaration.type_params, &HashMap::new());
     let type_parameters = TypeParameters::new(
@@ -368,6 +415,8 @@ fn library_type(
         });
     }
     let is_interface = declaration.kind == TypeKind::Interface;
+    let (members, declared_callables, declared_callable_order) =
+        class_members(identity, &declaration, &bounds, realizations, properties);
     LibraryType {
         access: declaration.visibility.into(),
         is_kotlin: true,
@@ -387,9 +436,9 @@ fn library_type(
         supertype_templates,
         constructors,
         hidden_member_properties: Default::default(),
-        declared_callables: HashMap::new(),
-        declared_callable_order: Vec::new(),
-        members: Vec::new(),
+        declared_callables,
+        declared_callable_order,
+        members,
         companion: Vec::new(),
         constants: HashMap::new(),
         sam_eligible: false,
@@ -412,6 +461,162 @@ fn library_type(
         retention: None,
         annotation_targets: None,
     }
+}
+
+/// What one classifier declares directly: the physical member list a backend reads, and the
+/// name-keyed families a call site selects among.
+///
+/// A klib member is the KOTLIN declaration, which is what makes this short. The JVM provider has
+/// to RECOVER a property from a `getSize()`/`setSize(I)` pair, a `@Metadata` property record and
+/// the class file's own method table, and it has to decide which of those three agree; here the
+/// fragment simply says "property `size`, type `Int`" and that is the whole of it. Nothing below
+/// invents an accessor name, because inventing one is the JVM spelling this provider exists to
+/// stop importing.
+///
+/// Two facts the fragment does NOT carry are recorded as such rather than guessed:
+/// a property's mutability (so every property is published read-only, with no setter) and a
+/// member's visibility (so every member is published `public`, which is what the overwhelming
+/// majority of a published stdlib surface is). Both are widenings of the decoder, not of this
+/// conversion.
+fn class_members(
+    owner: TypeName,
+    declaration: &crate::jvm::metadata::BuiltinClass,
+    bounds: &HashMap<String, Ty>,
+    realizations: &mut Vec<ExternalCallableRealization>,
+    property_realizations: &mut Vec<ExternalPropertyRealization>,
+) -> (Vec<LibraryMember>, HashMap<String, Callables>, Vec<String>) {
+    // Symbolic: the classifier's own formals stay unbound here, and core substitutes the applied
+    // receiver's arguments into them once, when it specializes the family it selected from.
+    let receiver = Ty::obj_name(owner);
+    let mut members = Vec::new();
+    let mut declared: HashMap<String, Callables> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for member in &declaration.members {
+        // A member's own formals shadow the classifier's, and carry their own declared bounds.
+        let member_bounds = crate::jvm::classpath::builtin_bounds(&member.formals, bounds);
+        let formals = member
+            .formals
+            .iter()
+            .map(|formal| formal.name.clone())
+            .collect::<Vec<_>>();
+        let params = member
+            .params
+            .iter()
+            .map(|parameter| crate::jvm::classpath::builtin_ty(parameter, &member_bounds))
+            .collect::<Vec<_>>();
+        let ret = crate::jvm::classpath::builtin_ty(&member.ret, &member_bounds);
+        let mut callable = crate::libraries::LibraryCallable::library(
+            owner,
+            member.name.clone(),
+            params.clone(),
+            ret,
+            ret,
+            String::new(),
+        );
+        let interned = realizations.len();
+        callable.external_identity = Some(member_identity(interned));
+        realizations.push(ExternalCallableRealization {
+            callable: callable.clone(),
+            // A klib property is read by CALLING its getter, not by reading a field: the container
+            // publishes no storage layout, and a native target owns its own. So the realization is
+            // a member call for a function and for a property alike.
+            kind: ExternalCallableKind::Member,
+        });
+        if !declared.contains_key(&member.name) {
+            order.push(member.name.clone());
+        }
+        let family = declared.entry(member.name.clone()).or_default();
+        let (mut functions, mut properties) = std::mem::take(family).into_parts();
+        if member.is_property {
+            // A read carries the PROPERTY's identity, not its getter's: the accessor is this
+            // provider's realization of the declaration, and a consumer must not have to rebuild
+            // an accessor name to ask what a read means.
+            let identity = crate::fir::ExternalPropertyId::from_raw(
+                u32::try_from(property_realizations.len())
+                    .expect("too many stdlib declarations for a packed identity"),
+            );
+            property_realizations.push(ExternalPropertyRealization {
+                name: member.name.clone(),
+                getter: callable
+                    .external_identity
+                    .expect("every klib member is interned with an identity"),
+                setter: None,
+                declares_value_class_storage: false,
+            });
+            callable.external_property_identity = Some(identity);
+            realizations[interned].callable.external_property_identity = Some(identity);
+            properties.overloads.push(crate::libraries::PropertyInfo {
+                name: member.name.clone(),
+                kind: crate::libraries::PropKind::Member,
+                receiver: Some(receiver),
+                formals: formals.clone(),
+                ty: ret,
+                context_count: 0,
+                context_param_names: Vec::new(),
+                getter: callable,
+                setter: None,
+                setter_visibility: crate::libraries::Visibility::Private,
+                is_const: false,
+                implicit_integer_coercion: false,
+                compile_time_constant: None,
+                visibility: crate::libraries::Visibility::Public,
+                owner,
+                receiver_rank: 0,
+                source_key: None,
+                stable_declaration: None,
+                getter_declaration: None,
+                setter_declaration: None,
+                source_member: None,
+                accessor_derived: false,
+                read_stability: crate::libraries::PropertyReadStability::Unstable,
+            });
+        } else {
+            let mut info = FunctionInfo::plain(FnKind::Member, Some(receiver), callable);
+            info.flags.operator = member.is_operator;
+            info.flags.infix = member.is_infix;
+            info.flags.is_abstract = member.is_abstract;
+            if !formals.is_empty() {
+                info.generic_sig = Some(crate::libraries::GenericSig {
+                    formal_bounds: member
+                        .formals
+                        .iter()
+                        .map(|formal| {
+                            formal
+                                .bounds
+                                .iter()
+                                .map(|bound| {
+                                    crate::jvm::classpath::builtin_ty(bound, &member_bounds)
+                                })
+                                .collect()
+                        })
+                        .collect(),
+                    formals: formals.clone(),
+                    receiver: None,
+                    params: params.clone(),
+                    ret,
+                    return_policy: crate::libraries::GenericReturnPolicy::Exact,
+                });
+            }
+            functions.overloads.push(info);
+            let mut physical =
+                LibraryMember::new(member.name.clone(), params, ret, String::new());
+            physical.set_is_abstract(member.is_abstract);
+            physical.set_ret_nullable(member.ret_nullable);
+            physical.set_is_interface(declaration.kind == TypeKind::Interface);
+            physical.external_identity = Some(member_identity(realizations.len() - 1));
+            members.push(physical);
+        }
+        *family = Callables::from_parts(functions, properties);
+    }
+    (members, declared, order)
+}
+
+/// The identity this provider hands out for the declaration at `position` in its realization
+/// table. Split out so the packing assertion reads the same at every site that assigns one.
+fn member_identity(position: usize) -> crate::fir::ExternalCallableId {
+    crate::fir::ExternalCallableId::from_raw(
+        u32::try_from(position).expect("too many stdlib declarations for a packed identity"),
+    )
 }
 
 #[cfg(test)]
@@ -611,21 +816,47 @@ mod compiles_against_the_klib {
             "and a classifier that exists nowhere is reported: {unknown:?}"
         );
 
-        // MEMBERS do not. `library_type` publishes no members — the conversion fills supertypes,
-        // constructors and type parameters, and leaves `members` empty — so `List.size` has
-        // nothing to resolve to even though `List` itself resolves. This is the next piece of the
-        // provider, and until it lands this test says so out loud rather than letting the gap read
-        // as success.
-        let member = diagnostics(&root, "fun box(): Int = listOf(1, 2, 3).size\n");
-        assert!(
-            member
-                .iter()
-                .any(|d| d.contains("unresolved reference 'size'")),
-            "a member of a stdlib classifier does not resolve yet: {member:?}"
-        );
+        // MEMBERS resolve now, and each line below says so by the SHAPE of what is left: a
+        // diagnostic from the native BACKEND naming the exact declaration it was handed. The
+        // frontend cannot decline a call it never resolved, so "the backend does not support
+        // `kotlin/String.length`" is only reachable once the provider answered with that property.
+        for (source, declined) in [
+            // A member PROPERTY of a classifier, read through the provider's property identity.
+            (
+                "fun box(): Int = \"abc\".length\n",
+                "a read of the property `kotlin/String.length`",
+            ),
+            // A member FUNCTION, selected among the classifier's declared families.
+            (
+                "fun box(): String = \"abc\".substring(1)\n",
+                "the member `kotlin.text.substring`",
+            ),
+            // A top-level declaration, with a member read on the type it returns.
+            (
+                "fun box(): Int = listOf(1, 2, 3).size\n",
+                "the declaration `kotlin.collections.listOf`",
+            ),
+            // And a GENERIC top-level declaration whose result type is inferred rather than
+            // declared: before the provider published a generic signature this line failed
+            // checking instead, with `Int` expected and the unbound `R` actual.
+            (
+                "fun box(): Int = listOf(1, 2, 3).let { it.size }\n",
+                "the member `kotlin.let`",
+            ),
+        ] {
+            let reported = diagnostics(&root, source);
+            assert!(
+                reported.iter().any(|d| d.contains(declined)),
+                "{source:?} resolves and then declines in the backend on {declined}: {reported:?}"
+            );
+            assert!(
+                !reported.iter().any(|d| d.contains("unresolved reference")),
+                "{source:?} resolves nothing through the provider: {reported:?}"
+            );
+        }
 
-        // And the control for that one: analysis alone is SILENT about an unresolved call, so a
-        // test that only ran analysis would have called the line above a success.
+        // And the control for all of them: analysis alone is SILENT about an unresolved call, so a
+        // test that only ran analysis would have called every line above a success.
         let call_only_analysis = {
             let libraries = NativeLibraries::from_distribution(&root).expect("loads");
             let inputs =
