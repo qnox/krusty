@@ -626,7 +626,7 @@ fn library_type(
     let is_interface = declaration.kind == TypeKind::Interface;
     let (members, declared_callables, declared_callable_order) =
         class_members(identity, &declaration, &bounds, realizations, properties);
-    LibraryType {
+    let mut classifier = LibraryType {
         access: declaration.visibility.into(),
         is_kotlin: true,
         source_file: None,
@@ -669,7 +669,16 @@ fn library_type(
         annotations: Vec::new(),
         retention: None,
         annotation_targets: None,
-    }
+    };
+    // `Int.plus`, `String.length`, `Array.size`, the bit operations, the numeric conversions: the
+    // klib declares every one of them as an ordinary member, because at the SOURCE level that is
+    // what they are. No target implements them by dispatching to a method, and this is the
+    // target-neutral place that says so — the same one the JVM provider calls, on the same
+    // declarations, stamping the operation onto the overload the fragment already published rather
+    // than adding a second one. Without it the corpus declined `kotlin.Int.plus` 135 times and
+    // `kotlin.Int.compareTo` 123: a member call the code generator has no method to call.
+    crate::libraries::add_core_builtin_declarations(&mut classifier, identity);
+    classifier
 }
 
 /// What one classifier declares directly: the physical member list a backend reads, and the
@@ -780,6 +789,16 @@ fn class_members(
                 read_stability: crate::libraries::PropertyReadStability::Unstable,
             });
         } else {
+            // What this member IS, rather than what it is declared as. A klib declares
+            // `Int.plus(Int): Int` as an ordinary member, because at the source level that is
+            // exactly what it is; no target implements it by dispatching to a method.
+            let realization = crate::libraries::builtin_realization::member_realization(
+                owner,
+                &member.name,
+                &params,
+                ret,
+            );
+            callable.member_realization = realization;
             let mut info = FunctionInfo::plain(FnKind::Member, Some(receiver), callable);
             info.flags.operator = member.is_operator;
             info.flags.infix = member.is_infix;
@@ -808,6 +827,7 @@ fn class_members(
             }
             functions.overloads.push(info);
             let mut physical = LibraryMember::new(member.name.clone(), params, ret, String::new());
+            physical.realization = realization;
             physical.set_is_abstract(member.is_abstract);
             physical.set_ret_nullable(member.ret_nullable);
             physical.set_is_interface(declaration.kind == TypeKind::Interface);
@@ -1032,11 +1052,6 @@ mod compiles_against_the_klib {
         // frontend cannot decline a call it never resolved, so "the backend does not support
         // `kotlin/String.length`" is only reachable once the provider answered with that property.
         for (source, declined) in [
-            // A member PROPERTY of a classifier, read through the provider's property identity.
-            (
-                "fun box(): Int = \"abc\".length\n",
-                "a read of the property `kotlin/String.length`",
-            ),
             // A member FUNCTION, selected among the classifier's declared families.
             (
                 "fun box(): String = \"abc\".substring(1)\n",
@@ -1081,6 +1096,15 @@ mod compiles_against_the_klib {
                 "{source:?} resolves nothing through the provider: {reported:?}"
             );
         }
+
+        // A member PROPERTY, read through the provider's property identity, compiles all the way
+        // through: `String.length` is one of the declarations a klib publishes as an ordinary
+        // member and no target implements by dispatching to a method.
+        let member_read = diagnostics(&root, "fun box(): Int = \"abc\".length\n");
+        assert!(
+            member_read.is_empty(),
+            "a member property of a stdlib classifier compiles: {member_read:?}"
+        );
 
         // A CONSTRUCTION compiles all the way through. Before the provider interned its
         // constructors, checked FIR had no target to name for `StringBuilder()` and the whole

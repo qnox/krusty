@@ -1,6 +1,7 @@
 //! Library metadata shared by symbol sources.
 
 mod array_factories;
+pub(crate) mod builtin_realization;
 mod core_builtins;
 mod generic_signature;
 mod inline_body;

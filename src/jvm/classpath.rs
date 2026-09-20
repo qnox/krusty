@@ -3329,149 +3329,16 @@ impl Classpath {
                             }
                         });
                     let physical_name = (physical_name != m.name).then_some(physical_name);
-                    let builtin_scalar = |name: TypeName| {
-                        [
-                            ("kotlin/Int", Ty::Int),
-                            ("kotlin/Byte", Ty::Byte),
-                            ("kotlin/Short", Ty::Short),
-                            ("kotlin/Long", Ty::Long),
-                            ("kotlin/Float", Ty::Float),
-                            ("kotlin/Double", Ty::Double),
-                            ("kotlin/Char", Ty::Char),
-                            ("kotlin/Boolean", Ty::Boolean),
-                        ]
-                        .into_iter()
-                        .find_map(|(candidate, ty)| name.matches(candidate).then_some(ty))
-                    };
-                    let declared_result_scalar = match m.generic_sig.ret.non_null() {
-                        Ty::Obj(name, _) => builtin_scalar(name),
-                        result => result.scalar_value_repr(),
-                    };
-                    let realization = match (internal_id, m.name.as_str()) {
-                        (owner, name)
-                            if builtin_scalar(owner).is_some()
-                                && m.generic_sig.params.is_empty()
-                                && declared_result_scalar.is_some()
-                                && matches!(name, "unaryPlus" | "unaryMinus") =>
-                        {
-                            let operation = if name == "unaryPlus" {
-                                crate::libraries::PrimitiveUnaryIntrinsic::Identity
-                            } else {
-                                crate::libraries::PrimitiveUnaryIntrinsic::Negate
-                            };
-                            crate::libraries::MemberRealization::Intrinsic(
-                                crate::libraries::CompilerIntrinsic::PrimitiveUnary(operation),
-                            )
-                        }
-                        (owner, name)
-                            if builtin_scalar(owner).is_some()
-                                && m.generic_sig.params.is_empty()
-                                && declared_result_scalar.is_some()
-                                && matches!(
-                                    name,
-                                    "toInt"
-                                        | "toByte"
-                                        | "toShort"
-                                        | "toLong"
-                                        | "toFloat"
-                                        | "toDouble"
-                                        | "toChar"
-                                ) =>
-                        {
-                            crate::libraries::MemberRealization::Intrinsic(
-                                crate::libraries::CompilerIntrinsic::NumericConversion,
-                            )
-                        }
-                        (owner, name)
-                            if builtin_scalar(owner).is_some()
-                                && m.generic_sig.params.len() == 1
-                                && declared_result_scalar.is_some()
-                                && matches!(name, "plus" | "minus" | "times" | "div" | "rem") =>
-                        {
-                            let operation = match name {
-                                "plus" => crate::libraries::PrimitiveBinaryIntrinsic::Add,
-                                "minus" => crate::libraries::PrimitiveBinaryIntrinsic::Subtract,
-                                "times" => crate::libraries::PrimitiveBinaryIntrinsic::Multiply,
-                                "div" => crate::libraries::PrimitiveBinaryIntrinsic::Divide,
-                                "rem" => crate::libraries::PrimitiveBinaryIntrinsic::Remainder,
-                                _ => unreachable!("guard admits only primitive binary arithmetic"),
-                            };
-                            crate::libraries::MemberRealization::Intrinsic(
-                                crate::libraries::CompilerIntrinsic::PrimitiveBinary(operation),
-                            )
-                        }
-                        (owner, "compareTo")
-                            if builtin_scalar(owner).is_some()
-                                && m.generic_sig.params.len() == 1
-                                && declared_result_scalar == Some(Ty::Int)
-                                && match m.generic_sig.params[0].non_null() {
-                                    Ty::Obj(parameter, _) => builtin_scalar(parameter).is_some(),
-                                    parameter => parameter.is_jvm_scalar(),
-                                } =>
-                        {
-                            crate::libraries::MemberRealization::Intrinsic(
-                                crate::libraries::CompilerIntrinsic::PrimitiveCompare,
-                            )
-                        }
-                        (owner, "not")
-                            if builtin_scalar(owner) == Some(Ty::Boolean)
-                                && m.generic_sig.params.is_empty()
-                                && declared_result_scalar == Some(Ty::Boolean) =>
-                        {
-                            crate::libraries::MemberRealization::Intrinsic(
-                                crate::libraries::CompilerIntrinsic::BooleanNot,
-                            )
-                        }
-                        (owner, name)
-                            if matches!(
-                                builtin_scalar(owner),
-                                Some(Ty::Int | Ty::Long | Ty::Boolean)
-                            ) && m.generic_sig.ret == builtin_scalar(owner).unwrap()
-                                && ((name == "inv" && m.generic_sig.params.is_empty())
-                                    || (matches!(name, "and" | "or" | "xor")
-                                        && m.generic_sig.params.as_slice()
-                                            == [builtin_scalar(owner).unwrap()])
-                                    || (matches!(name, "shl" | "shr" | "ushr")
-                                        && matches!(
-                                            builtin_scalar(owner),
-                                            Some(Ty::Int | Ty::Long)
-                                        )
-                                        && m.generic_sig.params.as_slice() == [Ty::Int])) =>
-                        {
-                            let intrinsic = match name {
-                                "and" => crate::libraries::CompilerIntrinsic::PrimitiveBitAnd,
-                                "or" => crate::libraries::CompilerIntrinsic::PrimitiveBitOr,
-                                "xor" => crate::libraries::CompilerIntrinsic::PrimitiveBitXor,
-                                "shl" => crate::libraries::CompilerIntrinsic::PrimitiveShiftLeft,
-                                "shr" => crate::libraries::CompilerIntrinsic::PrimitiveShiftRight,
-                                "ushr" => {
-                                    crate::libraries::CompilerIntrinsic::PrimitiveUnsignedShiftRight
-                                }
-                                "inv" => crate::libraries::CompilerIntrinsic::PrimitiveBitNot,
-                                _ => unreachable!("guard admits only primitive bit operations"),
-                            };
-                            crate::libraries::MemberRealization::Intrinsic(intrinsic)
-                        }
-                        (owner, "plus")
-                            if owner.matches("kotlin/String")
-                                && m.generic_sig.params.as_slice()
-                                    == [Ty::nullable(Ty::obj("kotlin/Any"))]
-                                && m.generic_sig.ret == Ty::String =>
-                        {
-                            crate::libraries::MemberRealization::Intrinsic(
-                                crate::libraries::CompilerIntrinsic::StringPlus,
-                            )
-                        }
-                        (_, "rangeTo") => crate::libraries::MemberRealization::RangeConstruction {
-                            open_end: false,
-                        },
-                        (_, "rangeUntil") => {
-                            crate::libraries::MemberRealization::RangeConstruction {
-                                open_end: true,
-                            }
-                        }
-                        _ => crate::libraries::MemberRealization::Dispatch,
-                    };
+                    // What this member IS, rather than what it is declared as: `Int.plus` is
+                    // the addition, `Int.toByte` the conversion, `rangeTo` a construction. The
+                    // rule is over the signature and belongs to no artifact, so it is stated once
+                    // for every provider rather than here, where the builtins file is parsed.
+                    let realization = crate::libraries::builtin_realization::member_realization(
+                        internal_id,
+                        &m.name,
+                        &m.generic_sig.params,
+                        m.generic_sig.ret,
+                    );
                     crate::libraries::LibraryMember {
                         external_identity: None,
                         external_default_provider: None,
