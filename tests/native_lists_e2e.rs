@@ -686,3 +686,56 @@ fn writing_through_a_list_while_walking_it_is_a_concurrent_modification() {
         "OK",
     );
 }
+
+#[test]
+fn a_progression_answers_the_iterable_members_a_range_does() {
+    // `10 downTo 1` is typed `IntProgression`, not `IntRange`, and the role table named only the
+    // three ranges — so every `Iterable` member on a progression declined by name, ten cases of
+    // `withIndex` alone under `ranges/forInProgressionWithIndex/`.
+    //
+    // The runtime needed nothing: one struct serves a range and a progression (a plain range is
+    // the one whose step is 1), and the object a `downTo` builds wears the very descriptor a range
+    // does — so `kt_iterable_with_index` and the walks beside it already reached it. What was
+    // missing is the STATIC name, which is what a call site has.
+    //
+    // Every shape that produces a progression is here, because they are separate stdlib
+    // declarations answering the same runtime object: `downTo`, `step`, `reversed`, and `step`
+    // applied to a descending walk. The unsigned and `Char` ranges are beside them because their
+    // names were missing from that table too.
+    //
+    // The indices matter as much as the values: `withIndex` counts the walk's own positions, so a
+    // descending progression yields `0:10, 1:9, 2:8` — a counter that read the element would give
+    // `10:10`.
+    //
+    // The three `map` results are here because naming the progressions exposed a runtime defect
+    // rather than only an unblocked path. `map` asks the iterable its SIZE once and allocates
+    // once, and that count read `last - first + 1` behind an ascending emptiness test — right for
+    // every range a program had been able to reach it with, since a plain range steps by 1 and
+    // ascends. A descending walk counted as EMPTY (`[]` for `3 downTo 1`), and a stepped one would
+    // have counted 7 where the walk yields 3. So the count is the walk's own now, and all three
+    // shapes are pinned: descending, stepped, and a walk that really is empty.
+    //
+    // Expectations are kotlinc's, taken by running this exact source under it.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   var downTo = \"\"\n\
+         \x20   for ((i, v) in (10 downTo 8).withIndex()) downTo += \"$i:$v,\"\n\
+         \x20   var stepped = \"\"\n\
+         \x20   for ((i, v) in (1..9 step 3).withIndex()) stepped += \"$i:$v,\"\n\
+         \x20   var reversed = \"\"\n\
+         \x20   for ((i, v) in (1..3).reversed().withIndex()) reversed += \"$i:$v,\"\n\
+         \x20   var unsigned = \"\"\n\
+         \x20   for ((i, v) in (1u..3u).withIndex()) unsigned += \"$i:$v,\"\n\
+         \x20   var chars = \"\"\n\
+         \x20   for ((i, v) in ('a'..'c').withIndex()) chars += \"$i:$v,\"\n\
+         \x20   val descending = (3 downTo 1).map { it * 2 }\n\
+         \x20   val steppedMap = (1..9 step 3).map { it }\n\
+         \x20   val empty = (1 downTo 3).map { it }\n\
+         \x20   var each = \"\"\n\
+         \x20   (1..3 step 2).forEach { each += \"$it,\" }\n\
+         \x20   return \"$downTo|$stepped|$reversed|$unsigned|$chars|$descending|$steppedMap|$empty|$each\"\n\
+         }\n",
+        "ProgressionIterableMembers",
+        "0:10,1:9,2:8,|0:1,1:4,2:7,|0:3,1:2,2:1,|0:1,1:2,2:3,|0:a,1:b,2:c,|[6, 4, 2]|[1, 4, 7]|[]|1,3,",
+    );
+}

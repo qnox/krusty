@@ -2275,13 +2275,30 @@ static kt_int kt_iterable_size(KRef iterable) {
         iterable->header.type != &kt_type_char_range) {
         KT_FAIL("krusty: this iterable cannot be counted\n");
     }
-    kt_long first = kt_range_first(iterable);
-    kt_long last = kt_range_last(iterable);
-    if (first > last) {
+    /* How many elements the WALK yields, which is not `last - first + 1` unless the step is 1 and
+       the walk ascends. A progression wears a range's descriptor here -- one struct serves both --
+       so a descending `3 downTo 1` reached the ascending test with `first` above `last` and was
+       counted as empty, and `1..9 step 3` would have been counted 7 where the walk yields 3.
+
+       `kt_range_empty` already answers emptiness for either direction and at the bounds' own
+       signedness, so the count below never divides for a walk that yields nothing.
+
+       The span is taken on the RING, as two's-complement subtraction, for the reason
+       `kt_progression_last` states about forming a distance: `Long.MIN_VALUE..Long.MAX_VALUE`
+       spans more than a `kt_long` holds, and the signed subtraction wraps. At 64 bits unsigned it
+       is exact -- and exact for an unsigned range's bounds above 2^63 by the same token. A span
+       that large cannot be collected anyway, which the cap below still says. `last` is already the
+       last element REACHED, so the span divides by the step exactly. */
+    const KRange *bounds = (const KRange *)iterable;
+    if (kt_range_empty(bounds)) {
         return 0;
     }
-    kt_long count = last - first + 1;
-    if (count > INT32_MAX) {
+    kt_long step = bounds->step;
+    uint64_t span = step > 0 ? (uint64_t)bounds->last - (uint64_t)bounds->first
+                             : (uint64_t)bounds->first - (uint64_t)bounds->last;
+    uint64_t magnitude = (uint64_t)(step > 0 ? step : -step);
+    uint64_t count = span / magnitude + 1u;
+    if (count > (uint64_t)INT32_MAX) {
         KT_FAIL("krusty: a range too long to collect\n");
     }
     return (kt_int)count;

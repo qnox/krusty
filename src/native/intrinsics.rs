@@ -493,6 +493,20 @@ pub(super) fn iteration_role(internal: crate::types::TypeName) -> Option<Iterati
         ("kotlin/ranges/IntRange", IterationRole::Iterable),
         ("kotlin/ranges/LongRange", IterationRole::Iterable),
         ("kotlin/ranges/CharRange", IterationRole::Iterable),
+        // A PROGRESSION is a walk with a step, and `10 downTo 1` is typed by one rather than by
+        // the range above it. The runtime needs nothing new for it: one struct serves a range and
+        // a progression — a plain range is the one whose step is 1 — and the object a `downTo`
+        // builds wears the very descriptor a range does, so every `kt_iterable_*` walk already
+        // reaches it. What was missing is only the STATIC name, which is what a call site has.
+        ("kotlin/ranges/IntProgression", IterationRole::Iterable),
+        ("kotlin/ranges/LongProgression", IterationRole::Iterable),
+        ("kotlin/ranges/CharProgression", IterationRole::Iterable),
+        // The unsigned pair the runtime owns, and their progressions. Kotlin declares exactly two
+        // unsigned ranges, since `UByte.rangeTo` and `UShort.rangeTo` both answer a `UIntRange`.
+        ("kotlin/ranges/UIntRange", IterationRole::Iterable),
+        ("kotlin/ranges/ULongRange", IterationRole::Iterable),
+        ("kotlin/ranges/UIntProgression", IterationRole::Iterable),
+        ("kotlin/ranges/ULongProgression", IterationRole::Iterable),
         ("kotlin/collections/Iterator", IterationRole::Iterator),
         // The primitive iterators an array hands out. Each is a concrete stdlib class rather than
         // an interface, and naming them is safe for the reason the interfaces are: the only objects
