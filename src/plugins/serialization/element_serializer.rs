@@ -5,7 +5,7 @@ use super::{
     collection_serializer_builder, generated_serializer_accessor, is_nullable, kserializer_of,
     serializer_of_name, type_is_contextual, wrap_nullable_serializer, KSERIALIZER_FQ,
 };
-use crate::ir::{ClassId, ExprId, IrExpr, IrFile};
+use crate::ir::{ClassId, ExprId, IrExpr, IrFile, IrTypeOp};
 use crate::plugins::PluginContext;
 use crate::types::{type_name, Ty, TypeName};
 
@@ -406,6 +406,45 @@ pub(super) fn element_serializer_plan(
     None
 }
 
+fn emit_collection_serializer(
+    ir: &mut IrFile,
+    builder: TypeName,
+    arguments: Vec<ElementSerializerPlan>,
+    narrow_arguments: bool,
+) -> ExprId {
+    let arity = arguments.len();
+    let arguments = arguments
+        .into_iter()
+        .map(|argument| {
+            let argument = emit_element_serializer(ir, argument);
+            if narrow_arguments {
+                ir.add_expr(IrExpr::TypeOp {
+                    op: IrTypeOp::Cast,
+                    arg: argument,
+                    type_operand: class_ty(KSERIALIZER_FQ),
+                })
+            } else {
+                argument
+            }
+        })
+        .collect();
+    // CONSTRUCTED, not obtained from the `BuiltinSerializersKt` factory that returns the same
+    // thing: `ListSerializer(x)` is an inline stdlib function over `ArrayListSerializer(x)`, and
+    // kotlinc's plugin emits the construction.
+    ir.add_expr(IrExpr::New {
+        internal: builder,
+        args: arguments,
+        ctor_params: Some(vec![class_ty(KSERIALIZER_FQ); arity]),
+        ctor_desc: Some(format!(
+            "({})V",
+            "Lkotlinx/serialization/KSerializer;".repeat(arity)
+        )),
+        external_target: None,
+        defaults: Box::new([]),
+        default_prefix_count: 0,
+    })
+}
+
 fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> ExprId {
     match plan {
         ElementSerializerPlan::Generated {
@@ -426,26 +465,7 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
             )
         }
         ElementSerializerPlan::Collection { builder, arguments } => {
-            let arity = arguments.len();
-            let arguments = arguments
-                .into_iter()
-                .map(|argument| emit_element_serializer(ir, argument))
-                .collect();
-            // CONSTRUCTED, not obtained from the `BuiltinSerializersKt` factory that returns the
-            // same thing: `ListSerializer(x)` is an inline stdlib function over
-            // `ArrayListSerializer(x)`, and kotlinc's plugin emits the construction.
-            ir.add_expr(IrExpr::New {
-                internal: builder,
-                args: arguments,
-                ctor_params: Some(vec![class_ty(KSERIALIZER_FQ); arity]),
-                ctor_desc: Some(format!(
-                    "({})V",
-                    "Lkotlinx/serialization/KSerializer;".repeat(arity)
-                )),
-                external_target: None,
-                defaults: Box::new([]),
-                default_prefix_count: 0,
-            })
+            emit_collection_serializer(ir, builder, arguments, false)
         }
         ElementSerializerPlan::Nullable(inner) => {
             let inner = emit_element_serializer(ir, *inner);
@@ -494,6 +514,28 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
             field: "INSTANCE".to_string(),
         }),
     }
+}
+
+/// Emit the serializer a child-cache factory returns from the already-selected semantic plan.
+///
+/// kotlinc narrows each direct collection-constructor operand and the resulting serializer to
+/// `KSerializer`. Keeping that representation detail here lets the emitter build the intended IR
+/// once; callers never reopen a generic `IrExpr::New` and guess what semantic plan produced it.
+pub(super) fn emit_cached_element_serializer(
+    ir: &mut IrFile,
+    plan: ElementSerializerPlan,
+) -> ExprId {
+    let serializer = match plan {
+        ElementSerializerPlan::Collection { builder, arguments } => {
+            emit_collection_serializer(ir, builder, arguments, true)
+        }
+        plan => emit_element_serializer(ir, plan),
+    };
+    ir.add_expr(IrExpr::TypeOp {
+        op: IrTypeOp::Cast,
+        arg: serializer,
+        type_operand: class_ty(KSERIALIZER_FQ),
+    })
 }
 
 pub(super) fn element_serializer_expr(
