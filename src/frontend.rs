@@ -732,7 +732,7 @@ pub const DEFAULT_MODULE_NAME: &str = "main";
 /// name reaches only diagnostics that spell it, never resolution.
 pub fn analyze_source_set_streaming_with_module(
     sources: &[SourceInput<'_>],
-    platform: Box<dyn SemanticPlatform>,
+    platform: impl Into<PlatformProvider>,
     project_features: &LangFeatures,
     module_name: &str,
     diags: &mut DiagSink,
@@ -741,7 +741,7 @@ pub fn analyze_source_set_streaming_with_module(
         sources,
         sources.len(),
         sources.len(),
-        platform,
+        platform.into(),
         project_features,
         module_name,
         |_, _| {},

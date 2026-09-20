@@ -1411,8 +1411,8 @@ pub struct File {
     /// The keyword travels with the declaration because every diagnostic about an `expect` points
     /// at it. Recovering it afterwards means searching the file's modifiers for the nearest one
     /// that ends before the declaration — a guess that has no answer when the declaration was
-     /// synthesized, and a wrong one whenever two headers share a line.
-     pub expect_decls: Vec<ExpectDeclaration>,
+    /// synthesized, and a wrong one whenever two headers share a line.
+    pub expect_decls: Vec<ExpectDeclaration>,
     /// Top-level declarations carrying the `actual` modifier, the mirror of [`Self::expect_decls`].
     /// An `actual` is otherwise inert; this records it so an `actual` with no `expect` to actualize
     /// can be rejected, which is an error in Kotlin.
