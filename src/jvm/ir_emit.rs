@@ -12956,7 +12956,23 @@ impl<'a> Emitter<'a> {
         if params.len() != args.len() {
             return false;
         }
-        let top_local = base + body.max_locals;
+        // Each substituted lambda's parameter slot is closed by the splice (its body replaces the
+        // `invoke`), so the relocated body occupies that many slots fewer.
+        let spliced_away = args
+            .iter()
+            .enumerate()
+            .filter(|(i, &argument)| {
+                *i < params.len()
+                    && matches!(
+                        self.ir.expr(argument),
+                        IrExpr::Lambda {
+                            inline_body: Some(_),
+                            ..
+                        }
+                    )
+            })
+            .count() as u16;
+        let top_local = base + body.max_locals.saturating_sub(spliced_away);
         self.next_slot = self.next_slot.max(top_local);
         // Build each lambda argument's pre-relocated body (leaving its boxed result on the stack), and
         // its own (branchy-predicate) frames — resolved to byte offsets within the body, relocated below.

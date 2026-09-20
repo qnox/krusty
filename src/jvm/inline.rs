@@ -468,20 +468,29 @@ fn local_load_store(base_op: u8, idx: u16) -> Insn {
 /// their `wide` variants), re-selecting the compact encoding. Relocating an inline body's locals into
 /// the caller's frame is a prerequisite for splicing — the body then occupies `base..base+max_locals`.
 pub fn shift_locals(insns: &mut [Insn], base: u16) -> Option<()> {
+    remap_locals(insns, |slot| slot + base)
+}
+
+/// Relocate every local-variable index in the body through `map`, re-selecting the compact encoding.
+///
+/// A splice needs more than a shift when it substitutes a lambda body for a `FunctionN.invoke`: the
+/// parameter that held the lambda object no longer exists, and leaving its slot reserved pushes
+/// every later local one slot up. `map` therefore both rebases and closes those gaps.
+pub fn remap_locals(insns: &mut [Insn], map: impl Fn(u16) -> u16) -> Option<()> {
     for insn in insns.iter_mut() {
         let Insn::Plain { op, operands } = insn else {
             continue;
         };
         let op = *op;
         if let Some((base_op, idx)) = decode_n_form(op) {
-            *insn = local_load_store(base_op, idx + base);
+            *insn = local_load_store(base_op, map(idx));
         } else if matches!(op, 0x15..=0x19 | 0x36..=0x3a) {
             // One-byte-indexed load/store.
-            let idx = *operands.first()? as u16 + base;
+            let idx = map(*operands.first()? as u16);
             *insn = local_load_store(op, idx);
         } else if op == 0xa9 {
             // ret <index>.
-            let idx = *operands.first()? as u16 + base;
+            let idx = map(*operands.first()? as u16);
             *insn = if idx <= 0xff {
                 Insn::Plain {
                     op: 0xa9,
@@ -495,7 +504,7 @@ pub fn shift_locals(insns: &mut [Insn], base: u16) -> Option<()> {
             };
         } else if op == 0x84 {
             // iinc <index> <const>.
-            let idx = *operands.first()? as u16 + base;
+            let idx = map(*operands.first()? as u16);
             let c = operands[1];
             *insn = if idx <= 0xff {
                 Insn::Plain {
@@ -513,7 +522,7 @@ pub fn shift_locals(insns: &mut [Insn], base: u16) -> Option<()> {
         } else if op == 0xc4 {
             // wide <sub-op> <index:2> [<const:2> for iinc].
             let sub = *operands.first()?;
-            let idx = ((operands[1] as u16) << 8 | operands[2] as u16) + base;
+            let idx = map((operands[1] as u16) << 8 | operands[2] as u16);
             if sub == 0x84 {
                 *insn = Insn::Plain {
                     op: 0xc4,
@@ -1856,7 +1865,19 @@ pub fn splice_unified(
             return None;
         }
     }
-    shift_locals(&mut insns, base)?;
+    // The parameter that held a substituted lambda no longer exists: its `aload` is deleted and its
+    // body is spliced in place of the `invoke`. Leaving its slot reserved would push every later host
+    // local one slot up, which the reference compiler does not do — it closes the gap. Relocate the
+    // body's locals through a map that both rebases and compacts.
+    let removed_slots: Vec<u16> = lambdas
+        .iter()
+        .filter_map(|lambda| offsets_of_param.get(lambda.param_index).copied())
+        .collect();
+    let compact = |slot: u16| -> u16 {
+        let closed = removed_slots.iter().filter(|&&gone| gone < slot).count() as u16;
+        base + slot - closed
+    };
+    remap_locals(&mut insns, compact)?;
     // Return handling: DROP a trailing return (fall through with the result on the stack), and redirect
     // any earlier return to the join (`goto` past the body). A pure BRANCHLESS body — no branches, a
     // single trailing return dropped — then needs NO frames/join, so the caller may splice it at ANY
@@ -1987,16 +2008,13 @@ pub fn splice_unified(
     }
 
     // Prologue: store each NON-lambda argument (already on the stack, top = last) into its slot.
-    let stores = param_store_ops(descriptor, base)?;
-    let lambda_slots: std::collections::HashSet<u16> = lambdas
-        .iter()
-        .filter_map(|l| offsets_of_param.get(l.param_index).map(|o| base + o))
-        .collect();
+    let stores = param_store_ops(descriptor, 0)?;
+    let lambda_slots: std::collections::HashSet<u16> = removed_slots.iter().copied().collect();
     let prologue: Vec<Insn> = stores
         .iter()
         .rev()
         .filter(|(slot, _)| !lambda_slots.contains(slot))
-        .map(|&(slot, op)| local_load_store(op, slot))
+        .map(|&(slot, op)| local_load_store(op, compact(slot)))
         .collect();
     crate::trace_compiler!(
         "splice",
@@ -2021,13 +2039,10 @@ pub fn splice_unified(
             .locals
             .iter()
             .enumerate()
-            .map(|(k, v)| {
-                if lambda_entry.contains(&k) {
-                    Some(VType::Top) // the lambda param is spliced away — its slot is dead
-                } else {
-                    relocate_vtype(v, &body.source_cp, cw)
-                }
-            })
+            // The lambda parameter is spliced away and its slot closed, so the frame must not
+            // describe it at all — a `Top` in its place would still reserve the slot.
+            .filter(|(k, _)| !lambda_entry.contains(k))
+            .map(|(_, v)| relocate_vtype(v, &body.source_cp, cw))
             .collect::<Option<Vec<_>>>()?;
         // A substituted lambda's `aload` is deleted, so remove that exact value while it would have
         // been live between the load and `FunctionN.invoke`. Do not discard FunctionN values by type:
@@ -2598,6 +2613,42 @@ mod tests {
         let mut t = disassemble(&[0x1a, 0xb1]).unwrap(); // iload_0; return
         shift_locals(&mut t, 10).unwrap();
         assert_eq!(assemble(&t), [0x15, 0x0a, 0xb1]); // iload 10; return
+    }
+
+    /// A substituted lambda's parameter slot is closed, not merely left reserved: every host local
+    /// above it moves down, which is what the reference compiler emits and what the flat shift got
+    /// wrong.
+    #[test]
+    fn remapping_closes_the_slot_a_spliced_lambda_parameter_left_behind() {
+        // A host `f(int x, Function1 g)` whose body uses x(0), g(1) and two locals 2, 3.
+        // g is spliced away, so with base = 1 the surviving locals are 1, 2, 3 — not 1, 3, 4.
+        let base = 1u16;
+        let removed = [1u16];
+        let compact = |slot: u16| -> u16 {
+            base + slot - removed.iter().filter(|&&gone| gone < slot).count() as u16
+        };
+        assert_eq!(compact(0), 1, "the value parameter rebases");
+        assert_eq!(compact(2), 2, "the first body local closes the gap");
+        assert_eq!(compact(3), 3);
+
+        // iload_0; iload_2; iadd; istore_3; return
+        let code = [0x1a, 0x1c, 0x60, 0x3e, 0xb1];
+        let mut insns = disassemble(&code).unwrap();
+        remap_locals(&mut insns, compact).unwrap();
+        // iload_1; iload_2; iadd; istore_3; return — every form stays compact.
+        assert_eq!(assemble(&insns), [0x1b, 0x1c, 0x60, 0x3e, 0xb1]);
+    }
+
+    /// Without a removed slot the remap is exactly the old shift, so the generalization cannot have
+    /// changed what every other splice emits.
+    #[test]
+    fn remapping_with_nothing_removed_is_the_flat_shift() {
+        let code = [0x1b, 0x3d, 0x84, 0x01, 0x01, 0xb1];
+        let mut shifted = disassemble(&code).unwrap();
+        shift_locals(&mut shifted, 4).unwrap();
+        let mut remapped = disassemble(&code).unwrap();
+        remap_locals(&mut remapped, |slot| slot + 4).unwrap();
+        assert_eq!(assemble(&shifted), assemble(&remapped));
     }
 
     /// A bootstrap entry's dependency graph is every member the host would have to reference.
