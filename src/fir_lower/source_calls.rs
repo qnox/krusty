@@ -962,7 +962,126 @@ impl BodyLowering<'_> {
         } else {
             slots.into_iter().collect::<Option<Vec<_>>>()?
         };
+        let (statements, receiver, args) = if preserve_inline_lambdas {
+            self.fold_back_unneeded_operand_locals(statements, receiver, args)
+        } else {
+            (statements, receiver, args)
+        };
         Some((statements, receiver, args, normalized.defaults))
+    }
+
+    /// Call `visit` for every local this expression reads, including inside a preserved inline
+    /// lambda's captures and body — both run in the caller's frame once the call is spliced.
+    fn for_each_value_read(&self, expression: ExprId, visit: &mut impl FnMut(u32)) {
+        if let IrExpr::GetValue(slot) = self.ir.expr(expression) {
+            visit(*slot);
+        }
+        let mut children = Vec::new();
+        crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| {
+            children.push(child)
+        });
+        for child in children {
+            self.for_each_value_read(child, visit);
+        }
+    }
+
+    /// Whether this expression declares or assigns `slot`.
+    fn writes_value(&self, expression: ExprId, slot: u32) -> bool {
+        let writes_here = match self.ir.expr(expression) {
+            IrExpr::Variable { index, .. } => *index == slot,
+            IrExpr::SetValue { var, .. } => *var == slot,
+            _ => false,
+        };
+        if writes_here {
+            return true;
+        }
+        let mut children = Vec::new();
+        crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| {
+            children.push(child)
+        });
+        children
+            .into_iter()
+            .any(|child| self.writes_value(child, slot))
+    }
+
+    /// Drop an operand local the splice contract does not need.
+    ///
+    /// A dependency inline call keeps its non-lambda operands in source-order locals so that a
+    /// captured lambda operand can reference them. An operand that is already a plain value — a
+    /// local read or a constant — and is used exactly once by this very call needs no local of its
+    /// own: re-reading it where the call consumes it is the same value in the same order. Keeping
+    /// one costs a slot and a copy the reference compiler does not emit, and shifts every local the
+    /// spliced body goes on to use.
+    ///
+    /// Only a value whose source is not written by any surviving statement qualifies, so folding it
+    /// back cannot move a read across a write.
+    fn fold_back_unneeded_operand_locals(
+        &mut self,
+        statements: Vec<ExprId>,
+        receiver: Option<ExprId>,
+        args: Vec<ExprId>,
+    ) -> (Vec<ExprId>, Option<ExprId>, Vec<ExprId>) {
+        let reads_of = |lowering: &Self, slot: u32, expression: ExprId| -> usize {
+            let mut seen = 0;
+            lowering.for_each_value_read(expression, &mut |read| {
+                if read == slot {
+                    seen += 1;
+                }
+            });
+            seen
+        };
+        let mut statements = statements;
+        let mut receiver = receiver;
+        let mut args = args;
+        let mut index = 0;
+        while index < statements.len() {
+            let IrExpr::Variable {
+                index: slot,
+                init: Some(init),
+                ..
+            } = self.ir.expr(statements[index]).clone()
+            else {
+                index += 1;
+                continue;
+            };
+            let source = match self.ir.expr(init) {
+                IrExpr::GetValue(source) => Some(*source),
+                IrExpr::Const(_) => None,
+                _ => {
+                    index += 1;
+                    continue;
+                }
+            };
+            // The local must be read exactly once, by this call, and nothing left behind may write
+            // the value it was copied from.
+            let uses: usize = args
+                .iter()
+                .chain(receiver.iter())
+                .map(|&operand| reads_of(self, slot, operand))
+                .sum::<usize>()
+                + statements
+                    .iter()
+                    .enumerate()
+                    .filter(|(other, _)| *other != index)
+                    .map(|(_, &statement)| reads_of(self, slot, statement))
+                    .sum::<usize>();
+            let rewritten = source.is_some_and(|source| {
+                statements.iter().enumerate().any(|(other, &statement)| {
+                    other != index && self.writes_value(statement, source)
+                })
+            });
+            if uses != 1 || rewritten {
+                index += 1;
+                continue;
+            }
+            statements.remove(index);
+            for operand in args.iter_mut().chain(receiver.iter_mut()) {
+                if matches!(self.ir.expr(*operand), IrExpr::GetValue(read) if *read == slot) {
+                    *operand = init;
+                }
+            }
+        }
+        (statements, receiver, args)
     }
 
     pub(super) fn wrap_call_statements(&mut self, statements: Vec<ExprId>, call: ExprId) -> ExprId {
