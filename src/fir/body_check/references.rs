@@ -804,6 +804,8 @@ impl BodyFirChecker<'_> {
                         receiver_type,
                         target_is_extension,
                         property.prop_ty,
+                        &property.getter.name,
+                        property.setter.as_ref().map(|setter| setter.name.as_str()),
                         adaptation,
                     )
                 } else {
@@ -833,6 +835,8 @@ impl BodyFirChecker<'_> {
                         None,
                         false,
                         property.ty,
+                        &property.getter.name,
+                        property.setter.as_ref().map(|setter| setter.name.as_str()),
                         adaptation,
                     )
                 } else {
@@ -1102,6 +1106,8 @@ impl BodyFirChecker<'_> {
         receiver_type: Option<Ty>,
         extension_receiver_target: bool,
         property_type: Ty,
+        getter_name: &str,
+        setter_name: Option<&str>,
         adaptation: Option<FirReferenceAdaptation>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
         let span = self.file.expr_span(expression);
@@ -1135,6 +1141,8 @@ impl BodyFirChecker<'_> {
         Ok(FirExprKind::PropertyReference {
             target: FirPropertyReferenceTarget::SpecializedModule {
                 property: target,
+                getter_name: getter_name.into(),
+                setter_name: setter_name.map(Into::into),
                 receiver: receiver_type.map(resolved).transpose()?,
                 extension_receiver: extension_receiver_target,
                 property_type: resolved(property_type)?,

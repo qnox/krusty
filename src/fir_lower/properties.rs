@@ -525,6 +525,8 @@ fn materialize_top_level_property(
             is_const: property.flags.has(DeclarationFlags::CONST),
             owner: None,
             visibility: property.visibility,
+            setter_jvm_name: None,
+            erased_declared_ty: None,
             custom_accessor: property.getter.is_some() || property.setter.is_some(),
             line: 0,
             source_order,
@@ -714,6 +716,8 @@ fn materialize_member_property(
             is_const: true,
             owner: Some(owner),
             visibility: property.visibility,
+            setter_jvm_name: None,
+            erased_declared_ty: None,
             custom_accessor: false,
             line: 0,
             source_order,
@@ -935,6 +939,18 @@ fn materialize_member_property(
     // targets can interleave properties and functions without consulting syntax or names.
     for function in getter.iter().chain(setter.iter()) {
         ir.fn_source_order.insert(*function, source_order);
+    }
+    // A PRIVATE member property's accessors are private methods, exactly as a backing-field
+    // property's are — this path records only their source order, so a private property with a
+    // custom accessor was published `public` and every caller reached it directly instead of
+    // through the synthetic bridge the declaration is supposed to expose.
+    if property.visibility.is_private() {
+        ir.private_methods.extend(getter.iter().copied());
+    }
+    if let Some(setter) = setter.filter(|_| {
+        property.visibility.is_private() || setter_is_private(index, property.declaration)
+    }) {
+        ir.private_methods.insert(setter);
     }
     let property_index = ir.classes[class_id as usize].properties.len() as u32;
     ir.classes[class_id as usize].properties.push(IrProperty {

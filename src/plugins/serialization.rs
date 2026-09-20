@@ -1116,6 +1116,8 @@ impl SerializationPlugin {
             is_const: false,
             owner: Some(type_name(class_fq)),
             visibility: crate::types::Visibility::Private,
+            setter_jvm_name: None,
+            erased_declared_ty: None,
             custom_accessor: true,
             line: owner_line,
             source_order: u32::MAX,

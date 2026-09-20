@@ -530,6 +530,11 @@ pub enum FirPropertyReferenceTarget {
     /// a symbolic declaration signature.
     SpecializedModule {
         property: PropertyId,
+        /// Accessor declaration spellings carried by the provider-selected property candidate.
+        /// These are declaration facts, not names reconstructed from the property spelling by a
+        /// later backend pass.
+        getter_name: Box<str>,
+        setter_name: Option<Box<str>>,
         receiver: Option<ResolvedTy>,
         extension_receiver: bool,
         property_type: ResolvedTy,

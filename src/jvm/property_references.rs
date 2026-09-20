@@ -1,11 +1,74 @@
 //! JVM realization of checked property-reference declarations.
 
+mod realization;
+
+pub(crate) use realization::{
+    PropertyAccessorRole, PropertyReferenceRealization, PropertyReferenceRealizations,
+};
+
 use super::classpath::{Classpath, ExternalCallableKind, ExternalCallableRealization};
 use crate::fir::{
     FirCallableReferenceBinding, FirPropertyReferenceTarget, FirPropertyTarget, PropertyId,
 };
-use crate::ir::{IrCheckedOperation, IrClass, IrExpr, IrFile, IrModuleProperty, PropRef};
+use crate::ir::{
+    FunId, IrCheckedOperation, IrClass, IrExpr, IrFile, IrLocalPropertyLayout, IrModuleProperty,
+    PropRef,
+};
 use crate::types::{type_name, Ty, TypeName};
+
+/// What this file materialized for a property it declares itself: the exact accessor functions,
+/// and whether the property is the sole storage of a value class.
+///
+/// Both are read from the checked layout the property's own stable identity keys, never from a
+/// name: an accessor is identified by the function it IS, and a value class's underlying property
+/// by the storage slot it occupies. A property declared in another file of the module — or by a
+/// dependency — has no layout here, and every field stays empty.
+#[derive(Clone, Copy, Debug, Default)]
+struct DeclaredAccessors {
+    getter: Option<FunId>,
+    setter: Option<FunId>,
+    value_class_storage: bool,
+}
+
+fn declared_accessors(ir: &IrFile, target: PropertyId) -> DeclaredAccessors {
+    let Some(layout) = ir.local_property_layouts.get(&target) else {
+        return DeclaredAccessors::default();
+    };
+    match layout {
+        IrLocalPropertyLayout::TopLevelStorage { getter, setter, .. } => DeclaredAccessors {
+            getter: *getter,
+            setter: *setter,
+            value_class_storage: false,
+        },
+        IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. } => DeclaredAccessors {
+            getter: Some(*getter),
+            setter: *setter,
+            value_class_storage: false,
+        },
+        IrLocalPropertyLayout::Member {
+            class,
+            backing_field,
+            getter,
+            setter,
+            ..
+        } => DeclaredAccessors {
+            getter: *getter,
+            setter: *setter,
+            // A value class has exactly one field, and the property that owns it is its underlying
+            // one. The storage slot is the identity; the two share no distinguishing spelling.
+            value_class_storage: *backing_field == Some(0)
+                && ir
+                    .classes
+                    .get(*class as usize)
+                    .is_some_and(|owner| owner.is_value),
+        },
+        IrLocalPropertyLayout::MemberExtension { getter, setter, .. } => DeclaredAccessors {
+            getter: Some(*getter),
+            setter: *setter,
+            value_class_storage: false,
+        },
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PropertyReferenceRealizationTarget {
@@ -19,7 +82,8 @@ pub(super) fn realize(
     stems: &[String],
     classpath: &Classpath,
     current_facade: &str,
-) -> Result<(), PropertyReferenceRealizationTarget> {
+) -> Result<PropertyReferenceRealizations, PropertyReferenceRealizationTarget> {
+    let mut realizations = PropertyReferenceRealizations::default();
     let expression_count = ir.exprs.len();
     for raw in 0..expression_count {
         if let IrExpr::LocalPropertyReference {
@@ -58,22 +122,41 @@ pub(super) fn realize(
         } else {
             None
         };
-        let property = match target {
-            FirPropertyReferenceTarget::Module(target) => module_property(
-                ir.referenced_module_properties
+        let (property, realization) = match target {
+            FirPropertyReferenceTarget::Module(target) => {
+                // Only lowering-generated delegate metadata uses this unspecialized form. It has
+                // no provider-selected callable candidate, so the JVM boundary materializes its
+                // default accessor convention once. Source-written references always take the
+                // `SpecializedModule` arm below and carry the selected declaration spellings.
+                let declaration = ir
+                    .referenced_module_properties
                     .get(&target)
-                    .ok_or(PropertyReferenceRealizationTarget::Module(target))?,
-                stems,
-                target,
-                mutable,
-            )?,
-            FirPropertyReferenceTarget::SpecializedModule { property, .. } => module_property(
+                    .ok_or(PropertyReferenceRealizationTarget::Module(target))?;
+                let getter = super::module_calls::property_getter_name(declaration);
+                let setter = mutable.then(|| crate::names::property_setter_name(&declaration.name));
+                module_property(
+                    declaration,
+                    stems,
+                    target,
+                    mutable,
+                    declared_accessors(ir, target),
+                    (&getter, setter.as_deref()),
+                )?
+            }
+            FirPropertyReferenceTarget::SpecializedModule {
+                property,
+                getter_name,
+                setter_name,
+                ..
+            } => module_property(
                 ir.referenced_module_properties
                     .get(&property)
                     .ok_or(PropertyReferenceRealizationTarget::Module(property))?,
                 stems,
                 property,
                 mutable,
+                declared_accessors(ir, property),
+                (getter_name.as_ref(), setter_name.as_deref()),
             )?,
             FirPropertyReferenceTarget::Classifier {
                 owner,
@@ -133,10 +216,17 @@ pub(super) fn realize(
                 .ok_or(PropertyReferenceRealizationTarget::Module(target))?;
             synthesize_delegated(ir, stems, target, &declaration, property)?
         } else {
-            synthesize(ir, current_facade, property, receiver)
+            synthesize(
+                ir,
+                current_facade,
+                property,
+                realization,
+                receiver,
+                &mut realizations,
+            )
         };
     }
-    Ok(())
+    Ok(realizations)
 }
 
 /// Realize the compiler-generated metadata value passed to a delegate convention. Unlike a
@@ -232,26 +322,42 @@ fn classifier_property(
     owner: TypeName,
     property: crate::fir::FirClassifierProperty,
     property_type: Ty,
-) -> PropRef {
+) -> (PropRef, PropertyReferenceRealization) {
     let (name, getter) = match property {
         crate::fir::FirClassifierProperty::EnumEntries => ("entries", "getEntries"),
     };
-    PropRef {
-        owner_internal: Some(owner),
-        call_owner_internal: Some(owner),
-        prop_name: name.to_string(),
-        getter_name: getter.to_string(),
-        getter_descriptor: None,
-        setter_name: None,
-        setter_descriptor: None,
-        boxed_value_class: None,
-        owner_is_interface: false,
-        prop_ty: property_type,
-        bound: false,
-        static_dispatch: true,
-        mutable: false,
-        ext_facade: None,
-    }
+    (
+        PropRef {
+            owner_internal: Some(owner),
+            call_owner_internal: Some(owner),
+            prop_name: name.to_string(),
+            getter_name: getter.to_string(),
+            getter_descriptor: None,
+            setter_name: None,
+            setter_descriptor: None,
+            owner_is_interface: false,
+            prop_ty: property_type,
+            bound: false,
+            static_dispatch: true,
+            mutable: false,
+            ext_facade: None,
+        },
+        PropertyReferenceRealization {
+            declared_getter_name: getter.to_string(),
+            declared_setter_name: None,
+            facade_storage: false,
+            // A synthesized classifier property (`EnumEntries`) is an ordinary static member
+            // accessor, generated by the backend rather than declared by any module function.
+            accessor_role: PropertyAccessorRole::Member,
+            getter_function: None,
+            setter_function: None,
+            physical_getter_ret: None,
+            declares_value_class_storage: false,
+            accessor_names_are_physical: false,
+            boxed_value_class: None,
+            unboxed_receiver_value_class: None,
+        },
+    )
 }
 
 fn external_property(
@@ -261,11 +367,12 @@ fn external_property(
     setter: Option<&FirPropertyTarget>,
     extension_receiver: bool,
     property_type: Ty,
-) -> Result<PropRef, PropertyReferenceRealizationTarget> {
+) -> Result<(PropRef, PropertyReferenceRealization), PropertyReferenceRealizationTarget> {
     // The name a `KProperty` answers with is the PROPERTY's, and only the provider has it: it
     // decoded it from the declaration's metadata, where an accessor's own name is a physical call
     // target that may be renamed or value-class-mangled.
-    let name = declared_property_name(classpath, getter)?;
+    let property_declaration = declared_property(classpath, getter)?;
+    let name = property_declaration.name.clone();
     let getter = external_accessor(classpath, getter, false)?;
     let setter = setter
         .map(|setter| external_accessor(classpath, setter, true))
@@ -316,43 +423,71 @@ fn external_property(
             return Err(failure);
         }
     };
-    Ok(PropRef {
-        owner_internal: Some(owner),
-        call_owner_internal: Some(callable.owner),
-        prop_name: name.to_string(),
-        getter_name: callable.name.clone(),
-        getter_descriptor: Some(descriptor),
-        setter_name: setter
-            .as_ref()
-            .map(|(_, setter)| setter.callable.name.clone()),
-        setter_descriptor: setter.as_ref().map(|(_, setter)| {
-            if field_realization {
-                crate::jvm::names::method_descriptor(&setter.callable.physical_params, Ty::Unit)
+    // The provider decoded this declaration edge from the metadata's stable string-table
+    // identities and attached it to the exact external property selected by FIR. Do not compare
+    // either the source spelling or the accessor spelling here.
+    let declares_value_class_storage = property_declaration.declares_value_class_storage;
+    Ok((
+        PropRef {
+            owner_internal: Some(owner),
+            call_owner_internal: Some(callable.owner),
+            prop_name: name.to_string(),
+            getter_name: callable.name.clone(),
+            getter_descriptor: Some(descriptor),
+            setter_name: setter
+                .as_ref()
+                .map(|(_, setter)| setter.callable.name.clone()),
+            setter_descriptor: setter.as_ref().map(|(_, setter)| {
+                if field_realization {
+                    crate::jvm::names::method_descriptor(&setter.callable.physical_params, Ty::Unit)
+                } else {
+                    callable_descriptor(&setter.callable)
+                }
+            }),
+            owner_is_interface: callable.owner_is_interface,
+            prop_ty: property_type,
+            bound: false,
+            static_dispatch,
+            mutable: setter.is_some(),
+            ext_facade,
+        },
+        PropertyReferenceRealization {
+            declared_getter_name: callable.name.clone(),
+            declared_setter_name: setter
+                .as_ref()
+                .map(|(_, setter)| setter.callable.name.clone()),
+            // A dependency's storage was realized by whoever compiled it, and its accessors are
+            // read from that artifact's metadata rather than realized again here.
+            facade_storage: false,
+            // A dependency's accessor arrives with its selected callable kind; an extension is the
+            // one that takes its receiver as the first argument.
+            accessor_role: if matches!(getter.1.kind, ExternalCallableKind::Extension) {
+                PropertyAccessorRole::Extension
             } else {
-                callable_descriptor(&setter.callable)
-            }
-        }),
-        boxed_value_class: None,
-        owner_is_interface: callable.owner_is_interface,
-        prop_ty: property_type,
-        bound: false,
-        static_dispatch,
-        mutable: setter.is_some(),
-        ext_facade,
-    })
+                PropertyAccessorRole::Member
+            },
+            // A dependency declares no function of this module.
+            getter_function: None,
+            setter_function: None,
+            physical_getter_ret: Some(callable.physical_ret),
+            declares_value_class_storage,
+            accessor_names_are_physical: true,
+            boxed_value_class: None,
+            unboxed_receiver_value_class: None,
+        },
+    ))
 }
 
 /// The Kotlin name of the property an accessor target belongs to, as its declaration published it.
-fn declared_property_name(
+fn declared_property(
     classpath: &Classpath,
     target: &FirPropertyTarget,
-) -> Result<String, PropertyReferenceRealizationTarget> {
+) -> Result<super::classpath::ExternalPropertyRealization, PropertyReferenceRealizationTarget> {
     let FirPropertyTarget::External { property, .. } = target else {
         return Err(PropertyReferenceRealizationTarget::Invalid);
     };
     classpath
         .external_property(*property)
-        .map(|realization| realization.name)
         .ok_or(PropertyReferenceRealizationTarget::Invalid)
 }
 
@@ -396,12 +531,20 @@ fn module_property(
     stems: &[String],
     target: PropertyId,
     reference_mutable: bool,
-) -> Result<PropRef, PropertyReferenceRealizationTarget> {
+    declared: DeclaredAccessors,
+    selected_accessor_names: (&str, Option<&str>),
+) -> Result<(PropRef, PropertyReferenceRealization), PropertyReferenceRealizationTarget> {
     let failure = PropertyReferenceRealizationTarget::Module(target);
     if !property.context_parameters.is_empty() || reference_mutable && !property.mutable {
         return Err(failure);
     }
     let name = &property.name;
+    let declared_getter_name = selected_accessor_names.0.to_owned();
+    let declared_setter_name = if reference_mutable {
+        Some(selected_accessor_names.1.ok_or(failure)?.to_owned())
+    } else {
+        None
+    };
     let declaration_facade =
         super::module_calls::facade_for(property.source, stems).ok_or(failure)?;
     let enclosing = property.owner;
@@ -447,39 +590,84 @@ fn module_property(
     } else {
         None
     };
-    Ok(PropRef {
-        owner_internal: Some(owner),
-        call_owner_internal: Some(enclosing.unwrap_or(declaration_facade)),
-        prop_name: name.to_string(),
-        getter_name: if access_bridge {
-            format!("access${}$p", crate::names::property_getter_name(name))
-        } else {
-            super::module_calls::property_getter_name(property)
-        },
-        getter_descriptor,
-        setter_name: reference_mutable.then(|| {
-            if access_bridge {
-                format!("access${}$p", crate::names::property_setter_name(name))
+    Ok((
+        PropRef {
+            owner_internal: Some(owner),
+            call_owner_internal: Some(enclosing.unwrap_or(declaration_facade)),
+            prop_name: name.to_string(),
+            getter_name: if access_bridge {
+                format!("access${declared_getter_name}$p")
             } else {
-                crate::names::property_setter_name(name)
-            }
-        }),
-        setter_descriptor,
-        boxed_value_class: None,
-        owner_is_interface: super::module_calls::owner_is_jvm_interface(property),
-        prop_ty: property.ty,
-        bound: false,
-        static_dispatch,
-        mutable: reference_mutable,
-        ext_facade,
-    })
+                declared_getter_name.clone()
+            },
+            getter_descriptor: getter_descriptor.clone(),
+            setter_name: reference_mutable.then(|| {
+                if access_bridge {
+                    format!(
+                        "access${}$p",
+                        declared_setter_name
+                            .as_deref()
+                            .expect("mutable reference setter")
+                    )
+                } else {
+                    declared_setter_name
+                        .clone()
+                        .expect("mutable reference setter")
+                }
+            }),
+            setter_descriptor,
+            owner_is_interface: super::module_calls::owner_is_jvm_interface(property),
+            prop_ty: property.ty,
+            bound: false,
+            static_dispatch,
+            mutable: reference_mutable,
+            ext_facade,
+        },
+        PropertyReferenceRealization {
+            declared_getter_name,
+            declared_setter_name,
+            // The facade's own storage: no owner, no extension receiver, no companion association,
+            // and no accessor the source wrote. Every one of those is a fact of THIS declaration,
+            // so the answer travels with the reference instead of being looked up in the declaring
+            // file.
+            facade_storage: enclosing.is_none()
+                && property.extension_receiver.is_none()
+                && !companion_associated
+                && !property
+                    .flags
+                    .has(crate::fir::DeclarationFlags::CUSTOM_GETTER)
+                && !property
+                    .flags
+                    .has(crate::fir::DeclarationFlags::CUSTOM_SETTER)
+                && !property.flags.has(crate::fir::DeclarationFlags::DELEGATED)
+                && !property.flags.has(crate::fir::DeclarationFlags::CONST),
+            accessor_role: if access_bridge {
+                PropertyAccessorRole::AccessBridge
+            } else if !companion_associated && property.extension_receiver.is_some() {
+                PropertyAccessorRole::Extension
+            } else {
+                PropertyAccessorRole::Member
+            },
+            getter_function: declared.getter,
+            setter_function: reference_mutable.then_some(declared.setter).flatten(),
+            // The accessor's physical return is the property's own type: this module writes no
+            // descriptor of its own for one, and the synthesized ones above are built from it.
+            physical_getter_ret: getter_descriptor.is_some().then_some(property.ty),
+            declares_value_class_storage: declared.value_class_storage,
+            accessor_names_are_physical: false,
+            boxed_value_class: None,
+            unboxed_receiver_value_class: None,
+        },
+    ))
 }
 
 fn synthesize(
     ir: &mut IrFile,
     current_facade: &str,
     mut property: PropRef,
+    realization: PropertyReferenceRealization,
     receiver: Option<crate::ir::ExprId>,
+    realizations: &mut PropertyReferenceRealizations,
 ) -> IrExpr {
     let bound = receiver.is_some();
     property.bound = bound;
@@ -498,6 +686,7 @@ fn synthesize(
     let mut class = IrClass::synthetic(internal);
     class.superclass = type_name(superclass);
     class.prop_ref = Some(property);
+    realizations.record(internal, realization);
     let class = ir.add_class(class);
     match receiver {
         Some(receiver) => IrExpr::New {
