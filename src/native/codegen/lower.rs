@@ -1467,8 +1467,47 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.statement(id)?;
                 Ok(None)
             }
-            other => Err(describe(&other)),
+            other => Err(self.describe_declined(&other)),
         }
+    }
+
+    /// The declining phrase for a node this generator does not lower.
+    ///
+    /// `describe` reads the node's shape and nothing else, which is right for most of them. A
+    /// dependency PROPERTY is the exception: every one arrives as the same
+    /// `Checked(ExternalPropertyRead)`, so the backlog lumped eighteen unrelated properties —
+    /// `Double.Companion.MAX_VALUE`, `System.out`, `UIntArray.indices` — under one row and could
+    /// not be worked from, which is exactly what `describe`'s own comment warns against. The
+    /// classpath knows the owner and the name, so they are stated the way a declining CALL already
+    /// states its callee.
+    fn describe_declined(&self, node: &IrExpr) -> String {
+        let named = match node {
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead { target, .. }) => self
+                .external_property_name(*target)
+                .map(|name| ("read", name)),
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyWrite { target, .. }) => self
+                .external_property_name(*target)
+                .map(|name| ("write", name)),
+            _ => None,
+        };
+        match named {
+            Some((access, name)) => format!("a {access} of the property `{name}`"),
+            // A target the classpath cannot name is a different gap from an unimplemented
+            // property, so it keeps the shape-only phrasing rather than borrowing a name it does
+            // not have.
+            None => describe(node),
+        }
+    }
+
+    /// `owner.name` for a dependency property, as the classpath records them.
+    fn external_property_name(&self, target: crate::fir::ExternalPropertyId) -> Option<String> {
+        let property = self.file.classpath.external_property(target)?;
+        let getter = self.file.classpath.external_callable(property.getter)?;
+        Some(format!(
+            "{}.{}",
+            getter.callable.owner.render(),
+            property.name
+        ))
     }
 
     fn constant(&mut self, constant: &IrConst) -> Result<Value, Unsupported> {

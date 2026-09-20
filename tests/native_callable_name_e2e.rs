@@ -87,6 +87,11 @@ fn a_reference_reaching_the_read_through_a_variable_declines() {
     // The fold needs the REFERENCE at the read. Stored in a variable, the read's receiver is a
     // variable read and the declaration is no longer in hand — so the generator declines rather
     // than inventing a name, which is the honest answer until the object carries one itself.
+    //
+    // The decline NAMES the property. It used to read `Checked(ExternalPropertyRead)`, the node's
+    // shape, which every dependency property in the corpus shares — so the backlog carried one row
+    // for eighteen unrelated properties and could not be worked from. Asserting the name here is
+    // what keeps that phrasing from silently regressing to the shape.
     super::common::expect_native_decline(
         "fun greet() {}\n\
          fun box(): String {\n\
@@ -94,6 +99,6 @@ fn a_reference_reaching_the_read_through_a_variable_declines() {
          \x20   return if (reference.name == \"greet\") \"OK\" else \"fail: ${reference.name}\"\n\
          }\n",
         "StoredCallableName",
-        "`Checked(ExternalPropertyRead)`",
+        "a read of the property `kotlin/reflect/KCallable.name`",
     );
 }

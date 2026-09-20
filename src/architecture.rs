@@ -395,7 +395,13 @@ mod tests {
             "src/native/codegen/mod.rs",
             &["backend", "diag", "frontend", "jvm"],
         );
-        assert_allowed_crate_modules("src/native/codegen/lower.rs", &["ir", "jvm", "types"]);
+        // `fir` for the same reason `objects.rs` has it: the checked property and callable ids
+        // the IR itself carries. Here it is the `ExternalPropertyId` a declining diagnostic names
+        // the property by — the generator reads the id's name, never a declaration through it.
+        assert_allowed_crate_modules(
+            "src/native/codegen/lower.rs",
+            &["fir", "ir", "jvm", "types"],
+        );
         // `fir` only for the checked property and callable ids the IR itself carries. `names` for
         // the same reason `statics.rs` has it, below: a `super` access to a property arrives named
         // by its ACCESSOR, and this file recovers which property that is by deriving each
