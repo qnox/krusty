@@ -997,6 +997,14 @@ pub struct BranchySplice {
     /// Branch operands (absolute positions in the enclosing builder) whose destinations live outside
     /// this splice. The enclosing builder retains them until their owning loop label is bound.
     pub external_branches: Vec<(usize, super::classfile::Label)>,
+    /// The dependency's own debug locals, relocated into the caller: `(start, length, slot, name,
+    /// descriptor)` with ABSOLUTE offsets in the spliced output and the caller's slot numbering.
+    ///
+    /// A spliced body's locals are real locals of the method that now contains them, and the
+    /// reference compiler describes every one of them. Their names come from the dependency, which
+    /// is the only place they exist; the `$iv` suffix marking a value as inlined is added here,
+    /// because it is a property of being inlined rather than of the declaration.
+    pub locals: Vec<(u16, u16, u16, String, String)>,
 }
 
 pub struct RelocatedLambdaSite {
@@ -1010,6 +1018,11 @@ pub struct RelocatedLambdaSite {
 pub struct LambdaSplice {
     /// The host parameter index of this lambda (its position in the descriptor).
     pub param_index: usize,
+    /// The body's own debug locals as `(start, slot, name, descriptor)`, with `start` an offset into
+    /// `body` as built. Each runs to the end of the body, which is the only thing its scope can mean
+    /// once the body is code inside another method. The splice relocates them, because only it knows
+    /// where the body landed and which of its instructions it cancelled away.
+    pub locals: Vec<(u16, u16, String, String)>,
     /// Pre-built lambda body (relocated into the target pool, locals absolute), leaving the lambda's
     /// result boxed to `Object` on the stack — exactly what the replaced `invoke` produced. Branchless
     /// (no frames) in v1.
@@ -2045,6 +2058,8 @@ pub fn splice_unified(
                                        // frames are offsets into the body as it was built, so the base they are bound against has to
                                        // move back by exactly what no longer precedes them.
     let mut dropped_prefix = Vec::new();
+    // Bytes dropped from its END by result cancellation, which shortens where its locals leave scope.
+    let mut dropped_suffix = Vec::new();
     for (lambda, load_idx, site) in
         lambda_invoke_sites(&insns, &body.source_cp, &lambda_slots, &deleted)?
     {
@@ -2064,6 +2079,7 @@ pub fn splice_unified(
         let mut at = site;
         let mut len = 1;
         let mut dropped = 0usize;
+        let mut suffix = 0usize;
         // The frames inside a cancelled region would describe a stack that no longer exists.
         let frame_inside = |from: usize, to: usize| {
             host_frames
@@ -2089,7 +2105,10 @@ pub fn splice_unified(
                 && !(site + 1..=site + spans).any(|index| deleted.contains(&index))
                 && !frame_inside(site, site + spans)
             {
-                replacement.pop();
+                let removed = replacement
+                    .pop()
+                    .expect("a trailing boxing was just observed");
+                suffix = assemble(std::slice::from_ref(&removed)).len();
                 len += spans;
             }
         }
@@ -2102,6 +2121,7 @@ pub fn splice_unified(
         lambda_loads.push(load_idx);
         site_lambdas.push(lambda);
         dropped_prefix.push(dropped);
+        dropped_suffix.push(suffix);
     }
     if !lambdas.is_empty()
         && (invoke_count != lambda_sites.len()
@@ -2500,6 +2520,83 @@ pub fn splice_unified(
             stack_prefix,
         });
     }
+    // Relocate the dependency's debug locals: its byte offsets become instruction indices, travel
+    // through the same `old2new` every branch target does, and come back as absolute offsets; its
+    // slots go through the same compaction the instructions did. A local whose declaration lands
+    // inside a region this splice deleted — the entry null-check, a substituted lambda's object —
+    // has no place left to be described, and a zero-length range is not one either.
+    let byte_to_index =
+        |offset: u16| -> Option<usize> { old_off.iter().position(|&at| at == offset as usize) };
+    let mut relocated_locals = Vec::new();
+    for local in &body.locals {
+        if removed_slots.contains(&local.slot) {
+            continue; // the substituted lambda's own object: no longer a value
+        }
+        let (Some(from), Some(to)) = (
+            byte_to_index(local.start_pc),
+            byte_to_index(local.start_pc.saturating_add(local.length)),
+        ) else {
+            continue;
+        };
+        let start = offs[p + old2new[from]];
+        let end = offs[p + old2new[to]];
+        let (Ok(start), Ok(length)) = (
+            u16::try_from(start),
+            u16::try_from(end.saturating_sub(start)),
+        ) else {
+            continue;
+        };
+        if length == 0 {
+            continue;
+        }
+        relocated_locals.push((
+            start,
+            length,
+            compact(local.slot),
+            super::debug_local_names::spliced_local_name(&local.name),
+            local.descriptor.clone(),
+        ));
+    }
+    // The lambda bodies' own locals, relocated the same way. They come FIRST in the table: the
+    // reference compiler describes the innermost inlining before the one that contains it. Each runs
+    // from where its store completed to the end of the body it belongs to, which is where the
+    // enclosing code resumes.
+    let mut lambda_locals = Vec::new();
+    for (occurrence, &site) in lambda_sites.iter().enumerate() {
+        let lambda = site_lambdas[occurrence];
+        if lambdas[lambda].locals.is_empty() {
+            continue;
+        }
+        let body_start = offs[p + old2new[site]];
+        let prefix = dropped_prefix[occurrence];
+        let suffix = dropped_suffix[occurrence];
+        let built = assemble(&lambdas[lambda].body).len();
+        let Some(spliced_len) = built.checked_sub(prefix + suffix) else {
+            continue;
+        };
+        let end = body_start + spliced_len;
+        // Reversed: the reference compiler lists the body's own marker before the parameters it
+        // opened, and a multi-parameter lambda's parameters in descending slot — which is the
+        // reverse of the order they are stored in, top of stack being the last parameter.
+        for (at, slot, name, descriptor) in lambdas[lambda].locals.iter().rev() {
+            let Some(offset) = (*at as usize).checked_sub(prefix) else {
+                continue; // declared inside the cancelled adapter — there is nothing left to scope
+            };
+            let start = body_start + offset;
+            let (Ok(start), Ok(length)) = (
+                u16::try_from(start),
+                u16::try_from(end.saturating_sub(start)),
+            ) else {
+                continue;
+            };
+            if length == 0 {
+                continue;
+            }
+            lambda_locals.push((start, length, *slot, name.clone(), descriptor.clone()));
+        }
+    }
+    lambda_locals.extend(relocated_locals);
+    let relocated_locals = lambda_locals;
     let external_branches = final_insns
         .iter()
         .enumerate()
@@ -2520,6 +2617,7 @@ pub fn splice_unified(
         lambda_sites: relocated_lambda_sites,
         handlers,
         external_branches,
+        locals: relocated_locals,
     })
 }
 

@@ -3412,11 +3412,17 @@ pub fn method_code_diff_against_kotlinc_lib(
     )))
 }
 
-/// One method's `javap -c` body, with constant-pool indices and trailing comments normalized away.
+/// One method's instructions and its `LocalVariableTable`, with constant-pool indices and trailing
+/// comments normalized away.
+///
+/// The `LineNumberTable` is deliberately excluded: a spliced body's line numbers are output lines
+/// that only a `SourceDebugExtension` gives meaning to, and krusty does not emit one yet
+/// (`docs/JVM_INLINE_BEFORE_CPS.md` a5/a6). Including it would fail for a reason this instrument is
+/// not measuring.
 #[allow(dead_code)]
 fn disassembled_method(dir: &Path, class: &str, method: &str) -> Option<String> {
     let out = std::process::Command::new(format!("{}/bin/javap", java_home()))
-        .args(["-p", "-c", "-cp"])
+        .args(["-p", "-c", "-l", "-cp"])
         .arg(dir)
         .arg(class.replace('/', "."))
         .output()
@@ -3424,6 +3430,7 @@ fn disassembled_method(dir: &Path, class: &str, method: &str) -> Option<String> 
     let text = String::from_utf8(out.stdout).ok()?;
     let mut body = String::new();
     let mut inside = false;
+    let mut skipping_lines = false;
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with(method) && trimmed.contains('(') {
@@ -3435,6 +3442,18 @@ fn disassembled_method(dir: &Path, class: &str, method: &str) -> Option<String> 
                 break;
             }
             if trimmed == "Code:" {
+                continue;
+            }
+            if trimmed == "LineNumberTable:" {
+                skipping_lines = true;
+                continue;
+            }
+            if trimmed == "LocalVariableTable:" {
+                skipping_lines = false;
+                body.push_str("LocalVariableTable\n");
+                continue;
+            }
+            if skipping_lines {
                 continue;
             }
             // `12: invokestatic  #23    // Method one:(I)I` → `12: invokestatic #`

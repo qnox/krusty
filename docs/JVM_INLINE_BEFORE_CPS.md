@@ -460,8 +460,9 @@ So §7a is six gaps, all reachable without a coroutine:
 | a1 | a value operand beside an inline-body lambda is bound to its own local | one extra local + `iload/istore` pair; shifts every later slot | **fixed** |
 | a2 | the spliced-away lambda parameter's slot stays reserved | shifts every host local one slot up | **fixed** |
 | a3 | the spliced lambda body has no `$i$a$` inline-depth marker | a missing `iconst_0; istore` and a slot | **fixed** |
-| a4 | no `LocalVariableTable` entries for the inlined frame | the whole table, including the `$iv` names read from the dependency's own table | open |
+| a4 | no `LocalVariableTable` entries for the inlined frame | the whole table, including the `$iv` names read from the dependency's own table | **fixed** |
 | a5 | no `SourceDebugExtension` | the entire SMAP attribute | open |
+| a6 | no `LineNumberTable` entries for the inlined body | the reference compiler records the *library's* lines inside the caller, which is what a5 then resolves | open |
 | b | the lambda's erased `invoke` adapter survives the splice | `valueOf` / `checkcast` / `intValue` the reference compiler does not emit | **fixed** (adjacent pairs) |
 
 **Result of the four code-level fixes.** For the shape this note is built around — a classpath
@@ -483,8 +484,31 @@ compiler's exact instruction sequence, over the same slots:
 ```
 
 `classpath_inline_splice_parity_e2e` pins it, comparing one method's disassembly against the
-reference compiler's with pool indices normalized away. What still separates the two class files is
-a4, a5, and the constant pool's interning order.
+reference compiler's with pool indices normalized away.
+
+The `LocalVariableTable` matches too, entry for entry — same starts, lengths, slots and names:
+
+```
+   Start  Length  Slot  Name
+      24       5     6  $i$a$-twice-MainKt$many$1
+      21       8     5  it
+      31       8     5  r$iv
+       4      39     2  $i$f$twice
+       6      37     3  acc$iv
+       9      34     4  i$iv
+       2      41     1  x$iv
+       0      44     0  v
+```
+
+The dependency's entries are relocated through the same `old2new` and slot map the instructions
+travel through, so they cannot drift from the code they describe. The lambda's own two have no other
+source and are named here: the parameter from the lambda's recorded parameter names, and the marker
+from the reference compiler's own spelling, `$i$a$-<callee>-<owner>$<enclosing>$<ordinal>`. The
+order is the reference compiler's: the innermost inlining first, and within a lambda its marker
+before its parameters, which is the reverse of the order they are stored in.
+
+What still separates the two class files is a5, a6, and the constant pool's interning order — 1068
+bytes against 1175.
 
 a1, a2 and a3 all move slot numbers, so they are fixed and measured together, with the corpus as the
 judge. a4 and a5 are additive attributes and independent of the rest. **b** is the only one that

@@ -12933,9 +12933,11 @@ impl<'a> Emitter<'a> {
     /// with that lambda's body. Handles `require(cond) { msg }` / `check(cond) { msg }` and the like —
     /// where the lambda runs only on a branch. v1: zero-arg (Function0) lambdas with branchless bodies,
     /// at an empty operand-stack baseline. Returns `false` (caller falls back / skips) on any other shape.
+    #[allow(clippy::too_many_arguments)]
     fn try_inline_unified(
         &mut self,
         call_expression: u32,
+        callee: &str,
         descriptor: &str,
         args: &[u32],
         body: &crate::jvm::classreader::MethodCode,
@@ -13013,7 +13015,7 @@ impl<'a> Emitter<'a> {
         let mut lam_max_stack = 0u16;
         for (i, &a) in args.iter().enumerate() {
             let mut scratch = CodeBuilder::new(self.next_slot);
-            let (lam_insns, lam_fr) = if let IrExpr::Lambda {
+            let (lam_insns, lam_fr, lam_locals_declared) = if let IrExpr::Lambda {
                 impl_fn,
                 arity,
                 captures,
@@ -13091,6 +13093,7 @@ impl<'a> Emitter<'a> {
                 // type, then store it (top = last). Then run the body, then box the result to `Object`
                 // (matching the replaced `invoke`'s `Object` result).
                 scratch.set_stack(arity as u16);
+                let mut lam_locals_declared: Vec<(u16, u16, String, String)> = Vec::new();
                 // This lambda's own locals start where the host's frame is free at the invoke, not
                 // above every host local. `None` only when the body could not be decoded, in which
                 // case the splice below declines too.
@@ -13124,6 +13127,22 @@ impl<'a> Emitter<'a> {
                     self.next_slot = self.next_slot.max(lambda_slot);
                     store(jt, slot, &mut scratch);
                     param_slots[n_cap + j] = (slot, jt);
+                    // Its scope opens once the store completes, and runs to the end of the body.
+                    if self.record_locals {
+                        if let Some(name) = self
+                            .ir
+                            .fn_params
+                            .get(&impl_fn)
+                            .and_then(|info| info.names.get(n_cap + j))
+                        {
+                            lam_locals_declared.push((
+                                u16::try_from(scratch.bytes.len()).unwrap_or(u16::MAX),
+                                slot,
+                                name.clone(),
+                                crate::jvm::names::type_descriptor(jt),
+                            ));
+                        }
+                    }
                 }
                 // The reference compiler opens an inlined lambda body with its own inline-depth
                 // marker — `iconst_0; istore` into a `$i$a$-<callee>-<caller>` local — exactly as it
@@ -13135,6 +13154,21 @@ impl<'a> Emitter<'a> {
                 self.next_slot = self.next_slot.max(lambda_slot);
                 scratch.push_int(0, self.cw);
                 store(Ty::Int, depth_marker, &mut scratch);
+                if self.record_locals {
+                    if let Some(origin) = self.ir.lambda_origins.get(&impl_fn) {
+                        lam_locals_declared.push((
+                            u16::try_from(scratch.bytes.len()).unwrap_or(u16::MAX),
+                            depth_marker,
+                            crate::jvm::debug_local_names::spliced_lambda_marker_name(
+                                callee,
+                                &self.owner,
+                                &origin.implementation_name,
+                                origin.implementation_ordinal,
+                            ),
+                            "I".to_string(),
+                        ));
+                    }
+                }
                 let body_ret = self.emit_fn_body_inline(inline_body, &param_slots, &mut scratch);
                 if body_ret.is_jvm_scalar() {
                     // The erased `invoke` result is `Object`, so reverse the same semantic adapter
@@ -13155,7 +13189,7 @@ impl<'a> Emitter<'a> {
                 ) else {
                     return false;
                 };
-                (lam_insns, lam_fr)
+                (lam_insns, lam_fr, lam_locals_declared)
             } else {
                 continue;
             };
@@ -13168,6 +13202,7 @@ impl<'a> Emitter<'a> {
             lam_splices.push(crate::jvm::inline::LambdaSplice {
                 param_index: i,
                 body: lam_insns,
+                locals: lam_locals_declared,
             });
         }
         if lam_splices.is_empty() {
@@ -13226,6 +13261,7 @@ impl<'a> Emitter<'a> {
             // The host's stack must cover the host body PLUS the deepest spliced lambda body (a safe upper
             // bound on the real peak) — else a deep lambda body overflows the host's operand stack.
             let ret_words = if probe.falls_through { ret_words } else { 0 };
+            let splice_start = code.bytes.len();
             code.splice_inline(
                 &probe.bytes,
                 &probe.external_branches,
@@ -13235,6 +13271,7 @@ impl<'a> Emitter<'a> {
                 ret_words,
                 probe.falls_through,
             );
+            self.record_spliced_locals(&probe.locals, splice_start, code);
             return true;
         }
         // RE-splice at the real method offset (so any switch in the host/lambda body pads correctly), then
@@ -13304,6 +13341,7 @@ impl<'a> Emitter<'a> {
             ret_words,
             bs.falls_through,
         );
+        self.record_spliced_locals(&bs.locals, 0, code);
         if bs.join_required {
             let join = code.new_label();
             self.bind(join, code);
@@ -13335,6 +13373,28 @@ impl<'a> Emitter<'a> {
             }
         }
         collapse_locals(&slots)
+    }
+
+    /// Describe a spliced body's own locals in the caller's debug table.
+    ///
+    /// They are real locals of the method that now contains them; the reference compiler names every
+    /// one. `shift` is where the splice landed for a body laid out at offset 0 — a branchless splice
+    /// is appended wherever the caller happens to be — and zero for one already laid out in place.
+    fn record_spliced_locals(
+        &self,
+        locals: &[(u16, u16, u16, String, String)],
+        shift: usize,
+        code: &mut CodeBuilder,
+    ) {
+        if !self.record_locals {
+            return;
+        }
+        for (start, length, slot, name, descriptor) in locals {
+            let Ok(start) = u16::try_from(*start as usize + shift) else {
+                continue;
+            };
+            code.add_local_entry(start, Some(*length), *slot, name, descriptor);
+        }
     }
 
     /// Full locals for a frame INSIDE a spliced lambda body: the caller's locals (`0..base`), then the
@@ -13505,6 +13565,7 @@ impl<'a> Emitter<'a> {
             if body_invokes_lambda {
                 return self.try_inline_unified(
                     call_expression,
+                    name,
                     splice_desc,
                     args,
                     &body,
@@ -13556,6 +13617,7 @@ impl<'a> Emitter<'a> {
                 return false;
             }
             let ret_words = if probe.falls_through { ret_words } else { 0 };
+            let splice_start = code.bytes.len();
             code.splice_inline(
                 &probe.bytes,
                 &probe.external_branches,
@@ -13565,6 +13627,7 @@ impl<'a> Emitter<'a> {
                 ret_words,
                 probe.falls_through,
             );
+            self.record_spliced_locals(&probe.locals, splice_start, code);
             return true;
         }
         // Branchy body: needs an empty operand-stack baseline (the relocated frames carry no stack
@@ -13603,6 +13666,7 @@ impl<'a> Emitter<'a> {
         bind_inline_handlers(code, &bs.handlers);
         code.set_needs_stackmap();
         let ret_words = if bs.falls_through { ret_words } else { 0 };
+        self.record_spliced_locals(&bs.locals, 0, code);
         code.splice_inline(
             &bs.bytes,
             &bs.external_branches,
