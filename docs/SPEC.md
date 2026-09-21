@@ -7800,6 +7800,22 @@ and behavior is checked by RUNNING the emitted program.
   (`a_value_class_wrapping_a_floating_point_value_answers_its_members`, which cross-checks the two
   backends and REQUIRES the native lowering).
 
+- **A class that implements a function type is called like one.** `invoke` is the single dependency
+  member this target already gives a FIXED slot: a function value's body sits right after
+  `kotlin.Any`'s three, the runtime names that number itself (`KT_SLOT_INVOKE`), and every caller
+  through a function type reads it. A class implementing `Function0<T>` puts its `invoke` there for
+  the same reason a lambda does, and until it did, every such class was declined as an override of
+  a dependency method.
+
+  Only when every operand and the result are REFERENCES. A caller through the function type passes
+  and reads references, and an `invoke(x: Int): Int` carries machine integers — that one needs a
+  bridge and still declines rather than being pointed at.
+
+  The slot sits AFTER `kotlin.Any`'s three rather than on top of one, so such a class keeps its own
+  `equals`, `hashCode` and `toString`.
+  Tests: `tests/native_function_type_classes_e2e.rs`; the corpus cases are
+  `codegen/box/functions/invoke/*.kt` and `codegen/box/funInterface/`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

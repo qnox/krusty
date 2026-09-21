@@ -942,7 +942,31 @@ fn layout_class(
                     None
                 }
             }
-            None => None,
+            // `invoke` on a class implementing a FUNCTION TYPE takes the one other fixed slot this
+            // target has: the runtime names it (`KT_SLOT_INVOKE`) and every caller through a
+            // function type reads it, a lambda's body included.
+            None => ir
+                .function_overrides
+                .get(&class.fq_name_id())
+                .into_iter()
+                .flatten()
+                .filter(|edge| {
+                    matches!(
+                        edge.implementation,
+                        ResolvedFunctionOverrideTarget::External(_)
+                    ) || edge.implementation_function == Some(fid)
+                })
+                .find(|edge| {
+                    edge.implementation_function == Some(fid)
+                        || ir
+                            .checked_callable_functions
+                            .get(match &edge.implementation {
+                                ResolvedFunctionOverrideTarget::Module(callable) => callable,
+                                ResolvedFunctionOverrideTarget::External(_) => return false,
+                            })
+                            == Some(&fid)
+                })
+                .and_then(|edge| external_invoke_slot(ir, edge, function)),
         };
         // What this method overrides, split by what each target owns: a class base owns a slot in
         // this vtable to replace, while an interface base owns a number in the program-wide
@@ -1669,6 +1693,32 @@ fn overridden_property_slot(
     }
 }
 
+/// The fixed slot a dependency override occupies, for the one dependency member that has one.
+///
+/// `kotlin.Function{N}.invoke` is it: a function value's body sits right after `kotlin.Any`'s
+/// three, the runtime names that number itself (`KT_SLOT_INVOKE`), and every caller through a
+/// function type reads it. A class implementing a function type puts its `invoke` there for the
+/// same reason a lambda does.
+///
+/// Only when every operand and the result are REFERENCES. A caller through the function type
+/// passes and reads references, and an `invoke(x: Int): Int` carries machine integers — that one
+/// needs a bridge and declines instead of being pointed at.
+fn external_invoke_slot(
+    ir: &IrFile,
+    edge: &crate::ir::IrFunctionOverride,
+    function: &IrFunction,
+) -> Option<u32> {
+    let _ = ir;
+    if edge.name != "invoke" {
+        return None;
+    }
+    if !super::intrinsics::is_function_type_name(edge.overridden_owner) {
+        return None;
+    }
+    let reference = |ty: Ty| c_kind(ty) == CKind::Ref;
+    (function.params.iter().copied().all(reference) && reference(function.ret)).then_some(3)
+}
+
 /// Implementation method → the method it overrides, for the methods `class` declares. Both ends
 /// must be functions of this file.
 fn overridden_functions(
@@ -1713,7 +1763,14 @@ fn overridden_functions(
                 }
             }
             ResolvedFunctionOverrideTarget::External(_) => {
-                if any_slot(function).is_none() {
+                // `invoke` is the one dependency member this target already gives a FIXED slot:
+                // a function value's body sits right after `kotlin.Any`'s three, and the runtime
+                // names that number itself (`KT_SLOT_INVOKE`). A class that implements a function
+                // type puts its `invoke` there for the same reason a lambda does — every caller
+                // through the function type reads that slot.
+                if any_slot(function).is_none()
+                    && external_invoke_slot(ir, edge, function).is_none()
+                {
                     return Err(format!(
                         "an override of a dependency method (`{}.{}`)",
                         class.fq_name(),

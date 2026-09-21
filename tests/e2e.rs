@@ -1072,6 +1072,8 @@ mod native_experimental_bitwise_e2e;
 mod native_float_predicates_e2e;
 #[path = "native_floor_mod_e2e.rs"]
 mod native_floor_mod_e2e;
+#[path = "native_function_type_classes_e2e.rs"]
+mod native_function_type_classes_e2e;
 #[path = "native_gc_e2e.rs"]
 mod native_gc_e2e;
 #[path = "native_gc_stress_e2e.rs"]

@@ -930,6 +930,19 @@ pub(super) fn unsigned_owner(owner: &str) -> Option<Ty> {
     })
 }
 
+/// Whether a name is one of Kotlin's function types (`kotlin.Function0`..`Function22`, or the
+/// arity-less `kotlin.Function` they all extend).
+///
+/// The one dependency type whose member this target gives a FIXED slot: a function value's
+/// `invoke` sits right after `kotlin.Any`'s three, and the runtime names that number itself.
+pub(super) fn is_function_type_name(owner: crate::types::TypeName) -> bool {
+    let rendered = kotlin_owner(&owner.render()).to_string();
+    let Some(suffix) = rendered.strip_prefix("kotlin/Function") else {
+        return false;
+    };
+    suffix.is_empty() || suffix.chars().all(|digit| digit.is_ascii_digit())
+}
+
 /// `xs.toList()` / `xs.reversed()` on an ARRAY: a snapshot of its elements as a list.
 ///
 /// Both are extensions of the collections facade, which also declares them over lists, sequences
