@@ -50,7 +50,7 @@ pub(super) struct ClassItems {
     /// For an `object` declaration: the static slot holding the instance, and its getter.
     pub(super) singleton: Option<(DataId, FuncId)>,
     /// One entry per `secondary_ctors` entry, in the same order.
-    secondaries: Vec<FuncId>,
+    pub(super) secondaries: Vec<FuncId>,
 }
 
 /// `kotlin.Any`'s three members, by runtime symbol, with their signatures.
@@ -699,14 +699,45 @@ impl<'a> FileLowering<'a> {
                 ..
             } => match self.ir.class_id_by_name(*owner) {
                 Some(parent) => {
-                    let parent_constructor =
-                        self.classes[parent as usize].constructor.ok_or_else(|| {
+                    // The checker selected an EXACT constructor, and it may be a SECONDARY one:
+                    // `class E : A { constructor() : super() }` where `A`'s no-argument
+                    // constructor is secondary. Taking the primary for every `super(…)` called it
+                    // with the wrong arguments, which Cranelift's own verifier caught as a
+                    // mismatched argument count — a decline rather than a wrong answer, and one
+                    // that took every file holding such a constructor with it.
+                    //
+                    // Kotlin admits no two constructors of one class with the same parameter list,
+                    // so a secondary matching `target_params` is the selection and the primary is
+                    // what remains when none does.
+                    let sibling = self.ir.classes[parent as usize]
+                        .secondary_ctors
+                        .iter()
+                        .position(|candidate| candidate.params == *target_params);
+                    let target = match sibling {
+                        Some(sibling) => {
+                            // A secondary carrying a PREFIX — an inner class's outer instance, or
+                            // a local class's captures — takes operands this delegation has no
+                            // way to supply, so it declines rather than calling it one short.
+                            if !self.ir.classes[parent as usize].secondary_ctors[sibling]
+                                .prefix_params
+                                .is_empty()
+                            {
+                                return Err(format!(
+                                    "a delegation to a superclass secondary constructor with \
+                                     compiler-supplied parameters (`{}`)",
+                                    owner.render()
+                                ));
+                            }
+                            self.classes[parent as usize].secondaries[sibling]
+                        }
+                        None => self.classes[parent as usize].constructor.ok_or_else(|| {
                             format!(
                                 "a delegation to a superclass with no primary constructor (`{}`)",
                                 owner.render()
                             )
-                        })?;
-                    (Some(parent_constructor), target_params.clone())
+                        })?,
+                    };
+                    (Some(target), target_params.clone())
                 }
                 // `kotlin.Any` is the root and declares no state, so `super()` reaching it has
                 // nothing to run — the same reason `define_constructor` calls no parent for a class

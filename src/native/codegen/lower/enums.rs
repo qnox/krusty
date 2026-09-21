@@ -93,13 +93,27 @@ impl<'a> FileLowering<'a> {
                 Some(subclass) => self.class_of(subclass, "the body of the enum constant")?,
                 None => class,
             };
-            let constructor = self.classes[owner as usize].constructor.ok_or_else(|| {
-                format!(
-                    "an enum constant whose class has no primary constructor (`{}.{}`)",
-                    declaration.fq_name(),
-                    entry.name
-                )
-            })?;
+            // A constant may select a SECONDARY constructor: `ENTRY` on an enum whose primary
+            // takes a `String` and which also declares `constructor() : this("OK")` is that call.
+            // Kotlin admits no two constructors of one class with the same parameter list, so a
+            // secondary matching the selection is the one, and the primary is what remains.
+            let sibling = self.ir.classes[owner as usize]
+                .secondary_ctors
+                .iter()
+                .position(|candidate| {
+                    candidate.prefix_params.is_empty()
+                        && candidate.params == entry.constructor_parameter_types
+                });
+            let constructor = match sibling {
+                Some(sibling) => self.classes[owner as usize].secondaries[sibling],
+                None => self.classes[owner as usize].constructor.ok_or_else(|| {
+                    format!(
+                        "an enum constant whose class has no primary constructor (`{}.{}`)",
+                        declaration.fq_name(),
+                        entry.name
+                    )
+                })?,
+            };
             shapes.push((
                 self.classes[owner as usize].descriptor,
                 self.model.layout(owner).instance_size,

@@ -1092,6 +1092,8 @@ mod native_ranges_e2e;
 mod native_receiver_property_e2e;
 #[path = "native_sam_e2e.rs"]
 mod native_sam_e2e;
+#[path = "native_secondary_constructors_e2e.rs"]
+mod native_secondary_constructors_e2e;
 #[path = "native_spread_e2e.rs"]
 mod native_spread_e2e;
 #[path = "native_string_builders_e2e.rs"]
