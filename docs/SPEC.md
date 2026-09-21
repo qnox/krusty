@@ -7597,6 +7597,19 @@ and behavior is checked by RUNNING the emitted program.
   which cross-checks the two backends and REQUIRES the native lowering); the corpus cases are
   `codegen/box/strings/forInString.kt` and the other `StringGet` cases.
 
+- **`kotlin.experimental`'s bit operations are the machine's, at the narrow width.** Kotlin gives
+  `Int` and `Long` `and`/`or`/`xor`/`inv` as members and gives `Byte` and `Short` the same four as
+  extensions in `kotlin.experimental`. That is where the library put the declaration, not a
+  difference in what the operation means, so they are instructions here rather than a runtime call
+  — the receiver never becomes an object to reach them.
+
+  The width comes from the RESULT: `Byte.and(Byte)` answers a `Byte`, so the declaration already
+  states the width all three operands share. It is observable — `0x0F.toByte().inv()` is `-16`,
+  where the same operation at 32 bits would answer `-241` before narrowing.
+  Tests: `tests/native_experimental_bitwise_e2e.rs`
+  (`the_narrow_integers_answer_their_bit_operations_at_their_own_width`, which cross-checks the two
+  backends and REQUIRES the native lowering); the corpus cases are `codegen/box/binaryOp/bitwiseOp*.kt`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

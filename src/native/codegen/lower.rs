@@ -2389,6 +2389,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                                 return self.convert(produced, Some(target), *ret);
                             }
                         }
+                        // `kotlin.experimental`'s bit operations on the narrow integers. Kotlin
+                        // gives `Int` and `Long` the same four as members and these as extensions,
+                        // which is where the library put them rather than a difference in what
+                        // they mean — so they are instructions here, not a call, which is also why
+                        // they are not in `scalar_member`: that table boxes its receiver.
+                        if let Some(op) =
+                            super::super::intrinsics::experimental_bitwise(&owner, &name, params)
+                        {
+                            return self.experimental_bitwise(op, receiver, args, *ret);
+                        }
                         // A member that asks about a NUMBER rather than an object, carried as one:
                         // `s[i]` must not box its index to reach the runtime.
                         if let Some((symbol, carried, answer)) =

@@ -930,6 +930,42 @@ pub(super) fn unsigned_owner(owner: &str) -> Option<Ty> {
     })
 }
 
+/// A bit operation `kotlin.experimental` declares for the NARROW integers.
+///
+/// Kotlin gives `Int` and `Long` `and`/`or`/`xor`/`inv` as members and gives `Byte` and `Short`
+/// the same four as extensions in this package. That is a library arrangement, not a difference in
+/// the operation: the answer is the machine's, at the receiver's own width. So these are realized
+/// as instructions rather than as a call, which is also why they are not in [`scalar_member`] —
+/// that table hands its receiver over as a reference.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum BitwiseOp {
+    And,
+    Or,
+    Xor,
+    Inv,
+}
+
+/// Which of the four a selected declaration is, or `None` for anything else.
+///
+/// The package is the gate. `kotlin.experimental` also publishes annotations and the opt-in
+/// markers, none of which is a call, and the four names are common enough that keying on the name
+/// alone would claim a member of some other type.
+pub(super) fn experimental_bitwise(owner: &str, name: &str, params: &[Ty]) -> Option<BitwiseOp> {
+    if declaration_package(kotlin_owner(owner)) != "kotlin/experimental" {
+        return None;
+    }
+    // The OPERAND is the receiver's own type, and a binary form takes it again: Kotlin declares no
+    // mixed-width overload here, so `Byte.and(Short)` does not exist and an argument of another
+    // width is a declaration this does not answer.
+    match (name, params) {
+        ("and", [Ty::Byte | Ty::Short]) => Some(BitwiseOp::And),
+        ("or", [Ty::Byte | Ty::Short]) => Some(BitwiseOp::Or),
+        ("xor", [Ty::Byte | Ty::Short]) => Some(BitwiseOp::Xor),
+        ("inv", []) => Some(BitwiseOp::Inv),
+        _ => None,
+    }
+}
+
 /// The unsigned integer a signed-to-unsigned conversion answers, for the facade extension naming
 /// one: `42.toUInt()`, `(-1).toUByte()`.
 ///

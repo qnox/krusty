@@ -588,6 +588,55 @@ fn float_comparison(op: IrBinOp) -> Option<FloatCC> {
     })
 }
 
+impl BodyLowering<'_, '_, '_> {
+    /// One of `kotlin.experimental`'s bit operations on a `Byte` or a `Short`.
+    ///
+    /// Nothing is called: the answer is the machine's, at the receiver's own width, and Kotlin's
+    /// own `Int` and `Long` members of the same four names are realized the same way a few lines
+    /// up. What separates them is where the library put the declaration, not what it means.
+    ///
+    /// The width comes from the RESULT rather than from the receiver: `Byte.and(Byte)` answers a
+    /// `Byte`, so the declaration already states the width all three operands share, and reading
+    /// it there needs no guess about what the receiver arrived carried as.
+    pub(super) fn experimental_bitwise(
+        &mut self,
+        op: super::super::super::intrinsics::BitwiseOp,
+        receiver: u32,
+        args: &[u32],
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        use super::super::super::intrinsics::BitwiseOp;
+        let operand = ret.non_null();
+        if !matches!(operand, Ty::Byte | Ty::Short) {
+            return Err(format!(
+                "a `kotlin.experimental` bit operation answering `{operand:?}`"
+            ));
+        }
+        let Some(left) = self.coerce(receiver, operand)? else {
+            return Err("a `Unit` receiver for a bit operation".to_string());
+        };
+        let right = match args {
+            [] => None,
+            [argument] => match self.coerce(*argument, operand)? {
+                Some(value) => Some(value),
+                None => return Err("a `Unit` operand for a bit operation".to_string()),
+            },
+            _ => return Err("a bit operation with more than one operand".to_string()),
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let produced = match (op, right) {
+            (BitwiseOp::And, Some(right)) => self.builder.ins().band(left, right),
+            (BitwiseOp::Or, Some(right)) => self.builder.ins().bor(left, right),
+            (BitwiseOp::Xor, Some(right)) => self.builder.ins().bxor(left, right),
+            (BitwiseOp::Inv, None) => self.builder.ins().bnot(left),
+            _ => return Err("a bit operation of the wrong arity".to_string()),
+        };
+        self.convert(produced, Some(operand), ret)
+    }
+}
+
 /// The type Kotlin performs an operation IN, which is not always either operand's.
 pub(super) fn arithmetic_result(op: IrBinOp, lhs: Ty, rhs: Option<Ty>) -> Ty {
     match (lhs, op) {
