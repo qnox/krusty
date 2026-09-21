@@ -140,9 +140,10 @@ fn normalize_when_statement_body(
 /// Each body is typed in ITS OWN value numbering. An `inline_body` is a copy of the lambda's body
 /// numbered as the impl method is — captures first, then the lambda's parameters, then the locals
 /// the body declares — so the enclosing function's parameter/local table says nothing about the
-/// `s` in `s = s + one(x)`. The snapshot that keeps `s` off the stack across the suspension is typed
-/// from the impl method's parameters and the body's own declarations instead; what neither names
-/// still declines, as it must.
+/// `s` in `s = s + one(x)`, and reads its capture 0 as whatever the enclosing parameter 0 is. The
+/// snapshot that keeps `s` off the stack across the suspension is typed from the impl method's
+/// declared parameters and the body's own declarations instead; what neither names still declines,
+/// as it must.
 pub(super) fn hoist_spliced_inline_bodies(
     ir: &mut IrFile,
     body: ExprId,
@@ -172,7 +173,7 @@ fn hoist_spliced_walk(
     {
         // A nested spliced body runs in this frame too, so normalize the innermost first.
         hoist_spliced_walk(ir, inner, suspend_set, orig_rets, seen);
-        let mut value_types = function_value_types(ir, impl_fn, inner);
+        let mut value_types = spliced_body_value_types(ir, impl_fn, inner);
         let rewritten = hoist_spliced_body(ir, inner, suspend_set, orig_rets, &mut value_types);
         if rewritten != inner {
             if let IrExpr::Lambda { inline_body, .. } = &mut ir.exprs[expression as usize] {

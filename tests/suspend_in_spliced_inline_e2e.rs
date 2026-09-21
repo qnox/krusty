@@ -569,12 +569,10 @@ fn a_suspension_stored_into_a_spliced_body_array_runs() {
     assert_eq!(output, "OK");
 }
 
-/// A capture shares its lambda-local index with an enclosing parameter of a DIFFERENT type: the
-/// body is typed in the lambda's numbering (`tag` at 0, `x` at 1, `s` at 2), while the enclosing
-/// function has `k: Int` at 0. Typing the snapshot from the enclosing table would either miss or,
-/// worse, guess.
+/// A body local declared AFTER a capture: the lambda's numbering is `tag` at 0, `x` at 1, `s` at 2,
+/// so `s` sits at an index the enclosing function (`k` at 0, `tag` at 1) never declared.
 #[test]
-fn a_capture_and_a_body_local_are_typed_in_the_lambda_numbering() {
+fn a_body_local_after_a_capture_is_typed_in_the_lambda_numbering() {
     const MAIN: &str = r#"
         import kotlinx.coroutines.runBlocking
         suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
@@ -585,6 +583,27 @@ fn a_capture_and_a_body_local_are_typed_in_the_lambda_numbering() {
         }
     "#;
     let Some(output) = run("suspend_spliced_capture_numbering", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// The capture ITSELF is the snapshot: `arr[0] = one(x)` puts the array under the suspension, and
+/// `arr` is capture 0 — an `IntArray` — where the enclosing function's parameter 0 is `k: Int`.
+/// Typed from the enclosing table, that snapshot would be an `Int` temp holding an array reference:
+/// a miscompile, not a decline. Typed in the lambda's numbering it is the array it is.
+#[test]
+fn a_captured_array_under_a_suspension_is_typed_as_the_capture() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun d(k: Int, arr: IntArray): Int = twice(k) { x -> arr[0] = one(x); arr[0] }
+        fun box(): String = runBlocking {
+            val n = d(1, IntArray(1))
+            if (n == 5) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_captured_array", MAIN) else {
         return;
     };
     assert_eq!(output, "OK");
