@@ -210,6 +210,11 @@ extern const KType kt_type_list_iterator;
 
 KRef kt_list_of(KRef elements);
 KRef kt_list_empty(void);
+/* `xs.toList()` and `xs.reversed()` on an ARRAY: a snapshot of its elements as a list, each boxed
+   on the way in. A snapshot rather than a view, which is Kotlin's own answer and is observable —
+   writing through the array afterwards leaves the list as it was. */
+KRef kt_array_to_list(KRef array);
+KRef kt_array_reversed(KRef array);
 KRef kt_list_single(KRef value);
 kt_int kt_list_size(KRef list);
 kt_boolean kt_list_is_empty(KRef list);

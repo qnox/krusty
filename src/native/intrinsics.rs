@@ -930,6 +930,30 @@ pub(super) fn unsigned_owner(owner: &str) -> Option<Ty> {
     })
 }
 
+/// `xs.toList()` / `xs.reversed()` on an ARRAY: a snapshot of its elements as a list.
+///
+/// Both are extensions of the collections facade, which also declares them over lists, sequences
+/// and ranges — so the owner cannot say which receiver this is and the caller asks the receiver.
+/// What the entry names is the runtime function for the ARRAY case only.
+pub(super) fn array_snapshot(owner: &str, name: &str, params: &[Ty]) -> Option<&'static str> {
+    // The unsigned arrays get their own package: Kotlin declares `UIntArray.reversed()` in
+    // `kotlin.collections.unsigned`, apart from the signed one it answers identically to. The
+    // runtime reads the element's type from the array's descriptor, so both reach one entry.
+    let package = declaration_package(kotlin_owner(owner));
+    if !matches!(
+        package,
+        "kotlin/collections" | "kotlin/collections/unsigned"
+    ) || !params.is_empty()
+    {
+        return None;
+    }
+    match name {
+        "toList" => Some("kt_array_to_list"),
+        "reversed" => Some("kt_array_reversed"),
+        _ => None,
+    }
+}
+
 /// `a.mod(b)` — the remainder carrying the DIVISOR's sign, as (runtime symbol, operand type).
 ///
 /// Kotlin declares one for every numeric pair, and the RESULT names the type they meet in:

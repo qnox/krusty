@@ -2428,6 +2428,25 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         {
                             return self.experimental_bitwise(op, receiver, args, *ret);
                         }
+                        // `xs.toList()` / `xs.reversed()` on an ARRAY: a snapshot of its
+                        // elements as a list, each boxed on the way in. Keyed on the RECEIVER,
+                        // because the collections facade declares the same two names over lists,
+                        // sequences and ranges — the owner cannot say which receiver this is.
+                        if let Some(symbol) =
+                            super::super::intrinsics::array_snapshot(&owner, &name, params)
+                        {
+                            if self
+                                .type_of(receiver)
+                                .map(Ty::non_null)
+                                .is_some_and(|ty| ty.is_array())
+                            {
+                                let value = self.reference(receiver)?;
+                                if self.terminated {
+                                    return Ok(None);
+                                }
+                                return self.runtime_call(symbol, &[any()], *ret, &[value]);
+                            }
+                        }
                         // A member that asks about a NUMBER rather than an object, carried as one:
                         // `s[i]` must not box its index to reach the runtime.
                         if let Some((symbol, carried, answer)) =

@@ -7658,6 +7658,30 @@ and behavior is checked by RUNNING the emitted program.
   `classDelegation` and `traits` delegation cases, and
   `codegen/box/extensionFunctions/*ExtensionSuper.kt` (KT-42176).
 
+- **An array answers its elements as a list, and as a reversed one.** `xs.toList()` and
+  `xs.reversed()` are a SNAPSHOT rather than a view, which is Kotlin's own answer and is
+  observable: writing through the array afterwards leaves the list as it was, and
+  `arrays/forInReversed/reversedOriginalUpdatedInLoopBody.kt` is written to check exactly that.
+
+  The elements are boxed on the way in, because a list holds references and a primitive array does
+  not — `IntArray.toList()` answering a `List<Int>` is that boxing. Which box each element gets is
+  read from the ARRAY's descriptor, the only thing that knows how wide an element is and how to
+  read its bits: a `LongArray` and a `DoubleArray` share a width and a trace bit and differ only
+  there, and an unsigned array holds the signed one's bits with a different box, which is the
+  difference between `4294967295` and `-1`.
+
+  The unsigned arrays are declared in `kotlin.collections.unsigned`, a package of their own, and
+  reach the same entry: the descriptor already says which they are.
+  Tests: `tests/native_array_snapshots_e2e.rs`; the corpus cases are
+  `codegen/box/arrays/forInReversed/*.kt`, `codegen/box/vararg/kt37715.kt` and the other
+  `collections.toList` cases.
+
+  **A JVM-lane defect this found, not fixed here:** `uintArrayOf(…).toList()` is rejected by
+  krusty's JVM backend with `VerifyError: Type '[I' is not assignable to 'java/lang/Iterable'`. A
+  `UIntArray` IS a `Collection<UInt>` in Kotlin, so `toList()` selects the `Iterable` extension;
+  that backend hands the erased `int[]` to it without the value-class wrapper. The native test for
+  the unsigned case is therefore native-only, with kotlinc's own answer as its expectation.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

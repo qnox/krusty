@@ -1742,6 +1742,7 @@ KRef kt_list_of(KRef elements) {
 
 KRef kt_list_empty(void) { return kt_list_of(kt_array_new(&kt_type_array, 0)); }
 
+
 /* `listOf(x)` — Kotlin's own single-element overload, which is a DIFFERENT declaration from the
    vararg one and not a vararg call of length one: `listOf(anArray)` selects it and answers a list
    holding that array. There is no array yet, so this makes the one the list needs. `value` is a
@@ -2096,6 +2097,31 @@ static KRef kt_array_element(KRef array, kt_int at) {
     KT_FAIL("krusty: this is not an array whose elements can be read\n");
     return NULL;
 }
+
+/* `xs.toList()` and `xs.reversed()` — a SNAPSHOT of an array's elements as a list. The snapshot is
+   the point: Kotlin's own answer is a new list, so writing through the array afterwards leaves it
+   as it was, and the corpus checks exactly that.
+
+   The elements are filled one at a time rather than copied, because a List holds references and a
+   primitive array does not: each element is boxed on the way in, which is what `IntArray.toList()`
+   answering a `List<Int>` means. The destination array is a root across those allocations, in a
+   local the conservative scan reads. */
+static KRef kt_array_snapshot(KRef array, int reversed) {
+    if (array == NULL) {
+        KT_FAIL("krusty: a list of a null array\n");
+    }
+    kt_int length = ((const KArray *)array)->length;
+    KRef elements = kt_array_new(&kt_type_array, length);
+    for (kt_int index = 0; index < length; index++) {
+        KRef value = kt_array_element(array, reversed ? length - 1 - index : index);
+        kt_elements_of(elements)[index] = value;
+    }
+    return kt_list_of(elements);
+}
+
+KRef kt_array_to_list(KRef array) { return kt_array_snapshot(array, 0); }
+
+KRef kt_array_reversed(KRef array) { return kt_array_snapshot(array, 1); }
 
 static kt_boolean kt_walk_has_next(KRef iterator) {
     const KWalk *walk = (const KWalk *)iterator;
