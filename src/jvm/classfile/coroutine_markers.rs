@@ -21,12 +21,14 @@ use super::CodeBuilder;
 pub enum CoroutineMarker {
     /// Immediately before a suspension's operands: where the spill block and the `label` store go.
     Suspension = 1,
-    /// Immediately after a suspension's `COROUTINE_SUSPENDED` check: where the resume path rejoins
-    /// with the call's result on the operand stack.
+    /// Immediately after the `areturn` a suspension leaves through: where the dispatch re-enters
+    /// the body with the spills restored and an empty stack, rethrows a failed resumption and
+    /// pushes the resumed value.
     Resume = 2,
-    /// Where the two paths out of a suspension meet. Its frame is recorded by the enclosing method,
-    /// not here: a frame recorded in a lambda's own builder is merged with the host's locals when
-    /// the body is relocated, which would claim locals the resume path never restored.
+    /// Where the two paths out of a suspension meet, with the call's result on the operand stack.
+    /// Both frames are recorded by the enclosing method, not here: a frame recorded in a lambda's
+    /// own builder is merged with the host's locals when the body is relocated, which would claim
+    /// locals the resume path never restored.
     Join = 3,
 }
 

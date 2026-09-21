@@ -292,7 +292,8 @@ first. The body's own tail value is typed by the `try` itself (or the coercion a
 the enclosing function's return type — that type is right only for a non-local `return` inside the
 body, which is the one statement it is used for. A value-`try` nested deeper in an expression
 (`1 + try { … }`) is not reached and still declines (`suspends_in_a_value_try`, checked AFTER
-normalization).
+normalization). A spliced body with a non-local `return` declines too (`spliced_body_returns`):
+under the machine that return has to yield the CPS `Object`, and the emitter does not box it yet.
 
 **The resume point is inside the body.** A failed resumption (`Result.Failure` in the
 continuation's `result`) is rethrown at a `Resume` marker emitted right after the suspension's

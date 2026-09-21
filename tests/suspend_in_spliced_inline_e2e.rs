@@ -610,3 +610,84 @@ fn a_value_try_catches_a_failed_resumption() {
     };
     assert_eq!(output, "OK");
 }
+
+/// A `try`/`finally` around the suspension, with the callee failing after it suspended: the
+/// catch-all handler covers the resume point, so the finalizer runs on that path too.
+#[test]
+fn a_value_try_finally_runs_its_finalizer_on_a_failed_resumption() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        var trace = ""
+        suspend fun boom(v: Int): Int { kotlinx.coroutines.yield(); throw IllegalStateException("b" + v) }
+        suspend fun guarded(): Int = twice(1) { x ->
+            try { boom(x) } catch (e: IllegalStateException) { -1 } finally { trace = trace + x }
+        }
+        fun box(): String = runBlocking {
+            val n = guarded()
+            if (n == -2 && trace == "12") "OK" else "FAIL: " + n + " " + trace
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_value_try_finally", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// The suspension sits in the `catch` arm: reached only through the handler, whose frame the
+/// state's restore has to agree with.
+#[test]
+fn a_value_try_whose_catch_arm_suspends_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun guarded(): Int = twice(1) { x ->
+            try { if (x == 2) throw IllegalStateException("x"); x } catch (e: Exception) { one(-x) }
+        }
+        fun box(): String = runBlocking {
+            val n = guarded()
+            if (n == 0) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_value_try_catch_suspends", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// A non-local `return` of a value-`try` from the spliced body. The desugar reaches this shape,
+/// but the machine cannot emit a non-local return yet (it has to yield the CPS `Object`), so the
+/// function keeps the diagnostic it had before the machine existed rather than a class that fails
+/// verification.
+#[test]
+fn a_non_local_return_of_a_value_try_still_declines() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun early(): Int {
+            twice(1) { x -> return try { one(x) } catch (e: Exception) { -1 } }
+            return 0
+        }
+        fun box(): String = runBlocking { "" + early() }
+    "#;
+    let jdk = common::jdk_modules();
+    let Some(libout) = common::compile_lib_ref("suspend_spliced_nonlocal_return_try", LIB) else {
+        return;
+    };
+    let cp = [
+        libout,
+        common::stdlib_jar(),
+        common::coroutines_jar(),
+        jdk.clone(),
+    ];
+    let outcome = common::backend_outcome_in_process(MAIN, "Main", &cp, Some(jdk.as_path()))
+        .expect("the source is frontend-valid");
+    match outcome {
+        common::BackendOutcome::Rejected(diagnostics) => assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.contains("call arity mismatch")),
+            "expected the pre-machine diagnostic, got {diagnostics:?}"
+        ),
+        common::BackendOutcome::Emitted => panic!("a non-local return under the machine emitted"),
+    }
+}
