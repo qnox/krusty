@@ -392,11 +392,11 @@ pub(crate) fn lower_suspend(
         let emit_time_machine = !spliced_suspensions.is_empty();
         // Those bodies have never been through suspension hoisting: the passes above stop at a
         // lambda. Normalize them now, then re-read the suspensions — hoisting rewrites the very
-        // expressions just collected.
+        // expressions just collected. Each body is typed in its own lambda's value numbering, not
+        // this function's.
         let spliced_suspensions = match (emit_time_machine, body) {
             (true, Some(b)) => {
-                let mut value_types = function_value_types(ir, fid, b);
-                hoist_spliced_inline_bodies(ir, b, &suspend_set, &orig_rets, &mut value_types);
+                hoist_spliced_inline_bodies(ir, b, &suspend_set, &orig_rets);
                 cps::frame_suspensions(ir, b, &suspend_set)
             }
             _ => spliced_suspensions,
