@@ -6042,11 +6042,16 @@ fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
             ir.exprs[e as usize] = IrExpr::Return(Some(boxed));
             box_returns(ir, v)
         }
-        // A lambda argument (`m.map { it.value }`) is a VALUE — its body is a separate impl function,
-        // not a `return` of the suspend function being boxed — so it is a leaf here (no outer return to
-        // box inside it). `for_each_child` deliberately exposes retained inline bodies, so this ownership
-        // boundary must remain explicit.
-        IrExpr::Lambda { .. } => true,
+        // A lambda argument (`m.map { it.value }`) is a VALUE whose impl function is a separate body,
+        // but the canonical child walk exposes only what this function owns: its captures, which are
+        // evaluated in this frame, and its retained `inline_body`. A `Return` that survives in an
+        // inline body is a NON-LOCAL return by construction — the template preparation already turned
+        // every local `return@label` into a labelled exit — and the classpath-inline splice realizes
+        // it as a return from THIS method. It must box exactly like a return written in the body
+        // proper: `twice(1) { x -> if (x == 2) return 100; x }` in a CPS body otherwise leaves
+        // `bipush 100; areturn` (VerifyError: "Bad type on operand stack"), and a bare `return` a void
+        // `return` where the `Object` result is expected. So a lambda is NOT a leaf here.
+        //
         // Return boxing is a tree rewrite, not an IR-shape validator. Use the canonical child relation
         // so adding an unrelated expression kind cannot make an otherwise valid suspend function
         // unsupported. Unsupported coroutine control-flow is rejected by the state-machine flattener,

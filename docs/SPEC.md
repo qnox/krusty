@@ -2282,6 +2282,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   leaf body — only the forwarded tail stays verbatim (kotlinc's shape). Previously the forward path
   skipped return boxing entirely (`iconst_1; areturn` → VerifyError)
   (`tail_forward_with_early_returns_boxes_them` in `tests/feature_coverage_s_e2e.rs`).
+- **A non-local `return` out of a lambda spliced into a classpath `inline fun` boxes like any other
+  suspend return.** Inside a lambda's inline template every surviving `IrExpr::Return` already crosses
+  out of the lambda (a local `return@label` became a labelled exit at template preparation), so the
+  splice realizes it as a return from the ENCLOSING method — and in a CPS body that method returns
+  `Object`. `box_returns` used to stop at `Lambda`, leaving `bipush 100; areturn` (VerifyError: `Bad type
+  on operand stack`) and a void `return` where a value is expected; it now walks the lambda's
+  `inline_body` too. A plain function returning `Any` was never affected: its coercion is inserted by
+  the lowering. Test: `tests/suspend_inline_splice_nonlocal_return_e2e.rs` (run both krusty-built and
+  `KRUSTY_REF_KOTLINC=1`; only the reference loop shape reproduced the report).
 - **`return` inside a `try { … } finally { … }`** now runs each enclosing `finally` (innermost first)
   before transferring control, instead of bailing. The lowerer pushes the `finally` AST onto a
   `try_finally_stack` while lowering the body/catches, and a `Stmt::Return` inside inlines those finallys:
