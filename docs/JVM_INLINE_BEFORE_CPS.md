@@ -277,6 +277,8 @@ Working today, each with a fixture in `tests/suspend_in_spliced_inline_e2e.rs`:
 | A `Long` (two-slot) local live across one | `a_long_local_survives_a_spliced_suspension` |
 | Through stdlib `run` / `let` / `repeat` | `…_spliced_stdlib_{run,let,repeat}_lambda_runs` |
 | An instance method's machine | `a_suspension_inside_a_spliced_lambda_of_a_member_runs` |
+| A MIXED function (its own suspension plus a spliced one) | `a_function_that_suspends_both_in_and_outside_a_spliced_body_runs` |
+| A mixed function inside `try`/`finally` | `a_mixed_function_inside_try_finally_runs` |
 | A PRIVATE member's machine (via `access$<name>`) | `…_of_a_private_member_runs` |
 | A body spliced into a `try` region (`runCatching { susp() }`) | `a_suspension_inside_a_spliced_try_region_runs` |
 
@@ -286,11 +288,17 @@ emitter declines the splice — there the lambda is a real closure, its standalo
 taken away, and the compile is declined rather than emitting an `invokedynamic` to a method that
 does not exist.
 
-**The remaining corpus blocker is a MIXED function**: one the IR machine already owns (it has a
-suspension of its own) that ALSO carries a suspension inside a spliced lambda. The emit-time machine
-claims only functions the IR machine finds nothing in, so the in-lambda suspension still reaches
-emission with no continuation to pass. Two machines cannot share one method, so this is step 7 —
-migrating a shape family off the IR machine — not a patch on the gate.
+**A MIXED function** — one with a suspension of its own AND one inside a spliced lambda — is taken
+whole by the emit-time machine: one method has one dispatch, so the two kinds cannot be split
+between two machines. No function that compiles today changes hands, because a function with a
+spliced suspension does not compile today.
+
+**The machine's shape is now kotlinc's.** The dispatch's `tableswitch` targets one restore block per
+state; each restores that state's spills, pushes the resumed value and jumps to the join inside the
+body. Restoring before re-entry is what makes a suspension inside a `try` verify: a handler's frame
+claims the locals the protected code assigned, and an edge from the region's own start cannot
+produce them. The blocks are emitted AFTER the body, so they cannot move the slots the body
+allocates — the plan was read from a first emission that had none of this code in it.
 
 **A lambda's `inline_body` is not evidence** that its body runs in this frame: lowering attaches one
 wherever it can, including to the lambda of an ordinary function. Only the operand of a call to an
