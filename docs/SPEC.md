@@ -7682,6 +7682,33 @@ and behavior is checked by RUNNING the emitted program.
   that backend hands the erased `int[]` to it without the value-class wrapper. The native test for
   the unsigned case is therefore native-only, with kotlinc's own answer as its expectation.
 
+- **A property an interface declares and a class supplies with no override edge to name it.**
+  Interface delegation is the shape: `class Q(a: A) : A by a` synthesizes `Q`'s own `x` and its
+  accessors, and nothing records that they implement `A.x` — there is no source declaration to
+  carry the edge, so the interface's number found no implementation and the file declined.
+
+  Kotlin has already decided they implement it: a class does not compile with an interface property
+  left unimplemented, and it cannot declare a second property of that name beside the inherited
+  one. So an interface in the class's hierarchy declaring the same name IS the member those
+  accessors fill, and matching by name is reading the language's rule rather than guessing — the
+  same ground the inherited-slot match already stands on.
+
+  Two more facts the missing edge had been hiding:
+
+  - A CALL to such an accessor has to name the same key the table holds. An abstract `val` in an
+    interface carries no accessor id, so its accessor reaches the method list as an ordinary method
+    and is tied back by NAME — the layout read it that way and the call site did not, so every call
+    to one asked for a `Function` key where the table held a `Getter`.
+  - A class that supplies a property its SUPERCLASS already had takes that slot. The base's
+    accessor may be synthesized from its field and so have no signature to match, so the inherited
+    slot is found by the property's name. `class E : B(), C by D()` is that case, and kotlinc
+    answers with the delegate (KT-70417); a private base property is excluded, because one is not
+    inherited and a subclass may shadow it freely.
+  Tests: `tests/native_delegated_properties_e2e.rs` (all three, each cross-checking the two
+  backends and REQUIRING the native lowering); the corpus cases are `codegen/box/classDelegation/`,
+  `codegen/box/classes/inheritance.kt` and the other "interface member with no implementation"
+  cases.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

@@ -338,6 +338,10 @@ pub(super) fn build(ir: &IrFile) -> Result<ClassModel, Unsupported> {
         check_supported(class)?;
     }
     let order = hierarchy_order(ir)?;
+    // Before the layouts, because a class laying itself out needs to know which interfaces it
+    // implements: an accessor it supplies with no override edge to name it — interface delegation
+    // synthesizes exactly those — is matched against the members those interfaces declare.
+    let interfaces = interface_closure(ir);
 
     let mut layouts: Vec<Option<ClassLayout>> = vec![None; ir.classes.len()];
     for &id in &order {
@@ -349,7 +353,7 @@ pub(super) fn build(ir: &IrFile) -> Result<ClassModel, Unsupported> {
                     .as_ref()
                     .expect("superclasses are laid out first")
             });
-            layout_class(ir, id, superclass, parent)?
+            layout_class(ir, id, superclass, parent, &interfaces[id as usize])?
         };
         layouts[id as usize] = Some(layout);
     }
@@ -357,7 +361,6 @@ pub(super) fn build(ir: &IrFile) -> Result<ClassModel, Unsupported> {
         .into_iter()
         .map(|layout| layout.expect("every class was laid out"))
         .collect();
-    let interfaces = interface_closure(ir);
     place_interface_slots(ir, &order, &mut layouts, &interfaces)?;
     Ok(ClassModel {
         layouts,
@@ -808,6 +811,7 @@ fn layout_class(
     id: ClassId,
     superclass: Option<ClassId>,
     parent: Option<&ClassLayout>,
+    interfaces: &[ClassId],
 ) -> Result<ClassLayout, Unsupported> {
     let class = &ir.classes[id as usize];
 
@@ -892,27 +896,17 @@ fn layout_class(
     // whatever stood there.
     let mut accessor_keys: HashMap<FunId, SlotKey> = HashMap::new();
     for property in &class.properties {
-        let stored = class.fields.iter().any(|field| field.name == property.name);
-        let named = |accessor: &str, arity: usize| {
-            if stored {
-                return None;
-            }
-            class.methods.iter().copied().find(|&fid| {
-                let function = &ir.functions[fid as usize];
-                function.name == accessor && function.params.len() == arity
-            })
-        };
-        let getter = property
-            .getter
-            .or_else(|| named(&crate::names::property_getter_name(&property.name), 0));
-        let setter = property
-            .setter
-            .or_else(|| named(&crate::names::property_setter_name(&property.name), 1));
-        if let Some(getter) = getter {
+        if let Some(getter) = property.getter {
             accessor_keys.insert(getter, SlotKey::Getter(id, property.name.clone()));
         }
-        if let Some(setter) = setter {
+        if let Some(setter) = property.setter {
             accessor_keys.insert(setter, SlotKey::Setter(id, property.name.clone()));
+        }
+    }
+    // The name fallback, through the same reading every CALL makes, so the two cannot disagree.
+    for &fid in &class.methods {
+        if let Some(key) = accessor_key_by_name(ir, id, fid) {
+            accessor_keys.entry(fid).or_insert(key);
         }
     }
 
@@ -1044,7 +1038,14 @@ fn layout_class(
                                 None
                             }
                             Some((slot, _)) => Some(slot),
-                            None => None,
+                            // No edge names a base for this accessor. The base's own accessor may
+                            // be SYNTHESIZED — `override lateinit var x` has no method to match
+                            // by signature — so the inherited slot is found by the property's
+                            // NAME instead. `class E : B(), C by D()` is the case: the delegation
+                            // supplies `x` again with no edge of its own, and kotlinc answers
+                            // with the delegate (KT-70417), which is what taking the base's slot
+                            // makes true here.
+                            None => inherited_accessor_slot(ir, superclass, name, setter, &slots),
                         }
                     }
                     _ => None,
@@ -1184,6 +1185,14 @@ fn layout_class(
     }
 
     register_inherited_interface_members(ir, class, &mut slots, &mut interface_bridges)?;
+    register_accessors_without_an_edge(
+        ir,
+        id,
+        class,
+        interfaces,
+        &mut slots,
+        &mut interface_bridges,
+    );
 
     // A `value class` is not a one-field class. Kotlin answers `equals`, `hashCode` and `toString`
     // by the value it wraps — `IC(1) == IC(1)` is true, and `IC(1).toString()` is `IC(n=1)` —
@@ -1236,6 +1245,77 @@ fn layout_class(
         slots,
         interface_bridges,
     })
+}
+
+/// Point an interface's property numbers at accessors this class supplies with NO override edge to
+/// name them.
+///
+/// Interface delegation is the shape: `class Q(a: A) : A by a` synthesizes `Q`'s own `x` and its
+/// accessors, and nothing records that they implement `A.x` — there is no source declaration to
+/// carry the edge, so the edge tables say nothing and `A`'s number found no implementation.
+///
+/// Kotlin has already decided they do implement it: a class does not compile with an interface
+/// property left unimplemented, and it cannot declare a second property of that name beside the
+/// inherited one. So an interface in this class's hierarchy declaring the same name IS the member
+/// these accessors fill — which is why matching by name is reading the language's rule rather than
+/// guessing, the same ground `inherited_open_slot` stands on.
+///
+/// `or_insert` throughout: a source `override val` has an edge, and that edge's answer wins.
+fn register_accessors_without_an_edge(
+    ir: &IrFile,
+    id: ClassId,
+    class: &IrClass,
+    interfaces: &[ClassId],
+    slots: &mut HashMap<SlotKey, u32>,
+    interface_bridges: &mut HashMap<SlotKey, Slot>,
+) {
+    for property in &class.properties {
+        for setter in [false, true] {
+            let spell = |owner: ClassId| {
+                if setter {
+                    SlotKey::Setter(owner, property.name.clone())
+                } else {
+                    SlotKey::Getter(owner, property.name.clone())
+                }
+            };
+            let Some(&slot) = slots.get(&spell(id)) else {
+                continue;
+            };
+            for &interface in interfaces {
+                let Some(declared) = ir.classes[interface as usize]
+                    .properties
+                    .iter()
+                    .find(|candidate| candidate.name == property.name)
+                else {
+                    continue;
+                };
+                // A `val` in the interface has no setter number to fill.
+                if setter && !declared.is_var {
+                    continue;
+                }
+                let key = spell(interface);
+                // The same representation question the edge-carrying paths ask: an interface
+                // declaring `val x: T` erases its accessor to a reference while the class supplies
+                // an unboxed machine integer, and the number takes a bridge rather than an alias.
+                if c_kind(declared.ty) != c_kind(property.ty) {
+                    interface_bridges
+                        .entry(key.clone())
+                        .or_insert(Slot::AccessorBridge {
+                            declared: declared.ty,
+                            implemented: property.ty,
+                            setter,
+                            target_slot: slot,
+                        });
+                }
+                // Overwrites rather than `or_insert`: what a class SUPPLIES wins over what it
+                // inherited, and the entry already there came from the superclass's layout.
+                // `class E : B(), C by D()` is that case — `B` implements `A.x` and the
+                // delegation to `D` supplies it again, and kotlinc answers with the delegate
+                // (KT-70417).
+                slots.insert(key, slot);
+            }
+        }
+    }
 }
 
 /// Point an interface's member numbers at implementations this class INHERITS rather than declares.
@@ -1392,6 +1472,42 @@ fn inherited_open_slot(
     None
 }
 
+/// The slot an inherited PROPERTY of the same name occupies, searched up the superclass chain.
+///
+/// By name, because a base's accessor need not be a method at all: a field-backed property's
+/// accessors are synthesized, so there is no signature for [`inherited_slot`] to match. Kotlin
+/// rejects a fresh redeclaration of an inherited property ("hides member of supertype and needs
+/// `override`"), so a subclass property of that name IS that one — except where the base's is
+/// PRIVATE, which is not inherited and which a subclass may shadow freely.
+fn inherited_accessor_slot(
+    ir: &IrFile,
+    superclass: Option<ClassId>,
+    name: &str,
+    setter: bool,
+    slots: &HashMap<SlotKey, u32>,
+) -> Option<u32> {
+    let mut at = superclass;
+    while let Some(class) = at {
+        if let Some(property) = ir.classes[class as usize]
+            .properties
+            .iter()
+            .find(|candidate| candidate.name == name)
+        {
+            if property.is_private {
+                return None;
+            }
+            let key = if setter {
+                SlotKey::Setter(class, name.to_string())
+            } else {
+                SlotKey::Getter(class, name.to_string())
+            };
+            return slots.get(&key).copied();
+        }
+        at = ir.class_id_by_name(ir.classes[class as usize].superclass);
+    }
+    None
+}
+
 fn inherited_slot(
     ir: &IrFile,
     superclass: Option<ClassId>,
@@ -1464,7 +1580,40 @@ pub(super) fn function_key(ir: &IrFile, owner: ClassId, fid: FunId) -> SlotKey {
             return SlotKey::Setter(owner, property.name.clone());
         }
     }
-    SlotKey::Function(fid)
+    // The same fallback the layout makes, and it has to be the same or a call names one key while
+    // the table holds the other: an abstract `val` in an interface carries no accessor id, so its
+    // accessor reaches the method list as an ordinary method and is tied back by name. Reading it
+    // only in the layout is what left `interface A { val x: Int }`'s accessor with a `Getter` slot
+    // and every call to it asking for a `Function` one.
+    accessor_key_by_name(ir, owner, fid).unwrap_or(SlotKey::Function(fid))
+}
+
+/// The property whose accessor a method IS, matched by the accessor's declared NAME.
+///
+/// Only for a property with no storage of its own. A property with a field is read through that
+/// field — its accessor is synthesized — so a method that happens to spell the accessor's name is
+/// a method: `class Bottom(val data: Int) { override fun getData(): Int }` declares both, which is
+/// legal Kotlin, and keying the method as the property's getter took it out of the method
+/// numbering entirely.
+fn accessor_key_by_name(ir: &IrFile, owner: ClassId, fid: FunId) -> Option<SlotKey> {
+    let class = &ir.classes[owner as usize];
+    let function = &ir.functions[fid as usize];
+    for property in &class.properties {
+        if class.fields.iter().any(|field| field.name == property.name) {
+            continue;
+        }
+        if function.params.is_empty()
+            && function.name == crate::names::property_getter_name(&property.name)
+        {
+            return Some(SlotKey::Getter(owner, property.name.clone()));
+        }
+        if function.params.len() == 1
+            && function.name == crate::names::property_setter_name(&property.name)
+        {
+            return Some(SlotKey::Setter(owner, property.name.clone()));
+        }
+    }
+    None
 }
 
 /// The slot an overriding property accessor replaces, found through the overridden property's
