@@ -7742,6 +7742,22 @@ and behavior is checked by RUNNING the emitted program.
   `codegen/box/privateConstructors/withVarargs.kt`, `codegen/box/enum/varargParam.kt` and the
   other "vararg constructor parameter" cases.
 
+- **An enum constant leaving a constructor argument out.** It is the same omission an ordinary
+  construction makes, written a third way: `RED` where the enum's constructor declares
+  `(val rgb: Int = 0)` is not an expression and not a supertype call, so neither of the collectors
+  that find omissions saw it and every such enum declined.
+
+  The constant reaches the class's own defaults wrapper — the one `Foo()` written as an expression
+  reaches — which fills the frame in declaration order and runs the constructor, so a default that
+  READS an earlier parameter finds it. What the entry supplies is the parameters it did not omit,
+  at their own physical types.
+
+  A constant with a BODY that also omits an argument still declines: its instance is a synthesized
+  subclass whose own constructor takes the entry's arguments, while the defaults are recorded
+  against the enum, so the wrapper has nothing to read for it.
+  Tests: `tests/native_enum_defaults_e2e.rs`; the corpus cases are
+  `codegen/box/defaultArguments/constructor/enum*.kt` and `codegen/box/enum/defaultCtor/`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

@@ -1062,6 +1062,8 @@ mod native_concurrency_e2e;
 mod native_delegated_properties_e2e;
 #[path = "native_delegation_e2e.rs"]
 mod native_delegation_e2e;
+#[path = "native_enum_defaults_e2e.rs"]
+mod native_enum_defaults_e2e;
 #[path = "native_exceptions_e2e.rs"]
 mod native_exceptions_e2e;
 #[path = "native_experimental_bitwise_e2e.rs"]

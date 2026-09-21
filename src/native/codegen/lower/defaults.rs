@@ -373,6 +373,22 @@ impl<'a> FileLowering<'a> {
                     .iter()
                     .filter_map(Self::omitted_constructor_arguments),
             )
+            // An enum CONSTANT leaving an argument out is the same omission written a third way:
+            // `RED` where the enum's constructor declares `(val rgb: Int = 0)` is not an
+            // expression and not a supertype call, so neither collector above sees it. A constant
+            // with a BODY is left out: its instance is a synthesized subclass whose own
+            // constructor takes the entry's arguments, and the defaults are recorded against the
+            // enum rather than against it.
+            .chain(self.ir.classes.iter().flat_map(|class| {
+                class.enum_entries.iter().filter_map(move |entry| {
+                    if entry.default_parameters.is_empty() || entry.subclass.is_some() {
+                        return None;
+                    }
+                    let mut omitted = entry.default_parameters.clone();
+                    omitted.sort_unstable();
+                    Some((class.fq_name_id(), omitted))
+                })
+            }))
             .collect();
         for (internal, omitted) in shapes {
             // A construction naming a class this file does not declare, or a SECONDARY
