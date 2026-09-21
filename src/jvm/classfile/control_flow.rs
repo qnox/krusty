@@ -40,6 +40,33 @@ impl CodeBuilder {
         }
     }
 
+    /// Bind `l` at an explicit offset that some ALREADY-EMITTED branch targets, whatever the
+    /// stream's reachability is now.
+    ///
+    /// [`Self::bind_at`] declines while the stream is dead, which is right for a label bound where
+    /// emission has stopped. A coroutine machine's states are different: their positions are found
+    /// after the whole body is emitted — so the stream has just ended in a `return` — and the
+    /// dispatch that reaches them was emitted long before.
+    pub fn bind_target_at(&mut self, l: Label, offset: usize) {
+        let index = self.label_index(l);
+        self.labels[index] = offset;
+        self.dead_bound[index] = false;
+    }
+
+    /// Bind `l` as the target of a branch this builder cannot see.
+    ///
+    /// A coroutine machine's resume state is reached only from the dispatch in the enclosing method,
+    /// and is emitted right after the `areturn` that leaves the frame on suspension. That return
+    /// makes the stream dead, so the state — reachable in the finished method — would be dropped as
+    /// unreachable here. Binding it this way says the arrival exists even though no branch to it has
+    /// been emitted.
+    pub fn bind_external_target(&mut self, l: Label) {
+        let index = self.label_index(l);
+        self.labels[index] = self.bytes.len();
+        self.dead = false;
+        self.dead_bound[index] = false;
+    }
+
     /// Bind `l` as an exception-handler entry guarding already-bound `[start, end)` ranges.
     pub fn bind_handler(&mut self, l: Label, protects: &[(Label, Label)]) {
         let index = self.label_index(l);

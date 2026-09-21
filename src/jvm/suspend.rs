@@ -28,6 +28,7 @@
 
 mod bottom_completion;
 pub(crate) mod cps;
+pub(crate) use cps::EmitTimeMachines;
 mod debug_metadata;
 mod get_or_create;
 mod hoisting;
@@ -184,6 +185,7 @@ pub(crate) fn lower_suspend(
     facade: &str,
     continuation_metadata: &mut ContinuationMetadataMap,
     default_call_operands: &mut crate::jvm::default_call_operands::DefaultCallOperands,
+    emit_time_machines: &mut EmitTimeMachines,
 ) -> bool {
     realize_safe_coroutine_points(ir);
     let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
@@ -346,14 +348,28 @@ pub(crate) fn lower_suspend(
         }
         let has_susp =
             forward.is_none() && body.is_some_and(|b| expr_calls_suspend(ir, b, &suspend_set));
+        // The IR machine sees no suspension here, but one lives inside a lambda whose body will be
+        // spliced into this very frame. Its machine is built during emission, where the spliced
+        // body's own locals exist. The conjunction is the whole gate: this claims only functions
+        // that would otherwise be emitted with no continuation to pass.
+        // Only a static function for now: a member's continuation has to capture its receiver, and
+        // the machine does not build that yet. A member keeps the diagnostic it has today.
+        let spliced_suspensions: Vec<ExprId> = match (has_susp, forward, body) {
+            (false, None, Some(b)) if ir.functions[fid as usize].is_static => {
+                cps::spliced_inline_suspensions(ir, b, &suspend_set)
+            }
+            _ => Vec::new(),
+        };
+        let emit_time_machine = !spliced_suspensions.is_empty();
         // A `suspendCoroutineUninterceptedOrReturn` block that reads its continuation is a
         // first-class suspension point (common lowering records it separately from callable nodes): the
         // machine passes ITSELF as the continuation, so `it.resume(v)` re-enters this machine at
         // the resume label — kotlinc's protocol (coroutines/tailCallToNothing).
         crate::trace_compiler!(
             "suspend",
-            "fn fid={fid} name={} has_susp={has_susp}",
-            ir.functions[fid as usize].name
+            "fn fid={fid} name={} has_susp={has_susp} spliced_suspensions={}",
+            ir.functions[fid as usize].name,
+            spliced_suspensions.len()
         );
         let is_static = ir.functions[fid as usize].is_static;
         // Keep the declared signature before it is consumed — the class's `@Metadata` and the method's
@@ -393,7 +409,7 @@ pub(crate) fn lower_suspend(
             // `Continuation` parameter itself. A body that DOES get a machine resolves the
             // placeholder to the machine WRAPPER inside `build_state_machine` (cont_v), so
             // `c.resume(v)` re-enters this machine.
-            if !has_susp {
+            if !has_susp && !emit_time_machine {
                 rewrite_current_continuation(ir, b, p_old);
             }
             // The pre-splice scope lists (captured above) hold PRE-shift local indices — shift them
@@ -435,6 +451,29 @@ pub(crate) fn lower_suspend(
             if !box_returns(ir, b) {
                 return false;
             }
+        } else if emit_time_machine {
+            // Emission owns this machine. Give every spliced suspension its continuation operand as
+            // an `IrExpr::CurrentContinuation`: one `aload` either way, so the discovery pass (which
+            // resolves it to `$completion`) allocates exactly the slots the emitting pass will.
+            let b = body.expect("a spliced-inline suspension implies a body");
+            let mut recorded = Vec::new();
+            for &call in &spliced_suspensions {
+                let cont = ir.add_expr(IrExpr::CurrentContinuation);
+                if !append_continuation(ir, call, cont, default_call_operands) {
+                    return false;
+                }
+                recorded.push(cps::SplicedSuspension { call });
+            }
+            if !box_returns(ir, b) {
+                return false;
+            }
+            ensure_tail_return(ir, b, orig_rets[fid as usize] == Ty::Unit);
+            // The standalone `invoke` of each such lambda is not emitted: it has no continuation of
+            // its own to pass, and every call to it is spliced.
+            for implementation in cps::spliced_suspension_lambda_impls(ir, b, &suspend_set) {
+                ir.inline_only_fns.insert(implementation);
+            }
+            emit_time_machines.record(fid, recorded);
         } else if !has_susp {
             // Leaf: box the returns (no state machine). The CPS method returns `Object`, so an expression
             // / statement body that falls through (no `return`) must get a terminal return — a value body

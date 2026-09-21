@@ -45,6 +45,59 @@ pub(crate) fn suspends_inside_a_spliced_inline_body(
     !spliced_inline_suspensions(ir, body, suspend_set).is_empty()
 }
 
+/// The implementation methods of the lambdas whose spliced bodies carry a suspension.
+///
+/// Such a lambda has two bodies: the template the splice consumes, and the standalone `invoke` the
+/// emitter would otherwise write. Only the spliced one is given a continuation to pass — the
+/// standalone copy cannot be, because it has no continuation of its own — so it must not be emitted.
+/// It is dead in any case: every call to the lambda is spliced.
+pub(crate) fn spliced_suspension_lambda_impls(
+    ir: &IrFile,
+    body: ExprId,
+    suspend_set: &HashSet<u32>,
+) -> Vec<u32> {
+    let mut impls = Vec::new();
+    let mut seen = HashSet::new();
+    collect_impls(ir, body, suspend_set, &mut seen, &mut impls);
+    impls
+}
+
+fn collect_impls(
+    ir: &IrFile,
+    expression: ExprId,
+    suspend_set: &HashSet<u32>,
+    seen: &mut HashSet<ExprId>,
+    out: &mut Vec<u32>,
+) {
+    if !seen.insert(expression) {
+        return;
+    }
+    if let IrExpr::Lambda {
+        impl_fn,
+        captures,
+        inline_body: Some(inline_body),
+        ..
+    } = &ir.exprs[expression as usize]
+    {
+        let mut found = Vec::new();
+        let mut inner = HashSet::new();
+        walk_frame(ir, *inline_body, suspend_set, true, &mut inner, &mut found);
+        if !found.is_empty() && !out.contains(impl_fn) {
+            out.push(*impl_fn);
+        }
+        for &capture in captures {
+            collect_impls(ir, capture, suspend_set, seen, out);
+        }
+        collect_impls(ir, *inline_body, suspend_set, seen, out);
+        return;
+    }
+    let mut children = Vec::new();
+    for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
+    for child in children {
+        collect_impls(ir, child, suspend_set, seen, out);
+    }
+}
+
 /// `inlined` records whether this expression is already inside some lambda's `inline_body`; only
 /// then does a suspension count, because only then is it invisible to the IR machine.
 fn walk_frame(

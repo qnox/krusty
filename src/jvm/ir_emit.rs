@@ -27,6 +27,7 @@ mod bottom_values;
 mod bridge_emission;
 mod call_operands;
 mod constructor_defaults;
+mod coroutine_machine;
 mod debug_lines;
 mod enum_entry_subclass;
 mod enum_metadata;
@@ -182,6 +183,26 @@ pub(crate) struct EmitRun {
     /// lexical nesting, while Java 8 bytecode does not; the declaring class owns one synthetic
     /// static access bridge and every cross-owner call targets it.
     private_member_access_bridges: std::cell::RefCell<std::collections::HashSet<u32>>,
+    /// Spill plans discovered for the suspend functions whose coroutine machine emission owns.
+    /// Absent on the discovery pass and present on the one that builds the machine.
+    machine_plans: std::cell::RefCell<coroutine_machine::MachinePlans>,
+    /// Continuation classes synthesized for the machines this emission builds, drained with the
+    /// facade they belong to.
+    machine_classes: std::cell::RefCell<Vec<(String, Vec<u8>)>>,
+}
+
+impl EmitRun {
+    fn has_machine_plan(&self, function: u32) -> bool {
+        self.machine_plans.borrow().contains_key(&function)
+    }
+
+    fn record_machine_plan(&self, function: u32, plan: coroutine_machine::MachinePlan) {
+        self.machine_plans.borrow_mut().insert(function, plan);
+    }
+
+    fn machine_plan(&self, function: u32) -> Option<coroutine_machine::MachinePlan> {
+        self.machine_plans.borrow().get(&function).cloned()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -278,6 +299,7 @@ pub(super) struct EmitEnv<'a> {
     bodies: &'a dyn MethodBodies,
     run: &'a EmitRun,
     continuation_metadata: &'a crate::jvm::suspend::ContinuationMetadataMap,
+    emit_time_machines: &'a crate::jvm::suspend::EmitTimeMachines,
     bridge_return_adaptations: &'a crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
     /// Semantic classifier declarations used only while translating Kotlin generic types into JVM
     /// `Signature` attributes. Declaration-site variance is a Kotlin fact; spelling it as JVM
@@ -3814,6 +3836,9 @@ pub fn mark_must_inline_lambdas(ir: &mut IrFile) {
 pub(crate) struct EmitMetadata<'a> {
     pub facade: Option<&'a KotlinMetadata>,
     pub continuations: &'a crate::jvm::suspend::ContinuationMetadataMap,
+    /// Suspend functions whose state machine this emission owns, because their only suspension is
+    /// inside a body it splices. See `docs/JVM_INLINE_BEFORE_CPS.md`.
+    pub emit_time_machines: &'a crate::jvm::suspend::EmitTimeMachines,
     pub bridge_returns: &'a crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
 }
 
@@ -3839,6 +3864,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         bodies,
         run,
         continuation_metadata: facts.metadata.continuations,
+        emit_time_machines: facts.metadata.emit_time_machines,
         bridge_return_adaptations: facts.metadata.bridge_returns,
         signature_symbols: facts.signature_symbols,
         jvm_default: opts.jvm_default,
@@ -3949,7 +3975,11 @@ fn emit_all_with_class_meta_impl(
         })
         .copied()
         .collect();
-    if dead.is_empty() && rescued.is_empty() {
+    // A coroutine machine the emission owns is built on the second pass, from what the first one
+    // learned about the post-splice frame: those functions need the re-emit whether or not any
+    // lambda turned out dead.
+    let machines_to_build = !env.run.machine_plans.borrow().is_empty();
+    if dead.is_empty() && rescued.is_empty() && !machines_to_build {
         return Some(first);
     }
     env.run.dead_lambdas.borrow_mut().clone_from(&dead);
@@ -4092,6 +4122,7 @@ fn emit_pass(
     // second pass emits a call site for a class that only existed in the discarded first output.
     env.run.lambda_classes.borrow_mut().clear();
     env.run.lambda_classes_written.borrow_mut().clear();
+    env.run.machine_classes.borrow_mut().clear();
     if !jvm_can_emit(ir) {
         crate::trace_compiler!(
             "lower",
@@ -4311,6 +4342,7 @@ fn emit_pass(
         }
         out.push((facade.to_string(), cw.finish()));
         out.extend(drain_lambda_classes(env, opts));
+        out.extend(env.run.machine_classes.borrow_mut().drain(..));
     }
     // Each class — with its optional `@Metadata` (the provider returns `None` for the default emit).
     for c in &ir.classes {
@@ -11013,6 +11045,40 @@ fn emit_method_inner_with_holder(
         e.slots.insert(vi, (slot, *t));
         e.next_slot += slot_words(*t);
     }
+    // A function whose coroutine machine emission owns reads its continuation from a slot this
+    // emitter picks. While the frame is being discovered that is the `$completion` parameter, which
+    // is one `aload` exactly like the machine's own local, so both passes allocate the same slots.
+    // A function whose coroutine machine emission owns gets its machine's own locals FIRST, right
+    // above the parameters and below everything the body allocates. Leasing them as backend
+    // temporaries is what makes every frame describe them — including the merged frames of a spliced
+    // lambda, which are built from the emitter's own slot view. Reserved identically on both passes,
+    // so the spill plan the first one reads is expressed in the slots the second one uses.
+    let machine_slots = env.emit_time_machines.suspensions(fid).map(|suspensions| {
+        let result = e.next_slot;
+        let continuation = result + 1;
+        let suspended = continuation + 1;
+        e.next_slot = suspended + 1;
+        let object = Ty::nullable(Ty::obj("kotlin/Any"));
+        e.lease_temporary(result, object);
+        // Typed as the machine's OWN continuation class: every read of this slot goes on to touch
+        // its `label`, `result` and spill fields, which the supertype does not declare.
+        e.lease_temporary(
+            continuation,
+            Ty::obj(&coroutine_machine::continuation_internal(owner, &f.name)),
+        );
+        e.lease_temporary(suspended, object);
+        e.continuation_slot = Some(continuation);
+        e.machine_suspensions = suspensions
+            .iter()
+            .enumerate()
+            .map(|(ordinal, suspension)| (suspension.call, ordinal))
+            .collect();
+        coroutine_machine::MachineSlots {
+            result,
+            continuation,
+            suspended,
+        }
+    });
     // kotlinc's writer visits a method HEADER before its code, so the name, descriptor, generic
     // `Signature` and annotation types precede every constant the body introduces. krusty builds the
     // body first, so reserve those entries here to land them in the same order.
@@ -11219,7 +11285,51 @@ fn emit_method_inner_with_holder(
             }
         }
     }
+    // Building the machine: everything the discovery pass learned is in hand, so the entry,
+    // the dispatch and the state it re-enters can be emitted around the same body.
+    let machine_states = match (machine_slots, env.run.machine_plan(fid)) {
+        (Some(slots), Some(plan)) => {
+            let internal = coroutine_machine::continuation_internal(owner, &f.name);
+            e.machine = Some(coroutine_machine::Machine {
+                plan,
+                slots,
+                internal,
+            });
+            let completion = param_tys.len().saturating_sub(1) as u32 + u32::from(instance);
+            let completion = e.slots.get(&completion).map(|&(slot, _)| slot);
+            completion.and_then(|completion| e.emit_machine_prologue(completion, &mut code))
+        }
+        _ => None,
+    };
     e.emit(body, &mut code);
+    // Discovery: this body is the post-splice bytecode the spill set has to be read from. Read it,
+    // then erase the markers so nothing synthetic can reach a class file even though these bytes are
+    // about to be discarded.
+    if !e.machine_suspensions.is_empty() && !env.run.has_machine_plan(fid) {
+        match coroutine_machine::discover(&code, &e.machine_slot_types, machine_slots) {
+            Some(plan) => {
+                crate::trace_compiler!(
+                    "suspend",
+                    "machine plan fid={fid} body_locals={} suspensions={:?}",
+                    plan.body_locals,
+                    plan.suspensions
+                );
+                env.run.record_machine_plan(fid, plan);
+            }
+            None => {
+                // No marker means the body never reached the suspension: the emitter declined the
+                // splice, so the lambda is a real closure after all and its suspension belongs to a
+                // method that has no continuation to pass. Routing has already taken the standalone
+                // `invoke` away — emitting now would leave an `invokedynamic` pointing at a method
+                // that does not exist. Decline the whole compile instead, as this shape did before
+                // the machine existed.
+                crate::trace_compiler!("suspend", "machine plan fid={fid} DECLINED");
+                env.run
+                    .set_inline_bail("suspension inside a lambda that was not spliced");
+            }
+        }
+        let _ = code.erase_markers();
+    }
     // The implicit `return` for a `Unit` function is dead code when the body already diverges
     // (`fun foo() { throw … }`): an unreachable `return` after `athrow` has no stack-map frame and
     // the verifier rejects it. Skip it exactly when the body can't fall through.
@@ -11231,6 +11341,46 @@ fn emit_method_inner_with_holder(
             code.mark_line(close);
         }
         code.ret_void();
+    }
+    // The dispatch's states live inside the spliced body, where only a marker could name them.
+    // Bind each one where its marker ended up, then erase every marker: they exist to survive the
+    // splice, not to reach a class file.
+    if let Some((_, resumes, default)) = machine_states {
+        let source_file = e.cw.source_file_name();
+        // Bind the states BEFORE the default block: that block ends in `athrow`, and binding an
+        // offset is refused once the stream is dead.
+        let found = code.marker_positions().unwrap_or_default();
+        for (at, kind, ordinal) in found {
+            if kind != crate::jvm::classfile::CoroutineMarker::Resume {
+                continue;
+            }
+            if let Some(&label) = resumes.get(ordinal as usize) {
+                // The state begins at the marker, which becomes `nop`s in its place.
+                code.bind_target_at(label, at);
+                // Its only predecessor is the dispatch, which arrives with the entry locals and
+                // nothing else; the restores that follow the marker put the spilled ones back.
+                if let Some(entry) = e.machine_entry_locals.clone() {
+                    code.add_frame_if_new(label, entry, Vec::new());
+                }
+            }
+        }
+        let _ = code.erase_markers();
+        e.emit_machine_default(default, &mut code);
+        if let Some(machine) = e.machine.clone() {
+            let bytes = coroutine_machine::build_continuation_class(
+                &machine.internal,
+                owner,
+                &f.name,
+                &reserved_desc,
+                &machine.plan,
+                Some(e.cw.major()),
+                source_file.as_deref(),
+            );
+            env.run
+                .machine_classes
+                .borrow_mut()
+                .push((machine.internal.clone(), bytes));
+        }
     }
     // The `$i$f$<name>` marker's LocalVariableTable entry covers the body from the post-store pc —
     // kotlinc writes it even when no other local is recorded. LVT strings intern EAGERLY, right
@@ -12801,6 +12951,21 @@ struct Emitter<'a> {
     /// yet registered in `slots` (queried before its declaration emits — e.g. an inline result temp).
     var_types: HashMap<u32, Ty>,
     next_slot: u16,
+    /// Where `IrExpr::CurrentContinuation` reads the continuation from, for a function whose
+    /// coroutine machine this emission owns. `None` for every other function.
+    continuation_slot: Option<u16>,
+    /// The suspensions of the function being emitted, by call expression, in machine order. Empty
+    /// for every function whose machine the IR pass owns.
+    machine_suspensions: HashMap<u32, usize>,
+    /// Types of slots this emitter allocated inside a spliced body — a lambda's parameters and its
+    /// inline-depth marker. A frame cannot describe them: they are assigned between frames, and the
+    /// spill plan needs their types to choose a continuation field and restore them.
+    machine_slot_types: HashMap<u16, Ty>,
+    /// The machine being built, on the pass that builds it.
+    machine: Option<coroutine_machine::Machine>,
+    /// The locals the dispatch can prove at a resume: the state on entry, before the body stored
+    /// anything. A resume's only predecessor is that dispatch.
+    machine_entry_locals: Option<Vec<VerifType>>,
     ret: Ty,
     /// Active loops: `(continue target, break target, checked common-IR target identity,
     /// active-finalizer depth on entry)`. FIR checking resolves a source label to a control target;
@@ -12886,6 +13051,11 @@ impl<'a> Emitter<'a> {
             label_unassigned_values: HashMap::new(),
             var_types: collect_body_var_types(ir, roots),
             next_slot: 0,
+            continuation_slot: None,
+            machine_suspensions: HashMap::new(),
+            machine_slot_types: HashMap::new(),
+            machine_entry_locals: None,
+            machine: None,
             ret,
             loop_stack: Vec::new(),
             pending_stack: Vec::new(),
@@ -13126,6 +13296,7 @@ impl<'a> Emitter<'a> {
                     self.next_slot = self.next_slot.max(lambda_slot);
                     store(jt, slot, &mut scratch);
                     param_slots[n_cap + j] = (slot, jt);
+                    self.machine_slot_types.insert(slot, jt);
                     // Its scope opens once the store completes, and runs to the end of the body.
                     if self.record_locals {
                         if let Some(name) = self
@@ -13153,6 +13324,7 @@ impl<'a> Emitter<'a> {
                 self.next_slot = self.next_slot.max(lambda_slot);
                 scratch.push_int(0, self.cw);
                 store(Ty::Int, depth_marker, &mut scratch);
+                self.machine_slot_types.insert(depth_marker, Ty::Int);
                 if self.record_locals {
                     if let Some(origin) = self.ir.lambda_origins.get(&impl_fn) {
                         lam_locals_declared.push((
@@ -13464,6 +13636,242 @@ impl<'a> Emitter<'a> {
             };
             code.add_line_mark_at(at, output);
         }
+    }
+
+    /// The machine's entry: take or make the continuation, read what a resume left in it, and
+    /// dispatch to the state it stopped in.
+    ///
+    /// Returns the label the body starts at, one label per suspension for the dispatch to re-enter,
+    /// and the label of the state that cannot happen.
+    fn emit_machine_prologue(
+        &mut self,
+        completion: u16,
+        code: &mut CodeBuilder,
+    ) -> Option<(Label, Vec<Label>, Label)> {
+        let machine = self.machine.clone()?;
+        let internal = machine.internal.clone();
+        let class = self.cw.class_ref(&internal);
+        let label_field = self.cw.fieldref(&internal, "label", "I");
+        let result_field = self.cw.fieldref(&internal, "result", "Ljava/lang/Object;");
+        let fresh = code.new_label();
+        let have = code.new_label();
+        let body = code.new_label();
+        let default = code.new_label();
+        let resumes: Vec<Label> = (0..machine.plan.suspensions.len())
+            .map(|_| code.new_label())
+            .collect();
+
+        // A continuation of our own type whose label carries the resume bit is this machine being
+        // re-entered; anything else is a fresh call.
+        code.aload(completion);
+        code.instance_of(class);
+        code.ifeq(fresh);
+        code.aload(completion);
+        code.checkcast(class);
+        code.astore(machine.slots.continuation);
+        code.aload(machine.slots.continuation);
+        code.getfield(label_field, 1);
+        code.push_int(i32::MIN, self.cw);
+        code.iand();
+        code.ifeq(fresh);
+        code.aload(machine.slots.continuation);
+        code.dup();
+        code.getfield(label_field, 1);
+        code.push_int(i32::MIN, self.cw);
+        code.isub();
+        code.putfield(label_field, 1);
+        code.goto(have);
+
+        // The machine's own locals are not assigned yet on the way in: the entry branch happens
+        // before any of them is stored, and a frame claiming otherwise describes a frame the
+        // incoming edge cannot produce.
+        let entry = self.verif_locals_upto(self.next_slot);
+        let unset = |locals: &[VerifType], slots: &[u16]| -> Vec<VerifType> {
+            let mut expanded = expand_collapsed_locals(locals);
+            for &slot in slots {
+                if let Some(at) = expanded.get_mut(slot as usize) {
+                    *at = VerifType::Top;
+                }
+            }
+            collapse_locals(&expanded)
+        };
+        let before_any = unset(
+            &entry,
+            &[
+                machine.slots.result,
+                machine.slots.continuation,
+                machine.slots.suspended,
+            ],
+        );
+        let after_continuation = unset(&entry, &[machine.slots.result, machine.slots.suspended]);
+        code.bind(fresh);
+        code.add_frame_if_new(fresh, before_any.clone(), Vec::new());
+        code.new_obj(class);
+        code.dup();
+        code.aload(completion);
+        let constructor =
+            self.cw
+                .methodref(&internal, "<init>", "(Lkotlin/coroutines/Continuation;)V");
+        code.invokespecial(constructor, 2, 0);
+        code.astore(machine.slots.continuation);
+
+        code.bind(have);
+        code.add_frame_if_new(have, after_continuation, Vec::new());
+        code.aload(machine.slots.continuation);
+        code.getfield(result_field, 1);
+        code.astore(machine.slots.result);
+        let suspended = self.cw.methodref(
+            "kotlin/coroutines/intrinsics/IntrinsicsKt",
+            "getCOROUTINE_SUSPENDED",
+            "()Ljava/lang/Object;",
+        );
+        code.invokestatic(suspended, 0, 1);
+        code.astore(machine.slots.suspended);
+        code.aload(machine.slots.continuation);
+        code.getfield(label_field, 1);
+        let mut targets = Vec::with_capacity(resumes.len() + 1);
+        targets.push(body);
+        targets.extend(resumes.iter().copied());
+        code.tableswitch(0, targets.len() as i32 - 1, default, &targets);
+
+        code.bind(body);
+        self.machine_entry_locals = Some(entry.clone());
+        code.add_frame_if_new(body, entry, Vec::new());
+        code.aload(machine.slots.result);
+        let throw_on_failure =
+            self.cw
+                .methodref("kotlin/ResultKt", "throwOnFailure", "(Ljava/lang/Object;)V");
+        code.invokestatic(throw_on_failure, 1, 0);
+        code.set_needs_stackmap();
+        Some((body, resumes, default))
+    }
+
+    /// The state a resume cannot legally be in: re-entering a machine that never suspended.
+    fn emit_machine_default(&mut self, default: Label, code: &mut CodeBuilder) {
+        let locals = self.verif_locals_upto(self.next_slot);
+        code.bind(default);
+        code.add_frame_if_new(default, locals, Vec::new());
+        let class = self.cw.class_ref("java/lang/IllegalStateException");
+        code.new_obj(class);
+        code.dup();
+        code.push_string("call to 'resume' before 'invoke' with coroutine", self.cw);
+        let constructor = self.cw.methodref(
+            "java/lang/IllegalStateException",
+            "<init>",
+            "(Ljava/lang/String;)V",
+        );
+        code.invokespecial(constructor, 2, 0);
+        code.athrow();
+    }
+
+    /// Spill the locals that must survive suspension `ordinal`, and record which state to resume in.
+    ///
+    /// Emitted BEFORE the call's operands: the sequence is stack-neutral, so it reads the same
+    /// whether the operands are already pushed or not, and placing it first keeps it out of the
+    /// operand emission it would otherwise have to thread through.
+    fn emit_machine_spills(&mut self, ordinal: usize, code: &mut CodeBuilder) {
+        let Some(machine) = self.machine.clone() else {
+            return;
+        };
+        let Some(suspension) = machine.plan.suspensions.get(ordinal) else {
+            return;
+        };
+        for (slot, ty, field, descriptor) in coroutine_machine::suspension_fields(suspension) {
+            code.aload(machine.slots.continuation);
+            load(ir_ty_to_jvm(&ty), slot, code);
+            let reference = self.cw.fieldref(&machine.internal, &field, descriptor);
+            code.putfield(reference, slot_words(ir_ty_to_jvm(&ty)) as i32);
+        }
+        code.aload(machine.slots.continuation);
+        code.push_int(ordinal as i32 + 1, self.cw);
+        let label = self.cw.fieldref(&machine.internal, "label", "I");
+        code.putfield(label, 1);
+    }
+
+    /// The `COROUTINE_SUSPENDED` check that follows a suspension's call, and the state the dispatch
+    /// re-enters at.
+    ///
+    /// The call's result is on the stack. If the callee suspended, this frame returns that sentinel
+    /// and the machine is re-entered later at the marked position, which restores the spilled locals
+    /// and pushes the resumed value instead. Both paths join with one value on the stack, so
+    /// whatever consumes the call cannot tell which one ran.
+    fn emit_machine_check(&mut self, ordinal: usize, code: &mut CodeBuilder) {
+        let Some(machine) = self.machine.clone() else {
+            return;
+        };
+        let Some(suspension) = machine.plan.suspensions.get(ordinal) else {
+            return;
+        };
+        let join = code.new_label();
+        code.dup();
+        code.aload(machine.slots.suspended);
+        code.if_acmpne(join);
+        code.aload(machine.slots.suspended);
+        code.areturn();
+        // Where the dispatch re-enters. The `areturn` above ended the stream, so the state is
+        // declared reachable first — otherwise everything that follows, marker included, is dropped
+        // as unreachable. The splice decides this position, so it is marked rather than recorded,
+        // and the marker is erased once the dispatch has been bound to it.
+        let resumed = code.new_label();
+        code.bind_external_target(resumed);
+        if let Ok(ordinal_marker) = u16::try_from(ordinal) {
+            code.coroutine_marker(
+                crate::jvm::classfile::CoroutineMarker::Resume,
+                ordinal_marker,
+            );
+        }
+        // The dispatch is this state's ONLY predecessor, and it jumps here with nothing but the
+        // machine's entry locals stored. A frame naming the body's locals — the ones live where
+        // this call sits — describes state that edge cannot produce; the restores below are what
+        // puts them back.
+        //
+        // The frame itself is recorded by the host, where the dispatch's label is bound at the
+        // marker: this builder may be a lambda body's own, whose offsets are pre-relocation and
+        // whose labels the host cannot bind.
+        let locals = self
+            .machine_entry_locals
+            .clone()
+            .unwrap_or_else(|| self.verif_locals_upto(self.next_slot));
+        for (slot, ty, field, descriptor) in coroutine_machine::suspension_fields(suspension) {
+            code.aload(machine.slots.continuation);
+            let reference = self.cw.fieldref(&machine.internal, &field, descriptor);
+            let jvm = ir_ty_to_jvm(&ty);
+            code.getfield(reference, slot_words(jvm) as i32);
+            // Only a reference spill widens on the way in — it is stored in an `Object` field, so
+            // the read has to be narrowed back. A primitive field already has the slot's own type,
+            // and casting an `int` is not something the verifier will accept.
+            if descriptor == "Ljava/lang/Object;" {
+                if let Some(internal) = checkcast_internal(jvm) {
+                    let class = self.cw.class_ref(&internal);
+                    code.checkcast(class);
+                }
+            }
+            store(jvm, slot, code);
+        }
+        code.aload(machine.slots.result);
+        let throw_on_failure =
+            self.cw
+                .methodref("kotlin/ResultKt", "throwOnFailure", "(Ljava/lang/Object;)V");
+        code.invokestatic(throw_on_failure, 1, 0);
+        code.aload(machine.slots.result);
+        code.bind(join);
+        // Two edges reach the join: the call that did not suspend, with every local the body has
+        // stored, and this resume, with the entry locals plus whatever was spilled. Recording both
+        // merges them, so a local only one edge can prove settles at `top` rather than being
+        // claimed on an edge that cannot produce it.
+        let stack = vec![VerifType::ObjectName("java/lang/Object".into())];
+        let fallthrough = self.verif_locals_upto(self.next_slot);
+        code.add_frame_if_new(join, fallthrough, stack.clone());
+        let mut restored = expand_collapsed_locals(&locals);
+        for (slot, ty, _, _) in coroutine_machine::suspension_fields(suspension) {
+            let slot = slot as usize;
+            if restored.len() <= slot {
+                restored.resize(slot + 1, VerifType::Top);
+            }
+            restored[slot] = verif_of(ir_ty_to_jvm(&ty));
+        }
+        code.add_frame_if_new(join, collapse_locals(&restored), stack);
+        code.set_needs_stackmap();
     }
 
     /// Describe a spliced body's own locals in the caller's debug table.
@@ -14174,8 +14582,32 @@ impl<'a> Emitter<'a> {
 
     fn emit_value(&mut self, e: u32, code: &mut CodeBuilder) {
         debug_lines::mark_expression_start(self.ir, e, code);
+        // A suspension whose machine emission owns: mark where it landed. The splice decides that
+        // position, so an offset recorded before it would be worthless, whereas an instruction
+        // travels with the code. Every marker is erased once its answers are read.
+        let suspension = self.machine_suspensions.get(&e).copied();
+        if let Some(ordinal) = suspension {
+            match self.machine.is_some() {
+                // Building the machine: spill first, then the call, then the resume point.
+                true => self.emit_machine_spills(ordinal, code),
+                // Discovering the frame: mark where the splice put this suspension.
+                false => {
+                    if let Ok(ordinal) = u16::try_from(ordinal) {
+                        code.coroutine_marker(
+                            crate::jvm::classfile::CoroutineMarker::Suspension,
+                            ordinal,
+                        );
+                    }
+                }
+            }
+        }
         let node = self.ir.expr(e).clone();
         self.emit_value_node(e, &node, code);
+        if let Some(ordinal) = suspension {
+            if self.machine.is_some() {
+                self.emit_machine_check(ordinal, code);
+            }
+        }
     }
 
     /// Emit `e` and then narrow it to the CONSUMPTION type `expected` — the `checkcast` kotlinc inserts
@@ -17194,10 +17626,15 @@ impl<'a> Emitter<'a> {
                 code.getstatic(f, 1);
             }
             IrExpr::CurrentContinuation => {
-                // The CPS pass (`jvm/suspend.rs`) rewrites every `CurrentContinuation` to a `GetValue` of
-                // the continuation slot before emit; reaching here means it was emitted outside a suspend
-                // function, which the front end forbids.
-                unreachable!("CurrentContinuation must be resolved by the CPS pass before emit")
+                // The CPS pass rewrites this to a `GetValue` of the continuation slot for every
+                // function whose machine it owns. It leaves the node in place for a function whose
+                // machine EMISSION owns — a suspension inside a body this emitter splices — because
+                // which slot holds the continuation is then an emission decision: the `$completion`
+                // parameter while discovering the frame, the machine's own local while building it.
+                let Some(slot) = self.continuation_slot else {
+                    unreachable!("CurrentContinuation outside a suspend function reaches emit")
+                };
+                code.aload(slot);
             }
             IrExpr::NotNullAssert { operand, message } => {
                 self.emit_value(*operand, code);
@@ -20188,6 +20625,7 @@ mod fail_soft_tests {
             crate::jvm::default_call_operands::DefaultCallOperands::default();
         let bridge_returns =
             crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations::default();
+        let emit_time_machines = crate::jvm::suspend::EmitTimeMachines::default();
         emit_all_with_checked_classifiers(
             ir,
             facade,
@@ -20197,6 +20635,7 @@ mod fail_soft_tests {
                     facade: None,
                     continuations: &continuations,
                     bridge_returns: &bridge_returns,
+                    emit_time_machines: &emit_time_machines,
                 },
                 signature_symbols: &NoClassifiers,
                 property_realizations: &property_realizations,

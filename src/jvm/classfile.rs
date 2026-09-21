@@ -12,7 +12,7 @@ mod coroutine_markers;
 mod line_numbers;
 mod method_parameters;
 
-pub use coroutine_markers::CoroutineMarker;
+pub use coroutine_markers::{CoroutineMarker, MARKER_LEN};
 
 pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PRIVATE: u16 = 0x0002;
@@ -899,6 +899,11 @@ impl ClassWriter {
             self.source_map = crate::jvm::source_map::SourceMap::new(&source_file, &path, lines);
         }
         Some(&mut self.source_map)
+    }
+
+    /// The class's own source file, for a synthesized class that belongs to it.
+    pub fn source_file_name(&self) -> Option<String> {
+        self.source_file.clone()
     }
 
     pub fn set_source_file(&mut self, name: Option<String>) {
