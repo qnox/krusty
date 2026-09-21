@@ -509,3 +509,102 @@ fn overloaded_suspend_functions_get_their_own_continuations() {
     };
     assert_eq!(output, "OK");
 }
+
+/// The suspension is an operand of a write to a LOCAL DECLARED IN THE SPLICED BODY: `s = s + one(x)`
+/// reaches the suspension with `s` on the stack, which the `areturn` a suspension leaves through
+/// destroys. The hoist has to snapshot `s` into a temp first, and typing that snapshot means seeing
+/// the lambda's own locals — the body is numbered in the lambda's own value space, not the
+/// enclosing function's.
+#[test]
+fn a_suspension_read_modify_writing_a_spliced_body_local_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun a(): Int = twice(1) { x -> var s = 0; s = s + one(x); s }
+        fun box(): String = runBlocking {
+            val n = a()
+            if (n == 5) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_rmw_local", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// The compound form of the same shape: `s += one(x)` desugars to the read-modify-write above.
+#[test]
+fn a_suspension_compound_assigned_to_a_spliced_body_local_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun a(): Int = twice(1) { x -> var s = 0; s += one(x); s }
+        fun box(): String = runBlocking {
+            val n = a()
+            if (n == 5) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_compound_local", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// An array store: the array reference and the index sit on the stack under the suspension, and the
+/// array is a spliced-body local too.
+#[test]
+fn a_suspension_stored_into_a_spliced_body_array_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun b(): Int = twice(1) { x -> val arr = IntArray(1); arr[0] = one(x); arr[0] }
+        fun box(): String = runBlocking {
+            val n = b()
+            if (n == 5) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_array_local", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// A body local declared AFTER a capture: the lambda's numbering is `tag` at 0, `x` at 1, `s` at 2,
+/// so `s` sits at an index the enclosing function (`k` at 0, `tag` at 1) never declared.
+#[test]
+fn a_body_local_after_a_capture_is_typed_in_the_lambda_numbering() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun c(k: Int, tag: String): Int = twice(k) { x -> var s = tag.length; s = s + one(x); s }
+        fun box(): String = runBlocking {
+            val n = c(1, "ab")
+            if (n == 9) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_capture_numbering", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// The capture ITSELF is the snapshot: `arr[0] = one(x)` puts the array under the suspension, and
+/// `arr` is capture 0 — an `IntArray` — where the enclosing function's parameter 0 is `k: Int`.
+/// Typed from the enclosing table, that snapshot would be an `Int` temp holding an array reference:
+/// a miscompile, not a decline. Typed in the lambda's numbering it is the array it is.
+#[test]
+fn a_captured_array_under_a_suspension_is_typed_as_the_capture() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun d(k: Int, arr: IntArray): Int = twice(k) { x -> arr[0] = one(x); arr[0] }
+        fun box(): String = runBlocking {
+            val n = d(1, IntArray(1))
+            if (n == 5) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_captured_array", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
