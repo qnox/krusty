@@ -330,7 +330,10 @@ impl<'a> FileLowering<'a> {
                 params.extend(super::functions::carried_parameters(self.ir, *declared));
                 let ret = base.ret;
                 let id = self.declare_local_function(
-                    &format!("kt_bridge_{declared}_{target}_{target_slot}"),
+                    &match target_slot {
+                        Some(slot) => format!("kt_bridge_{declared}_{target}_{slot}"),
+                        None => format!("kt_bridge_{declared}_{target}_direct"),
+                    },
                     &params,
                     ret,
                 )?;
@@ -866,7 +869,7 @@ impl<'a> FileLowering<'a> {
     fn define_bridge(
         &mut self,
         declared: crate::ir::FunId,
-        target_slot: u32,
+        target_slot: Option<u32>,
         target: crate::ir::FunId,
         id: FuncId,
     ) -> Result<(), Unsupported> {
@@ -888,13 +891,24 @@ impl<'a> FileLowering<'a> {
                 };
                 arguments.push(value);
             }
-            let answer = body.dispatch(
-                values[0],
-                target_slot,
-                &forwarded,
-                forwarded_ret,
-                &arguments,
-            )?;
+            // Through the slot where there is one, so a further subclass's override is reached
+            // through the same base. An INTERFACE's own bridge has none — see `Slot::Bridge` —
+            // and calls the default body outright, which is where it is the only implementation.
+            let answer = match target_slot {
+                Some(slot) => {
+                    body.dispatch(values[0], slot, &forwarded, forwarded_ret, &arguments)?
+                }
+                None => {
+                    let Some(target) = body.file.functions[target as usize] else {
+                        return Err("a bridge to a method with no body".to_string());
+                    };
+                    let func_ref = body.func_ref(target);
+                    let mut operands = vec![values[0]];
+                    operands.extend_from_slice(&arguments);
+                    let call = body.emit_call(func_ref, &operands)?;
+                    body.builder.inst_results(call).first().copied()
+                }
+            };
             match (answer, carrier(result)) {
                 (Some(answer), Carrier::Void) => {
                     let _ = answer;

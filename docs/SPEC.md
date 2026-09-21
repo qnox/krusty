@@ -7625,6 +7625,39 @@ and behavior is checked by RUNNING the emitted program.
   REQUIRING the native lowering); the corpus cases are `codegen/box/fp/remainderVsMod*.kt` and the
   `inlineArgsInPlace` pair.
 
+- **A method reached through an interface that declares it at another representation is bridged.**
+  An interface's member numbers are placed program-wide rather than in one class's table, so a
+  representation change cannot be answered by replacing an entry in that table — there is no entry
+  there. It is answered where the number is FILLED: the class records a bridge against the
+  interface's key, and the interface region reads it before it reads the slot map, which is the
+  arrangement a property accessor's interface bridge already used.
+
+  Three things the shape forced, each of which pointing the number straight at the implementation
+  would have hidden:
+
+  - A number needing a bridge must not be SHARED with a spelling that does not.
+    `interface Z1 : A<String>, B<String, Int>` overriding `foo(String, Int)` is callable through
+    `A.foo(T, Int)`'s number as it stands and through `B.foo(T, U)`'s only after conversion, so
+    `Z1`'s own spelling joins `A`'s number rather than `B`'s.
+  - What an implementor inherits has to be chosen against ITS hierarchy. `Z1` and `Z2` above both
+    fill `A`'s number, and one recorded answer meant the last interface laid out won — a class
+    implementing the other answered with a body it does not have. The supplier is now the most
+    derived interface in the implementor's own hierarchy that has one.
+  - An interface's own bridge has no slot to forward through: the slot it would name is the
+    interface's table index and not the implementor's. It calls the body outright, which is what a
+    plain default already does, and is reached only where nothing overrides the member.
+
+  Separately, and found by the same work: **a method spelled like a property's accessor is a
+  method.** A property with a field is read through that field, so its accessor is synthesized; a
+  same-named method is a declaration of its own. Keying it as the property's getter took it out of
+  the method numbering entirely, so the base's slot kept the base's body and a call through the
+  base jumped into whatever stood there. The name fallback now applies only to a property with no
+  storage — an abstract `val` in an interface, which is what it was written for.
+  Tests: `tests/native_interface_bridges_e2e.rs` (all three, each cross-checking the two backends
+  and REQUIRING the native lowering); the corpus cases are all of `codegen/box/bridges/`, the
+  `classDelegation` and `traits` delegation cases, and
+  `codegen/box/extensionFunctions/*ExtensionSuper.kt` (KT-42176).
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

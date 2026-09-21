@@ -185,7 +185,13 @@ pub(super) enum Slot {
         /// The base method whose signature this entry wears.
         declared: FunId,
         /// The slot to forward through, and the method whose carriers that slot expects.
-        target_slot: u32,
+        ///
+        /// `None` where there is no slot to forward through: an INTERFACE's own bridge stands in
+        /// the default an implementor inherits, and the slot it would name is the interface's
+        /// table index rather than that implementor's. A default is reached only where nothing
+        /// overrides the member, so calling `target` outright is the same answer — and it is the
+        /// same thing a plain `Slot::Function` default already does.
+        target_slot: Option<u32>,
         target: FunId,
     },
     /// The same thing for a property ACCESSOR reached through an INTERFACE that declares it with
@@ -487,15 +493,33 @@ fn place_interface_slots(
                         .find_map(|&base| relative[base as usize].get(key).copied())
                 })
                 .collect();
-            let joined = match inherited.iter().flatten().next() {
-                Some(&number) => number,
+            // A key with no number of its own joins one that HAS one — but only a number that
+            // carries the entry as it stands. A number needing a bridge wears the base's
+            // signature, and a key that does not need one is callable with the entry's: sharing
+            // the two would make a caller through this interface pass what the bridge converts.
+            // `interface Z1 : A<String>, B<String, Int>` overriding `foo(String, Int)` is that
+            // case — `A`'s number takes the body, `B`'s takes a bridge, and `Z1`'s own spelling
+            // has to join `A`'s.
+            let plain = |key: &SlotKey| !layout.interface_bridges.contains_key(key);
+            let joined = match keys
+                .iter()
+                .zip(&inherited)
+                .find_map(|(key, number)| number.filter(|_| plain(key)))
+            {
+                Some(number) => number,
                 None => {
                     let assigned = members.len() as u32;
                     members.push(InterfaceMember {
                         interface: id,
-                        key: keys.first().expect("a group has a key").clone(),
+                        key: keys
+                            .iter()
+                            .find(|key| plain(key))
+                            .or_else(|| keys.first())
+                            .expect("a group has a key")
+                            .clone(),
                         aliases: Vec::new(),
-                        default: entry.clone(),
+                        // Filled by the loop below, which knows which key this number wears.
+                        defaults: Vec::new(),
                     });
                     assigned
                 }
@@ -507,8 +531,25 @@ fn place_interface_slots(
             for (key, &number) in keys.iter().zip(&numbered) {
                 // An interface redeclaring an inherited member with a body replaces what the base
                 // supplied, for classes that implement neither themselves.
-                if !matches!(entry, Slot::Abstract) {
-                    members[number as usize].default = entry.clone();
+                //
+                // Per KEY, because one entry can fill several numbers and need a bridge in only
+                // some of them: `interface Z1 : A<String>, B<String, Int>` overriding
+                // `foo(String, Int)` is callable through `A`'s number as it stands — `A.foo(T,
+                // Int)` already carries the second operand as a machine integer — and through
+                // `B`'s number only after conversion, since `B.foo(T, U)` carries both as
+                // references. Reading the entry for both numbers put the raw body where `B`'s
+                // caller passes a boxed integer.
+                let supplied = layout
+                    .interface_bridges
+                    .get(key)
+                    .cloned()
+                    .unwrap_or_else(|| entry.clone());
+                if !matches!(supplied, Slot::Abstract) {
+                    let member = &mut members[number as usize];
+                    match member.defaults.iter_mut().find(|(who, _)| *who == id) {
+                        Some((_, existing)) => *existing = supplied,
+                        None => member.defaults.push((id, supplied)),
+                    }
                 }
                 // A class implementing `Both : Named` registers what it overrides under the key the
                 // override names, and that can be ANY interface's spelling of the same member — a
@@ -574,7 +615,7 @@ fn place_interface_slots(
                 if !mine {
                     continue;
                 }
-                defaults[base as usize + member_slot] = member.default.clone();
+                defaults[base as usize + member_slot] = supplied(member, id, interfaces);
             }
             table = defaults;
             layouts[id as usize].slots = slots;
@@ -600,7 +641,7 @@ fn place_interface_slots(
                     // The class (or an ancestor) implements the member: its own slot already holds
                     // the most derived implementation, whatever further overrides did to it.
                     Some(&slot) => vtable[slot as usize].clone(),
-                    None => member.default.clone(),
+                    None => supplied(member, id, interfaces),
                 }
             };
             // A CONCRETE class reaching the abstract trap for an interface it DOES implement
@@ -656,9 +697,40 @@ struct InterfaceMember {
     key: SlotKey,
     /// The same member as spelled through each interface that inherits it.
     aliases: Vec<SlotKey>,
-    /// What a class that implements the interface without supplying this member gets: the
-    /// interface's own body where it has one, and otherwise the abstract trap.
-    default: Slot,
+    /// What a class that implements the interface without supplying this member gets, PER
+    /// interface that supplies one — the interface's own body where it has one.
+    ///
+    /// Several interfaces can supply one number: `interface Z1 : A, B` and `interface Z2 : B, A`
+    /// each override the member `A` and `B` both declare, and both are numbered onto `A`'s entry.
+    /// One recorded answer meant the last interface laid out won, and a class implementing the
+    /// other answered with a body it does not have. [`supplied`] chooses against the
+    /// implementor's own hierarchy instead.
+    defaults: Vec<(ClassId, Slot)>,
+}
+
+/// What an implementor inherits for one interface member: the body of the MOST DERIVED interface
+/// in its own hierarchy that supplies one, or the abstract trap when none does.
+///
+/// "Most derived" is the supplier that no other candidate extends. Kotlin guarantees there is one:
+/// a class inheriting two unrelated bodies for the same member does not compile without an
+/// override of its own, and that override is what this is consulted instead of.
+fn supplied(member: &InterfaceMember, class: ClassId, interfaces: &[Vec<ClassId>]) -> Slot {
+    let reaches =
+        |from: ClassId, to: ClassId| from == to || interfaces[from as usize].contains(&to);
+    let candidates: Vec<&(ClassId, Slot)> = member
+        .defaults
+        .iter()
+        .filter(|(supplier, _)| reaches(class, *supplier))
+        .collect();
+    candidates
+        .iter()
+        .find(|(supplier, _)| {
+            !candidates
+                .iter()
+                .any(|(other, _)| other != supplier && reaches(*other, *supplier))
+        })
+        .map(|(_, slot)| slot.clone())
+        .unwrap_or(Slot::Abstract)
 }
 
 /// Classes sorted so that everything a class is laid out FROM precedes it: its superclass, whose
@@ -785,6 +857,14 @@ fn layout_class(
     let instance_size = round_up(end, 8);
 
     // ---- vtable ----
+    // Bridges against an INTERFACE's member numbers, which are placed program-wide rather than in
+    // this table. Filled below wherever an implementation and the interface's declaration disagree
+    // about representation, and read where the interface region is laid out.
+    // Inherited, because a subclass's vtable inherits the slot the bridge forwards through and
+    // would otherwise take the raw implementation at the interface's number.
+    let mut interface_bridges: HashMap<SlotKey, Slot> = parent
+        .map(|parent| parent.interface_bridges.clone())
+        .unwrap_or_default();
     let (mut vtable, mut slots) = match (parent, external) {
         (Some(parent), _) => (parent.vtable.clone(), parent.slots.clone()),
         // A base the runtime owns fills `kotlin.Any`'s three slots its own way — a `Throwable`
@@ -802,9 +882,21 @@ fn layout_class(
     // its accessor reaches the method list as an ordinary method; matching the declared accessor
     // name is what ties the two back together, so the interface and the class implementing it
     // agree on one key for the member.
+    //
+    // Only where the property has no STORAGE of its own. A property with a field is read through
+    // that field — the accessor for it is synthesized below — so a method that happens to spell
+    // the accessor's name is a method and not that accessor. `class Bottom(val data: Int) : Top {
+    // override fun getData(): Int = data }` declares both, which is legal Kotlin and not even
+    // unusual; keying the method as the property's getter took it out of the method numbering
+    // entirely, so the base's slot kept the base's body and a call through the base jumped into
+    // whatever stood there.
     let mut accessor_keys: HashMap<FunId, SlotKey> = HashMap::new();
     for property in &class.properties {
+        let stored = class.fields.iter().any(|field| field.name == property.name);
         let named = |accessor: &str, arity: usize| {
+            if stored {
+                return None;
+            }
             class.methods.iter().copied().find(|&fid| {
                 let function = &ir.functions[fid as usize];
                 function.name == accessor && function.params.len() == arity
@@ -857,7 +949,9 @@ fn layout_class(
         // What this method overrides, split by what each target owns: a class base owns a slot in
         // this vtable to replace, while an interface base owns a number in the program-wide
         // interface region, which is pointed at this method's slot once that slot is known.
-        let mut interface_keys = Vec::new();
+        // The interface bases this method satisfies, each with the declaration a BRIDGE against
+        // that number would wear — `None` where the representations already agree.
+        let mut interface_keys: Vec<(SlotKey, Option<FunId>)> = Vec::new();
         let mut class_replaces = None;
         // A base whose signature has a different REPRESENTATION keeps its own slot and gets a
         // bridge placed in it once this method's slot is known. A class base can always take one;
@@ -882,9 +976,10 @@ fn layout_class(
             let key = function_key(ir, owner, overridden);
             if ir.classes[owner as usize].is_interface {
                 // The interface's number is placed program-wide rather than in this vtable, so
-                // there is no entry here to put a bridge in. Declined rather than answered wrongly.
-                unbridgeable(ir, function, &ir.functions[overridden as usize])?;
-                interface_keys.push(key);
+                // there is no entry HERE to put a bridge in. The bridge is recorded against the
+                // interface's own key instead, and read where that number is filled — which is
+                // the arrangement a property accessor's interface bridge already uses.
+                interface_keys.push((key, (!matches).then_some(overridden)));
                 continue;
             }
             let slot = slots.get(&key).copied().ok_or_else(|| {
@@ -967,7 +1062,22 @@ fn layout_class(
             }
         };
         slots.insert(own_key, slot);
-        for key in interface_keys {
+        for (key, bridge) in interface_keys {
+            // The number wears the INTERFACE's signature and converts; the slot map still points
+            // at this method, because everything else that reads the map wants the
+            // implementation. Which of the two a caller gets is decided where the number is
+            // filled, and it prefers the bridge.
+            if let Some(declared) = bridge {
+                interface_bridges
+                    .entry(key.clone())
+                    .or_insert(Slot::Bridge {
+                        declared,
+                        // An INTERFACE's entry is a default an implementor inherits, and this
+                        // slot is the interface's own table index — not that implementor's.
+                        target_slot: (!class.is_interface).then_some(slot),
+                        target: fid,
+                    });
+            }
             slots.insert(key, slot);
         }
         // The base keeps its own slot and its own signature; what changes is only what stands in
@@ -976,7 +1086,7 @@ fn layout_class(
         for (base_slot, declared) in bridged {
             vtable[base_slot as usize] = Slot::Bridge {
                 declared,
-                target_slot: slot,
+                target_slot: Some(slot),
                 target: fid,
             };
         }
@@ -1073,7 +1183,6 @@ fn layout_class(
         }
     }
 
-    let mut interface_bridges = HashMap::new();
     register_inherited_interface_members(ir, class, &mut slots, &mut interface_bridges)?;
 
     // A `value class` is not a one-field class. Kotlin answers `equals`, `hashCode` and `toString`
@@ -1177,16 +1286,23 @@ fn register_inherited_interface_members(
         // The inherited method has to be CALLABLE through the interface's signature. `class F5 :
         // F3, D4()` where `D4.foo(): Int` is what `D1.foo(): Any` gets is the case that says why:
         // one returns an unboxed machine integer, the other a reference, and pointing the
-        // interface's slot at it would have a caller read an integer as a pointer. The JVM emits a
-        // bridge for exactly this; until one is emitted here, the file is declined.
-        unbridgeable(
-            ir,
+        // interface's number straight at it would have a caller read an integer as a pointer. The
+        // number takes a bridge wearing the interface's carrier instead — the same answer the
+        // property path below gives, and the same one the JVM gives by emitting a bridge method.
+        let key = function_key(ir, interface, overridden);
+        if !same_representation(
             &ir.functions[implementation as usize],
             &ir.functions[overridden as usize],
-        )?;
-        slots
-            .entry(function_key(ir, interface, overridden))
-            .or_insert(slot);
+        ) {
+            interface_bridges
+                .entry(key.clone())
+                .or_insert(Slot::Bridge {
+                    declared: overridden,
+                    target_slot: Some(slot),
+                    target: implementation,
+                });
+        }
+        slots.entry(key).or_insert(slot);
     }
     for edge in ir
         .property_overrides
@@ -1515,26 +1631,6 @@ fn same_representation(implementation: &IrFunction, overridden: &IrFunction) -> 
             .zip(&overridden.params)
             .all(|(a, b)| c_kind(*a) == c_kind(*b))
         && c_kind(implementation.ret) == c_kind(overridden.ret)
-}
-
-/// The decline an override keeps when no bridge can be placed for it.
-fn unbridgeable(
-    ir: &IrFile,
-    implementation: &IrFunction,
-    overridden: &IrFunction,
-) -> Result<(), Unsupported> {
-    if same_representation(implementation, overridden) {
-        return Ok(());
-    }
-    let owner = implementation
-        .dispatch_receiver
-        .map_or_else(String::new, TypeName::render);
-    let _ = ir;
-    Err(format!(
-        "an override that changes a parameter's or the result's representation (`{owner}.{}`; \
-         a bridge method is needed)",
-        implementation.name
-    ))
 }
 
 /// A symbol-safe spelling of a Kotlin name: every non-alphanumeric character becomes `_`.
@@ -1940,7 +2036,7 @@ mod tests {
             model.layouts[b as usize].vtable[base_slot as usize],
             Slot::Bridge {
                 declared: a_f,
-                target_slot: own_slot,
+                target_slot: Some(own_slot),
                 target: b_f,
             },
             "the base's slot holds a bridge forwarding to the override's slot"
