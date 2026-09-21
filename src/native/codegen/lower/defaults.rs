@@ -172,77 +172,70 @@ impl<'a> FileLowering<'a> {
             ));
         }
         let result = declaration.ret;
-        self.emit_function(
-            id,
-            signature,
-            result,
-            &name,
-            &mut |body, params| {
-                // The callee's own frame: `this` at slot 0 where there is one, then every
-                // parameter at its own ordinal, so a default reading an earlier one finds it. Each
-                // slot is declared ONCE — declaring it again would hand back a fresh, undefined
-                // variable and lose what was put in it.
-                let mut variables = Vec::with_capacity(slots.len());
-                for (slot, ty) in slots.iter().enumerate() {
-                    variables.push(body.declare_value(slot as u32, *ty)?);
-                }
-                if receiver == 1 {
-                    body.builder.def_var(variables[0], params[0]);
-                }
-                for (index, ordinal) in supplied.iter().enumerate() {
-                    let slot = *ordinal + receiver;
-                    body.builder
-                        .def_var(variables[slot], params[index + receiver]);
-                }
-                // Declaration order, because a later default may read an earlier one's parameter.
-                for ordinal in &omitted {
-                    let Some(Some(expression)) = defaults.get(*ordinal as usize) else {
-                        return Err(format!(
-                            "an omitted argument with no default (`{}`)",
-                            declaration.name
-                        ));
-                    };
-                    let slot = (*ordinal as usize) + receiver;
-                    let Some(value) = body.coerce(*expression, slots[slot])? else {
-                        return Err(format!(
-                            "a `Unit` default argument (`{}`)",
-                            declaration.name
-                        ));
-                    };
-                    if body.terminated {
-                        return Ok(());
-                    }
-                    body.builder.def_var(variables[slot], value);
-                }
-                let arguments: Vec<Value> = variables
-                    .iter()
-                    .map(|variable| body.builder.use_var(*variable))
-                    .collect();
-                let returned = match virtual_slot {
-                    Some(slot) => {
-                        body.dispatch(arguments[0], slot, &slots[1..], result, &arguments[1..])?
-                    }
-                    None => {
-                        let target = target.ok_or_else(|| {
-                            "a defaulted call to a function with no body".to_string()
-                        })?;
-                        let func_ref = body.func_ref(target);
-                        let call = body.emit_call(func_ref, &arguments)?;
-                        body.builder.inst_results(call).first().copied()
-                    }
+        self.emit_function(id, signature, result, &name, &mut |body, params| {
+            // The callee's own frame: `this` at slot 0 where there is one, then every
+            // parameter at its own ordinal, so a default reading an earlier one finds it. Each
+            // slot is declared ONCE — declaring it again would hand back a fresh, undefined
+            // variable and lose what was put in it.
+            let mut variables = Vec::with_capacity(slots.len());
+            for (slot, ty) in slots.iter().enumerate() {
+                variables.push(body.declare_value(slot as u32, *ty)?);
+            }
+            if receiver == 1 {
+                body.builder.def_var(variables[0], params[0]);
+            }
+            for (index, ordinal) in supplied.iter().enumerate() {
+                let slot = *ordinal + receiver;
+                body.builder
+                    .def_var(variables[slot], params[index + receiver]);
+            }
+            // Declaration order, because a later default may read an earlier one's parameter.
+            for ordinal in &omitted {
+                let Some(Some(expression)) = defaults.get(*ordinal as usize) else {
+                    return Err(format!(
+                        "an omitted argument with no default (`{}`)",
+                        declaration.name
+                    ));
                 };
-                match returned {
-                    Some(value) if carrier(result) != Carrier::Void => {
-                        body.builder.ins().return_(&[value]);
-                    }
-                    _ => {
-                        body.builder.ins().return_(&[]);
-                    }
+                let slot = (*ordinal as usize) + receiver;
+                let Some(value) = body.coerce(*expression, slots[slot])? else {
+                    return Err(format!(
+                        "a `Unit` default argument (`{}`)",
+                        declaration.name
+                    ));
+                };
+                if body.terminated {
+                    return Ok(());
                 }
-                body.terminate();
-                Ok(())
-            },
-        )
+                body.builder.def_var(variables[slot], value);
+            }
+            let arguments: Vec<Value> = variables
+                .iter()
+                .map(|variable| body.builder.use_var(*variable))
+                .collect();
+            let returned = match virtual_slot {
+                Some(slot) => {
+                    body.dispatch(arguments[0], slot, &slots[1..], result, &arguments[1..])?
+                }
+                None => {
+                    let target = target
+                        .ok_or_else(|| "a defaulted call to a function with no body".to_string())?;
+                    let func_ref = body.func_ref(target);
+                    let call = body.emit_call(func_ref, &arguments)?;
+                    body.builder.inst_results(call).first().copied()
+                }
+            };
+            match returned {
+                Some(value) if carrier(result) != Carrier::Void => {
+                    body.builder.ins().return_(&[value]);
+                }
+                _ => {
+                    body.builder.ins().return_(&[]);
+                }
+            }
+            body.terminate();
+            Ok(())
+        })
     }
 }
 

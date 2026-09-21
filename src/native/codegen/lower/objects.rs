@@ -837,61 +837,52 @@ impl<'a> FileLowering<'a> {
         let forwarded = super::functions::carried_parameters(self.ir, target);
         let forwarded_ret = self.ir.functions[target as usize].ret;
         let name = format!("bridge to `{}`", base.name);
-        self.emit_function(
-            id,
-            signature,
-            result,
-            &name,
-            &mut |body, values| {
-                let mut arguments = Vec::with_capacity(forwarded.len());
-                for (index, &want) in forwarded.iter().enumerate() {
-                    let have = carried.get(index).copied();
-                    let Some(value) = body.convert(values[index + 1], have, want)? else {
-                        return Err("a `Unit` operand crossing a bridge".to_string());
+        self.emit_function(id, signature, result, &name, &mut |body, values| {
+            let mut arguments = Vec::with_capacity(forwarded.len());
+            for (index, &want) in forwarded.iter().enumerate() {
+                let have = carried.get(index).copied();
+                let Some(value) = body.convert(values[index + 1], have, want)? else {
+                    return Err("a `Unit` operand crossing a bridge".to_string());
+                };
+                arguments.push(value);
+            }
+            let answer = body.dispatch(
+                values[0],
+                target_slot,
+                &forwarded,
+                forwarded_ret,
+                &arguments,
+            )?;
+            match (answer, carrier(result)) {
+                (Some(answer), Carrier::Void) => {
+                    let _ = answer;
+                    body.builder.ins().return_(&[]);
+                }
+                (Some(answer), _) => {
+                    let Some(answer) = body.convert(answer, Some(forwarded_ret), result)? else {
+                        return Err("an answer that does not cross a bridge".to_string());
                     };
-                    arguments.push(value);
+                    body.builder.ins().return_(&[answer]);
                 }
-                let answer = body.dispatch(
-                    values[0],
-                    target_slot,
-                    &forwarded,
-                    forwarded_ret,
-                    &arguments,
-                )?;
-                match (answer, carrier(result)) {
-                    (Some(answer), Carrier::Void) => {
-                        let _ = answer;
-                        body.builder.ins().return_(&[]);
-                    }
-                    (Some(answer), _) => {
-                        let Some(answer) = body.convert(answer, Some(forwarded_ret), result)?
-                        else {
-                            return Err("an answer that does not cross a bridge".to_string());
-                        };
-                        body.builder.ins().return_(&[answer]);
-                    }
-                    // `open fun foo(): Any` overridden by `fun foo(): Unit`. The override produces
-                    // no machine value, and `Unit` is still the Kotlin value a caller reading the
-                    // base's slot gets back — the runtime owns that singleton, so hand it over.
-                    (None, Carrier::Ref) => {
-                        let unit = body
-                            .runtime_call("kt_unit", &[], any(), &[])?
-                            .expect("`kt_unit` returns the singleton");
-                        body.builder.ins().return_(&[unit]);
-                    }
-                    (None, Carrier::Void) => {
-                        body.builder.ins().return_(&[]);
-                    }
-                    (None, Carrier::Scalar(_, _)) => {
-                        return Err(
-                            "a `Unit` answer where the base declares a primitive".to_string()
-                        );
-                    }
+                // `open fun foo(): Any` overridden by `fun foo(): Unit`. The override produces
+                // no machine value, and `Unit` is still the Kotlin value a caller reading the
+                // base's slot gets back — the runtime owns that singleton, so hand it over.
+                (None, Carrier::Ref) => {
+                    let unit = body
+                        .runtime_call("kt_unit", &[], any(), &[])?
+                        .expect("`kt_unit` returns the singleton");
+                    body.builder.ins().return_(&[unit]);
                 }
-                body.terminate();
-                Ok(())
-            },
-        )
+                (None, Carrier::Void) => {
+                    body.builder.ins().return_(&[]);
+                }
+                (None, Carrier::Scalar(_, _)) => {
+                    return Err("a `Unit` answer where the base declares a primitive".to_string());
+                }
+            }
+            body.terminate();
+            Ok(())
+        })
     }
 
     fn define_value_member(
@@ -911,64 +902,52 @@ impl<'a> FileLowering<'a> {
         match member {
             ValueMember::Equals => {
                 let signature = self.signature_of(&[any(), any()], Ty::Boolean)?;
-                self.emit_function(
-                    id,
-                    signature,
-                    Ty::Boolean,
-                    &name,
-                    &mut |body, params| {
-                        let (left, right) = (params[0], params[1]);
-                        let type_address = body.data_address(descriptor);
-                        let same_type = body
-                            .runtime_call(
-                                "kt_is_instance",
-                                &[any(), any()],
-                                Ty::Boolean,
-                                &[right, type_address],
-                            )?
-                            .expect("`kt_is_instance` returns a Boolean");
-                        let merge = body.builder.create_block();
-                        body.builder.append_block_param(merge, types::I8);
-                        let compare = body.builder.create_block();
-                        let other = body.builder.create_block();
-                        body.builder.ins().brif(same_type, compare, &[], other, &[]);
+                self.emit_function(id, signature, Ty::Boolean, &name, &mut |body, params| {
+                    let (left, right) = (params[0], params[1]);
+                    let type_address = body.data_address(descriptor);
+                    let same_type = body
+                        .runtime_call(
+                            "kt_is_instance",
+                            &[any(), any()],
+                            Ty::Boolean,
+                            &[right, type_address],
+                        )?
+                        .expect("`kt_is_instance` returns a Boolean");
+                    let merge = body.builder.create_block();
+                    body.builder.append_block_param(merge, types::I8);
+                    let compare = body.builder.create_block();
+                    let other = body.builder.create_block();
+                    body.builder.ins().brif(same_type, compare, &[], other, &[]);
 
-                        body.continue_in(other);
-                        body.builder.seal_block(other);
-                        let no = body.builder.ins().iconst(types::I8, 0);
-                        body.builder.ins().jump(merge, &[BlockArg::Value(no)]);
+                    body.continue_in(other);
+                    body.builder.seal_block(other);
+                    let no = body.builder.ins().iconst(types::I8, 0);
+                    body.builder.ins().jump(merge, &[BlockArg::Value(no)]);
 
-                        body.continue_in(compare);
-                        body.builder.seal_block(compare);
-                        let mine = body.builder.ins().load(clif, trusted(), left, offset);
-                        let theirs = body.builder.ins().load(clif, trusted(), right, offset);
-                        let equal = body.values_equal(mine, theirs, ty)?;
-                        body.builder.ins().jump(merge, &[BlockArg::Value(equal)]);
+                    body.continue_in(compare);
+                    body.builder.seal_block(compare);
+                    let mine = body.builder.ins().load(clif, trusted(), left, offset);
+                    let theirs = body.builder.ins().load(clif, trusted(), right, offset);
+                    let equal = body.values_equal(mine, theirs, ty)?;
+                    body.builder.ins().jump(merge, &[BlockArg::Value(equal)]);
 
-                        body.continue_in(merge);
-                        body.builder.seal_block(merge);
-                        let answer = body.builder.block_params(merge)[0];
-                        body.builder.ins().return_(&[answer]);
-                        body.terminate();
-                        Ok(())
-                    },
-                )
+                    body.continue_in(merge);
+                    body.builder.seal_block(merge);
+                    let answer = body.builder.block_params(merge)[0];
+                    body.builder.ins().return_(&[answer]);
+                    body.terminate();
+                    Ok(())
+                })
             }
             ValueMember::HashCode => {
                 let signature = self.signature_of(&[any()], Ty::Int)?;
-                self.emit_function(
-                    id,
-                    signature,
-                    Ty::Int,
-                    &name,
-                    &mut |body, params| {
-                        let value = body.builder.ins().load(clif, trusted(), params[0], offset);
-                        let hash = body.value_hash(value, ty)?;
-                        body.builder.ins().return_(&[hash]);
-                        body.terminate();
-                        Ok(())
-                    },
-                )
+                self.emit_function(id, signature, Ty::Int, &name, &mut |body, params| {
+                    let value = body.builder.ins().load(clif, trusted(), params[0], offset);
+                    let hash = body.value_hash(value, ty)?;
+                    body.builder.ins().return_(&[hash]);
+                    body.terminate();
+                    Ok(())
+                })
             }
             ValueMember::ToString => {
                 let opening = format!("{kotlin_name}({field_name}=");

@@ -504,19 +504,13 @@ impl<'a> FileLowering<'a> {
         ));
         let name = function.name.clone();
         let ret = function.ret;
-        self.emit_function(
-            id,
-            signature,
-            ret,
-            &name,
-            &mut |lowering, params| {
-                for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
-                    let variable = lowering.declare_value(slot as u32, *ty)?;
-                    lowering.builder.def_var(variable, *value);
-                }
-                lowering.statement(body)
-            },
-        )
+        self.emit_function(id, signature, ret, &name, &mut |lowering, params| {
+            for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
+                let variable = lowering.declare_value(slot as u32, *ty)?;
+                lowering.builder.def_var(variable, *value);
+            }
+            lowering.statement(body)
+        })
     }
 
     /// `kt_program_entry`: what the runtime's `_start` calls. Records the stack bottom for the

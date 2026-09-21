@@ -152,11 +152,12 @@ impl BodyLowering<'_, '_, '_> {
         // The type each side unboxes to, which the guard has already established is a
         // floating-point one. Kotlin does not compare a `Double` with a `Float` through `==`, so
         // two different widths here are a shape this has no rule for rather than a conversion.
-        let (Some(left_ty), Some(right_ty)) = (
-            lhs_ty.and_then(scalar_bound),
-            rhs_ty.and_then(scalar_bound),
-        ) else {
-            return Err("an IEEE comparison whose operand names no floating-point type".to_string());
+        let (Some(left_ty), Some(right_ty)) =
+            (lhs_ty.and_then(scalar_bound), rhs_ty.and_then(scalar_bound))
+        else {
+            return Err(
+                "an IEEE comparison whose operand names no floating-point type".to_string(),
+            );
         };
         if left_ty != right_ty {
             return Err("an IEEE comparison between two floating-point widths".to_string());

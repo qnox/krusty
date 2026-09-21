@@ -26457,9 +26457,10 @@ impl<'a> Checker<'a> {
                     && member.implicit_classifier_callable.is_none()
                     && self.classifier_is_object(selected.callable.owner)
                 {
-                    member.singleton_dispatch = Some(Box::new(crate::libraries::SingletonDispatch {
-                        classifier: selected.callable.owner,
-                    }));
+                    member.singleton_dispatch =
+                        Some(Box::new(crate::libraries::SingletonDispatch {
+                            classifier: selected.callable.owner,
+                        }));
                 }
                 self.resolved_calls
                     .insert(call, ResolvedCall::Companion(member));

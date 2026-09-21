@@ -535,55 +535,47 @@ impl<'a> FileLowering<'a> {
         let capture_offsets = capture_offsets.to_vec();
         let incoming = parameters.to_vec();
         let name = format!("{base}_invoke");
-        self.emit_function(
-            thunk,
-            signature,
-            result,
-            &name,
-            &mut |body, params| {
-                let mut arguments = Vec::with_capacity(declared.len());
-                for (offset, ty) in capture_offsets.iter().zip(&declared) {
-                    let clif = carrier(*ty).clif().expect("a capture is never `Unit`");
-                    arguments.push(body.builder.ins().load(
-                        clif,
-                        trusted(),
-                        params[0],
-                        *offset as i32,
-                    ));
+        self.emit_function(thunk, signature, result, &name, &mut |body, params| {
+            let mut arguments = Vec::with_capacity(declared.len());
+            for (offset, ty) in capture_offsets.iter().zip(&declared) {
+                let clif = carrier(*ty).clif().expect("a capture is never `Unit`");
+                arguments.push(
+                    body.builder
+                        .ins()
+                        .load(clif, trusted(), params[0], *offset as i32),
+                );
+            }
+            for (index, ty) in declared[capture_offsets.len()..].iter().enumerate() {
+                let Some(value) = body.convert(params[index + 1], Some(incoming[index]), *ty)?
+                else {
+                    return Err("a `Unit` argument to a functional interface".to_string());
+                };
+                arguments.push(value);
+            }
+            let func_ref = body.func_ref(target);
+            let call = body.emit_call(func_ref, &arguments)?;
+            let returned = body.builder.inst_results(call).first().copied();
+            match (returned, carrier(result)) {
+                (_, Carrier::Void) => {}
+                (Some(value), _) => {
+                    let value = body
+                        .convert(value, Some(produced), result)?
+                        .expect("a non-void carrier");
+                    body.builder.ins().return_(&[value]);
+                    body.terminate();
                 }
-                for (index, ty) in declared[capture_offsets.len()..].iter().enumerate() {
-                    let Some(value) =
-                        body.convert(params[index + 1], Some(incoming[index]), *ty)?
-                    else {
-                        return Err("a `Unit` argument to a functional interface".to_string());
-                    };
-                    arguments.push(value);
+                // A `Unit` body answering an interface that declares a value: the runtime's
+                // singleton is that value.
+                (None, _) => {
+                    let unit = body
+                        .runtime_call("kt_unit", &[], any(), &[])?
+                        .expect("`kt_unit` returns the singleton");
+                    body.builder.ins().return_(&[unit]);
+                    body.terminate();
                 }
-                let func_ref = body.func_ref(target);
-                let call = body.emit_call(func_ref, &arguments)?;
-                let returned = body.builder.inst_results(call).first().copied();
-                match (returned, carrier(result)) {
-                    (_, Carrier::Void) => {}
-                    (Some(value), _) => {
-                        let value = body
-                            .convert(value, Some(produced), result)?
-                            .expect("a non-void carrier");
-                        body.builder.ins().return_(&[value]);
-                        body.terminate();
-                    }
-                    // A `Unit` body answering an interface that declares a value: the runtime's
-                    // singleton is that value.
-                    (None, _) => {
-                        let unit = body
-                            .runtime_call("kt_unit", &[], any(), &[])?
-                            .expect("`kt_unit` returns the singleton");
-                        body.builder.ins().return_(&[unit]);
-                        body.terminate();
-                    }
-                }
-                Ok(())
-            },
-        )
+            }
+            Ok(())
+        })
     }
 
     /// The uniform entry point: unpack the captures this object carries, convert each argument
@@ -606,45 +598,38 @@ impl<'a> FileLowering<'a> {
         let capture_offsets = capture_offsets.to_vec();
         let name = format!("{base}_invoke");
 
-        self.emit_function(
-            thunk,
-            signature,
-            any(),
-            &name,
-            &mut |body, params| {
-                let mut arguments = Vec::with_capacity(parameters.len());
-                for (offset, ty) in capture_offsets.iter().zip(&parameters) {
-                    let clif = carrier(*ty).clif().expect("a capture is never `Unit`");
-                    arguments.push(body.builder.ins().load(
-                        clif,
-                        trusted(),
-                        params[0],
-                        *offset as i32,
-                    ));
-                }
-                for (index, ty) in parameters[capture_offsets.len()..].iter().enumerate() {
-                    let Some(value) = body.convert(params[index + 1], Some(any()), *ty)? else {
-                        return Err("a `Unit` lambda parameter".to_string());
-                    };
-                    arguments.push(value);
-                }
-                let func_ref = body.func_ref(target);
-                let call = body.emit_call(func_ref, &arguments)?;
-                let result = body.builder.inst_results(call).first().copied();
-                // A `Unit`-returning lambda still answers with a reference: the runtime's `Unit`.
-                let result = match result {
-                    Some(value) => body
-                        .convert(value, Some(ret), any())?
-                        .expect("a reference carrier"),
-                    None => body
-                        .runtime_call("kt_unit", &[], any(), &[])?
-                        .expect("`kt_unit` returns the singleton"),
+        self.emit_function(thunk, signature, any(), &name, &mut |body, params| {
+            let mut arguments = Vec::with_capacity(parameters.len());
+            for (offset, ty) in capture_offsets.iter().zip(&parameters) {
+                let clif = carrier(*ty).clif().expect("a capture is never `Unit`");
+                arguments.push(
+                    body.builder
+                        .ins()
+                        .load(clif, trusted(), params[0], *offset as i32),
+                );
+            }
+            for (index, ty) in parameters[capture_offsets.len()..].iter().enumerate() {
+                let Some(value) = body.convert(params[index + 1], Some(any()), *ty)? else {
+                    return Err("a `Unit` lambda parameter".to_string());
                 };
-                body.builder.ins().return_(&[result]);
-                body.terminate();
-                Ok(())
-            },
-        )
+                arguments.push(value);
+            }
+            let func_ref = body.func_ref(target);
+            let call = body.emit_call(func_ref, &arguments)?;
+            let result = body.builder.inst_results(call).first().copied();
+            // A `Unit`-returning lambda still answers with a reference: the runtime's `Unit`.
+            let result = match result {
+                Some(value) => body
+                    .convert(value, Some(ret), any())?
+                    .expect("a reference carrier"),
+                None => body
+                    .runtime_call("kt_unit", &[], any(), &[])?
+                    .expect("`kt_unit` returns the singleton"),
+            };
+            body.builder.ins().return_(&[result]);
+            body.terminate();
+            Ok(())
+        })
     }
 
     /// The holder type for a captured `var` of the given carrier, declared on first use.
