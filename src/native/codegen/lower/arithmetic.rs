@@ -152,15 +152,16 @@ impl BodyLowering<'_, '_, '_> {
                 let condition = comparison(op, true).expect("equality");
                 return Ok(Some(self.builder.ins().icmp(condition, left, right)));
             }
-            if self.is_function_expression(lhs) || self.is_function_expression(rhs) {
-                // Kotlin compares two callable references by the DECLARATION they name and the
-                // receiver they bind, so `::f == ::f` is true even though each `::f` is its own
-                // object. The generator gives one `kotlin.Any`'s identity equality, which answers
-                // that `false` — so the comparison is declined rather than answered wrongly. What
-                // it needs is one emitted type per referenced declaration, with an `equals` that
-                // compares the type and the bound receiver.
-                return Err("equality on a function value".to_string());
-            }
+            // A function value is compared like any other reference: through `kt_equals` below,
+            // which dispatches `equals` on the receiver's own table. The TABLE is what makes that
+            // right, rather than anything this site can see. A callable reference carries
+            // `kt_reference_equals`, keyed by the declaration it names and the receiver it binds,
+            // so `Foo::bar == Foo::bar` is true though the two are different objects. A property
+            // reference carries its own, comparing the type — one per property — and the bound
+            // receivers. A lambda carries `kotlin.Any`'s, which is the identity Kotlin gives one.
+            //
+            // This site used to decline instead, because the static type does not say WHICH of the
+            // three produced the value. It does not have to: the object does, at run time.
             // An IEEE comparison where an operand arrived BOXED. Kotlin's
             // `ProperIeee754Comparisons` compares two floating-point operands by IEEE rules — so
             // `NaN == NaN` is false — whenever both static types are the floating-point type

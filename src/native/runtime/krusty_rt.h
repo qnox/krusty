@@ -60,6 +60,13 @@ typedef struct KType {
        no second chain to walk. An interface's own descriptor carries its bases here too. */
     const struct KType *const *interfaces;
     uint32_t interface_count;
+    /* On a CALLABLE REFERENCE's descriptor: the byte offset of the field holding the BOUND
+       RECEIVER, or 0 when the reference binds none. Kept apart from `reference_offsets` because
+       those are every reference-typed field the collector must trace, and a reference to a local
+       function carries its ordinary captures among them — so the first of them is not the
+       receiver, and equality reading it there compared a capture instead. 0 is unambiguous: no
+       field can sit at offset 0, which is the type header. */
+    uint32_t reference_receiver_offset;
     /* Non-NULL only on a CALLABLE REFERENCE's descriptor, where it is the identity of the
        declaration referred to, together with whether a receiver is bound. Two `Foo::bar` written
        in two places are different objects with different descriptors, and Kotlin says they are

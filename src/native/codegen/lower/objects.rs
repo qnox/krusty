@@ -28,6 +28,10 @@ mod ktype {
     pub const VTABLE_LENGTH: u32 = 48;
     pub const INTERFACES: u32 = 56;
     pub const INTERFACE_COUNT: u32 = 64;
+    /// Only a callable reference's descriptor has one, and only a BOUND one a non-zero one. Sits
+    /// in the padding `interface_count` leaves before the pointer below, so the record is the same
+    /// size it was.
+    pub const REFERENCE_RECEIVER_OFFSET: u32 = 68;
     /// Only a callable reference's descriptor has one; see the note on `KType`.
     pub const REFERENCE_TARGET: u32 = 72;
     pub const SIZE: usize = 80;
@@ -429,7 +433,9 @@ impl<'a> FileLowering<'a> {
         vtable: &[FuncId],
         superclass: DataId,
         interfaces: &[DataId],
-        reference_target: Option<DataId>,
+        // A callable reference's declaration identity, and the byte offset of its bound receiver
+        // — 0 when it binds none. The two travel together because only a reference has either.
+        reference_target: Option<(DataId, u32)>,
     ) -> Result<(), Unsupported> {
         let references = if reference_offsets.is_empty() {
             None
@@ -494,6 +500,11 @@ impl<'a> FileLowering<'a> {
         );
         write_u32(&mut bytes, ktype::VTABLE_LENGTH, vtable.len() as u32);
         write_u32(&mut bytes, ktype::INTERFACE_COUNT, interfaces.len() as u32);
+        write_u32(
+            &mut bytes,
+            ktype::REFERENCE_RECEIVER_OFFSET,
+            reference_target.map_or(0, |(_, receiver)| receiver),
+        );
         let mut description = DataDescription::new();
         description.define(bytes.into_boxed_slice());
         description.set_align(8);
@@ -503,7 +514,10 @@ impl<'a> FileLowering<'a> {
             (ktype::SUPER, Some(superclass)),
             (ktype::VTABLE, Some(table)),
             (ktype::INTERFACES, implemented),
-            (ktype::REFERENCE_TARGET, reference_target),
+            (
+                ktype::REFERENCE_TARGET,
+                reference_target.map(|(marker, _)| marker),
+            ),
         ] {
             let Some(data) = data else {
                 continue;

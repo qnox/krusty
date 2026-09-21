@@ -39,10 +39,14 @@ struct Site {
     /// function value carrying captures; what differs is the TYPE it wears, and therefore which
     /// vtable a caller dispatches through.
     sam: Option<crate::ir::IrSamTarget>,
-    /// Set for a CALLABLE REFERENCE whose only capture is its bound receiver, if any — the shape
-    /// [`crate::native::runtime`]'s reference equality reads. A reference that captures more than
-    /// that keeps identity equality, which is what it had before any of this.
+    /// Set for a CALLABLE REFERENCE: the declaration it names, which is what equality compares.
+    /// A lambda leaves it unset and keeps identity equality, which is what Kotlin gives one.
     identity: Option<String>,
+    /// Which capture holds the value EQUALITY reads — a reference's bound receiver, or the
+    /// function a SAM delegate wraps — when one does. The descriptor records where it lands so
+    /// the runtime does not have to guess it is the first reference-typed field: a reference to a
+    /// local function carries that function's ordinary captures as reference fields too.
+    receiver_capture: Option<usize>,
 }
 
 /// The site an expression creates, or `None` when it creates none.
@@ -61,26 +65,34 @@ fn closure_site(expr: &IrExpr) -> Option<Result<Site, Unsupported>> {
             captures: captures.clone(),
             sam: sam.clone(),
             // A SAM delegate's identity depends on WHAT IT WRAPS, which needs the arena to see —
-            // so it is decided in `declare_lambdas` rather than here.
+            // so it and the flag below are decided in `declare_lambdas` rather than here.
             identity: None,
+            receiver_capture: None,
         })),
         IrExpr::CallableReference(reference) => Some(if reference.declaration_suspend {
             Err("a suspend callable reference".to_string())
         } else {
             Ok(Site {
                 impl_fn: reference.adapter,
+                // The adapter's frame is the referenced declaration's captures, then the bound
+                // receiver, then the parameters the caller supplies — see
+                // `fir_lower::local_callables`, which counts `own_start` in exactly that order.
+                // A reference with no captures of its own is the only shape where the two orders
+                // coincide, and it used to be the only shape emitted with this pair.
                 captures: reference
-                    .bound_receiver
-                    .into_iter()
-                    .chain(reference.captures.iter().copied())
+                    .captures
+                    .iter()
+                    .copied()
+                    .chain(reference.bound_receiver)
                     .collect(),
                 // A callable reference converted to a `fun interface` arrives as a lambda with a
                 // SAM target, not as a reference, so there is none to carry here.
                 sam: None,
-                identity: reference
-                    .captures
-                    .is_empty()
-                    .then(|| reference_identity(reference)),
+                identity: Some(reference_identity(reference)),
+                receiver_capture: reference
+                    .bound_receiver
+                    .is_some()
+                    .then(|| reference.captures.len()),
             })
         }),
         _ => None,
@@ -231,6 +243,7 @@ impl<'a> FileLowering<'a> {
                 captures,
                 sam,
                 identity,
+                mut receiver_capture,
             } = site?;
             let body = self
                 .ir
@@ -278,19 +291,30 @@ impl<'a> FileLowering<'a> {
             // singleton, so two conversions of it would wrap the same object. `simpleLambdas.kt`
             // is that case, and it is why this asks what the delegate wraps rather than trusting
             // that a SAM delegate always wraps something with an identity of its own.
-            let identity = identity.or_else(|| {
-                let target = sam.as_ref()?;
-                let wrapped = *captures.first()?;
-                matches!(self.ir.expr(wrapped), IrExpr::CallableReference(_)).then(|| {
-                    format!(
-                        "kt_refid_sam_{}",
-                        model::c_identifier(&target.classifier.render())
-                    )
+            let sam_identity = {
+                let wrapped = captures.first().copied();
+                sam.as_ref().zip(wrapped).and_then(|(target, wrapped)| {
+                    matches!(self.ir.expr(wrapped), IrExpr::CallableReference(_)).then(|| {
+                        format!(
+                            "kt_refid_sam_{}",
+                            model::c_identifier(&target.classifier.render())
+                        )
+                    })
                 })
-            });
+            };
+            if identity.is_none() && sam_identity.is_some() {
+                // What the delegate WRAPS is the value its equality compares, and it is capture 0.
+                receiver_capture = Some(0);
+            }
+            let identity = identity.or(sam_identity);
             let capture_types: Vec<Ty> =
                 carried_parameters(self.ir, impl_fn)[..captures.len()].to_vec();
             let (capture_offsets, instance_size, references) = layout(&capture_types);
+            // Where the value equality reads lands, or 0 for a reference that binds nothing. No
+            // field can sit at offset 0 — the header is there — so 0 says "none" unambiguously.
+            let receiver_offset = receiver_capture
+                .and_then(|capture| capture_offsets.get(capture).copied())
+                .unwrap_or(0);
 
             let base = format!("kt_fn_{index}");
             let descriptor = self.declare_local_data(&format!("kt_type_{base}"), false)?;
@@ -307,7 +331,7 @@ impl<'a> FileLowering<'a> {
                             let marker = self.reference_identity_marker(name)?;
                             vtable[0] = self.runtime_member_import("kt_reference_equals")?;
                             vtable[1] = self.runtime_member_import("kt_reference_hash_code")?;
-                            Some(marker)
+                            Some((marker, receiver_offset))
                         }
                         None => None,
                     };
@@ -342,7 +366,7 @@ impl<'a> FileLowering<'a> {
                             // two are `equals` and `hashCode` (`KT_SLOT_*` in `krusty_rt.h`).
                             vtable[0] = self.runtime_member_import("kt_reference_equals")?;
                             vtable[1] = self.runtime_member_import("kt_reference_hash_code")?;
-                            Some(marker)
+                            Some((marker, receiver_offset))
                         }
                         None => None,
                     };

@@ -3233,15 +3233,16 @@ void kt_assert_false(kt_boolean actual, KRef message) {
 
 /* ---- callable references ----------------------------------------------------------------- */
 
-/* A bound reference keeps its receiver as its first reference field, which is what
-   `reference_count` being non-zero means on one of these descriptors: the lowering gives this
-   pair only to a reference whose captures are exactly the bound receiver or nothing at all. */
+/* The receiver a bound reference bound, or NULL for an unbound one. The descriptor says WHERE it
+   is rather than this inferring it: a reference to a local function carries that function's
+   ordinary captures as reference fields too, so the first of them is only the receiver when there
+   are no captures — which is exactly the case this used to be restricted to. */
 static KRef kt_reference_receiver(KRef self) {
     const KType *type = self->header.type;
-    if (type->reference_count == 0) {
+    if (type->reference_receiver_offset == 0) {
         return NULL;
     }
-    return *(KRef *)((uint8_t *)self + type->reference_offsets[0]);
+    return *(KRef *)((uint8_t *)self + type->reference_receiver_offset);
 }
 
 kt_boolean kt_reference_equals(KRef self, KRef other) {

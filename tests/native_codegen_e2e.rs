@@ -1294,33 +1294,27 @@ fn a_callable_reference_is_a_function_value_like_any_other() {
 }
 
 #[test]
-fn comparing_two_function_values_is_declined() {
-    let Some(target) = host() else {
+fn two_references_to_one_declaration_are_equal_through_two_variables() {
+    if host().is_none() {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
         return;
-    };
+    }
     // Kotlin compares function values by the DECLARATION they name and the receiver they bind, so
-    // `::f == ::f` is true even though each `::f` is its own object. A function value here has
-    // `kotlin.Any`'s identity equality, which would answer `false` — so the comparison is refused
-    // rather than answered wrongly. What it needs is one emitted type per referenced declaration,
-    // carrying an `equals` that compares the type and the bound receiver.
-    let (_, diagnostics) = compile(
-        &[(
-            "Main",
-            "fun double(n: Int): Int = n * 2\n\
+    // `::double == ::double` is true even though each is its own object. Nothing at the comparison
+    // can see that: both variables are spelled `(Int) -> Int`, which a lambda wears too. The
+    // OBJECT answers instead — a reference's table carries an `equals` keyed by the declaration,
+    // a lambda's carries `kotlin.Any`'s identity — and this used to be declined for want of that.
+    assert_eq!(
+        run("fun double(n: Int): Int = n * 2\n\
              fun main() {\n\
              \x20   val a: (Int) -> Int = ::double\n\
              \x20   val b: (Int) -> Int = ::double\n\
+             \x20   val lambda: (Int) -> Int = { it * 2 }\n\
              \x20   println(a == b)\n\
-             }\n",
-        )],
-        target,
-    );
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("equality on a function value")),
-        "expected the backend to decline, got {diagnostics:?}"
+             \x20   println(a == lambda)\n\
+             \x20   println(a.hashCode() == b.hashCode())\n\
+             }\n"),
+        "true\nfalse\ntrue\n"
     );
 }
 

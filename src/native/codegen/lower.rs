@@ -1643,16 +1643,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(string.expect("`kt_string_literal` returns a string"))
     }
 
-    /// Whether an expression produces a function value: a lambda, a `::f`, or anything typed as
-    /// one. Every site that would realize equality asks here first, because Kotlin's answer for a
-    /// callable reference is structural and this generator's is identity.
-    fn is_function_expression(&self, id: u32) -> bool {
-        matches!(
-            self.file.ir.expr(id),
-            IrExpr::Lambda { .. } | IrExpr::CallableReference(_)
-        ) || self.type_of(id).is_some_and(is_function_value)
-    }
-
     /// The Kotlin type of an expression, as far as the lowering needs it: enough to decide the
     /// carrier. `None` means undetermined, and callers that cannot proceed decline.
     /// The type an expression's value has: how wide it is, and how to read the bits in it.
@@ -2145,15 +2135,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     // A member: the receiver is the runtime function's first argument, and
                     // everything crosses as a reference.
                     Some(receiver) => {
-                        // `f.equals(…)` and `f.hashCode()` on a function value answer by the
-                        // declaration named, not by identity — the same reason `==` on one is
-                        // declined above, and undecidable for the same reason: the receiver's type
-                        // no longer says whether a lambda or a reference produced it.
-                        if matches!(name.as_str(), "equals" | "hashCode")
-                            && self.is_function_expression(receiver)
-                        {
-                            return Err("equality on a function value".to_string());
-                        }
+                        // `f.equals(…)` and `f.hashCode()` on a function value need no case of
+                        // their own. The receiver's static type does not say whether a lambda or a
+                        // reference produced it, and does not have to: the OBJECT's table does, at
+                        // run time, and the ordinary member dispatch below reaches it.
                         // `x.apply(block)` where `block` is a function VALUE rather than a
                         // lambda written here: nothing was spliced, so the call is realized as
                         // what it means — invoke the block on the receiver.
@@ -2642,23 +2627,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         Ok(values)
     }
-}
-
-/// Whether a value is a function value — a lambda or a callable reference. Spelled several ways:
-/// `(Int) -> Int` is `Ty::Fun`, while a reference stored in a `val` takes the `KFunction1` its
-/// declaration names. Equality has to treat all of them alike, and the reason is that by the time
-/// a value reaches a comparison its spelling no longer says WHICH it is: `val f: (Int) -> Int =
-/// ::double` erases the reference to the same `Function1` a lambda gets. A lambda's `equals` is
-/// identity, which this generator would answer correctly; a reference's is structural, which it
-/// would answer wrongly — so the one type they share has to be declined for both.
-fn is_function_value(ty: Ty) -> bool {
-    if matches!(ty.non_null(), Ty::Fun(_)) {
-        return true;
-    }
-    ty.non_null().obj_internal().is_some_and(|name| {
-        let name = name.render();
-        name.starts_with("kotlin/Function") || name.starts_with("kotlin/reflect/KFunction")
-    })
 }
 
 /// The primitive a reference-carried type REPRESENTS, or `None` when it represents no primitive.
