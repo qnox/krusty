@@ -18402,7 +18402,29 @@ impl<'a> Emitter<'a> {
             None
         };
         if let Some((to, arg, internal)) = inst_fuse {
+            let physical_arg = self
+                .ir
+                .physical_types
+                .get(&arg)
+                .map(ir_ty_to_jvm)
+                .unwrap_or_else(|| self.value_ty(arg));
+            let semantic_arg = self
+                .ir
+                .logical_types
+                .get(&arg)
+                .copied()
+                .unwrap_or(physical_arg);
             self.emit_value(arg, code);
+            // `instanceof` takes a REFERENCE. A scalar operand is boxed first, exactly as the
+            // unfused emit above does it — `if (n is Number)` where `n` is an `Int` reached here
+            // and put an `int` where the verifier wants an object.
+            if physical_arg.is_jvm_scalar() {
+                box_prim_free(
+                    self.cw,
+                    code,
+                    semantic_scalar_adapter(semantic_arg, physical_arg),
+                );
+            }
             let ci = self.cw.class_ref(&internal);
             code.instance_of(ci);
             self.frame(target, vec![], code);

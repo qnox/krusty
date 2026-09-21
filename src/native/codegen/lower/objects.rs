@@ -2122,12 +2122,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         type_name_of(type_operand)
                     ));
                 };
-                if self
-                    .type_of(arg)
-                    .is_some_and(|ty| carrier(ty) != Carrier::Ref)
-                {
-                    return Err("an `is` check on a scalar".to_string());
-                }
+                // A SCALAR operand is asked the same way, through its box. Kotlin has no subtyping
+                // among the primitive types, so the answer is settled statically — but `5 is
+                // Number` and `1u is Comparable<*>` are true, and each primitive's box carries the
+                // descriptor that says so (an unsigned one its own, which is what makes `1u is
+                // Int` false). Boxing and asking is therefore both correct and the only rule
+                // needed, where a static answer would need the hierarchy this generator lacks.
                 let Some(object) = self.receiver(arg)? else {
                     return Ok(None);
                 };

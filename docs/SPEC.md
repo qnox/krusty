@@ -7409,6 +7409,24 @@ and behavior is checked by RUNNING the emitted program.
   `codegen/box/when/exhaustiveWhenReturn.kt`, `codegen/box/branching/when8.kt`,
   `codegen/box/regressions/kt18779.kt` and `codegen/box/when/enumOptimization/kt15806.kt`.
 
+- **An `is` check asks a scalar operand through its box, on both backends.** Kotlin has no
+  subtyping among the primitive types, so `n is Long` where `n` is an `Int` does not even compile
+  and an `is` on a scalar reads as settled — but `5 is Number` and `1u is Comparable<UInt>` are
+  true, and answering those needs the hierarchy. Each primitive's box carries the descriptor that
+  has it, an unsigned one its own (which is what makes `(1u as Any) is Int` false), so boxing and
+  asking is both correct and the only rule needed. `Unit` is the same question with the runtime's
+  singleton as the operand.
+
+  The native generator declined such a check outright. The JVM backend boxed correctly in its
+  ordinary emit and NOT in the fused `instanceof; ifne` shape it uses for a condition, so
+  `if (n is Number)` put an `int` where the verifier wants an object and the class was rejected
+  with `VerifyError: Bad type on operand stack`. Both now box.
+  Tests: `tests/native_codegen_e2e.rs` (`an_is_check_asks_a_scalar_operand_through_its_box`, which
+  cross-checks the two backends and REQUIRES the native lowering); the corpus cases are
+  `codegen/box/boxingOptimization/kt5844.kt`, `codegen/box/dataClasses/unitComponent.kt`,
+  `codegen/box/inlineClasses/boxResultInlineClassOfConstructorCallGeneric.kt` and
+  `codegen/box/primitiveTypes/kt36952_identityEqualsWithBooleanInLocalFunction.kt`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

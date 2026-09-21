@@ -2831,3 +2831,35 @@ fn an_exhaustive_when_whose_arms_all_return_ends_the_function() {
     common::expect_box_ok_with_stdlib(source, "ExhaustiveWhenEnd");
     common::expect_native_box(source, "ExhaustiveWhenEnd", "OK");
 }
+
+#[test]
+fn an_is_check_asks_a_scalar_operand_through_its_box() {
+    // Kotlin has no subtyping among the primitive types, so an `is` check on a scalar reads as
+    // settled — but `5 is Number` and `1u is Comparable<UInt>` are true, and answering those needs
+    // a hierarchy this generator does not have. Each primitive's box carries the descriptor that
+    // does, an unsigned one its own, so boxing and asking the runtime is both correct and the only
+    // rule needed. `Unit` is the same question with the singleton as the operand.
+    let source = "fun <T> asGiven(value: T): T = value\n\
+         fun box(): String {\n\
+         \x20   val whole: Int = 5\n\
+         \x20   if (whole !is Number) return \"fail 1\"\n\
+         \x20   if (whole !is Comparable<Int>) return \"fail 2\"\n\
+         \x20   val wide: Long = 1L\n\
+         \x20   if (wide !is Long) return \"fail 3\"\n\
+         \x20   val fraction: Double = 1.1\n\
+         \x20   if (fraction !is Double) return \"fail 4\"\n\
+         \x20   val unsigned: UInt = 1u\n\
+         \x20   if (unsigned !is UInt) return \"fail 5\"\n\
+         \x20   val nothingness: Unit = asGiven(Unit)\n\
+         \x20   if (nothingness !is Unit) return \"fail 6\"\n\
+         \x20   val widened: Any = unsigned\n\
+         \x20   if (widened is Int) return \"fail 7\"\n\
+         \x20   if (widened !is UInt) return \"fail 8\"\n\
+         \x20   val boxed: Any = whole\n\
+         \x20   if (boxed !is Int) return \"fail 9\"\n\
+         \x20   if (boxed is Long) return \"fail 10\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "IsScalar");
+    common::expect_native_box(source, "IsScalar", "OK");
+}
