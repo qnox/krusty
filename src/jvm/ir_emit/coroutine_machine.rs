@@ -91,22 +91,20 @@ pub(super) fn verif_spill_type(v: &VerifType) -> Option<Ty> {
 ///
 /// The markers say where each suspension landed — a position no offset recorded before the splice
 /// could have predicted. Around each one, the locals live across it are the spill set, and their
-/// types come from the nearest frame at or before it, which is the only typed view of the frame
-/// this pass has.
+/// types are what the verifier holds there: computed forward over the spliced body from `entry`,
+/// the method's own entry locals, and the frames it carries (see [`FrameTypes`]).
 ///
-/// `None` when the body cannot be analyzed or a live local cannot be typed: the machine then
-/// declines and the caller bails exactly as it did before.
+/// `None` when the body cannot be analyzed or a value that must survive cannot be typed: the
+/// machine then declines and the caller bails exactly as it did before.
 pub(super) fn discover(
     code: &crate::jvm::classfile::CodeBuilder,
-    allocated: &HashMap<u16, Ty>,
     machine: Option<MachineSlots>,
-    at_markers: &HashMap<usize, Vec<VerifType>>,
+    entry: &[VerifType],
     cw: &crate::jvm::classfile::ClassWriter,
     expected: usize,
-    prefixes: &HashMap<usize, Vec<VerifType>>,
 ) -> Option<MachinePlan> {
     use crate::jvm::classfile::CoroutineMarker;
-    use crate::jvm::suspend::cps::{ControlGraph, Handler, LocalLiveness};
+    use crate::jvm::suspend::cps::{ControlGraph, FrameTypes, Handler, LocalLiveness};
 
     let markers: Vec<(usize, u16)> = code
         .marker_positions()?
@@ -148,7 +146,13 @@ pub(super) fn discover(
         crate::trace_compiler!("suspend", "discover: state {missing} was never emitted");
         return None;
     }
-    let Some(insns) = crate::jvm::inline::disassemble(&code.bytes) else {
+    // The builder's own bytes hold a placeholder for every branch not yet linked; the control
+    // flow read here has to be the method's.
+    let Some(bytes) = code.resolved_bytes() else {
+        crate::trace_compiler!("suspend", "discover: a branch destination is unbound");
+        return None;
+    };
+    let Some(insns) = crate::jvm::inline::disassemble(&bytes) else {
         crate::trace_compiler!("suspend", "discover: disassemble failed");
         return None;
     };
@@ -173,160 +177,87 @@ pub(super) fn discover(
         crate::trace_compiler!("suspend", "discover: liveness declined");
         return None;
     };
-    // The parameters are assigned before the first instruction; the machine's own slots begin right
-    // above them.
-    let mut parameters = crate::jvm::suspend::cps::SlotSet::default();
-    for slot in 0..machine.map_or(0, |machine| machine.result) {
-        parameters.insert(slot);
-    }
-    let Some(assigned) = LocalLiveness::definitely_assigned(&insns, &graph, &parameters) else {
-        crate::trace_compiler!("suspend", "discover: definite assignment declined");
+    // The frames this body carries, by instruction index and slot: the splice relocated the
+    // dependency's own, and this emitter recorded one at every label it bound.
+    let frames: Vec<(usize, Vec<VerifType>, Vec<VerifType>)> = code
+        .resolved_frames()
+        .into_iter()
+        .map(|(at, locals, stack)| Some((index_of(at)?, expand_slots(&locals), stack)))
+        .collect::<Option<Vec<_>>>()?;
+    let Some(types) = FrameTypes::analyze(&insns, &graph, entry, &frames, cw) else {
+        crate::trace_compiler!("suspend", "discover: frame analysis declined");
         return None;
     };
-
-    // Frames, ascending, as the only typed view of the frame this pass has.
-    let mut frames = code.resolved_frames();
-    frames.sort_by_key(|(at, _, _)| *at);
 
     let mut suspensions = vec![SuspensionPlan::default(); expected];
     for (at, ordinal) in markers {
         let index = index_of(at)?;
-        let live = liveness.live_before(index);
-        // Two partial views of the same frame, overlaid. A frame describes the SPLICED body's own
-        // locals, which no IR declaration names; the emitter's view at the marker describes the
-        // host's, including the ones assigned between frames. The merge point's frame is built from
-        // the emitter's view, so a local either view types is one the resume has to restore.
-        let mut typed = nearest_frame_slots(&frames, at).unwrap_or_default();
-        if let Some(held) = at_markers.get(&(ordinal as usize)) {
-            let held = expand_slots(held);
-            if held.len() > typed.len() {
-                typed.resize(held.len(), VerifType::Top);
-            }
-            for (slot, ty) in held.into_iter().enumerate() {
-                if matches!(typed[slot], VerifType::Top) {
-                    typed[slot] = ty;
-                }
-            }
-        }
-        // What the resume has to put back is not only what liveness calls live across the call: the
-        // frame where the two paths meet claims every local the emitter held here, whether or not
-        // the body reads it again, and one that frame types but the resume leaves unset fails
-        // verification.
-        let mut slots: Vec<u16> = live.iter().collect();
-        for (slot, typed_as) in typed.iter().enumerate() {
-            let slot = slot as u16;
-            let described = !matches!(typed_as, VerifType::Top | VerifType::UninitializedThis);
-            if described && !slots.contains(&slot) {
+        let Some(state) = types.before(index) else {
+            crate::trace_compiler!(
+                "suspend",
+                "discover: marker {ordinal} at {at} is unreachable"
+            );
+            return None;
+        };
+        crate::trace_compiler!(
+            "suspend",
+            "discover: marker {ordinal} at {at} locals={:?} stack={:?}",
+            state.locals,
+            state.stack
+        );
+        // What the resume has to put back is not only what liveness calls live across the call:
+        // every frame the body can reach from the join claims the locals it holds there, whether
+        // or not the body reads them again, and one such frame types but the resume leaves unset
+        // fails verification at the edge into it. A slot the verifier holds as `top` here cannot
+        // be claimed by any of them without a store in between, so it needs no restoring.
+        let mut slots: Vec<u16> = liveness.live_before(index).iter().collect();
+        for slot in claimed_from(&graph, index, &frames) {
+            if !slots.contains(&slot) {
                 slots.push(slot);
-            }
-        }
-        // A local the SPLICED body assigns — an inline-depth marker, a loop's own temporary — is
-        // described by frames AFTER the suspension and by none before it, yet the handler and merge
-        // frames on the far side claim it. The resume has to restore those too, and may do so
-        // exactly when every path to the suspension has assigned them: a spill of an unset local
-        // fails verification at the spill itself.
-        //
-        // Those frames are also the best TYPE for such a slot. A merge point states what every edge
-        // into it agrees on — `Object` where one edge holds a boxed `Integer` — and the restore has
-        // to leave the slot holding what the merge expects.
-        let assigned_here = &assigned[index];
-        let mut ahead: HashMap<u16, VerifType> = HashMap::new();
-        for (_, frame_locals, _) in frames.iter().filter(|(frame_at, _, _)| *frame_at > at) {
-            for (slot, typed_as) in expand_slots(frame_locals).into_iter().enumerate() {
-                let slot = slot as u16;
-                if matches!(typed_as, VerifType::Top | VerifType::UninitializedThis) {
-                    continue;
-                }
-                if !assigned_here.contains(slot) {
-                    continue;
-                }
-                ahead.entry(slot).or_insert(typed_as);
-                if !slots.contains(&slot) {
-                    slots.push(slot);
-                }
             }
         }
         slots.sort_unstable();
         let mut spills = Vec::new();
         // A `long`/`double` occupies two slots and the liveness set holds both. It is spilled once,
-        // under its first word; the second is the same value and has no type of its own (a frame
-        // describes it as `top`).
-        let mut high_word: Option<u16> = None;
+        // under its first word; the second is the same value and has no type of its own (the
+        // verifier holds it as `top`).
         for slot in slots {
-            if high_word == Some(slot) {
-                high_word = None;
-                continue;
-            }
             // The machine's own locals are not spilled: they hold the state that survives the
             // suspension rather than anything the body needs restored.
             if machine.is_some_and(|machine| machine.owns(slot)) {
                 continue;
             }
-            // A frame describes the host's locals; the ones this emitter allocated inside the
-            // spliced body are assigned between frames and are known only to it.
-            // Two frames describe this slot from either side of the suspension, and the join has
-            // to satisfy both. Where they disagree — a loop whose accumulator enters as `Integer`
-            // and merges as `Object` — neither is the state at the join, so the slot takes the type
-            // they have in common. The value itself is unchanged; only what the frame claims about
-            // it weakens, and a reference is assignable to `Object` from either side.
-            // Every frame that describes this slot has to be satisfied by one restore. A loop
-            // carries the widest of them — its head states what all its edges agree on — so the
-            // slot takes what they have in common. The value is unchanged; only the claim about it
-            // weakens, and a reference satisfies `Object` from any of them.
-            let mut from_frame = typed.get(slot as usize).and_then(verif_spill_type);
-            for (_, frame_locals, _) in frames.iter() {
-                let Some(claimed) = expand_slots(frame_locals)
-                    .get(slot as usize)
-                    .and_then(verif_spill_type)
-                else {
-                    continue;
-                };
-                from_frame = Some(match from_frame {
-                    Some(known) if known != claimed => common_type(known, claimed)?,
-                    Some(known) => known,
-                    None => claimed,
-                });
-            }
-            let from_frame = from_frame
-                .or_else(|| local_table_type(code, slot, at))
-                .or_else(|| stored_reference_type(&insns, index, slot, cw));
-            let Some(ty) = from_frame.or_else(|| allocated.get(&slot).copied()) else {
+            let held = state.local(slot);
+            if matches!(
+                held,
+                crate::jvm::suspend::cps::VerificationType::Uninitialized(_)
+            ) {
                 crate::trace_compiler!(
                     "suspend",
-                    "discover: slot {slot} live at {at} has no type in a frame of {} slots (stores {:?})",
-                    typed.len(),
-                    stores_into(&insns, index, slot)
+                    "discover: slot {slot} holds an unconstructed object at {at}"
+                );
+                return None;
+            }
+            let Some(ty) = verif_spill_type(&held.to_verif()) else {
+                continue;
+            };
+            spills.push((slot, ty));
+        }
+        // What the body holds on the operand stack under this call — the dependency's own values,
+        // `acc` in `acc = acc + f(x)` — is saved into slots ABOVE everything the body uses, so it
+        // cannot collide with a local. It is saved per suspension, since only one state is ever
+        // live at a time. `areturn` discards the stack, so a value that cannot be typed cannot be
+        // carried, and the machine declines.
+        let mut prefix = Vec::new();
+        let mut slot = code.max_locals;
+        for value in &state.stack {
+            let Some(ty) = verif_spill_type(&value.to_verif()) else {
+                crate::trace_compiler!(
+                    "suspend",
+                    "discover: operand {value:?} under the suspension at {at} cannot be carried"
                 );
                 return None;
             };
-            // A reference slot the body ASSIGNS AGAIN after the suspension is carried by a merge —
-            // a loop whose accumulator the body rewrites each turn — and its type at the join is
-            // whatever that merge settled on, which no frame in this body states. Restoring it under
-            // the type a frame gives here would claim more than the other edge can prove, so the
-            // machine declines instead of emitting a class that cannot verify.
-            if !matches!(spill_kind(ty), 'I' | 'J' | 'F' | 'D') {
-                if let Some(rewritten) = reassigned_after(&insns, index, slot, cw) {
-                    if rewritten != ty {
-                        crate::trace_compiler!(
-                            "suspend",
-                            "discover: slot {slot} is rewritten after {at} ({ty:?} vs {rewritten:?})"
-                        );
-                        return None;
-                    }
-                }
-            }
-            if matches!(spill_kind(ty), 'J' | 'D') {
-                high_word = Some(slot + 1);
-            }
-            spills.push((slot, ty));
-        }
-        // The dependency's stack prefix is saved into slots ABOVE everything the body uses, so it
-        // cannot collide with a local — and it is saved per suspension, since only one state is ever
-        // live at a time.
-        let mut prefix = Vec::new();
-        let mut slot = code.max_locals;
-        for value in prefixes.get(&(ordinal as usize)).into_iter().flatten() {
-            let ty = verif_spill_type(value)?;
             prefix.push((slot, ty));
             slot += slot_words(ir_ty_to_jvm(&ty));
         }
@@ -340,125 +271,35 @@ pub(super) fn discover(
     })
 }
 
-/// The type of a REFERENCE local the spliced body stores between frames, read off the instruction
-/// that produced the value.
-///
-/// A dependency compiled without a local-variable table names such a slot nowhere: no frame types
-/// it, no declaration in this file owns it, and the debug table is empty. What produced the value
-/// still says what it is — a call's return type, a `checkcast`, a field read.
-fn stored_reference_type(
-    insns: &[crate::jvm::inline::Insn],
-    index: usize,
-    slot: u16,
-    cw: &crate::jvm::classfile::ClassWriter,
-) -> Option<Ty> {
-    use crate::jvm::inline::Insn;
-    let store = insns.iter().take(index).rposition(|insn| {
-        matches!(insn, Insn::Plain { op, operands }
-            if matches!((*op, operands.first()), (0x3a, Some(&n)) if u16::from(n) == slot)
-                || (0x4b..=0x4e).contains(op) && u16::from(op - 0x4b) == slot)
-    })?;
-    let Insn::Plain { op, operands } = insns.get(store.checked_sub(1)?)? else {
-        return None;
-    };
-    let index_of = |operands: &[u8]| -> Option<u16> {
-        Some(u16::from_be_bytes([*operands.first()?, *operands.get(1)?]))
-    };
-    match op {
-        // A call's declared return type.
-        0xb6..=0xb9 => {
-            let (_, _, descriptor) = cw.methodref_parts(index_of(operands)?)?;
-            let returns = descriptor.rsplit(')').next()?;
-            descriptor_reference_ty(returns)
-        }
-        // A narrowing the body performed itself, or an instance it just built.
-        0xc0 | 0xbb | 0xbd => {
-            let class = cw.class_name_at(index_of(operands)?)?;
-            Some(Ty::obj(class))
-        }
-        _ => None,
-    }
-}
-
-/// A field descriptor's `Ty`, for REFERENCES only: a primitive there would mean the store was not
-/// an `astore` and something is being misread.
-fn descriptor_reference_ty(descriptor: &str) -> Option<Ty> {
-    matches!(descriptor.as_bytes().first(), Some(b'L') | Some(b'['))
-        .then(|| crate::jvm::ir_emit::ty_from_field_descriptor(descriptor))
-}
-
-/// The type the body stores into `slot` at its first write AFTER `index`, when that is a reference
-/// this pass can read off the producing instruction.
-fn reassigned_after(
-    insns: &[crate::jvm::inline::Insn],
-    index: usize,
-    slot: u16,
-    cw: &crate::jvm::classfile::ClassWriter,
-) -> Option<Ty> {
-    use crate::jvm::inline::Insn;
-    let next = insns.iter().enumerate().skip(index).find(|(_, insn)| {
-        matches!(insn, Insn::Plain { op, operands }
-            if matches!((*op, operands.first()), (0x3a, Some(&n)) if u16::from(n) == slot)
-                || (0x4b..=0x4e).contains(op) && u16::from(op - 0x4b) == slot)
-    })?;
-    stored_reference_type(insns, next.0 + 1, slot, cw)
-}
-
-/// What two views of one slot agree on.
-///
-/// References meet at `Object`, which any of them is assignable to. Primitives do not meet at all:
-/// a slot that is an `int` on one side and a `long` on the other holds two different values, and no
-/// single restore is right for both — the machine declines rather than pick one.
-fn common_type(before: Ty, after: Ty) -> Option<Ty> {
-    let reference = |ty: &Ty| !matches!(spill_kind(*ty), 'I' | 'J' | 'F' | 'D');
-    (reference(&before) && reference(&after)).then(|| Ty::obj("java/lang/Object"))
-}
-
-/// The store opcodes that write `slot` before instruction `index`. Diagnostic: it says what kind of
-/// value an untypeable slot holds.
-fn stores_into(insns: &[crate::jvm::inline::Insn], index: usize, slot: u16) -> Vec<u8> {
-    use crate::jvm::inline::Insn;
-    insns
-        .iter()
-        .take(index)
-        .filter_map(|insn| match insn {
-            Insn::Plain { op, operands } => {
-                let wrote = match (*op, operands.first()) {
-                    (0x36..=0x3a, Some(&n)) => Some(u16::from(n)),
-                    (0x3b..=0x4e, _) => Some(u16::from((op - 0x3b) % 4)),
-                    _ => None,
-                };
-                (wrote == Some(slot)).then_some(*op)
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-/// The type a spliced body's own local is declared with, from the debug table.
-///
-/// A local assigned between frames — `astore` into a slot the dependency's body owns — is typed by
-/// neither a frame nor this emitter's slot map. The splice copies the dependency's
-/// LocalVariableTable into the host, and that names the descriptor.
-fn local_table_type(code: &crate::jvm::classfile::CodeBuilder, slot: u16, at: usize) -> Option<Ty> {
-    let at = u16::try_from(at).ok()?;
-    code.local_entries()
-        .iter()
-        .find(|(start, length, entry_slot, _, _)| {
-            *entry_slot == slot
-                && *start <= at
-                && length.is_none_or(|length| at < start.saturating_add(length))
-        })
-        .map(|(_, _, _, _, descriptor)| crate::jvm::ir_emit::ty_from_field_descriptor(descriptor))
-}
-
-/// The slot-indexed locals of the last frame at or before `offset`.
-fn nearest_frame_slots(
+/// The slots some frame reachable from instruction `from` claims a type for.
+fn claimed_from(
+    graph: &crate::jvm::suspend::cps::ControlGraph,
+    from: usize,
     frames: &[(usize, Vec<VerifType>, Vec<VerifType>)],
-    offset: usize,
-) -> Option<Vec<VerifType>> {
-    let (_, locals, _) = frames.iter().rfind(|(at, _, _)| *at <= offset)?;
-    Some(expand_slots(locals))
+) -> Vec<u16> {
+    let mut seen = vec![false; graph.exit() + 1];
+    let mut pending = vec![from];
+    while let Some(index) = pending.pop() {
+        if index > graph.exit() || std::mem::replace(&mut seen[index], true) {
+            continue;
+        }
+        pending.extend_from_slice(graph.normal_successors(index));
+        pending.extend_from_slice(graph.exceptional_successors(index));
+    }
+    let mut claimed = Vec::new();
+    for (index, locals, _) in frames {
+        if !seen.get(*index).copied().unwrap_or(false) {
+            continue;
+        }
+        for (slot, typed_as) in locals.iter().enumerate() {
+            let described = !matches!(typed_as, VerifType::Top | VerifType::UninitializedThis);
+            let slot = slot as u16;
+            if described && !claimed.contains(&slot) {
+                claimed.push(slot);
+            }
+        }
+    }
+    claimed
 }
 
 /// Verification types indexed by SLOT: a `long`/`double` is one entry in a frame and two slots.

@@ -288,6 +288,47 @@ impl ConstPool {
         ))
     }
 
+    /// The descriptor a Fieldref at `idx` names.
+    fn fieldref_descriptor(&self, idx: u16) -> Option<&str> {
+        let Const::Fieldref(_, name_and_type) = self.entry_at(idx)? else {
+            return None;
+        };
+        let Const::NameAndType(_, descriptor_idx) = self.entry_at(*name_and_type)? else {
+            return None;
+        };
+        self.utf8_at(*descriptor_idx)
+    }
+
+    /// The descriptor of the call site an `invokedynamic` at `idx` links.
+    fn invokedynamic_descriptor(&self, idx: u16) -> Option<&str> {
+        let Const::InvokeDynamic(_, name_and_type) = self.entry_at(idx)? else {
+            return None;
+        };
+        let Const::NameAndType(_, descriptor_idx) = self.entry_at(*name_and_type)? else {
+            return None;
+        };
+        self.utf8_at(*descriptor_idx)
+    }
+
+    /// The verification type `ldc`/`ldc_w`/`ldc2_w` of the constant at `idx` pushes.
+    fn loadable_constant_type(&self, idx: u16) -> Option<VerifType> {
+        Some(match self.entry_at(idx)? {
+            Const::Integer(_) => VerifType::Integer,
+            Const::Float(_) => VerifType::Float,
+            Const::Long(_) => VerifType::Long,
+            Const::Double(_) => VerifType::Double,
+            Const::String(_) => VerifType::ObjectName("java/lang/String".to_string()),
+            Const::Class(_) => VerifType::ObjectName("java/lang/Class".to_string()),
+            Const::MethodType(_) => {
+                VerifType::ObjectName("java/lang/invoke/MethodType".to_string())
+            }
+            Const::MethodHandle(..) => {
+                VerifType::ObjectName("java/lang/invoke/MethodHandle".to_string())
+            }
+            _ => return None,
+        })
+    }
+
     fn class(&mut self, internal_name: &str) -> u16 {
         // Ty→bytecode boundary: a built-in type may reach here under its Kotlin name (`kotlin/Any`);
         // a `CONSTANT_Class` must carry the JVM name (`java/lang/Object`). Every bare class reference
@@ -1699,6 +1740,21 @@ impl ClassWriter {
     /// The internal name of the `CONSTANT_Class` at `index`, for the same reason.
     pub fn class_name_at(&self, index: u16) -> Option<&str> {
         self.cp.class_name(index)
+    }
+
+    /// The descriptor of the field reference at `index`, for the same reason.
+    pub fn fieldref_descriptor_at(&self, index: u16) -> Option<&str> {
+        self.cp.fieldref_descriptor(index)
+    }
+
+    /// The descriptor of the `invokedynamic` call site at `index`, for the same reason.
+    pub fn invokedynamic_descriptor_at(&self, index: u16) -> Option<&str> {
+        self.cp.invokedynamic_descriptor(index)
+    }
+
+    /// The verification type an `ldc` of the constant at `index` pushes, for the same reason.
+    pub fn loadable_constant_type_at(&self, index: u16) -> Option<VerifType> {
+        self.cp.loadable_constant_type(index)
     }
 
     pub fn methodref(&mut self, class: &str, name: &str, desc: &str) -> u16 {

@@ -1901,7 +1901,7 @@ fn machine_eligible(ir: &IrFile, fid: u32) -> bool {
     function.dispatch_receiver.is_some() && !owner_is_interface && !ir.open_methods.contains(&fid)
 }
 
-fn function_value_types(ir: &IrFile, fid: u32, body: ExprId) -> HashMap<u32, Ty> {
+pub(super) fn function_value_types(ir: &IrFile, fid: u32, body: ExprId) -> HashMap<u32, Ty> {
     fn collect(ir: &IrFile, expression: ExprId, out: &mut HashMap<u32, Ty>) {
         match &ir.exprs[expression as usize] {
             IrExpr::Variable {

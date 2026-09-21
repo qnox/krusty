@@ -281,6 +281,7 @@ Working today, each with a fixture in `tests/suspend_in_spliced_inline_e2e.rs`:
 | A mixed function inside `try`/`finally` | `a_mixed_function_inside_try_finally_runs` |
 | A PRIVATE member's machine (via `access$<name>`) | `…_of_a_private_member_runs` |
 | A body spliced into a `try` region (`runCatching { susp() }`) | `a_suspension_inside_a_spliced_try_region_runs` |
+| An accumulator the loop REWRITES across the suspension (`fold`, `reduce`) | `an_accumulator_rewritten_across_a_spliced_suspension_runs`, `stdlib_fold_and_reduce_with_a_suspending_operation_run` |
 
 Still bailing, by design: an OPEN member (the continuation re-enters with `invokevirtual`, which
 must reach this very body — kotlinc uses a `$suspendImpl` static for these), and any shape where the
@@ -305,8 +306,21 @@ wherever it can, including to the lambda of an ordinary function. Only the opera
 inline function is spliced, and both the suspension walk and the impl-suppression walk apply that
 rule.
 
+**A spill's type is the verifier's, computed.** The discovery pass runs a forward verification-type
+analysis over the spliced body (`src/jvm/suspend/cps/frame_types.rs`): seeded by the method's entry
+locals, every instruction's effect applied in order, joins meeting the way the verifier's do
+(references at `Object`, `null` at the other reference, differing primitives unusable), and a
+recorded frame REPLACING the computed state at its position — which is what the verifier holds
+there whatever arrives. The state at a suspension marker is exactly what the spill has to describe:
+the locals' types choose the continuation fields and the casts that read them back, and the operand
+stack under the call is the prefix the machine saves and restores. This is what an accumulator a
+loop rewrites across the suspension needs — its type at the join is the loop's merge, which no
+single frame in the body states — and it replaced reading the nearest frame, the emitter's own
+slot table, the dependency's debug locals and the producing instruction, each of which covered one
+case and guessed at the rest.
+
 **Correctness before byte parity.** Two deliberate divergences from kotlinc remain: the spill set is
-widened to every local the merged frames CLAIM at a resume (kotlinc spills exactly its liveness
+widened to every local a frame REACHABLE from the join claims (kotlinc spills exactly its liveness
 set), and suspensions inside a spliced body are hoisted to statement temps before the machine reads
 them. Both are what makes the shapes above run; neither is byte-identical. §7a still gates parity.
 

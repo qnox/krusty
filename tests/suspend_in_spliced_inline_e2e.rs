@@ -53,6 +53,12 @@ inline fun twice(x: Int, f: (Int) -> Int): Int {
     }
     return acc
 }
+
+inline fun <R> accumulate(xs: List<Int>, initial: R, f: (R, Int) -> R): R {
+    var acc = initial
+    for (x in xs) acc = f(acc, x)
+    return acc
+}
 "#;
 
 #[test]
@@ -505,6 +511,82 @@ fn overloaded_suspend_functions_get_their_own_continuations() {
         }
     "#;
     let Some(output) = run("suspend_spliced_overloads", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// A generic accumulator the dependency's loop REWRITES across the suspension: its type at the
+/// join is the loop's merge — `Object`, where the entry edge holds the boxed initial value and the
+/// back edge the lambda's boxed result — which no single frame in the body states. The spill's type
+/// is computed by the forward verification-type analysis, not read off the nearest frame.
+#[test]
+fn an_accumulator_rewritten_across_a_spliced_suspension_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun total(xs: List<Int>): Int = accumulate(xs, 0) { acc, b -> acc + one(b) }
+        suspend fun joined(xs: List<Int>): String = accumulate(xs, "") { acc, b -> acc + one(b) }
+        fun box(): String = runBlocking {
+            val xs = listOf(1, 2, 3)
+            val n = total(xs)
+            val s = joined(xs)
+            if (n == 9 && s == "234") "OK" else "FAIL: " + n + " " + s
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_accumulator", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// The same shape through the stdlib's `fold` and `reduce`, whose bodies are whatever distribution
+/// is provisioned: the values are checked, not only that the class verifies, because a machine
+/// that restores the accumulator under the wrong type fails at the `iadd` that consumes it.
+#[test]
+fn stdlib_fold_and_reduce_with_a_suspending_operation_run() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun a(xs: List<Int>): Int = xs.fold(0) { acc, b -> acc + one(b) }
+        suspend fun b(xs: List<Int>): Int = xs.reduce { acc, b -> acc + one(b) }
+        suspend fun c(xs: List<Int>): String = xs.fold("") { acc, b -> acc + one(b) }
+        suspend fun d(xs: List<Int>): Long = xs.fold(0L) { acc, b -> acc + one(b) }
+        suspend fun e(xs: List<Int>): List<Int> = xs.fold(listOf()) { acc, b -> acc + one(b) }
+        suspend fun f(xs: List<Int>): Int = xs.foldIndexed(0) { i, acc, b -> acc + i + one(b) }
+        suspend fun g(xs: List<Int>): Int = xs.reduce { acc, b -> maxOf(acc, one(b)) }
+        suspend fun h(xs: List<Int>): Int = xs.sumOf { one(it) }
+        suspend fun i(xs: List<Int>): String = xs.fold("") { acc, b -> val t = acc + one(b); t }
+        suspend fun j(xs: List<Int>): Int = xs.foldRight(0) { b, acc -> acc + one(b) }
+        fun box(): String = runBlocking {
+            val xs = listOf(1, 2, 3)
+            val got = listOf(a(xs), b(xs), c(xs), d(xs), e(xs), f(xs), g(xs), h(xs), i(xs), j(xs))
+            val want = listOf<Any>(9, 8, "234", 9L, listOf(2, 3, 4), 12, 4, 9, "234", 9)
+            if (got == want) "OK" else "FAIL: " + got
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_fold_reduce", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// A snapshot of a spliced lambda's OWN parameter, taken before a later operand suspends, is typed
+/// by the lambda's numbering, not the enclosing function's: `acc` here is value 0 of the lambda,
+/// and value 0 of `total` is the list. Typed as the list, the temp was boxed on the way in and
+/// consumed as an `int` on the way out.
+#[test]
+fn a_snapshot_of_a_spliced_lambda_parameter_is_typed_by_the_lambda() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun total(xs: List<Int>): Int = accumulate(xs, 0) { acc, b -> acc * 10 + one(b) }
+        fun box(): String = runBlocking {
+            val n = total(listOf(1, 2, 3))
+            if (n == 234) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_lambda_param_snapshot", MAIN) else {
         return;
     };
     assert_eq!(output, "OK");

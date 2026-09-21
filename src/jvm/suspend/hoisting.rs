@@ -159,14 +159,20 @@ fn hoist_spliced_walk(
         return;
     }
     if let IrExpr::Lambda {
+        impl_fn,
         captures,
         inline_body: Some(inner),
         ..
     } = ir.exprs[expression as usize].clone()
     {
+        // A lambda's body has its OWN value numbering: its parameters and locals are the
+        // implementation function's, not the enclosing function's. A snapshot of `acc` inside
+        // `fold(0) { acc, b -> acc + one(b) }` typed by the enclosing function's value 0 would be
+        // declared as the list being folded.
+        let mut own = super::function_value_types(ir, impl_fn, inner);
         // A nested spliced body runs in this frame too, so normalize the innermost first.
-        hoist_spliced_walk(ir, inner, suspend_set, orig_rets, value_types, seen);
-        let rewritten = hoist_spliced_body(ir, inner, suspend_set, orig_rets, value_types);
+        hoist_spliced_walk(ir, inner, suspend_set, orig_rets, &mut own, seen);
+        let rewritten = hoist_spliced_body(ir, inner, suspend_set, orig_rets, &mut own);
         if rewritten != inner {
             if let IrExpr::Lambda { inline_body, .. } = &mut ir.exprs[expression as usize] {
                 *inline_body = Some(rewritten);
@@ -1284,6 +1290,11 @@ fn hoist_operands_in_order(
                     );
                     return None;
                 };
+                crate::trace_compiler!(
+                    "suspend",
+                    "hoist_operands_in_order: snapshot operand {i} ({:?}) as {ty:?}",
+                    ir.exprs[x as usize]
+                );
                 snapshot_ty[i] = Some(ty);
             }
         }
