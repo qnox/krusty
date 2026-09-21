@@ -5,13 +5,13 @@
 //! program can observe and the declaration costs the generator nothing to accept. Whole files were
 //! declining for it anyway, on the declaration alone.
 //!
-//! An annotation INSTANCE is a different thing and still declines. Kotlin defines its `equals`,
-//! `hashCode` and `toString` over its arguments — arrays by content — and this backend would give
-//! it `kotlin.Any`'s identity ones, so reading its members would work while comparing two would
-//! not. That is the kind of half-right that answers rather than declines, which is why the line is
-//! drawn at the value rather than at the declaration.
+//! An annotation INSTANCE is a different thing, and it IS realized: Kotlin defines its `equals`,
+//! `hashCode` and `toString` over its arguments — arrays by content — and this backend synthesizes
+//! those three rather than leaving `kotlin.Any`'s identity ones in their slots. The rules and the
+//! shapes they cover are in `tests/native_annotation_instances_e2e.rs`; the two cases here are the
+//! ones the old refusal was stated as.
 
-use super::common::{expect_box_ok_with_stdlib, expect_native_box, expect_native_decline};
+use super::common::{expect_box_ok_with_stdlib, expect_native_box};
 
 #[test]
 fn a_declared_and_applied_annotation_leaves_the_program_alone() {
@@ -70,30 +70,29 @@ fn a_nested_annotation_declaration_is_accepted_with_its_owner() {
 }
 
 #[test]
-fn constructing_an_annotation_declines_rather_than_comparing_by_identity() {
-    // The refusal, stated as the program that would expose it: Kotlin answers `true` here because
-    // two annotation instances with equal arguments are equal, and identity equality answers
-    // `false` while still compiling and running.
-    expect_native_decline(
-        "annotation class Tag(val name: String)\n\
+fn two_annotation_instances_with_equal_arguments_are_equal() {
+    // Kotlin answers `true` here because an annotation instance's `equals` is its MEMBERS', not
+    // its identity. This was the program the refusal was stated as, back when identity equality
+    // would have answered `false` while still compiling and running.
+    let src = "annotation class Tag(val name: String)\n\
          fun box(): String {\n\
          \x20   val first = Tag(\"x\")\n\
          \x20   val second = Tag(\"x\")\n\
-         \x20   return if (first == second) \"OK\" else \"fail\"\n\
-         }\n",
-        "ConstructedAnnotation",
-        "annotation class",
-    );
+         \x20   if (first !== second) {\n\
+         \x20       if (first != second) return \"fail equals\"\n\
+         \x20       if (first.hashCode() != second.hashCode()) return \"fail hashCode\"\n\
+         \x20   }\n\
+         \x20   if (first == Tag(\"y\")) return \"fail a differing member\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_box_ok_with_stdlib(src, "ConstructedAnnotation");
+    expect_native_box(src, "ConstructedAnnotation", "OK");
 }
 
 #[test]
-fn reading_a_constructed_annotations_member_declines_with_the_construction() {
-    // Reading a member WOULD answer correctly; it declines because the value it reads from cannot
-    // be built. The line is at the value, not at each thing done with it.
-    expect_native_decline(
-        "annotation class Tag(val name: String)\n\
-         fun box(): String = Tag(\"OK\").name\n",
-        "ConstructedAnnotationMember",
-        "annotation class",
-    );
+fn a_constructed_annotations_member_is_read_from_the_instance() {
+    let src = "annotation class Tag(val name: String)\n\
+         fun box(): String = Tag(\"OK\").name\n";
+    expect_box_ok_with_stdlib(src, "ConstructedAnnotationMember");
+    expect_native_box(src, "ConstructedAnnotationMember", "OK");
 }
