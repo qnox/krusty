@@ -63,3 +63,146 @@ fn a_suspension_inside_a_spliced_inline_lambda_runs() {
     };
     assert_eq!(output, "OK");
 }
+
+/// Two suspensions in one spliced body: each needs its own state, and the second must resume with
+/// the first one's result already restored.
+#[test]
+fn two_suspensions_in_one_spliced_body_run() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int = v + 1
+        suspend fun pair(v: Int): Int = twice(v) { one(it) + one(it) }
+        fun box(): String = runBlocking {
+            val n = pair(10)
+            if (n == 46) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_two", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// A reference-typed local live across the suspension: spilled into the `L$0` family and narrowed
+/// back on resume, where a primitive spill is not.
+#[test]
+fn a_reference_local_survives_a_spliced_suspension() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int = v + 1
+        suspend fun tagged(tag: String, v: Int): String {
+            val n = twice(v) { one(it) }
+            return tag + n
+        }
+        fun box(): String = runBlocking {
+            val s = tagged("n=", 10)
+            if (s == "n=23") "OK" else "FAIL: " + s
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_ref", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// The suspension sits in one arm of a conditional inside the spliced body, so only some paths
+/// reach it and the resume re-enters mid-branch.
+#[test]
+fn a_conditional_suspension_in_a_spliced_body_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int = v + 1
+        suspend fun odds(v: Int): Int = twice(v) { if (it % 2 == 0) one(it) else it }
+        fun box(): String = runBlocking {
+            val n = odds(10)
+            if (n == 22) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_cond", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// A two-slot local (`Long`) live across the suspension: one verification entry, two slots.
+#[test]
+fn a_long_local_survives_a_spliced_suspension() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int = v + 1
+        suspend fun wide(v: Int): Long {
+            val base = 100L
+            val n = twice(v) { one(it) }
+            return base + n
+        }
+        fun box(): String = runBlocking {
+            val n = wide(10)
+            if (n == 123L) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_long", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// The same, through a stdlib `inline fun` rather than a fixture one: `run`'s body is spliced, so
+/// the suspension inside it belongs to this frame.
+#[test]
+fn a_suspension_inside_a_spliced_stdlib_run_lambda_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int = v + 1
+        suspend fun viaRun(v: Int): Int = run { one(v) }
+        fun box(): String = runBlocking {
+            val n = viaRun(10)
+            if (n == 11) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("probe_run", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// `let` passes the receiver as the lambda's argument, so the spliced body opens with a parameter
+/// slot this emitter allocated rather than one any frame describes.
+#[test]
+fn a_suspension_inside_a_spliced_stdlib_let_lambda_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int = v + 1
+        suspend fun viaLet(v: Int): Int = v.let { one(it) }
+        fun box(): String = runBlocking {
+            val n = viaLet(10)
+            if (n == 11) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("probe_let", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// A suspension inside a spliced LOOP body, resumed once per iteration, with a captured
+/// accumulator live across it.
+#[test]
+fn a_suspension_inside_a_spliced_stdlib_repeat_lambda_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int = v + 1
+        suspend fun viaRepeat(v: Int): Int {
+            var acc = 0
+            repeat(3) { acc = acc + one(v) }
+            return acc
+        }
+        fun box(): String = runBlocking {
+            val n = viaRepeat(10)
+            if (n == 33) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("probe_repeat", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}

@@ -11306,7 +11306,23 @@ fn emit_method_inner_with_holder(
     // then erase the markers so nothing synthetic can reach a class file even though these bytes are
     // about to be discarded.
     if !e.machine_suspensions.is_empty() && !env.run.has_machine_plan(fid) {
-        match coroutine_machine::discover(&code, &e.machine_slot_types, machine_slots) {
+        // Every slot this emitter owns, so a local assigned between frames can still be typed: the
+        // ones it allocated inside the spliced body, plus the body's own values — a hoisted
+        // suspension temp is one of those and no frame describes it.
+        let mut allocated = e.machine_slot_types.clone();
+        for &(slot, ty) in e.slots.values() {
+            allocated.entry(slot).or_insert(ty);
+        }
+        {
+            let mut keys: Vec<u16> = allocated.keys().copied().collect();
+            keys.sort_unstable();
+            crate::trace_compiler!(
+                "suspend",
+                "discover: allocated slots {keys:?} max_locals={}",
+                code.max_locals
+            );
+        }
+        match coroutine_machine::discover(&code, &allocated, machine_slots) {
             Some(plan) => {
                 crate::trace_compiler!(
                     "suspend",
@@ -13643,6 +13659,17 @@ impl<'a> Emitter<'a> {
     ///
     /// Returns the label the body starts at, one label per suspension for the dispatch to re-enter,
     /// and the label of the state that cannot happen.
+    /// Remember a declared local's slot type for the emit-time machine's discovery pass.
+    ///
+    /// `slots` is scoped: a block restores it on the way out, so by the time the spill plan is read
+    /// off the finished bytecode a body-local's type is no longer there. The frames cover the host's
+    /// locals; this covers everything declared between them, a hoisted suspension temp included.
+    fn record_machine_slot(&mut self, slot: u16, ty: Ty) {
+        if !self.machine_suspensions.is_empty() {
+            self.machine_slot_types.insert(slot, ty);
+        }
+    }
+
     fn emit_machine_prologue(
         &mut self,
         completion: u16,
@@ -14303,6 +14330,7 @@ impl<'a> Emitter<'a> {
                         s
                     });
                     self.slots.insert(index, (slot, jt));
+                    self.record_machine_slot(slot, jt);
                     self.unassigned_values.remove(&index);
                     store(jt, slot, code);
                     // A source local becomes visible after its initializing store.
@@ -14328,6 +14356,7 @@ impl<'a> Emitter<'a> {
                         s
                     });
                     self.slots.insert(index, (slot, jt));
+                    self.record_machine_slot(slot, jt);
                     self.unassigned_values.insert(index);
                     // An uninitialized source local (`lateinit var`) still has a lexical lifetime.
                     // Its declaration emits no store, so open the debug range at the declaration's

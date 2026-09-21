@@ -167,7 +167,15 @@ pub(super) fn discover(
             return None;
         };
         let mut spills = Vec::new();
+        // A `long`/`double` occupies two slots and the liveness set holds both. It is spilled once,
+        // under its first word; the second is the same value and has no type of its own (a frame
+        // describes it as `top`).
+        let mut high_word: Option<u16> = None;
         for slot in live.iter() {
+            if high_word == Some(slot) {
+                high_word = None;
+                continue;
+            }
             // The machine's own locals are not spilled: they hold the state that survives the
             // suspension rather than anything the body needs restored.
             if machine.is_some_and(|machine| machine.owns(slot)) {
@@ -184,6 +192,9 @@ pub(super) fn discover(
                 );
                 return None;
             };
+            if matches!(spill_kind(ty), 'J' | 'D') {
+                high_word = Some(slot + 1);
+            }
             spills.push((slot, ty));
         }
         spills.sort_by_key(|&(slot, _)| slot);

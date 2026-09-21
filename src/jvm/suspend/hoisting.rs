@@ -126,6 +126,102 @@ fn normalize_when_statement_body(
     }
 }
 
+/// Hoist the suspensions inside the bodies of lambdas that will be SPLICED into this frame.
+///
+/// A suspension leaves the method at the `areturn` that yields `COROUTINE_SUSPENDED`, and the
+/// operand stack does not survive that — only locals do, in the continuation's spill fields. So a
+/// suspension has to stand alone, with its result bound to a local, exactly as this pass arranges
+/// for the suspensions the IR machine can see. `f(one(it) + one(it))` reaches the second call with
+/// the first one's result on the stack; bound to temps, both are ordinary statements.
+///
+/// The bodies are rewritten in place where they are blocks; a bare expression body becomes one, so
+/// the lambda's `inline_body` is repointed at the new block.
+pub(super) fn hoist_spliced_inline_bodies(
+    ir: &mut IrFile,
+    body: ExprId,
+    suspend_set: &HashSet<u32>,
+    orig_rets: &[Ty],
+    value_types: &mut HashMap<u32, Ty>,
+) {
+    let mut seen = HashSet::new();
+    hoist_spliced_walk(ir, body, suspend_set, orig_rets, value_types, &mut seen);
+}
+
+fn hoist_spliced_walk(
+    ir: &mut IrFile,
+    expression: ExprId,
+    suspend_set: &HashSet<u32>,
+    orig_rets: &[Ty],
+    value_types: &mut HashMap<u32, Ty>,
+    seen: &mut HashSet<ExprId>,
+) {
+    if !seen.insert(expression) {
+        return;
+    }
+    if let IrExpr::Lambda {
+        captures,
+        inline_body: Some(inner),
+        ..
+    } = ir.exprs[expression as usize].clone()
+    {
+        // A nested spliced body runs in this frame too, so normalize the innermost first.
+        hoist_spliced_walk(ir, inner, suspend_set, orig_rets, value_types, seen);
+        let rewritten = hoist_spliced_body(ir, inner, suspend_set, orig_rets, value_types);
+        if rewritten != inner {
+            if let IrExpr::Lambda { inline_body, .. } = &mut ir.exprs[expression as usize] {
+                *inline_body = Some(rewritten);
+            }
+        }
+        for capture in captures {
+            hoist_spliced_walk(ir, capture, suspend_set, orig_rets, value_types, seen);
+        }
+        return;
+    }
+    let mut children = Vec::new();
+    crate::ir::for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
+    for child in children {
+        hoist_spliced_walk(ir, child, suspend_set, orig_rets, value_types, seen);
+    }
+}
+
+/// One spliced body, normalized. Returns the body to use — the same id when it was a block.
+fn hoist_spliced_body(
+    ir: &mut IrFile,
+    body: ExprId,
+    suspend_set: &HashSet<u32>,
+    orig_rets: &[Ty],
+    value_types: &mut HashMap<u32, Ty>,
+) -> ExprId {
+    match ir.exprs[body as usize].clone() {
+        IrExpr::Block { stmts, value } => {
+            let mut out = Vec::with_capacity(stmts.len());
+            for stmt in stmts {
+                hoist_stmt(ir, stmt, suspend_set, orig_rets, value_types, &mut out);
+            }
+            let value = value.map(|v| {
+                let mut prelude = Vec::new();
+                let hoisted = hoist_expr(ir, v, suspend_set, orig_rets, value_types, &mut prelude);
+                out.extend(prelude);
+                hoisted
+            });
+            ir.exprs[body as usize] = IrExpr::Block { stmts: out, value };
+            body
+        }
+        _ => {
+            let mut prelude = Vec::new();
+            let hoisted = hoist_expr(ir, body, suspend_set, orig_rets, value_types, &mut prelude);
+            if prelude.is_empty() {
+                body
+            } else {
+                ir.add_expr(IrExpr::Block {
+                    stmts: prelude,
+                    value: Some(hoisted),
+                })
+            }
+        }
+    }
+}
+
 pub(super) fn hoist_suspensions(
     ir: &mut IrFile,
     b: ExprId,
