@@ -2863,3 +2863,52 @@ fn an_is_check_asks_a_scalar_operand_through_its_box() {
     common::expect_box_ok_with_stdlib(source, "IsScalar");
     common::expect_native_box(source, "IsScalar", "OK");
 }
+
+#[test]
+fn a_class_may_extend_an_exception_the_runtime_owns() {
+    // `kotlin.Throwable` and the exceptions Kotlin declares under it are classes no file declares,
+    // and the layout pass declined any class extending one. The runtime already carries a `KType`
+    // and a storage layout for each, which is the same arrangement `kotlin.Enum` has had all along:
+    // the base's fields come first, its `toString` fills `kotlin.Any`'s slot, and the subclass's
+    // descriptor points at the runtime's — which is the whole of what makes a `catch` clause take
+    // the subclass, since matching a clause walks exactly that chain.
+    let source = "class Plain : Exception(\"plain\")\n\
+         class Named(message: String) : Exception(message)\n\
+         class Silent : Throwable()\n\
+         class State(message: String) : IllegalStateException(message)\n\
+         fun box(): String {\n\
+         \x20   if (Named(\"foo\").message != \"foo\") return \"fail 1\"\n\
+         \x20   if (Silent().message != null) return \"fail 2: ${Silent().message}\"\n\
+         \x20   val caught = try {\n\
+         \x20       throw Plain()\n\
+         \x20   } catch (e: Throwable) {\n\
+         \x20       e.message\n\
+         \x20   }\n\
+         \x20   if (caught != \"plain\") return \"fail 3: $caught\"\n\
+         \x20   val byBase = try {\n\
+         \x20       throw Named(\"base\")\n\
+         \x20   } catch (e: Exception) {\n\
+         \x20       e.message\n\
+         \x20   }\n\
+         \x20   if (byBase != \"base\") return \"fail 4: $byBase\"\n\
+         \x20   val precise = try {\n\
+         \x20       throw State(\"precise\")\n\
+         \x20   } catch (e: IllegalStateException) {\n\
+         \x20       e.message\n\
+         \x20   }\n\
+         \x20   if (precise != \"precise\") return \"fail 5: $precise\"\n\
+         \x20   var order = \"\"\n\
+         \x20   try {\n\
+         \x20       throw Silent()\n\
+         \x20   } catch (e: Exception) {\n\
+         \x20       order += \"wrong\"\n\
+         \x20   } catch (e: Throwable) {\n\
+         \x20       order += \"right\"\n\
+         \x20   }\n\
+         \x20   if (order != \"right\") return \"fail 6: $order\"\n\
+         \x20   if (Named(\"shown\").toString() != \"Named: shown\") return \"fail 7: ${Named(\"shown\")}\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "RuntimeBase");
+    common::expect_native_box(source, "RuntimeBase", "OK");
+}

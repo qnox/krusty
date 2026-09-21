@@ -95,6 +95,55 @@ pub(super) fn is_enum(class: &IrClass) -> bool {
     class.superclass.matches("kotlin/Enum")
 }
 
+/// A base class no file declares, whose layout the RUNTIME owns.
+///
+/// `kotlin.Enum` is the same idea spelled out above, and this is the rest of the family: a source
+/// class may extend `kotlin.Throwable` or any of the exceptions Kotlin declares under it, and the
+/// runtime already carries a `KType` and a storage layout for each — that is what makes `catch (e:
+/// Exception)` take such a subclass without anything further, since matching a clause walks the
+/// `base` chain those descriptors already form.
+#[derive(Clone, Copy)]
+pub(super) struct ExternalBase {
+    /// The runtime's `KType` for this class, by data symbol.
+    pub descriptor: &'static str,
+    /// The first byte after the base's own storage — where a subclass's fields begin.
+    pub fields_end: u32,
+    /// Reference fields the base contributes, as offsets the collector traces.
+    pub reference_offsets: &'static [u32],
+    /// What the base puts in `kotlin.Any`'s three slots, by runtime symbol.
+    pub any_slots: [&'static str; ANY_SLOTS as usize],
+}
+
+/// `kotlin.Throwable`'s own storage: the header, then `message`.
+const THROWABLE_MESSAGE_OFFSET: u32 = HEADER_SIZE;
+const THROWABLE_FIELDS_END: u32 = HEADER_SIZE + 8;
+const THROWABLE_REFERENCE_OFFSETS: &[u32] = &[THROWABLE_MESSAGE_OFFSET];
+
+/// The base `superclass` names, when it is one the runtime owns rather than one this file declares.
+///
+/// Which classes those are, and under which of the two providers' spellings they arrive, is
+/// [`crate::native::intrinsics::throwable_descriptor`]'s to know — this adds only the LAYOUT, which
+/// is a fact about emitting a subclass rather than about naming the base.
+pub(super) fn external_base(superclass: TypeName) -> Option<ExternalBase> {
+    // Each of these wears `KThrowable`'s layout and `Throwable`'s own `toString`; only the
+    // descriptor — and so the position in the `catch`-matching chain — differs.
+    let descriptor = super::intrinsics::throwable_descriptor(superclass)?;
+    Some(ExternalBase {
+        descriptor,
+        fields_end: THROWABLE_FIELDS_END,
+        reference_offsets: THROWABLE_REFERENCE_OFFSETS,
+        any_slots: [
+            "kt_any_equals",
+            "kt_any_hash_code",
+            "kt_throwable_to_string",
+        ],
+    })
+}
+
+/// Where a subclass of an external base stores what the base's constructor was given. Only
+/// `Throwable`'s single `message` is realized; a base with more than one is not in the table above.
+pub(super) const EXTERNAL_BASE_FIELD_OFFSET: u32 = THROWABLE_MESSAGE_OFFSET;
+
 /// The size of an object header: one pointer to the type.
 pub(super) const HEADER_SIZE: u32 = 8;
 
@@ -625,6 +674,7 @@ fn hierarchy_order(ir: &IrFile) -> Result<Vec<ClassId>, Unsupported> {
     for class in &ir.classes {
         if !class.superclass.matches("kotlin/Any")
             && !class.superclass.matches("kotlin/Enum")
+            && external_base(class.superclass).is_none()
             && ir.class_id_by_name(class.superclass).is_none()
         {
             return Err(format!(
@@ -690,23 +740,25 @@ fn layout_class(
     let class = &ir.classes[id as usize];
 
     // ---- fields ----
+    let external = external_base(class.superclass);
     let mut end = parent.map_or_else(
         || {
             if is_enum(class) {
                 ENUM_FIELDS_END
             } else {
-                HEADER_SIZE
+                external.map_or(HEADER_SIZE, |base| base.fields_end)
             }
         },
         |parent| parent.fields_end,
     );
     let mut reference_offsets = parent.map_or_else(
         || {
-            // The constant's name is a reference the collector traces like any other.
+            // The constant's name is a reference the collector traces like any other, and so is
+            // a `Throwable`'s message: what the base stores is traced through the subclass.
             if is_enum(class) {
                 vec![ENUM_NAME_OFFSET]
             } else {
-                Vec::new()
+                external.map_or_else(Vec::new, |base| base.reference_offsets.to_vec())
             }
         },
         |parent| parent.reference_offsets.clone(),
@@ -733,9 +785,17 @@ fn layout_class(
     let instance_size = round_up(end, 8);
 
     // ---- vtable ----
-    let (mut vtable, mut slots) = parent.map_or_else(any_vtable, |parent| {
-        (parent.vtable.clone(), parent.slots.clone())
-    });
+    let (mut vtable, mut slots) = match (parent, external) {
+        (Some(parent), _) => (parent.vtable.clone(), parent.slots.clone()),
+        // A base the runtime owns fills `kotlin.Any`'s three slots its own way — a `Throwable`
+        // renders as `qualified.Name: message` rather than by identity — and a subclass inherits
+        // that table before putting anything of its own in it.
+        (None, Some(base)) => {
+            let (_, slots) = any_vtable();
+            (base.any_slots.map(Slot::Runtime).to_vec(), slots)
+        }
+        (None, None) => any_vtable(),
+    };
 
     // Which methods are property accessors, so their slots are keyed by the property. A property
     // whose accessor has no BODY — an abstract `val` in an interface — carries no accessor id, and

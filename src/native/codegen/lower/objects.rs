@@ -64,6 +64,9 @@ fn any_member(symbol: &str) -> Option<(Vec<Ty>, Ty)> {
         // answers. See the note beside them in `krusty_rt.h`.
         "kt_reference_equals" => (vec![any(), any()], Ty::Boolean),
         "kt_reference_hash_code" => (vec![any()], Ty::Int),
+        // `Throwable.toString()`, which every class declared under one of the runtime's exception
+        // types inherits — the qualified name, and `: message` after it when there is one.
+        "kt_throwable_to_string" => (vec![any()], any()),
         _ => return None,
     })
 }
@@ -598,9 +601,15 @@ impl<'a> FileLowering<'a> {
         let name = self.kotlin_name(class);
         let descriptor = self.classes[class as usize].descriptor;
         // A class's `super` is its superclass where it has one, because `is` walks that chain.
+        // With no superclass in this file it may still have one the RUNTIME owns — `class C :
+        // Exception(…)` — and pointing at that descriptor is the whole of what makes `catch (e:
+        // Exception)` take `C`: matching a clause walks exactly this chain.
         let superclass = match layout.superclass {
             Some(parent) => self.classes[parent as usize].descriptor,
-            None => self.import_data("kt_type_any")?,
+            None => match model::external_base(self.ir.classes[class as usize].superclass) {
+                Some(base) => self.import_data(base.descriptor)?,
+                None => self.import_data("kt_type_any")?,
+            },
         };
         let interfaces: Vec<DataId> = self.model.interfaces[class as usize]
             .clone()
@@ -1110,6 +1119,12 @@ impl<'a> FileLowering<'a> {
                 };
                 Some((parent_constructor, params, omitted))
             }
+            // A base the runtime owns has no constructor to call: the object is already
+            // allocated, and what the base's constructor would have done is store what it was
+            // given. Which argument shapes that covers is the same question a direct
+            // `Exception(…)` asks, and it is asked in the same place — see
+            // `throwable_message_operand`, which declines a `cause` this storage cannot hold.
+            None if model::external_base(declaration.superclass).is_some() => None,
             None if !declaration.super_args.is_empty() => {
                 return Err(format!(
                     "a superclass constructor call to `{}`",
@@ -1184,6 +1199,29 @@ impl<'a> FileLowering<'a> {
                 }
                 let func_ref = body.func_ref(*constructor);
                 body.emit_call(func_ref, &arguments)?;
+            }
+            // The runtime-owned base has no constructor to call; its storage is written here
+            // instead, in the same place and order the call would have run. The operand is
+            // computed exactly as a direct `Exception(…)` computes it, so `Exception()` leaves
+            // Kotlin's `null` message and a `cause` this storage cannot hold declines.
+            if parent.is_none() && model::external_base(declaration.superclass).is_some() {
+                let Some(value) = body.throwable_message_operand(
+                    &declaration.fq_name(),
+                    &declaration.super_args,
+                    Some(&declaration.super_ctor_params),
+                )?
+                else {
+                    return Ok(());
+                };
+                if body.terminated {
+                    return Ok(());
+                }
+                body.builder.ins().store(
+                    trusted(),
+                    value,
+                    this,
+                    model::EXTERNAL_BASE_FIELD_OFFSET as i32,
+                );
             }
             if !declaration.explicit_param_stores {
                 let mut next_field = 0;
@@ -1693,6 +1731,58 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(Some(object))
     }
 
+    /// The message operand a `Throwable` constructor was given, as the runtime's single `message`
+    /// field takes it: a `null` reference where the constructor took none.
+    ///
+    /// Only the no-argument and one-message forms are realized. A `cause: Throwable?` is the other
+    /// one-argument form and this `Throwable` has no `cause` field, so accepting it would silently
+    /// drop what the program passed; it declines instead. `Ok(None)` means the lowering left.
+    fn throwable_message_operand(
+        &mut self,
+        name: &str,
+        args: &[u32],
+        selected: Option<&[Ty]>,
+    ) -> Result<Option<Value>, Unsupported> {
+        use super::super::super::intrinsics::ThrowableMessage;
+        let message = match (args, selected) {
+            ([], _) => None,
+            ([argument], Some([only])) => {
+                match super::super::super::intrinsics::throwable_message(only) {
+                    Some(kind) => Some((*argument, kind)),
+                    None => return Err(format!("this constructor of `{name}`")),
+                }
+            }
+            _ => return Err(format!("this constructor of `{name}`")),
+        };
+        let Some((argument, kind)) = message else {
+            // Kotlin's `null` message, which `toString` reports as the type name alone.
+            return Ok(Some(self.builder.ins().iconst(types::I64, 0)));
+        };
+        // A `Rendered` message is its `toString`, which is what the runtime's own renderer
+        // answers — so a scalar overload (`AssertionError(42)`) crosses as the box that renderer
+        // takes, and a reference goes straight to it.
+        let value = match kind {
+            ThrowableMessage::Verbatim => self.expression(argument)?,
+            ThrowableMessage::Rendered => {
+                let value = self.coerce(argument, Ty::nullable(Ty::obj("kotlin/Any")))?;
+                if self.terminated {
+                    return Ok(None);
+                }
+                let Some(value) = value else {
+                    return Err(format!("a `Unit` message for `{name}`"));
+                };
+                self.runtime_call("kt_to_string", &[any()], any(), &[value])?
+            }
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        match value {
+            Some(value) => Ok(Some(value)),
+            None => Err(format!("a `Unit` message for `{name}`")),
+        }
+    }
+
     /// `Throwable(message)` and its subclasses, as the runtime declares them.
     ///
     /// Only the no-argument and `message: String?` constructors are realized. A `cause` is the
@@ -1705,46 +1795,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         args: &[u32],
         selected: Option<&[Ty]>,
     ) -> Result<Option<Value>, Unsupported> {
-        use super::super::super::intrinsics::ThrowableMessage;
-        let message = match (args, selected) {
-            ([], _) => None,
-            ([argument], Some([only])) => {
-                match super::super::super::intrinsics::throwable_message(only) {
-                    Some(kind) => Some((*argument, *only, kind)),
-                    None => return Err(format!("this constructor of `{name}`")),
-                }
-            }
-            _ => return Err(format!("this constructor of `{name}`")),
-        };
-        let message = match message {
-            Some((argument, declared, kind)) => {
-                // A `Rendered` message is its `toString`, which is what the runtime's own renderer
-                // answers — so a scalar overload (`AssertionError(42)`) crosses as the box that
-                // renderer takes, and a reference goes straight to it.
-                let value = match kind {
-                    ThrowableMessage::Verbatim => self.expression(argument)?,
-                    ThrowableMessage::Rendered => {
-                        let value = self.coerce(argument, Ty::nullable(Ty::obj("kotlin/Any")))?;
-                        if self.terminated {
-                            return Ok(None);
-                        }
-                        let Some(value) = value else {
-                            return Err(format!("a `Unit` message for `{name}`"));
-                        };
-                        let _ = declared;
-                        self.runtime_call("kt_to_string", &[any()], any(), &[value])?
-                    }
-                };
-                if self.terminated {
-                    return Ok(None);
-                }
-                let Some(value) = value else {
-                    return Err(format!("a `Unit` message for `{name}`"));
-                };
-                value
-            }
-            // Kotlin's `null` message, which `toString` reports as the type name alone.
-            None => self.builder.ins().iconst(types::I64, 0),
+        let Some(message) = self.throwable_message_operand(name, args, selected)? else {
+            return Ok(None);
         };
         if self.terminated {
             return Ok(None);

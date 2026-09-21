@@ -7427,6 +7427,32 @@ and behavior is checked by RUNNING the emitted program.
   `codegen/box/inlineClasses/boxResultInlineClassOfConstructorCallGeneric.kt` and
   `codegen/box/primitiveTypes/kt36952_identityEqualsWithBooleanInLocalFunction.kt`.
 
+- **A class may extend an exception the RUNTIME owns.** `kotlin.Throwable` and the exceptions
+  Kotlin declares under it are classes no file declares, so the layout pass — which builds a class
+  from its superclass's fields and vtable — declined every class extending one. It needs neither
+  the source nor a classpath: the runtime already carries a `KType` and a storage layout for each,
+  which is the same arrangement `kotlin.Enum` has had all along. The base's storage comes first
+  (`Throwable`'s single `message`, traced by the collector like any other reference), its own
+  `toString` fills `kotlin.Any`'s slot, and the subclass's descriptor points at the runtime's —
+  which is the whole of what makes `catch (e: Exception)` take the subclass, since matching a
+  clause walks exactly that chain.
+
+  The base has no constructor to call: the object is already allocated, and what its constructor
+  would have done is store what it was given, so the store happens where the call would have run.
+  `Exception()` leaves the message null, which is Kotlin's null message; an argument shape the
+  base's storage cannot hold is declined rather than silently dropped.
+
+  Both spellings are one entry, because the two providers differ — a klib says
+  `kotlin.IllegalStateException` and a JVM classpath says `java.lang.IllegalStateException`, and
+  on the JVM the Kotlin name is a typealias for the Java one.
+  Tests: `tests/native_codegen_e2e.rs` (`a_class_may_extend_an_exception_the_runtime_owns`, which
+  cross-checks the two backends and REQUIRES the native lowering); the corpus cases are
+  `codegen/box/exceptions/extend0.kt`, `codegen/box/classes/exceptionConstructor.kt`,
+  `codegen/box/inference/tryCatchAtAssignment{,WithSmartCast}.kt`,
+  `codegen/box/finally/someStuff.kt`,
+  `codegen/box/controlStructures/tryCatchInExpressions/{multipleCatchBlocks,tryInsideTry}.kt` and
+  `codegen/box/callableReference/adaptedReferences/manyDefaultsAndVararg.kt`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

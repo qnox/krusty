@@ -1806,21 +1806,39 @@ mod compiles_against_the_klib {
 
         // A stdlib class that is `open` or `abstract` can be EXTENDED. It resolves — reading
         // "extensible only if an interface" off the kind rather than the declared modality made
-        // `kotlin.Exception` unsubclassable — and the code generator declines it for its own,
-        // separate reason, which is what the shape of this diagnostic says.
+        // `kotlin.Exception` unsubclassable — and for an exception the generator now emits it
+        // too, because the runtime owns that base's layout and descriptor.
         let subclass = diagnostics(
             &root,
             "class E : Exception(\"x\")\nfun box(): String = \"OK\"\n",
         );
         assert!(
-            subclass
-                .iter()
-                .any(|d| d.contains("a superclass declared outside this file")),
-            "an open stdlib class is extensible: {subclass:?}"
+            subclass.is_empty(),
+            "a class extending a stdlib exception compiles: {subclass:?}"
+        );
+
+        // A base whose layout the runtime does NOT own still declines, and the decline is the
+        // generator's rather than the provider's: resolution reached the class either way.
+        let unowned = diagnostics(
+            &root,
+            "class N : Number() {\n\
+             \x20   override fun toByte(): Byte = 0\n\
+             \x20   override fun toDouble(): Double = 0.0\n\
+             \x20   override fun toFloat(): Float = 0.0f\n\
+             \x20   override fun toInt(): Int = 0\n\
+             \x20   override fun toLong(): Long = 0\n\
+             \x20   override fun toShort(): Short = 0\n\
+             }\nfun box(): String = \"OK\"\n",
         );
         assert!(
-            !subclass.iter().any(|d| d.contains("cannot be subclassed")),
-            "and the refusal is the GENERATOR's, not the provider's: {subclass:?}"
+            unowned
+                .iter()
+                .any(|d| d.contains("a superclass declared outside this file")),
+            "an open stdlib class with no runtime layout still declines: {unowned:?}"
+        );
+        assert!(
+            !unowned.iter().any(|d| d.contains("cannot be subclassed")),
+            "and the refusal is the GENERATOR's, not the provider's: {unowned:?}"
         );
 
         // The control for the emit stage itself: analysis alone is SILENT about an unresolved

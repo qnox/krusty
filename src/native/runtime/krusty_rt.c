@@ -3078,7 +3078,7 @@ typedef struct KThrowable {
 
 static const uint32_t kt_throwable_offsets[] = {offsetof(KThrowable, message)};
 
-static KRef kt_throwable_to_string(KRef self) {
+KRef kt_throwable_to_string(KRef self) {
     const KType *type = self->header.type;
     KRef name = kt_string_utf8(type->name, (kt_int)type->name_length);
     KRef message = ((KThrowable *)self)->message;

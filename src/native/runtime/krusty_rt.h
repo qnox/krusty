@@ -523,6 +523,11 @@ KRef kt_throwable_new(const KType *type, KRef message);
 /* Its `message`, or NULL. */
 KRef kt_throwable_message(KRef self);
 
+/* `Throwable.toString()`: the qualified name, and `: message` after it when there is one. A class
+   the SOURCE declares as a subclass of one of these inherits it through its own vtable, which is
+   why it is published rather than private to this file. */
+KRef kt_throwable_to_string(KRef self);
+
 /* Reading a `lateinit` property before anything assigned it, named for the message Kotlin gives. */
 void kt_uninitialized_property(KRef name);
 
