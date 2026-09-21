@@ -2979,3 +2979,42 @@ fn a_result_is_its_value_or_a_marker_holding_the_exception() {
     common::expect_box_ok_with_stdlib(source, "ResultValue");
     common::expect_native_box(source, "ResultValue", "OK");
 }
+
+#[test]
+fn a_list_answers_its_first_and_last_element() {
+    // `first()` and `last()` with no predicate are a question about the ends of the list, which
+    // the runtime already had the pieces for. Kotlin raises `NoSuchElementException` on an empty
+    // one rather than answering null, and the distinction is not academic: a list of a nullable
+    // element type has a perfectly good null first element, and the two must stay apart.
+    //
+    // The one-argument forms take a LAMBDA and are a different question entirely — an inline
+    // declaration whose body decides which element — so they are not these.
+    let source = "fun box(): String {\n\
+         \x20   val letters = listOf(\"O\", \"K\", \"!\")\n\
+         \x20   if (letters.first() != \"O\") return \"fail 1\"\n\
+         \x20   if (letters.last() != \"!\") return \"fail 2\"\n\
+         \x20   val one = listOf(7)\n\
+         \x20   if (one.first() != 7) return \"fail 3\"\n\
+         \x20   if (one.last() != 7) return \"fail 4\"\n\
+         \x20   val nullable: List<String?> = listOf(null, \"x\")\n\
+         \x20   if (nullable.first() != null) return \"fail 5\"\n\
+         \x20   if (nullable.last() != \"x\") return \"fail 6\"\n\
+         \x20   val empty = listOf<String>()\n\
+         \x20   var raised = \"none\"\n\
+         \x20   try {\n\
+         \x20       empty.first()\n\
+         \x20   } catch (e: NoSuchElementException) {\n\
+         \x20       raised = \"first\"\n\
+         \x20   }\n\
+         \x20   if (raised != \"first\") return \"fail 7: $raised\"\n\
+         \x20   try {\n\
+         \x20       empty.last()\n\
+         \x20   } catch (e: NoSuchElementException) {\n\
+         \x20       raised = \"last\"\n\
+         \x20   }\n\
+         \x20   if (raised != \"last\") return \"fail 8: $raised\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "ListEnds");
+    common::expect_native_box(source, "ListEnds", "OK");
+}

@@ -214,6 +214,9 @@ KRef kt_list_single(KRef value);
 kt_int kt_list_size(KRef list);
 kt_boolean kt_list_is_empty(KRef list);
 KRef kt_list_get(KRef list, kt_int index);
+/* `first()` / `last()`; both raise `NoSuchElementException` on an empty list, as Kotlin does. */
+KRef kt_list_first(KRef list);
+KRef kt_list_last(KRef list);
 kt_int kt_list_index_of(KRef list, KRef value);
 kt_int kt_list_last_index_of(KRef list, KRef value);
 kt_boolean kt_list_contains(KRef list, KRef value);

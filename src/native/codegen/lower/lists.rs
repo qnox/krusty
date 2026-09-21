@@ -200,6 +200,11 @@ fn list_symbol(name: &str, arity: usize, physical: &[Ty]) -> Option<(&'static st
         ("getSize" | "size", 0) => ("kt_list_size", vec![any()], Ty::Int),
         ("isEmpty", 0) => ("kt_list_is_empty", vec![any()], Ty::Boolean),
         ("get", 1) => ("kt_list_get", vec![any(), Ty::Int], any()),
+        // `first()` and `last()` with no predicate. The one-argument forms take a LAMBDA and are
+        // a different question — an inline declaration whose body decides which element — so they
+        // are not these and fall through.
+        ("first", 0) => ("kt_list_first", vec![any()], any()),
+        ("last", 0) => ("kt_list_last", vec![any()], any()),
         ("indexOf", 1) => ("kt_list_index_of", vec![any(), any()], Ty::Int),
         ("lastIndexOf", 1) => ("kt_list_last_index_of", vec![any(), any()], Ty::Int),
         ("contains", 1) => ("kt_list_contains", vec![any(), any()], Ty::Boolean),

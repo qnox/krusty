@@ -1772,6 +1772,26 @@ KRef kt_list_get(KRef list, kt_int index) {
     return kt_elements_of(elements)[index];
 }
 
+/* `first()` and `last()`. Kotlin raises `NoSuchElementException` on an empty list, with its own
+   wording, rather than answering NULL — a list of a nullable element type has a perfectly good
+   NULL first element and the two must stay distinguishable. */
+KRef kt_list_first(KRef list) {
+    if (kt_list_size(list) == 0) {
+        kt_throw(kt_throwable_new(&kt_type_no_such_element_exception,
+                                  kt_string_utf8("List is empty.", 14)));
+    }
+    return kt_elements_of(((const KList *)list)->elements)[0];
+}
+
+KRef kt_list_last(KRef list) {
+    kt_int size = kt_list_size(list);
+    if (size == 0) {
+        kt_throw(kt_throwable_new(&kt_type_no_such_element_exception,
+                                  kt_string_utf8("List is empty.", 14)));
+    }
+    return kt_elements_of(((const KList *)list)->elements)[size - 1];
+}
+
 kt_int kt_list_index_of(KRef list, KRef value) {
     KRef elements = ((const KList *)list)->elements;
     kt_int length = kt_list_size(list);

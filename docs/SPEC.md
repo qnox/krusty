@@ -7495,6 +7495,19 @@ and behavior is checked by RUNNING the emitted program.
   `codegen/box/inlineClasses/result/*.kt` and the `Result` cases under
   `codegen/box/inlineClasses/`.
 
+- **A list answers its first and last element.** `first()` and `last()` with no predicate are a
+  question about the ends of the list, which the runtime already held the pieces for. Kotlin raises
+  `NoSuchElementException` on an empty one rather than answering null, with its own wording, and
+  the distinction is not academic: a list of a nullable element type has a perfectly good null
+  first element, and answering null for "empty" would make the two indistinguishable.
+
+  The ONE-argument forms take a lambda and are a different question — an inline declaration whose
+  body decides which element — so they are not these and still decline.
+  Tests: `tests/native_codegen_e2e.rs` (`a_list_answers_its_first_and_last_element`, which
+  cross-checks the two backends and REQUIRES the native lowering); the corpus cases are
+  `codegen/box/boxingOptimization/kt6842.kt`, `codegen/box/callableReference/kt50172.kt` and the
+  other `collections.first` cases.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
