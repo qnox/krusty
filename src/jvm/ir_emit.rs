@@ -11383,50 +11383,40 @@ fn emit_method_inner_with_holder(
         // offset is refused once the stream is dead.
         let found = code.marker_positions().unwrap_or_default();
         for (at, kind, ordinal) in found {
-            // The join's frame: the entry state plus what this suspension restores. Recorded here,
-            // in the enclosing method, so nothing merges the host's own locals into it — the resume
-            // edge cannot produce those.
-            if kind == crate::jvm::classfile::CoroutineMarker::Join {
-                let (Some(entry), Some(machine)) =
-                    (e.machine_entry_locals.clone(), e.machine.clone())
-                else {
-                    continue;
-                };
-                let Some(suspension) = machine.plan.suspensions.get(ordinal as usize) else {
-                    continue;
-                };
-                let mut restored = expand_collapsed_locals(&entry);
-                for (slot, ty, _, _) in coroutine_machine::suspension_fields(suspension) {
-                    let slot = slot as usize;
-                    if restored.len() <= slot {
-                        restored.resize(slot + 1, VerifType::Top);
-                    }
-                    restored[slot] = verif_of(ir_ty_to_jvm(&ty));
-                }
-                let label = code.new_label();
-                // The marker sits immediately BEFORE the join, so the frame belongs after it.
-                code.bind_target_at(label, at + crate::jvm::classfile::MARKER_LEN);
-                code.add_frame_if_new(
-                    label,
-                    collapse_locals(&restored),
-                    vec![VerifType::ObjectName("java/lang/Object".into())],
-                );
+            if kind != crate::jvm::classfile::CoroutineMarker::Join {
                 continue;
             }
-            if kind != crate::jvm::classfile::CoroutineMarker::Resume {
+            // Bind the label the dispatch's restore block jumps to, and record the frame the two
+            // edges share: the entry locals plus what this state restored, with the resumed value
+            // on the stack.
+            let (Some(entry), Some(machine)) = (e.machine_entry_locals.clone(), e.machine.clone())
+            else {
                 continue;
-            }
-            if let Some(&label) = resumes.get(ordinal as usize) {
-                // The state begins at the marker, which becomes `nop`s in its place.
-                code.bind_target_at(label, at);
-                // Its only predecessor is the dispatch, which arrives with the entry locals and
-                // nothing else; the restores that follow the marker put the spilled ones back.
-                if let Some(entry) = e.machine_entry_locals.clone() {
-                    code.add_frame_if_new(label, entry, Vec::new());
+            };
+            let Some(suspension) = machine.plan.suspensions.get(ordinal as usize) else {
+                continue;
+            };
+            let Some(&join) = e.machine_joins.get(ordinal as usize) else {
+                continue;
+            };
+            let mut restored = expand_collapsed_locals(&entry);
+            for (slot, ty, _, _) in coroutine_machine::suspension_fields(suspension) {
+                let slot = slot as usize;
+                if restored.len() <= slot {
+                    restored.resize(slot + 1, VerifType::Top);
                 }
+                restored[slot] = verif_of(ir_ty_to_jvm(&ty));
             }
+            // The marker sits AT the join: it is the first instruction there, and becomes `nop`s.
+            code.bind_target_at(join, at);
+            code.add_frame_if_new(
+                join,
+                collapse_locals(&restored),
+                vec![VerifType::ObjectName("java/lang/Object".into())],
+            );
         }
         let _ = code.erase_markers();
+        e.emit_machine_states(&resumes, &mut code);
         e.emit_machine_default(default, &mut code);
         if let Some(machine) = e.machine.clone() {
             let bytes = coroutine_machine::build_continuation_class(
@@ -13044,6 +13034,9 @@ struct Emitter<'a> {
     /// The locals the dispatch can prove at a resume: the state on entry, before the body stored
     /// anything. A resume's only predecessor is that dispatch.
     machine_entry_locals: Option<Vec<VerifType>>,
+    /// Where each state re-enters the body. The dispatch's restore block jumps here, so these are
+    /// the enclosing method's labels; a `Join` marker says where the splice put each one.
+    machine_joins: Vec<Label>,
     ret: Ty,
     /// Active loops: `(continue target, break target, checked common-IR target identity,
     /// active-finalizer depth on entry)`. FIR checking resolves a source label to a control target;
@@ -13134,6 +13127,7 @@ impl<'a> Emitter<'a> {
             machine_slot_types: HashMap::new(),
             machine_marker_locals: HashMap::new(),
             machine_entry_locals: None,
+            machine_joins: Vec::new(),
             machine: None,
             ret,
             loop_stack: Vec::new(),
@@ -13478,6 +13472,7 @@ impl<'a> Emitter<'a> {
             self.cw,
             reified,
         ) else {
+            crate::trace_compiler!("splice", "probe declined ({descriptor})");
             return false;
         };
         // The splice records frames if it has a join, any lambda body has frames, OR the HOST body itself
@@ -13554,6 +13549,7 @@ impl<'a> Emitter<'a> {
             self.cw,
             reified,
         ) else {
+            crate::trace_compiler!("splice", "probe declined ({descriptor})");
             return false;
         };
         let capture_frame_locals = capture_materializations
@@ -13833,16 +13829,72 @@ impl<'a> Emitter<'a> {
         targets.extend(resumes.iter().copied());
         code.tableswitch(0, targets.len() as i32 - 1, default, &targets);
 
-        code.bind(body);
         self.machine_entry_locals = Some(entry.clone());
-        code.add_frame_if_new(body, entry, Vec::new());
-        code.aload(machine.slots.result);
         let throw_on_failure =
             self.cw
                 .methodref("kotlin/ResultKt", "throwOnFailure", "(Ljava/lang/Object;)V");
+
+        // A state's restores are emitted AFTER the body, in `emit_machine_states`: they must not
+        // allocate or touch a slot before the body is laid out, because the plan being realized
+        // here was read from a first emission that had none of this code in it.
+        let joins: Vec<Label> = (0..machine.plan.suspensions.len())
+            .map(|_| code.new_label())
+            .collect();
+        self.machine_joins = joins;
+
+        code.bind(body);
+        code.add_frame_if_new(body, entry, Vec::new());
+        code.aload(machine.slots.result);
         code.invokestatic(throw_on_failure, 1, 0);
         code.set_needs_stackmap();
         Some((body, resumes, default))
+    }
+
+    /// The dispatch's states, emitted AFTER the body they re-enter.
+    ///
+    /// Each restores its own spills, pushes the resumed value and jumps to the join inside the body,
+    /// so nothing the machine adds sits between the `try` ranges the body declares and the locals
+    /// they describe: a handler's frame claims the body's locals, and an edge from a restore that
+    /// had not run yet cannot produce them. Placing the block after the body also keeps the slot
+    /// allocation identical to the first emission, which is where the plan was read.
+    fn emit_machine_states(&mut self, states: &[Label], code: &mut CodeBuilder) {
+        let Some(machine) = self.machine.clone() else {
+            return;
+        };
+        let entry = self.machine_entry_locals.clone().unwrap_or_default();
+        let throw_on_failure =
+            self.cw
+                .methodref("kotlin/ResultKt", "throwOnFailure", "(Ljava/lang/Object;)V");
+        for (ordinal, suspension) in machine.plan.suspensions.iter().enumerate() {
+            let (Some(&state), Some(&join)) =
+                (states.get(ordinal), self.machine_joins.get(ordinal))
+            else {
+                continue;
+            };
+            code.bind_external_target(state);
+            code.set_stack_height(0);
+            code.add_frame_if_new(state, entry.clone(), Vec::new());
+            for (slot, ty, field, descriptor) in coroutine_machine::suspension_fields(suspension) {
+                code.aload(machine.slots.continuation);
+                let reference = self.cw.fieldref(&machine.internal, &field, descriptor);
+                let jvm = ir_ty_to_jvm(&ty);
+                code.getfield(reference, slot_words(jvm) as i32);
+                // Only a reference spill widens on the way in — it is stored in an `Object` field,
+                // so the read has to be narrowed back. A primitive field already has the slot's own
+                // type, and casting an `int` is not something the verifier will accept.
+                if descriptor == "Ljava/lang/Object;" {
+                    if let Some(internal) = checkcast_internal(jvm) {
+                        let class = self.cw.class_ref(&internal);
+                        code.checkcast(class);
+                    }
+                }
+                store(jvm, slot, code);
+            }
+            code.aload(machine.slots.result);
+            code.invokestatic(throw_on_failure, 1, 0);
+            code.aload(machine.slots.result);
+            code.goto(join);
+        }
     }
 
     /// The state a resume cannot legally be in: re-entering a machine that never suspended.
@@ -13898,69 +13950,28 @@ impl<'a> Emitter<'a> {
         let Some(machine) = self.machine.clone() else {
             return;
         };
-        let Some(suspension) = machine.plan.suspensions.get(ordinal) else {
+        if machine.plan.suspensions.get(ordinal).is_none() {
             return;
-        };
+        }
         let join = code.new_label();
         code.dup();
         code.aload(machine.slots.suspended);
         code.if_acmpne(join);
         code.aload(machine.slots.suspended);
         code.areturn();
-        // Where the dispatch re-enters. The `areturn` above ended the stream, so the state is
-        // declared reachable first — otherwise everything that follows, marker included, is dropped
-        // as unreachable. The splice decides this position, so it is marked rather than recorded,
-        // and the marker is erased once the dispatch has been bound to it.
-        let resumed = code.new_label();
-        code.bind_external_target(resumed);
-        if let Ok(ordinal_marker) = u16::try_from(ordinal) {
-            code.coroutine_marker(
-                crate::jvm::classfile::CoroutineMarker::Resume,
-                ordinal_marker,
-            );
-        }
-        // The dispatch is this state's ONLY predecessor, and it jumps here with nothing but the
-        // machine's entry locals stored. A frame naming the body's locals — the ones live where
-        // this call sits — describes state that edge cannot produce; the restores below are what
-        // puts them back.
+        // Where the two paths meet: the call that did not suspend, and the dispatch's restore block
+        // for this state, which arrives with the resumed value on the stack. The marker names the
+        // position for the enclosing method, which owns both the label the restore block jumps to
+        // and the frame — one recorded in this builder would be merged with the host's locals when
+        // the body is relocated, claiming locals the dispatch cannot produce.
         //
-        // The frame itself is recorded by the host, where the dispatch's label is bound at the
-        // marker: this builder may be a lambda body's own, whose offsets are pre-relocation and
-        // whose labels the host cannot bind.
-        let locals = self
-            .machine_entry_locals
-            .clone()
-            .unwrap_or_else(|| self.verif_locals_upto(self.next_slot));
-        for (slot, ty, field, descriptor) in coroutine_machine::suspension_fields(suspension) {
-            code.aload(machine.slots.continuation);
-            let reference = self.cw.fieldref(&machine.internal, &field, descriptor);
-            let jvm = ir_ty_to_jvm(&ty);
-            code.getfield(reference, slot_words(jvm) as i32);
-            // Only a reference spill widens on the way in — it is stored in an `Object` field, so
-            // the read has to be narrowed back. A primitive field already has the slot's own type,
-            // and casting an `int` is not something the verifier will accept.
-            if descriptor == "Ljava/lang/Object;" {
-                if let Some(internal) = checkcast_internal(jvm) {
-                    let class = self.cw.class_ref(&internal);
-                    code.checkcast(class);
-                }
-            }
-            store(jvm, slot, code);
-        }
-        code.aload(machine.slots.result);
-        let throw_on_failure =
-            self.cw
-                .methodref("kotlin/ResultKt", "throwOnFailure", "(Ljava/lang/Object;)V");
-        code.invokestatic(throw_on_failure, 1, 0);
-        code.aload(machine.slots.result);
-        // Where the two paths meet. The frame is the enclosing method's to record: one recorded in
-        // this builder is merged with the host's locals when the body is relocated, and would then
-        // claim locals the resume path never restored. `locals` is unused here for the same reason.
-        let _ = locals;
+        // The `areturn` above ended the stream, so the join is bound FIRST: that binding revives
+        // emission (a branch to it was already emitted), and the marker is then live code at the
+        // join's own position — bytes emitted into a dead region are dropped with it.
+        code.bind(join);
         if let Ok(marker) = u16::try_from(ordinal) {
             code.coroutine_marker(crate::jvm::classfile::CoroutineMarker::Join, marker);
         }
-        code.bind(join);
         code.set_needs_stackmap();
     }
 
@@ -14266,6 +14277,7 @@ impl<'a> Emitter<'a> {
             self.cw,
             reified,
         ) else {
+            crate::trace_compiler!("splice", "probe declined ({descriptor})");
             return false;
         };
         let prefix = self.verif_locals_upto(base);

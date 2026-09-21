@@ -126,7 +126,15 @@ pub(super) fn discover(
         .filter(|(_, kind, _)| *kind == CoroutineMarker::Suspension)
         .map(|(at, _, ordinal)| (at, ordinal))
         .collect();
-    crate::trace_compiler!("suspend", "discover: {} marker(s)", markers.len());
+    crate::trace_compiler!(
+        "suspend",
+        "discover: {} marker(s) ordinals={:?}",
+        markers.len(),
+        markers
+            .iter()
+            .map(|(_, ordinal)| *ordinal)
+            .collect::<Vec<_>>()
+    );
     if markers.is_empty() {
         return None;
     }

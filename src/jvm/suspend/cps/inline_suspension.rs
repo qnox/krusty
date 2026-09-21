@@ -28,16 +28,21 @@ use std::collections::HashSet;
 /// one wherever it can, including to the lambda of an ordinary function (`launch { … }`). Only the
 /// argument of an INLINE call can be spliced, so only there does the body belong to this frame.
 fn calls_an_inline_function(ir: &IrFile, expression: ExprId) -> bool {
-    matches!(
-        &ir.exprs[expression as usize],
-        IrExpr::Call {
-            callee: Callee::Static {
-                inline: InlineKind::CanInline | InlineKind::MustInline,
-                ..
-            },
-            ..
-        }
-    )
+    let IrExpr::Call {
+        callee: Callee::Static { name, inline, .. },
+        ..
+    } = &ir.exprs[expression as usize]
+    else {
+        return false;
+    };
+    match inline {
+        InlineKind::None => false,
+        // The emitter's own rule: a `$default` synthetic is an ABI dispatcher whose mask prologue
+        // has to run as emitted, so only a splice-only declaration bypasses it. Claiming one here
+        // would promise a machine a state that never gets emitted.
+        InlineKind::CanInline => !name.ends_with("$default"),
+        InlineKind::MustInline => true,
+    }
 }
 
 /// Suspension points inside the `inline_body` of a lambda reached from `body`, in encounter order.

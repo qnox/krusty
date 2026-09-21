@@ -3732,6 +3732,16 @@ impl CodeBuilder {
         self.cur_stack
     }
 
+    /// Declare the operand-stack height at a block this builder cannot infer linearly.
+    ///
+    /// The tracker follows the instruction stream, so a block entered only by a branch inherits the
+    /// height left by whatever was emitted before it — which is not what reaches it. A coroutine
+    /// machine's dispatch is built of such blocks: each ends in a `goto` with the resumed value on
+    /// the stack, and the one that follows starts empty.
+    pub fn set_stack_height(&mut self, height: i32) {
+        self.cur_stack = height;
+    }
+
     pub(crate) fn can_fall_through(&self) -> bool {
         !self.dead
     }

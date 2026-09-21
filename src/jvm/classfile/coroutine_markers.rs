@@ -39,11 +39,25 @@ impl CodeBuilder {
     /// Emit a marker for suspension `ordinal`. Stack-neutral, like the `nop`s that replace it.
     pub fn coroutine_marker(&mut self, kind: CoroutineMarker, ordinal: u16) {
         if !self.is_dead() {
-            self.bytes.push(MARKER_OP);
-            self.bytes.push(kind as u8);
-            self.bytes.push((ordinal >> 8) as u8);
-            self.bytes.push((ordinal & 0xff) as u8);
+            self.write_coroutine_marker(kind, ordinal);
         }
+    }
+
+    /// Emit a marker even where emission has stopped.
+    ///
+    /// A join sits immediately after the `areturn` that leaves the frame on suspension, so the
+    /// stream is dead exactly where the position has to be marked. The marker's own bytes are then
+    /// unreachable — nothing branches to them, and they become `nop`s — while the position they
+    /// name is the live instruction that follows.
+    pub fn coroutine_marker_unreachable(&mut self, kind: CoroutineMarker, ordinal: u16) {
+        self.write_coroutine_marker(kind, ordinal);
+    }
+
+    fn write_coroutine_marker(&mut self, kind: CoroutineMarker, ordinal: u16) {
+        self.bytes.push(MARKER_OP);
+        self.bytes.push(kind as u8);
+        self.bytes.push((ordinal >> 8) as u8);
+        self.bytes.push((ordinal & 0xff) as u8);
     }
 
     /// Every marker in the finished bytes: `(byte offset, kind, ordinal)`, in offset order.

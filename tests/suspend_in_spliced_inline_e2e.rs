@@ -250,8 +250,9 @@ fn a_suspension_inside_a_spliced_try_region_runs() {
     assert_eq!(output, "OK");
 }
 
+/// The corpus shape: a stdlib `runCatching` around a suspending call.
 #[test]
-fn probe_stdlib_run_catching() {
+fn a_suspension_inside_stdlib_run_catching_runs() {
     const MAIN: &str = r#"
         import kotlinx.coroutines.runBlocking
         suspend fun one(v: Int): Int = v + 1
@@ -308,6 +309,35 @@ fn a_function_that_suspends_both_in_and_outside_a_spliced_body_runs() {
         }
     "#;
     let Some(output) = run("suspend_spliced_mixed", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// A mixed function whose suspensions sit inside a `try`/`finally`. The handler's frame claims the
+/// locals the protected code assigned, so every state must restore them BEFORE re-entering the
+/// region — which is why the dispatch's restore blocks live outside it.
+#[test]
+fn a_mixed_function_inside_try_finally_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int = v + 1
+        suspend fun guardedMixed(v: Int): Int {
+            var acc = 0
+            try {
+                acc = acc + one(v)
+                acc = acc + twice(v) { one(it) }
+            } finally {
+                acc = acc + 1
+            }
+            return acc
+        }
+        fun box(): String = runBlocking {
+            val n = guardedMixed(10)
+            if (n == 35) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("probe_mixed_try", MAIN) else {
         return;
     };
     assert_eq!(output, "OK");
