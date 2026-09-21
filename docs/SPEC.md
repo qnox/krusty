@@ -7312,6 +7312,28 @@ and behavior is checked by RUNNING the emitted program.
   (`an_override_that_answers_unit_still_answers_the_base_a_value`); the corpus case is
   `codegen/box/bridges/test18.kt`.
 
+- **`ProperIeee754Comparisons` survives a boxed operand.** Kotlin compares two floating-point
+  operands by IEEE rules whenever both static types are the floating-point type itself, INCLUDING
+  through a type parameter bounded by it (`fun <T : Double> f(d: Double, v: T) = d == v`) and
+  through its nullable form. `NaN == NaN` is then false and `0.0 == -0.0` true — and both verdicts
+  reverse once an operand widens to `Any`, where `equals` answers the total order instead. A
+  reference-carried operand is a BOX, not a widening, so the rule still applies to it: the
+  comparison opens the box and compares the numbers rather than handing the pair to the runtime's
+  `kt_equals`, which would answer the total order and be wrong rather than imprecise. `null` is not
+  a number and is answered before any unboxing — a null equals only another null — while a scalar
+  operand cannot be null and is asked nothing.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`a_floating_point_comparison_stays_ieee_when_an_operand_arrives_boxed`, which cross-checks the
+  two backends and REQUIRES the native lowering); the corpus cases are
+  `codegen/box/ieee754/{equalsNaN_properIeeeComparisons,whenNullableSmartCast,when_properIeeeComparisons}.kt`,
+  `codegen/box/binaryOp/{eqNullableDoublesWithTP,kt44402}.kt` and
+  `codegen/box/regressions/kt71119.kt`.
+
+  Known separately: the JVM backend emits a `VerifyError` for a call passing `null` to a
+  `<A : Double?>` parameter (`eqNullableDoublesWithTP`'s shape), which is why the cross-checked
+  program above stops at the nullable LOCAL and the generic nullable parameter is covered by the
+  corpus case on the native lane only.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

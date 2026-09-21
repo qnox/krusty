@@ -130,6 +130,94 @@ impl BodyLowering<'_, '_, '_> {
         Ok((lhs, rhs, width, signed))
     }
 
+    /// `==` and `!=` between two floating-point operands where at least one arrived BOXED.
+    ///
+    /// Kotlin's `ProperIeee754Comparisons` compares by IEEE rules whenever both static types are
+    /// the floating-point type itself — through a type parameter bounded by it and through its
+    /// nullable form — so `NaN == NaN` is false and `0.0 == -0.0` is true. `kt_equals` answers the
+    /// TOTAL order instead, where those two verdicts are reversed; it becomes the right answer only
+    /// once an operand widens to something like `Any`, which is why this cannot go there.
+    ///
+    /// `null` is not a floating-point value and never reaches the comparison: a reference operand
+    /// is checked first, and a null equals only another null. A scalar operand cannot be null and
+    /// is asked nothing.
+    fn ieee_equality(
+        &mut self,
+        op: IrBinOp,
+        lhs: u32,
+        lhs_ty: Option<Ty>,
+        rhs: u32,
+        rhs_ty: Option<Ty>,
+    ) -> Result<Option<Value>, Unsupported> {
+        // The type each side unboxes to, which the guard has already established is a
+        // floating-point one. Kotlin does not compare a `Double` with a `Float` through `==`, so
+        // two different widths here are a shape this has no rule for rather than a conversion.
+        let (Some(left_ty), Some(right_ty)) = (
+            lhs_ty.and_then(scalar_bound),
+            rhs_ty.and_then(scalar_bound),
+        ) else {
+            return Err("an IEEE comparison whose operand names no floating-point type".to_string());
+        };
+        if left_ty != right_ty {
+            return Err("an IEEE comparison between two floating-point widths".to_string());
+        }
+        let Some(left) = self.expression(lhs)? else {
+            return Err("a `Unit` operand".to_string());
+        };
+        let Some(right) = self.expression(rhs)? else {
+            return Err("a `Unit` operand".to_string());
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+
+        let merge = self.builder.create_block();
+        self.builder.append_block_param(merge, types::I8);
+        let compare = self.builder.create_block();
+        let absent = self.builder.create_block();
+
+        let left_null = self.is_null_operand(left, lhs_ty);
+        let right_null = self.is_null_operand(right, rhs_ty);
+        let either = self.builder.ins().bor(left_null, right_null);
+        self.builder.ins().brif(either, absent, &[], compare, &[]);
+
+        self.continue_in(absent);
+        self.builder.seal_block(absent);
+        let both = self.builder.ins().band(left_null, right_null);
+        self.builder.ins().jump(merge, &[BlockArg::Value(both)]);
+
+        self.continue_in(compare);
+        self.builder.seal_block(compare);
+        let left = self
+            .convert(left, lhs_ty, left_ty)?
+            .expect("a floating-point target yields a value");
+        let right = self
+            .convert(right, rhs_ty, right_ty)?
+            .expect("a floating-point target yields a value");
+        let equal = self.builder.ins().fcmp(FloatCC::Equal, left, right);
+        self.builder.ins().jump(merge, &[BlockArg::Value(equal)]);
+
+        self.continue_in(merge);
+        self.builder.seal_block(merge);
+        let answer = self.builder.block_params(merge)[0];
+        Ok(Some(if op == IrBinOp::Ne {
+            let one = self.builder.ins().iconst(types::I8, 1);
+            self.builder.ins().bxor(answer, one)
+        } else {
+            answer
+        }))
+    }
+
+    /// Whether an operand is `null`, as a `Boolean`. A scalar one never is, and says so with a
+    /// constant rather than a comparison against a pointer it is not.
+    fn is_null_operand(&mut self, value: Value, ty: Option<Ty>) -> Value {
+        if ty.map(carrier) != Some(Carrier::Ref) {
+            return self.builder.ins().iconst(types::I8, 0);
+        }
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        self.builder.ins().icmp(IntCC::Equal, value, zero)
+    }
+
     /// A built-in binary operator, with Kotlin's semantics where the machine's differ.
     pub(super) fn binary(
         &mut self,
@@ -172,18 +260,14 @@ impl BodyLowering<'_, '_, '_> {
             //
             // The difference is invisible for two unboxed operands, which take the scalar path
             // below and already compare by IEEE. It shows exactly here, where one side is a
-            // reference and the rule still applies. Answering with `kt_equals` is wrong rather
-            // than imprecise, so the comparison is declined until it is unboxed and compared
-            // properly; `ieee754/equalsNaN_properIeeeComparisons.kt` is the case.
+            // reference and the rule still applies, so the box is opened and the comparison made
+            // on the numbers themselves.
             if on_references
                 && [lhs_ty, rhs_ty]
                     .iter()
                     .all(|ty| ty.is_some_and(is_ieee_operand))
             {
-                return Err(
-                    "an IEEE floating-point comparison with an operand that arrived boxed"
-                        .to_string(),
-                );
+                return self.ieee_equality(op, lhs, lhs_ty, rhs, rhs_ty);
             }
             if on_references {
                 // Kotlin's `==` on references is `equals`, dispatched through the receiver's

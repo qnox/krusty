@@ -2616,3 +2616,35 @@ fn an_override_that_answers_unit_still_answers_the_base_a_value() {
         "true\nkotlin.Unit\n42\n"
     );
 }
+
+#[test]
+fn a_floating_point_comparison_stays_ieee_when_an_operand_arrives_boxed() {
+    // Kotlin compares two floating-point operands by IEEE rules whenever both static types are the
+    // floating-point type itself — including through a type parameter bounded by it and through its
+    // nullable form. `NaN == NaN` is then false and `0.0 == -0.0` true, and BOTH verdicts reverse
+    // once an operand widens to `Any`, where `equals` answers the total order instead. A boxed
+    // operand does not change which rule applies, so the box is opened rather than handed to the
+    // total order; `null` is not a number and is answered before any unboxing.
+    //
+    // Run on both backends and REQUIRED of the native one: a decline is the defect this pins, and
+    // the ordinary cross-check treats a decline as a skip.
+    let source = "fun <T : Double> sameDouble(d: Double, v: T): Boolean = d == v\n\
+         fun <T : Float> sameFloat(f: Float, v: T): Boolean = f == v\n\
+         fun box(): String {\n\
+         \x20   val nan = Double.NaN\n\
+         \x20   if (sameDouble(nan, nan)) return \"fail: NaN == NaN through a type parameter\"\n\
+         \x20   if (!sameDouble(0.0, -0.0)) return \"fail: 0.0 != -0.0 through a type parameter\"\n\
+         \x20   if (sameFloat(Float.NaN, Float.NaN)) return \"fail: Float NaN == NaN\"\n\
+         \x20   if (!sameFloat(0.0f, -0.0f)) return \"fail: Float 0.0 != -0.0\"\n\
+         \x20   val widened: Any = nan\n\
+         \x20   if (widened != widened) return \"fail: a widened NaN is not itself\"\n\
+         \x20   val absent: Double? = null\n\
+         \x20   val quiet: Double? = nan\n\
+         \x20   if (quiet == quiet) return \"fail: NaN? == NaN?\"\n\
+         \x20   if (quiet == absent) return \"fail: NaN? == null\"\n\
+         \x20   if (absent != absent) return \"fail: null != null\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "Ieee");
+    common::expect_native_box(source, "Ieee", "OK");
+}
