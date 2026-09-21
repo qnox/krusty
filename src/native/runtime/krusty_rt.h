@@ -215,6 +215,13 @@ KRef kt_list_empty(void);
    writing through the array afterwards leaves the list as it was. */
 KRef kt_array_to_list(KRef array);
 KRef kt_array_reversed(KRef array);
+/* An annotation member's array, by CONTENT — what Kotlin gives an annotation instance's `equals`,
+   `hashCode` and `toString` for an array member, and what separates it from a data class's (that
+   one compares arrays by identity). Each element is read through its box, so a `Float` element is
+   compared and hashed on the total order. */
+kt_boolean kt_array_content_equals(KRef left, KRef right);
+kt_int kt_array_content_hash_code(KRef array);
+KRef kt_array_content_to_string(KRef array);
 KRef kt_list_single(KRef value);
 kt_int kt_list_size(KRef list);
 kt_boolean kt_list_is_empty(KRef list);

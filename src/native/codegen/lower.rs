@@ -2884,6 +2884,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// Whether two values already in hand are `equals`, by the same rules.
+    /// Two strings, concatenated.
+    pub(super) fn join(&mut self, left: Value, right: Value) -> Result<Value, Unsupported> {
+        Ok(self
+            .runtime_call("kt_string_plus", &[any(), any()], any(), &[left, right])?
+            .expect("`kt_string_plus` returns a string"))
+    }
+
     pub(super) fn values_equal(
         &mut self,
         left: Value,

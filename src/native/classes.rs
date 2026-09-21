@@ -203,6 +203,12 @@ pub(super) enum Slot {
     /// It carries TYPES where [`Slot::Bridge`] carries function ids, because neither end need be
     /// a source accessor: either may be a synthesized field access, which has no declaration to
     /// name. It forwards by DISPATCH for the same reason the method bridge does.
+    /// `kotlin.Any`'s three for an ANNOTATION instance. Kotlin defines all three over the
+    /// annotation's members, and an ARRAY member is compared, hashed and rendered by CONTENT —
+    /// which is what separates it from a data class, where an array member is compared by
+    /// identity. `hashCode` is the contract sum of `(127 * name.hashCode()) xor value.hashCode()`,
+    /// and a program can read it: the corpus computes the same sum in Kotlin and compares.
+    AnnotationMember { class: ClassId, member: ValueMember },
     AccessorBridge {
         /// The property type as the INTERFACE declares it: the carrier this entry wears.
         declared: Ty,
@@ -1205,6 +1211,19 @@ fn layout_class(
     // declares — rather than to this class.
     if is_enum(class) && matches!(vtable[2], Slot::Runtime(_)) {
         vtable[2] = Slot::Runtime("kt_enum_to_string");
+    }
+    // An annotation INSTANCE is a value whose three `kotlin.Any` members Kotlin defines over its
+    // members rather than by identity. A declaration that carries none of them is still one — the
+    // language gives no way to write them — so there is nothing to preserve here as a value class
+    // has to.
+    if class.is_annotation {
+        for (slot, member) in [
+            (0, ValueMember::Equals),
+            (1, ValueMember::HashCode),
+            (2, ValueMember::ToString),
+        ] {
+            vtable[slot] = Slot::AnnotationMember { class: id, member };
+        }
     }
     if class.is_value {
         if class.fields.len() != 1 {

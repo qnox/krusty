@@ -308,6 +308,7 @@ impl<'a> FileLowering<'a> {
                     Slot::FieldGetter { .. }
                         | Slot::FieldSetter { .. }
                         | Slot::ValueMember { .. }
+                        | Slot::AnnotationMember { .. }
                         | Slot::Bridge { .. }
                         | Slot::AccessorBridge { .. }
                 )
@@ -362,7 +363,9 @@ impl<'a> FileLowering<'a> {
                 self.accessors.insert(slot, id);
                 continue;
             }
-            if let Slot::ValueMember { class, member } = &slot {
+            if let Slot::ValueMember { class, member } | Slot::AnnotationMember { class, member } =
+                &slot
+            {
                 let base = self.class_base(*class).to_string();
                 let (suffix, params, ret) = match member {
                     ValueMember::Equals => ("equals", vec![any(), any()], Ty::Boolean),
@@ -597,6 +600,7 @@ impl<'a> FileLowering<'a> {
                 Slot::FieldGetter { .. }
                 | Slot::FieldSetter { .. }
                 | Slot::ValueMember { .. }
+                | Slot::AnnotationMember { .. }
                 | Slot::Bridge { .. }
                 | Slot::AccessorBridge { .. } => self.accessors[slot],
             });
@@ -802,6 +806,9 @@ impl<'a> FileLowering<'a> {
         }
         if let Slot::ValueMember { class, member } = slot {
             return self.define_value_member(*class, *member, id);
+        }
+        if let Slot::AnnotationMember { class, member } = slot {
+            return self.define_annotation_member(*class, *member, id);
         }
         let (Slot::FieldGetter { class, field } | Slot::FieldSetter { class, field }) = slot else {
             unreachable!("only field accessors are synthesized");
@@ -1067,6 +1074,173 @@ impl<'a> FileLowering<'a> {
                     let whole = body
                         .runtime_call("kt_string_plus", &[any(), any()], any(), &[joined, tail])?
                         .expect("`kt_string_plus` returns a string");
+                    body.builder.ins().return_(&[whole]);
+                    body.terminate();
+                    Ok(())
+                })
+            }
+        }
+    }
+
+    /// An ANNOTATION instance's `equals`, `hashCode` and `toString`: the same answers Kotlin gives,
+    /// which are the MEMBERS' and not the object's identity.
+    ///
+    /// An array member is compared, hashed and rendered by CONTENT — the one place these differ
+    /// from a data class's, where an array member is compared by identity. `hashCode` is the
+    /// contract sum of `(127 * name.hashCode()) xor value.hashCode()` over the members, and a
+    /// program can read it: the corpus computes that sum in Kotlin and compares.
+    ///
+    /// The member's NAME hash is taken at run time rather than folded here, so it is the same
+    /// `String.hashCode` the program's own `name.hashCode()` reaches. Folding it would be a second
+    /// statement of that function, and the two would have to be kept equal by hand.
+    fn define_annotation_member(
+        &mut self,
+        class: ClassId,
+        member: ValueMember,
+        id: FuncId,
+    ) -> Result<(), Unsupported> {
+        let layout = self.model.layout(class).clone();
+        let declaration = self.ir.classes[class as usize].clone();
+        let kotlin_name = self.kotlin_name(class);
+        let name = format!("{}.{member:?}", declaration.fq_name());
+        let descriptor = self.classes[class as usize].descriptor;
+        // Each member as (its Kotlin name, its type, where it sits).
+        let members: Vec<(String, Ty, i32)> = declaration
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                (
+                    field.name.clone(),
+                    field.ty,
+                    layout.fields[index].offset as i32,
+                )
+            })
+            .collect();
+        for (_, ty, _) in &members {
+            if carrier(*ty).clif().is_none() {
+                return Err(format!(
+                    "an annotation member of `{ty:?}` (`{}`)",
+                    declaration.fq_name()
+                ));
+            }
+        }
+        match member {
+            ValueMember::Equals => {
+                let signature = self.signature_of(&[any(), any()], Ty::Boolean)?;
+                self.emit_function(id, signature, Ty::Boolean, &name, &mut |body, params| {
+                    let (left, right) = (params[0], params[1]);
+                    let differs = body.builder.create_block();
+                    let type_address = body.data_address(descriptor);
+                    let same_type = body
+                        .runtime_call(
+                            "kt_is_instance",
+                            &[any(), any()],
+                            Ty::Boolean,
+                            &[right, type_address],
+                        )?
+                        .expect("`kt_is_instance` returns a Boolean");
+                    let compare = body.builder.create_block();
+                    body.builder
+                        .ins()
+                        .brif(same_type, compare, &[], differs, &[]);
+                    body.continue_in(compare);
+                    body.builder.seal_block(compare);
+                    for (_, ty, offset) in &members {
+                        let clif = carrier(*ty).clif().expect("checked above");
+                        let mine = body.builder.ins().load(clif, trusted(), left, *offset);
+                        let theirs = body.builder.ins().load(clif, trusted(), right, *offset);
+                        let equal = if ty.non_null().is_array() {
+                            body.runtime_call(
+                                "kt_array_content_equals",
+                                &[any(), any()],
+                                Ty::Boolean,
+                                &[mine, theirs],
+                            )?
+                            .expect("`kt_array_content_equals` returns a Boolean")
+                        } else {
+                            body.values_equal(mine, theirs, *ty)?
+                        };
+                        let next = body.builder.create_block();
+                        body.builder.ins().brif(equal, next, &[], differs, &[]);
+                        body.continue_in(next);
+                        body.builder.seal_block(next);
+                    }
+                    let yes = body.builder.ins().iconst(types::I8, 1);
+                    body.builder.ins().return_(&[yes]);
+                    body.terminate();
+                    body.continue_in(differs);
+                    body.builder.seal_block(differs);
+                    let no = body.builder.ins().iconst(types::I8, 0);
+                    body.builder.ins().return_(&[no]);
+                    body.terminate();
+                    Ok(())
+                })
+            }
+            ValueMember::HashCode => {
+                let signature = self.signature_of(&[any()], Ty::Int)?;
+                self.emit_function(id, signature, Ty::Int, &name, &mut |body, params| {
+                    let mut sum = body.builder.ins().iconst(types::I32, 0);
+                    for (member_name, ty, offset) in &members {
+                        let clif = carrier(*ty).clif().expect("checked above");
+                        let value = body.builder.ins().load(clif, trusted(), params[0], *offset);
+                        let hash = if ty.non_null().is_array() {
+                            body.runtime_call(
+                                "kt_array_content_hash_code",
+                                &[any()],
+                                Ty::Int,
+                                &[value],
+                            )?
+                            .expect("`kt_array_content_hash_code` returns an Int")
+                        } else {
+                            body.value_hash(value, *ty)?
+                        };
+                        let text = body.string_literal(member_name.as_bytes())?;
+                        let name_hash = body
+                            .runtime_call("kt_hash_code", &[any()], Ty::Int, &[text])?
+                            .expect("`kt_hash_code` returns an Int");
+                        let weight = body.builder.ins().imul_imm_s(name_hash, 127);
+                        let contribution = body.builder.ins().bxor(weight, hash);
+                        sum = body.builder.ins().iadd(sum, contribution);
+                    }
+                    body.builder.ins().return_(&[sum]);
+                    body.terminate();
+                    Ok(())
+                })
+            }
+            ValueMember::ToString => {
+                let signature = self.signature_of(&[any()], any())?;
+                self.emit_function(id, signature, any(), &name, &mut |body, params| {
+                    let mut text = body.string_literal(format!("@{kotlin_name}(").as_bytes())?;
+                    for (index, (member_name, ty, offset)) in members.iter().enumerate() {
+                        let separator = if index == 0 {
+                            format!("{member_name}=")
+                        } else {
+                            format!(", {member_name}=")
+                        };
+                        let head = body.string_literal(separator.as_bytes())?;
+                        text = body.join(text, head)?;
+                        let clif = carrier(*ty).clif().expect("checked above");
+                        let value = body.builder.ins().load(clif, trusted(), params[0], *offset);
+                        let rendered = if ty.non_null().is_array() {
+                            body.runtime_call(
+                                "kt_array_content_to_string",
+                                &[any()],
+                                any(),
+                                &[value],
+                            )?
+                            .expect("`kt_array_content_to_string` returns a string")
+                        } else {
+                            let boxed = body
+                                .convert(value, Some(*ty), any())?
+                                .expect("a member is never `Unit`");
+                            body.runtime_call("kt_to_string", &[any()], any(), &[boxed])?
+                                .expect("`kt_to_string` returns a string")
+                        };
+                        text = body.join(text, rendered)?;
+                    }
+                    let tail = body.string_literal(b")")?;
+                    let whole = body.join(text, tail)?;
                     body.builder.ins().return_(&[whole]);
                     body.terminate();
                     Ok(())
@@ -1658,14 +1832,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         if declaration.is_abstract || declaration.is_sealed {
             return Err(format!("construction of the abstract class `{name}`"));
-        }
-        // An annotation INSTANCE is a value whose `equals`, `hashCode` and `toString` Kotlin
-        // defines over its arguments — arrays by content — and this backend would give it
-        // `kotlin.Any`'s identity ones. Reading its members would work and comparing two would
-        // not, which is the kind of half-right that answers rather than declines. Declaring and
-        // applying an annotation is unaffected: neither produces a value.
-        if declaration.is_annotation {
-            return Err(format!("construction of the annotation class `{name}`"));
         }
         // Matching uses the DECLARED list, because that is what the construction node names;
         // filling the frame uses the physical one, because that is what the constructor declares.

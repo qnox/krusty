@@ -7709,6 +7709,29 @@ and behavior is checked by RUNNING the emitted program.
   `codegen/box/classes/inheritance.kt` and the other "interface member with no implementation"
   cases.
 
+- **An annotation class is a value, and its three `kotlin.Any` members are its members'.** Kotlin
+  lets an annotation class be instantiated, and defines `equals`, `hashCode` and `toString` over
+  the arguments rather than by identity. Construction and member reads needed nothing — the class
+  lays out like any other — so what the declaration was waiting on was those three.
+
+  An ARRAY member is compared, hashed and rendered by CONTENT. That is the whole difference from a
+  data class, where an array member is compared by identity, which is why the two cannot share one
+  synthesis. A floating-point member is compared through its BOX, so NaN equals itself and the two
+  zeroes stay distinct.
+
+  `hashCode` is a contract a program can read rather than an implementation detail: the sum of
+  `(127 * name.hashCode()) xor value.hashCode()` over the members, which
+  `annotations/instances/annotationEqHc.kt` computes in Kotlin and compares. The member name's hash
+  is taken at RUN time so it is the same `String.hashCode` the program's own `name.hashCode()`
+  reaches; folding it here would be a second statement of that function, to be kept equal by hand.
+
+  The JVM backend's annotation IMPLEMENTATION class stays declined. It is that backend's own
+  synthesis — a class implementing `java.lang.annotation.Annotation` — and reaches this model only
+  by mistake.
+  Tests: `tests/native_annotation_instances_e2e.rs` (all three, each cross-checking the two
+  backends and REQUIRING the native lowering); the corpus cases are
+  `codegen/box/annotations/instances/`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

@@ -2123,6 +2123,66 @@ KRef kt_array_to_list(KRef array) { return kt_array_snapshot(array, 0); }
 
 KRef kt_array_reversed(KRef array) { return kt_array_snapshot(array, 1); }
 
+/* An annotation member's array, compared by CONTENT — `Arrays.equals`, which is what Kotlin gives
+   an annotation instance's `equals` for an array member and what separates it from a data class's
+   (that one compares arrays by identity).
+
+   Each element is compared the way its BOX compares, so a `Float` or `Double` element uses the
+   total order: NaN equals itself and the two zeroes are distinct. */
+kt_boolean kt_array_content_equals(KRef left, KRef right) {
+    if (left == right) {
+        return true;
+    }
+    if (left == NULL || right == NULL) {
+        return false;
+    }
+    kt_int length = ((const KArray *)left)->length;
+    if (length != ((const KArray *)right)->length) {
+        return false;
+    }
+    for (kt_int index = 0; index < length; index++) {
+        if (!kt_equals(kt_array_element(left, index), kt_array_element(right, index))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* `Arrays.hashCode`: 1, then `31 * result + element.hashCode()` per element, a null element
+   contributing 0 and a null array answering 0. The arithmetic is on the unsigned ring, because
+   Kotlin's `Int` wraps where C's signed overflow is undefined. */
+kt_int kt_array_content_hash_code(KRef array) {
+    if (array == NULL) {
+        return 0;
+    }
+    kt_int length = ((const KArray *)array)->length;
+    uint32_t result = 1;
+    for (kt_int index = 0; index < length; index++) {
+        KRef element = kt_array_element(array, index);
+        uint32_t hash = element == NULL ? 0u : (uint32_t)kt_hash_code(element);
+        result = result * 31u + hash;
+    }
+    return (kt_int)result;
+}
+
+/* `Arrays.toString`: `[a, b]`, and the text `null` for a null array. */
+KRef kt_array_content_to_string(KRef array) {
+    if (array == NULL) {
+        return kt_string_utf8("null", 4);
+    }
+    KRef builder = kt_string_builder_new();
+    kt_string_builder_append(builder, kt_string_utf8("[", 1));
+    kt_int length = ((const KArray *)array)->length;
+    for (kt_int index = 0; index < length; index++) {
+        if (index != 0) {
+            kt_string_builder_append(builder, kt_string_utf8(", ", 2));
+        }
+        kt_string_builder_append(builder, kt_array_element(array, index));
+    }
+    kt_string_builder_append(builder, kt_string_utf8("]", 1));
+    return kt_to_string(builder);
+}
+
 static kt_boolean kt_walk_has_next(KRef iterator) {
     const KWalk *walk = (const KWalk *)iterator;
     if (iterator->header.type == &kt_type_chars_iterator) {

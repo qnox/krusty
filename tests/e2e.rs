@@ -1748,6 +1748,8 @@ mod native_try_catch_e2e;
 #[path = "native_type_checks_e2e.rs"]
 mod native_type_checks_e2e;
 
+#[path = "native_annotation_instances_e2e.rs"]
+mod native_annotation_instances_e2e;
 #[path = "native_annotations_e2e.rs"]
 mod native_annotations_e2e;
 
