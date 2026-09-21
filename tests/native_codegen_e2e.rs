@@ -1577,30 +1577,30 @@ fn an_interface_answers_is_and_as() {
 }
 
 #[test]
-fn an_override_that_needs_a_bridge_is_declined() {
+fn an_inherited_method_reaches_an_interfaces_number_through_a_bridge() {
     let Some(target) = host() else {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
         return;
     };
-    // `D4.foo(): Int` is what `D1.foo(): Any` gets here, and the two disagree about the machine:
-    // one returns an unboxed integer, the other a reference. Pointing the interface's slot at the
-    // inherited method would have a caller read an integer as a pointer. The JVM emits a bridge
-    // for exactly this; until one is emitted here the file is declined rather than miscompiled.
-    let (_, diagnostics) = compile(
-        &[(
-            "Main",
-            "interface Boxed { fun foo(): Any }\n\
+    let _ = target;
+    // `Raw.foo(): Int` is what `Boxed.foo(): Any` gets here, and the two disagree about the
+    // machine: one answers an unboxed integer, the other a reference. Pointing the interface's
+    // number at the inherited method would have a caller read that integer as a pointer, so the
+    // number holds a bridge wearing the interface's carrier instead — which is what the JVM emits
+    // a bridge method for.
+    //
+    // Nothing in this class is declared `override`: `Both` satisfies `Boxed.foo` with a method
+    // `Raw` knows nothing about, which is the fake override the interface pass registers.
+    assert_eq!(
+        run("interface Boxed { fun foo(): Any }\n\
              open class Raw { fun foo(): Int = 42 }\n\
              class Both : Raw(), Boxed\n\
-             fun main() { val b: Boxed = Both(); println(b.foo()) }\n",
-        )],
-        target,
-    );
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("a bridge method is needed")),
-        "expected the backend to decline, got {diagnostics:?}"
+             fun main() {\n\
+             \x20   val b: Boxed = Both()\n\
+             \x20   println(b.foo())\n\
+             \x20   println(Both().foo())\n\
+             }\n"),
+        "42\n42\n"
     );
 }
 
