@@ -13458,10 +13458,6 @@ impl<'a> Emitter<'a> {
         if lam_splices.is_empty() {
             return false; // no lambda argument — not this path
         }
-        let lam_bodies: Vec<Vec<crate::jvm::inline::Insn>> = lam_splices
-            .iter()
-            .map(|splice| splice.body.clone())
-            .collect();
         // Probe at offset 0 to learn whether frames are needed (HOST branchy OR any lambda BODY branchy).
         let Some(probe) = crate::jvm::inline::splice_unified(
             body,

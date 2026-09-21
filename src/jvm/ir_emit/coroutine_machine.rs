@@ -46,26 +46,6 @@ pub(super) struct MachinePlan {
 }
 
 impl MachinePlan {
-    /// Slot of the resumed value (`$result`).
-    pub(super) fn result_slot(&self) -> u16 {
-        self.body_locals
-    }
-
-    /// Slot of the machine's own continuation.
-    pub(super) fn continuation_slot(&self) -> u16 {
-        self.body_locals + 1
-    }
-
-    /// Slot holding `COROUTINE_SUSPENDED`, compared against every suspension's result.
-    pub(super) fn suspended_slot(&self) -> u16 {
-        self.body_locals + 2
-    }
-
-    /// One past the machine's own locals.
-    pub(super) fn max_locals(&self) -> u16 {
-        self.body_locals + 3
-    }
-
     /// The continuation field holding spill `index`, by representation kind.
     pub(super) fn spill_field(kind: char, index: usize) -> String {
         format!("{kind}${index}")

@@ -85,15 +85,6 @@ pub(crate) fn frame_suspensions(
     found
 }
 
-/// Whether any suspension reached from `body` is one the IR machine cannot see.
-pub(crate) fn suspends_inside_a_spliced_inline_body(
-    ir: &IrFile,
-    body: ExprId,
-    suspend_set: &HashSet<u32>,
-) -> bool {
-    !spliced_inline_suspensions(ir, body, suspend_set).is_empty()
-}
-
 /// The implementation methods of the lambdas whose spliced bodies carry a suspension.
 ///
 /// Such a lambda has two bodies: the template the splice consumes, and the standalone `invoke` the
@@ -331,11 +322,6 @@ mod tests {
             spliced_inline_suspensions(&ir, body, &HashSet::new()),
             [point]
         );
-        assert!(suspends_inside_a_spliced_inline_body(
-            &ir,
-            body,
-            &HashSet::new()
-        ));
     }
 
     /// A lambda with no `inline_body` is a real closure: its body belongs to a generated `invoke`

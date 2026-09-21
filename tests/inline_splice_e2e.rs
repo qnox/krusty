@@ -120,7 +120,3 @@ fn typed_bodies_are_spliced() {
     };
     assert_eq!(out.trim(), "OK", "typed box() returned {out:?}");
 }
-
-fn contains(hay: &[u8], needle: &[u8]) -> bool {
-    hay.windows(needle.len()).any(|w| w == needle)
-}

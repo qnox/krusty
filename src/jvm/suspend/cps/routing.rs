@@ -32,12 +32,4 @@ impl EmitTimeMachines {
     pub(crate) fn suspensions(&self, function: u32) -> Option<&[SplicedSuspension]> {
         self.functions.get(&function).map(Vec::as_slice)
     }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.functions.is_empty()
-    }
-
-    pub(crate) fn functions(&self) -> impl Iterator<Item = u32> + '_ {
-        self.functions.keys().copied()
-    }
 }

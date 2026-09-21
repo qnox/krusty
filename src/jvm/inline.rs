@@ -5,7 +5,7 @@
 //! local remapping, and `reifiedOperationMarker` handling layer on top in later phases.
 
 use super::classfile::ClassWriter;
-use super::classreader::{utf8_value, ExcEntry, MethodCode, MethodLocal, C};
+use super::classreader::{utf8_value, MethodCode, C};
 use std::collections::HashMap;
 
 mod relocation;

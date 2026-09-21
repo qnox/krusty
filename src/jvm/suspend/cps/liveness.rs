@@ -34,12 +34,6 @@ impl SlotSet {
         }
     }
 
-    pub(crate) fn contains(&self, slot: u16) -> bool {
-        self.words
-            .get(slot as usize / 64)
-            .is_some_and(|word| word & (1 << (slot as usize % 64)) != 0)
-    }
-
     /// `true` when this changed.
     fn union_with(&mut self, other: &SlotSet) -> bool {
         if other.words.len() > self.words.len() {
@@ -60,10 +54,6 @@ impl SlotSet {
             (0..64)
                 .filter_map(move |bit| (bits & (1 << bit) != 0).then(|| (word * 64 + bit) as u16))
         })
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.words.iter().all(|&word| word == 0)
     }
 }
 
