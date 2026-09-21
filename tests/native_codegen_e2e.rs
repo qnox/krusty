@@ -2472,3 +2472,63 @@ fn a_branch_ending_in_a_local_it_declares_still_has_a_value() {
         "P",
     );
 }
+
+#[test]
+fn a_break_inside_an_expression_leaves_the_loop_with_the_expression_half_built() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `x + break` jumps out while the concatenation is still being assembled, so the store and
+    // the loop's back edge never happen and the block opened for them ends in whatever the
+    // abandoned expression had already materialized — a constant, with no terminator after it.
+    // Cranelift rejects such a block, so the whole function was refused. The value is the point
+    // as much as the compile: `x` must keep the value it had, the loop must be left once, and
+    // the `continue` arm must go round exactly as many times as it is told.
+    assert_eq!(
+        run("fun main() {\n\
+             \x20   var x = \"OK\"\n\
+             \x20   while (true) {\n\
+             \x20       x = x + break\n\
+             \x20   }\n\
+             \x20   println(x)\n\
+             \x20   var seen = 0\n\
+             \x20   var i = 0\n\
+             \x20   while (i < 3) {\n\
+             \x20       i = i + 1\n\
+             \x20       val skip = \"\" + if (i == 2) continue else \"\"\n\
+             \x20       seen = seen + skip.length + 1\n\
+             \x20   }\n\
+             \x20   println(seen)\n\
+             }\n"),
+        "OK\n2\n"
+    );
+}
+
+#[test]
+fn a_break_in_an_expression_under_a_finally_still_runs_the_finally() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // The same shape with a `finally` between the jump and the loop it leaves. The `continue` in
+    // the body is abandoned mid-expression exactly as above, and on its way out it still has to
+    // run the `finally` — whose own `break` is abandoned mid-expression in turn.
+    assert_eq!(
+        run("fun main() {\n\
+             \x20   var x = \"OK\"\n\
+             \x20   var ran = 0\n\
+             \x20   while (true) {\n\
+             \x20       try {\n\
+             \x20           x = x + continue\n\
+             \x20       } finally {\n\
+             \x20           ran = ran + 1\n\
+             \x20           x = x + break\n\
+             \x20       }\n\
+             \x20   }\n\
+             \x20   println(x)\n\
+             \x20   println(ran)\n\
+             }\n"),
+        "OK\n1\n"
+    );
+}

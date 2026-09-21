@@ -433,6 +433,7 @@ impl<'a> FileLowering<'a> {
                     handlers: Vec::new(),
                     propagate: None,
                     finallys: Vec::new(),
+                    dead: Vec::new(),
                 };
                 let params = body.builder.block_params(entry).to_vec();
                 fill(&mut body, &params)?;
@@ -449,6 +450,9 @@ impl<'a> FileLowering<'a> {
                 // After the body, because only the body knows whether any call was made: a frame
                 // with nothing to propagate through never creates the block at all.
                 body.seal_propagation();
+                // Last, because the two above may still be emitting into a dead block — the final
+                // `trap` just above is emitted into one whenever the body ended terminated.
+                body.seal_dead_blocks();
             }
             builder.seal_all_blocks();
             builder.finalize(frontend_config);
@@ -621,6 +625,12 @@ struct BodyLowering<'a, 'b, 'c> {
     /// The `finally` blocks the current position sits inside, innermost last. Every way out of a
     /// `try` runs them, so `return`, `break` and `continue` consult this before jumping.
     finallys: Vec<PendingFinally>,
+    /// Every block [`Self::terminate`] opened for the unreachable code after a jump. Most receive
+    /// that code and end in a terminator of their own; one whose statement walker stopped instead,
+    /// or that a construct switched away from, stays EMPTY — and an empty block is not a block
+    /// Cranelift will accept. They are swept at the end of the body, where what is still empty is
+    /// finally known.
+    dead: Vec<Block>,
 }
 
 /// One `finally` the current position is inside.
@@ -671,7 +681,35 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     fn terminate(&mut self) {
         self.terminated = true;
         let dead = self.builder.create_block();
+        self.dead.push(dead);
         self.builder.switch_to_block(dead);
+    }
+
+    /// Give every block opened for unreachable code a terminator of its own.
+    ///
+    /// `break` and `continue` inside an EXPRESSION are what leave one without: `x = x + break`
+    /// jumps out of the loop while the concatenation is still being built, so the store and the
+    /// loop's own back edge are skipped and the block opened to hold them ends in whatever the
+    /// abandoned expression had already materialized — a bare constant, in that case. The loop
+    /// then switches to its exit and the unfinished one is orphaned.
+    ///
+    /// What matters is the TERMINATOR, not emptiness: a block nothing reached still holds the
+    /// operands evaluated before the jump. Unreachable by construction, so a trap is the honest
+    /// end — nothing branches there, and a `return` would need a value this has no way to make.
+    fn seal_dead_blocks(&mut self) {
+        for block in std::mem::take(&mut self.dead) {
+            let ends = self
+                .builder
+                .func
+                .layout
+                .last_inst(block)
+                .is_some_and(|inst| self.builder.func.dfg.insts[inst].opcode().is_terminator());
+            if ends {
+                continue;
+            }
+            self.builder.switch_to_block(block);
+            self.builder.ins().trap(TrapCode::unwrap_user(1));
+        }
     }
 
     /// A checked bottom value: a producer whose Kotlin type is `Nothing` but which still has a
