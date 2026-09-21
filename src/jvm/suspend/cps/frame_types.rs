@@ -149,8 +149,9 @@ impl FrameState {
     }
 
     fn set_local(&mut self, slot: usize, value: VerificationType) {
-        if self.locals.len() <= slot + 1 {
-            self.locals.resize(slot + 2, VerificationType::Top);
+        let needed = slot + 1 + usize::from(value.is_wide());
+        if self.locals.len() < needed {
+            self.locals.resize(needed, VerificationType::Top);
         }
         // Writing the second word of a `long`/`double` destroys it (JVMS §4.10.1.9, `store`).
         if slot > 0 && self.locals[slot - 1].is_wide() {
@@ -450,6 +451,9 @@ fn step(
         0x16 | 0x1e..=0x21 => s.push(Long),           // lload(_n)
         0x17 | 0x22..=0x25 => s.push(Float),          // fload(_n)
         0x18 | 0x26..=0x29 => s.push(Double),         // dload(_n)
+        // A load of a slot the state holds as `top`, and an `iinc` of one that is not an `int`,
+        // are not checked: they push or keep `top`, which the ORIGINAL class would already have
+        // failed verification on. Being lenient here cannot make a verifiable body look wrong.
         0x19 => {
             let slot = u16::from(*operands.first()?);
             s.push(s.local(slot).clone());
@@ -1018,6 +1022,117 @@ mod tests {
         assert_eq!(
             types.before(3).expect("reachable").stack,
             [reference("java/lang/StringBuilder")]
+        );
+    }
+
+    #[test]
+    fn dup2_x2_moves_a_long_under_another_long() {
+        let pool = FakePool::default();
+        // lconst_0 ; lconst_1 ; dup2_x2 ; return   — [L0, L1] -> [L1, L0, L1]
+        let insns = [plain(0x09), plain(0x0a), plain(0x5e), plain(0xb1)];
+        let types = analyze(&insns, &[], &[], &pool);
+        assert_eq!(
+            types.before(3).expect("reachable").stack,
+            [
+                VerificationType::Long,
+                VerificationType::Long,
+                VerificationType::Long
+            ]
+        );
+        // dup_x2 with a long under the top: iconst_0 ; lconst_0 ; swap is illegal, so build
+        // [L, I] and dup_x2 → [I, L, I]
+        let insns = [plain(0x09), plain(0x03), plain(0x5b), plain(0xb1)];
+        let types = analyze(&insns, &[], &[], &pool);
+        assert_eq!(
+            types.before(3).expect("reachable").stack,
+            [
+                VerificationType::Integer,
+                VerificationType::Long,
+                VerificationType::Integer
+            ]
+        );
+    }
+
+    #[test]
+    fn a_wide_store_and_load_name_the_same_slot_as_their_compact_forms() {
+        let pool = FakePool::default();
+        let wide = |inner: u8, slot: u16| with(0xc4, &[inner, (slot >> 8) as u8, slot as u8]);
+        // aconst_null ; wide astore 300 ; wide aload 300 ; wide istore 301 is illegal; use return
+        let insns = [plain(0x01), wide(0x3a, 300), wide(0x19, 300), plain(0xb1)];
+        let types = analyze(&insns, &[], &[], &pool);
+        assert_eq!(
+            types.before(2).expect("reachable").local(300),
+            &VerificationType::Null
+        );
+        assert_eq!(
+            types.before(3).expect("reachable").stack,
+            [VerificationType::Null]
+        );
+    }
+
+    #[test]
+    fn a_constructor_call_retypes_the_uninitialized_copy_held_in_a_local() {
+        let mut pool = FakePool::default();
+        pool.classes.insert(4, "java/lang/StringBuilder");
+        pool.methods.insert(6, "()V");
+        // new #4 ; dup ; astore_1 ; invokespecial #6 ; return
+        let insns = [
+            with(0xbb, &[0, 4]),
+            plain(0x59),
+            plain(0x4c),
+            with(0xb7, &[0, 6]),
+            plain(0xb1),
+        ];
+        let types = analyze(&insns, &[object("Main")], &[], &pool);
+        assert_eq!(
+            types.before(3).expect("reachable").local(1),
+            &VerificationType::Uninitialized(0)
+        );
+        assert_eq!(
+            types.before(4).expect("reachable").local(1),
+            &reference("java/lang/StringBuilder")
+        );
+    }
+
+    /// The shape `fold` depends on: the loop head carries a recorded frame claiming `Object` for
+    /// the accumulator, and that — not the computed meet of the entry and back edges — is what the
+    /// body is held to.
+    #[test]
+    fn a_recorded_frame_at_a_loop_head_is_what_the_body_is_held_to() {
+        let mut pool = FakePool::default();
+        pool.methods.insert(5, "()Ljava/lang/Integer;");
+        // 0: invokestatic #5 ; 1: astore_1
+        // 2: iload_2 ; 3: ifeq 7        <- frame: slot 1 = Object
+        // 4: invokestatic #5 ; 5: astore_1 ; 6: goto 2
+        // 7: return
+        let insns = [
+            with(0xb8, &[0, 5]),
+            plain(0x4c),
+            plain(0x1c),
+            branch(0x99, 7),
+            with(0xb8, &[0, 5]),
+            plain(0x4c),
+            branch(0xa7, 2),
+            plain(0xb1),
+        ];
+        let entry = [object("Main"), VerifType::Top, VerifType::Integer];
+        let frames = [(
+            2,
+            vec![
+                object("Main"),
+                object("java/lang/Object"),
+                VerifType::Integer,
+            ],
+            vec![],
+        )];
+        let types = analyze(&insns, &entry, &frames, &pool);
+        assert_eq!(
+            types.before(4).expect("body").local(1),
+            &reference("java/lang/Object")
+        );
+        assert_eq!(
+            types.before(7).expect("exit").local(1),
+            &reference("java/lang/Object")
         );
     }
 

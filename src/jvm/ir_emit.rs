@@ -11399,7 +11399,9 @@ fn emit_method_inner_with_holder(
                 continue;
             };
             let mut restored = expand_collapsed_locals(&entry);
-            for (slot, ty, _, _) in coroutine_machine::suspension_fields(suspension) {
+            // Every spill, the constant-`null` ones included: the restore leaves those holding
+            // `null`, and the frame has to say so rather than `Object`.
+            for &(slot, ty) in &suspension.spills {
                 let slot = slot as usize;
                 if restored.len() <= slot {
                     restored.resize(slot + 1, VerifType::Top);
@@ -13872,6 +13874,11 @@ impl<'a> Emitter<'a> {
                 }
                 store(jvm, slot, code);
             }
+            // A slot the verifier held as `null` at the suspension is a constant, not a field.
+            for slot in coroutine_machine::constant_null_slots(suspension) {
+                code.aconst_null();
+                code.astore(slot);
+            }
             code.aload(machine.slots.result);
             code.invokestatic(throw_on_failure, 1, 0);
             code.aload(machine.slots.result);
@@ -13899,9 +13906,9 @@ impl<'a> Emitter<'a> {
 
     /// Spill the locals that must survive suspension `ordinal`, and record which state to resume in.
     ///
-    /// Emitted BEFORE the call's operands: the sequence is stack-neutral, so it reads the same
-    /// whether the operands are already pushed or not, and placing it first keeps it out of the
-    /// operand emission it would otherwise have to thread through.
+    /// Emitted BEFORE the call's operands, which is also where the dependency's own stack prefix
+    /// still sits: this block empties that prefix into locals, so the operands are pushed onto a
+    /// clean stack and the call's own emission needs to know nothing about any of it.
     fn emit_machine_spills(&mut self, ordinal: usize, code: &mut CodeBuilder) {
         let Some(machine) = self.machine.clone() else {
             return;
@@ -13938,9 +13945,6 @@ impl<'a> Emitter<'a> {
         let Some(machine) = self.machine.clone() else {
             return;
         };
-        if machine.plan.suspensions.get(ordinal).is_none() {
-            return;
-        }
         let Some(suspension) = machine.plan.suspensions.get(ordinal) else {
             return;
         };

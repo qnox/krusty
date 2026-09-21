@@ -35,6 +35,11 @@ impl MachineSlots {
 pub(super) struct SuspensionPlan {
     /// `(slot, type)` of every local live across the suspension, ascending by slot. The slots a
     /// stack prefix is saved into are part of this: once saved they are locals like any other.
+    ///
+    /// A slot the verifier holds as `null` — `Ty::Null` — owns no field: its value is a constant,
+    /// the resume rematerializes it with `aconst_null`, and the join claims `null` for it. Storing
+    /// it in an `Object` field would restore it as `Object`, which is wider than what the code
+    /// after the join was verified against.
     pub(super) spills: Vec<(u16, Ty)>,
     /// The operand-stack values the dependency holds UNDER this suspension, bottom-first, each with
     /// the slot it is saved into. `areturn` discards the stack, so they are stored before the call
@@ -81,7 +86,7 @@ pub(super) fn verif_spill_type(v: &VerifType) -> Option<Ty> {
         VerifType::Float => Ty::Float,
         VerifType::Double => Ty::Double,
         VerifType::ObjectName(name) => Ty::obj(name.as_str()),
-        VerifType::Null => Ty::nullable(Ty::obj("kotlin/Any")),
+        VerifType::Null => Ty::Null,
         // `Top` is an unassigned slot and `UninitializedThis` cannot be spilled.
         _ => return None,
     })
@@ -158,7 +163,7 @@ pub(super) fn discover(
     };
     let offsets = crate::jvm::inline::insn_offsets_at(&insns, 0);
     let index_of = |offset: usize| offsets.iter().position(|&at| at == offset);
-    let regions = code
+    let Some(regions) = code
         .resolved_exceptions()
         .iter()
         .map(|&(start, end, handler, _)| {
@@ -168,7 +173,14 @@ pub(super) fn discover(
                 handler: index_of(handler as usize)?,
             })
         })
-        .collect::<Option<Vec<_>>>()?;
+        .collect::<Option<Vec<_>>>()
+    else {
+        crate::trace_compiler!(
+            "suspend",
+            "discover: an exception-table boundary is not an instruction offset"
+        );
+        return None;
+    };
     let Some(graph) = ControlGraph::build(&insns, &regions) else {
         crate::trace_compiler!("suspend", "discover: control graph declined");
         return None;
@@ -179,11 +191,18 @@ pub(super) fn discover(
     };
     // The frames this body carries, by instruction index and slot: the splice relocated the
     // dependency's own, and this emitter recorded one at every label it bound.
-    let frames: Vec<(usize, Vec<VerifType>, Vec<VerifType>)> = code
+    let Some(frames) = code
         .resolved_frames()
         .into_iter()
         .map(|(at, locals, stack)| Some((index_of(at)?, expand_slots(&locals), stack)))
-        .collect::<Option<Vec<_>>>()?;
+        .collect::<Option<Vec<(usize, Vec<VerifType>, Vec<VerifType>)>>>()
+    else {
+        crate::trace_compiler!(
+            "suspend",
+            "discover: a frame is not at an instruction offset"
+        );
+        return None;
+    };
     let Some(types) = FrameTypes::analyze(&insns, &graph, entry, &frames, cw) else {
         crate::trace_compiler!("suspend", "discover: frame analysis declined");
         return None;
@@ -340,6 +359,9 @@ pub(super) fn spill_fields(plan: &MachinePlan) -> Vec<(String, &'static str)> {
     for suspension in &plan.suspensions {
         let mut here: Vec<(char, usize)> = Vec::new();
         for (_, ty) in &suspension.spills {
+            if *ty == Ty::Null {
+                continue;
+            }
             let kind = spill_kind(*ty);
             match here.iter_mut().find(|(k, _)| *k == kind) {
                 Some((_, n)) => *n += 1,
@@ -365,13 +387,26 @@ pub(super) fn spill_fields(plan: &MachinePlan) -> Vec<(String, &'static str)> {
     fields
 }
 
-/// Which field each spill of one suspension is stored in.
+/// The slots a suspension restores as a constant `null` rather than from a field.
+pub(super) fn constant_null_slots(suspension: &SuspensionPlan) -> Vec<u16> {
+    suspension
+        .spills
+        .iter()
+        .filter(|(_, ty)| *ty == Ty::Null)
+        .map(|&(slot, _)| slot)
+        .collect()
+}
+
+/// Which field each spill of one suspension is stored in. A constant-`null` slot has none.
 pub(super) fn suspension_fields(
     suspension: &SuspensionPlan,
 ) -> Vec<(u16, Ty, String, &'static str)> {
     let mut next: Vec<(char, usize)> = Vec::new();
     let mut placed = Vec::new();
     for &(slot, ty) in &suspension.spills {
+        if ty == Ty::Null {
+            continue;
+        }
         let kind = spill_kind(ty);
         let index = match next.iter_mut().find(|(k, _)| *k == kind) {
             Some((_, n)) => {

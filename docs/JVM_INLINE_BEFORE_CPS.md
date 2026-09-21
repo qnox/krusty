@@ -282,6 +282,8 @@ Working today, each with a fixture in `tests/suspend_in_spliced_inline_e2e.rs`:
 | A PRIVATE member's machine (via `access$<name>`) | `…_of_a_private_member_runs` |
 | A body spliced into a `try` region (`runCatching { susp() }`) | `a_suspension_inside_a_spliced_try_region_runs` |
 | An accumulator the loop REWRITES across the suspension (`fold`, `reduce`) | `an_accumulator_rewritten_across_a_spliced_suspension_runs`, `stdlib_fold_and_reduce_with_a_suspending_operation_run` |
+| A spliced lambda's own parameter snapshot, typed in the lambda's numbering | `a_snapshot_of_a_spliced_lambda_parameter_is_typed_by_the_lambda` |
+| A `null`-typed local or operand across the suspension | `a_null_{local,operand}_…_is_rematerialized` |
 
 Still bailing, by design: an OPEN member (the continuation re-enters with `invokevirtual`, which
 must reach this very body — kotlinc uses a `$suspendImpl` static for these), and any shape where the
@@ -313,7 +315,11 @@ locals, every instruction's effect applied in order, joins meeting the way the v
 recorded frame REPLACING the computed state at its position — which is what the verifier holds
 there whatever arrives. The state at a suspension marker is exactly what the spill has to describe:
 the locals' types choose the continuation fields and the casts that read them back, and the operand
-stack under the call is the prefix the machine saves and restores. This is what an accumulator a
+stack under the call is the prefix the machine saves and restores — the host's own operands
+included, which the emitter no longer has to decline. A slot or operand the verifier holds as
+`null` is a constant, not a field: the resume rematerializes it with `aconst_null` and the join
+claims `null`, since an `Object` restore would be wider than what the code after the join was
+verified against. This is what an accumulator a
 loop rewrites across the suspension needs — its type at the join is the loop's merge, which no
 single frame in the body states — and it replaced reading the nearest frame, the emitter's own
 slot table, the dependency's debug locals and the producing instruction, each of which covered one
@@ -639,7 +645,9 @@ shared slot is always dead at the point it is reused.
   class-load time. The gate runs `box()` on a real JVM, which catches it; `VerifyError` is the
   expected failure mode, not silent divergence.
 * **The marker contract** must survive relocation into an unrelated constant pool. It is an
-  `invokestatic` to a synthetic name, which `relocate_insns` already handles like any other call.
+  a reserved `impdep1` (`0xfe`) instruction carrying a kind and an ordinal: no compiler emits it,
+  the relocation carries it like any other instruction, and it is overwritten with `nop`s the moment
+  its position has been read (`src/jvm/classfile/coroutine_markers.rs`).
 
 ## 9. Measuring
 

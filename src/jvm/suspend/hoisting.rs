@@ -136,15 +136,22 @@ fn normalize_when_statement_body(
 ///
 /// The bodies are rewritten in place where they are blocks; a bare expression body becomes one, so
 /// the lambda's `inline_body` is repointed at the new block.
+///
+/// Each body is typed in ITS OWN value numbering. An `inline_body` is a copy of the lambda's body
+/// numbered as the impl method is — captures first, then the lambda's parameters, then the locals
+/// the body declares — so the enclosing function's parameter/local table says nothing about the
+/// `s` in `s = s + one(x)`, and reads its capture 0 as whatever the enclosing parameter 0 is. The
+/// snapshot that keeps `s` off the stack across the suspension is typed from the impl method's
+/// declared parameters and the body's own declarations instead; what neither names still declines,
+/// as it must.
 pub(super) fn hoist_spliced_inline_bodies(
     ir: &mut IrFile,
     body: ExprId,
     suspend_set: &HashSet<u32>,
     orig_rets: &[Ty],
-    value_types: &mut HashMap<u32, Ty>,
 ) {
     let mut seen = HashSet::new();
-    hoist_spliced_walk(ir, body, suspend_set, orig_rets, value_types, &mut seen);
+    hoist_spliced_walk(ir, body, suspend_set, orig_rets, &mut seen);
 }
 
 fn hoist_spliced_walk(
@@ -152,7 +159,6 @@ fn hoist_spliced_walk(
     expression: ExprId,
     suspend_set: &HashSet<u32>,
     orig_rets: &[Ty],
-    value_types: &mut HashMap<u32, Ty>,
     seen: &mut HashSet<ExprId>,
 ) {
     if !seen.insert(expression) {
@@ -165,28 +171,24 @@ fn hoist_spliced_walk(
         ..
     } = ir.exprs[expression as usize].clone()
     {
-        // A lambda's body has its OWN value numbering: its parameters and locals are the
-        // implementation function's, not the enclosing function's. A snapshot of `acc` inside
-        // `fold(0) { acc, b -> acc + one(b) }` typed by the enclosing function's value 0 would be
-        // declared as the list being folded.
-        let mut own = super::function_value_types(ir, impl_fn, inner);
         // A nested spliced body runs in this frame too, so normalize the innermost first.
-        hoist_spliced_walk(ir, inner, suspend_set, orig_rets, &mut own, seen);
-        let rewritten = hoist_spliced_body(ir, inner, suspend_set, orig_rets, &mut own);
+        hoist_spliced_walk(ir, inner, suspend_set, orig_rets, seen);
+        let mut value_types = spliced_body_value_types(ir, impl_fn, inner);
+        let rewritten = hoist_spliced_body(ir, inner, suspend_set, orig_rets, &mut value_types);
         if rewritten != inner {
             if let IrExpr::Lambda { inline_body, .. } = &mut ir.exprs[expression as usize] {
                 *inline_body = Some(rewritten);
             }
         }
         for capture in captures {
-            hoist_spliced_walk(ir, capture, suspend_set, orig_rets, value_types, seen);
+            hoist_spliced_walk(ir, capture, suspend_set, orig_rets, seen);
         }
         return;
     }
     let mut children = Vec::new();
     crate::ir::for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
     for child in children {
-        hoist_spliced_walk(ir, child, suspend_set, orig_rets, value_types, seen);
+        hoist_spliced_walk(ir, child, suspend_set, orig_rets, seen);
     }
 }
 
