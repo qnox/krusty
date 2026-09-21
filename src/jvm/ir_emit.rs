@@ -11328,7 +11328,8 @@ fn emit_method_inner_with_holder(
                 code.max_locals
             );
         }
-        match coroutine_machine::discover(&code, &allocated, machine_slots) {
+        let at_markers = e.machine_marker_locals.clone();
+        match coroutine_machine::discover(&code, &allocated, machine_slots, &at_markers) {
             Some(plan) => {
                 crate::trace_compiler!(
                     "suspend",
@@ -11373,6 +11374,36 @@ fn emit_method_inner_with_holder(
         // offset is refused once the stream is dead.
         let found = code.marker_positions().unwrap_or_default();
         for (at, kind, ordinal) in found {
+            // The join's frame: the entry state plus what this suspension restores. Recorded here,
+            // in the enclosing method, so nothing merges the host's own locals into it — the resume
+            // edge cannot produce those.
+            if kind == crate::jvm::classfile::CoroutineMarker::Join {
+                let (Some(entry), Some(machine)) =
+                    (e.machine_entry_locals.clone(), e.machine.clone())
+                else {
+                    continue;
+                };
+                let Some(suspension) = machine.plan.suspensions.get(ordinal as usize) else {
+                    continue;
+                };
+                let mut restored = expand_collapsed_locals(&entry);
+                for (slot, ty, _, _) in coroutine_machine::suspension_fields(suspension) {
+                    let slot = slot as usize;
+                    if restored.len() <= slot {
+                        restored.resize(slot + 1, VerifType::Top);
+                    }
+                    restored[slot] = verif_of(ir_ty_to_jvm(&ty));
+                }
+                let label = code.new_label();
+                // The marker sits immediately BEFORE the join, so the frame belongs after it.
+                code.bind_target_at(label, at + crate::jvm::classfile::MARKER_LEN);
+                code.add_frame_if_new(
+                    label,
+                    collapse_locals(&restored),
+                    vec![VerifType::ObjectName("java/lang/Object".into())],
+                );
+                continue;
+            }
             if kind != crate::jvm::classfile::CoroutineMarker::Resume {
                 continue;
             }
@@ -12984,6 +13015,10 @@ struct Emitter<'a> {
     /// inline-depth marker. A frame cannot describe them: they are assigned between frames, and the
     /// spill plan needs their types to choose a continuation field and restore them.
     machine_slot_types: HashMap<u16, Ty>,
+    /// The locals this emitter holds at each suspension, recorded by the discovery pass. This is the
+    /// view the merge point's frame is built from, so it — not a frame found by position — says what
+    /// a resume has to restore.
+    machine_marker_locals: HashMap<usize, Vec<VerifType>>,
     /// The machine being built, on the pass that builds it.
     machine: Option<coroutine_machine::Machine>,
     /// The locals the dispatch can prove at a resume: the state on entry, before the body stored
@@ -13077,6 +13112,7 @@ impl<'a> Emitter<'a> {
             continuation_slot: None,
             machine_suspensions: HashMap::new(),
             machine_slot_types: HashMap::new(),
+            machine_marker_locals: HashMap::new(),
             machine_entry_locals: None,
             machine: None,
             ret,
@@ -13897,23 +13933,14 @@ impl<'a> Emitter<'a> {
                 .methodref("kotlin/ResultKt", "throwOnFailure", "(Ljava/lang/Object;)V");
         code.invokestatic(throw_on_failure, 1, 0);
         code.aload(machine.slots.result);
-        code.bind(join);
-        // Two edges reach the join: the call that did not suspend, with every local the body has
-        // stored, and this resume, with the entry locals plus whatever was spilled. Recording both
-        // merges them, so a local only one edge can prove settles at `top` rather than being
-        // claimed on an edge that cannot produce it.
-        let stack = vec![VerifType::ObjectName("java/lang/Object".into())];
-        let fallthrough = self.verif_locals_upto(self.next_slot);
-        code.add_frame_if_new(join, fallthrough, stack.clone());
-        let mut restored = expand_collapsed_locals(&locals);
-        for (slot, ty, _, _) in coroutine_machine::suspension_fields(suspension) {
-            let slot = slot as usize;
-            if restored.len() <= slot {
-                restored.resize(slot + 1, VerifType::Top);
-            }
-            restored[slot] = verif_of(ir_ty_to_jvm(&ty));
+        // Where the two paths meet. The frame is the enclosing method's to record: one recorded in
+        // this builder is merged with the host's locals when the body is relocated, and would then
+        // claim locals the resume path never restored. `locals` is unused here for the same reason.
+        let _ = locals;
+        if let Ok(marker) = u16::try_from(ordinal) {
+            code.coroutine_marker(crate::jvm::classfile::CoroutineMarker::Join, marker);
         }
-        code.add_frame_if_new(join, collapse_locals(&restored), stack);
+        code.bind(join);
         code.set_needs_stackmap();
     }
 
@@ -14635,14 +14662,18 @@ impl<'a> Emitter<'a> {
             match self.machine.is_some() {
                 // Building the machine: spill first, then the call, then the resume point.
                 true => self.emit_machine_spills(ordinal, code),
-                // Discovering the frame: mark where the splice put this suspension.
+                // Discovering the frame: mark where the splice put this suspension, and keep the
+                // locals held here — the frame where the resume rejoins the body is built from
+                // exactly this view.
                 false => {
-                    if let Ok(ordinal) = u16::try_from(ordinal) {
+                    if let Ok(marker) = u16::try_from(ordinal) {
                         code.coroutine_marker(
                             crate::jvm::classfile::CoroutineMarker::Suspension,
-                            ordinal,
+                            marker,
                         );
                     }
+                    let locals = self.verif_locals_upto(self.next_slot);
+                    self.machine_marker_locals.insert(ordinal, locals);
                 }
             }
         }

@@ -24,6 +24,10 @@ pub enum CoroutineMarker {
     /// Immediately after a suspension's `COROUTINE_SUSPENDED` check: where the resume path rejoins
     /// with the call's result on the operand stack.
     Resume = 2,
+    /// Where the two paths out of a suspension meet. Its frame is recorded by the enclosing method,
+    /// not here: a frame recorded in a lambda's own builder is merged with the host's locals when
+    /// the body is relocated, which would claim locals the resume path never restored.
+    Join = 3,
 }
 
 /// The opcode. `impdep1`; see the module docs.
@@ -55,6 +59,7 @@ impl CodeBuilder {
                 let kind = match self.bytes.get(pc + 1)? {
                     1 => CoroutineMarker::Suspension,
                     2 => CoroutineMarker::Resume,
+                    3 => CoroutineMarker::Join,
                     _ => return None,
                 };
                 let ordinal = (u16::from(*self.bytes.get(pc + 2)?) << 8)

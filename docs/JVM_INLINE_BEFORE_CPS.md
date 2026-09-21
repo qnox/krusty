@@ -259,6 +259,35 @@ this note (§7) rather than in a characterization test.
 
 Step 3 is the one that pays for the work; steps 1 and 2 exist so that step 3 is small.
 
+## 6a. Landed state (2026-09-21)
+
+Steps 3 and 5 are in, in a form the note did not anticipate: the machine reads its spill set off
+the **post-splice bytecode of a first emission** and is then built by a second one, rather than a
+separate bytecode CPS pass. `src/jvm/ir_emit/coroutine_machine.rs` holds the plan, the continuation
+class and the discovery; the control graph and liveness of step 1 feed it.
+
+Working today, each with a fixture in `tests/suspend_in_spliced_inline_e2e.rs`:
+
+| Shape | Fixture |
+| --- | --- |
+| One suspension in a spliced lambda | `a_suspension_inside_a_spliced_inline_lambda_runs` |
+| Two suspensions in one spliced body | `two_suspensions_in_one_spliced_body_run` |
+| A reference local live across one | `a_reference_local_survives_a_spliced_suspension` |
+| A conditional suspension | `a_conditional_suspension_in_a_spliced_body_runs` |
+| A `Long` (two-slot) local live across one | `a_long_local_survives_a_spliced_suspension` |
+| Through stdlib `run` / `let` / `repeat` | `…_spliced_stdlib_{run,let,repeat}_lambda_runs` |
+| An instance method's machine | `a_suspension_inside_a_spliced_lambda_of_a_member_runs` |
+
+Still bailing, by design: an OPEN or private member (the continuation re-enters with
+`invokevirtual`, which must reach this very body), and any shape where the emitter declines the
+splice — there the lambda is a real closure, its standalone `invoke` has been taken away, and the
+compile is declined rather than emitting an `invokedynamic` to a method that does not exist.
+
+**Correctness before byte parity.** Two deliberate divergences from kotlinc remain: the spill set is
+widened to every local the merged frames CLAIM at a resume (kotlinc spills exactly its liveness
+set), and suspensions inside a spliced body are hoisted to statement temps before the machine reads
+them. Both are what makes the shapes above run; neither is byte-identical. §7a still gates parity.
+
 ## 7. Test strategy — no stdlib functions
 
 Fixtures must **not** rely on stdlib inline functions. A stdlib `filter` proves nothing repeatable:

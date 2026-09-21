@@ -35,6 +35,8 @@ fn run(tag: &str, main: &str) -> Option<String> {
 /// A classpath inline function with a loop and accumulator locals — none of which exist until it
 /// has been spliced, which is exactly what the machine has to spill.
 const LIB: &str = r#"
+inline fun <R> attempt(f: () -> R): R? = try { f() } catch (e: Throwable) { null }
+
 inline fun twice(x: Int, f: (Int) -> Int): Int {
     var acc = 0
     var i = 0
@@ -223,6 +225,26 @@ fn a_suspension_inside_a_spliced_lambda_of_a_member_runs() {
         }
     "#;
     let Some(output) = run("suspend_spliced_member", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// The lambda's body is spliced INTO A PROTECTED REGION: the inline function wraps it in
+/// `try`/`catch`. The suspension leaves the method from inside that region and the resume re-enters
+/// it. (`runCatching { … }` around a suspending call is this shape.)
+#[test]
+fn a_suspension_inside_a_spliced_try_region_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int = v + 1
+        suspend fun guarded(v: Int): Int = attempt { one(v) } ?: -1
+        fun box(): String = runBlocking {
+            val n = guarded(10)
+            if (n == 11) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_try", MAIN) else {
         return;
     };
     assert_eq!(output, "OK");

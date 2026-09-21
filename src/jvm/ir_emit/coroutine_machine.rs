@@ -114,6 +114,7 @@ pub(super) fn discover(
     code: &crate::jvm::classfile::CodeBuilder,
     allocated: &HashMap<u16, Ty>,
     machine: Option<MachineSlots>,
+    at_markers: &HashMap<usize, Vec<VerifType>>,
 ) -> Option<MachinePlan> {
     use crate::jvm::classfile::CoroutineMarker;
     use crate::jvm::suspend::cps::{ControlGraph, Handler, LocalLiveness};
@@ -162,14 +163,26 @@ pub(super) fn discover(
     for (at, ordinal) in markers {
         let index = index_of(at)?;
         let live = liveness.live_before(index);
-        let Some(typed) = nearest_frame_slots(&frames, at) else {
-            crate::trace_compiler!("suspend", "discover: no frame at or before {at}");
-            return None;
-        };
-        // What the resume has to put back is not only what liveness calls live across the call: a
-        // frame at the join claims every HOST local the merge asserts there, whether or not the body
-        // reads it again. A slot the frame types but the resume leaves unset fails verification, so
-        // the frame's own view is part of the set.
+        // Two partial views of the same frame, overlaid. A frame describes the SPLICED body's own
+        // locals, which no IR declaration names; the emitter's view at the marker describes the
+        // host's, including the ones assigned between frames. The merge point's frame is built from
+        // the emitter's view, so a local either view types is one the resume has to restore.
+        let mut typed = nearest_frame_slots(&frames, at).unwrap_or_default();
+        if let Some(held) = at_markers.get(&(ordinal as usize)) {
+            let held = expand_slots(held);
+            if held.len() > typed.len() {
+                typed.resize(held.len(), VerifType::Top);
+            }
+            for (slot, ty) in held.into_iter().enumerate() {
+                if matches!(typed[slot], VerifType::Top) {
+                    typed[slot] = ty;
+                }
+            }
+        }
+        // What the resume has to put back is not only what liveness calls live across the call: the
+        // frame where the two paths meet claims every local the emitter held here, whether or not
+        // the body reads it again, and one that frame types but the resume leaves unset fails
+        // verification.
         let mut slots: Vec<u16> = live.iter().collect();
         for (slot, typed_as) in typed.iter().enumerate() {
             let slot = slot as u16;
@@ -228,6 +241,11 @@ fn nearest_frame_slots(
         .iter()
         .filter(|(at, _, _)| *at <= offset)
         .next_back()?;
+    Some(expand_slots(locals))
+}
+
+/// Verification types indexed by SLOT: a `long`/`double` is one entry in a frame and two slots.
+fn expand_slots(locals: &[VerifType]) -> Vec<VerifType> {
     let mut slots = Vec::with_capacity(locals.len());
     for v in locals {
         slots.push(v.clone());
@@ -235,7 +253,7 @@ fn nearest_frame_slots(
             slots.push(VerifType::Top);
         }
     }
-    Some(slots)
+    slots
 }
 
 /// The continuation class a machine keeps its state in: `<facade>$<function>$1`.
