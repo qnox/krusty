@@ -1016,15 +1016,6 @@ pub struct BranchySplice {
 pub struct RelocatedLambdaSite {
     pub lambda_index: usize,
     pub byte_start: usize,
-    /// Final byte offset of each instruction of the lambda body AS BUILT, indexed by its own
-    /// instruction index. An instruction the splice cancelled away maps to where the surviving body
-    /// begins.
-    ///
-    /// The body's frames are byte offsets into it as built, and its final layout is not that layout
-    /// shifted by a constant: cancelling its entry adapter removes instructions, and a switch pads
-    /// against its absolute position. Mapping a frame through its INSTRUCTION index is exact where
-    /// subtracting a byte count is not.
-    pub body_offsets: Vec<usize>,
     pub host_locals: Vec<VType>,
     pub stack_prefix: Option<Vec<VType>>,
 }
@@ -2638,27 +2629,6 @@ pub fn splice_unified(
     // (`host_states`): the loop-body context a branchy lambda body's frames need. The locals are collapsed
     // to frame form, the spliced-away lambda slot dropped, and both relocated into `cw`. A `None`
     // state only occurs for a BRANCHLESS lambda (its frames/prefix are unused) → the `param_ctx` filler.
-    // Final byte offset of every instruction of each lambda body as built (drained ones collapse to
-    // the surviving body's start).
-    let mut body_offsets: Vec<Vec<usize>> = Vec::with_capacity(lambda_sites.len());
-    for (occurrence, &site) in lambda_sites.iter().enumerate() {
-        let lambda = site_lambdas[occurrence];
-        let start_index = p + old2new[site];
-        let built = lambdas[lambda].body.len();
-        let drained = dropped_prefix_insns[occurrence];
-        let mut table = Vec::with_capacity(built);
-        for index in 0..built {
-            let at = index
-                .checked_sub(drained)
-                .map_or(offs[start_index], |kept| {
-                    offs.get(start_index + kept)
-                        .copied()
-                        .unwrap_or(offs[start_index])
-                });
-            table.push(at);
-        }
-        body_offsets.push(table);
-    }
     let mut relocated_lambda_sites = Vec::with_capacity(host_states.len());
     for (occurrence, state) in host_states.iter().enumerate() {
         let (host_locals, stack_prefix) = match state {
@@ -2677,7 +2647,6 @@ pub fn splice_unified(
         relocated_lambda_sites.push(RelocatedLambdaSite {
             lambda_index: site_lambdas[occurrence],
             byte_start: offs[p + old2new[lambda_sites[occurrence]]],
-            body_offsets: body_offsets[occurrence].clone(),
             host_locals,
             stack_prefix,
         });

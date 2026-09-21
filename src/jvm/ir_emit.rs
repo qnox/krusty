@@ -13330,16 +13330,11 @@ impl<'a> Emitter<'a> {
                 .as_ref()
                 .map(|p| p.iter().map(vtype_to_verif).collect())
                 .unwrap_or_default();
-            // The body's frames are byte offsets into it AS BUILT; its final layout is not that
-            // layout shifted by a constant, so each one travels through its instruction index.
-            let built = crate::jvm::inline::insn_offsets_at(&lam_bodies[site.lambda_index], 0);
+            // A body's frames are byte offsets into it as built, and it is spliced verbatim: the
+            // splice only ever cancels instructions off a body with NO frames, so there is nothing
+            // here to remap.
             for (fb, locals, stack) in frames {
-                let Some(index) = built.iter().position(|&at| at == *fb) else {
-                    return false;
-                };
-                let Some(&off) = site.body_offsets.get(index) else {
-                    return false;
-                };
+                let off = site.byte_start + fb;
                 let lambda_base = spliced_frame
                     .as_ref()
                     .and_then(|frame| frame.lambda_bases.get(site.lambda_index).copied())
