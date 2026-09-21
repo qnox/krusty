@@ -265,17 +265,14 @@ pub(super) fn discover(
             if machine.is_some_and(|machine| machine.owns(slot)) {
                 continue;
             }
+            // One restore has to satisfy every frame that describes this slot. A loop carries the
+            // widest of them — its head states what all its edges agree on — so the slot takes what
+            // they have in common: a reference that enters as `Integer` and merges as `Object` is
+            // restored as `Object`. The value is unchanged; only the claim about it weakens.
+            //
             // A frame describes the host's locals; the ones this emitter allocated inside the
-            // spliced body are assigned between frames and are known only to it.
-            // Two frames describe this slot from either side of the suspension, and the join has
-            // to satisfy both. Where they disagree — a loop whose accumulator enters as `Integer`
-            // and merges as `Object` — neither is the state at the join, so the slot takes the type
-            // they have in common. The value itself is unchanged; only what the frame claims about
-            // it weakens, and a reference is assignable to `Object` from either side.
-            // Every frame that describes this slot has to be satisfied by one restore. A loop
-            // carries the widest of them — its head states what all its edges agree on — so the
-            // slot takes what they have in common. The value is unchanged; only the claim about it
-            // weakens, and a reference satisfies `Object` from any of them.
+            // spliced body are assigned between frames and are known only to it, which is what the
+            // fallbacks below are for.
             let mut from_frame = typed.get(slot as usize).and_then(verif_spill_type);
             for (_, frame_locals, _) in frames.iter() {
                 let Some(claimed) = expand_slots(frame_locals)
