@@ -7542,6 +7542,21 @@ and behavior is checked by RUNNING the emitted program.
   REQUIRING the native lowering); the corpus cases are `codegen/box/contracts/nonNullSmartCast.kt`,
   `codegen/box/delegatedProperty/provideDelegate/setValue.kt` and the other `kotlin.require` cases.
 
+- **`buildString` and `buildList` make the subject the block fills.** Both are `inline`, so a
+  provider holding their bodies splices them and nothing reaches a backend; a klib publishes none
+  and the call arrives whole. The shape is the one the scope functions already get — evaluate,
+  invoke, answer — with the subject MADE by the call rather than written by the caller.
+
+  `buildString` answers the builder's `toString()`, which is a COPY, and that is observable: a
+  program that keeps the builder through a capture and appends after the call still reads what the
+  call answered. `buildList` answers the list it filled, because the read-only type it is declared
+  with is a static claim and not a runtime one — the same position Kotlin's own takes. The
+  capacity overload's argument is a hint no program can read back, and it is passed on.
+  Tests: `tests/native_builder_scope_e2e.rs` (all three, each cross-checking the two backends and
+  REQUIRING the native lowering); the corpus cases are
+  `codegen/box/controlStructures/forIn*WithIndex*NameBasedDestructuring*.kt` and
+  `codegen/box/inlineClasses/contextsAndAccessors/kt27513*.kt`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

@@ -2515,6 +2515,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         {
                             return realized;
                         }
+                        // `buildString { … }` / `buildList { … }`: a subject made here, the
+                        // block, then the subject. The same rearrangement the scope functions get.
+                        if let Some(builder) =
+                            super::super::intrinsics::builder_scope(&owner, &name, params)
+                        {
+                            return self.builder_scope_function(builder, args);
+                        }
                         // `require`, `check`, `requireNotNull`, `checkNotNull`, `error`. Not a
                         // runtime call: the message block runs only when the check fails, so the
                         // shape is a branch around a raise rather than a call with operands.

@@ -1046,6 +1046,8 @@ mod named_super_arg_e2e;
 mod narrowed_this_member_call_e2e;
 #[path = "native_bottom_value_e2e.rs"]
 mod native_bottom_value_e2e;
+#[path = "native_builder_scope_e2e.rs"]
+mod native_builder_scope_e2e;
 #[path = "native_classes_e2e.rs"]
 mod native_classes_e2e;
 #[path = "native_codegen_e2e.rs"]

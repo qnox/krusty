@@ -313,6 +313,39 @@ pub(super) fn is_assert_fails_with(owner: &str, name: &str, params: &[Ty]) -> bo
         }
 }
 
+/// A `build…` function: a fresh subject the block fills, answered once it has.
+///
+/// `buildString { append(1) }` is `StringBuilder().apply { … }.toString()` written shorter, and the
+/// rearrangement is the same one the scope functions above get — the difference is only that the
+/// subject is MADE here rather than written by the caller.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Builder {
+    /// `buildString(builderAction: StringBuilder.() -> Unit): String`.
+    Text,
+    /// `buildList(builderAction: MutableList<E>.() -> Unit): List<E>`.
+    List,
+}
+
+/// Which `build…` function a selected top-level declaration is, or `None` for anything else.
+///
+/// The optional `capacity` is Kotlin's own second overload of each, and it is a HINT: a program
+/// cannot read it back, so passing it on or dropping it are both correct and it is passed on.
+pub(super) fn builder_scope(owner: &str, name: &str, params: &[Ty]) -> Option<Builder> {
+    let builder = match (declaration_package(kotlin_owner(owner)), name) {
+        ("kotlin/text", "buildString") => Builder::Text,
+        ("kotlin/collections", "buildList") => Builder::List,
+        _ => return None,
+    };
+    // The BLOCK is what makes this the declaration it looks like; `buildList`'s siblings
+    // `buildSet` and `buildMap` have the same shape and are not answered, so they are not named
+    // above rather than being separated here.
+    match params {
+        [Ty::Fun(_)] => Some(builder),
+        [Ty::Int, Ty::Fun(_)] => Some(builder),
+        _ => None,
+    }
+}
+
 /// One of `kotlin`'s preconditions: `require`, `check`, `requireNotNull`, `checkNotNull`, `error`.
 ///
 /// Each raises a named exception with a wording Kotlin fixes, and each has a form taking a
