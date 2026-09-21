@@ -463,6 +463,15 @@ impl BodyLowering<'_, '_, '_> {
             let (symbol, carried, answer) = indexed_value_symbol(name, args.len())?;
             return Some(self.list_call(symbol, &carried, answer, receiver, args, ret));
         }
+        // A receiver typed by a COLLECTION type goes to the runtime's own dispatch, which knows
+        // only the collections this runtime makes — a range and a list. A file DECLARING an
+        // implementation of one puts an object of its own behind that type, and the runtime would
+        // read a vtable with no such entry, so where such a class exists these decline by name
+        // instead. No static type can tell the two apart; that is the whole reason the dispatch is
+        // the runtime's, and it is also why the guard is the FILE's rather than the receiver's.
+        if self.file.declares_its_own_collection {
+            return None;
+        }
         let role = super::super::super::intrinsics::iteration_role_of(ty);
         // `joinToString()` written with nothing in the parentheses reaches this backend with six
         // operands or with none, depending only on which provider selected the declaration: a

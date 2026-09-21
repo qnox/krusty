@@ -7816,6 +7816,29 @@ and behavior is checked by RUNNING the emitted program.
   Tests: `tests/native_function_type_classes_e2e.rs`; the corpus cases are
   `codegen/box/functions/invoke/*.kt` and `codegen/box/funInterface/`.
 
+- **A class may override a member of a type declared outside the file.** The class model refused
+  every such class by name — 94 methods and 41 properties across the corpus, the largest remaining
+  decline. It need not: the override takes a slot of its own, like any member the class declares
+  freshly. A caller naming the CLASS reaches it, and a caller naming the dependency type declines
+  at the call site, where the type it named is still in sight.
+
+  What the refusal was protecting is narrower than a whole class, and is kept:
+
+  - `invoke` on a function type. Its number is FIXED — a function value's body sits right after
+    `kotlin.Any`'s three and the runtime names that number itself — so a caller reads it rather
+    than asking, and an override that cannot take that slot (its operands are not all references)
+    would be reached there anyway. That one still declines.
+  - The runtime's COLLECTION dispatch. A receiver typed `List`, `Iterable` or `Iterator` goes to a
+    dispatch that knows only the collections this runtime makes, and no static type tells the two
+    apart — that is the whole reason the dispatch is the runtime's. So the guard is the FILE's: a
+    file declaring one of its own declines those members by name rather than reading a vtable for
+    an entry it does not have.
+
+  What remains missing is fixed slot numbers for the members of runtime-known types, which is what
+  would let a call THROUGH such a type dispatch; that phase is in `docs/IMPLEMENTATION_PLAN.md`.
+  Tests: `tests/native_dependency_overrides_e2e.rs` and
+  `tests/native_function_type_classes_e2e.rs`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

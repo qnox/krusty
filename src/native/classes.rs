@@ -1763,16 +1763,24 @@ fn overridden_functions(
                 }
             }
             ResolvedFunctionOverrideTarget::External(_) => {
-                // `invoke` is the one dependency member this target already gives a FIXED slot:
-                // a function value's body sits right after `kotlin.Any`'s three, and the runtime
-                // names that number itself (`KT_SLOT_INVOKE`). A class that implements a function
-                // type puts its `invoke` there for the same reason a lambda does — every caller
-                // through the function type reads that slot.
+                // An override of a DEPENDENCY method takes a slot of its own, like any method
+                // this class declares freshly: a caller naming the class reaches it, and a caller
+                // naming the dependency type declines at the call site, where the type it named
+                // is still in sight.
+                //
+                // `invoke` is the exception, because it is the one dependency member this target
+                // already gives a FIXED number: a function value's body sits right after
+                // `kotlin.Any`'s three and the runtime names that number itself
+                // (`KT_SLOT_INVOKE`), so every caller through a function type reads it rather
+                // than asking. One that cannot take that slot — its operands are not all
+                // references — would be reached there anyway, so it declines instead.
                 if any_slot(function).is_none()
+                    && edge.name == "invoke"
+                    && super::intrinsics::is_function_type_name(edge.overridden_owner)
                     && external_invoke_slot(ir, edge, function).is_none()
                 {
                     return Err(format!(
-                        "an override of a dependency method (`{}.{}`)",
+                        "an override of `invoke` that cannot take the function slot (`{}.{}`)",
                         class.fq_name(),
                         function.name
                     ));
@@ -1810,12 +1818,12 @@ fn overridden_properties(
                 .and_then(|base| Some((base.class?, base.name.clone()))),
             ResolvedPropertyOverrideTarget::External(_) => None,
         };
+        // An override of a property declared OUTSIDE this file takes a slot of its own, like any
+        // property this class declares freshly: a caller naming the class reaches it, and a caller
+        // naming the dependency type declines at the call site, where the type it named is still
+        // in sight. There is no base slot here to replace, and nothing in this file numbers one.
         let Some(overridden) = overridden else {
-            return Err(format!(
-                "an override of a property declared outside this file (`{}.{}`)",
-                class.fq_name(),
-                edge.name
-            ));
+            continue;
         };
         // Every target: a property can override a superclass's and an interface's at once, and
         // the direct base's edge (depth 1) is the one whose slot is replaced, so it goes first.

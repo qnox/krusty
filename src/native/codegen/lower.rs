@@ -190,6 +190,7 @@ pub fn lower_file(
         reference_identities: HashMap::new(),
         holders: HashMap::new(),
         references: HashMap::new(),
+        declares_its_own_collection: declares_its_own_collection(ir),
     };
     lowering.declare_functions()?;
     lowering.declare_classes()?;
@@ -235,6 +236,30 @@ pub fn lower_file(
     })
 }
 
+/// Whether the file puts a class of its own behind one of the runtime's collection types.
+///
+/// Read from the OVERRIDE edges rather than from the supertype lists: what matters is that a
+/// member of this file answers for one of those types, which is exactly what an edge to a
+/// dependency declaration of it records — and it holds for a class reaching the type through
+/// another dependency type the supertype list does not name.
+fn declares_its_own_collection(ir: &IrFile) -> bool {
+    let owned = |owner: crate::types::TypeName| {
+        crate::native::intrinsics::is_list_type(owner)
+            || crate::native::intrinsics::iteration_role_of(Ty::Obj(owner, &[])).is_some()
+    };
+    ir.function_overrides.values().flatten().any(|edge| {
+        matches!(
+            edge.overridden,
+            crate::fir::ResolvedFunctionOverrideTarget::External(_)
+        ) && owned(edge.overridden_owner)
+    }) || ir.property_overrides.values().flatten().any(|edge| {
+        matches!(
+            edge.overridden,
+            crate::fir::ResolvedPropertyOverrideTarget::External(_)
+        ) && owned(edge.overridden_owner)
+    })
+}
+
 struct FileLowering<'a> {
     ir: &'a IrFile,
     provider: &'a Rc<dyn SemanticPlatform>,
@@ -277,6 +302,13 @@ struct FileLowering<'a> {
     /// callable references compare. Deduplicated here because two sites naming the same
     /// declaration must reach the SAME marker; that is the whole point of it.
     reference_identities: HashMap<String, DataId>,
+    /// Whether this file declares a class of its own behind one of the runtime's COLLECTION types.
+    ///
+    /// A receiver typed by one of those goes to the runtime's own dispatch, which knows only the
+    /// collections this runtime MAKES — a range and a list. An object of the program's own behind
+    /// that type would have its vtable read for an entry it does not have, so where such a class
+    /// exists those members decline by name instead of being answered wrongly.
+    declares_its_own_collection: bool,
 }
 
 impl<'a> FileLowering<'a> {
