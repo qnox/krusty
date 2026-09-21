@@ -139,7 +139,7 @@ impl<'a> FileLowering<'a> {
         self.emit_function(
             items.initializer,
             signature,
-            Carrier::Void,
+            Ty::Unit,
             &name,
             &mut |body, _| {
                 let flag_address = body.data_address(items.flag);

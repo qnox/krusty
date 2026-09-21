@@ -175,7 +175,7 @@ impl<'a> FileLowering<'a> {
         self.emit_function(
             id,
             signature,
-            carrier(result),
+            result,
             &name,
             &mut |body, params| {
                 // The callee's own frame: `this` at slot 0 where there is one, then every
@@ -464,7 +464,7 @@ impl<'a> FileLowering<'a> {
         slots.extend(frame.iter().copied());
         let omitted = key.omitted.clone();
         let label = format!("{name}.<init>$defaults");
-        self.emit_function(id, signature, Carrier::Void, &label, &mut |body, params| {
+        self.emit_function(id, signature, Ty::Unit, &label, &mut |body, params| {
             // `this` at slot 0 and every parameter at its own ordinal, so a default reading an
             // earlier one finds it. Each slot is declared ONCE: declaring it again hands back a
             // fresh, undefined variable and loses what was put in it.

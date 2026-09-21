@@ -538,7 +538,7 @@ impl<'a> FileLowering<'a> {
         self.emit_function(
             thunk,
             signature,
-            carrier(result),
+            result,
             &name,
             &mut |body, params| {
                 let mut arguments = Vec::with_capacity(declared.len());
@@ -609,7 +609,7 @@ impl<'a> FileLowering<'a> {
         self.emit_function(
             thunk,
             signature,
-            Carrier::Ref,
+            any(),
             &name,
             &mut |body, params| {
                 let mut arguments = Vec::with_capacity(parameters.len());

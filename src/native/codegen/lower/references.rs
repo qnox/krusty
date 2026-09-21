@@ -370,7 +370,7 @@ impl<'a> FileLowering<'a> {
         self.emit_function(
             id,
             signature,
-            Carrier::Scalar(types::I8, false),
+            Ty::Boolean,
             &format!("{base}_equals"),
             &mut |body, params| {
                 let no = body.builder.ins().iconst(types::I8, 0);
@@ -442,7 +442,7 @@ impl<'a> FileLowering<'a> {
         self.emit_function(
             id,
             signature,
-            Carrier::Ref,
+            any(),
             &format!("{base}_get"),
             &mut |body, params| {
                 let value = match access {
@@ -490,7 +490,7 @@ impl<'a> FileLowering<'a> {
         self.emit_function(
             id,
             signature,
-            Carrier::Void,
+            Ty::Unit,
             &format!("{base}_set"),
             &mut |body, params| {
                 match access {
@@ -541,7 +541,7 @@ impl<'a> FileLowering<'a> {
         self.emit_function(
             id,
             signature,
-            Carrier::Ref,
+            any(),
             &format!("{base}_name"),
             &mut |body, _| {
                 let value = body.string_literal(&text)?;

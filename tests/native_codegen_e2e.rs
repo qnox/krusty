@@ -2562,3 +2562,57 @@ fn a_collection_literal_calls_its_companion_operator_on_the_companion() {
         "OK\n3\n0\n"
     );
 }
+
+#[test]
+fn a_result_declared_narrower_than_the_value_it_returns_is_converted() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // A value typed by a type PARAMETER is carried as a reference, whatever the parameter is
+    // bounded by. `fun <T : Int> foo(x: T): Int = x` returns that reference where the declaration
+    // says a machine integer, so the `return` has to unbox — it used to hand the pointer straight
+    // back, which the code generator's verifier refused (`result 0 has type i64, must match …
+    // i32`). The nullable bound is the same shape one level out.
+    assert_eq!(
+        run("fun <T : Int> width(x: T): Int = x\n\
+             fun <T : Long> wide(x: T): Long = x\n\
+             fun <T : Boolean> truth(x: T): Boolean = x\n\
+             fun main() {\n\
+             \x20   println(width(17))\n\
+             \x20   val computed = 3 + 4\n\
+             \x20   println(width(computed))\n\
+             \x20   println(wide(9000000000L))\n\
+             \x20   println(truth(true))\n\
+             }\n"),
+        "17\n7\n9000000000\ntrue\n"
+    );
+}
+
+#[test]
+fn an_override_that_answers_unit_still_answers_the_base_a_value() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `A.foo(): Any` overridden by `B.foo(): Unit`. The override's slot produces no machine value,
+    // so the bridge standing in the base's slot returned nothing at all where the base's signature
+    // promises a reference. `Unit` is a real Kotlin value and the runtime owns the one instance of
+    // it; a caller going through `A` must get that instance back.
+    assert_eq!(
+        run("open class A {\n\
+             \x20   open fun foo(): Any = 42\n\
+             }\n\
+             open class B : A() {\n\
+             \x20   override fun foo(): Unit { }\n\
+             }\n\
+             fun main() {\n\
+             \x20   val a: A = B()\n\
+             \x20   println(a.foo() == Unit)\n\
+             \x20   println(a.foo())\n\
+             \x20   val plain: A = A()\n\
+             \x20   println(plain.foo())\n\
+             }\n"),
+        "true\nkotlin.Unit\n42\n"
+    );
+}

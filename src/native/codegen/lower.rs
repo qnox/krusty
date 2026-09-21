@@ -408,10 +408,14 @@ impl<'a> FileLowering<'a> {
         &mut self,
         id: FuncId,
         signature: Signature,
-        result: Carrier,
+        result: Ty,
         name: &str,
         fill: &mut Fill<'_>,
     ) -> Result<(), Unsupported> {
+        // Both facts about the result travel into the body: the carrier decides the shape of the
+        // `return`, and the TYPE decides how a value that arrives in another representation is
+        // converted into it — a carrier cannot, because `Boolean` and `UByte` share one.
+        let carried = carrier(result);
         let frontend_config = self.module.target_config();
         let mut context = self.module.make_context();
         context.func.signature = signature;
@@ -427,7 +431,8 @@ impl<'a> FileLowering<'a> {
                     file: self,
                     builder: &mut builder,
                     values: HashMap::new(),
-                    result,
+                    result: carried,
+                    result_type: result,
                     loops: Vec::new(),
                     terminated: false,
                     handlers: Vec::new(),
@@ -440,7 +445,7 @@ impl<'a> FileLowering<'a> {
                 if body.terminated {
                     body.builder.ins().trap(TrapCode::unwrap_user(1));
                 } else {
-                    if result != Carrier::Void {
+                    if carried != Carrier::Void {
                         return Err(format!(
                             "a non-`Unit` function `{name}` that falls off its end"
                         ));
@@ -502,7 +507,7 @@ impl<'a> FileLowering<'a> {
         self.emit_function(
             id,
             signature,
-            carrier(ret),
+            ret,
             &name,
             &mut |lowering, params| {
                 for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
@@ -610,6 +615,9 @@ struct BodyLowering<'a, 'b, 'c> {
     /// Kotlin value slot → Cranelift variable and its declared type.
     values: HashMap<u32, (Variable, Ty)>,
     result: Carrier,
+    /// The declared result TYPE behind [`Self::result`]. A `return` whose value arrives in another
+    /// representation is converted into this, which the carrier alone cannot name.
+    result_type: Ty,
     /// Loops the current position is inside, innermost last.
     loops: Vec<LoopFrame>,
     /// Whether control has left the current block for good — a `return`, `break` or `continue`
@@ -794,15 +802,31 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         self.builder.ins().return_(&[value]);
                     }
                     (Some(value), _) => {
-                        let value = self.expression(value)?;
+                        let source = self.type_of(value);
+                        let lowered = self.expression(value)?;
                         if self.terminated {
                             return Ok(());
                         }
-                        let Some(value) = value else {
+                        let Some(lowered) = lowered else {
                             return Err(
                                 "a `return` of no value from a non-`Unit` function".to_string()
                             );
                         };
+                        // The expression need not already be in the result's representation: a
+                        // body whose value is typed by a type PARAMETER carries a reference, and
+                        // `fun <T : Int> foo(x: T): Int = x` returns exactly that where an `Int`
+                        // is declared. Unboxing is the conversion, and the declared result type is
+                        // what names it.
+                        let declared = self.result_type;
+                        let Some(value) = self.convert(lowered, source, declared)? else {
+                            return Err(
+                                "a `return` whose value does not reach the declared result"
+                                    .to_string(),
+                            );
+                        };
+                        if self.terminated {
+                            return Ok(());
+                        }
                         self.run_finallys_for_return()?;
                         if self.terminated {
                             return Ok(());

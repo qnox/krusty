@@ -7291,6 +7291,27 @@ and behavior is checked by RUNNING the emitted program.
   (`a_collection_literal_calls_its_companion_operator_on_the_companion`); the corpus cases are
   `codegen/box/collectionLiterals/{genericCollection,multipleOfOverloads,nonGenericCollection,resolvesToOperator}.kt`.
 
+- **A `return` converts into the result its declaration names.** A value typed by a type PARAMETER
+  is carried as a reference whatever that parameter is bounded by, so `fun <T : Int> foo(x: T): Int
+  = x` hands a pointer back where the declaration says a machine integer. The scalar `return` arm
+  emitted the value untouched and the code generator's verifier refused the function outright
+  (`result 0 has type i64, must match function signature of i32`). The conversion is an unboxing,
+  and naming it needs the result TYPE rather than its carrier — `Boolean` and `UByte` share one
+  carrier and unbox through different descriptors — so the body lowering now carries both.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`a_result_declared_narrower_than_the_value_it_returns_is_converted`); the corpus case is
+  `codegen/box/boxing/boxing15.kt`.
+
+- **An override answering `Unit` still answers the base a value.** `open fun foo(): Any` overridden
+  by `override fun foo(): Unit` changes the result's representation, so the base's vtable slot
+  holds a bridge. The override's slot produces no machine value and the bridge returned nothing at
+  all, where the base's signature promises a reference. `Unit` is a real Kotlin value — a caller
+  going through `A` reads the singleton and compares equal to `Unit` — and the runtime owns the one
+  instance of it, so the bridge materializes it rather than returning empty-handed.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`an_override_that_answers_unit_still_answers_the_base_a_value`); the corpus case is
+  `codegen/box/bridges/test18.kt`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

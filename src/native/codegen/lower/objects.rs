@@ -710,7 +710,7 @@ impl<'a> FileLowering<'a> {
         let arguments = secondary.delegate_args.clone();
         let prelude = secondary.delegate_prelude.clone();
         let body_expression = secondary.body;
-        self.emit_function(id, signature, Carrier::Void, &name, &mut |body, params| {
+        self.emit_function(id, signature, Ty::Unit, &name, &mut |body, params| {
             for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                 let variable = body.declare_value(slot as u32, *ty)?;
                 body.builder.def_var(variable, *value);
@@ -777,7 +777,7 @@ impl<'a> FileLowering<'a> {
             let signature = self.signature_of(&[any()], ty)?;
             let class = *class;
             let field = *field;
-            self.emit_function(id, signature, carrier(ty), &name, &mut |body, params| {
+            self.emit_function(id, signature, ty, &name, &mut |body, params| {
                 // Through `load_field` and not a bare load, because this is the FOURTH path that
                 // reads a field and a `lateinit` one is guarded on all of them. It is the path a
                 // property that OVERRIDES another reaches: the read goes through a vtable slot, so
@@ -792,7 +792,7 @@ impl<'a> FileLowering<'a> {
             })
         } else {
             let signature = self.signature_of(&[any(), ty], Ty::Unit)?;
-            self.emit_function(id, signature, Carrier::Void, &name, &mut |body, params| {
+            self.emit_function(id, signature, Ty::Unit, &name, &mut |body, params| {
                 body.builder
                     .ins()
                     .store(trusted(), params[1], params[0], offset);
@@ -840,7 +840,7 @@ impl<'a> FileLowering<'a> {
         self.emit_function(
             id,
             signature,
-            carrier(result),
+            result,
             &name,
             &mut |body, values| {
                 let mut arguments = Vec::with_capacity(forwarded.len());
@@ -858,16 +858,34 @@ impl<'a> FileLowering<'a> {
                     forwarded_ret,
                     &arguments,
                 )?;
-                match answer {
-                    Some(answer) => {
+                match (answer, carrier(result)) {
+                    (Some(answer), Carrier::Void) => {
+                        let _ = answer;
+                        body.builder.ins().return_(&[]);
+                    }
+                    (Some(answer), _) => {
                         let Some(answer) = body.convert(answer, Some(forwarded_ret), result)?
                         else {
-                            return Err("a `Unit` answer crossing a bridge".to_string());
+                            return Err("an answer that does not cross a bridge".to_string());
                         };
                         body.builder.ins().return_(&[answer]);
                     }
-                    None => {
+                    // `open fun foo(): Any` overridden by `fun foo(): Unit`. The override produces
+                    // no machine value, and `Unit` is still the Kotlin value a caller reading the
+                    // base's slot gets back — the runtime owns that singleton, so hand it over.
+                    (None, Carrier::Ref) => {
+                        let unit = body
+                            .runtime_call("kt_unit", &[], any(), &[])?
+                            .expect("`kt_unit` returns the singleton");
+                        body.builder.ins().return_(&[unit]);
+                    }
+                    (None, Carrier::Void) => {
                         body.builder.ins().return_(&[]);
+                    }
+                    (None, Carrier::Scalar(_, _)) => {
+                        return Err(
+                            "a `Unit` answer where the base declares a primitive".to_string()
+                        );
                     }
                 }
                 body.terminate();
@@ -896,7 +914,7 @@ impl<'a> FileLowering<'a> {
                 self.emit_function(
                     id,
                     signature,
-                    carrier(Ty::Boolean),
+                    Ty::Boolean,
                     &name,
                     &mut |body, params| {
                         let (left, right) = (params[0], params[1]);
@@ -941,7 +959,7 @@ impl<'a> FileLowering<'a> {
                 self.emit_function(
                     id,
                     signature,
-                    carrier(Ty::Int),
+                    Ty::Int,
                     &name,
                     &mut |body, params| {
                         let value = body.builder.ins().load(clif, trusted(), params[0], offset);
@@ -955,7 +973,7 @@ impl<'a> FileLowering<'a> {
             ValueMember::ToString => {
                 let opening = format!("{kotlin_name}({field_name}=");
                 let signature = self.signature_of(&[any()], any())?;
-                self.emit_function(id, signature, Carrier::Ref, &name, &mut |body, params| {
+                self.emit_function(id, signature, any(), &name, &mut |body, params| {
                     let value = body.builder.ins().load(clif, trusted(), params[0], offset);
                     let boxed = body
                         .convert(value, Some(ty), any())?
@@ -1064,7 +1082,7 @@ impl<'a> FileLowering<'a> {
             .map(|(_, getter)| getter);
 
         let name = format!("{}.<init>", declaration.fq_name());
-        self.emit_function(id, signature, Carrier::Void, &name, &mut |body, params| {
+        self.emit_function(id, signature, Ty::Unit, &name, &mut |body, params| {
             for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
                 let variable = body.declare_value(slot as u32, *ty)?;
                 body.builder.def_var(variable, *value);
@@ -1186,7 +1204,7 @@ impl<'a> FileLowering<'a> {
 
         let name = format!("{}.INSTANCE", self.ir.classes[class as usize].fq_name());
         let signature = self.signature_of(&[], any())?;
-        self.emit_function(getter, signature, Carrier::Ref, &name, &mut |body, _| {
+        self.emit_function(getter, signature, any(), &name, &mut |body, _| {
             if let Some(initializer) = enclosing_enum {
                 let func_ref = body.func_ref(initializer);
                 body.emit_call(func_ref, &[])?;

@@ -111,7 +111,7 @@ impl<'a> FileLowering<'a> {
             .map(|(index, declaration)| (self.statics[index], declaration.ty, declaration.init))
             .collect();
 
-        self.emit_function(id, signature, Carrier::Void, &symbol, &mut |body, _| {
+        self.emit_function(id, signature, Ty::Unit, &symbol, &mut |body, _| {
             for (slot, ty, _) in &declarations {
                 if carrier(*ty) != Carrier::Ref {
                     continue;
