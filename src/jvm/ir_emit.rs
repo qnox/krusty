@@ -13236,7 +13236,7 @@ impl<'a> Emitter<'a> {
         // Build each lambda argument's pre-relocated body (leaving its boxed result on the stack), and
         // its own (branchy-predicate) frames — resolved to byte offsets within the body, relocated below.
         let mut lam_splices: Vec<crate::jvm::inline::LambdaSplice> = Vec::new();
-        let mut lam_frames: Vec<ResolvedFrames> = Vec::new();
+        let mut lam_frames: Vec<Vec<ResolvedFrames>> = Vec::new();
         // Capture initializers belong to lambda-creation time, in argument evaluation order. A
         // capture that is already a caller local needs no code; every other checked value is
         // materialized once when its lambda operand is reached, then the spliced body reads that
@@ -13248,8 +13248,7 @@ impl<'a> Emitter<'a> {
         // would otherwise overflow the host's stack). Propagated to `splice_inline` below.
         let mut lam_max_stack = 0u16;
         for (i, &a) in args.iter().enumerate() {
-            let mut scratch = CodeBuilder::new(self.next_slot);
-            let (lam_insns, lam_fr, lam_locals_declared, lam_lines) = if let IrExpr::Lambda {
+            let (bodies, frames, lam_max_locals, lam_stack) = if let IrExpr::Lambda {
                 impl_fn,
                 arity,
                 captures,
@@ -13321,13 +13320,6 @@ impl<'a> Emitter<'a> {
                     };
                     cap_slots.push((slot, cap_tys[k]));
                 }
-                // Build the lambda body into a scratch builder. The host left the lambda's `arity`
-                // arguments on the stack (as `Object`, the erased `FunctionN.invoke` parameters);
-                // unbox a primitive parameter, or `checkcast` a specific reference parameter to its
-                // type, then store it (top = last). Then run the body, then box the result to `Object`
-                // (matching the replaced `invoke`'s `Object` result).
-                scratch.set_stack(arity as u16);
-                let mut lam_locals_declared: Vec<(u16, u16, String, String)> = Vec::new();
                 // This lambda's own locals start where the host's frame is free at the invoke, not
                 // above every host local. `None` only when the body could not be decoded, in which
                 // case the splice below declines too.
@@ -13343,115 +13335,150 @@ impl<'a> Emitter<'a> {
                     .map(|&(slot, ty)| slot + slot_words(ty))
                     .max()
                     .unwrap_or(0);
-                let mut lambda_slot = spliced_frame
+                let lambda_slot_base = spliced_frame
                     .as_ref()
                     .and_then(|frame| frame.lambda_bases.get(ordinal).copied())
                     .unwrap_or(self.next_slot)
                     .max(capture_ceiling);
-                let mut param_slots: Vec<(u16, Ty)> = cap_slots;
-                param_slots.extend(std::iter::repeat_n((0u16, Ty::Error), arity));
-                for j in (0..arity).rev() {
-                    let jt = lam_tys[j];
-                    if jt.is_jvm_scalar() {
-                        // `FunctionN.invoke` hands every argument over as `Object`. Select its adapter
-                        // from the lambda's semantic parameter before using the physical carrier for
-                        // the local slot; otherwise `UInt` is mistaken for boxed `Int` here.
-                        unbox_prim(
-                            self.cw,
-                            &mut scratch,
-                            semantic_scalar_adapter(lam_semantic_tys[j], jt),
-                        );
-                    } else if let Some(internal) = checkcast_internal(jt) {
-                        let ci = self.cw.class_ref(&internal);
-                        scratch.checkcast(ci);
+                // How many sites the host invokes this lambda from. One body serves them all unless
+                // the body carries a suspension: then each site is a state of this machine, and a
+                // state is one position with its own spill set, so the body is built once per site
+                // and each copy marks its suspensions with its own ordinals. The copies are laid out
+                // from the same slot base, so they differ in nothing but those ordinals — which is
+                // what lets the discovery pass and the build pass number them alike.
+                let sites = spliced_frame
+                    .as_ref()
+                    .and_then(|frame| frame.site_counts.get(ordinal).copied())
+                    .unwrap_or(1)
+                    .max(1);
+                let slot_base = self.next_slot;
+                let states_before = self.machine_next_ordinal;
+                let mut bodies: Vec<crate::jvm::inline::LambdaBody> = Vec::new();
+                let mut frames: Vec<ResolvedFrames> = Vec::new();
+                let mut lam_max_locals = 0u16;
+                let mut lam_stack = 0u16;
+                loop {
+                    self.next_slot = slot_base;
+                    // Build the lambda body into a scratch builder. The host left the lambda's `arity`
+                    // arguments on the stack (as `Object`, the erased `FunctionN.invoke` parameters);
+                    // unbox a primitive parameter, or `checkcast` a specific reference parameter to its
+                    // type, then store it (top = last). Then run the body, then box the result to `Object`
+                    // (matching the replaced `invoke`'s `Object` result).
+                    let mut scratch = CodeBuilder::new(self.next_slot);
+                    scratch.set_stack(arity as u16);
+                    let mut lam_locals_declared: Vec<(u16, u16, String, String)> = Vec::new();
+                    let mut lambda_slot = lambda_slot_base;
+                    let mut param_slots: Vec<(u16, Ty)> = cap_slots.clone();
+                    param_slots.extend(std::iter::repeat_n((0u16, Ty::Error), arity));
+                    for j in (0..arity).rev() {
+                        let jt = lam_tys[j];
+                        if jt.is_jvm_scalar() {
+                            // `FunctionN.invoke` hands every argument over as `Object`. Select its adapter
+                            // from the lambda's semantic parameter before using the physical carrier for
+                            // the local slot; otherwise `UInt` is mistaken for boxed `Int` here.
+                            unbox_prim(
+                                self.cw,
+                                &mut scratch,
+                                semantic_scalar_adapter(lam_semantic_tys[j], jt),
+                            );
+                        } else if let Some(internal) = checkcast_internal(jt) {
+                            let ci = self.cw.class_ref(&internal);
+                            scratch.checkcast(ci);
+                        }
+                        let slot = lambda_slot;
+                        lambda_slot += slot_words(jt);
+                        self.next_slot = self.next_slot.max(lambda_slot);
+                        store(jt, slot, &mut scratch);
+                        param_slots[n_cap + j] = (slot, jt);
+                        // Its scope opens once the store completes, and runs to the end of the body.
+                        if self.record_locals {
+                            if let Some(name) = self
+                                .ir
+                                .fn_params
+                                .get(&impl_fn)
+                                .and_then(|info| info.names.get(n_cap + j))
+                            {
+                                lam_locals_declared.push((
+                                    u16::try_from(scratch.bytes.len()).unwrap_or(u16::MAX),
+                                    slot,
+                                    name.clone(),
+                                    crate::jvm::names::type_descriptor(jt),
+                                ));
+                            }
+                        }
                     }
-                    let slot = lambda_slot;
-                    lambda_slot += slot_words(jt);
+                    // The reference compiler opens an inlined lambda body with its own inline-depth
+                    // marker — `iconst_0; istore` into a `$i$a$-<callee>-<caller>` local — exactly as it
+                    // opens an inlined function body with `$i$f$<callee>`. The host's marker arrives
+                    // inside the relocated host body; this one has no other source, because the lambda
+                    // body is emitted from IR rather than relocated.
+                    let depth_marker = lambda_slot;
+                    lambda_slot += 1;
                     self.next_slot = self.next_slot.max(lambda_slot);
-                    store(jt, slot, &mut scratch);
-                    param_slots[n_cap + j] = (slot, jt);
-                    // Its scope opens once the store completes, and runs to the end of the body.
+                    scratch.push_int(0, self.cw);
+                    store(Ty::Int, depth_marker, &mut scratch);
                     if self.record_locals {
-                        if let Some(name) = self
-                            .ir
-                            .fn_params
-                            .get(&impl_fn)
-                            .and_then(|info| info.names.get(n_cap + j))
-                        {
+                        if let Some(origin) = self.ir.lambda_origins.get(&impl_fn) {
                             lam_locals_declared.push((
                                 u16::try_from(scratch.bytes.len()).unwrap_or(u16::MAX),
-                                slot,
-                                name.clone(),
-                                crate::jvm::names::type_descriptor(jt),
+                                depth_marker,
+                                crate::jvm::debug_local_names::spliced_lambda_marker_name(
+                                    callee,
+                                    &self.owner,
+                                    &origin.implementation_name,
+                                    origin.implementation_ordinal,
+                                ),
+                                "I".to_string(),
                             ));
                         }
                     }
-                }
-                // The reference compiler opens an inlined lambda body with its own inline-depth
-                // marker — `iconst_0; istore` into a `$i$a$-<callee>-<caller>` local — exactly as it
-                // opens an inlined function body with `$i$f$<callee>`. The host's marker arrives
-                // inside the relocated host body; this one has no other source, because the lambda
-                // body is emitted from IR rather than relocated.
-                let depth_marker = lambda_slot;
-                lambda_slot += 1;
-                self.next_slot = self.next_slot.max(lambda_slot);
-                scratch.push_int(0, self.cw);
-                store(Ty::Int, depth_marker, &mut scratch);
-                if self.record_locals {
-                    if let Some(origin) = self.ir.lambda_origins.get(&impl_fn) {
-                        lam_locals_declared.push((
-                            u16::try_from(scratch.bytes.len()).unwrap_or(u16::MAX),
-                            depth_marker,
-                            crate::jvm::debug_local_names::spliced_lambda_marker_name(
-                                callee,
-                                &self.owner,
-                                &origin.implementation_name,
-                                origin.implementation_ordinal,
-                            ),
-                            "I".to_string(),
-                        ));
+                    let body_ret =
+                        self.emit_fn_body_inline(inline_body, &param_slots, &mut scratch);
+                    if body_ret.is_jvm_scalar() {
+                        // The erased `invoke` result is `Object`, so reverse the same semantic adapter
+                        // choice after the inline body leaves its physical carrier on the stack. Use
+                        // the BODY's value type, not the contextual lambda declaration return: a block
+                        // accepted as `() -> Any?` can still produce a primitive `Boolean`/`Int` here.
+                        box_prim_free(
+                            self.cw,
+                            &mut scratch,
+                            semantic_scalar_adapter(body_value_ty, body_ret),
+                        );
+                    }
+                    scratch.link_local_branches(); // enclosing-loop transfers remain owned by the caller
+                    let lam_fr = scratch.resolved_frames(); // branchy predicate body → its own frames
+                    let Some(lam_insns) = crate::jvm::inline::disassemble_lambda(
+                        &scratch.bytes,
+                        &scratch.external_branches(),
+                    ) else {
+                        return false;
+                    };
+                    lam_max_locals = lam_max_locals.max(scratch.max_locals);
+                    lam_stack = lam_stack.max(scratch.max_stack);
+                    frames.push(lam_fr);
+                    bodies.push(crate::jvm::inline::LambdaBody {
+                        body: lam_insns,
+                        locals: lam_locals_declared,
+                        lines: scratch.line_marks().to_vec(),
+                    });
+                    let suspends = self.machine_next_ordinal > states_before;
+                    if !suspends || bodies.len() >= sites {
+                        break;
                     }
                 }
-                let body_ret = self.emit_fn_body_inline(inline_body, &param_slots, &mut scratch);
-                if body_ret.is_jvm_scalar() {
-                    // The erased `invoke` result is `Object`, so reverse the same semantic adapter
-                    // choice after the inline body leaves its physical carrier on the stack. Use
-                    // the BODY's value type, not the contextual lambda declaration return: a block
-                    // accepted as `() -> Any?` can still produce a primitive `Boolean`/`Int` here.
-                    box_prim_free(
-                        self.cw,
-                        &mut scratch,
-                        semantic_scalar_adapter(body_value_ty, body_ret),
-                    );
-                }
-                scratch.link_local_branches(); // enclosing-loop transfers remain owned by the caller
-                let lam_fr = scratch.resolved_frames(); // branchy predicate body → its own frames
-                let Some(lam_insns) = crate::jvm::inline::disassemble_lambda(
-                    &scratch.bytes,
-                    &scratch.external_branches(),
-                ) else {
-                    return false;
-                };
-                (
-                    lam_insns,
-                    lam_fr,
-                    lam_locals_declared,
-                    scratch.line_marks().to_vec(),
-                )
+                (bodies, frames, lam_max_locals, lam_stack)
             } else {
                 continue;
             };
-            if code.max_locals < scratch.max_locals {
-                code.max_locals = scratch.max_locals;
+            if code.max_locals < lam_max_locals {
+                code.max_locals = lam_max_locals;
             }
-            self.next_slot = self.next_slot.max(scratch.max_locals);
-            lam_max_stack = lam_max_stack.max(scratch.max_stack);
-            lam_frames.push(lam_fr);
+            self.next_slot = self.next_slot.max(lam_max_locals);
+            lam_max_stack = lam_max_stack.max(lam_stack);
+            lam_frames.push(frames);
             lam_splices.push(crate::jvm::inline::LambdaSplice {
                 param_index: i,
-                body: lam_insns,
-                locals: lam_locals_declared,
-                lines: lam_lines,
+                bodies,
             });
         }
         if lam_splices.is_empty() {
@@ -13562,7 +13589,7 @@ impl<'a> Emitter<'a> {
             code.add_frame_if_new(l, locals, st);
         }
         for site in &bs.lambda_sites {
-            let frames = &lam_frames[site.lambda_index];
+            let frames = &lam_frames[site.lambda_index][site.body_index];
             let host_ctx = &site.host_locals;
             // The lambda body's frames were compiled against an EMPTY operand base; rebase each onto the
             // host operand-stack prefix sitting below the lambda value (e.g. a `map` destination). Empty

@@ -130,9 +130,12 @@ pub(super) fn discover(
         return None;
     }
     // One marker per suspension, each with its own ordinal. An inline function that invokes its
-    // lambda at two sites splices the same body twice, so one ordinal is marked twice: the plans
-    // would then describe one site with the other's locals. A missing ordinal is the mirror case —
-    // the state would have no position, and its spills would never be emitted.
+    // lambda at two sites receives one body per site, each marked with its own ordinals; were the
+    // same body spliced twice, one ordinal would be marked twice and the plan would describe one
+    // site with the other's locals. That no longer happens by construction, and this check is the
+    // safety net that keeps a machine resuming at the wrong position from ever reaching a class
+    // file. A missing ordinal is the mirror case — the state would have no position, and its
+    // spills would never be emitted.
     let mut marked: Vec<bool> = vec![false; expected];
     for &(_, ordinal) in &markers {
         let Some(seen) = marked.get_mut(ordinal as usize) else {
