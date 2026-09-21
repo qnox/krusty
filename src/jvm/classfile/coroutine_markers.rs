@@ -35,6 +35,30 @@ const MARKER_OP: u8 = 0xfe;
 /// Opcode + kind + a two-byte ordinal.
 pub const MARKER_LEN: usize = 4;
 
+/// Every marker in `bytes`: `(byte offset, kind, ordinal)`, in offset order.
+///
+/// Free-standing because a spliced body is scanned before it reaches a builder: the splice decides
+/// where a machine's positions land, and its own bytes are the first place they exist.
+pub fn markers_in(bytes: &[u8]) -> Option<Vec<(usize, CoroutineMarker, u16)>> {
+    let mut found = Vec::new();
+    let mut pc = 0;
+    while pc < bytes.len() {
+        let len = crate::jvm::inline::instruction_len(bytes, pc)?;
+        if bytes[pc] == MARKER_OP {
+            let kind = match bytes.get(pc + 1)? {
+                1 => CoroutineMarker::Suspension,
+                2 => CoroutineMarker::Resume,
+                3 => CoroutineMarker::Join,
+                _ => return None,
+            };
+            let ordinal = (u16::from(*bytes.get(pc + 2)?) << 8) | u16::from(*bytes.get(pc + 3)?);
+            found.push((pc, kind, ordinal));
+        }
+        pc += len;
+    }
+    Some(found)
+}
+
 impl CodeBuilder {
     /// Emit a marker for suspension `ordinal`. Stack-neutral, like the `nop`s that replace it.
     pub fn coroutine_marker(&mut self, kind: CoroutineMarker, ordinal: u16) {
@@ -65,24 +89,7 @@ impl CodeBuilder {
     /// The scan walks instruction by instruction rather than searching for the opcode byte, because
     /// `0xfe` also occurs inside operands — a constant-pool index, a branch offset, a `bipush`.
     pub fn marker_positions(&self) -> Option<Vec<(usize, CoroutineMarker, u16)>> {
-        let mut found = Vec::new();
-        let mut pc = 0;
-        while pc < self.bytes.len() {
-            let len = crate::jvm::inline::instruction_len(&self.bytes, pc)?;
-            if self.bytes[pc] == MARKER_OP {
-                let kind = match self.bytes.get(pc + 1)? {
-                    1 => CoroutineMarker::Suspension,
-                    2 => CoroutineMarker::Resume,
-                    3 => CoroutineMarker::Join,
-                    _ => return None,
-                };
-                let ordinal = (u16::from(*self.bytes.get(pc + 2)?) << 8)
-                    | u16::from(*self.bytes.get(pc + 3)?);
-                found.push((pc, kind, ordinal));
-            }
-            pc += len;
-        }
-        Some(found)
+        markers_in(&self.bytes)
     }
 
     /// Overwrite every marker with `nop`s, keeping all offsets. Call once the labels are bound.

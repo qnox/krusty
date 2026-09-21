@@ -34,6 +34,23 @@ impl SlotSet {
         }
     }
 
+    pub(crate) fn contains(&self, slot: u16) -> bool {
+        self.words
+            .get(slot as usize / 64)
+            .is_some_and(|word| word & (1 << (slot as usize % 64)) != 0)
+    }
+
+    /// Keep only what both hold; `true` when that removed something.
+    pub(crate) fn intersect_with(&mut self, other: &SlotSet) -> bool {
+        let mut changed = false;
+        for (index, word) in self.words.iter_mut().enumerate() {
+            let kept = *word & other.words.get(index).copied().unwrap_or(0);
+            changed |= kept != *word;
+            *word = kept;
+        }
+        changed
+    }
+
     /// `true` when this changed.
     fn union_with(&mut self, other: &SlotSet) -> bool {
         if other.words.len() > self.words.len() {
@@ -163,6 +180,68 @@ impl LocalLiveness {
             }
         }
         Some(LocalLiveness { before })
+    }
+
+    /// Slots DEFINITELY assigned before `index` runs: every path from the method's entry to it
+    /// stores them.
+    ///
+    /// The spill plan needs this where a frame cannot be read: a local the SPLICED body assigns —
+    /// an inline-depth marker, a loop's own temporary — is described by frames after the suspension
+    /// but by none before it. Spilling one that a path could leave unset would fail verification at
+    /// the spill itself, so "some store precedes it in the instruction order" is not enough.
+    pub(crate) fn definitely_assigned(
+        insns: &[Insn],
+        graph: &ControlGraph,
+        parameters: &SlotSet,
+    ) -> Option<Vec<SlotSet>> {
+        if graph.exit() != insns.len() {
+            return None;
+        }
+        let access: Vec<(Vec<u16>, Vec<u16>)> = insns.iter().map(reads_and_writes).collect();
+        // Everything is assumed assigned everywhere, then cut back to what every edge agrees on —
+        // the usual way to reach the greatest fixed point of an intersection.
+        let mut all = SlotSet::default();
+        for (_, writes) in &access {
+            for &slot in writes {
+                all.insert(slot);
+            }
+        }
+        for slot in parameters.iter() {
+            all.insert(slot);
+        }
+        let mut before = vec![all.clone(); insns.len() + 1];
+        before[0] = parameters.clone();
+        let order = graph.reverse_post_order();
+        loop {
+            let mut changed = false;
+            for &index in &order {
+                if index == insns.len() {
+                    continue;
+                }
+                let mut out = before[index].clone();
+                for &slot in &access[index].1 {
+                    out.insert(slot);
+                }
+                for &successor in graph.normal_successors(index) {
+                    if successor != 0 {
+                        changed |= before[successor].intersect_with(&out);
+                    }
+                }
+                // A handler is reached from anywhere inside the protected range, including before
+                // the store that follows the throw, so an exceptional edge carries the state BEFORE
+                // this instruction's own writes.
+                let entry_state = before[index].clone();
+                for &handler in graph.exceptional_successors(index) {
+                    if handler != 0 {
+                        changed |= before[handler].intersect_with(&entry_state);
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        Some(before)
     }
 
     /// Slots live immediately BEFORE `index` executes.

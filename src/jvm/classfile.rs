@@ -12,7 +12,7 @@ mod coroutine_markers;
 mod line_numbers;
 mod method_parameters;
 
-pub use coroutine_markers::{CoroutineMarker, MARKER_LEN};
+pub use coroutine_markers::{markers_in, CoroutineMarker, MARKER_LEN};
 
 pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PRIVATE: u16 = 0x0002;

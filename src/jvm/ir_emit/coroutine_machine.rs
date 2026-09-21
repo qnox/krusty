@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 
 use crate::jvm::classfile::VerifType;
+use crate::jvm::ir_emit::{ir_ty_to_jvm, slot_words};
 use crate::types::Ty;
 
 /// Where the machine keeps its own state. Reserved above the parameters and below the body's own
@@ -32,8 +33,13 @@ impl MachineSlots {
 /// One suspension's spill plan: the locals that must survive it.
 #[derive(Clone, Debug, Default)]
 pub(super) struct SuspensionPlan {
-    /// `(slot, type)` of every local live across the suspension, ascending by slot.
+    /// `(slot, type)` of every local live across the suspension, ascending by slot. The slots a
+    /// stack prefix is saved into are part of this: once saved they are locals like any other.
     pub(super) spills: Vec<(u16, Ty)>,
+    /// The operand-stack values the dependency holds UNDER this suspension, bottom-first, each with
+    /// the slot it is saved into. `areturn` discards the stack, so they are stored before the call
+    /// and pushed back on both paths out of it.
+    pub(super) prefix: Vec<(u16, Ty)>,
 }
 
 /// What the discovery pass learned about one suspend function.
@@ -96,6 +102,8 @@ pub(super) fn discover(
     machine: Option<MachineSlots>,
     at_markers: &HashMap<usize, Vec<VerifType>>,
     cw: &crate::jvm::classfile::ClassWriter,
+    expected: usize,
+    prefixes: &HashMap<usize, Vec<VerifType>>,
 ) -> Option<MachinePlan> {
     use crate::jvm::classfile::CoroutineMarker;
     use crate::jvm::suspend::cps::{ControlGraph, Handler, LocalLiveness};
@@ -116,6 +124,28 @@ pub(super) fn discover(
             .collect::<Vec<_>>()
     );
     if markers.is_empty() {
+        return None;
+    }
+    // One marker per suspension, each with its own ordinal. An inline function that invokes its
+    // lambda at two sites splices the same body twice, so one ordinal is marked twice: the plans
+    // would then describe one site with the other's locals. A missing ordinal is the mirror case —
+    // the state would have no position, and its spills would never be emitted.
+    let mut marked: Vec<bool> = vec![false; expected];
+    for &(_, ordinal) in &markers {
+        let Some(seen) = marked.get_mut(ordinal as usize) else {
+            crate::trace_compiler!("suspend", "discover: ordinal {ordinal} is not a state");
+            return None;
+        };
+        if std::mem::replace(seen, true) {
+            crate::trace_compiler!(
+                "suspend",
+                "discover: ordinal {ordinal} marked more than once"
+            );
+            return None;
+        }
+    }
+    if let Some(missing) = marked.iter().position(|seen| !seen) {
+        crate::trace_compiler!("suspend", "discover: state {missing} was never emitted");
         return None;
     }
     let Some(insns) = crate::jvm::inline::disassemble(&code.bytes) else {
@@ -143,12 +173,22 @@ pub(super) fn discover(
         crate::trace_compiler!("suspend", "discover: liveness declined");
         return None;
     };
+    // The parameters are assigned before the first instruction; the machine's own slots begin right
+    // above them.
+    let mut parameters = crate::jvm::suspend::cps::SlotSet::default();
+    for slot in 0..machine.map_or(0, |machine| machine.result) {
+        parameters.insert(slot);
+    }
+    let Some(assigned) = LocalLiveness::definitely_assigned(&insns, &graph, &parameters) else {
+        crate::trace_compiler!("suspend", "discover: definite assignment declined");
+        return None;
+    };
 
     // Frames, ascending, as the only typed view of the frame this pass has.
     let mut frames = code.resolved_frames();
     frames.sort_by_key(|(at, _, _)| *at);
 
-    let mut suspensions = vec![SuspensionPlan::default(); markers.len()];
+    let mut suspensions = vec![SuspensionPlan::default(); expected];
     for (at, ordinal) in markers {
         let index = index_of(at)?;
         let live = liveness.live_before(index);
@@ -180,6 +220,32 @@ pub(super) fn discover(
                 slots.push(slot);
             }
         }
+        // A local the SPLICED body assigns — an inline-depth marker, a loop's own temporary — is
+        // described by frames AFTER the suspension and by none before it, yet the handler and merge
+        // frames on the far side claim it. The resume has to restore those too, and may do so
+        // exactly when every path to the suspension has assigned them: a spill of an unset local
+        // fails verification at the spill itself.
+        //
+        // Those frames are also the best TYPE for such a slot. A merge point states what every edge
+        // into it agrees on — `Object` where one edge holds a boxed `Integer` — and the restore has
+        // to leave the slot holding what the merge expects.
+        let assigned_here = &assigned[index];
+        let mut ahead: HashMap<u16, VerifType> = HashMap::new();
+        for (_, frame_locals, _) in frames.iter().filter(|(frame_at, _, _)| *frame_at > at) {
+            for (slot, typed_as) in expand_slots(frame_locals).into_iter().enumerate() {
+                let slot = slot as u16;
+                if matches!(typed_as, VerifType::Top | VerifType::UninitializedThis) {
+                    continue;
+                }
+                if !assigned_here.contains(slot) {
+                    continue;
+                }
+                ahead.entry(slot).or_insert(typed_as);
+                if !slots.contains(&slot) {
+                    slots.push(slot);
+                }
+            }
+        }
         slots.sort_unstable();
         let mut spills = Vec::new();
         // A `long`/`double` occupies two slots and the liveness set holds both. It is spilled once,
@@ -198,9 +264,30 @@ pub(super) fn discover(
             }
             // A frame describes the host's locals; the ones this emitter allocated inside the
             // spliced body are assigned between frames and are known only to it.
-            let from_frame = typed
-                .get(slot as usize)
-                .and_then(verif_spill_type)
+            // Two frames describe this slot from either side of the suspension, and the join has
+            // to satisfy both. Where they disagree — a loop whose accumulator enters as `Integer`
+            // and merges as `Object` — neither is the state at the join, so the slot takes the type
+            // they have in common. The value itself is unchanged; only what the frame claims about
+            // it weakens, and a reference is assignable to `Object` from either side.
+            // Every frame that describes this slot has to be satisfied by one restore. A loop
+            // carries the widest of them — its head states what all its edges agree on — so the
+            // slot takes what they have in common. The value is unchanged; only the claim about it
+            // weakens, and a reference satisfies `Object` from any of them.
+            let mut from_frame = typed.get(slot as usize).and_then(verif_spill_type);
+            for (_, frame_locals, _) in frames.iter() {
+                let Some(claimed) = expand_slots(frame_locals)
+                    .get(slot as usize)
+                    .and_then(verif_spill_type)
+                else {
+                    continue;
+                };
+                from_frame = Some(match from_frame {
+                    Some(known) if known != claimed => common_type(known, claimed)?,
+                    Some(known) => known,
+                    None => claimed,
+                });
+            }
+            let from_frame = from_frame
                 .or_else(|| local_table_type(code, slot, at))
                 .or_else(|| stored_reference_type(&insns, index, slot, cw));
             let Some(ty) = from_frame.or_else(|| allocated.get(&slot).copied()) else {
@@ -212,13 +299,40 @@ pub(super) fn discover(
                 );
                 return None;
             };
+            // A reference slot the body ASSIGNS AGAIN after the suspension is carried by a merge —
+            // a loop whose accumulator the body rewrites each turn — and its type at the join is
+            // whatever that merge settled on, which no frame in this body states. Restoring it under
+            // the type a frame gives here would claim more than the other edge can prove, so the
+            // machine declines instead of emitting a class that cannot verify.
+            if !matches!(spill_kind(ty), 'I' | 'J' | 'F' | 'D') {
+                if let Some(rewritten) = reassigned_after(&insns, index, slot, cw) {
+                    if rewritten != ty {
+                        crate::trace_compiler!(
+                            "suspend",
+                            "discover: slot {slot} is rewritten after {at} ({ty:?} vs {rewritten:?})"
+                        );
+                        return None;
+                    }
+                }
+            }
             if matches!(spill_kind(ty), 'J' | 'D') {
                 high_word = Some(slot + 1);
             }
             spills.push((slot, ty));
         }
+        // The dependency's stack prefix is saved into slots ABOVE everything the body uses, so it
+        // cannot collide with a local — and it is saved per suspension, since only one state is ever
+        // live at a time.
+        let mut prefix = Vec::new();
+        let mut slot = code.max_locals;
+        for value in prefixes.get(&(ordinal as usize)).into_iter().flatten() {
+            let ty = verif_spill_type(value)?;
+            prefix.push((slot, ty));
+            slot += slot_words(ir_ty_to_jvm(&ty));
+        }
+        spills.extend(prefix.iter().copied());
         spills.sort_by_key(|&(slot, _)| slot);
-        *suspensions.get_mut(ordinal as usize)? = SuspensionPlan { spills };
+        *suspensions.get_mut(ordinal as usize)? = SuspensionPlan { spills, prefix };
     }
     Some(MachinePlan {
         suspensions,
@@ -271,6 +385,33 @@ fn stored_reference_type(
 fn descriptor_reference_ty(descriptor: &str) -> Option<Ty> {
     matches!(descriptor.as_bytes().first(), Some(b'L') | Some(b'['))
         .then(|| crate::jvm::ir_emit::ty_from_field_descriptor(descriptor))
+}
+
+/// The type the body stores into `slot` at its first write AFTER `index`, when that is a reference
+/// this pass can read off the producing instruction.
+fn reassigned_after(
+    insns: &[crate::jvm::inline::Insn],
+    index: usize,
+    slot: u16,
+    cw: &crate::jvm::classfile::ClassWriter,
+) -> Option<Ty> {
+    use crate::jvm::inline::Insn;
+    let next = insns.iter().enumerate().skip(index).find(|(_, insn)| {
+        matches!(insn, Insn::Plain { op, operands }
+            if matches!((*op, operands.first()), (0x3a, Some(&n)) if u16::from(n) == slot)
+                || (0x4b..=0x4e).contains(op) && u16::from(op - 0x4b) == slot)
+    })?;
+    stored_reference_type(insns, next.0 + 1, slot, cw)
+}
+
+/// What two views of one slot agree on.
+///
+/// References meet at `Object`, which any of them is assignable to. Primitives do not meet at all:
+/// a slot that is an `int` on one side and a `long` on the other holds two different values, and no
+/// single restore is right for both — the machine declines rather than pick one.
+fn common_type(before: Ty, after: Ty) -> Option<Ty> {
+    let reference = |ty: &Ty| !matches!(spill_kind(*ty), 'I' | 'J' | 'F' | 'D');
+    (reference(&before) && reference(&after)).then(|| Ty::obj("java/lang/Object"))
 }
 
 /// The store opcodes that write `slot` before instruction `index`. Diagnostic: it says what kind of
@@ -439,17 +580,23 @@ pub(super) fn build_access_bridge(
     owner: &str,
     function: &str,
     descriptor: &str,
+    instance: bool,
 ) -> Option<(String, String, crate::jvm::classfile::CodeBuilder)> {
     use crate::jvm::classfile::CodeBuilder;
     let (params, ret) = split_descriptor(descriptor)?;
-    // The receiver plus every parameter: a bridge declares exactly the slots it is handed.
-    let locals = 1 + params
-        .iter()
-        .map(|p| usize::from(matches!(p.as_bytes().first(), Some(b'J') | Some(b'D'))) + 1)
-        .sum::<usize>();
+    // Every parameter, and the receiver first when there is one: a bridge declares exactly the
+    // slots it is handed.
+    let locals = usize::from(instance)
+        + params
+            .iter()
+            .map(|p| usize::from(matches!(p.as_bytes().first(), Some(b'J') | Some(b'D'))) + 1)
+            .sum::<usize>();
     let mut code = CodeBuilder::new(locals as u16);
-    code.aload(0);
-    let mut slot = 1u16;
+    let mut slot = 0u16;
+    if instance {
+        code.aload(0);
+        slot = 1;
+    }
     for parameter in &params {
         match parameter.as_bytes().first() {
             Some(b'J') => {
@@ -476,7 +623,12 @@ pub(super) fn build_access_bridge(
     }
     let target = cw.methodref(owner, function, descriptor);
     let returns = i32::from(ret != "V");
-    code.invokespecial(target, i32::from(slot), returns);
+    // `invokespecial` is the only legal form for a private instance method; a private static is
+    // called the way any static is.
+    match instance {
+        true => code.invokespecial(target, i32::from(slot), returns),
+        false => code.invokestatic(target, i32::from(slot), returns),
+    }
     match ret.as_str() {
         "V" => code.ret_void(),
         "J" => code.lreturn(),
@@ -485,7 +637,10 @@ pub(super) fn build_access_bridge(
         "I" | "Z" | "B" | "C" | "S" => code.ireturn(),
         _ => code.areturn(),
     }
-    let bridge_descriptor = format!("(L{owner};{}", &descriptor[1..]);
+    let bridge_descriptor = match instance {
+        true => format!("(L{owner};{}", &descriptor[1..]),
+        false => descriptor.to_string(),
+    };
     Some((access_bridge_name(function), bridge_descriptor, code))
 }
 
@@ -613,11 +768,17 @@ pub(super) fn build_continuation_class(spec: ContinuationClass<'_>) -> Vec<u8> {
             let reference = cw.methodref(outer, bridge, &descriptor);
             invoke.invokestatic(reference, words, 1);
         }
-        (_, Some(_)) => {
+        // A private static: same arguments as the method itself, through a static the continuation
+        // class is allowed to name.
+        (Some(bridge), None) => {
+            let reference = cw.methodref(outer, bridge, outer_descriptor);
+            invoke.invokestatic(reference, words, 1);
+        }
+        (None, Some(_)) => {
             let reference = cw.methodref(outer, outer_method, outer_descriptor);
             invoke.invokevirtual(reference, words, 1);
         }
-        (_, None) => {
+        (None, None) => {
             let reference = cw.methodref(outer, outer_method, outer_descriptor);
             invoke.invokestatic(reference, words, 1);
         }

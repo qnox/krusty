@@ -20,5 +20,5 @@ pub(crate) use control_graph::{ControlGraph, Handler};
 pub(crate) use inline_suspension::{
     frame_suspensions, spliced_inline_suspensions, spliced_suspension_lambda_impls,
 };
-pub(crate) use liveness::LocalLiveness;
+pub(crate) use liveness::{LocalLiveness, SlotSet};
 pub(crate) use routing::{EmitTimeMachines, SplicedSuspension};

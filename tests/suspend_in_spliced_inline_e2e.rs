@@ -53,7 +53,7 @@ inline fun twice(x: Int, f: (Int) -> Int): Int {
 fn a_suspension_inside_a_spliced_inline_lambda_runs() {
     const MAIN: &str = r#"
         import kotlinx.coroutines.runBlocking
-        suspend fun one(v: Int): Int = v + 1
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
         suspend fun many(v: Int): Int = twice(v) { one(it) }
         fun box(): String = runBlocking {
             val n = many(10)
@@ -72,7 +72,7 @@ fn a_suspension_inside_a_spliced_inline_lambda_runs() {
 fn two_suspensions_in_one_spliced_body_run() {
     const MAIN: &str = r#"
         import kotlinx.coroutines.runBlocking
-        suspend fun one(v: Int): Int = v + 1
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
         suspend fun pair(v: Int): Int = twice(v) { one(it) + one(it) }
         fun box(): String = runBlocking {
             val n = pair(10)
@@ -91,7 +91,7 @@ fn two_suspensions_in_one_spliced_body_run() {
 fn a_reference_local_survives_a_spliced_suspension() {
     const MAIN: &str = r#"
         import kotlinx.coroutines.runBlocking
-        suspend fun one(v: Int): Int = v + 1
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
         suspend fun tagged(tag: String, v: Int): String {
             val n = twice(v) { one(it) }
             return tag + n
@@ -113,7 +113,7 @@ fn a_reference_local_survives_a_spliced_suspension() {
 fn a_conditional_suspension_in_a_spliced_body_runs() {
     const MAIN: &str = r#"
         import kotlinx.coroutines.runBlocking
-        suspend fun one(v: Int): Int = v + 1
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
         suspend fun odds(v: Int): Int = twice(v) { if (it % 2 == 0) one(it) else it }
         fun box(): String = runBlocking {
             val n = odds(10)
@@ -131,7 +131,7 @@ fn a_conditional_suspension_in_a_spliced_body_runs() {
 fn a_long_local_survives_a_spliced_suspension() {
     const MAIN: &str = r#"
         import kotlinx.coroutines.runBlocking
-        suspend fun one(v: Int): Int = v + 1
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
         suspend fun wide(v: Int): Long {
             val base = 100L
             val n = twice(v) { one(it) }
@@ -154,7 +154,7 @@ fn a_long_local_survives_a_spliced_suspension() {
 fn a_suspension_inside_a_spliced_stdlib_run_lambda_runs() {
     const MAIN: &str = r#"
         import kotlinx.coroutines.runBlocking
-        suspend fun one(v: Int): Int = v + 1
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
         suspend fun viaRun(v: Int): Int = run { one(v) }
         fun box(): String = runBlocking {
             val n = viaRun(10)
@@ -173,7 +173,7 @@ fn a_suspension_inside_a_spliced_stdlib_run_lambda_runs() {
 fn a_suspension_inside_a_spliced_stdlib_let_lambda_runs() {
     const MAIN: &str = r#"
         import kotlinx.coroutines.runBlocking
-        suspend fun one(v: Int): Int = v + 1
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
         suspend fun viaLet(v: Int): Int = v.let { one(it) }
         fun box(): String = runBlocking {
             val n = viaLet(10)
@@ -192,7 +192,7 @@ fn a_suspension_inside_a_spliced_stdlib_let_lambda_runs() {
 fn a_suspension_inside_a_spliced_stdlib_repeat_lambda_runs() {
     const MAIN: &str = r#"
         import kotlinx.coroutines.runBlocking
-        suspend fun one(v: Int): Int = v + 1
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
         suspend fun viaRepeat(v: Int): Int {
             var acc = 0
             repeat(3) { acc = acc + one(v) }
@@ -215,7 +215,7 @@ fn a_suspension_inside_a_spliced_stdlib_repeat_lambda_runs() {
 fn a_suspension_inside_a_spliced_lambda_of_a_member_runs() {
     const MAIN: &str = r#"
         import kotlinx.coroutines.runBlocking
-        suspend fun one(v: Int): Int = v + 1
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
         class Holder(val base: Int) {
             suspend fun total(): Int = twice(base) { one(it) }
         }
@@ -237,7 +237,7 @@ fn a_suspension_inside_a_spliced_lambda_of_a_member_runs() {
 fn a_suspension_inside_a_spliced_try_region_runs() {
     const MAIN: &str = r#"
         import kotlinx.coroutines.runBlocking
-        suspend fun one(v: Int): Int = v + 1
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
         suspend fun guarded(v: Int): Int = attempt { one(v) } ?: -1
         fun box(): String = runBlocking {
             val n = guarded(10)
@@ -255,7 +255,7 @@ fn a_suspension_inside_a_spliced_try_region_runs() {
 fn a_suspension_inside_stdlib_run_catching_runs() {
     const MAIN: &str = r#"
         import kotlinx.coroutines.runBlocking
-        suspend fun one(v: Int): Int = v + 1
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
         suspend fun guardedStdlib(v: Int): Int = runCatching { one(v) }.getOrDefault(-1)
         fun box(): String = runBlocking {
             val n = guardedStdlib(10)
@@ -274,7 +274,7 @@ fn a_suspension_inside_stdlib_run_catching_runs() {
 fn a_suspension_inside_a_spliced_lambda_of_a_private_member_runs() {
     const MAIN: &str = r#"
         import kotlinx.coroutines.runBlocking
-        suspend fun one(v: Int): Int = v + 1
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
         class Holder(val base: Int) {
             private suspend fun step(): Int = twice(base) { one(it) }
             suspend fun total(): Int = step() + 1
@@ -297,7 +297,7 @@ fn a_suspension_inside_a_spliced_lambda_of_a_private_member_runs() {
 fn a_function_that_suspends_both_in_and_outside_a_spliced_body_runs() {
     const MAIN: &str = r#"
         import kotlinx.coroutines.runBlocking
-        suspend fun one(v: Int): Int = v + 1
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
         suspend fun mixed(v: Int): Int {
             val a = one(v)
             val b = twice(a) { one(it) }
@@ -321,7 +321,7 @@ fn a_function_that_suspends_both_in_and_outside_a_spliced_body_runs() {
 fn a_mixed_function_inside_try_finally_runs() {
     const MAIN: &str = r#"
         import kotlinx.coroutines.runBlocking
-        suspend fun one(v: Int): Int = v + 1
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
         suspend fun guardedMixed(v: Int): Int {
             var acc = 0
             try {
@@ -338,6 +338,84 @@ fn a_mixed_function_inside_try_finally_runs() {
         }
     "#;
     let Some(output) = run("probe_mixed_try", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// A PRIVATE top-level function's machine. Its continuation cannot name the method either, so it
+/// re-enters through the same synthetic static a private member uses — with no receiver.
+#[test]
+fn a_suspension_inside_a_spliced_lambda_of_a_private_function_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        private suspend fun step(v: Int): Int = twice(v) { one(it) }
+        fun box(): String = runBlocking {
+            val n = step(10)
+            if (n == 23) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_private_fun", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// `sumOf` holds its accumulator on the operand stack across the call it makes. The stack does not
+/// survive a suspension, so the machine saves it into locals and puts it back on both paths out.
+#[test]
+fn a_suspension_under_a_dependency_operand_stack_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun total(xs: List<Int>): Int = xs.sumOf { one(it) }
+        fun box(): String = runBlocking {
+            val n = total(listOf(1, 2, 3))
+            if (n == 9) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_understack", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// `any` leaves the loop early, so the frames on the far side of the suspension claim locals the
+/// spliced body assigned and no frame before it describes.
+#[test]
+fn a_suspension_in_a_short_circuiting_stdlib_loop_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun anyBig(xs: List<Int>): Boolean = xs.any { one(it) > 2 }
+        fun box(): String = runBlocking {
+            val hit = anyBig(listOf(1, 2))
+            if (hit) "OK" else "FAIL"
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_any", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// `takeIf` returns the receiver or null, and `mapNotNull` builds a list: both keep a reference the
+/// resume has to hand back.
+#[test]
+fn suspensions_in_stdlib_bodies_that_carry_a_reference_run() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun kept(v: Int): Int? = v.takeIf { one(it) > 5 }
+        suspend fun mapped(xs: List<Int>): List<Int> = xs.mapNotNull { one(it) }
+        fun box(): String = runBlocking {
+            val k = kept(9)
+            val m = mapped(listOf(1, 2))
+            if (k == 9 && m == listOf(2, 3)) "OK" else "FAIL: " + k + " " + m
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_reference_bodies", MAIN) else {
         return;
     };
     assert_eq!(output, "OK");

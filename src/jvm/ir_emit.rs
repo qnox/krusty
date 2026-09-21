@@ -11074,8 +11074,7 @@ fn emit_method_inner_with_holder(
         e.continuation_slot = Some(continuation);
         e.machine_suspensions = suspensions
             .iter()
-            .enumerate()
-            .map(|(ordinal, suspension)| (suspension.call, ordinal))
+            .map(|suspension| suspension.call)
             .collect();
         crate::trace_compiler!(
             "suspend",
@@ -11305,9 +11304,11 @@ fn emit_method_inner_with_holder(
                 internal,
                 // An instance method is re-entered on its receiver, which the continuation keeps.
                 receiver: instance.then(|| owner.to_string()),
-                // A private method is not callable from the continuation class; a synthetic static
-                // on the owner is.
-                bridge: (instance && ir.private_methods.contains(&fid))
+                // A private method is not callable from the continuation class, whether it is a
+                // member or a top-level function; a synthetic static on the owner is.
+                bridge: ir
+                    .private_methods
+                    .contains(&fid)
                     .then(|| coroutine_machine::access_bridge_name(&f.name)),
             });
             let completion = param_tys.len().saturating_sub(1) as u32 + u32::from(instance);
@@ -11338,7 +11339,18 @@ fn emit_method_inner_with_holder(
             );
         }
         let at_markers = e.machine_marker_locals.clone();
-        match coroutine_machine::discover(&code, &allocated, machine_slots, &at_markers, e.cw) {
+        // One state per site emitted, which is what the markers name.
+        let expected = e.machine_next_ordinal;
+        let prefixes = e.machine_marker_prefixes.clone();
+        match coroutine_machine::discover(
+            &code,
+            &allocated,
+            machine_slots,
+            &at_markers,
+            e.cw,
+            expected,
+            &prefixes,
+        ) {
             Some(plan) => {
                 crate::trace_compiler!(
                     "suspend",
@@ -11437,9 +11449,13 @@ fn emit_method_inner_with_holder(
                 .push((machine.internal.clone(), bytes));
             // The bridge itself lives on the owner, beside the method it re-enters.
             if let Some(bridge) = machine.bridge.as_deref() {
-                if let Some((name, descriptor, body)) =
-                    coroutine_machine::build_access_bridge(e.cw, owner, &f.name, &reserved_desc)
-                {
+                if let Some((name, descriptor, body)) = coroutine_machine::build_access_bridge(
+                    e.cw,
+                    owner,
+                    &f.name,
+                    &reserved_desc,
+                    instance,
+                ) {
                     debug_assert_eq!(name, bridge);
                     // `public static final synthetic`, as kotlinc emits it.
                     e.cw.add_method(0x1019, &name, &descriptor, &body);
@@ -13021,7 +13037,11 @@ struct Emitter<'a> {
     continuation_slot: Option<u16>,
     /// The suspensions of the function being emitted, by call expression, in machine order. Empty
     /// for every function whose machine the IR pass owns.
-    machine_suspensions: HashMap<u32, usize>,
+    machine_suspensions: HashSet<u32>,
+    /// The next state's ordinal. A state belongs to an emission SITE, not to an expression: an
+    /// inline function that invokes its lambda twice splices the same body twice, and each copy
+    /// suspends on its own locals. Both passes emit the same sequence, so both number it alike.
+    machine_next_ordinal: usize,
     /// Types of slots this emitter allocated inside a spliced body — a lambda's parameters and its
     /// inline-depth marker. A frame cannot describe them: they are assigned between frames, and the
     /// spill plan needs their types to choose a continuation field and restore them.
@@ -13030,6 +13050,13 @@ struct Emitter<'a> {
     /// view the merge point's frame is built from, so it — not a frame found by position — says what
     /// a resume has to restore.
     machine_marker_locals: HashMap<usize, Vec<VerifType>>,
+    /// The operand-stack depth under each suspension, from the same pass. A continuation carries
+    /// locals, never the stack, so anything already there cannot survive the suspension.
+    machine_marker_stacks: HashMap<usize, i32>,
+    /// The operand-stack prefix the DEPENDENCY holds under each suspension — `acc` in a body that
+    /// computes `acc = acc + f(x)`. The lambda's own builder cannot see it: the values are pushed by
+    /// the code the splice wraps around this one, so the splice is where they become known.
+    machine_marker_prefixes: HashMap<usize, Vec<VerifType>>,
     /// The machine being built, on the pass that builds it.
     machine: Option<coroutine_machine::Machine>,
     /// The locals the dispatch can prove at a resume: the state on entry, before the body stored
@@ -13124,9 +13151,12 @@ impl<'a> Emitter<'a> {
             var_types: collect_body_var_types(ir, roots),
             next_slot: 0,
             continuation_slot: None,
-            machine_suspensions: HashMap::new(),
+            machine_suspensions: HashSet::new(),
+            machine_next_ordinal: 0,
             machine_slot_types: HashMap::new(),
             machine_marker_locals: HashMap::new(),
+            machine_marker_stacks: HashMap::new(),
+            machine_marker_prefixes: HashMap::new(),
             machine_entry_locals: None,
             machine_joins: Vec::new(),
             machine: None,
@@ -13523,6 +13553,7 @@ impl<'a> Emitter<'a> {
                 ret_words,
                 probe.falls_through,
             );
+            self.record_spliced_stack_prefixes(&probe);
             self.record_spliced_lines(
                 &probe.lines,
                 owner,
@@ -13609,6 +13640,7 @@ impl<'a> Emitter<'a> {
             ret_words,
             bs.falls_through,
         );
+        self.record_spliced_stack_prefixes(&bs);
         self.record_spliced_lines(
             &bs.lines,
             owner,
@@ -13924,6 +13956,12 @@ impl<'a> Emitter<'a> {
         let Some(suspension) = machine.plan.suspensions.get(ordinal) else {
             return;
         };
+        // What the dependency left on the stack under this call goes into locals first — top value
+        // into the last slot — so the call's own operands are pushed onto an empty stack and nothing
+        // is lost to the `areturn` a suspension leaves through.
+        for &(slot, ty) in suspension.prefix.iter().rev() {
+            store(ir_ty_to_jvm(&ty), slot, code);
+        }
         for (slot, ty, field, descriptor) in coroutine_machine::suspension_fields(suspension) {
             code.aload(machine.slots.continuation);
             load(ir_ty_to_jvm(&ty), slot, code);
@@ -13950,6 +13988,9 @@ impl<'a> Emitter<'a> {
         if machine.plan.suspensions.get(ordinal).is_none() {
             return;
         }
+        let Some(suspension) = machine.plan.suspensions.get(ordinal) else {
+            return;
+        };
         let join = code.new_label();
         code.dup();
         code.aload(machine.slots.suspended);
@@ -13969,7 +14010,58 @@ impl<'a> Emitter<'a> {
         if let Ok(marker) = u16::try_from(ordinal) {
             code.coroutine_marker(crate::jvm::classfile::CoroutineMarker::Join, marker);
         }
+        // Both paths meet here holding only the call's result, so the dependency's own values go
+        // back on the stack AFTER the join — once, for the two of them. The code the splice wrapped
+        // around this one then finds exactly what it pushed, with the result on top.
+        if !suspension.prefix.is_empty() {
+            let result = machine.slots.result;
+            code.astore(result);
+            for &(slot, ty) in &suspension.prefix {
+                load(ir_ty_to_jvm(&ty), slot, code);
+            }
+            code.aload(result);
+        }
         code.set_needs_stackmap();
+    }
+
+    /// Record the operand-stack prefix under every suspension a splice just placed.
+    ///
+    /// A machine's spill block runs where the marker is, which is inside the relocated body: by then
+    /// the dependency has already pushed whatever it holds across the call. Those values do not
+    /// survive the `areturn` that a suspension leaves through, so the machine has to save them — and
+    /// only the splice knows they are there.
+    fn record_spliced_stack_prefixes(&mut self, splice: &crate::jvm::inline::BranchySplice) {
+        if self.machine_suspensions.is_empty() {
+            return;
+        }
+        let Some(markers) = crate::jvm::classfile::markers_in(&splice.bytes) else {
+            return;
+        };
+        let mut sites: Vec<(usize, Vec<VerifType>)> = splice
+            .lambda_sites
+            .iter()
+            .map(|site| {
+                let prefix = site
+                    .stack_prefix
+                    .as_ref()
+                    .map(|prefix| prefix.iter().map(vtype_to_verif).collect())
+                    .unwrap_or_default();
+                (site.byte_start, prefix)
+            })
+            .collect();
+        sites.sort_by_key(|(start, _)| *start);
+        for (at, kind, ordinal) in markers {
+            if kind != crate::jvm::classfile::CoroutineMarker::Suspension {
+                continue;
+            }
+            let Some((_, prefix)) = sites.iter().rfind(|(start, _)| *start <= at) else {
+                continue;
+            };
+            if !prefix.is_empty() {
+                self.machine_marker_prefixes
+                    .insert(ordinal as usize, prefix.clone());
+            }
+        }
     }
 
     /// Describe a spliced body's own locals in the caller's debug table.
@@ -14710,7 +14802,11 @@ impl<'a> Emitter<'a> {
     /// away — `api.stop(id)` as a statement — is a state of the machine like any other, and one
     /// that never spilled would resume into a frame the dispatch cannot produce.
     fn machine_before(&mut self, e: u32, code: &mut CodeBuilder) -> Option<usize> {
-        let ordinal = self.machine_suspensions.get(&e).copied()?;
+        if !self.machine_suspensions.contains(&e) {
+            return None;
+        }
+        let ordinal = self.machine_next_ordinal;
+        self.machine_next_ordinal += 1;
         match self.machine.is_some() {
             // Building the machine: spill first, then the call, then the check.
             true => self.emit_machine_spills(ordinal, code),
@@ -14725,6 +14821,8 @@ impl<'a> Emitter<'a> {
                 }
                 let locals = self.verif_locals_upto(self.next_slot);
                 self.machine_marker_locals.insert(ordinal, locals);
+                self.machine_marker_stacks
+                    .insert(ordinal, code.stack_height());
             }
         }
         Some(ordinal)
