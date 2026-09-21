@@ -7610,6 +7610,21 @@ and behavior is checked by RUNNING the emitted program.
   (`the_narrow_integers_answer_their_bit_operations_at_their_own_width`, which cross-checks the two
   backends and REQUIRES the native lowering); the corpus cases are `codegen/box/binaryOp/bitwiseOp*.kt`.
 
+- **`mod` carries the divisor's sign, where `%` carries the dividend's.** The two disagree on
+  exactly the operands whose signs differ, which is why Kotlin declares both: `(-7) % 3` is `-1`
+  and `(-7).mod(3)` is `2`. The RESULT names the width the operands meet in, so `Int.mod(Long)` is
+  a `Long` question; the narrow integers answer at their own width and are computed at `Int`, which
+  is exact because the answer's magnitude is below the divisor's.
+
+  On floating point the sign that decides is Kotlin's `sign`, not the sign bit: it answers NaN for
+  NaN, and a NaN sign compares unequal to everything, which is what carries a NaN out of the
+  adjustment instead of into an addition that would hide it. Either zero is answered as it stands,
+  because `r != 0.0` is false for both. An integer zero divisor throws Kotlin's
+  `ArithmeticException`, because `mod` is `%` adjusted and `%` throws.
+  Tests: `tests/native_floor_mod_e2e.rs` (all three, each cross-checking the two backends and
+  REQUIRING the native lowering); the corpus cases are `codegen/box/fp/remainderVsMod*.kt` and the
+  `inlineArgsInPlace` pair.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

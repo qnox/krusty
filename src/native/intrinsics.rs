@@ -930,6 +930,30 @@ pub(super) fn unsigned_owner(owner: &str) -> Option<Ty> {
     })
 }
 
+/// `a.mod(b)` — the remainder carrying the DIVISOR's sign, as (runtime symbol, operand type).
+///
+/// Kotlin declares one for every numeric pair, and the RESULT names the type they meet in:
+/// `Int.mod(Long)` answers a `Long`, so both operands are read at that width. The narrow integers
+/// answer at their own width and are computed at `Int`, which is exact — the answer's magnitude is
+/// below the divisor's, so nothing is lost on the way back down.
+///
+/// Not [`scalar_member`]: that table hands its receiver over as a reference, and the receiver here
+/// is a number.
+pub(super) fn floor_mod(owner: &str, name: &str, params: &[Ty]) -> Option<(&'static str, Ty)> {
+    if declaration_package(kotlin_owner(owner)) != "kotlin" || name != "mod" {
+        return None;
+    }
+    // A single numeric operand is the whole of the declaration set. `Char` is absent because
+    // Kotlin declares no `mod` for it, and a `Unit` or reference argument names something else.
+    match params {
+        [Ty::Byte | Ty::Short | Ty::Int] => Some(("kt_mod_int", Ty::Int)),
+        [Ty::Long] => Some(("kt_mod_long", Ty::Long)),
+        [Ty::Float] => Some(("kt_mod_float", Ty::Float)),
+        [Ty::Double] => Some(("kt_mod_double", Ty::Double)),
+        _ => None,
+    }
+}
+
 /// A bit operation `kotlin.experimental` declares for the NARROW integers.
 ///
 /// Kotlin gives `Int` and `Long` `and`/`or`/`xor`/`inv` as members and gives `Byte` and `Short`

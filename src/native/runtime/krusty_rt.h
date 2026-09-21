@@ -672,6 +672,11 @@ kt_int  kt_div_uint(kt_int a, kt_int b);
 kt_int  kt_rem_uint(kt_int a, kt_int b);
 kt_long kt_div_ulong(kt_long a, kt_long b);
 kt_long kt_rem_ulong(kt_long a, kt_long b);
+/* `a.mod(b)` — the remainder carrying the DIVISOR's sign, where `%` carries the dividend's. Kotlin
+   declares `mod` for every numeric pair; the narrow integers reach these two at `Int` width, which
+   is exact because the answer's magnitude is below the divisor's. */
+kt_int  kt_mod_int(kt_int a, kt_int b);
+kt_long kt_mod_long(kt_long a, kt_long b);
 kt_int  kt_shl_int(kt_int a, kt_int bits);
 kt_int  kt_shr_int(kt_int a, kt_int bits);
 kt_int  kt_ushr_int(kt_int a, kt_int bits);
@@ -692,6 +697,11 @@ kt_int kt_compare_boolean(kt_boolean a, kt_boolean b);
    means and what no instruction on some targets provides. Defined in `krusty_fp.c`. */
 kt_float  kt_rem_float(kt_float a, kt_float b);
 kt_double kt_rem_double(kt_double a, kt_double b);
+/* `a.mod(b)` on floating point: the same remainder brought onto the DIVISOR's sign. Defined beside
+   them in `krusty_fp.c`, because the sign it compares is Kotlin's `sign` — which answers NaN, and
+   so is not the sign bit. */
+kt_float  kt_mod_float(kt_float a, kt_float b);
+kt_double kt_mod_double(kt_double a, kt_double b);
 
 kt_int kt_compare_float(kt_float a, kt_float b);
 kt_int kt_compare_double(kt_double a, kt_double b);

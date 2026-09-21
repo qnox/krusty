@@ -2389,6 +2389,35 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                                 return self.convert(produced, Some(target), *ret);
                             }
                         }
+                        // `a.mod(b)`: the remainder brought onto the DIVISOR's sign. Both
+                        // operands are read at the width the declaration answers in, which is what
+                        // makes `Int.mod(Long)` a `Long` question rather than a truncated one.
+                        if let Some((symbol, operand)) =
+                            super::super::intrinsics::floor_mod(&owner, &name, params)
+                        {
+                            let [argument] = args else {
+                                return Err("a `mod` with more than one operand".to_string());
+                            };
+                            let Some(left) = self.coerce(receiver, operand)? else {
+                                return Err("a `Unit` receiver for `mod`".to_string());
+                            };
+                            let Some(right) = self.coerce(*argument, operand)? else {
+                                return Err("a `Unit` operand for `mod`".to_string());
+                            };
+                            if self.terminated {
+                                return Ok(None);
+                            }
+                            let produced = self.runtime_call(
+                                symbol,
+                                &[operand, operand],
+                                operand,
+                                &[left, right],
+                            )?;
+                            let Some(produced) = produced else {
+                                return Ok(None);
+                            };
+                            return self.convert(produced, Some(operand), *ret);
+                        }
                         // `kotlin.experimental`'s bit operations on the narrow integers. Kotlin
                         // gives `Int` and `Long` the same four as members and these as extensions,
                         // which is where the library put them rather than a difference in what

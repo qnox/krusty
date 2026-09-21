@@ -439,3 +439,39 @@ kt_float kt_rem_float(kt_float a, kt_float b) {
     }
     return (kt_float)kt_rem_double((kt_double)a, (kt_double)b);
 }
+
+/* The sign of a floating-point value as Kotlin's `sign` gives it: NaN for NaN, the value itself for
+   either zero (so -0.0 stays negative), and ±1 otherwise. Written out rather than taken from
+   `signbit`, because what `mod` below compares is Kotlin's `sign`, and that answers NaN — a
+   comparison no sign BIT can express. */
+static kt_double kt_sign_double(kt_double x) {
+    if (x != x) return x;
+    if (x == 0.0) return x;
+    return x > 0.0 ? 1.0 : -1.0;
+}
+
+static kt_float kt_sign_float(kt_float x) {
+    if (x != x) return x;
+    if (x == 0.0f) return x;
+    return x > 0.0f ? 1.0f : -1.0f;
+}
+
+/* `a.mod(b)` — the remainder carrying the DIVISOR's sign, where `%` carries the dividend's. Kotlin
+   defines it as `val r = a % b; if (r != 0.0 && r.sign != b.sign) r + b else r`, and this is that
+   definition: `r != 0.0` is false for either zero, so a zero remainder is answered as it stands,
+   and a NaN sign compares unequal to everything, which carries a NaN out of the adjustment too. */
+kt_double kt_mod_double(kt_double a, kt_double b) {
+    kt_double r = kt_rem_double(a, b);
+    if (r != 0.0 && !(kt_sign_double(r) == kt_sign_double(b))) {
+        return r + b;
+    }
+    return r;
+}
+
+kt_float kt_mod_float(kt_float a, kt_float b) {
+    kt_float r = kt_rem_float(a, b);
+    if (r != 0.0f && !(kt_sign_float(r) == kt_sign_float(b))) {
+        return r + b;
+    }
+    return r;
+}

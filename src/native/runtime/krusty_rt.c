@@ -2940,6 +2940,29 @@ kt_long kt_rem_long(kt_long a, kt_long b) {
     return a % b;
 }
 
+/* `a.mod(b)` — the remainder carrying the DIVISOR's sign, where `%` carries the dividend's. Kotlin
+   defines it as `val r = a % b; if (r != 0 && r.sign != b.sign) r + b else r`, and the sign test is
+   the exclusive-or's top bit. The addition is done on the unsigned ring: the sum fits the type by
+   construction, and signed overflow would be undefined in C where Kotlin's wraps.
+
+   Division by zero reaches `kt_rem_*` first, which records Kotlin's `ArithmeticException` and
+   answers 0; the caller checks the pending slot before it reads anything. */
+kt_int kt_mod_int(kt_int a, kt_int b) {
+    kt_int r = kt_rem_int(a, b);
+    if (r != 0 && (((uint32_t)r ^ (uint32_t)b) >> 31) != 0) {
+        return (kt_int)((uint32_t)r + (uint32_t)b);
+    }
+    return r;
+}
+
+kt_long kt_mod_long(kt_long a, kt_long b) {
+    kt_long r = kt_rem_long(a, b);
+    if (r != 0 && (((uint64_t)r ^ (uint64_t)b) >> 63) != 0) {
+        return (kt_long)((uint64_t)r + (uint64_t)b);
+    }
+    return r;
+}
+
 /* Kotlin masks the shift count, so `1 shl 32` is `1`, not undefined. A right shift of a negative
    value is implementation-defined in C, so the arithmetic shift is spelled out instead of assumed. */
 /* ---- unsigned integers ----------------------------------------------------------------------- */
