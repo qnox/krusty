@@ -112,3 +112,39 @@ fn the_null_literal_declines_for_the_same_reason_a_nullable_value_does() {
         "contains",
     );
 }
+
+/// A range the program never named: `x in a.indices`, asked with an element that is not an `Int`.
+///
+/// `indices` is realized as an `IntRange` and nothing else — `Self::indices` builds one whatever
+/// the receiver is indexable as — but the READ carried no type, so the facade `contains` could not
+/// recognize its receiver as a range and the call fell through to the dependency-member path,
+/// which declined it by name. Binding the read to the same `IntRange` it is realized as is what
+/// lets the element arrive at its own width, which is where the correctness of this comparison
+/// lives: a `Long` truncated to the range's element answers the wrong question.
+///
+/// The corpus's `ranges/contains/generated/{array,charSequence,collection}Indices.kt` are this
+/// case, each over one receiver kind, and each asking every width.
+#[test]
+fn an_indices_range_is_recognized_where_the_program_kept_no_name_for_it() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val ints = intArrayOf(1, 2, 3)\n\
+         \x20   val objects = arrayOf<Any>(1, 2, 3)\n\
+         \x20   val list = listOf(1, 2, 3)\n\
+         \x20   val text = \"abc\"\n\
+         \x20   if ((-1).toByte() in ints.indices) return \"fail -1 byte\"\n\
+         \x20   if (!(2.toByte() in ints.indices)) return \"fail 2 byte\"\n\
+         \x20   if (!(0.toShort() in objects.indices)) return \"fail 0 short\"\n\
+         \x20   if (3.toShort() in objects.indices) return \"fail 3 short\"\n\
+         \x20   if (!(1L in list.indices)) return \"fail 1L\"\n\
+         \x20   if (3L in list.indices) return \"fail 3L\"\n\
+         \x20   // Past the end of an `Int`, so a truncating comparison would answer `true`.\n\
+         \x20   if (4294967296L in text.indices) return \"fail 2^32 truncated into range\"\n\
+         \x20   if (!(text.indices.contains(2.toByte()))) return \"fail explicit contains\"\n\
+         \x20   if (0.toByte() in intArrayOf().indices) return \"fail empty\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "IndicesContains",
+        "OK",
+    );
+}

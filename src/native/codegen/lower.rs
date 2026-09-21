@@ -1993,6 +1993,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     // depends on the receiver as much as on the getter — a range declares `first`
                     // too — so the receiverless read is none of them.
                     None => match receiver {
+                        // `x.indices` is realized as an `IntRange` and as nothing else, whatever
+                        // the receiver is indexable as, so the read IS one. Saying so is what
+                        // lets `b in a.indices` recognize its receiver as a range when `b` is not
+                        // an `Int`: that comparison is the ranges FACADE's, which reads its
+                        // element from the receiver, and a receiver with no type sent the call
+                        // to the dependency-member path to be declined by name.
+                        Some(_) if self.external_getter_is_indices(*target) => {
+                            Ty::obj("kotlin/ranges/IntRange")
+                        }
                         Some(receiver)
                             if self.lazy_getter(*target, *receiver).is_some()
                                 || self.pair_getter(*target, *receiver).is_some() =>
