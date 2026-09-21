@@ -2944,3 +2944,38 @@ fn an_unsigned_field_hashes_as_the_signed_value_it_wraps() {
     common::expect_box_ok_with_stdlib(source, "UnsignedHash");
     common::expect_native_box(source, "UnsignedHash", "OK");
 }
+
+#[test]
+fn a_result_is_its_value_or_a_marker_holding_the_exception() {
+    // `kotlin.Result` is a value class over `Any?`, and the representation is Kotlin's own rather
+    // than a wrapper of this runtime's invention: a SUCCESS is the value itself, so
+    // `Result.success(x)` costs nothing and a `Result<T>` crosses a function boundary as an
+    // ordinary reference; a FAILURE is a marker holding the exception. Every member is then one
+    // question about that single reference — whether it is the marker.
+    //
+    // A `null` success is representable and distinct from a failure, because the marker is never
+    // null; that is the case a wrapper-free representation has to get right.
+    let source = "fun box(): String {\n\
+         \x20   val ok = Result.success(\"OK\")\n\
+         \x20   if (ok.getOrNull() != \"OK\") return \"fail 1\"\n\
+         \x20   if (!ok.isSuccess) return \"fail 2\"\n\
+         \x20   if (ok.isFailure) return \"fail 3\"\n\
+         \x20   if (ok.exceptionOrNull() != null) return \"fail 4\"\n\
+         \x20   if (ok.getOrThrow() != \"OK\") return \"fail 5\"\n\
+         \x20   val bad = Result.failure<String>(IllegalStateException(\"boom\"))\n\
+         \x20   if (bad.getOrNull() != null) return \"fail 6\"\n\
+         \x20   if (bad.isSuccess) return \"fail 7\"\n\
+         \x20   if (!bad.isFailure) return \"fail 8\"\n\
+         \x20   if (bad.exceptionOrNull()?.message != \"boom\") return \"fail 9\"\n\
+         \x20   val absent = Result.success<String?>(null)\n\
+         \x20   if (absent.isFailure) return \"fail 10\"\n\
+         \x20   if (absent.getOrNull() != null) return \"fail 11\"\n\
+         \x20   if (absent.exceptionOrNull() != null) return \"fail 12\"\n\
+         \x20   val number = Result.success(42)\n\
+         \x20   if (number.getOrNull() != 42) return \"fail 13\"\n\
+         \x20   if (number.getOrThrow() != 42) return \"fail 14\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "ResultValue");
+    common::expect_native_box(source, "ResultValue", "OK");
+}

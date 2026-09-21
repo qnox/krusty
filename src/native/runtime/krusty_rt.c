@@ -1020,6 +1020,71 @@ const KType kt_type_lazy = {"kotlin.Lazy",
                             3,
                             0};
 
+/* `kotlin.Result` is a value class over `Any?`, and its representation is Kotlin's own: a SUCCESS
+   is the value itself, so `Result.success(x)` is `x` and costs nothing, and a FAILURE is this
+   marker holding the exception. That is what lets a `Result<T>` cross a function boundary as an
+   ordinary reference with no wrapper of this runtime's invention.
+
+   A `null` success is representable and distinct from a failure, because a failure is never NULL. */
+typedef struct KResultFailure {
+    KObjectHeader header;
+    KRef exception;
+} KResultFailure;
+
+static const uint32_t kt_result_failure_offsets[] = {offsetof(KResultFailure, exception)};
+
+static const KType kt_type_result_failure = {"kotlin.Result.Failure",
+                                             sizeof("kotlin.Result.Failure") - 1,
+                                             sizeof(KResultFailure),
+                                             1,
+                                             0,
+                                             kt_result_failure_offsets,
+                                             &kt_type_any,
+                                             kt_any_vtable,
+                                             3,
+                                             0};
+
+/* `Result.success(x)` IS `x`. This exists so the call site has a target of the ordinary shape
+   rather than a special case; it costs one call and no allocation. */
+KRef kt_result_success(KRef value) { return value; }
+
+KRef kt_result_failure(KRef exception) {
+    KResultFailure *failure =
+        (KResultFailure *)kt_gc_allocate(&kt_type_result_failure, sizeof(KResultFailure));
+    failure->exception = exception;
+    return (KRef)failure;
+}
+
+kt_boolean kt_result_is_failure(KRef value) {
+    return value != NULL && value->header.type == &kt_type_result_failure;
+}
+
+kt_boolean kt_result_is_success(KRef value) { return !kt_result_is_failure(value); }
+
+KRef kt_result_get_or_null(KRef value) { return kt_result_is_failure(value) ? NULL : value; }
+
+KRef kt_result_exception_or_null(KRef value) {
+    return kt_result_is_failure(value) ? ((const KResultFailure *)value)->exception : NULL;
+}
+
+KRef kt_result_get_or_throw(KRef value) {
+    if (kt_result_is_failure(value)) {
+        kt_throw(((const KResultFailure *)value)->exception);
+    }
+    return value;
+}
+
+/* Kotlin's own rendering: `Success(value)` or `Failure(exception)`. */
+KRef kt_result_to_string(KRef value) {
+    if (kt_result_is_failure(value)) {
+        KRef opening = kt_string_utf8("Failure(", 8);
+        KRef rendered = kt_to_string(((const KResultFailure *)value)->exception);
+        return kt_string_plus(kt_string_plus(opening, rendered), kt_string_utf8(")", 1));
+    }
+    KRef opening = kt_string_utf8("Success(", 8);
+    return kt_string_plus(kt_string_plus(opening, kt_to_string(value)), kt_string_utf8(")", 1));
+}
+
 KRef kt_lazy_of(KRef initializer) {
     KLazy *lazy = (KLazy *)kt_gc_allocate(&kt_type_lazy, sizeof(KLazy));
     lazy->initializer = initializer;

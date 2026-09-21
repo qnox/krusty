@@ -1815,6 +1815,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// Is this accessor `Throwable.message`?
+    /// `r.isSuccess` / `r.isFailure` — a question about the one reference a `Result` IS.
+    pub(super) fn result_predicate(
+        &self,
+        target: crate::fir::ExternalPropertyId,
+    ) -> Option<&'static str> {
+        let property = self.file.provider.external_property(target)?;
+        let getter = self.file.provider.external_callable(property.getter)?;
+        super::super::super::intrinsics::result_predicate(getter.callable.owner, &property.name)
+    }
+
     pub(super) fn is_throwable_message(&self, target: crate::fir::ExternalPropertyId) -> bool {
         let Some(property) = self.file.provider.external_property(target) else {
             return false;
@@ -2319,6 +2329,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // one value, so there is nothing per-file to declare.
         if classifier.matches("kotlin/Unit") {
             return self.runtime_call("kt_unit", &[], any(), &[]);
+        }
+        // An object the runtime realizes entirely has no instance and needs none: every member of
+        // it is answered without reading the receiver. One provider materializes that receiver
+        // before the call reaches the table that says so, and this is what it materializes.
+        if super::super::super::intrinsics::is_stateless_runtime_object(classifier) {
+            return Ok(Some(self.builder.ins().iconst(types::I64, 0)));
         }
         let class = self.file.class_of(classifier, "the object")?;
         let Some((_, getter)) = self.file.classes[class as usize].singleton else {

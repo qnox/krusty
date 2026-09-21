@@ -877,6 +877,20 @@ pub(super) fn is_throwable_message(owner: crate::types::TypeName, name: &str) ->
     name == "message" && matches!(kotlin_owner(&owner.render()), "kotlin/Throwable")
 }
 
+/// The runtime function answering `Result.isSuccess` / `Result.isFailure`, or `None`.
+///
+/// Both are questions about the one reference a `Result` IS: whether it is the failure marker.
+pub(super) fn result_predicate(owner: crate::types::TypeName, name: &str) -> Option<&'static str> {
+    if kotlin_owner(&owner.render()) != "kotlin/Result" {
+        return None;
+    }
+    match name {
+        "isSuccess" => Some("kt_result_is_success"),
+        "isFailure" => Some("kt_result_is_failure"),
+        _ => None,
+    }
+}
+
 /// The runtime function answering a `KClass` name accessor, or `None` for anything else.
 ///
 /// Both spellings of each are taken for the reason `is_char_sequence_length` takes both: which one
@@ -895,6 +909,63 @@ pub(super) fn class_name_accessor(
     }
 }
 
+/// Whether this is an object the runtime realizes ENTIRELY, so it has no instance of its own.
+///
+/// `Result.Companion` is the only one: it holds no state, and every member of it is answered
+/// directly (see [`runtime_companion_member`]), so nothing ever reads the value a reference to it
+/// would carry. A provider that materializes the receiver before the call reaches that table needs
+/// something to materialize, and for such an object the honest answer is the null reference —
+/// there is no object, and nothing dereferences it.
+pub(super) fn is_stateless_runtime_object(classifier: crate::types::TypeName) -> bool {
+    matches!(
+        kotlin_owner(&classifier.render()),
+        "kotlin/Result$Companion"
+    )
+}
+
+/// A member the runtime answers with a REFERENCE, whatever the call site's own type.
+///
+/// `Result.getOrThrow()` on a `Result<Int>` answers the box that `Result` holds, and the site
+/// wants the integer — so these are apart from [`runtime_member`], whose entries answer exactly
+/// what their call sites ask for and need no conversion.
+pub(super) fn runtime_reference_member(
+    owner: &str,
+    name: &str,
+    params: &[Ty],
+) -> Option<&'static str> {
+    // `getOrThrow` is a top-level extension, so it arrives as a member of the `kotlin` facade
+    // rather than of `Result`.
+    if declaration_package(kotlin_owner(owner)) == "kotlin"
+        && name == "getOrThrow"
+        && params.is_empty()
+    {
+        return Some("kt_result_get_or_throw");
+    }
+    match (kotlin_owner(owner), name, params) {
+        ("kotlin/Result", "getOrNull", []) => Some("kt_result_get_or_null"),
+        ("kotlin/Result", "exceptionOrNull", []) => Some("kt_result_exception_or_null"),
+        ("kotlin/Result", "toString", []) => Some("kt_result_to_string"),
+        _ => None,
+    }
+}
+
+/// A member of a COMPANION the runtime realizes, whose receiver carries nothing.
+///
+/// `Result.Companion` has no state and no instance in any file krusty compiles, so there is no
+/// receiver to pass and none to evaluate — the call is its arguments alone. That is why these are
+/// apart from [`runtime_member`], which leads every call with the receiver.
+pub(super) fn runtime_companion_member(
+    owner: &str,
+    name: &str,
+    params: &[Ty],
+) -> Option<&'static str> {
+    match (kotlin_owner(owner), name, params) {
+        ("kotlin/Result$Companion", "success", [_]) => Some("kt_result_success"),
+        ("kotlin/Result$Companion", "failure", [_]) => Some("kt_result_failure"),
+        _ => None,
+    }
+}
+
 pub(super) fn runtime_member(owner: &str, name: &str, params: &[Ty]) -> Option<&'static str> {
     // `removeSuffix` is a top-level extension of `kotlin.text`, so it arrives as a member of that
     // package's file facade; everything it takes and answers is a reference, which is this path.
@@ -909,6 +980,11 @@ pub(super) fn runtime_member(owner: &str, name: &str, params: &[Ty]) -> Option<&
             _ => {}
         }
     }
+    // `kotlin.Result` is a value class over `Any?` and its representation is Kotlin's own — a
+    // success IS the value, a failure a marker holding the exception — so every member is a
+    // question about that one reference and the runtime answers it directly. `getOrThrow` is a
+    // top-level extension, so it arrives as a member of the `kotlin` facade rather than of
+    // `Result`.
     match (kotlin_owner(owner), name, params) {
         ("kotlin/String", "plus", [_]) => Some("kt_string_plus"),
         // A builder's `append` takes one of a dozen overloads on the JVM and one function here:

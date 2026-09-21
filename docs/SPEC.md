@@ -7471,6 +7471,30 @@ and behavior is checked by RUNNING the emitted program.
   sign-extension is the library's answer rather than this file's claim); the corpus cases are
   `codegen/box/inlineClasses/{kt27096,kt27132,kt34902,kt70461}.kt`.
 
+- **A `Result` is its value, or a marker holding the exception.** `kotlin.Result` is a value class
+  over `Any?` and the representation is Kotlin's own rather than a wrapper of this runtime's
+  invention: a SUCCESS *is* the value, so `Result.success(x)` costs nothing and a `Result<T>`
+  crosses a function boundary as an ordinary reference; a FAILURE is a marker carrying the
+  exception. Every member is then one question about that single reference — whether it is the
+  marker — and `isSuccess`, `isFailure`, `getOrNull`, `exceptionOrNull` and `getOrThrow` are each
+  answered directly. A `null` success is representable and distinct from a failure, because the
+  marker is never null.
+
+  Two things the shape forced, both of which a wrapper would have hidden:
+
+  - `Result.Companion` holds no state and every member of it is answered without reading a
+    receiver, so it has no instance and needs none. One provider materializes that receiver before
+    the call reaches the table saying so, and for such an object the honest thing to materialize is
+    the null reference.
+  - A member that answers a REFERENCE is not a member that answers what the call site asked for.
+    `getOrThrow()` on a `Result<Int>` answers the box the `Result` holds while the site wants the
+    integer, so the runtime's own answer type is declared and the conversion made — declaring the
+    site's type instead read an `i64` return as an `i32`.
+  Tests: `tests/native_codegen_e2e.rs` (`a_result_is_its_value_or_a_marker_holding_the_exception`,
+  which cross-checks the two backends and REQUIRES the native lowering); the corpus cases are
+  `codegen/box/inlineClasses/result/*.kt` and the `Result` cases under
+  `codegen/box/inlineClasses/`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

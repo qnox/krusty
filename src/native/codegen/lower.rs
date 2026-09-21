@@ -1443,6 +1443,20 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     .expect("checked by the guard");
                 self.class_name(symbol, receiver)
             }
+            // `r.isSuccess` / `r.isFailure`: whether the one reference a `Result` IS is the
+            // failure marker.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.result_predicate(target).is_some() => {
+                let symbol = self.result_predicate(target).expect("checked by the guard");
+                let value = self.reference(receiver)?;
+                if self.terminated {
+                    return Ok(None);
+                }
+                self.runtime_call(symbol, &[any()], Ty::Boolean, &[value])
+            }
             // `e.message`: the one field a runtime `Throwable` carries.
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
                 target,
@@ -2395,6 +2409,48 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                                 return Ok(None);
                             };
                             return self.convert(produced, Some(answer), *ret);
+                        }
+                        // A member the runtime answers with a REFERENCE: the site's own type may
+                        // be narrower, and reconciling the two is this boundary's job — a
+                        // `Result<Int>` holds a box and `getOrThrow` on it answers that box.
+                        if let Some(symbol) = super::super::intrinsics::runtime_reference_member(
+                            &owner, &name, params,
+                        ) {
+                            let mut arguments = vec![self.reference(receiver)?];
+                            for argument in args {
+                                arguments.push(self.reference(*argument)?);
+                            }
+                            if self.terminated {
+                                return Ok(None);
+                            }
+                            let signature = vec![any(); arguments.len()];
+                            let produced =
+                                self.runtime_call(symbol, &signature, any(), &arguments)?;
+                            let Some(produced) = produced else {
+                                return Ok(None);
+                            };
+                            return self.convert(produced, Some(any()), *ret);
+                        }
+                        // A companion member the runtime realizes takes its arguments alone:
+                        // the receiver is a singleton carrying nothing, and it is not evaluated —
+                        // `Result.Companion` has no instance in any file this compiles.
+                        if let Some(symbol) = super::super::intrinsics::runtime_companion_member(
+                            &owner, &name, params,
+                        ) {
+                            let mut arguments = Vec::with_capacity(args.len());
+                            for argument in args {
+                                arguments.push(self.reference(*argument)?);
+                            }
+                            if self.terminated {
+                                return Ok(None);
+                            }
+                            let signature = vec![any(); arguments.len()];
+                            let produced =
+                                self.runtime_call(symbol, &signature, any(), &arguments)?;
+                            let Some(produced) = produced else {
+                                return Ok(None);
+                            };
+                            return self.convert(produced, Some(any()), *ret);
                         }
                         let Some(symbol) =
                             super::super::intrinsics::runtime_member(&owner, &name, params)
