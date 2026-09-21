@@ -85,6 +85,80 @@ pub(crate) fn frame_suspensions(
     found
 }
 
+/// Whether a SPLICED body suspends inside a `try` that produces a value.
+///
+/// The value-`try` desugar runs over a function body and stops at every lambda, so such an arm keeps
+/// the call's raw `Object` result and is stored straight into the arm's local, which the emitted
+/// frame then describes as a scalar. Until that desugar reaches spliced bodies, a machine must not
+/// claim one.
+pub(crate) fn suspends_in_a_value_try(
+    ir: &IrFile,
+    body: ExprId,
+    suspend_set: &HashSet<u32>,
+) -> bool {
+    let mut stack = vec![(body, false)];
+    let mut seen = HashSet::new();
+    while let Some((at, spliced)) = stack.pop() {
+        if !seen.insert((at, spliced)) {
+            continue;
+        }
+        match &ir.exprs[at as usize] {
+            IrExpr::Lambda {
+                captures,
+                inline_body,
+                ..
+            } => {
+                for &capture in captures {
+                    stack.push((capture, spliced));
+                }
+                if let Some(&inner) = inline_body.as_ref() {
+                    stack.push((inner, true));
+                }
+                continue;
+            }
+            IrExpr::Try { body, result, .. }
+                if spliced
+                    && *result != crate::types::Ty::Unit
+                    && tail_value(ir, *body)
+                        .is_some_and(|value| holds_a_suspension(ir, value, suspend_set)) =>
+            {
+                // Only when the VALUE is the suspension. A body that binds it first
+                // (`try { val v = one(x); v }`) hands the arm an ordinary local, which is stored
+                // with the adaptation the arm expects.
+                return true;
+            }
+            _ => {}
+        }
+        for_each_child(&ir.exprs, at, &mut |child| stack.push((child, spliced)));
+    }
+    false
+}
+
+/// The expression a block yields, or the expression itself when it is not a block.
+fn tail_value(ir: &IrFile, body: ExprId) -> Option<ExprId> {
+    match &ir.exprs[body as usize] {
+        IrExpr::Block { value, .. } => *value,
+        _ => Some(body),
+    }
+}
+
+/// Any suspension reachable in `body`, closure boundaries included — a conservative "this region
+/// suspends" for deciding whether a shape is safe to claim.
+fn holds_a_suspension(ir: &IrFile, body: ExprId, suspend_set: &HashSet<u32>) -> bool {
+    let mut stack = vec![body];
+    let mut seen = HashSet::new();
+    while let Some(at) = stack.pop() {
+        if !seen.insert(at) {
+            continue;
+        }
+        if is_suspension_point(ir, at, suspend_set) {
+            return true;
+        }
+        for_each_child(&ir.exprs, at, &mut |child| stack.push(child));
+    }
+    false
+}
+
 /// The implementation methods of the lambdas whose spliced bodies carry a suspension.
 ///
 /// Such a lambda has two bodies: the template the splice consumes, and the standalone `invoke` the

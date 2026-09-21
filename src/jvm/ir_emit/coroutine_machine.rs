@@ -474,8 +474,8 @@ fn expand_slots(locals: &[VerifType]) -> Vec<VerifType> {
 }
 
 /// The continuation class a machine keeps its state in: `<facade>$<function>$1`.
-pub(super) fn continuation_internal(owner: &str, function: &str) -> String {
-    format!("{owner}${function}$1")
+pub(super) fn continuation_internal(owner: &str, function: &str, ordinal: usize) -> String {
+    crate::jvm::suspend::continuation_class_name(owner, function, ordinal)
 }
 
 const CONTINUATION_IMPL: &str = "kotlin/coroutines/jvm/internal/ContinuationImpl";

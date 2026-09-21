@@ -37,6 +37,12 @@ fn run(tag: &str, main: &str) -> Option<String> {
 const LIB: &str = r#"
 inline fun <R> attempt(f: () -> R): R? = try { f() } catch (e: Throwable) { null }
 
+inline fun holdRef(f: () -> Int): Int {
+    val sb = StringBuilder("p")
+    sb.append(f())
+    return sb.length
+}
+
 inline fun twice(x: Int, f: (Int) -> Int): Int {
     var acc = 0
     var i = 0
@@ -416,6 +422,89 @@ fn suspensions_in_stdlib_bodies_that_carry_a_reference_run() {
         }
     "#;
     let Some(output) = run("suspend_spliced_reference_bodies", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// The dependency's stack prefix is found by matching a marker's position against the site the
+/// splice laid out — two coordinate systems, and they only agree when nothing precedes the call.
+/// Statements before it used to lose the prefix entirely.
+#[test]
+fn a_suspension_under_a_prefix_runs_with_statements_before_it() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun padded(): Int {
+            val a = 1
+            val b = 2
+            val c = 3
+            return twice(1) { one(it) } + a + b + c
+        }
+        fun box(): String = runBlocking {
+            val n = padded()
+            if (n == 11) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_padded", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// A spliced body that splices another: the outer call's values sit UNDER the inner call's, and the
+/// resume has to restore both.
+#[test]
+fn a_suspension_under_two_nested_prefixes_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun nested(): Int = twice(1) { x -> twice(x) { y -> one(y) } }
+        fun box(): String = runBlocking {
+            val n = nested()
+            if (n == 12) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_nested_prefix", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// A REFERENCE on the dependency's stack — the splice names its class by constant-pool index, which
+/// a spill field's descriptor cannot use.
+#[test]
+fn a_reference_on_the_dependency_stack_survives_a_suspension() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun held(): Int = holdRef { one(1) }
+        fun box(): String = runBlocking {
+            val n = held()
+            if (n == 2) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_ref_prefix", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// Two overloads each own a machine; they must not share one continuation class, whose spill layout
+/// belongs to exactly one of them.
+#[test]
+fn overloaded_suspend_functions_get_their_own_continuations() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun f(a: Int): Int = twice(a) { one(it) }
+        suspend fun f(): Int = f(1) + f(2)
+        fun box(): String = runBlocking {
+            val n = f()
+            if (n == 12) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_overloads", MAIN) else {
         return;
     };
     assert_eq!(output, "OK");

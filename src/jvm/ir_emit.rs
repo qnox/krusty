@@ -11068,7 +11068,11 @@ fn emit_method_inner_with_holder(
         // its `label`, `result` and spill fields, which the supertype does not declare.
         e.lease_temporary(
             continuation,
-            Ty::obj(&coroutine_machine::continuation_internal(owner, &f.name)),
+            Ty::obj(&coroutine_machine::continuation_internal(
+                owner,
+                &f.name,
+                crate::jvm::suspend::same_name_ordinal(ir, fid),
+            )),
         );
         e.lease_temporary(suspended, object);
         e.continuation_slot = Some(continuation);
@@ -11297,7 +11301,11 @@ fn emit_method_inner_with_holder(
     // the dispatch and the state it re-enters can be emitted around the same body.
     let machine_states = match (machine_slots, env.run.machine_plan(fid)) {
         (Some(slots), Some(plan)) => {
-            let internal = coroutine_machine::continuation_internal(owner, &f.name);
+            let internal = coroutine_machine::continuation_internal(
+                owner,
+                &f.name,
+                crate::jvm::suspend::same_name_ordinal(ir, fid),
+            );
             e.machine = Some(coroutine_machine::Machine {
                 plan,
                 slots,
@@ -11339,6 +11347,24 @@ fn emit_method_inner_with_holder(
             );
         }
         let at_markers = e.machine_marker_locals.clone();
+        // An operand this emitter itself left on the stack under a suspension — a spliced body's
+        // `s = s + one(x)` whose hoist could not type the operand — is not the dependency's prefix
+        // and has no recorded type. It cannot be carried across the `areturn`, so the machine
+        // declines rather than emit a frame that claims it survived.
+        let unhoisted: Vec<(usize, i32)> = e
+            .machine_marker_stacks
+            .iter()
+            .filter(|(_, &height)| height != 0)
+            .map(|(&ordinal, &height)| (ordinal, height))
+            .collect();
+        if !unhoisted.is_empty() {
+            crate::trace_compiler!(
+                "suspend",
+                "machine plan fid={fid} DECLINED: operand left under a suspension {unhoisted:?}"
+            );
+            env.run
+                .set_inline_bail("an operand of a suspension could not be hoisted");
+        }
         // One state per site emitted, which is what the markers name.
         let expected = e.machine_next_ordinal;
         let prefixes = e.machine_marker_prefixes.clone();
@@ -13553,7 +13579,7 @@ impl<'a> Emitter<'a> {
                 ret_words,
                 probe.falls_through,
             );
-            self.record_spliced_stack_prefixes(&probe);
+            self.record_spliced_stack_prefixes(&probe, 0);
             self.record_spliced_lines(
                 &probe.lines,
                 owner,
@@ -13640,7 +13666,7 @@ impl<'a> Emitter<'a> {
             ret_words,
             bs.falls_through,
         );
-        self.record_spliced_stack_prefixes(&bs);
+        self.record_spliced_stack_prefixes(&bs, splice_start);
         self.record_spliced_lines(
             &bs.lines,
             owner,
@@ -14030,23 +14056,30 @@ impl<'a> Emitter<'a> {
     /// the dependency has already pushed whatever it holds across the call. Those values do not
     /// survive the `areturn` that a suspension leaves through, so the machine has to save them — and
     /// only the splice knows they are there.
-    fn record_spliced_stack_prefixes(&mut self, splice: &crate::jvm::inline::BranchySplice) {
+    fn record_spliced_stack_prefixes(
+        &mut self,
+        splice: &crate::jvm::inline::BranchySplice,
+        laid_out_at: usize,
+    ) {
         if self.machine_suspensions.is_empty() {
             return;
         }
         let Some(markers) = crate::jvm::classfile::markers_in(&splice.bytes) else {
             return;
         };
+        // A site's position is in the coordinates the body was LAID OUT for — the real offset on the
+        // second splice, zero on the probe — while a marker's is an index into these bytes. Compare
+        // them in one space, or every site looks like it starts after every marker.
         let mut sites: Vec<(usize, Vec<VerifType>)> = splice
             .lambda_sites
             .iter()
-            .map(|site| {
-                let prefix = site
+            .filter_map(|site| {
+                let prefix: Vec<VerifType> = site
                     .stack_prefix
                     .as_ref()
-                    .map(|prefix| prefix.iter().map(vtype_to_verif).collect())
+                    .map(|prefix| prefix.iter().map(|v| self.spliced_prefix_type(v)).collect())
                     .unwrap_or_default();
-                (site.byte_start, prefix)
+                Some((site.byte_start.checked_sub(laid_out_at)?, prefix))
             })
             .collect();
         sites.sort_by_key(|(start, _)| *start);
@@ -14057,10 +14090,31 @@ impl<'a> Emitter<'a> {
             let Some((_, prefix)) = sites.iter().rfind(|(start, _)| *start <= at) else {
                 continue;
             };
-            if !prefix.is_empty() {
-                self.machine_marker_prefixes
-                    .insert(ordinal as usize, prefix.clone());
+            if prefix.is_empty() {
+                continue;
             }
+            // A body that splices an inline call of its own is recorded by the inner splice first.
+            // This one wraps that: its values sit UNDER what the inner splice already noted.
+            let ordinal = ordinal as usize;
+            let mut under = prefix.clone();
+            if let Some(inner) = self.machine_marker_prefixes.get(&ordinal) {
+                under.extend(inner.iter().cloned());
+            }
+            self.machine_marker_prefixes.insert(ordinal, under);
+        }
+    }
+
+    /// A spliced body's stack entry as a verification type this emitter can name.
+    ///
+    /// The splice describes an object by its own constant-pool index; a spill has to know the class,
+    /// because it decides the field's descriptor and the cast that reads it back.
+    fn spliced_prefix_type(&self, value: &crate::jvm::inline::VType) -> VerifType {
+        match vtype_to_verif(value) {
+            VerifType::Object(index) => match self.cw.class_name_at(index) {
+                Some(name) => VerifType::ObjectName(name.to_string()),
+                None => VerifType::Top,
+            },
+            other => other,
         }
     }
 

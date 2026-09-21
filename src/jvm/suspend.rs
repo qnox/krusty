@@ -361,7 +361,10 @@ pub(crate) fn lower_suspend(
         // dispatch, so the two kinds cannot be split between the IR machine and this one. The IR
         // machine never saw the spliced kind, so such a function does not compile today at all.
         let spliced_suspensions: Vec<ExprId> = match (forward, body) {
-            (None, Some(b)) if machine_eligible(ir, fid) => {
+            (None, Some(b))
+                if machine_eligible(ir, fid)
+                    && !cps::suspends_in_a_value_try(ir, b, &suspend_set) =>
+            {
                 match cps::spliced_inline_suspensions(ir, b, &suspend_set).is_empty() {
                     true => Vec::new(),
                     false => cps::frame_suspensions(ir, b, &suspend_set),
@@ -393,7 +396,14 @@ pub(crate) fn lower_suspend(
         let spliced_suspensions = match (emit_time_machine, body) {
             (true, Some(b)) => {
                 let mut value_types = function_value_types(ir, fid, b);
-                hoist_spliced_inline_bodies(ir, b, &suspend_set, &orig_rets, &mut value_types);
+                hoist_spliced_inline_bodies(
+                    ir,
+                    b,
+                    &suspend_set,
+                    &orig_rets,
+                    &ret_ty,
+                    &mut value_types,
+                );
                 cps::frame_suspensions(ir, b, &suspend_set)
             }
             _ => spliced_suspensions,
@@ -2394,6 +2404,33 @@ fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> boo
     found
 }
 
+/// How many functions with this one's continuation NAME the file declares before it.
+///
+/// A continuation class is named after the method it re-enters, so two overloads would share one —
+/// and they do not share a spill layout, so whichever class loses the name resumes against fields it
+/// does not have (`NoSuchFieldError`). Both machines number the later one.
+pub(crate) fn same_name_ordinal(ir: &IrFile, fid: u32) -> usize {
+    let function = &ir.functions[fid as usize];
+    let bare = |name: &str| name.split('-').next().unwrap_or(name).to_string();
+    let name = bare(&function.name);
+    ir.functions
+        .iter()
+        .take(fid as usize)
+        .filter(|other| {
+            bare(&other.name) == name && other.dispatch_receiver == function.dispatch_receiver
+        })
+        .count()
+}
+
+/// The continuation class for `fid`: `<owner>$<function>$1`, and `$2`, `$3`, … for the overloads
+/// that follow it.
+pub(crate) fn continuation_class_name(owner: &str, function: &str, ordinal: usize) -> String {
+    match ordinal {
+        0 => format!("{owner}${function}$1"),
+        n => format!("{owner}${function}${}", n + 1),
+    }
+}
+
 /// Build the coroutine state machine for `fid` (whose body `b` is a top-level block). The body is
 /// flattened into a state graph: each suspension point (including one inside an `if`/`when` branch value)
 /// ends a state and starts a resume state, and control flow becomes `label = next` transitions through a
@@ -2718,7 +2755,8 @@ fn build_state_machine(
     // kotlinc names `create-SCm-oBs`'s continuation `<Owner>$create$1`. `-` can't occur in a Kotlin
     // identifier, so it only ever separates the mangle hash — strip from the first `-`.
     let cont_fname = fname.split('-').next().unwrap_or(&fname);
-    let cont_internal = format!("{cont_owner}${cont_fname}$1");
+    let cont_internal =
+        continuation_class_name(&cont_owner, cont_fname, same_name_ordinal(ir, fid));
     let cont_ty = Ty::obj(&cont_internal);
 
     let base = max_value_index(ir) + 1;
