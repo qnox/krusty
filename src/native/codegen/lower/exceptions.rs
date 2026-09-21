@@ -591,3 +591,142 @@ impl BodyLowering<'_, '_, '_> {
         Ok(result.map(|_| self.builder.block_params(merge)[0]))
     }
 }
+
+/// What a precondition branches on: the `Boolean` that must hold, or the null test of the
+/// reference that must be present. Named rather than normalized to one polarity, because
+/// normalizing means an extra instruction on one of the two for nothing.
+enum Condition {
+    Holds(Value),
+    Absent(Value),
+}
+
+impl BodyLowering<'_, '_, '_> {
+    /// `require`, `check`, `requireNotNull`, `checkNotNull` and `error`.
+    ///
+    /// Kotlin declares all five `inline`, so a provider holding their bodies splices them and
+    /// nothing arrives here. A klib publishes no body to splice, and the call reaches this backend
+    /// whole — which is why these are realized rather than waiting on the whole of `kotlin`.
+    ///
+    /// The `lazyMessage` block is evaluated in the FAILING block and nowhere else. That is not an
+    /// optimization: `require(xs.isNotEmpty()) { xs.first().toString() }` is a program whose
+    /// message throws when the check passes, and Kotlin calls the block only on failure.
+    pub(super) fn precondition(
+        &mut self,
+        precondition: super::super::super::intrinsics::Precondition,
+        args: &[u32],
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        use super::super::super::intrinsics::PreconditionShape;
+        let (checked, message) = match (precondition.shape, args) {
+            (PreconditionShape::Always, [message]) => {
+                // Nothing is checked, so the message is written rather than deferred and the
+                // raise is unconditional.
+                let text = self.reference(*message)?;
+                if self.terminated {
+                    return Ok(None);
+                }
+                let Some(text) = self.render(text)? else {
+                    return Ok(None);
+                };
+                return self.raise(precondition.descriptor, text);
+            }
+            (_, [checked]) => (*checked, None),
+            (_, [checked, message]) => (*checked, Some(*message)),
+            _ => return Err("a precondition with an unexpected argument shape".to_string()),
+        };
+        // The value is evaluated ONCE — `requireNotNull(f())` calls `f` once and answers what it
+        // returned — so what the check branches on is derived from the value already in hand.
+        let (condition, held) = match precondition.shape {
+            PreconditionShape::Holds => {
+                let Some(value) = self.coerce(checked, Ty::Boolean)? else {
+                    return Err("a precondition over a `Unit` value".to_string());
+                };
+                (Condition::Holds(value), None)
+            }
+            PreconditionShape::Present | PreconditionShape::Always => {
+                let value = self.reference(checked)?;
+                (Condition::Absent(self.is_null(value)), Some(value))
+            }
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let fail = self.builder.create_block();
+        let proceed = self.builder.create_block();
+        match condition {
+            Condition::Holds(value) => self.builder.ins().brif(value, proceed, &[], fail, &[]),
+            Condition::Absent(value) => self.builder.ins().brif(value, fail, &[], proceed, &[]),
+        };
+        self.continue_in(fail);
+        self.raise_precondition(precondition, message)?;
+        self.continue_in(proceed);
+        // `requireNotNull` ANSWERS the value it checked, at the type the call site asked for: the
+        // declaration is generic, so a site expecting an `Int` gets the box read back as one.
+        match held {
+            Some(value) if carrier(ret) != Carrier::Void => self.convert(value, Some(any()), ret),
+            _ => Ok(None),
+        }
+    }
+
+    /// The failing half: render the message the call wrote, or Kotlin's own wording for the form
+    /// that wrote none, and throw.
+    fn raise_precondition(
+        &mut self,
+        precondition: super::super::super::intrinsics::Precondition,
+        message: Option<u32>,
+    ) -> Result<(), Unsupported> {
+        let text = match message {
+            Some(block) => {
+                // The block answers `Any`, and the exception carries a `String`: Kotlin renders it
+                // with `toString()`, so a message written as a number is its decimal spelling.
+                let function = self.reference(block)?;
+                if self.terminated {
+                    return Ok(());
+                }
+                match self.invoke_value(function, &[], any())? {
+                    Some(value) => self.render(value)?,
+                    // A block that left rather than answered: the throw it made is already in
+                    // flight, and nothing here adds to it.
+                    None => return Ok(()),
+                }
+            }
+            None => Some(self.string_literal(precondition.default_message.as_bytes())?),
+        };
+        let Some(text) = text else {
+            return Ok(());
+        };
+        self.raise(precondition.descriptor, text)?;
+        Ok(())
+    }
+
+    /// Build the named exception around a message and throw it, leaving the builder terminated.
+    fn raise(&mut self, descriptor: &str, message: Value) -> Result<Option<Value>, Unsupported> {
+        let descriptor = self.file.import_data(descriptor)?;
+        let descriptor = self.data_address(descriptor);
+        let thrown = self.runtime_call(
+            "kt_throwable_new",
+            &[any(), any()],
+            any(),
+            &[descriptor, message],
+        )?;
+        let Some(thrown) = thrown else {
+            return Ok(None);
+        };
+        // The same store-and-jump `Self::throw` makes, and deliberately not through
+        // `Self::runtime_call`: the check that helper emits would branch on the slot this very
+        // call just set.
+        let id = self.file.import("kt_throw", &[any()], Ty::Unit)?;
+        let func_ref = self.func_ref(id);
+        self.builder.ins().call(func_ref, &[thrown]);
+        let target = self.unwind_target();
+        self.builder.ins().jump(target, &[]);
+        self.terminate();
+        Ok(None)
+    }
+
+    /// A value as the string an exception carries — `toString()` on whatever it is, which is the
+    /// same runtime entry point a lone `"$x"` reaches.
+    fn render(&mut self, value: Value) -> Result<Option<Value>, Unsupported> {
+        self.runtime_call("kt_to_string", &[any()], Ty::String, &[value])
+    }
+}

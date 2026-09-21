@@ -2515,6 +2515,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         {
                             return realized;
                         }
+                        // `require`, `check`, `requireNotNull`, `checkNotNull`, `error`. Not a
+                        // runtime call: the message block runs only when the check fails, so the
+                        // shape is a branch around a raise rather than a call with operands.
+                        if let Some(precondition) =
+                            super::super::intrinsics::precondition(&owner, &name, params)
+                        {
+                            return self.precondition(precondition, args, *ret);
+                        }
                         let Some(symbol) =
                             super::super::intrinsics::runtime_function(&owner, &name, params)
                         else {

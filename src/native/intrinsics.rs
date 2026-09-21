@@ -313,6 +313,91 @@ pub(super) fn is_assert_fails_with(owner: &str, name: &str, params: &[Ty]) -> bo
         }
 }
 
+/// One of `kotlin`'s preconditions: `require`, `check`, `requireNotNull`, `checkNotNull`, `error`.
+///
+/// Each raises a named exception with a wording Kotlin fixes, and each has a form taking a
+/// `lazyMessage: () -> Any` that is called ONLY when the check fails. Kotlin declares them
+/// `inline`, so a provider with the body splices them and nothing arrives here; a klib publishes
+/// no body to splice, and the call reaches a backend whole.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct Precondition {
+    /// The runtime descriptor of the exception raised.
+    pub(super) descriptor: &'static str,
+    /// The message used when the call writes none — Kotlin's own wording, which programs read.
+    pub(super) default_message: &'static str,
+    /// What is checked: a `Boolean` that must be true, or a reference that must not be null.
+    pub(super) shape: PreconditionShape,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PreconditionShape {
+    /// `require(value)` / `check(value)`: a `Boolean` that must hold. Answers `Unit`.
+    Holds,
+    /// `requireNotNull(value)` / `checkNotNull(value)`: answers the value, now known present.
+    Present,
+    /// `error(message)`: no check at all, and `Nothing` as the result. The message is written
+    /// rather than deferred, so it is an ordinary argument and not a block.
+    Always,
+}
+
+/// Which precondition a selected top-level declaration is, or `None` for anything else.
+///
+/// Keyed on the package and the shape as well as the name. The lazy-message parameter is what
+/// separates the two forms of each, and an overload with anything else in that position falls
+/// through to the ordinary declining path rather than being answered with the wrong message.
+pub(super) fn precondition(owner: &str, name: &str, params: &[Ty]) -> Option<Precondition> {
+    if declaration_package(kotlin_owner(owner)) != "kotlin" {
+        return None;
+    }
+    let (descriptor, default_message, shape) = match name {
+        "require" => (
+            "kt_type_illegal_argument_exception",
+            "Failed requirement.",
+            PreconditionShape::Holds,
+        ),
+        "check" => (
+            "kt_type_illegal_state_exception",
+            "Check failed.",
+            PreconditionShape::Holds,
+        ),
+        "requireNotNull" => (
+            "kt_type_illegal_argument_exception",
+            "Required value was null.",
+            PreconditionShape::Present,
+        ),
+        "checkNotNull" => (
+            "kt_type_illegal_state_exception",
+            "Required value was null.",
+            PreconditionShape::Present,
+        ),
+        "error" => (
+            "kt_type_illegal_state_exception",
+            // Never reached: `error` takes its message as an ordinary argument.
+            "",
+            PreconditionShape::Always,
+        ),
+        _ => return None,
+    };
+    let admitted = match shape {
+        // `require(Boolean)` and `require(Boolean) { … }`. The checked operand is declared
+        // `Boolean`, so a call whose first parameter is anything else is another declaration.
+        PreconditionShape::Holds => {
+            matches!(params, [Ty::Boolean] | [Ty::Boolean, Ty::Fun(_)])
+        }
+        // `requireNotNull(T?)` — the operand is a type parameter, so nothing about it is worth
+        // asserting here beyond its count; what matters is that the second parameter, when there
+        // is one, is the block.
+        PreconditionShape::Present => matches!(params, [_] | [_, Ty::Fun(_)]),
+        // `error(Any)`. Its message is NOT a block, which is what keeps it apart from the others.
+        PreconditionShape::Always => matches!(params, [param] if !matches!(param, Ty::Fun(_))),
+    };
+    admitted.then_some(Precondition {
+        descriptor,
+        default_message,
+        shape,
+    })
+}
+
 /// Is this `kotlin.String`, at either nullability and under either spelling?
 fn is_string_type(ty: &Ty) -> bool {
     match ty {

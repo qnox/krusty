@@ -1066,6 +1066,8 @@ mod native_gc_e2e;
 mod native_gc_stress_e2e;
 #[path = "native_lists_e2e.rs"]
 mod native_lists_e2e;
+#[path = "native_preconditions_e2e.rs"]
+mod native_preconditions_e2e;
 #[path = "native_property_reference_e2e.rs"]
 mod native_property_reference_e2e;
 #[path = "native_range_contains_e2e.rs"]

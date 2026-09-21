@@ -7508,6 +7508,40 @@ and behavior is checked by RUNNING the emitted program.
   `codegen/box/boxingOptimization/kt6842.kt`, `codegen/box/callableReference/kt50172.kt` and the
   other `collections.first` cases.
 
+- **An `indices` range is recognized where the program kept no name for it.** `x.indices` is
+  realized as an `IntRange` and as nothing else, whatever the receiver is indexable as, but the
+  READ carried no type. `b in a.indices` for a `b` that is not an `Int` is the ranges FACADE's
+  `contains`, which reads its element from the RECEIVER — so a receiver with no type could not be
+  recognized as a range at all, and the call fell through to the dependency-member path to be
+  declined by name.
+
+  The element arriving at its own width is the whole of that comparison's correctness: truncating
+  a `Long` to the range's element makes `4294967296L` into `0` and answers `true`.
+  Tests: `tests/native_range_contains_e2e.rs`
+  (`an_indices_range_is_recognized_where_the_program_kept_no_name_for_it`); the corpus cases are
+  `codegen/box/ranges/contains/generated/{array,charSequence,collection}Indices.kt`.
+
+- **Preconditions raise Kotlin's own exception with Kotlin's own wording.** `require`, `check`,
+  `requireNotNull`, `checkNotNull` and `error` are declared `inline`, so a provider holding their
+  bodies splices them and nothing reaches a backend; a klib publishes no body to splice and the
+  call arrives whole. Three facts are Kotlin's rather than a backend's, and a program can read all
+  three:
+
+  - The exception: `IllegalArgumentException` for the two `require` forms, `IllegalStateException`
+    for `check`, `checkNotNull` and `error`.
+  - The wording when the call writes no message: `"Failed requirement."`, `"Check failed."` and
+    `"Required value was null."`.
+  - `lazyMessage` runs ONLY when the check fails, and then once. It is not an optimization:
+    `require(xs.isNotEmpty()) { xs.first().toString() }` is a program whose message throws when
+    the check passes.
+
+  So the shape is a branch around a raise rather than a call with operands, and the message is
+  rendered with `toString()` — `require(false) { 42 }` carries `"42"`. The checked value is
+  evaluated once, which `requireNotNull(f())` is entitled to.
+  Tests: `tests/native_preconditions_e2e.rs` (all five, each cross-checking the two backends and
+  REQUIRING the native lowering); the corpus cases are `codegen/box/contracts/nonNullSmartCast.kt`,
+  `codegen/box/delegatedProperty/provideDelegate/setValue.kt` and the other `kotlin.require` cases.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
