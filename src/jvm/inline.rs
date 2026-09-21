@@ -1015,15 +1015,28 @@ pub struct BranchySplice {
 
 pub struct RelocatedLambdaSite {
     pub lambda_index: usize,
+    /// Which of that lambda's `bodies` this site received.
+    pub body_index: usize,
     pub byte_start: usize,
     pub host_locals: Vec<VType>,
     pub stack_prefix: Option<Vec<VType>>,
 }
 
-/// One lambda argument to splice into a host body at its `FunctionN.invoke` site.
+/// One lambda argument to splice into a host body at its `FunctionN.invoke` sites.
 pub struct LambdaSplice {
     /// The host parameter index of this lambda (its position in the descriptor).
     pub param_index: usize,
+    /// What replaces each `invoke` of this lambda. ONE body serves every site — the ordinary case: a
+    /// body the host may run any number of times is the same code at each of them. One body PER
+    /// SITE, in the host's instruction order, when the sites cannot share: a suspension inside the
+    /// body is a state of the enclosing machine, and a state is one position with its own spill
+    /// set, so each site carries a copy marked with its own ordinal. Any other count is a mistake
+    /// the splice declines.
+    pub bodies: Vec<LambdaBody>,
+}
+
+/// One built body of a lambda argument, as the splice puts it in place of a `FunctionN.invoke`.
+pub struct LambdaBody {
     /// The body's own debug locals as `(start, slot, name, descriptor)`, with `start` an offset into
     /// `body` as built. Each runs to the end of the body, which is the only thing its scope can mean
     /// once the body is code inside another method. The splice relocates them, because only it knows
@@ -1966,6 +1979,8 @@ fn incremented_local_slot(insn: &Insn) -> Option<u16> {
 pub struct SplicedFrame {
     /// One entry per `lambda_params` position, in that order.
     pub lambda_bases: Vec<u16>,
+    /// How many `FunctionN.invoke` sites the host has for each `lambda_params` position.
+    pub site_counts: Vec<usize>,
     /// One past the highest caller slot the relocated host body occupies.
     pub top_local: u16,
 }
@@ -2020,14 +2035,17 @@ pub fn spliced_frame(
     };
     let sites = lambda_invoke_sites(&insns, &body.source_cp, &lambda_slots, &deleted)?;
     let mut bases = vec![None; lambda_params.len()];
+    let mut site_counts = vec![0usize; lambda_params.len()];
     for (lambda, _, site) in sites {
         let free = free_local_slot_at(&insns, site, &frames, parameter_end, body.max_locals);
         // A lambda invoked from several sites takes the highest, so one body suits them all.
         let at = compact(free);
         bases[lambda] = Some(bases[lambda].map_or(at, |had: u16| had.max(at)));
+        site_counts[lambda] += 1;
     }
     Some(SplicedFrame {
         lambda_bases: bases.into_iter().collect::<Option<Vec<_>>>()?,
+        site_counts,
         // The slot one past the body's own locals, through the same compaction its locals take.
         top_local: compact(body.max_locals),
     })
@@ -2171,17 +2189,35 @@ pub fn splice_unified(
     let mut lambda_sites = Vec::new(); // original invoke index per occurrence
     let mut lambda_loads = Vec::new(); // original receiver-load index per occurrence
     let mut site_lambdas = Vec::new(); // input lambda index per occurrence
-                                       // Bytes of the lambda body dropped from its FRONT by argument cancellation. The body's own
-                                       // frames are offsets into the body as it was built, so the base they are bound against has to
-                                       // move back by exactly what no longer precedes them.
+    let mut site_bodies: Vec<&LambdaBody> = Vec::new(); // the body spliced at each occurrence
+    let mut site_body_indices = Vec::new(); // its index in the lambda's `bodies`
+                                            // Bytes of the lambda body dropped from its FRONT by argument cancellation. The body's own
+                                            // frames are offsets into the body as it was built, so the base they are bound against has to
+                                            // move back by exactly what no longer precedes them.
     let mut dropped_prefix = Vec::new();
     // The same drop counted in INSTRUCTIONS, which is what maps a frame exactly.
     let mut dropped_prefix_insns = Vec::new();
     // Bytes dropped from its END by result cancellation, which shortens where its locals leave scope.
     let mut dropped_suffix = Vec::new();
-    for (lambda, load_idx, site) in
-        lambda_invoke_sites(&insns, &body.source_cp, &lambda_slots, &deleted)?
-    {
+    let found_sites = lambda_invoke_sites(&insns, &body.source_cp, &lambda_slots, &deleted)?;
+    for (lambda, load_idx, site) in found_sites.iter().copied() {
+        // The k-th site of a lambda takes its k-th body, or the one body every site shares. A lambda
+        // built per site has exactly as many bodies as the host has sites for it: fewer would leave
+        // a site without code, more would leave a state without a position.
+        let occurrence = site_lambdas
+            .iter()
+            .filter(|&&earlier| earlier == lambda)
+            .count();
+        let of_lambda = found_sites
+            .iter()
+            .filter(|(candidate, _, _)| *candidate == lambda)
+            .count();
+        let body_index = match lambdas[lambda].bodies.len() {
+            1 => 0,
+            count if count == of_lambda => occurrence,
+            _ => return None,
+        };
+        let site_body = &lambdas[lambda].bodies[body_index];
         edits.push(Edit {
             at: load_idx,
             len: 1,
@@ -2194,7 +2230,7 @@ pub fn splice_unified(
             // every argument of a zero- or one-parameter lambda and the result of any lambda; an earlier
             // argument of a multi-parameter lambda is separated from its unboxing by the next argument's
             // evaluation and needs a stack walk this does not attempt.
-        let mut replacement = lambdas[lambda].body.clone();
+        let mut replacement = site_body.body.clone();
         let mut at = site;
         let mut len = 1;
         let mut dropped = 0usize;
@@ -2209,7 +2245,7 @@ pub fn splice_unified(
         // Only a body with no frames of its own: cancelling instructions off its front moves every
         // later offset in it, and its frames are recorded against the layout it was built with. A
         // branchy body would need those rebased, and the mapping is not a constant shift.
-        let body_has_frames = lambdas[lambda]
+        let body_has_frames = site_body
             .body
             .iter()
             .any(|insn| !matches!(insn, Insn::Plain { .. }));
@@ -2252,6 +2288,8 @@ pub fn splice_unified(
         lambda_sites.push(site);
         lambda_loads.push(load_idx);
         site_lambdas.push(lambda);
+        site_bodies.push(site_body);
+        site_body_indices.push(body_index);
         dropped_prefix.push(dropped);
         dropped_prefix_insns.push(dropped_insns);
         dropped_suffix.push(suffix);
@@ -2273,8 +2311,8 @@ pub fn splice_unified(
     // A BRANCHY lambda body has its own frames, compiled against an empty operand base; they must be
     // rebased onto the host state. If that state couldn't be modeled, bail (a BRANCHLESS body has no
     // frames, so its unmodeled state is irrelevant). The caller then falls back to a real call.
-    for (site, &lambda) in site_lambdas.iter().enumerate() {
-        let branchy = lambdas[lambda]
+    for (site, site_body) in site_bodies.iter().enumerate() {
+        let branchy = site_body
             .body
             .iter()
             .any(|i| !matches!(i, Insn::Plain { .. }));
@@ -2553,8 +2591,7 @@ pub fn splice_unified(
     // the verifier can't fall through the return, so it needs a stack-map frame there. Synthesize one from
     // the host state at the invoke plus the (dropped) `FunctionN.invoke` result, so the dead continuation
     // still verifies. (Without this the splice would emit a frameless target → `VerifyError`.)
-    for (k, &lambda) in site_lambdas.iter().enumerate() {
-        let lam = &lambdas[lambda];
+    for (k, lam) in site_bodies.iter().enumerate() {
         let diverges = matches!(
             lam.body.last(),
             Some(Insn::Plain { op, .. }) if matches!(op, 0xac..=0xb1 | 0xbf)
@@ -2646,6 +2683,7 @@ pub fn splice_unified(
         };
         relocated_lambda_sites.push(RelocatedLambdaSite {
             lambda_index: site_lambdas[occurrence],
+            body_index: site_body_indices[occurrence],
             byte_start: offs[p + old2new[lambda_sites[occurrence]]],
             host_locals,
             stack_prefix,
@@ -2694,14 +2732,14 @@ pub fn splice_unified(
     // enclosing code resumes.
     let mut lambda_locals = Vec::new();
     for (occurrence, &site) in lambda_sites.iter().enumerate() {
-        let lambda = site_lambdas[occurrence];
-        if lambdas[lambda].locals.is_empty() {
+        let lambda = site_bodies[occurrence];
+        if lambda.locals.is_empty() {
             continue;
         }
         let body_start = offs[p + old2new[site]];
         let prefix = dropped_prefix[occurrence];
         let suffix = dropped_suffix[occurrence];
-        let built = assemble(&lambdas[lambda].body).len();
+        let built = assemble(&lambda.body).len();
         let Some(spliced_len) = built.checked_sub(prefix + suffix) else {
             continue;
         };
@@ -2709,7 +2747,7 @@ pub fn splice_unified(
         // Reversed: the reference compiler lists the body's own marker before the parameters it
         // opened, and a multi-parameter lambda's parameters in descending slot — which is the
         // reverse of the order they are stored in, top of stack being the last parameter.
-        for (at, slot, name, descriptor) in lambdas[lambda].locals.iter().rev() {
+        for (at, slot, name, descriptor) in lambda.locals.iter().rev() {
             let Some(offset) = (*at as usize).checked_sub(prefix) else {
                 continue; // declared inside the cancelled adapter — there is nothing left to scope
             };
@@ -2738,10 +2776,10 @@ pub fn splice_unified(
         relocated_lines.push((at, line, true));
     }
     for (occurrence, &site) in lambda_sites.iter().enumerate() {
-        let lambda = site_lambdas[occurrence];
+        let lambda = site_bodies[occurrence];
         let body_start = offs[p + old2new[site]];
         let prefix = dropped_prefix[occurrence];
-        for &(at, line) in &lambdas[lambda].lines {
+        for &(at, line) in &lambda.lines {
             let Some(offset) = (at as usize).checked_sub(prefix) else {
                 continue;
             };
@@ -2756,12 +2794,12 @@ pub fn splice_unified(
     // when the region opened is restored at its end, which is what the reference compiler emits.
     let mut resumed = Vec::new();
     for (occurrence, &site) in lambda_sites.iter().enumerate() {
-        let lambda = site_lambdas[occurrence];
-        if lambdas[lambda].lines.is_empty() {
+        let lambda = site_bodies[occurrence];
+        if lambda.lines.is_empty() {
             continue;
         }
         let body_start = offs[p + old2new[site]];
-        let built = assemble(&lambdas[lambda].body).len();
+        let built = assemble(&lambda.body).len();
         let Some(spliced_len) =
             built.checked_sub(dropped_prefix[occurrence] + dropped_suffix[occurrence])
         else {
