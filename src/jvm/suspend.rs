@@ -362,6 +362,23 @@ pub(crate) fn lower_suspend(
             }
             _ => Vec::new(),
         };
+        #[cfg(feature = "trace")]
+        if spliced_suspensions.is_empty() && !has_susp && forward.is_none() {
+            if let Some(b) = body {
+                let ignored = cps::spliced_inline_suspensions(ir, b, &suspend_set);
+                if !ignored.is_empty() {
+                    crate::trace_compiler!(
+                        "suspend",
+                        "machine NOT eligible fid={fid} name={} static={} open={} private={} n={}",
+                        ir.functions[fid as usize].name,
+                        ir.functions[fid as usize].is_static,
+                        ir.open_methods.contains(&fid),
+                        ir.private_methods.contains(&fid),
+                        ignored.len()
+                    );
+                }
+            }
+        }
         let emit_time_machine = !spliced_suspensions.is_empty();
         // Those bodies have never been through suspension hoisting: the passes above stop at a
         // lambda. Normalize them now, then re-read the suspensions — hoisting rewrites the very
@@ -1871,10 +1888,7 @@ fn machine_eligible(ir: &IrFile, fid: u32) -> bool {
             .iter()
             .any(|class| class.fq_name_matches(&receiver.render()) && class.is_interface)
     });
-    function.dispatch_receiver.is_some()
-        && !owner_is_interface
-        && !ir.open_methods.contains(&fid)
-        && !ir.private_methods.contains(&fid)
+    function.dispatch_receiver.is_some() && !owner_is_interface && !ir.open_methods.contains(&fid)
 }
 
 fn function_value_types(ir: &IrFile, fid: u32, body: ExprId) -> HashMap<u32, Ty> {

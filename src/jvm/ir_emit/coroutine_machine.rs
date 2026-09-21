@@ -346,6 +346,79 @@ pub(super) struct Machine {
     /// `Some(owner)` for an instance method: the continuation holds the receiver, because
     /// re-entering the method needs one.
     pub(super) receiver: Option<String>,
+    /// `Some(name)` when re-entry goes through a synthetic static on the owner: a PRIVATE method is
+    /// not callable from the continuation class, exactly as for kotlinc's `access$<name>`.
+    pub(super) bridge: Option<String>,
+}
+
+/// The synthetic static a continuation re-enters a private method through.
+pub(super) fn access_bridge_name(function: &str) -> String {
+    format!("access${function}")
+}
+
+/// Build kotlinc's `access$<name>`: take the receiver and every parameter, call the private method
+/// with `invokespecial` — the only legal form for a private member — and hand back its result.
+pub(super) fn build_access_bridge(
+    cw: &mut crate::jvm::classfile::ClassWriter,
+    owner: &str,
+    function: &str,
+    descriptor: &str,
+) -> Option<(String, String, crate::jvm::classfile::CodeBuilder)> {
+    use crate::jvm::classfile::CodeBuilder;
+    let (params, ret) = split_descriptor(descriptor)?;
+    // The receiver plus every parameter: a bridge declares exactly the slots it is handed.
+    let locals = 1 + params
+        .iter()
+        .map(|p| usize::from(matches!(p.as_bytes().first(), Some(b'J') | Some(b'D'))) + 1)
+        .sum::<usize>();
+    let mut code = CodeBuilder::new(locals as u16);
+    code.aload(0);
+    let mut slot = 1u16;
+    for parameter in &params {
+        match parameter.as_bytes().first() {
+            Some(b'J') => {
+                code.lload(slot);
+                slot += 2;
+            }
+            Some(b'D') => {
+                code.dload(slot);
+                slot += 2;
+            }
+            Some(b'F') => {
+                code.fload(slot);
+                slot += 1;
+            }
+            Some(b'L') | Some(b'[') => {
+                code.aload(slot);
+                slot += 1;
+            }
+            _ => {
+                code.iload(slot);
+                slot += 1;
+            }
+        }
+    }
+    let target = cw.methodref(owner, function, descriptor);
+    let returns = i32::from(ret != "V");
+    code.invokespecial(target, i32::from(slot), returns);
+    match ret.as_str() {
+        "V" => code.ret_void(),
+        "J" => code.lreturn(),
+        "D" => code.dreturn(),
+        "F" => code.freturn(),
+        "I" | "Z" | "B" | "C" | "S" => code.ireturn(),
+        _ => code.areturn(),
+    }
+    let bridge_descriptor = format!("(L{owner};{}", &descriptor[1..]);
+    Some((access_bridge_name(function), bridge_descriptor, code))
+}
+
+/// A descriptor's parameter list and return descriptor, as written.
+fn split_descriptor(descriptor: &str) -> Option<(Vec<String>, String)> {
+    let (mut params, ret) = parse_outer_descriptor(descriptor)?;
+    // `parse_outer_descriptor` drops the trailing continuation, which a bridge must pass on.
+    params.push(format!("L{CONTINUATION};"));
+    Some((params, ret))
 }
 
 /// Build the continuation class a machine keeps its state in.
@@ -362,6 +435,7 @@ pub(super) fn build_continuation_class(
     major: Option<u16>,
     source_file: Option<&str>,
     receiver: Option<&str>,
+    bridge: Option<&str>,
 ) -> Vec<u8> {
     use crate::jvm::classfile::{ClassWriter, CodeBuilder, ACC_FINAL, ACC_PUBLIC};
     let mut cw = ClassWriter::new(internal, CONTINUATION_IMPL);
@@ -436,10 +510,22 @@ pub(super) fn build_continuation_class(
     let class = cw.class_ref(CONTINUATION);
     invoke.checkcast(class);
     words += 1;
-    let outer_ref = cw.methodref(outer, outer_method, outer_descriptor);
-    match receiver {
-        Some(_) => invoke.invokevirtual(outer_ref, words, 1),
-        None => invoke.invokestatic(outer_ref, words, 1),
+    match (bridge, receiver) {
+        // The bridge is static and takes the receiver as its first argument, which is already on
+        // the stack.
+        (Some(bridge), Some(owner)) => {
+            let descriptor = format!("(L{owner};{}", &outer_descriptor[1..]);
+            let reference = cw.methodref(outer, bridge, &descriptor);
+            invoke.invokestatic(reference, words, 1);
+        }
+        (_, Some(_)) => {
+            let reference = cw.methodref(outer, outer_method, outer_descriptor);
+            invoke.invokevirtual(reference, words, 1);
+        }
+        (_, None) => {
+            let reference = cw.methodref(outer, outer_method, outer_descriptor);
+            invoke.invokestatic(reference, words, 1);
+        }
     }
     invoke.areturn();
     cw.add_method(

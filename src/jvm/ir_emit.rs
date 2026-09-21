@@ -11077,6 +11077,11 @@ fn emit_method_inner_with_holder(
             .enumerate()
             .map(|(ordinal, suspension)| (suspension.call, ordinal))
             .collect();
+        crate::trace_compiler!(
+            "suspend",
+            "machine wanted fid={fid} calls={:?}",
+            suspensions.iter().map(|s| s.call).collect::<Vec<_>>()
+        );
         coroutine_machine::MachineSlots {
             result,
             continuation,
@@ -11300,6 +11305,10 @@ fn emit_method_inner_with_holder(
                 internal,
                 // An instance method is re-entered on its receiver, which the continuation keeps.
                 receiver: instance.then(|| owner.to_string()),
+                // A private method is not callable from the continuation class; a synthetic static
+                // on the owner is.
+                bridge: (instance && ir.private_methods.contains(&fid))
+                    .then(|| coroutine_machine::access_bridge_name(&f.name)),
             });
             let completion = param_tys.len().saturating_sub(1) as u32 + u32::from(instance);
             let completion = e.slots.get(&completion).map(|&(slot, _)| slot);
@@ -11429,11 +11438,22 @@ fn emit_method_inner_with_holder(
                 Some(e.cw.major()),
                 source_file.as_deref(),
                 machine.receiver.as_deref(),
+                machine.bridge.as_deref(),
             );
             env.run
                 .machine_classes
                 .borrow_mut()
                 .push((machine.internal.clone(), bytes));
+            // The bridge itself lives on the owner, beside the method it re-enters.
+            if let Some(bridge) = machine.bridge.as_deref() {
+                if let Some((name, descriptor, body)) =
+                    coroutine_machine::build_access_bridge(e.cw, owner, &f.name, &reserved_desc)
+                {
+                    debug_assert_eq!(name, bridge);
+                    // `public static final synthetic`, as kotlinc emits it.
+                    e.cw.add_method(0x1019, &name, &descriptor, &body);
+                }
+            }
         }
     }
     // The `$i$f$<name>` marker's LocalVariableTable entry covers the body from the post-store pc —

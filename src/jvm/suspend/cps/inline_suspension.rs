@@ -18,8 +18,27 @@
 //! that would otherwise be emitted with no continuation to pass.
 
 use super::super::is_suspension_point;
-use crate::ir::{for_each_child, ExprId, IrExpr, IrFile};
+use crate::ir::{for_each_child, Callee, ExprId, IrExpr, IrFile};
+use crate::libraries::InlineKind;
 use std::collections::HashSet;
+
+/// Whether `expression` is a call whose callee the JVM backend may splice here.
+///
+/// Carrying an `inline_body` does NOT make a lambda's body part of this frame: lowering attaches
+/// one wherever it can, including to the lambda of an ordinary function (`launch { … }`). Only the
+/// argument of an INLINE call can be spliced, so only there does the body belong to this frame.
+fn calls_an_inline_function(ir: &IrFile, expression: ExprId) -> bool {
+    matches!(
+        &ir.exprs[expression as usize],
+        IrExpr::Call {
+            callee: Callee::Static {
+                inline: InlineKind::CanInline | InlineKind::MustInline,
+                ..
+            },
+            ..
+        }
+    )
+}
 
 /// Suspension points inside the `inline_body` of a lambda reached from `body`, in encounter order.
 ///
@@ -69,6 +88,17 @@ fn collect_impls(
     seen: &mut HashSet<ExprId>,
     out: &mut Vec<u32>,
 ) {
+    collect(ir, expression, suspend_set, false, seen, out);
+}
+
+fn collect(
+    ir: &IrFile,
+    expression: ExprId,
+    suspend_set: &HashSet<u32>,
+    spliceable: bool,
+    seen: &mut HashSet<ExprId>,
+    out: &mut Vec<u32>,
+) {
     if !seen.insert(expression) {
         return;
     }
@@ -79,22 +109,42 @@ fn collect_impls(
         ..
     } = &ir.exprs[expression as usize]
     {
+        // Only a lambda whose body is actually spliced loses its standalone `invoke`; one passed to
+        // an ordinary function is a real closure and needs it.
+        if !spliceable {
+            for &capture in captures {
+                collect(ir, capture, suspend_set, false, seen, out);
+            }
+            return;
+        }
         let mut found = Vec::new();
         let mut inner = HashSet::new();
-        walk_frame(ir, *inline_body, suspend_set, true, &mut inner, &mut found);
+        walk(
+            ir,
+            *inline_body,
+            suspend_set,
+            true,
+            false,
+            &mut inner,
+            &mut found,
+        );
         if !found.is_empty() && !out.contains(impl_fn) {
             out.push(*impl_fn);
         }
         for &capture in captures {
-            collect_impls(ir, capture, suspend_set, seen, out);
+            collect(ir, capture, suspend_set, false, seen, out);
         }
-        collect_impls(ir, *inline_body, suspend_set, seen, out);
+        collect(ir, *inline_body, suspend_set, false, seen, out);
         return;
     }
+    let operands_are_spliceable = match &ir.exprs[expression as usize] {
+        IrExpr::Call { .. } => calls_an_inline_function(ir, expression),
+        _ => spliceable,
+    };
     let mut children = Vec::new();
     for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
     for child in children {
-        collect_impls(ir, child, suspend_set, seen, out);
+        collect(ir, child, suspend_set, operands_are_spliceable, seen, out);
     }
 }
 
@@ -105,6 +155,21 @@ fn walk_frame(
     expression: ExprId,
     suspend_set: &HashSet<u32>,
     inlined: bool,
+    seen: &mut HashSet<ExprId>,
+    found: &mut Vec<ExprId>,
+) {
+    walk(ir, expression, suspend_set, inlined, false, seen, found);
+}
+
+/// `inlined`: this expression already sits inside a body that runs in this frame. `spliceable`: it
+/// is an operand of an inline call, so a lambda here has its body spliced rather than realized as a
+/// closure.
+fn walk(
+    ir: &IrFile,
+    expression: ExprId,
+    suspend_set: &HashSet<u32>,
+    inlined: bool,
+    spliceable: bool,
     seen: &mut HashSet<ExprId>,
     found: &mut Vec<ExprId>,
 ) {
@@ -122,17 +187,36 @@ fn walk_frame(
     {
         // The captures are evaluated by THIS frame, whatever the lambda is.
         for &capture in captures {
-            walk_frame(ir, capture, suspend_set, inlined, seen, found);
+            walk(ir, capture, suspend_set, inlined, false, seen, found);
         }
-        // A spliced body runs in this frame; a real closure's does not.
-        if let Some(&body) = inline_body.as_ref() {
-            walk_frame(ir, body, suspend_set, true, seen, found);
+        // A spliced body runs in this frame; a real closure's does not — and only the operand of an
+        // inline call is spliced, however the lowering filled `inline_body` in.
+        match (spliceable, inline_body.as_ref()) {
+            (true, Some(&body)) => walk(ir, body, suspend_set, true, false, seen, found),
+            _ => {}
         }
         return;
     }
-    for_each_child(&ir.exprs, expression, &mut |child| {
-        walk_frame(ir, child, suspend_set, inlined, seen, found)
-    });
+    // A CALL decides this for its own operands; anything else — a coercion, a block, an argument
+    // wrapper — passes the answer through, since the lambda it holds is still the operand of
+    // whatever call encloses it.
+    let operands_are_spliceable = match &ir.exprs[expression as usize] {
+        IrExpr::Call { .. } => calls_an_inline_function(ir, expression),
+        _ => spliceable,
+    };
+    let mut children = Vec::new();
+    for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
+    for child in children {
+        walk(
+            ir,
+            child,
+            suspend_set,
+            inlined,
+            operands_are_spliceable,
+            seen,
+            found,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -165,6 +249,20 @@ mod tests {
         })
     }
 
+    /// A call to an `inline` function taking `argument` — the only position whose lambda is spliced.
+    fn inline_call(ir: &mut IrFile, argument: ExprId) -> ExprId {
+        ir.add_expr(IrExpr::Call {
+            callee: crate::ir::Callee::Static {
+                owner: crate::types::TypeName::from("LibKt"),
+                name: "with".to_string(),
+                descriptor: "(Lkotlin/jvm/functions/Function0;)Ljava/lang/Object;".to_string(),
+                inline: InlineKind::CanInline,
+            },
+            dispatch_receiver: None,
+            args: vec![argument],
+        })
+    }
+
     #[test]
     fn a_suspension_in_this_frame_is_not_one_the_ir_machine_misses() {
         let mut ir = IrFile::default();
@@ -181,8 +279,9 @@ mod tests {
         let mut ir = IrFile::default();
         let point = suspension(&mut ir);
         let lam = lambda(&mut ir, Vec::new(), Some(point));
+        let call = inline_call(&mut ir, lam);
         let body = ir.add_expr(IrExpr::Block {
-            stmts: vec![lam],
+            stmts: vec![call],
             value: None,
         });
         assert_eq!(
@@ -206,8 +305,9 @@ mod tests {
             let capture = suspension(&mut ir);
             let inner = suspension(&mut ir);
             let lam = lambda(&mut ir, vec![capture], spliced.then_some(inner));
+            let call = inline_call(&mut ir, lam);
             let body = ir.add_expr(IrExpr::Block {
-                stmts: vec![lam],
+                stmts: vec![call],
                 value: None,
             });
             let found = spliced_inline_suspensions(&ir, body, &HashSet::new());
@@ -223,10 +323,14 @@ mod tests {
     fn nested_spliced_bodies_are_all_in_this_frame() {
         let mut ir = IrFile::default();
         let inner_point = suspension(&mut ir);
-        let inner = lambda(&mut ir, Vec::new(), Some(inner_point));
-        let outer = lambda(&mut ir, Vec::new(), Some(inner));
+        let inner_call = {
+            let inner = lambda(&mut ir, Vec::new(), Some(inner_point));
+            inline_call(&mut ir, inner)
+        };
+        let outer = lambda(&mut ir, Vec::new(), Some(inner_call));
+        let call = inline_call(&mut ir, outer);
         let body = ir.add_expr(IrExpr::Block {
-            stmts: vec![outer],
+            stmts: vec![call],
             value: None,
         });
         assert_eq!(

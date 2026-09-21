@@ -249,3 +249,42 @@ fn a_suspension_inside_a_spliced_try_region_runs() {
     };
     assert_eq!(output, "OK");
 }
+
+#[test]
+fn probe_stdlib_run_catching() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int = v + 1
+        suspend fun guardedStdlib(v: Int): Int = runCatching { one(v) }.getOrDefault(-1)
+        fun box(): String = runBlocking {
+            val n = guardedStdlib(10)
+            if (n == 11) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("probe_run_catching", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// A PRIVATE member's machine: the continuation cannot call the method directly, so it re-enters
+/// through the synthetic `access$<name>` static, as kotlinc's does.
+#[test]
+fn a_suspension_inside_a_spliced_lambda_of_a_private_member_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int = v + 1
+        class Holder(val base: Int) {
+            private suspend fun step(): Int = twice(base) { one(it) }
+            suspend fun total(): Int = step() + 1
+        }
+        fun box(): String = runBlocking {
+            val n = Holder(10).total()
+            if (n == 24) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_private", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
