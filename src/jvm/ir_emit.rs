@@ -14683,7 +14683,9 @@ impl<'a> Emitter<'a> {
             );
             return;
         }
+        let suspension = self.machine_before(e, code);
         self.emit_value_node(e, node, code);
+        self.machine_after(suspension, code);
         // A successfully spliced bottom-typed expression has already transferred control (for
         // example, an inline lambda's non-local `return`). It leaves no value to discard. The
         // semantic type is retained on the IR expression even when the selected callable's physical
@@ -14699,32 +14701,42 @@ impl<'a> Emitter<'a> {
         // A suspension whose machine emission owns: mark where it landed. The splice decides that
         // position, so an offset recorded before it would be worthless, whereas an instruction
         // travels with the code. Every marker is erased once its answers are read.
-        let suspension = self.machine_suspensions.get(&e).copied();
-        if let Some(ordinal) = suspension {
-            match self.machine.is_some() {
-                // Building the machine: spill first, then the call, then the resume point.
-                true => self.emit_machine_spills(ordinal, code),
-                // Discovering the frame: mark where the splice put this suspension, and keep the
-                // locals held here — the frame where the resume rejoins the body is built from
-                // exactly this view.
-                false => {
-                    if let Ok(marker) = u16::try_from(ordinal) {
-                        code.coroutine_marker(
-                            crate::jvm::classfile::CoroutineMarker::Suspension,
-                            marker,
-                        );
-                    }
-                    let locals = self.verif_locals_upto(self.next_slot);
-                    self.machine_marker_locals.insert(ordinal, locals);
-                }
-            }
-        }
+        let suspension = self.machine_before(e, code);
         let node = self.ir.expr(e).clone();
         self.emit_value_node(e, &node, code);
-        if let Some(ordinal) = suspension {
-            if self.machine.is_some() {
-                self.emit_machine_check(ordinal, code);
+        self.machine_after(suspension, code);
+    }
+
+    /// Open a suspension this emission's machine owns, if `e` is one.
+    ///
+    /// Both the value and the discarding path go through this: a suspension whose result is thrown
+    /// away — `api.stop(id)` as a statement — is a state of the machine like any other, and one
+    /// that never spilled would resume into a frame the dispatch cannot produce.
+    fn machine_before(&mut self, e: u32, code: &mut CodeBuilder) -> Option<usize> {
+        let ordinal = self.machine_suspensions.get(&e).copied()?;
+        match self.machine.is_some() {
+            // Building the machine: spill first, then the call, then the check.
+            true => self.emit_machine_spills(ordinal, code),
+            // Discovering the frame: mark where the splice put this suspension, and keep the locals
+            // held here — the frame where the body is re-entered is built from exactly this view.
+            false => {
+                if let Ok(marker) = u16::try_from(ordinal) {
+                    code.coroutine_marker(
+                        crate::jvm::classfile::CoroutineMarker::Suspension,
+                        marker,
+                    );
+                }
+                let locals = self.verif_locals_upto(self.next_slot);
+                self.machine_marker_locals.insert(ordinal, locals);
             }
+        }
+        Some(ordinal)
+    }
+
+    /// Close a suspension opened by [`Self::machine_before`].
+    fn machine_after(&mut self, suspension: Option<usize>, code: &mut CodeBuilder) {
+        if let (Some(ordinal), true) = (suspension, self.machine.is_some()) {
+            self.emit_machine_check(ordinal, code);
         }
     }
 
