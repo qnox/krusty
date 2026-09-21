@@ -85,12 +85,51 @@ pub(crate) fn frame_suspensions(
     found
 }
 
-/// Whether a SPLICED body suspends inside a `try` that produces a value.
+/// Whether a SPLICED body leaves the enclosing function through a non-local `return`.
 ///
-/// The value-`try` desugar runs over a function body and stops at every lambda, so such an arm keeps
-/// the call's raw `Object` result and is stored straight into the arm's local, which the emitted
-/// frame then describes as a scalar. Until that desugar reaches spliced bodies, a machine must not
-/// claim one.
+/// A `return` inside an inline body is non-local by the time it reaches here: lowering turns a
+/// lambda-local return into a structural exit (`prepare_inline_template`). Under the machine that
+/// return has to yield the CPS `Object` result, and the emitter does not box it yet — the method
+/// fails verification — so a machine must not claim such a body. Without the machine the function
+/// keeps the diagnostic it has today.
+pub(crate) fn spliced_body_returns(ir: &IrFile, body: ExprId, suspend_set: &HashSet<u32>) -> bool {
+    let mut stack = vec![(body, false)];
+    let mut seen = HashSet::new();
+    while let Some((at, spliced)) = stack.pop() {
+        if !seen.insert((at, spliced)) {
+            continue;
+        }
+        match &ir.exprs[at as usize] {
+            IrExpr::Lambda {
+                captures,
+                inline_body,
+                ..
+            } => {
+                for &capture in captures {
+                    stack.push((capture, spliced));
+                }
+                if let Some(&inner) = inline_body.as_ref() {
+                    if holds_a_suspension(ir, inner, suspend_set) {
+                        stack.push((inner, true));
+                    }
+                }
+                continue;
+            }
+            IrExpr::Return(_) if spliced => return true,
+            _ => {}
+        }
+        for_each_child(&ir.exprs, at, &mut |child| stack.push((child, spliced)));
+    }
+    false
+}
+
+/// Whether a SPLICED body still suspends inside a `try` that produces a value, after normalization.
+///
+/// Such an arm keeps the call's raw `Object` result and stores it straight into the arm's local,
+/// which the emitted frame then describes as a scalar. The value-`try` desugar the spliced body
+/// gets (`desugar_spliced_value_try`) binds the arms of a `try` that is the body's own value or a
+/// statement's operand; one nested deeper in an expression (`1 + try { … }`) is not reached, and a
+/// machine must not claim it.
 pub(crate) fn suspends_in_a_value_try(
     ir: &IrFile,
     body: ExprId,

@@ -11382,12 +11382,15 @@ fn emit_method_inner_with_holder(
         // offset is refused once the stream is dead.
         let found = code.marker_positions().unwrap_or_default();
         for (at, kind, ordinal) in found {
-            if kind != crate::jvm::classfile::CoroutineMarker::Join {
-                continue;
-            }
-            // Bind the label the dispatch's restore block jumps to, and record the frame the two
-            // edges share: the entry locals plus what this state restored, with the resumed value
-            // on the stack.
+            let is_resume = match kind {
+                crate::jvm::classfile::CoroutineMarker::Resume => true,
+                crate::jvm::classfile::CoroutineMarker::Join => false,
+                crate::jvm::classfile::CoroutineMarker::Suspension => continue,
+            };
+            // Bind the label the dispatch's restore block jumps to (the resume point) and the join
+            // the two paths out of the suspension meet at, and record their frames: the entry
+            // locals plus what this state restored — with nothing on the stack at the resume
+            // point, and the resumed value at the join.
             let (Some(entry), Some(machine)) = (e.machine_entry_locals.clone(), e.machine.clone())
             else {
                 continue;
@@ -11395,7 +11398,11 @@ fn emit_method_inner_with_holder(
             let Some(suspension) = machine.plan.suspensions.get(ordinal as usize) else {
                 continue;
             };
-            let Some(&join) = e.machine_joins.get(ordinal as usize) else {
+            let target = match is_resume {
+                true => e.machine_resumes.get(ordinal as usize),
+                false => e.machine_joins.get(ordinal as usize),
+            };
+            let Some(&target) = target else {
                 continue;
             };
             let mut restored = expand_collapsed_locals(&entry);
@@ -11408,13 +11415,13 @@ fn emit_method_inner_with_holder(
                 }
                 restored[slot] = verif_of(ir_ty_to_jvm(&ty));
             }
-            // The marker sits AT the join: it is the first instruction there, and becomes `nop`s.
-            code.bind_target_at(join, at);
-            code.add_frame_if_new(
-                join,
-                collapse_locals(&restored),
-                vec![VerifType::ObjectName("java/lang/Object".into())],
-            );
+            // The marker sits AT the position: it is the first instruction there, and becomes `nop`s.
+            code.bind_target_at(target, at);
+            let stack = match is_resume {
+                true => Vec::new(),
+                false => vec![VerifType::ObjectName("java/lang/Object".into())],
+            };
+            code.add_frame_if_new(target, collapse_locals(&restored), stack);
         }
         let _ = code.erase_markers();
         e.emit_machine_states(&resumes, &mut code);
@@ -13037,7 +13044,12 @@ struct Emitter<'a> {
     /// anything. A resume's only predecessor is that dispatch.
     machine_entry_locals: Option<Vec<VerifType>>,
     /// Where each state re-enters the body. The dispatch's restore block jumps here, so these are
-    /// the enclosing method's labels; a `Join` marker says where the splice put each one.
+    /// the enclosing method's labels; a `Resume` marker says where the splice put each one. The
+    /// block there rethrows a failed resumption INSIDE the body, where a `try` around the
+    /// suspension can catch it, then falls into the join.
+    machine_resumes: Vec<Label>,
+    /// Where the two paths out of a suspension meet, with the call's result on the stack; a `Join`
+    /// marker says where the splice put each one.
     machine_joins: Vec<Label>,
     ret: Ty,
     /// Active loops: `(continue target, break target, checked common-IR target identity,
@@ -13128,6 +13140,7 @@ impl<'a> Emitter<'a> {
             machine_suspensions: HashSet::new(),
             machine_next_ordinal: 0,
             machine_entry_locals: None,
+            machine_resumes: Vec::new(),
             machine_joins: Vec::new(),
             machine: None,
             ret,
@@ -13460,6 +13473,7 @@ impl<'a> Emitter<'a> {
                         body: lam_insns,
                         locals: lam_locals_declared,
                         lines: scratch.line_marks().to_vec(),
+                        handlers: scratch.resolved_exceptions(),
                     });
                     let suspends = self.machine_next_ordinal > states_before;
                     if !suspends || bodies.len() >= sites {
@@ -13852,6 +13866,10 @@ impl<'a> Emitter<'a> {
             .map(|_| code.new_label())
             .collect();
         self.machine_joins = joins;
+        let resume_points: Vec<Label> = (0..machine.plan.suspensions.len())
+            .map(|_| code.new_label())
+            .collect();
+        self.machine_resumes = resume_points;
 
         code.bind(body);
         code.add_frame_if_new(body, entry, Vec::new());
@@ -13863,22 +13881,23 @@ impl<'a> Emitter<'a> {
 
     /// The dispatch's states, emitted AFTER the body they re-enter.
     ///
-    /// Each restores its own spills, pushes the resumed value and jumps to the join inside the body,
-    /// so nothing the machine adds sits between the `try` ranges the body declares and the locals
-    /// they describe: a handler's frame claims the body's locals, and an edge from a restore that
-    /// had not run yet cannot produce them. Placing the block after the body also keeps the slot
-    /// allocation identical to the first emission, which is where the plan was read.
+    /// Each restores its own spills and jumps to the resume point inside the body, so nothing the
+    /// machine adds sits between the `try` ranges the body declares and the locals they describe: a
+    /// handler's frame claims the body's locals, and an edge from a restore that had not run yet
+    /// cannot produce them. Placing the block after the body also keeps the slot allocation
+    /// identical to the first emission, which is where the plan was read.
+    ///
+    /// A failed resumption is NOT rethrown here: the block is outside every `try` range the body
+    /// declares, so a `catch` around the suspension would never see the callee's exception. The
+    /// resume point inside the body does that (see [`Self::emit_machine_check`]).
     fn emit_machine_states(&mut self, states: &[Label], code: &mut CodeBuilder) {
         let Some(machine) = self.machine.clone() else {
             return;
         };
         let entry = self.machine_entry_locals.clone().unwrap_or_default();
-        let throw_on_failure =
-            self.cw
-                .methodref("kotlin/ResultKt", "throwOnFailure", "(Ljava/lang/Object;)V");
         for (ordinal, suspension) in machine.plan.suspensions.iter().enumerate() {
-            let (Some(&state), Some(&join)) =
-                (states.get(ordinal), self.machine_joins.get(ordinal))
+            let (Some(&state), Some(&resume)) =
+                (states.get(ordinal), self.machine_resumes.get(ordinal))
             else {
                 continue;
             };
@@ -13906,10 +13925,7 @@ impl<'a> Emitter<'a> {
                 code.aconst_null();
                 code.astore(slot);
             }
-            code.aload(machine.slots.result);
-            code.invokestatic(throw_on_failure, 1, 0);
-            code.aload(machine.slots.result);
-            code.goto(join);
+            code.goto(resume);
         }
     }
 
@@ -13981,15 +13997,31 @@ impl<'a> Emitter<'a> {
         code.if_acmpne(join);
         code.aload(machine.slots.suspended);
         code.areturn();
-        // Where the two paths meet: the call that did not suspend, and the dispatch's restore block
-        // for this state, which arrives with the resumed value on the stack. The marker names the
-        // position for the enclosing method, which owns both the label the restore block jumps to
-        // and the frame — one recorded in this builder would be merged with the host's locals when
-        // the body is relocated, claiming locals the dispatch cannot produce.
+        // The resume point: where the dispatch's restore block re-enters, with the spills restored
+        // and nothing on the stack. A resumption that failed is rethrown HERE, inside the body —
+        // inside any `try` the body wraps around the suspension, which is the only place a `catch`
+        // there can see the callee's exception — and a successful one pushes its value and falls
+        // into the join. kotlinc lays its state out at this same position, for the same reason.
         //
-        // The `areturn` above ended the stream, so the join is bound FIRST: that binding revives
-        // emission (a branch to it was already emitted), and the marker is then live code at the
-        // join's own position — bytes emitted into a dead region are dropped with it.
+        // The `areturn` above ended the stream and nothing in this builder branches here, so the
+        // position is declared an external arrival. The marker names it for the enclosing method,
+        // which owns both the label the restore block jumps to and the frame — one recorded in this
+        // builder would be merged with the host's locals when the body is relocated, claiming locals
+        // the dispatch cannot produce.
+        let resume = code.new_label();
+        code.bind_external_target(resume);
+        code.set_stack_height(0);
+        if let Ok(marker) = u16::try_from(ordinal) {
+            code.coroutine_marker(crate::jvm::classfile::CoroutineMarker::Resume, marker);
+        }
+        let throw_on_failure =
+            self.cw
+                .methodref("kotlin/ResultKt", "throwOnFailure", "(Ljava/lang/Object;)V");
+        code.aload(machine.slots.result);
+        code.invokestatic(throw_on_failure, 1, 0);
+        code.aload(machine.slots.result);
+        // Where the two paths meet: the call that did not suspend, and the resume point above, both
+        // with the call's result on the stack.
         code.bind(join);
         if let Ok(marker) = u16::try_from(ordinal) {
             code.coroutine_marker(crate::jvm::classfile::CoroutineMarker::Join, marker);

@@ -1045,6 +1045,12 @@ pub struct LambdaBody {
     /// The body's own line marks as `(offset into `body`, line)`. These are the CALLER's lines — an
     /// inlined lambda is the caller's source wherever it ends up running.
     pub lines: Vec<(u16, u16)>,
+    /// The body's own exception table as `(start, end, handler, catch_type)`, offsets into `body`
+    /// as built and `catch_type` already in the target pool (the body was built against it). A
+    /// `try` inside the lambda is code inside another method once spliced, and its handler must
+    /// guard the same bytes there: the splice relocates the ranges, because only it knows where
+    /// the body landed and which of its instructions it cancelled away.
+    pub handlers: Vec<(u16, u16, u16, u16)>,
     /// Pre-built lambda body (relocated into the target pool, locals absolute), leaving the lambda's
     /// result boxed to `Object` on the stack — exactly what the replaced `invoke` produced. Branchless
     /// (no frames) in v1.
@@ -2650,6 +2656,52 @@ pub fn splice_unified(
             relocate_const(&body.source_cp, h.catch_type, cw)?
         };
         handlers.push((start, end, handler, catch_type));
+    }
+    // The lambda bodies' own handlers, relocated the same way their locals are below: a body is
+    // spliced verbatim except for the adapter instructions cancelled off its ends, so a range is its
+    // built offset less the cancelled prefix, and one that ran to the body's end now ends where the
+    // spliced bytes do. A handler that landed inside the cancelled prefix guards nothing that exists.
+    for (occurrence, &site) in lambda_sites.iter().enumerate() {
+        let lambda = site_bodies[occurrence];
+        if lambda.handlers.is_empty() {
+            continue;
+        }
+        // A handler is entered with only the exception on the stack: whatever the host held under
+        // the lambda's value (`acc + f(x)`) is gone, and the code after the region would find it
+        // missing. The reference compiler spills that prefix into locals around such a body; this
+        // splice does not yet, so it declines and the lambda stays a closure.
+        if host_states[occurrence]
+            .as_ref()
+            .is_some_and(|(_, stack)| !stack.is_empty())
+        {
+            return None;
+        }
+        let body_start = offs[p + old2new[site]];
+        let prefix = dropped_prefix[occurrence];
+        let suffix = dropped_suffix[occurrence];
+        let built = assemble(&lambda.body).len();
+        let Some(spliced_len) = built.checked_sub(prefix + suffix) else {
+            continue;
+        };
+        for &(start, end, handler, catch_type) in &lambda.handlers {
+            let (Some(start), Some(end), Some(handler)) = (
+                (start as usize).checked_sub(prefix),
+                (end as usize).checked_sub(prefix),
+                (handler as usize).checked_sub(prefix),
+            ) else {
+                return None;
+            };
+            let end = end.min(spliced_len);
+            if start >= end || handler > spliced_len {
+                return None;
+            }
+            handlers.push((
+                body_start + start,
+                body_start + end,
+                body_start + handler,
+                catch_type,
+            ));
+        }
     }
     let falls_through = caller_continuation_reachable(&final_insns, &offs, &handlers)?;
     // The host's live body locals at each lambda's invoke point — the host frame (decoded, before

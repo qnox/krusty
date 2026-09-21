@@ -361,10 +361,7 @@ pub(crate) fn lower_suspend(
         // dispatch, so the two kinds cannot be split between the IR machine and this one. The IR
         // machine never saw the spliced kind, so such a function does not compile today at all.
         let spliced_suspensions: Vec<ExprId> = match (forward, body) {
-            (None, Some(b))
-                if machine_eligible(ir, fid)
-                    && !cps::suspends_in_a_value_try(ir, b, &suspend_set) =>
-            {
+            (None, Some(b)) if machine_eligible(ir, fid) => {
                 match cps::spliced_inline_suspensions(ir, b, &suspend_set).is_empty() {
                     true => Vec::new(),
                     false => cps::frame_suspensions(ir, b, &suspend_set),
@@ -389,18 +386,26 @@ pub(crate) fn lower_suspend(
                 }
             }
         }
-        let emit_time_machine = !spliced_suspensions.is_empty();
-        // Those bodies have never been through suspension hoisting: the passes above stop at a
-        // lambda. Normalize them now, then re-read the suspensions — hoisting rewrites the very
-        // expressions just collected. Each body is typed in its own lambda's value numbering, not
-        // this function's.
-        let spliced_suspensions = match (emit_time_machine, body) {
-            (true, Some(b)) => {
-                hoist_spliced_inline_bodies(ir, b, &suspend_set, &orig_rets);
-                cps::frame_suspensions(ir, b, &suspend_set)
+        // Those bodies have never been through the value-`try` desugar or suspension hoisting: the
+        // passes above stop at a lambda. Normalize them now, then re-read the suspensions — hoisting
+        // rewrites the very expressions just collected. Each body is typed in its own lambda's value
+        // numbering, not this function's. A value-`try` the desugar could not reach (one nested
+        // inside an expression) still keeps the call's raw `Object` in a scalar arm, and a non-local
+        // `return` is not boxed to the CPS result yet; such a body is declined after normalization,
+        // exactly as before the machine existed.
+        let spliced_suspensions = match (spliced_suspensions.is_empty(), body) {
+            (false, Some(b)) => {
+                hoist_spliced_inline_bodies(ir, b, &suspend_set, &orig_rets, &ret_ty);
+                let declined = cps::suspends_in_a_value_try(ir, b, &suspend_set)
+                    || cps::spliced_body_returns(ir, b, &suspend_set);
+                match declined {
+                    true => Vec::new(),
+                    false => cps::frame_suspensions(ir, b, &suspend_set),
+                }
             }
             _ => spliced_suspensions,
         };
+        let emit_time_machine = !spliced_suspensions.is_empty();
         // A `suspendCoroutineUninterceptedOrReturn` block that reads its continuation is a
         // first-class suspension point (common lowering records it separately from callable nodes): the
         // machine passes ITSELF as the continuation, so `it.resume(v)` re-enters this machine at

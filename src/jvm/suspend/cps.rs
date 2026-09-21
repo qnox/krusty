@@ -20,8 +20,8 @@ mod routing;
 pub(crate) use control_graph::{ControlGraph, Handler};
 pub(crate) use frame_types::{FrameTypes, VerificationType};
 pub(crate) use inline_suspension::{
-    frame_suspensions, spliced_inline_suspensions, spliced_suspension_lambda_impls,
-    suspends_in_a_value_try,
+    frame_suspensions, spliced_body_returns, spliced_inline_suspensions,
+    spliced_suspension_lambda_impls, suspends_in_a_value_try,
 };
 pub(crate) use liveness::LocalLiveness;
 pub(crate) use routing::{EmitTimeMachines, SplicedSuspension};
