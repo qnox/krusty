@@ -287,6 +287,8 @@ Working today, each with a fixture in `tests/suspend_in_spliced_inline_e2e.rs`:
 | A spliced lambda's own parameter snapshot, typed in the lambda's numbering | `a_snapshot_of_a_spliced_lambda_parameter_is_typed_by_the_lambda` |
 | A `null`-typed local or operand across the suspension | `a_null_{local,operand}_…_is_rematerialized` |
 | A lambda the inline function invokes at TWO sites (`f(1) + f(2)`, stdlib `maxOf`) | `a_lambda_invoked_at_two_sites_suspends_at_each`, `two_sites_with_different_live_sets_each_spill_their_own`, `…_stdlib_max_of_selector_runs` |
+| A spliced local fed by ANOTHER local (`onEach { susp(it) }`) | `a_local_fed_by_another_local_in_a_spliced_body_is_typed` |
+| A receiver copy of an instance built in place (`buildString { susp() }`) | `a_receiver_copy_in_a_spliced_body_is_typed` |
 
 **A value-`try` in a spliced body** gets the value-`try` desugar a function body gets
 (`desugar_spliced_value_try` in `src/jvm/suspend/hoisting.rs`), before the body is hoisted. A
@@ -342,7 +344,6 @@ ordinals — and `LambdaSplice::bodies` carries one body per site for the splice
 order. A body with no suspension is still built once. The discovery pass and the build pass both
 count sites off the dependency's bytecode (`SplicedFrame::site_counts`), which is what makes the
 numbering reproducible across them; `discover` keeps its duplicate-ordinal check as the safety net.
-
 **A lambda's `inline_body` is not evidence** that its body runs in this frame: lowering attaches one
 wherever it can, including to the lambda of an ordinary function. Only the operand of a call to an
 inline function is spliced, and both the suspension walk and the impl-suppression walk apply that

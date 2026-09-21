@@ -985,3 +985,51 @@ fn a_non_local_return_of_a_value_try_still_declines() {
         common::BackendOutcome::Emitted => panic!("a non-local return under the machine emitted"),
     }
 }
+
+/// A spliced body whose only store into a local is fed by ANOTHER local — `onEach` copies its
+/// receiver, then its lambda's parameter, with `aload`/`astore` pairs. No recorded frame types such
+/// a slot and no call, `checkcast` or `new` produced its value; when spills were typed by reading
+/// frames and producers the machine declined:
+///
+/// ```text
+/// [suspend] discover: slot 7 live at <N> has no type in a frame of <M> slots (stores [58])
+/// ```
+///
+/// The forward analysis carries the source slot's type through the copy.
+#[test]
+fn a_local_fed_by_another_local_in_a_spliced_body_is_typed() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun f(xs: List<Int>): List<Int> = xs.onEach { one(it) }
+        fun box(): String = runBlocking {
+            val xs = f(listOf(1, 2, 3))
+            if (xs == listOf(1, 2, 3)) "OK" else "FAIL: " + xs
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_aload_copy", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// The same shape through a receiver copy: `buildString` stores its `StringBuilder` receiver into a
+/// local the lambda then reads, and the suspension sits between the two. The source of that copy
+/// was built in place — `new StringBuilder; dup; invokespecial <init>; astore` — so the copied
+/// value's type is the instance the constructor initialized, not the call's `void` result.
+#[test]
+fn a_receiver_copy_in_a_spliced_body_is_typed() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun g(): String = buildString { append(one(1)) }
+        fun box(): String = runBlocking {
+            val s = g()
+            if (s == "2") "OK" else "FAIL: " + s
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_receiver_copy", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
