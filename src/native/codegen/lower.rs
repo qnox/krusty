@@ -681,6 +681,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     fn terminate(&mut self) {
         self.terminated = true;
         let dead = self.builder.create_block();
+        // Sealed at birth. Nothing ever branches here — the block exists only to absorb whatever
+        // an abandoned expression is still emitting — and "sealed with no predecessors" is how the
+        // builder RECOGNIZES unreachable code. Without it, leaving this block half-built (which is
+        // exactly what `x + break` does) trips the builder's own "fill your block before
+        // switching" invariant, checked in the one CI run that keeps `debug_assert!` on.
+        self.builder.seal_block(dead);
         self.dead.push(dead);
         self.builder.switch_to_block(dead);
     }
