@@ -5,9 +5,10 @@
 //! the class failed verification at load (`Bad type on operand stack`). A bare `return` in a
 //! `Unit` suspend function has the same hole (`return` where the method expects a value).
 //!
-//! The dependency is krusty-built by default and reference-built under `KRUSTY_REF_KOTLINC=1`;
-//! only the reference loop shape — the accumulator already on the operand stack when the lambda
-//! runs — reproduced the original report, so this fixture is meant to be run both ways.
+//! The dependency is krusty-built by default (the gate) and reference-built under
+//! `KRUSTY_REF_KOTLINC=1`. Both shapes failed before the fix with the same two VerifyErrors; the
+//! reference build is kept meaningful because the original report came from a kotlinc-built loop
+//! that holds the accumulator on the operand stack when the lambda runs.
 
 use super::common;
 

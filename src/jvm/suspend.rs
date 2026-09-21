@@ -6052,6 +6052,12 @@ fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
         // `bipush 100; areturn` (VerifyError: "Bad type on operand stack"), and a bare `return` a void
         // `return` where the `Object` result is expected. So a lambda is NOT a leaf here.
         //
+        // The invariant covers returns that leave the template being spliced. A `return@outer` in a
+        // lambda nested inside another emit-time-spliced lambda is prepared only by the INNER
+        // template (`reachable_checked_returns` stops at a nested lambda), survives as a raw `Return`,
+        // and the emitter realizes it as this method's — a pre-existing gap; boxing it here keeps
+        // that shape at least loadable and is not what makes it wrong.
+        //
         // Return boxing is a tree rewrite, not an IR-shape validator. Use the canonical child relation
         // so adding an unrelated expression kind cannot make an otherwise valid suspend function
         // unsupported. Unsupported coroutine control-flow is rejected by the state-machine flattener,

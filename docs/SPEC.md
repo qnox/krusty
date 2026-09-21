@@ -2289,8 +2289,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Object`. `box_returns` used to stop at `Lambda`, leaving `bipush 100; areturn` (VerifyError: `Bad type
   on operand stack`) and a void `return` where a value is expected; it now walks the lambda's
   `inline_body` too. A plain function returning `Any` was never affected: its coercion is inserted by
-  the lowering. Test: `tests/suspend_inline_splice_nonlocal_return_e2e.rs` (run both krusty-built and
-  `KRUSTY_REF_KOTLINC=1`; only the reference loop shape reproduced the report).
+  the lowering. The invariant is scoped to returns that leave the template being spliced: a
+  `return@outer` inside a lambda nested in ANOTHER emit-time-spliced lambda is prepared only by the
+  inner template and survives as a raw `Return` the emitter realizes as the method's — a pre-existing
+  gap this rule does not close. Test: `tests/suspend_inline_splice_nonlocal_return_e2e.rs`.
 - **`return` inside a `try { … } finally { … }`** now runs each enclosing `finally` (innermost first)
   before transferring control, instead of bailing. The lowerer pushes the `finally` AST onto a
   `try_finally_stack` while lowering the body/catches, and a `Stmt::Return` inside inlines those finallys:
