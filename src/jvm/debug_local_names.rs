@@ -35,6 +35,9 @@ pub(super) fn spliced_lambda_marker_name(
     enclosing: &str,
     ordinal: u32,
 ) -> String {
+    // A debug-table name is an UNQUALIFIED name (JVMS 4.2.2): `/` is illegal in one, and a class
+    // loader rejects the whole class over it. The owner contributes its simple name only.
+    let owner = owner.rsplit('/').next().unwrap_or(owner);
     format!("$i$a$-{callee}-{owner}${enclosing}${}", ordinal + 1)
 }
 
@@ -88,6 +91,16 @@ pub(super) fn render(
 
 #[cfg(test)]
 mod tests {
+    /// A packaged owner contributes only its simple name: a debug-table name may not contain `/`,
+    /// and a class carrying one is rejected at load with `Illegal field name`.
+    #[test]
+    fn a_spliced_lambda_marker_never_carries_a_qualified_owner() {
+        let name =
+            super::spliced_lambda_marker_name("firstOrNull", "lib/Catalog", "findResource", 0);
+        assert_eq!(name, "$i$a$-firstOrNull-Catalog$findResource$1");
+        assert!(!name.contains('/'));
+    }
+
     use super::*;
     use crate::ir::{IrExpr, IrFunction};
     use crate::types::Ty;

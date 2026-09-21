@@ -3412,6 +3412,35 @@ pub fn method_code_diff_against_kotlinc_lib(
     )))
 }
 
+/// Whether `bytes` contains a CALL to `callee` — a method reference an instruction names, rather
+/// than the name appearing anywhere in the class.
+///
+/// A spliced inline function's name still occurs in the class: its inline-depth marker
+/// (`$i$f$<callee>`) is a debug-table entry, and the source map names the file it came from. Those
+/// are not calls, and the reference compiler emits them too, so a byte search for the name answers
+/// a different question from the one a splice test is asking.
+#[allow(dead_code)]
+pub fn class_calls_method(bytes: &[u8], class: &str, callee: &str) -> Option<bool> {
+    let dir = scratch_dir()?;
+    let path = dir.join(format!("{class}.class"));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+    std::fs::write(&path, bytes).ok()?;
+    let out = std::process::Command::new(format!("{}/bin/javap", java_home()))
+        .args(["-p", "-c", "-cp"])
+        .arg(&dir)
+        .arg(class.replace('/', "."))
+        .output()
+        .ok()?;
+    let text = String::from_utf8(out.stdout).ok()?;
+    let _ = std::fs::remove_dir_all(&dir);
+    Some(
+        text.lines()
+            .any(|line| line.contains("// Method ") && line.contains(&format!(".{callee}:"))),
+    )
+}
+
 /// One method's instructions and its `LocalVariableTable`, with constant-pool indices and trailing
 /// comments normalized away.
 ///

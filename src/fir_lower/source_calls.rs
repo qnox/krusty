@@ -962,7 +962,20 @@ impl BodyLowering<'_> {
         } else {
             slots.into_iter().collect::<Option<Vec<_>>>()?
         };
-        let (statements, receiver, args) = if preserve_inline_lambdas {
+        // Only where an inline lambda LITERAL is among the operands: that is the expansion whose
+        // splice stores each remaining operand into the callee's own parameter slot, so a local of
+        // its own is a second copy. An expansion with no such lambda keeps its operand local —
+        // the reference compiler emits one there, and removing it changes which slot the body reads.
+        let substitutes_a_lambda = args.iter().any(|&argument| {
+            matches!(
+                self.ir.expr(argument),
+                IrExpr::Lambda {
+                    inline_body: Some(_),
+                    ..
+                }
+            )
+        });
+        let (statements, receiver, args) = if preserve_inline_lambdas && substitutes_a_lambda {
             self.fold_back_unneeded_operand_locals(statements, receiver, args)
         } else {
             (statements, receiver, args)

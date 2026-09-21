@@ -750,6 +750,10 @@ pub struct ClassWriter {
     major: u16,
     /// Source-file simple name for the `SourceFile` attribute (set via [`ClassWriter::set_source_file`]).
     source_file: Option<String>,
+    /// The JSR-045 source map for a class that contains inlined code, accumulated as each inline
+    /// body is spliced and rendered into `SourceDebugExtension` at the end. A class with nothing
+    /// inlined carries no attribute. See [`crate::jvm::source_map`].
+    source_map: crate::jvm::source_map::SourceMap,
     /// Owner, method name, and descriptor for the `EnclosingMethod` attribute.
     enclosing_method: Option<(String, String, String)>,
     pub internal_name: String,
@@ -861,6 +865,7 @@ impl ClassWriter {
             permitted_subclasses: Vec::new(),
             major: MAJOR_JAVA8,
             source_file: None,
+            source_map: crate::jvm::source_map::SourceMap::default(),
             enclosing_method: None,
             internal_name: internal_name.to_string(),
         }
@@ -878,6 +883,24 @@ impl ClassWriter {
 
     /// Set the source-file simple name for the `SourceFile` attribute (e.g. `Foo.kt`). `None` (the
     /// default) emits no attribute.
+    /// The class's source map, started from the class's own source file the first time an inline
+    /// body is spliced into it. Splicing a dependency's `inline fun` puts that dependency's source
+    /// into this class, and the map is what tells a debugger which file an inlined line belongs to.
+    ///
+    /// `lines` is the highest line the class's own code can claim. `None` when the class has no
+    /// `SourceFile` to map against, in which case its inlined lines cannot be described at all.
+    pub fn source_map_for_inlining(
+        &mut self,
+        lines: u16,
+    ) -> Option<&mut crate::jvm::source_map::SourceMap> {
+        if self.source_map.is_unstarted() {
+            let source_file = self.source_file.clone()?;
+            let path = self.internal_name.clone();
+            self.source_map = crate::jvm::source_map::SourceMap::new(&source_file, &path, lines);
+        }
+        Some(&mut self.source_map)
+    }
+
     pub fn set_source_file(&mut self, name: Option<String>) {
         self.source_file = name;
     }
@@ -2948,6 +2971,13 @@ impl ClassWriter {
             u2(&mut body, file_idx);
             (name, body)
         });
+        // The source map follows `SourceFile`: it names the same thing, one file deeper.
+        let smap_attr = self.source_map.render().map(|smap| {
+            let name = self.cp.utf8("SourceDebugExtension");
+            // JVMS 4.7.11: the attribute body is the modified-UTF-8 bytes themselves, with no
+            // length prefix and no constant-pool entry of their own.
+            (name, smap.into_bytes())
+        });
         // Intern `Deprecated` only if the class or a method carries it; a method's own use already
         // interned it in the per-method sequence above. A CLASS-level one interns here — after
         // `InnerClasses` and `SourceFile`, before `RuntimeVisibleAnnotations` — which is kotlinc's
@@ -2969,6 +2999,22 @@ impl ClassWriter {
         } else {
             None
         };
+        // The source map is also published as a BINARY-retained annotation, which is how a Kotlin
+        // consumer reads it back without parsing the class file's own attribute.
+        if let Some(smap) = self.source_map.render() {
+            let mut body = Vec::new();
+            let annotation = self.cp.utf8("Lkotlin/jvm/internal/SourceDebugExtension;");
+            u2(&mut body, annotation);
+            u2(&mut body, 1); // one element pair
+            let name = self.cp.utf8("value");
+            u2(&mut body, name);
+            body.push(b'['); // an array of one string, which is how kotlinc spells it
+            u2(&mut body, 1);
+            body.push(b's');
+            let value = self.cp.utf8(&smap);
+            u2(&mut body, value);
+            self.invisible_annotations.push(body);
+        }
         // ONE `RuntimeInvisibleAnnotations` for the BINARY-retained class annotations, written directly
         // after the visible ones — the order kotlinc emits them in.
         let ria_attr = if !self.invisible_annotations.is_empty() {
@@ -3238,6 +3284,7 @@ impl ClassWriter {
             [
                 enclosing_method_attr,
                 sourcefile_attr,
+                smap_attr,
                 deprecated_attr,
                 rva_attr,
                 ria_attr,

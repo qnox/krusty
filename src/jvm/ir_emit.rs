@@ -56,6 +56,10 @@ struct InlineStaticTarget<'a> {
     name: &'a str,
     descriptor: &'a str,
     splice_desc: &'a str,
+    /// An `@InlineOnly` callee, which contributes NO debug information to the caller: the reference
+    /// compiler gives such a body no inline-depth marker, no locals, no line entries and no source
+    /// map, so that it is invisible in a stack trace. Splicing one must be equally invisible.
+    inline_only: bool,
 }
 
 /// kotlinc realizes a NAMED `object` declaration's property backing fields as STATIC fields on the
@@ -12937,7 +12941,9 @@ impl<'a> Emitter<'a> {
     fn try_inline_unified(
         &mut self,
         call_expression: u32,
+        owner: &str,
         callee: &str,
+        inline_only: bool,
         descriptor: &str,
         args: &[u32],
         body: &crate::jvm::classreader::MethodCode,
@@ -12958,27 +12964,6 @@ impl<'a> Emitter<'a> {
         if params.len() != args.len() {
             return false;
         }
-        // Each substituted lambda's parameter slot is closed by the splice (its body replaces the
-        // `invoke`), so the relocated body occupies that many slots fewer.
-        let spliced_away = args
-            .iter()
-            .enumerate()
-            .filter(|(i, &argument)| {
-                *i < params.len()
-                    && matches!(
-                        self.ir.expr(argument),
-                        IrExpr::Lambda {
-                            inline_body: Some(_),
-                            ..
-                        }
-                    )
-            })
-            .count() as u16;
-        let top_local = base + body.max_locals.saturating_sub(spliced_away);
-        self.next_slot = self.next_slot.max(top_local);
-        // Where each substituted lambda's own locals go. Not `top_local`: the reference compiler
-        // puts them at the first slot free WHERE THE INVOKE IS, reusing slots belonging to host
-        // locals that are not live yet, so a body inlined before such a local lands one slot lower.
         let lambda_parameters: Vec<usize> = args
             .iter()
             .enumerate()
@@ -12993,12 +12978,17 @@ impl<'a> Emitter<'a> {
             })
             .map(|(i, _)| i)
             .collect();
-        let lambda_slot_bases = crate::jvm::inline::spliced_lambda_slot_bases(
-            body,
-            descriptor,
-            &lambda_parameters,
-            base,
-        );
+        // ONE plan for the caller frame: where the relocated host body ends, and where each
+        // substituted lambda's own locals begin. A substituted lambda's parameter slot is closed by
+        // the splice, so the body occupies that many slots fewer; and a lambda's locals go at the
+        // first slot free WHERE ITS INVOKE IS, not above every host local, because the reference
+        // compiler reuses slots belonging to host locals that are not written yet.
+        let spliced_frame =
+            crate::jvm::inline::spliced_frame(body, descriptor, &lambda_parameters, base);
+        let top_local = spliced_frame
+            .as_ref()
+            .map_or(base + body.max_locals, |frame| frame.top_local);
+        self.next_slot = self.next_slot.max(top_local);
         // Build each lambda argument's pre-relocated body (leaving its boxed result on the stack), and
         // its own (branchy-predicate) frames — resolved to byte offsets within the body, relocated below.
         let mut lam_splices: Vec<crate::jvm::inline::LambdaSplice> = Vec::new();
@@ -13015,7 +13005,7 @@ impl<'a> Emitter<'a> {
         let mut lam_max_stack = 0u16;
         for (i, &a) in args.iter().enumerate() {
             let mut scratch = CodeBuilder::new(self.next_slot);
-            let (lam_insns, lam_fr, lam_locals_declared) = if let IrExpr::Lambda {
+            let (lam_insns, lam_fr, lam_locals_declared, lam_lines) = if let IrExpr::Lambda {
                 impl_fn,
                 arity,
                 captures,
@@ -13101,10 +13091,19 @@ impl<'a> Emitter<'a> {
                     .iter()
                     .position(|&parameter| parameter == i)
                     .expect("a substituted lambda is one of the collected lambda parameters");
-                let mut lambda_slot = lambda_slot_bases
+                // Above the host's frame, and above every slot this lambda's own captures occupy:
+                // a capture is live for the whole body that reads it, so a parameter placed on one
+                // overwrites the value the body was given.
+                let capture_ceiling = cap_slots
+                    .iter()
+                    .map(|&(slot, ty)| slot + slot_words(ty))
+                    .max()
+                    .unwrap_or(0);
+                let mut lambda_slot = spliced_frame
                     .as_ref()
-                    .and_then(|bases| bases.get(ordinal).copied())
-                    .unwrap_or(self.next_slot);
+                    .and_then(|frame| frame.lambda_bases.get(ordinal).copied())
+                    .unwrap_or(self.next_slot)
+                    .max(capture_ceiling);
                 let mut param_slots: Vec<(u16, Ty)> = cap_slots;
                 param_slots.extend(std::iter::repeat_n((0u16, Ty::Error), arity));
                 for j in (0..arity).rev() {
@@ -13189,7 +13188,12 @@ impl<'a> Emitter<'a> {
                 ) else {
                     return false;
                 };
-                (lam_insns, lam_fr, lam_locals_declared)
+                (
+                    lam_insns,
+                    lam_fr,
+                    lam_locals_declared,
+                    scratch.line_marks().to_vec(),
+                )
             } else {
                 continue;
             };
@@ -13203,11 +13207,16 @@ impl<'a> Emitter<'a> {
                 param_index: i,
                 body: lam_insns,
                 locals: lam_locals_declared,
+                lines: lam_lines,
             });
         }
         if lam_splices.is_empty() {
             return false; // no lambda argument — not this path
         }
+        let lam_bodies: Vec<Vec<crate::jvm::inline::Insn>> = lam_splices
+            .iter()
+            .map(|splice| splice.body.clone())
+            .collect();
         // Probe at offset 0 to learn whether frames are needed (HOST branchy OR any lambda BODY branchy).
         let Some(probe) = crate::jvm::inline::splice_unified(
             body,
@@ -13271,7 +13280,15 @@ impl<'a> Emitter<'a> {
                 ret_words,
                 probe.falls_through,
             );
-            self.record_spliced_locals(&probe.locals, splice_start, code);
+            self.record_spliced_lines(
+                &probe.lines,
+                owner,
+                body.source_file.as_deref(),
+                inline_only,
+                splice_start,
+                code,
+            );
+            self.record_spliced_locals(&probe.locals, inline_only, splice_start, code);
             return true;
         }
         // RE-splice at the real method offset (so any switch in the host/lambda body pads correctly), then
@@ -13313,9 +13330,21 @@ impl<'a> Emitter<'a> {
                 .as_ref()
                 .map(|p| p.iter().map(vtype_to_verif).collect())
                 .unwrap_or_default();
+            // The body's frames are byte offsets into it AS BUILT; its final layout is not that
+            // layout shifted by a constant, so each one travels through its instruction index.
+            let built = crate::jvm::inline::insn_offsets_at(&lam_bodies[site.lambda_index], 0);
             for (fb, locals, stack) in frames {
-                let off = site.byte_start + fb;
-                let merged = self.merge_lambda_frame_locals(base, top_local, host_ctx, locals);
+                let Some(index) = built.iter().position(|&at| at == *fb) else {
+                    return false;
+                };
+                let Some(&off) = site.body_offsets.get(index) else {
+                    return false;
+                };
+                let lambda_base = spliced_frame
+                    .as_ref()
+                    .and_then(|frame| frame.lambda_bases.get(site.lambda_index).copied())
+                    .unwrap_or(top_local);
+                let merged = self.merge_lambda_frame_locals(base, lambda_base, host_ctx, locals);
                 let merged = self.overlay_frame_locals(merged, &capture_frame_locals);
                 let mut st = op_prefix.clone();
                 st.extend(stack.iter().cloned());
@@ -13341,7 +13370,15 @@ impl<'a> Emitter<'a> {
             ret_words,
             bs.falls_through,
         );
-        self.record_spliced_locals(&bs.locals, 0, code);
+        self.record_spliced_lines(
+            &bs.lines,
+            owner,
+            body.source_file.as_deref(),
+            inline_only,
+            0,
+            code,
+        );
+        self.record_spliced_locals(&bs.locals, inline_only, 0, code);
         if bs.join_required {
             let join = code.new_label();
             self.bind(join, code);
@@ -13375,6 +13412,65 @@ impl<'a> Emitter<'a> {
         collapse_locals(&slots)
     }
 
+    /// Record a spliced body's line marks, mapping the dependency's lines into output lines the
+    /// caller's source map gives meaning to.
+    ///
+    /// The dependency's own numbers cannot be written down as they are: two files would then claim
+    /// the same lines. The map reserves a fresh output range for this region and says where it came
+    /// from, which is what a debugger reads back. A spliced lambda's marks are the caller's own
+    /// source and pass through untouched.
+    fn record_spliced_lines(
+        &mut self,
+        lines: &[(u16, u16, bool)],
+        owner: &str,
+        source_file: Option<&str>,
+        inline_only: bool,
+        shift: usize,
+        code: &mut CodeBuilder,
+    ) {
+        if lines.is_empty() {
+            return;
+        }
+        // An `@InlineOnly` body is meant to be invisible: the reference compiler gives it no line
+        // entries and no source map, so a stack trace never names it.
+        let source_file = (!inline_only).then_some(source_file).flatten();
+        let dependency = lines.iter().filter(|(_, _, inlined)| *inlined);
+        let first = dependency.clone().map(|&(_, line, _)| line).min();
+        let last = dependency.map(|&(_, line, _)| line).max();
+        let call_line = code.current_line().unwrap_or(1);
+        // The highest line the class's own code can claim. `source_line_count` already counts the
+        // position past the last line, where a synthesized mark (a closing brace's implicit return)
+        // is recorded.
+        let claimable = u16::try_from(self.ir.source_line_count)
+            .unwrap_or(u16::MAX)
+            .max(1);
+        let offset = match (source_file, first, last) {
+            (Some(source_file), Some(first), Some(last)) => self
+                .cw
+                .source_map_for_inlining(claimable)
+                .and_then(|map| map.inline_region(source_file, owner, first, last, call_line)),
+            // Without the dependency's file name there is nothing to map its lines against, so its
+            // marks are dropped rather than written as lines of the caller's own file.
+            _ => None,
+        };
+        for &(at, line, inlined) in lines {
+            let Ok(at) = u16::try_from(at as usize + shift) else {
+                continue;
+            };
+            if !inlined {
+                code.add_line_mark_at(at, line);
+                continue;
+            }
+            let Some(offset) = offset else {
+                continue;
+            };
+            let Ok(output) = u16::try_from(i32::from(line) + offset) else {
+                continue;
+            };
+            code.add_line_mark_at(at, output);
+        }
+    }
+
     /// Describe a spliced body's own locals in the caller's debug table.
     ///
     /// They are real locals of the method that now contains them; the reference compiler names every
@@ -13383,10 +13479,12 @@ impl<'a> Emitter<'a> {
     fn record_spliced_locals(
         &self,
         locals: &[(u16, u16, u16, String, String)],
+        inline_only: bool,
         shift: usize,
         code: &mut CodeBuilder,
     ) {
-        if !self.record_locals {
+        // An `@InlineOnly` body contributes no debug locals either, for the same reason.
+        if !self.record_locals || inline_only {
             return;
         }
         for (start, length, slot, name, descriptor) in locals {
@@ -13404,22 +13502,24 @@ impl<'a> Emitter<'a> {
     fn merge_lambda_frame_locals(
         &mut self,
         base: u16,
-        top_local: u16,
+        lambda_base: u16,
         host_ctx: &[crate::jvm::inline::VType],
         lam_locals: &[VerifType],
     ) -> Vec<VerifType> {
         let mut slots = self.verif_slots_upto(base); // 0..base caller locals (slot-indexed)
-                                                     // The host's live locals at `base..` (slot-indexed), then pad to `top_local` with `Top`.
+                                                     // The host's live locals at `base..`, then pad to where the lambda's own begin.
         let host_collapsed: Vec<VerifType> = host_ctx.iter().map(vtype_to_verif).collect();
         slots.extend(expand_collapsed_locals(&host_collapsed));
-        slots.truncate(top_local as usize);
-        while slots.len() < top_local as usize {
+        slots.truncate(lambda_base as usize);
+        while slots.len() < lambda_base as usize {
             slots.push(VerifType::Top);
         }
-        // The lambda's own slots (`top_local..`): expand the scratch frame, take from `top_local`.
+        // The lambda's own slots. They begin where the splice placed them — which is at the first
+        // slot the host no longer needs, NOT above the host's whole frame — so a frame that took
+        // them from the host's extent would leave the lambda's own parameters undescribed.
         for s in expand_collapsed_locals(lam_locals)
             .into_iter()
-            .skip(top_local as usize)
+            .skip(lambda_base as usize)
         {
             slots.push(s);
         }
@@ -13499,6 +13599,7 @@ impl<'a> Emitter<'a> {
             name,
             descriptor,
             splice_desc,
+            inline_only,
         } = target;
         crate::trace_compiler!(
             "splice",
@@ -13565,7 +13666,9 @@ impl<'a> Emitter<'a> {
             if body_invokes_lambda {
                 return self.try_inline_unified(
                     call_expression,
+                    owner,
                     name,
+                    inline_only,
                     splice_desc,
                     args,
                     &body,
@@ -13627,7 +13730,15 @@ impl<'a> Emitter<'a> {
                 ret_words,
                 probe.falls_through,
             );
-            self.record_spliced_locals(&probe.locals, splice_start, code);
+            self.record_spliced_lines(
+                &probe.lines,
+                owner,
+                body.source_file.as_deref(),
+                inline_only,
+                splice_start,
+                code,
+            );
+            self.record_spliced_locals(&probe.locals, inline_only, splice_start, code);
             return true;
         }
         // Branchy body: needs an empty operand-stack baseline (the relocated frames carry no stack
@@ -13666,7 +13777,6 @@ impl<'a> Emitter<'a> {
         bind_inline_handlers(code, &bs.handlers);
         code.set_needs_stackmap();
         let ret_words = if bs.falls_through { ret_words } else { 0 };
-        self.record_spliced_locals(&bs.locals, 0, code);
         code.splice_inline(
             &bs.bytes,
             &bs.external_branches,
@@ -13676,6 +13786,15 @@ impl<'a> Emitter<'a> {
             ret_words,
             bs.falls_through,
         );
+        self.record_spliced_lines(
+            &bs.lines,
+            owner,
+            body.source_file.as_deref(),
+            inline_only,
+            0,
+            code,
+        );
+        self.record_spliced_locals(&bs.locals, inline_only, 0, code);
         // Join frame: the redirected returns land at the continuation right after the spliced body.
         let join = code.new_label();
         self.bind(join, code);
@@ -16012,6 +16131,7 @@ impl<'a> Emitter<'a> {
                                 name: &name,
                                 descriptor: &descriptor,
                                 splice_desc: &splice_desc,
+                                inline_only: inline.must_inline(),
                             };
                             self.try_inline_static_as(e, target, &all, code, true, &reified)
                         } else {
@@ -16025,6 +16145,7 @@ impl<'a> Emitter<'a> {
                                 name: &name,
                                 descriptor: &descriptor,
                                 splice_desc: &descriptor,
+                                inline_only: inline.must_inline(),
                             };
                             self.try_inline_static_as(
                                 e,

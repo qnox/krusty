@@ -27,7 +27,7 @@
 //! own parameters — its continuation would also have to capture them) skip the file.
 
 mod bottom_completion;
-mod cps;
+pub(crate) mod cps;
 mod debug_metadata;
 mod get_or_create;
 mod hoisting;
