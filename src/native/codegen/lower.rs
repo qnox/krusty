@@ -433,6 +433,7 @@ impl<'a> FileLowering<'a> {
                     values: HashMap::new(),
                     result: carried,
                     result_type: result,
+                    unit_values: std::collections::HashSet::new(),
                     loops: Vec::new(),
                     terminated: false,
                     handlers: Vec::new(),
@@ -608,6 +609,11 @@ struct BodyLowering<'a, 'b, 'c> {
     builder: &'b mut FunctionBuilder<'c>,
     /// Kotlin value slot → Cranelift variable and its declared type.
     values: HashMap<u32, (Variable, Ty)>,
+    /// Slots of locals whose type is `Unit`. They hold no machine value — there is one `Unit` and
+    /// the runtime owns it — so there is no variable to declare, but the local is still READABLE:
+    /// `val u = println("x"); u.toString()` is "kotlin.Unit". The slot is remembered so a read
+    /// answers the `Unit` value rather than a missing declaration.
+    unit_values: std::collections::HashSet<u32>,
     result: Carrier,
     /// The declared result TYPE behind [`Self::result`]. A `return` whose value arrives in another
     /// representation is converted into this, which the carrier alone cannot name.
@@ -853,6 +859,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     if let Some(init) = init {
                         self.expression(init)?;
                     }
+                    // Nothing to declare and something to remember: the local exists, and reading
+                    // it must answer `Unit` rather than report a slot that was never declared.
+                    self.unit_values.insert(index);
                     return Ok(());
                 }
                 let variable = self.declare_value(index, ty)?;
@@ -873,6 +882,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 }
             }
             IrExpr::SetValue { var, value } => {
+                if self.unit_values.contains(&var) {
+                    // A `Unit`-typed local stores nothing, so the assignment is its right-hand
+                    // side's effect and no more.
+                    self.expression(value)?;
+                    return Ok(());
+                }
                 let Some(&(variable, ty)) = self.values.get(&var) else {
                     return Err("an assignment to an undeclared local".to_string());
                 };
@@ -990,6 +1005,33 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// `while`, `do…while`, and the shape a lowered `for` takes: a loop whose `update` runs after
     /// the body at the `continue` target. Every jump is a real edge here — the `goto` scaffolding
     /// the C emitter needed for labels and updates is just what a control-flow graph is.
+    /// A loop's test, emitted into the block the current position is in: go round again or leave.
+    /// A condition that is never false takes no test at all, which is what keeps the exit of a
+    /// `while (true)` out of the graph.
+    fn loop_test(
+        &mut self,
+        cond: u32,
+        always: bool,
+        body_block: Block,
+        exit: Block,
+    ) -> Result<(), Unsupported> {
+        if always {
+            self.builder.ins().jump(body_block, &[]);
+            return Ok(());
+        }
+        let condition = self.expression(cond)?;
+        if self.terminated {
+            return Ok(());
+        }
+        let Some(condition) = condition else {
+            return Err("a loop condition of no value".to_string());
+        };
+        self.builder
+            .ins()
+            .brif(condition, body_block, &[], exit, &[]);
+        Ok(())
+    }
+
     fn loop_statement(
         &mut self,
         cond: u32,
@@ -1015,19 +1057,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             .ins()
             .jump(if post_test { body_block } else { header }, &[]);
 
-        self.continue_in(header);
-        if always {
-            self.builder.ins().jump(body_block, &[]);
-        } else {
-            let condition = self.expression(cond)?;
-            if !self.terminated {
-                let Some(condition) = condition else {
-                    return Err("a loop condition of no value".to_string());
-                };
-                self.builder
-                    .ins()
-                    .brif(condition, body_block, &[], exit, &[]);
-            }
+        // A PRE-test loop asks its condition before the body runs, so the condition is lowered
+        // first. A POST-test one asks it after — and Kotlin scopes a `do`-block's locals into the
+        // `while`, so the condition may READ what the body declares. Lowering it here would look
+        // for a slot the body has not reached yet, which is why it waits until below. The BLOCK is
+        // the same either way; only when it is filled differs.
+        if !post_test {
+            self.continue_in(header);
+            self.loop_test(cond, always, body_block, exit)?;
         }
 
         self.loops.push(LoopFrame {
@@ -1049,7 +1086,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.builder.ins().jump(header, &[]);
             }
         }
+        // Popped BEFORE the post-test condition for the same reason the pre-test one is lowered
+        // before the push: a jump written in a condition leaves the enclosing loop, not this one.
         let broken = self.loops.pop().is_some_and(|frame| frame.broken);
+        if post_test {
+            self.continue_in(header);
+            self.loop_test(cond, always, body_block, exit)?;
+        }
 
         // Nothing branches to the exit of a loop that is never false and never broken, so there is
         // no position after it to continue in.
@@ -1225,6 +1268,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrExpr::Const(constant) => self.constant(&constant).map(Some),
             IrExpr::UnitInstance => Ok(None),
             IrExpr::GetValue(slot) => {
+                if self.unit_values.contains(&slot) {
+                    // `Unit` in value position: no machine value, exactly as a `Unit`-returning
+                    // call produces none. A position that wants a reference gets the runtime's
+                    // singleton from `coerce`, which is where every other `Unit` value comes from.
+                    return Ok(None);
+                }
                 let Some(&(variable, _)) = self.values.get(&slot) else {
                     return Err("a read of an undeclared local".to_string());
                 };
@@ -1782,7 +1831,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 IrConst::Null => Ty::Null,
             },
             IrExpr::UnitInstance => Ty::Unit,
-            IrExpr::GetValue(slot) => self.values.get(slot)?.1,
+            IrExpr::GetValue(slot) => match self.values.get(slot) {
+                Some(&(_, ty)) => ty,
+                None if self.unit_values.contains(slot) => Ty::Unit,
+                None => return None,
+            },
             IrExpr::TypeOp {
                 op, type_operand, ..
             } => match op {

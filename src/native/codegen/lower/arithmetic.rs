@@ -232,8 +232,13 @@ impl BodyLowering<'_, '_, '_> {
         if matches!(op, IrBinOp::Eq | IrBinOp::Ne) {
             let against_null = matches!(self.file.ir.expr(lhs), IrExpr::Const(IrConst::Null))
                 || matches!(self.file.ir.expr(rhs), IrExpr::Const(IrConst::Null));
-            let on_references = lhs_ty.map(carrier) == Some(Carrier::Ref)
-                || rhs_ty.map(carrier) == Some(Carrier::Ref);
+            // `Unit` counts as a reference here: it is a VALUE in Kotlin, the runtime owns the one
+            // instance of it, and `reference` materializes that singleton for an operand that
+            // produces no machine value. `println("x") == Unit` is true, and comparing the two
+            // through the ordinary reference path is what says so.
+            let reference_operand =
+                |ty: Option<Ty>| matches!(ty.map(carrier), Some(Carrier::Ref | Carrier::Void));
+            let on_references = reference_operand(lhs_ty) || reference_operand(rhs_ty);
             if against_null {
                 // `x == null` is `x === null` in Kotlin: no `equals` is ever called.
                 let left = self.reference(lhs)?;

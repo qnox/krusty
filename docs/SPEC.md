@@ -7357,6 +7357,33 @@ and behavior is checked by RUNNING the emitted program.
   `codegen/box/properties/{primitiveOverrideDefaultAccessor,primitiveOverrideDelegateAccessor}.kt`.
   `bridges/test5.kt` and `bridges/test15.kt` leave the expected-failure ledger with it.
 
+- **A `Unit`-typed local holds no machine value and is still readable.** `Unit` is a VALUE in
+  Kotlin and the runtime owns the one instance of it, so a local of that type has nothing to put in
+  a variable — the declaration is dropped and its initializer runs for its effect alone. That left
+  every later mention of the local reporting a slot that was never declared, so
+  `val u = println("x"); u.toString()` was declined where Kotlin answers `"kotlin.Unit"`. The slot
+  is now remembered as a `Unit` one: a read produces no value, exactly as a `Unit`-returning call
+  does, and a position wanting a reference gets the singleton from the same place every other
+  `Unit` value comes from. An assignment to such a local is its right-hand side's effect and no
+  more.
+
+  `==` counts a `Unit` operand as a reference for the same reason: `println("x") == Unit` is true,
+  and the ordinary reference path says so once the singleton is materialized.
+  Tests: `tests/native_codegen_e2e.rs` (`a_unit_typed_local_is_still_a_value_that_can_be_read`);
+  the corpus cases are `codegen/box/basics/{unit1,unit2,unchecked_cast10}.kt` and
+  `codegen/box/controlStructures/kt237.kt`.
+
+- **A `do`-`while` condition may read what its body declares.** Kotlin scopes a `do`-block's locals
+  into the `while` that closes it, so the condition is the one place a loop test reads a local the
+  BODY declares — `do { val limit = x + 5 } while (limit < 10)`. The test was lowered before the
+  body whatever the loop's shape, so those reads found a slot that did not exist yet. The block the
+  test fills is the same either way; only WHEN it is filled changes, and a post-test loop fills it
+  after the body and the update. The loop frame is popped before that, for the same reason the
+  pre-test condition is lowered before it is pushed: a jump written in a condition leaves the
+  ENCLOSING loop, not this one.
+  Tests: `tests/native_codegen_e2e.rs` (`a_do_while_condition_reads_what_its_body_declares`); the
+  corpus case is `codegen/box/controlStructures/kt3280.kt`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

@@ -2698,3 +2698,60 @@ fn an_interface_property_implemented_at_another_representation_is_bridged() {
     common::expect_box_ok_with_stdlib(source, "IfaceProp");
     common::expect_native_box(source, "IfaceProp", "OK");
 }
+
+#[test]
+fn a_unit_typed_local_is_still_a_value_that_can_be_read() {
+    // `Unit` is a VALUE in Kotlin and the runtime owns the one instance of it, so a local of that
+    // type holds no machine value — there is nothing to put in a variable. It is still readable:
+    // the declaration was dropped and every later mention of the local reported a slot that was
+    // never declared. A read now answers `Unit`, which a position wanting a reference turns into
+    // the singleton, exactly as a `Unit`-returning call's result does.
+    let source = "fun sideEffect(text: String): Unit {}\n\
+         fun explicit() {\n\
+         \x20   return Unit\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val answered = sideEffect(\"first\")\n\
+         \x20   if (answered.toString() != \"kotlin.Unit\") return \"fail 1: $answered\"\n\
+         \x20   val returned = explicit()\n\
+         \x20   if (returned.toString() != \"kotlin.Unit\") return \"fail 2: $returned\"\n\
+         \x20   val written: Unit = Unit\n\
+         \x20   if (written != Unit) return \"fail 3\"\n\
+         \x20   if (answered != returned) return \"fail 4\"\n\
+         \x20   if (answered !== Unit) return \"fail 5\"\n\
+         \x20   val widened: Any = answered\n\
+         \x20   if (widened !== Unit) return \"fail 6\"\n\
+         \x20   var reassigned: Unit = Unit\n\
+         \x20   reassigned = sideEffect(\"second\")\n\
+         \x20   if (reassigned.toString() != \"kotlin.Unit\") return \"fail 7\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "UnitLocal");
+    common::expect_native_box(source, "UnitLocal", "OK");
+}
+
+#[test]
+fn a_do_while_condition_reads_what_its_body_declares() {
+    // Kotlin scopes a `do`-block's locals into the `while` that closes it, so the condition is the
+    // one place a loop test may read a local the BODY declares. The test was lowered before the
+    // body whatever the loop's shape, so those reads found a slot that did not exist yet. The
+    // block it fills is the same; only when it is filled changes.
+    let source = "fun box(): String {\n\
+         \x20   var x = 0\n\
+         \x20   do {\n\
+         \x20       x++\n\
+         \x20       val limit = x + 5\n\
+         \x20   } while (limit < 10)\n\
+         \x20   if (x != 5) return \"fail 1: $x\"\n\
+         \x20   var rounds = 0\n\
+         \x20   do {\n\
+         \x20       val left = \"X\"\n\
+         \x20       val right = \"Y\"\n\
+         \x20       rounds++\n\
+         \x20   } while (left + right != \"XY\")\n\
+         \x20   if (rounds != 1) return \"fail 2: $rounds\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "DoWhileScope");
+    common::expect_native_box(source, "DoWhileScope", "OK");
+}
