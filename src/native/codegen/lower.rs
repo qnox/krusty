@@ -2537,6 +2537,52 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                                 return self.runtime_call(symbol, &[any()], *ret, &[value]);
                             }
                         }
+                        // `s.startsWith(t)`, `s.endsWith(t)` and `t in s`, whose last parameter
+                        // is Kotlin's `ignoreCase`. The default reaches here as a CONSTANT
+                        // argument rather than as an absent one, so the case-sensitive form — the
+                        // only one the runtime answers — is recognizable right here: a literal
+                        // `false` and nothing else. Anything else asks about Unicode case folding,
+                        // which the runtime holds no table for, and declines below by name.
+                        if let Some(symbol) =
+                            super::super::intrinsics::case_sensitive_text_member(
+                                &owner, &name, params,
+                            )
+                        {
+                            // `ignoreCase` has a DEFAULT, and the two providers hand that over
+                            // differently: a klib call materializes the default as a constant
+                            // argument, a jar call leaves the argument out. Both mean the same
+                            // thing — the case-sensitive form — and reading the argument list
+                            // rather than the signature is what makes them the same answer.
+                            let sensitive = match args.len() {
+                                given if given + 1 == params.len() => true,
+                                given if given == params.len() => {
+                                    args.last().is_some_and(|flag| {
+                                        matches!(
+                                            self.file.ir.expr(*flag),
+                                            IrExpr::Const(IrConst::Boolean(false))
+                                        )
+                                    })
+                                }
+                                _ => false,
+                            };
+                            if sensitive {
+                                let arguments =
+                                    vec![self.reference(receiver)?, self.reference(args[0])?];
+                                if self.terminated {
+                                    return Ok(None);
+                                }
+                                let produced = self.runtime_call(
+                                    symbol,
+                                    &[any(), any()],
+                                    Ty::Boolean,
+                                    &arguments,
+                                )?;
+                                let Some(produced) = produced else {
+                                    return Ok(None);
+                                };
+                                return self.convert(produced, Some(Ty::Boolean), *ret);
+                            }
+                        }
                         // A member that asks about a NUMBER rather than an object, carried as one:
                         // `s[i]` must not box its index to reach the runtime.
                         if let Some((symbol, carried, answer)) =

@@ -438,6 +438,264 @@ KRef kt_string_remove_suffix(KRef self, KRef suffix) {
     return kt_string_of(self->as.string.storage, bytes, length - tail);
 }
 
+/* The code point beginning at byte `at`, with the width of its encoding written to `width`.
+
+   The UTF-16 walk above answers in UNITS, which is what Kotlin counts; the questions below —
+   whitespace, reversal — are about CHARACTERS, and a character above U+FFFF is one of those and
+   two of the other. Decoding once per character rather than per unit is what keeps a surrogate
+   pair from being split by an operation that has no business splitting it. */
+static uint32_t kt_code_point_at(const char *bytes, kt_int at, kt_int *width) {
+    unsigned char lead = (unsigned char)bytes[at];
+    if (lead < 0x80u) {
+        *width = 1;
+        return lead;
+    }
+    if (lead < 0xE0u) {
+        *width = 2;
+        return ((uint32_t)(lead & 0x1Fu) << 6) | ((unsigned char)bytes[at + 1] & 0x3Fu);
+    }
+    if (lead < 0xF0u) {
+        *width = 3;
+        return ((uint32_t)(lead & 0x0Fu) << 12)
+               | (((uint32_t)(unsigned char)bytes[at + 1] & 0x3Fu) << 6)
+               | ((unsigned char)bytes[at + 2] & 0x3Fu);
+    }
+    *width = 4;
+    return ((uint32_t)(lead & 0x07u) << 18)
+           | (((uint32_t)(unsigned char)bytes[at + 1] & 0x3Fu) << 12)
+           | (((uint32_t)(unsigned char)bytes[at + 2] & 0x3Fu) << 6)
+           | ((unsigned char)bytes[at + 3] & 0x3Fu);
+}
+
+/* Kotlin's `Char.isWhitespace()`, which is Java's `isWhitespace(c) || isSpaceChar(c)` — the UNION,
+   so the non-breaking spaces that `isWhitespace` alone excludes (U+00A0, U+2007, U+202F) are
+   whitespace here. Listing the code points is the whole of the definition: the set is closed and
+   small, and a table lookup into a Unicode database would answer the same thing at more cost. */
+static kt_boolean kt_is_whitespace(uint32_t code) {
+    if (code <= 0x20u) {
+        /* Tab, the line breaks, and the file/group/record/unit separators, plus the space. */
+        return (code >= 0x09u && code <= 0x0Du) || (code >= 0x1Cu && code <= 0x20u);
+    }
+    if (code >= 0x2000u && code <= 0x200Au) {
+        return 1;
+    }
+    return code == 0x85u || code == 0xA0u || code == 0x1680u || code == 0x2028u
+           || code == 0x2029u || code == 0x202Fu || code == 0x205Fu || code == 0x3000u;
+}
+
+/* A string over the receiver's bytes from `from` (inclusive) to `to`, sharing the receiver's
+   storage where it can.
+
+   A STRING's text is immutable, so a slice of it is a view — the same trade `substring` makes. A
+   BUILDER's is not: a later `append` may replace the very array the text lives in, so a string cut
+   from one takes a copy. Both shapes reach here because the `kotlin.text` members these serve are
+   declared on `CharSequence`. */
+static KRef kt_string_slice(KRef self, kt_int from, kt_int to) {
+    kt_int byte_length = 0;
+    const char *bytes = kt_text_of(self, &byte_length);
+    kt_int length = to - from;
+    if (self->header.type == &kt_type_string_builder) {
+        KByteArray *copied = kt_bytes_new(length);
+        memcpy(kt_bytes_of(copied), bytes + from, (size_t)length);
+        return kt_string_of((KRef)copied, kt_bytes_of(copied), length);
+    }
+    return kt_string_of(self->as.string.storage, self->as.string.bytes + from, length);
+}
+
+/* `s.isEmpty()` and `s.isNotEmpty()`. No walk is needed and none would help: a text has zero
+   UTF-16 units exactly when it has zero bytes, since every encoding is at least one byte long. */
+kt_boolean kt_string_is_empty(KRef self) {
+    kt_int byte_length = 0;
+    (void)kt_text_of(self, &byte_length);
+    return byte_length == 0;
+}
+
+kt_boolean kt_string_is_not_empty(KRef self) { return !kt_string_is_empty(self); }
+
+/* `s.isBlank()` and `s.isNotBlank()`: empty, or whitespace all the way through. */
+kt_boolean kt_string_is_blank(KRef self) {
+    kt_int byte_length = 0;
+    const char *bytes = kt_text_of(self, &byte_length);
+    for (kt_int at = 0; at < byte_length;) {
+        kt_int width = 0;
+        if (!kt_is_whitespace(kt_code_point_at(bytes, at, &width))) {
+            return 0;
+        }
+        at += width;
+    }
+    return 1;
+}
+
+kt_boolean kt_string_is_not_blank(KRef self) { return !kt_string_is_blank(self); }
+
+/* `s.trim()`, `s.trimStart()` and `s.trimEnd()`. The bounds are found by character and cut on a
+   character boundary, so the result is always well-formed text. */
+static void kt_string_trimmed(KRef self, kt_int *from, kt_int *to) {
+    kt_int byte_length = 0;
+    const char *bytes = kt_text_of(self, &byte_length);
+    kt_int start = 0;
+    while (start < byte_length) {
+        kt_int width = 0;
+        if (!kt_is_whitespace(kt_code_point_at(bytes, start, &width))) {
+            break;
+        }
+        start += width;
+    }
+    kt_int end = byte_length;
+    while (end > start) {
+        /* Back up over the continuation bytes to the character's lead byte: the walk runs forward
+           everywhere else, and this is the one place that needs the previous character. */
+        kt_int back = end - 1;
+        while (back > start && ((unsigned char)bytes[back] & 0xC0u) == 0x80u) {
+            back--;
+        }
+        kt_int width = 0;
+        if (!kt_is_whitespace(kt_code_point_at(bytes, back, &width))) {
+            break;
+        }
+        end = back;
+    }
+    *from = start;
+    *to = end;
+}
+
+KRef kt_string_trim(KRef self) {
+    kt_int from = 0;
+    kt_int to = 0;
+    kt_string_trimmed(self, &from, &to);
+    return kt_string_slice(self, from, to);
+}
+
+KRef kt_string_trim_start(KRef self) {
+    kt_int from = 0;
+    kt_int to = 0;
+    kt_string_trimmed(self, &from, &to);
+    kt_int byte_length = 0;
+    (void)kt_text_of(self, &byte_length);
+    return kt_string_slice(self, from, byte_length);
+}
+
+KRef kt_string_trim_end(KRef self) {
+    kt_int from = 0;
+    kt_int to = 0;
+    kt_string_trimmed(self, &from, &to);
+    return kt_string_slice(self, 0, to);
+}
+
+/* Whether the receiver's bytes hold `other`'s at `at`. */
+static kt_boolean kt_bytes_match(const char *bytes, kt_int at, const char *wanted, kt_int length) {
+    for (kt_int index = 0; index < length; index++) {
+        if (bytes[at + index] != wanted[index]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* `s.startsWith(prefix)`, `s.endsWith(suffix)` and `s.contains(other)`.
+
+   Bytes settle all three, for the reason `removeSuffix` already relies on: UTF-8 is a prefix code,
+   so one text begins, ends or holds another exactly when its bytes do — a match can neither start
+   in the middle of a character nor straddle one. Only the case-SENSITIVE forms reach here; the
+   generator declines `ignoreCase = true`, which is a question about Unicode case folding rather
+   than about text. */
+kt_boolean kt_string_starts_with(KRef self, KRef prefix) {
+    kt_int byte_length = 0;
+    const char *bytes = kt_text_of(self, &byte_length);
+    kt_int head = 0;
+    const char *wanted = kt_text_of(prefix, &head);
+    return head <= byte_length && kt_bytes_match(bytes, 0, wanted, head);
+}
+
+kt_boolean kt_string_ends_with(KRef self, KRef suffix) {
+    kt_int byte_length = 0;
+    const char *bytes = kt_text_of(self, &byte_length);
+    kt_int tail = 0;
+    const char *wanted = kt_text_of(suffix, &tail);
+    return tail <= byte_length && kt_bytes_match(bytes, byte_length - tail, wanted, tail);
+}
+
+kt_boolean kt_string_contains(KRef self, KRef other) {
+    kt_int byte_length = 0;
+    const char *bytes = kt_text_of(self, &byte_length);
+    kt_int wanted_length = 0;
+    const char *wanted = kt_text_of(other, &wanted_length);
+    for (kt_int at = 0; at + wanted_length <= byte_length; at++) {
+        if (kt_bytes_match(bytes, at, wanted, wanted_length)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* `s.repeat(n)`. A negative count is Kotlin's own `IllegalArgumentException`. */
+KRef kt_string_repeat(KRef self, kt_int count) {
+    if (count < 0) {
+        KRef message = kt_string_plus(kt_string_utf8("Count 'n' must be non-negative, but was ", 40),
+                                      kt_to_string(kt_box_int(count)));
+        kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception,
+                                  kt_string_plus(message, kt_string_utf8(".", 1))));
+        /* `kt_throw` comes back; the length below would be negative. See `kt_string_first`. */
+        return self;
+    }
+    kt_int byte_length = 0;
+    const char *bytes = kt_text_of(self, &byte_length);
+    KByteArray *joined = kt_bytes_new(byte_length * count);
+    for (kt_int time = 0; time < count; time++) {
+        memcpy(kt_bytes_of(joined) + time * byte_length, bytes, (size_t)byte_length);
+    }
+    return kt_string_of((KRef)joined, kt_bytes_of(joined), byte_length * count);
+}
+
+/* `s.reversed()`. Reversal is by CHARACTER, not by UTF-16 unit: Kotlin's own answer keeps a
+   surrogate pair together, and so does moving whole UTF-8 encodings. */
+KRef kt_string_reversed(KRef self) {
+    kt_int byte_length = 0;
+    const char *bytes = kt_text_of(self, &byte_length);
+    KByteArray *reversed = kt_bytes_new(byte_length);
+    char *out = kt_bytes_of(reversed);
+    kt_int written = byte_length;
+    for (kt_int at = 0; at < byte_length;) {
+        kt_int width = 0;
+        (void)kt_code_point_at(bytes, at, &width);
+        written -= width;
+        memcpy(out + written, bytes + at, (size_t)width);
+        at += width;
+    }
+    return kt_string_of((KRef)reversed, out, byte_length);
+}
+
+/* `s.first()` and `s.last()` — the UTF-16 unit at either end, which is what a `Char` is. Kotlin
+   raises `NoSuchElementException` on empty text, with its own wording.
+
+   The raise is followed by a RETURN rather than by the answer. `kt_throw` records the exception for
+   the call site to find and COMES BACK, so whatever follows it runs with one already in flight —
+   and `kt_string_get` on empty text raises its own, which would take this one's place and report an
+   index the program never asked about. The value returned here is never read: the call site tests
+   for the exception before it looks at the answer. */
+static kt_boolean kt_text_raise_when_empty(KRef self) {
+    if (!kt_string_is_empty(self)) {
+        return 0;
+    }
+    kt_throw(kt_throwable_new(&kt_type_no_such_element_exception,
+                              kt_string_utf8("Char sequence is empty.", 23)));
+    return 1;
+}
+
+kt_char kt_string_first(KRef self) {
+    if (kt_text_raise_when_empty(self)) {
+        return 0;
+    }
+    return kt_string_get(self, 0);
+}
+
+kt_char kt_string_last(KRef self) {
+    if (kt_text_raise_when_empty(self)) {
+        return 0;
+    }
+    return kt_string_get(self, kt_string_length(self) - 1);
+}
+
 static kt_int kt_render_ulong(uint64_t value, char *buffer);
 
 /* Render a signed 64-bit value into `buffer` (at least 20 bytes); returns the length written. */

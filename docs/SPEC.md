@@ -2212,6 +2212,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `the_comparison_magnitude_agrees_with_the_jvm_backend`), `tests/native_codegen_e2e.rs`
   (`a_slice_between_the_halves_of_one_character_fails_loudly`).
 
+- **`kotlin.text`'s questions about a string are the runtime's, and the case-INSENSITIVE forms
+  decline.** `isEmpty`, `isNotEmpty`, `isBlank`, `isNotBlank`, `trim`, `trimStart`, `trimEnd`,
+  `startsWith`, `endsWith`, `contains`, `repeat`, `reversed`, `first` and `last` each need a walk of
+  the encoding, which is where `length` and `s[i]` already live.
+  Which walk each one needs is the whole of the decision. Emptiness is about BYTES — a text has
+  zero UTF-16 units exactly when it has zero bytes. `startsWith`, `endsWith` and `contains` are
+  about bytes too, for the reason `removeSuffix` is: UTF-8 is a prefix code, so a match can neither
+  begin inside a character nor straddle one. Blankness, trimming and reversal are about
+  CHARACTERS — reversing by UTF-16 unit would split a surrogate pair, and Kotlin's own answer keeps
+  it whole. `first` and `last` are about units, which is what a `Char` is.
+  Whitespace is Kotlin's `Char.isWhitespace()`, the UNION of Java's `isWhitespace` and
+  `isSpaceChar`, so the non-breaking spaces `isWhitespace` alone excludes are whitespace here.
+  A trimmed STRING shares the receiver's storage as a substring does; a trimmed BUILDER is copied,
+  because a later `append` may replace the array its text lives in.
+  `ignoreCase = true` DECLINES: it asks about Unicode case folding rather than about text, and the
+  runtime holds no case table. The flag has a default and the two providers hand it over
+  differently — a klib call materializes a constant `false`, a jar call leaves the argument out —
+  so the call site reads its ARGUMENTS rather than the signature, and both spell the same answer.
+  A raise inside one of these is followed by a RETURN: `kt_throw` records the exception for the
+  call site and comes back, so `first()` on empty text must not go on to ask for index 0 — that
+  raise would take the place of the one the program should see.
+  Tests: `tests/native_string_members_e2e.rs`.
+
 - **A primitive's member, asked of a value that arrived as an object.** Two shapes on the native
   target, and what separates them is who knows which primitive is in the box.
   `n.toInt()` where `n` is a `Number`: the site could type it only as `Number`, so the DESCRIPTOR

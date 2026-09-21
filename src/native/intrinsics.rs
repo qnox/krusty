@@ -823,6 +823,21 @@ pub(super) fn scalar_member(
                 vec![reference, Ty::Int],
                 Ty::obj("kotlin/String"),
             )),
+            // Questions about the text that answer a machine value rather than an object. Each is
+            // the runtime's because the text is UTF-8 and the answer is about what Kotlin counts:
+            // `isEmpty` is about bytes, `first`/`last` about UTF-16 units, and a program that
+            // asked either in Kotlin source would walk the encoding to find out.
+            ("isEmpty", []) => Some(("kt_string_is_empty", vec![reference], Ty::Boolean)),
+            ("isNotEmpty", []) => Some(("kt_string_is_not_empty", vec![reference], Ty::Boolean)),
+            ("isBlank", []) => Some(("kt_string_is_blank", vec![reference], Ty::Boolean)),
+            ("isNotBlank", []) => Some(("kt_string_is_not_blank", vec![reference], Ty::Boolean)),
+            ("first", []) => Some(("kt_string_first", vec![reference], Ty::Char)),
+            ("last", []) => Some(("kt_string_last", vec![reference], Ty::Char)),
+            ("repeat", [Ty::Int]) => Some((
+                "kt_string_repeat",
+                vec![reference, Ty::Int],
+                Ty::obj("kotlin/String"),
+            )),
             _ => None,
         };
     }
@@ -844,6 +859,29 @@ pub(super) fn scalar_member(
             vec![reference, Ty::Int, Ty::Int],
             Ty::obj("kotlin/String"),
         )),
+        // `isEmpty` and its three relatives are INLINE extensions in `kotlin.text`, so a jar
+        // provider presents them as members of the receiver's own type rather than of the text
+        // facade — the same declaration under a second spelling, exactly as `charAt` is `get`.
+        (
+            "kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder",
+            "isEmpty",
+            [],
+        ) => Some(("kt_string_is_empty", vec![reference], Ty::Boolean)),
+        (
+            "kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder",
+            "isNotEmpty",
+            [],
+        ) => Some(("kt_string_is_not_empty", vec![reference], Ty::Boolean)),
+        (
+            "kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder",
+            "isBlank",
+            [],
+        ) => Some(("kt_string_is_blank", vec![reference], Ty::Boolean)),
+        (
+            "kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder",
+            "isNotBlank",
+            [],
+        ) => Some(("kt_string_is_not_blank", vec![reference], Ty::Boolean)),
         // The ANSWER is an `Int`, so this cannot go through the reference-carried member path
         // below: `a < b` would box the very comparison it is asking about.
         ("kotlin/String", "compareTo", [_]) => {
@@ -877,6 +915,47 @@ pub(super) fn scalar_member(
         ("kotlin/Number", "toDouble" | "doubleValue", []) => {
             Some(("kt_number_to_double", vec![reference], Ty::Double))
         }
+        _ => None,
+    }
+}
+
+/// A `kotlin.text` member whose LAST parameter is Kotlin's `ignoreCase`, with the runtime entry
+/// point that answers the case-SENSITIVE form.
+///
+/// These cannot go through [`scalar_member`]: that table carries every parameter, and the
+/// `ignoreCase` one is not a value the runtime is given — it is a question the runtime does not
+/// answer. Only the caller can see whether it was asked, so the caller selects the entry point and
+/// drops the argument, and declines when the flag is anything but a literal `false`. Case folding
+/// is a question about Unicode rather than about text, and the runtime holds no case table.
+///
+/// The `Char` overload of `contains` is deliberately absent: its operand is a machine value, not a
+/// reference, and these entry points take text on both sides.
+pub(super) fn case_sensitive_text_member(
+    owner: &str,
+    name: &str,
+    params: &[Ty],
+) -> Option<&'static str> {
+    let owner = kotlin_owner(owner);
+    if declaration_package(owner) != "kotlin/text"
+        && !matches!(owner, "kotlin/String" | "kotlin/CharSequence")
+    {
+        return None;
+    }
+    // Either shape of the declaration: with the `ignoreCase` parameter, as the `kotlin.text`
+    // extension declares it, or without, as `java.lang.String`'s own member has it. The CALLER
+    // decides whether the flag was asked for, by the arguments it holds.
+    let text = match params {
+        [text] | [text, Ty::Boolean] => text,
+        _ => return None,
+    };
+    if !matches!(*text, Ty::Obj(named, _) if is_char_sequence(named) || named.matches("kotlin/String"))
+    {
+        return None;
+    }
+    match name {
+        "startsWith" => Some("kt_string_starts_with"),
+        "endsWith" => Some("kt_string_ends_with"),
+        "contains" => Some("kt_string_contains"),
         _ => None,
     }
 }
@@ -1195,6 +1274,12 @@ pub(super) fn runtime_member(owner: &str, name: &str, params: &[Ty]) -> Option<&
     if declaration_package(kotlin_owner(owner)) == "kotlin/text" {
         match (name, params) {
             ("removeSuffix", [_]) => return Some("kt_string_remove_suffix"),
+            // Text in, text out: every operand and the answer are references, so the ordinary
+            // reference path carries all of them.
+            ("trim", []) => return Some("kt_string_trim"),
+            ("trimStart", []) => return Some("kt_string_trim_start"),
+            ("trimEnd", []) => return Some("kt_string_trim_end"),
+            ("reversed", []) => return Some("kt_string_reversed"),
             // `appendLine` is Kotlin's own, declared beside the builder rather than on it, so it
             // arrives as a member of the facade with the builder as its receiver.
             ("appendLine", [_]) => return Some("kt_string_builder_append_line"),

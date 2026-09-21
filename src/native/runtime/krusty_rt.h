@@ -476,6 +476,39 @@ kt_int kt_string_compare_to(KRef a, KRef b);
    their trailing bytes do. */
 KRef kt_string_remove_suffix(KRef self, KRef suffix);
 
+/* `s.isEmpty()` / `s.isNotEmpty()`: a text has zero UTF-16 units exactly when it has zero bytes. */
+kt_boolean kt_string_is_empty(KRef self);
+kt_boolean kt_string_is_not_empty(KRef self);
+
+/* `s.isBlank()` / `s.isNotBlank()`: empty, or whitespace all the way through. Whitespace is
+   Kotlin's `Char.isWhitespace()`, which is the UNION of Java's `isWhitespace` and `isSpaceChar`. */
+kt_boolean kt_string_is_blank(KRef self);
+kt_boolean kt_string_is_not_blank(KRef self);
+
+/* `s.trim()`, `s.trimStart()`, `s.trimEnd()`: the receiver without whitespace at the named end.
+   Like `substring`, the result shares a STRING receiver's storage; a builder's text is copied,
+   because a later `append` may replace the array it lives in. */
+KRef kt_string_trim(KRef self);
+KRef kt_string_trim_start(KRef self);
+KRef kt_string_trim_end(KRef self);
+
+/* `s.startsWith(prefix)`, `s.endsWith(suffix)`, `s.contains(other)`. Bytes settle all three, the
+   way they settle `removeSuffix`. Only the case-SENSITIVE forms arrive: the generator declines
+   `ignoreCase = true`, which asks about Unicode case folding rather than about text. */
+kt_boolean kt_string_starts_with(KRef self, KRef prefix);
+kt_boolean kt_string_ends_with(KRef self, KRef suffix);
+kt_boolean kt_string_contains(KRef self, KRef other);
+
+/* `s.repeat(n)`; a negative count is Kotlin's `IllegalArgumentException`. */
+KRef kt_string_repeat(KRef self, kt_int count);
+
+/* `s.reversed()`, by CHARACTER — a surrogate pair stays together, as Kotlin's own answer does. */
+KRef kt_string_reversed(KRef self);
+
+/* `s.first()` / `s.last()`; both raise `NoSuchElementException` on empty text, as Kotlin does. */
+kt_char kt_string_first(KRef self);
+kt_char kt_string_last(KRef self);
+
 /* A string LITERAL, interned: equal literals are ONE object, as Kotlin promises. `slot` is a static
    per distinct text; see the definition for why the root is registered before the allocation. */
 KRef kt_string_literal(const char *bytes, kt_int length, KRef *slot);

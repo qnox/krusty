@@ -1102,6 +1102,8 @@ mod native_secondary_constructors_e2e;
 mod native_spread_e2e;
 #[path = "native_string_builders_e2e.rs"]
 mod native_string_builders_e2e;
+#[path = "native_string_members_e2e.rs"]
+mod native_string_members_e2e;
 #[path = "native_strings_e2e.rs"]
 mod native_strings_e2e;
 #[path = "native_tailrec_e2e.rs"]
