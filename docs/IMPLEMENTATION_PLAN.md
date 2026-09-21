@@ -2356,6 +2356,49 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 > getters; coroutines; inner classes; nullable primitives `Int?`) are each multi-file, infrastructure-scale
 > efforts — see the coverage-roadmap notes for entry points. The 0-FAIL never-miscompile invariant holds.
 
+## Native: fixed slot numbers for members of runtime-known types  🚧
+
+Three groups of native-lane declines share ONE missing mechanism, and none of them can be closed
+without it. Measured on the klib lane at `fbc32b1c` (klib 4357 passed, failed 0):
+
+| group | cases | decline |
+|---|---|---|
+| a class extending `kotlin.Number` | 7 | `a superclass declared outside this file` |
+| `x.compareTo(y)` where `x: Comparable<T>` | 6 | `the member kotlin.Comparable.compareTo` |
+| a functional interface declared outside this file (`kotlin/Comparator`) | 5 | as named |
+
+**The mechanism.** A member declared by a type this file does NOT declare has no slot number. The
+interface numbering pass numbers only interfaces the file declares, and a class's vtable is its
+superclass's with overrides replaced — so when the superclass is the runtime's, there is nothing to
+replace and an override takes a fresh slot whose number no caller can know. A call through the
+declaring type therefore cannot dispatch, and today each of these is realized instead by an
+intrinsic that reads a shape it recognizes: `n.toDouble()` reads a boxed primitive's payload,
+`compareTo` compares by the receiver's known type.
+
+**Why it is not a decline that can simply be lifted.** Relaxing the override check alone was tried
+and reverted: it took 5 of the 6 `primitiveTypes/numberToChar` cases and turned
+`primitiveTypes/virtualCallToCustomNumber.kt` from a decline into a runtime ABORT, because
+`numberToDouble(FortyTwo)` reaches the boxed-primitive intrinsic with an object that is not one.
+A decline becoming a wrong answer is the outcome the two-sided gate exists to catch, and it caught
+this one as `failed 1`.
+
+**The design.** Give each runtime-known type's members fixed slot numbers immediately after
+`kotlin.Any`'s three, seeded as `Slot::Abstract` in a subclass's table and replaced by that
+subclass's overrides. The intrinsic then keeps its existing switch for the shapes it recognizes —
+a boxed primitive, a string — and dispatches through the receiver's vtable for anything else.
+`kotlin.Number` needs seven (`toByte`, `toShort`, `toInt`, `toLong`, `toFloat`, `toDouble`,
+`toChar`); `kotlin.Comparable` needs one.
+
+What this costs is the part to weigh before starting: a boxed primitive's descriptor must carry
+those slots too, or dispatching on one reads past its table. `ExternalBase` in
+`src/native/classes.rs` is where the layout side goes, beside the `kotlin.Throwable` entry that
+already works this way, and `src/native/intrinsics.rs` owns which types are known.
+
+**What already works this way.** `kotlin.Enum` and the `kotlin.Throwable` family: both are bases no
+file declares, whose layout, descriptor and `kotlin.Any` slots the runtime carries, and a source
+class extends either of them today. Neither needed slot numbers because neither declares a member
+a subclass overrides and a caller dispatches through — which is exactly the gap this phase closes.
+
 ## Bare-name stdlib hardcode audit (no-hardcode policy)  🚧
 
 Standing rule: krusty may hardcode a value/desugar **only where kotlinc also intrinsifies it**; a
