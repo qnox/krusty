@@ -4202,6 +4202,13 @@ pub struct BuiltinClass {
     /// `Enum`) — from the `@Metadata` `CLASS_KIND` flag. Needed when reporting a classless builtin whose
     /// JVM class is absent (a no-JDK compile), so member calls emit the right invoke opcode.
     pub kind: TypeKind,
+    /// The declaration is a `fun interface`, so a lambda converts to it and its name is a SAM
+    /// constructor. A Java interface is structurally eligible and needs no bit; a KOTLIN one is
+    /// eligible only by declaring this, which is why a provider reading Kotlin metadata has to
+    /// carry it rather than infer eligibility from the member shape. `kotlin.Comparator` is the
+    /// declaration that says so on a klib-backed target, where it is a real `fun interface` and
+    /// not, as on the JVM, a type alias for `java.util.Comparator`.
+    pub is_fun_interface: bool,
     /// Source visibility from the metadata flag word. This is deliberately separate from `access`:
     /// Kotlin `internal` declarations are public in classfiles after name mangling.
     pub visibility: Visibility,

@@ -459,13 +459,48 @@ impl BodyLowering<'_, '_, '_> {
             return Some(self.list_call(symbol, &carried, answer, receiver, args, ret));
         }
         let role = super::super::super::intrinsics::iteration_role_of(ty);
+        // `joinToString()` written with nothing in the parentheses reaches this backend with six
+        // operands or with none, depending only on which provider selected the declaration: a
+        // klib has no `$default` synthetic to call, so an omitted argument is materialized as the
+        // declaration's own default instead. The two are the same call, and the arity this
+        // matches on is the WRITTEN one.
+        let written = if name == "joinToString" && self.is_defaulted_join(args) {
+            0
+        } else {
+            args.len()
+        };
+        let args = &args[args.len() - written..];
         let (symbol, carried, answer) =
-            match role.and_then(|role| interface_symbol(role, name, args.len())) {
+            match role.and_then(|role| interface_symbol(role, name, written)) {
                 Some(symbol) => symbol,
-                None if is_list(ty) => list_symbol(name, args.len(), physical)?,
+                None if is_list(ty) => list_symbol(name, written, physical)?,
                 None => return None,
             };
         Some(self.list_call(symbol, &carried, answer, receiver, args, ret))
+    }
+
+    /// Whether every operand of a `joinToString` is the constant the stdlib declares it to default
+    /// to, so that the call is the one a program wrote as `joinToString()`.
+    ///
+    /// Spelled out value by value rather than counted, because what this decides is whether six
+    /// operands may be DROPPED: a call that passes a separator of its own must keep declining,
+    /// with the argument it passed still in sight, and only the exact default run is droppable.
+    fn is_defaulted_join(&self, args: &[u32]) -> bool {
+        let [separator, prefix, postfix, limit, truncated, transform] = args else {
+            return false;
+        };
+        let string = |id: &u32, expected: &str| {
+            matches!(
+                self.file.ir.expr(*id),
+                IrExpr::Const(IrConst::String(value)) if value.as_str() == Some(expected)
+            )
+        };
+        string(separator, ", ")
+            && string(prefix, "")
+            && string(postfix, "")
+            && matches!(self.file.ir.expr(*limit), IrExpr::Const(IrConst::Int(-1)))
+            && string(truncated, "...")
+            && matches!(self.file.ir.expr(*transform), IrExpr::Const(IrConst::Null))
     }
 
     fn list_call(

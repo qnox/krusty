@@ -1454,6 +1454,11 @@ fn semantic_class(
             sealed_subclasses,
             inline_class_property,
             kind: metadata::builtin_class_kind(header.flags),
+            // `IS_FUN`. Read from the same flag word the kind and modality come from, and dropped
+            // until now: every `fun interface` a klib declares was published as an ordinary one,
+            // so no lambda converted to `Comparator` and `Comparator { a, b -> … }` was not a
+            // constructor at all.
+            is_fun_interface: header.flags & (1 << 14) != 0,
             visibility: metadata::builtin_class_visibility(header.flags),
             is_expect: header.flags & (1 << 12) != 0,
             modality: metadata::builtin_class_modality(header.flags),

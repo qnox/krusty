@@ -454,14 +454,19 @@ pub(super) fn is_callable_name(owner: crate::types::TypeName, name: &str) -> boo
         .any(|candidate| owner.matches(candidate))
 }
 
-/// Whether a declaration's owner is the file facade the stdlib's delegate operators on a property
-/// reference live in. `kotlin.getValue`/`kotlin.setValue` are top-level extensions of
-/// `KProperty0`/`KProperty1`, so they reach a backend as members of
-/// `kotlin/PropertyReferenceDelegatesKt`.
+/// Whether a declaration's owner is where the stdlib's delegate operators on a property reference
+/// live. `kotlin.getValue`/`kotlin.setValue` are top-level extensions of `KProperty0`/`KProperty1`,
+/// so a JVM provider presents them on the file facade `PropertyReferenceDelegates.kt` compiles to
+/// and a klib provider, which has no facades, presents them on the package itself.
+///
+/// The bare package `kotlin` is admitted even though `Lazy.getValue` is also a top-level `kotlin`
+/// declaration of that name, because the owner is not what tells them apart: only a call whose
+/// RECEIVER is one of the four property-reference types reaches these slots, and the caller checks
+/// that before asking anything else.
 pub(super) fn is_property_delegates_facade(owner: &str) -> bool {
     matches!(
         kotlin_owner(owner),
-        "kotlin/PropertyReferenceDelegatesKt" | "kotlin/properties"
+        "kotlin/PropertyReferenceDelegatesKt" | "kotlin/properties" | "kotlin"
     )
 }
 
@@ -758,12 +763,17 @@ pub(super) fn scalar_member(
     }
 }
 
-/// `x++` on a primitive that arrived as an OBJECT, as the type it steps and the step itself.
+/// `x++` on a primitive, as the type it steps and the step itself.
 ///
-/// `var i: Int? = 10; i++` selects `Int.inc()`, which the provider presents as a member of
-/// `java/lang/Integer` — the receiver is a box only because the site's static type was nullable,
-/// and what is in it is the very primitive the member was selected on. So this needs no descriptor
-/// read, unlike [`scalar_member`]'s `Number` conversions: the owner already says.
+/// `var i: Int? = 10; i++` selects `Int.inc()`, and what is in the box is the very primitive the
+/// member was selected on. So this needs no descriptor read, unlike [`scalar_member`]'s `Number`
+/// conversions: the OWNER already says which type steps.
+///
+/// Two spellings arrive, because two providers name the same declaration differently. A JVM
+/// provider presents `Int.inc()` as a member of the box class it is realized on; a klib provider
+/// has no box class to name and presents the Kotlin classifier. Neither spelling changes what the
+/// operation is, and the lowering takes a receiver that is already a scalar without a round trip
+/// through a box — so admitting both is the whole of the difference.
 pub(super) fn boxed_step(owner: &str, name: &str, params: &[Ty]) -> Option<(Ty, i64)> {
     if !params.is_empty() {
         return None;
@@ -774,13 +784,13 @@ pub(super) fn boxed_step(owner: &str, name: &str, params: &[Ty]) -> Option<(Ty, 
         _ => return None,
     };
     let ty = match owner {
-        "java/lang/Byte" => Ty::Byte,
-        "java/lang/Short" => Ty::Short,
-        "java/lang/Integer" => Ty::Int,
-        "java/lang/Long" => Ty::Long,
-        "java/lang/Character" => Ty::Char,
-        "java/lang/Float" => Ty::Float,
-        "java/lang/Double" => Ty::Double,
+        "java/lang/Byte" | "kotlin/Byte" => Ty::Byte,
+        "java/lang/Short" | "kotlin/Short" => Ty::Short,
+        "java/lang/Integer" | "kotlin/Int" => Ty::Int,
+        "java/lang/Long" | "kotlin/Long" => Ty::Long,
+        "java/lang/Character" | "kotlin/Char" => Ty::Char,
+        "java/lang/Float" | "kotlin/Float" => Ty::Float,
+        "java/lang/Double" | "kotlin/Double" => Ty::Double,
         _ => return None,
     };
     Some((ty, step))
@@ -935,6 +945,54 @@ mod tests {
             "kotlin/collections"
         );
         assert_eq!(declaration_package("kotlin"), "kotlin");
+    }
+
+    /// The delegate operators on a property reference, under either provider's spelling.
+    ///
+    /// The klib spelling is the bare package, which `Lazy.getValue` also answers to — the owner
+    /// does not separate them and is not asked to. Fourteen corpus cases delegated to a property
+    /// reference and were declined because only the JVM facade was admitted.
+    #[test]
+    fn the_reference_delegate_operators_are_found_under_either_spelling() {
+        assert!(is_property_delegates_facade(
+            "kotlin/PropertyReferenceDelegatesKt"
+        ));
+        assert!(is_property_delegates_facade("kotlin/properties"));
+        assert!(is_property_delegates_facade("kotlin"));
+        // A different package, and a CLASS in the right one, are both still no.
+        assert!(!is_property_delegates_facade("kotlin/collections"));
+        assert!(!is_property_delegates_facade("kotlin/Lazy"));
+        assert!(!is_property_delegates_facade("kotlin/text/StringsKt"));
+    }
+
+    /// `x++` names the same operation whichever provider selected the declaration.
+    ///
+    /// A JVM provider realizes `Int.inc()` on the box class; a klib provider has no box class and
+    /// names the Kotlin classifier. Nine corpus cases reached the generator under the second
+    /// spelling and were declined as an unknown member.
+    #[test]
+    fn a_step_is_the_same_operation_under_either_providers_spelling() {
+        for (jvm, kotlin, stepped) in [
+            ("java/lang/Byte", "kotlin/Byte", Ty::Byte),
+            ("java/lang/Short", "kotlin/Short", Ty::Short),
+            ("java/lang/Integer", "kotlin/Int", Ty::Int),
+            ("java/lang/Long", "kotlin/Long", Ty::Long),
+            ("java/lang/Character", "kotlin/Char", Ty::Char),
+            ("java/lang/Float", "kotlin/Float", Ty::Float),
+            ("java/lang/Double", "kotlin/Double", Ty::Double),
+        ] {
+            assert_eq!(boxed_step(jvm, "inc", &[]), Some((stepped, 1)));
+            assert_eq!(boxed_step(kotlin, "inc", &[]), Some((stepped, 1)));
+            assert_eq!(boxed_step(jvm, "dec", &[]), Some((stepped, -1)));
+            assert_eq!(boxed_step(kotlin, "dec", &[]), Some((stepped, -1)));
+        }
+        // What the widened table must NOT admit. `Boolean` has no step at all, an argument means
+        // the member is something else entirely, and a classifier that merely lives in `kotlin`
+        // is not a primitive.
+        assert_eq!(boxed_step("kotlin/Boolean", "inc", &[]), None);
+        assert_eq!(boxed_step("kotlin/String", "inc", &[]), None);
+        assert_eq!(boxed_step("kotlin/Int", "inc", &[Ty::Int]), None);
+        assert_eq!(boxed_step("kotlin/Int", "plus", &[]), None);
     }
 
     /// A class comes back unchanged, so no comparison against a package can match it. This is what

@@ -1009,7 +1009,11 @@ fn library_type(
         members,
         companion: Vec::new(),
         constants,
-        sam_eligible: false,
+        // A Kotlin interface converts from a lambda only by declaring `fun`, and the klib says
+        // which do. Published as `false` for everything until now, which made `kotlin.Comparator`
+        // — a real `fun interface` on this target, where the JVM has only a type alias for
+        // `java.util.Comparator` — refuse both the lambda and its own SAM constructor.
+        sam_eligible: declaration.is_fun_interface,
         callable_signature: None,
         callable_signatures: Vec::new(),
         companion_object: declaration
@@ -1723,22 +1727,32 @@ mod compiles_against_the_klib {
         );
 
         // An extension with SIX defaulted parameters, four of them strings and one a negative
-        // integer, all omitted. It REALIZES — the declaration that reported "selected extension
-        // 'joinToString' has no callable realization" — and the code generator declines it for its
-        // own reason. Each default reaches its parameter by ASSIGNABILITY, which is how a default
-        // is written in Kotlin and how it must be checked: `separator: CharSequence = ", "` fills
-        // a `CharSequence` with a `String`, and `transform: ((T) -> String)? = null` fills a
-        // function type with a `null`. An exact match rejected both.
+        // integer, all omitted. It compiles end to end — the declaration that first reported
+        // "selected extension 'joinToString' has no callable realization", then reached the code
+        // generator and was declined there. Each default reaches its parameter by ASSIGNABILITY,
+        // which is how a default is written in Kotlin and how it must be checked:
+        // `separator: CharSequence = ", "` fills a `CharSequence` with a `String`, and
+        // `transform: ((T) -> String)? = null` fills a function type with a `null`. An exact match
+        // rejected both.
         let joined = diagnostics(&root, "fun box(): String = listOf(1, 2).joinToString()\n");
         assert!(
-            joined
-                .iter()
-                .any(|d| d.contains("the member `kotlin.collections.joinToString`")),
-            "an extension omitting every defaulted argument realizes: {joined:?}"
+            joined.is_empty(),
+            "an extension omitting every defaulted argument compiles: {joined:?}"
+        );
+
+        // And a call that passes an argument of its own still declines, which is what makes the
+        // line above a statement about the DEFAULTS rather than about the name. The runtime
+        // answers one `joinToString` — the whole-declaration one — so a separator nobody declared
+        // must not be silently dropped on the way to it.
+        let separated = diagnostics(
+            &root,
+            "fun box(): String = listOf(1, 2).joinToString(\"-\")\n",
         );
         assert!(
-            !joined.iter().any(|d| d.contains("no callable realization")),
-            "and the refusal is the GENERATOR's, not resolution's: {joined:?}"
+            separated
+                .iter()
+                .any(|d| d.contains("the member `kotlin.collections.joinToString`")),
+            "a joiner given a separator of its own is refused, not defaulted: {separated:?}"
         );
 
         // A block that returns NON-LOCALLY is valid only spliced into the function it returns
