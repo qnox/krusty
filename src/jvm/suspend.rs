@@ -388,21 +388,14 @@ pub(crate) fn lower_suspend(
         }
         // Those bodies have never been through the value-`try` desugar or suspension hoisting: the
         // passes above stop at a lambda. Normalize them now, then re-read the suspensions — hoisting
-        // rewrites the very expressions just collected. A value-`try` the desugar could not reach
-        // (one nested inside an expression) still keeps the call's raw `Object` in a scalar arm, and
-        // a non-local `return` is not boxed to the CPS result yet; such a body is declined after
-        // normalization, exactly as before the machine existed.
+        // rewrites the very expressions just collected. Each body is typed in its own lambda's value
+        // numbering, not this function's. A value-`try` the desugar could not reach (one nested
+        // inside an expression) still keeps the call's raw `Object` in a scalar arm, and a non-local
+        // `return` is not boxed to the CPS result yet; such a body is declined after normalization,
+        // exactly as before the machine existed.
         let spliced_suspensions = match (spliced_suspensions.is_empty(), body) {
             (false, Some(b)) => {
-                let mut value_types = function_value_types(ir, fid, b);
-                hoist_spliced_inline_bodies(
-                    ir,
-                    b,
-                    &suspend_set,
-                    &orig_rets,
-                    &ret_ty,
-                    &mut value_types,
-                );
+                hoist_spliced_inline_bodies(ir, b, &suspend_set, &orig_rets, &ret_ty);
                 let declined = cps::suspends_in_a_value_try(ir, b, &suspend_set)
                     || cps::spliced_body_returns(ir, b, &suspend_set);
                 match declined {
@@ -1914,6 +1907,33 @@ fn machine_eligible(ir: &IrFile, fid: u32) -> bool {
 }
 
 fn function_value_types(ir: &IrFile, fid: u32, body: ExprId) -> HashMap<u32, Ty> {
+    function_value_types_with(ir, fid, &ir.functions[fid as usize].params, body)
+}
+
+/// The value-type table of a lambda's `inline_body`, numbered as the impl method is: captures, then
+/// the lambda's own parameters, then the locals the body declares. A `suspend`-typed lambda may
+/// already have been through this pass — it precedes the frame it is spliced into in `suspend_funs`
+/// — and then carries a trailing `Continuation` at the index its body's first local uses. The
+/// declared signature is the one the body was numbered against.
+pub(super) fn spliced_body_value_types(
+    ir: &IrFile,
+    impl_fn: u32,
+    body: ExprId,
+) -> HashMap<u32, Ty> {
+    let params = ir
+        .suspend_declared_sigs
+        .get(&impl_fn)
+        .map(|(params, _)| params.as_slice())
+        .unwrap_or(&ir.functions[impl_fn as usize].params);
+    function_value_types_with(ir, impl_fn, params, body)
+}
+
+fn function_value_types_with(
+    ir: &IrFile,
+    fid: u32,
+    params: &[Ty],
+    body: ExprId,
+) -> HashMap<u32, Ty> {
     fn collect(ir: &IrFile, expression: ExprId, out: &mut HashMap<u32, Ty>) {
         match &ir.exprs[expression as usize] {
             IrExpr::Variable {
@@ -1940,7 +1960,7 @@ fn function_value_types(ir: &IrFile, fid: u32, body: ExprId) -> HashMap<u32, Ty>
     if let Some(receiver) = physical_receiver {
         out.insert(0, Ty::obj_name(receiver));
     }
-    for (index, ty) in function.params.iter().copied().enumerate() {
+    for (index, ty) in params.iter().copied().enumerate() {
         out.insert(receiver_offset + index as u32, ty);
     }
     // A generated `SuspendLambda.invokeSuspend` reloads captures and own lambda parameters from the

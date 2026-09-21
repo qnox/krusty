@@ -137,6 +137,14 @@ fn normalize_when_statement_body(
 /// The bodies are rewritten in place where they are blocks; a bare expression body becomes one, so
 /// the lambda's `inline_body` is repointed at the new block.
 ///
+/// Each body is typed in ITS OWN value numbering. An `inline_body` is a copy of the lambda's body
+/// numbered as the impl method is — captures first, then the lambda's parameters, then the locals
+/// the body declares — so the enclosing function's parameter/local table says nothing about the
+/// `s` in `s = s + one(x)`, and reads its capture 0 as whatever the enclosing parameter 0 is. The
+/// snapshot that keeps `s` off the stack across the suspension is typed from the impl method's
+/// declared parameters and the body's own declarations instead; what neither names still declines,
+/// as it must.
+///
 /// `ret` is the ENCLOSING function's return type: the only statement in a spliced body it types is
 /// a non-local `return`, which leaves that function. The body's own value is typed by the value
 /// itself (see [`desugar_spliced_value_try`]).
@@ -146,18 +154,9 @@ pub(super) fn hoist_spliced_inline_bodies(
     suspend_set: &HashSet<u32>,
     orig_rets: &[Ty],
     ret: &Ty,
-    value_types: &mut HashMap<u32, Ty>,
 ) {
     let mut seen = HashSet::new();
-    hoist_spliced_walk(
-        ir,
-        body,
-        suspend_set,
-        orig_rets,
-        ret,
-        value_types,
-        &mut seen,
-    );
+    hoist_spliced_walk(ir, body, suspend_set, orig_rets, ret, &mut seen);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -167,35 +166,37 @@ fn hoist_spliced_walk(
     suspend_set: &HashSet<u32>,
     orig_rets: &[Ty],
     ret: &Ty,
-    value_types: &mut HashMap<u32, Ty>,
     seen: &mut HashSet<ExprId>,
 ) {
     if !seen.insert(expression) {
         return;
     }
     if let IrExpr::Lambda {
+        impl_fn,
         captures,
         inline_body: Some(inner),
         ..
     } = ir.exprs[expression as usize].clone()
     {
         // A nested spliced body runs in this frame too, so normalize the innermost first.
-        hoist_spliced_walk(ir, inner, suspend_set, orig_rets, ret, value_types, seen);
-        let rewritten = hoist_spliced_body(ir, inner, suspend_set, orig_rets, ret, value_types);
+        hoist_spliced_walk(ir, inner, suspend_set, orig_rets, ret, seen);
+        let mut value_types = spliced_body_value_types(ir, impl_fn, inner);
+        let rewritten =
+            hoist_spliced_body(ir, inner, suspend_set, orig_rets, ret, &mut value_types);
         if rewritten != inner {
             if let IrExpr::Lambda { inline_body, .. } = &mut ir.exprs[expression as usize] {
                 *inline_body = Some(rewritten);
             }
         }
         for capture in captures {
-            hoist_spliced_walk(ir, capture, suspend_set, orig_rets, ret, value_types, seen);
+            hoist_spliced_walk(ir, capture, suspend_set, orig_rets, ret, seen);
         }
         return;
     }
     let mut children = Vec::new();
     crate::ir::for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
     for child in children {
-        hoist_spliced_walk(ir, child, suspend_set, orig_rets, ret, value_types, seen);
+        hoist_spliced_walk(ir, child, suspend_set, orig_rets, ret, seen);
     }
 }
 
