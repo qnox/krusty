@@ -356,14 +356,21 @@ pub(crate) fn lower_suspend(
         // has to reach exactly this body: an OPEN method would re-dispatch to an override, and a
         // private one is not callable from the continuation class. Those keep the diagnostic they
         // have today.
-        let spliced_suspensions: Vec<ExprId> = match (has_susp, forward, body) {
-            (false, None, Some(b)) if machine_eligible(ir, fid) => {
-                cps::spliced_inline_suspensions(ir, b, &suspend_set)
+        //
+        // A function that ALSO has suspensions of its own is taken whole: one method has one
+        // dispatch, so the two kinds cannot be split between the IR machine and this one. The IR
+        // machine never saw the spliced kind, so such a function does not compile today at all.
+        let spliced_suspensions: Vec<ExprId> = match (forward, body) {
+            (None, Some(b)) if machine_eligible(ir, fid) => {
+                match cps::spliced_inline_suspensions(ir, b, &suspend_set).is_empty() {
+                    true => Vec::new(),
+                    false => cps::frame_suspensions(ir, b, &suspend_set),
+                }
             }
             _ => Vec::new(),
         };
         #[cfg(feature = "trace")]
-        if spliced_suspensions.is_empty() && !has_susp && forward.is_none() {
+        if spliced_suspensions.is_empty() && forward.is_none() {
             if let Some(b) = body {
                 let ignored = cps::spliced_inline_suspensions(ir, b, &suspend_set);
                 if !ignored.is_empty() {
@@ -387,7 +394,7 @@ pub(crate) fn lower_suspend(
             (true, Some(b)) => {
                 let mut value_types = function_value_types(ir, fid, b);
                 hoist_spliced_inline_bodies(ir, b, &suspend_set, &orig_rets, &mut value_types);
-                cps::spliced_inline_suspensions(ir, b, &suspend_set)
+                cps::frame_suspensions(ir, b, &suspend_set)
             }
             _ => spliced_suspensions,
         };

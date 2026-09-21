@@ -18,7 +18,7 @@ mod routing;
 
 pub(crate) use control_graph::{ControlGraph, Handler};
 pub(crate) use inline_suspension::{
-    spliced_inline_suspensions, spliced_suspension_lambda_impls,
+    frame_suspensions, spliced_inline_suspensions, spliced_suspension_lambda_impls,
     suspends_inside_a_spliced_inline_body,
 };
 pub(crate) use liveness::LocalLiveness;

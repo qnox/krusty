@@ -55,6 +55,31 @@ pub(crate) fn spliced_inline_suspensions(
     found
 }
 
+/// EVERY suspension this frame runs, in encounter order: its own, and those inside the spliced
+/// bodies it will contain.
+///
+/// A function with both kinds cannot be split between two machines — one method has one dispatch —
+/// so when the emit-time machine takes such a function it takes all of them.
+pub(crate) fn frame_suspensions(
+    ir: &IrFile,
+    body: ExprId,
+    suspend_set: &HashSet<u32>,
+) -> Vec<ExprId> {
+    let mut found = Vec::new();
+    let mut seen = HashSet::new();
+    walk(
+        ir,
+        body,
+        suspend_set,
+        true,
+        false,
+        true,
+        &mut seen,
+        &mut found,
+    );
+    found
+}
+
 /// Whether any suspension reached from `body` is one the IR machine cannot see.
 pub(crate) fn suspends_inside_a_spliced_inline_body(
     ir: &IrFile,
@@ -125,6 +150,7 @@ fn collect(
             suspend_set,
             true,
             false,
+            false,
             &mut inner,
             &mut found,
         );
@@ -158,25 +184,37 @@ fn walk_frame(
     seen: &mut HashSet<ExprId>,
     found: &mut Vec<ExprId>,
 ) {
-    walk(ir, expression, suspend_set, inlined, false, seen, found);
+    walk(
+        ir,
+        expression,
+        suspend_set,
+        inlined,
+        false,
+        false,
+        seen,
+        found,
+    );
 }
 
 /// `inlined`: this expression already sits inside a body that runs in this frame. `spliceable`: it
 /// is an operand of an inline call, so a lambda here has its body spliced rather than realized as a
-/// closure.
+/// closure. `every`: record the suspensions this frame runs directly as well, not only the ones the
+/// IR machine cannot see.
+#[allow(clippy::too_many_arguments)]
 fn walk(
     ir: &IrFile,
     expression: ExprId,
     suspend_set: &HashSet<u32>,
     inlined: bool,
     spliceable: bool,
+    every: bool,
     seen: &mut HashSet<ExprId>,
     found: &mut Vec<ExprId>,
 ) {
     if !seen.insert(expression) {
         return;
     }
-    if inlined && is_suspension_point(ir, expression, suspend_set) {
+    if (inlined || every) && is_suspension_point(ir, expression, suspend_set) {
         found.push(expression);
     }
     if let IrExpr::Lambda {
@@ -187,13 +225,12 @@ fn walk(
     {
         // The captures are evaluated by THIS frame, whatever the lambda is.
         for &capture in captures {
-            walk(ir, capture, suspend_set, inlined, false, seen, found);
+            walk(ir, capture, suspend_set, inlined, false, every, seen, found);
         }
         // A spliced body runs in this frame; a real closure's does not — and only the operand of an
         // inline call is spliced, however the lowering filled `inline_body` in.
-        match (spliceable, inline_body.as_ref()) {
-            (true, Some(&body)) => walk(ir, body, suspend_set, true, false, seen, found),
-            _ => {}
+        if let (true, Some(&body)) = (spliceable, inline_body.as_ref()) {
+            walk(ir, body, suspend_set, true, false, every, seen, found);
         }
         return;
     }
@@ -213,6 +250,7 @@ fn walk(
             suspend_set,
             inlined,
             operands_are_spliceable,
+            every,
             seen,
             found,
         );

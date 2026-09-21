@@ -288,3 +288,27 @@ fn a_suspension_inside_a_spliced_lambda_of_a_private_member_runs() {
     };
     assert_eq!(output, "OK");
 }
+
+/// A MIXED function: one suspension of its own, which the IR machine can see, and another inside a
+/// spliced lambda, which it cannot. One method has one dispatch, so the emit-time machine takes
+/// both.
+#[test]
+fn a_function_that_suspends_both_in_and_outside_a_spliced_body_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int = v + 1
+        suspend fun mixed(v: Int): Int {
+            val a = one(v)
+            val b = twice(a) { one(it) }
+            return a + b
+        }
+        fun box(): String = runBlocking {
+            val n = mixed(10)
+            if (n == 36) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_mixed", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
