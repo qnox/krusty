@@ -330,8 +330,6 @@ pub(super) fn check_supported(class: &IrClass) -> Result<(), Unsupported> {
         "an annotation implementation class"
     } else if class.prop_ref.is_some() || class.func_ref.is_some() {
         "a callable reference"
-    } else if class.ctor_args.iter().any(|argument| argument.is_vararg) {
-        "a vararg constructor parameter"
     } else {
         return Ok(());
     };
@@ -2253,15 +2251,16 @@ mod tests {
     fn out_of_scope_classes_are_declined_by_name() {
         let mut ir = IrFile::default();
         let id = class(&mut ir, "D", "kotlin/Any", 0);
-        // A data class, an interface, a value class, an `inner` class and now an ANNOTATION class
-        // are deliberately absent from this list: each lowers like the class it is now, an
-        // annotation because applying one produces nothing a program here can observe. What
-        // remains are constructs with no realization at all yet.
+        // A data class, an interface, a value class, an `inner` class, an ANNOTATION class and now
+        // a VARARG constructor parameter are deliberately absent from this list: each lowers like
+        // the thing it is. A vararg parameter is PHYSICALLY an array, and the IR records it as one
+        // — so a constructor taking it takes a reference, like any other array parameter, and
+        // there was nothing for the refusal to protect.
         ir.classes[id as usize]
             .ctor_args
             .push(crate::ir::IrCtorArg {
                 name: Some("rest".to_string()),
-                ty: Ty::Int,
+                ty: Ty::obj_args("kotlin/Array", &[Ty::Int]),
                 declared_ty: None,
                 is_field: false,
                 field_index: None,
@@ -2270,9 +2269,12 @@ mod tests {
                 type_param: None,
                 check: None,
             });
+        build(&ir).expect("a vararg constructor parameter is an array parameter");
+
+        ir.classes[id as usize].annotation_impl_of = Some(TypeName::from("D"));
         assert!(build(&ir)
             .expect_err("declined")
-            .contains("a vararg constructor parameter"));
+            .contains("an annotation implementation class"));
     }
 
     #[test]

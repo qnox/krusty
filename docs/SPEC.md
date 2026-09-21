@@ -7732,6 +7732,16 @@ and behavior is checked by RUNNING the emitted program.
   backends and REQUIRING the native lowering); the corpus cases are
   `codegen/box/annotations/instances/`.
 
+- **A `vararg` constructor parameter is the array it already is.** A vararg parameter is
+  PHYSICALLY an array and the IR records it as one, so a constructor taking it takes a reference
+  like any other array parameter. The class model refused every such class by name, and there was
+  nothing for the refusal to protect — the shape it was written against, a vararg argument
+  recorded as its ELEMENT type, is not one this lowering produces.
+  Tests: `tests/native_vararg_constructor_e2e.rs` (all three, each cross-checking the two backends
+  and REQUIRING the native lowering); the corpus cases are
+  `codegen/box/privateConstructors/withVarargs.kt`, `codegen/box/enum/varargParam.kt` and the
+  other "vararg constructor parameter" cases.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
