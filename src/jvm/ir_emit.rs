@@ -11325,58 +11325,19 @@ fn emit_method_inner_with_holder(
         }
         _ => None,
     };
+    // The verifier's view of the frame on entry: what the discovery pass computes every later
+    // state from. Taken before the body runs, while the parameters are the only locals assigned.
+    let entry_locals = machine_slots
+        .filter(|_| !e.machine_suspensions.is_empty() && !env.run.has_machine_plan(fid))
+        .map(|slots| e.verif_slots_upto(slots.result));
     e.emit(body, &mut code);
     // Discovery: this body is the post-splice bytecode the spill set has to be read from. Read it,
     // then erase the markers so nothing synthetic can reach a class file even though these bytes are
     // about to be discarded.
-    if !e.machine_suspensions.is_empty() && !env.run.has_machine_plan(fid) {
-        // Every slot this emitter owns, so a local assigned between frames can still be typed: the
-        // ones it allocated inside the spliced body, plus the body's own values — a hoisted
-        // suspension temp is one of those and no frame describes it.
-        let mut allocated = e.machine_slot_types.clone();
-        for &(slot, ty) in e.slots.values() {
-            allocated.entry(slot).or_insert(ty);
-        }
-        {
-            let mut keys: Vec<u16> = allocated.keys().copied().collect();
-            keys.sort_unstable();
-            crate::trace_compiler!(
-                "suspend",
-                "discover: allocated slots {keys:?} max_locals={}",
-                code.max_locals
-            );
-        }
-        let at_markers = e.machine_marker_locals.clone();
-        // An operand this emitter itself left on the stack under a suspension — a spliced body's
-        // `s = s + one(x)` whose hoist could not type the operand — is not the dependency's prefix
-        // and has no recorded type. It cannot be carried across the `areturn`, so the machine
-        // declines rather than emit a frame that claims it survived.
-        let unhoisted: Vec<(usize, i32)> = e
-            .machine_marker_stacks
-            .iter()
-            .filter(|(_, &height)| height != 0)
-            .map(|(&ordinal, &height)| (ordinal, height))
-            .collect();
-        if !unhoisted.is_empty() {
-            crate::trace_compiler!(
-                "suspend",
-                "machine plan fid={fid} DECLINED: operand left under a suspension {unhoisted:?}"
-            );
-            env.run
-                .set_inline_bail("an operand of a suspension could not be hoisted");
-        }
+    if let Some(entry_locals) = entry_locals {
         // One state per site emitted, which is what the markers name.
         let expected = e.machine_next_ordinal;
-        let prefixes = e.machine_marker_prefixes.clone();
-        match coroutine_machine::discover(
-            &code,
-            &allocated,
-            machine_slots,
-            &at_markers,
-            e.cw,
-            expected,
-            &prefixes,
-        ) {
+        match coroutine_machine::discover(&code, machine_slots, &entry_locals, e.cw, expected) {
             Some(plan) => {
                 crate::trace_compiler!(
                     "suspend",
@@ -11438,7 +11399,9 @@ fn emit_method_inner_with_holder(
                 continue;
             };
             let mut restored = expand_collapsed_locals(&entry);
-            for (slot, ty, _, _) in coroutine_machine::suspension_fields(suspension) {
+            // Every spill, the constant-`null` ones included: the restore leaves those holding
+            // `null`, and the frame has to say so rather than `Object`.
+            for &(slot, ty) in &suspension.spills {
                 let slot = slot as usize;
                 if restored.len() <= slot {
                     restored.resize(slot + 1, VerifType::Top);
@@ -13068,21 +13031,6 @@ struct Emitter<'a> {
     /// inline function that invokes its lambda twice splices the same body twice, and each copy
     /// suspends on its own locals. Both passes emit the same sequence, so both number it alike.
     machine_next_ordinal: usize,
-    /// Types of slots this emitter allocated inside a spliced body — a lambda's parameters and its
-    /// inline-depth marker. A frame cannot describe them: they are assigned between frames, and the
-    /// spill plan needs their types to choose a continuation field and restore them.
-    machine_slot_types: HashMap<u16, Ty>,
-    /// The locals this emitter holds at each suspension, recorded by the discovery pass. This is the
-    /// view the merge point's frame is built from, so it — not a frame found by position — says what
-    /// a resume has to restore.
-    machine_marker_locals: HashMap<usize, Vec<VerifType>>,
-    /// The operand-stack depth under each suspension, from the same pass. A continuation carries
-    /// locals, never the stack, so anything already there cannot survive the suspension.
-    machine_marker_stacks: HashMap<usize, i32>,
-    /// The operand-stack prefix the DEPENDENCY holds under each suspension — `acc` in a body that
-    /// computes `acc = acc + f(x)`. The lambda's own builder cannot see it: the values are pushed by
-    /// the code the splice wraps around this one, so the splice is where they become known.
-    machine_marker_prefixes: HashMap<usize, Vec<VerifType>>,
     /// The machine being built, on the pass that builds it.
     machine: Option<coroutine_machine::Machine>,
     /// The locals the dispatch can prove at a resume: the state on entry, before the body stored
@@ -13179,10 +13127,6 @@ impl<'a> Emitter<'a> {
             continuation_slot: None,
             machine_suspensions: HashSet::new(),
             machine_next_ordinal: 0,
-            machine_slot_types: HashMap::new(),
-            machine_marker_locals: HashMap::new(),
-            machine_marker_stacks: HashMap::new(),
-            machine_marker_prefixes: HashMap::new(),
             machine_entry_locals: None,
             machine_joins: Vec::new(),
             machine: None,
@@ -13446,7 +13390,6 @@ impl<'a> Emitter<'a> {
                         self.next_slot = self.next_slot.max(lambda_slot);
                         store(jt, slot, &mut scratch);
                         param_slots[n_cap + j] = (slot, jt);
-                        self.machine_slot_types.insert(slot, jt);
                         // Its scope opens once the store completes, and runs to the end of the body.
                         if self.record_locals {
                             if let Some(name) = self
@@ -13474,7 +13417,6 @@ impl<'a> Emitter<'a> {
                     self.next_slot = self.next_slot.max(lambda_slot);
                     scratch.push_int(0, self.cw);
                     store(Ty::Int, depth_marker, &mut scratch);
-                    self.machine_slot_types.insert(depth_marker, Ty::Int);
                     if self.record_locals {
                         if let Some(origin) = self.ir.lambda_origins.get(&impl_fn) {
                             lam_locals_declared.push((
@@ -13606,7 +13548,6 @@ impl<'a> Emitter<'a> {
                 ret_words,
                 probe.falls_through,
             );
-            self.record_spliced_stack_prefixes(&probe, 0);
             self.record_spliced_lines(
                 &probe.lines,
                 owner,
@@ -13693,7 +13634,6 @@ impl<'a> Emitter<'a> {
             ret_words,
             bs.falls_through,
         );
-        self.record_spliced_stack_prefixes(&bs, splice_start);
         self.record_spliced_lines(
             &bs.lines,
             owner,
@@ -13800,17 +13740,6 @@ impl<'a> Emitter<'a> {
     ///
     /// Returns the label the body starts at, one label per suspension for the dispatch to re-enter,
     /// and the label of the state that cannot happen.
-    /// Remember a declared local's slot type for the emit-time machine's discovery pass.
-    ///
-    /// `slots` is scoped: a block restores it on the way out, so by the time the spill plan is read
-    /// off the finished bytecode a body-local's type is no longer there. The frames cover the host's
-    /// locals; this covers everything declared between them, a hoisted suspension temp included.
-    fn record_machine_slot(&mut self, slot: u16, ty: Ty) {
-        if !self.machine_suspensions.is_empty() {
-            self.machine_slot_types.insert(slot, ty);
-        }
-    }
-
     fn emit_machine_prologue(
         &mut self,
         completion: u16,
@@ -13972,6 +13901,11 @@ impl<'a> Emitter<'a> {
                 }
                 store(jvm, slot, code);
             }
+            // A slot the verifier held as `null` at the suspension is a constant, not a field.
+            for slot in coroutine_machine::constant_null_slots(suspension) {
+                code.aconst_null();
+                code.astore(slot);
+            }
             code.aload(machine.slots.result);
             code.invokestatic(throw_on_failure, 1, 0);
             code.aload(machine.slots.result);
@@ -14074,74 +14008,6 @@ impl<'a> Emitter<'a> {
         code.set_needs_stackmap();
     }
 
-    /// Record the operand-stack prefix under every suspension a splice just placed.
-    ///
-    /// A machine's spill block runs where the marker is, which is inside the relocated body: by then
-    /// the dependency has already pushed whatever it holds across the call. Those values do not
-    /// survive the `areturn` that a suspension leaves through, so the machine has to save them — and
-    /// only the splice knows they are there.
-    fn record_spliced_stack_prefixes(
-        &mut self,
-        splice: &crate::jvm::inline::BranchySplice,
-        laid_out_at: usize,
-    ) {
-        if self.machine_suspensions.is_empty() {
-            return;
-        }
-        let Some(markers) = crate::jvm::classfile::markers_in(&splice.bytes) else {
-            return;
-        };
-        // A site's position is in the coordinates the body was LAID OUT for — the real offset on the
-        // second splice, zero on the probe — while a marker's is an index into these bytes. Compare
-        // them in one space, or every site looks like it starts after every marker.
-        let mut sites: Vec<(usize, Vec<VerifType>)> = splice
-            .lambda_sites
-            .iter()
-            .filter_map(|site| {
-                let prefix: Vec<VerifType> = site
-                    .stack_prefix
-                    .as_ref()
-                    .map(|prefix| prefix.iter().map(|v| self.spliced_prefix_type(v)).collect())
-                    .unwrap_or_default();
-                Some((site.byte_start.checked_sub(laid_out_at)?, prefix))
-            })
-            .collect();
-        sites.sort_by_key(|(start, _)| *start);
-        for (at, kind, ordinal) in markers {
-            if kind != crate::jvm::classfile::CoroutineMarker::Suspension {
-                continue;
-            }
-            let Some((_, prefix)) = sites.iter().rfind(|(start, _)| *start <= at) else {
-                continue;
-            };
-            if prefix.is_empty() {
-                continue;
-            }
-            // A body that splices an inline call of its own is recorded by the inner splice first.
-            // This one wraps that: its values sit UNDER what the inner splice already noted.
-            let ordinal = ordinal as usize;
-            let mut under = prefix.clone();
-            if let Some(inner) = self.machine_marker_prefixes.get(&ordinal) {
-                under.extend(inner.iter().cloned());
-            }
-            self.machine_marker_prefixes.insert(ordinal, under);
-        }
-    }
-
-    /// A spliced body's stack entry as a verification type this emitter can name.
-    ///
-    /// The splice describes an object by its own constant-pool index; a spill has to know the class,
-    /// because it decides the field's descriptor and the cast that reads it back.
-    fn spliced_prefix_type(&self, value: &crate::jvm::inline::VType) -> VerifType {
-        match vtype_to_verif(value) {
-            VerifType::Object(index) => match self.cw.class_name_at(index) {
-                Some(name) => VerifType::ObjectName(name.to_string()),
-                None => VerifType::Top,
-            },
-            other => other,
-        }
-    }
-
     /// Describe a spliced body's own locals in the caller's debug table.
     ///
     /// They are real locals of the method that now contains them; the reference compiler names every
@@ -14154,16 +14020,6 @@ impl<'a> Emitter<'a> {
         shift: usize,
         code: &mut CodeBuilder,
     ) {
-        // The machine needs these types whatever the debug settings are: a local the spliced body
-        // assigns between frames is typed by nothing else, and the spill plan cannot be read
-        // without it.
-        if !self.machine_suspensions.is_empty() {
-            for (_, _, slot, _, descriptor) in locals {
-                self.machine_slot_types
-                    .entry(*slot)
-                    .or_insert_with(|| ty_from_field_descriptor(descriptor));
-            }
-        }
         // An `@InlineOnly` body contributes no debug locals either, for the same reason.
         if !self.record_locals || inline_only {
             return;
@@ -14582,7 +14438,6 @@ impl<'a> Emitter<'a> {
                         s
                     });
                     self.slots.insert(index, (slot, jt));
-                    self.record_machine_slot(slot, jt);
                     self.unassigned_values.remove(&index);
                     store(jt, slot, code);
                     // A source local becomes visible after its initializing store.
@@ -14608,7 +14463,6 @@ impl<'a> Emitter<'a> {
                         s
                     });
                     self.slots.insert(index, (slot, jt));
-                    self.record_machine_slot(slot, jt);
                     self.unassigned_values.insert(index);
                     // An uninitialized source local (`lateinit var`) still has a lexical lifetime.
                     // Its declaration emits no store, so open the debug range at the declaration's
@@ -14888,8 +14742,9 @@ impl<'a> Emitter<'a> {
         match self.machine.is_some() {
             // Building the machine: spill first, then the call, then the check.
             true => self.emit_machine_spills(ordinal, code),
-            // Discovering the frame: mark where the splice put this suspension, and keep the locals
-            // held here — the frame where the body is re-entered is built from exactly this view.
+            // Discovering the frame: mark where the splice put this suspension. The discovery pass
+            // reads everything else — the locals held here and what is on the stack under the
+            // call — off the finished bytecode.
             false => {
                 if let Ok(marker) = u16::try_from(ordinal) {
                     code.coroutine_marker(
@@ -14897,10 +14752,6 @@ impl<'a> Emitter<'a> {
                         marker,
                     );
                 }
-                let locals = self.verif_locals_upto(self.next_slot);
-                self.machine_marker_locals.insert(ordinal, locals);
-                self.machine_marker_stacks
-                    .insert(ordinal, code.stack_height());
             }
         }
         Some(ordinal)
@@ -19943,7 +19794,6 @@ impl<'a> Emitter<'a> {
         );
         // A temporary released before the plan is read is invisible to it otherwise, and a spill
         // set cannot skip a slot the frames still describe.
-        self.record_machine_slot(slot, ty);
         self.temporaries.lease(slot, ty)
     }
 

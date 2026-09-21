@@ -1292,6 +1292,11 @@ fn hoist_operands_in_order(
                     );
                     return None;
                 };
+                crate::trace_compiler!(
+                    "suspend",
+                    "hoist_operands_in_order: snapshot operand {i} ({:?}) as {ty:?}",
+                    ir.exprs[x as usize]
+                );
                 snapshot_ty[i] = Some(ty);
             }
         }
