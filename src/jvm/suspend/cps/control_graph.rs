@@ -127,11 +127,11 @@ impl ControlGraph {
         }
         state[0] = 1;
         while let Some((index, next)) = stack.pop() {
-            let successors = self
+            let mut successors = self
                 .normal_successors(index)
                 .iter()
                 .chain(self.exceptional_successors(index));
-            match successors.skip(next).next() {
+            match successors.nth(next) {
                 Some(&to) => {
                     stack.push((index, next + 1));
                     if state[to] == 0 {

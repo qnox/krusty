@@ -11419,17 +11419,18 @@ fn emit_method_inner_with_holder(
         e.emit_machine_states(&resumes, &mut code);
         e.emit_machine_default(default, &mut code);
         if let Some(machine) = e.machine.clone() {
-            let bytes = coroutine_machine::build_continuation_class(
-                &machine.internal,
-                owner,
-                &f.name,
-                &reserved_desc,
-                &machine.plan,
-                Some(e.cw.major()),
-                source_file.as_deref(),
-                machine.receiver.as_deref(),
-                machine.bridge.as_deref(),
-            );
+            let bytes =
+                coroutine_machine::build_continuation_class(coroutine_machine::ContinuationClass {
+                    internal: &machine.internal,
+                    outer: owner,
+                    outer_method: &f.name,
+                    outer_descriptor: &reserved_desc,
+                    plan: &machine.plan,
+                    major: Some(e.cw.major()),
+                    source_file: source_file.as_deref(),
+                    receiver: machine.receiver.as_deref(),
+                    bridge: machine.bridge.as_deref(),
+                });
             env.run
                 .machine_classes
                 .borrow_mut()

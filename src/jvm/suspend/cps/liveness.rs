@@ -52,7 +52,8 @@ impl SlotSet {
     pub(crate) fn iter(&self) -> impl Iterator<Item = u16> + '_ {
         self.words.iter().enumerate().flat_map(|(word, &bits)| {
             (0..64)
-                .filter_map(move |bit| (bits & (1 << bit) != 0).then(|| (word * 64 + bit) as u16))
+                .filter(move |bit| bits & (1 << bit) != 0)
+                .map(move |bit| (word * 64 + bit) as u16)
         })
     }
 }

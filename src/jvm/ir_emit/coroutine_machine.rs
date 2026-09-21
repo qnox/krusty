@@ -252,7 +252,7 @@ fn stored_reference_type(
     };
     match op {
         // A call's declared return type.
-        0xb6 | 0xb7 | 0xb8 | 0xb9 => {
+        0xb6..=0xb9 => {
             let (_, _, descriptor) = cw.methodref_parts(index_of(operands)?)?;
             let returns = descriptor.rsplit(')').next()?;
             descriptor_reference_ty(returns)
@@ -316,10 +316,7 @@ fn nearest_frame_slots(
     frames: &[(usize, Vec<VerifType>, Vec<VerifType>)],
     offset: usize,
 ) -> Option<Vec<VerifType>> {
-    let (_, locals, _) = frames
-        .iter()
-        .filter(|(at, _, _)| *at <= offset)
-        .next_back()?;
+    let (_, locals, _) = frames.iter().rfind(|(at, _, _)| *at <= offset)?;
     Some(expand_slots(locals))
 }
 
@@ -505,17 +502,36 @@ fn split_descriptor(descriptor: &str) -> Option<(Vec<String>, String)> {
 /// `<facade>$<function>$1 extends ContinuationImpl`, holding the resumed value, the state label and
 /// one field per spilled local. Its `invokeSuspend` stores the value, sets the resume bit and
 /// re-enters the function, which then dispatches to the state it stopped in.
-pub(super) fn build_continuation_class(
-    internal: &str,
-    outer: &str,
-    outer_method: &str,
-    outer_descriptor: &str,
-    plan: &MachinePlan,
-    major: Option<u16>,
-    source_file: Option<&str>,
-    receiver: Option<&str>,
-    bridge: Option<&str>,
-) -> Vec<u8> {
+pub(super) struct ContinuationClass<'a> {
+    /// Internal name of the class to build.
+    pub(super) internal: &'a str,
+    /// The class holding the method this continuation re-enters, and that method's name and
+    /// descriptor.
+    pub(super) outer: &'a str,
+    pub(super) outer_method: &'a str,
+    pub(super) outer_descriptor: &'a str,
+    pub(super) plan: &'a MachinePlan,
+    /// Class-file major version, matched to the method's own.
+    pub(super) major: Option<u16>,
+    pub(super) source_file: Option<&'a str>,
+    /// `Some(owner)` for an instance method, whose receiver the continuation keeps.
+    pub(super) receiver: Option<&'a str>,
+    /// `Some(name)` when re-entry goes through a synthetic static on the owner.
+    pub(super) bridge: Option<&'a str>,
+}
+
+pub(super) fn build_continuation_class(spec: ContinuationClass<'_>) -> Vec<u8> {
+    let ContinuationClass {
+        internal,
+        outer,
+        outer_method,
+        outer_descriptor,
+        plan,
+        major,
+        source_file,
+        receiver,
+        bridge,
+    } = spec;
     use crate::jvm::classfile::{ClassWriter, CodeBuilder, ACC_FINAL, ACC_PUBLIC};
     let mut cw = ClassWriter::new(internal, CONTINUATION_IMPL);
     if let Some(major) = major {
