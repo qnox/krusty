@@ -396,14 +396,7 @@ pub(crate) fn lower_suspend(
         let spliced_suspensions = match (emit_time_machine, body) {
             (true, Some(b)) => {
                 let mut value_types = function_value_types(ir, fid, b);
-                hoist_spliced_inline_bodies(
-                    ir,
-                    b,
-                    &suspend_set,
-                    &orig_rets,
-                    &ret_ty,
-                    &mut value_types,
-                );
+                hoist_spliced_inline_bodies(ir, b, &suspend_set, &orig_rets, &mut value_types);
                 cps::frame_suspensions(ir, b, &suspend_set)
             }
             _ => spliced_suspensions,

@@ -141,28 +141,17 @@ pub(super) fn hoist_spliced_inline_bodies(
     body: ExprId,
     suspend_set: &HashSet<u32>,
     orig_rets: &[Ty],
-    ret: &Ty,
     value_types: &mut HashMap<u32, Ty>,
 ) {
     let mut seen = HashSet::new();
-    hoist_spliced_walk(
-        ir,
-        body,
-        suspend_set,
-        orig_rets,
-        ret,
-        value_types,
-        &mut seen,
-    );
+    hoist_spliced_walk(ir, body, suspend_set, orig_rets, value_types, &mut seen);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn hoist_spliced_walk(
     ir: &mut IrFile,
     expression: ExprId,
     suspend_set: &HashSet<u32>,
     orig_rets: &[Ty],
-    ret: &Ty,
     value_types: &mut HashMap<u32, Ty>,
     seen: &mut HashSet<ExprId>,
 ) {
@@ -176,22 +165,22 @@ fn hoist_spliced_walk(
     } = ir.exprs[expression as usize].clone()
     {
         // A nested spliced body runs in this frame too, so normalize the innermost first.
-        hoist_spliced_walk(ir, inner, suspend_set, orig_rets, ret, value_types, seen);
-        let rewritten = hoist_spliced_body(ir, inner, suspend_set, orig_rets, ret, value_types);
+        hoist_spliced_walk(ir, inner, suspend_set, orig_rets, value_types, seen);
+        let rewritten = hoist_spliced_body(ir, inner, suspend_set, orig_rets, value_types);
         if rewritten != inner {
             if let IrExpr::Lambda { inline_body, .. } = &mut ir.exprs[expression as usize] {
                 *inline_body = Some(rewritten);
             }
         }
         for capture in captures {
-            hoist_spliced_walk(ir, capture, suspend_set, orig_rets, ret, value_types, seen);
+            hoist_spliced_walk(ir, capture, suspend_set, orig_rets, value_types, seen);
         }
         return;
     }
     let mut children = Vec::new();
     crate::ir::for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
     for child in children {
-        hoist_spliced_walk(ir, child, suspend_set, orig_rets, ret, value_types, seen);
+        hoist_spliced_walk(ir, child, suspend_set, orig_rets, value_types, seen);
     }
 }
 
@@ -201,7 +190,6 @@ fn hoist_spliced_body(
     body: ExprId,
     suspend_set: &HashSet<u32>,
     orig_rets: &[Ty],
-    ret: &Ty,
     value_types: &mut HashMap<u32, Ty>,
 ) -> ExprId {
     match ir.exprs[body as usize].clone() {
