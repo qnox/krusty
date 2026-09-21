@@ -51,6 +51,6 @@ fn an_invoke_carrying_machine_operands_still_declines() {
          }\n\
          fun box(): String = if (Doubler()(21) == 42) \"OK\" else \"fail\"\n",
         "MachineInvoke",
-        "an override of a dependency method",
+        "cannot take the function slot",
     );
 }

@@ -930,6 +930,14 @@ pub(super) fn unsigned_owner(owner: &str) -> Option<Ty> {
     })
 }
 
+/// A dependency type's KOTLIN name, whichever spelling a provider presented it under.
+///
+/// `java.lang.CharSequence` and `kotlin.CharSequence` are one type; which one a call carries is
+/// the provider's business, so anything keyed on the type has to ask for the Kotlin name first.
+pub(super) fn kotlin_name_of(owner: crate::types::TypeName) -> String {
+    kotlin_owner(&owner.render()).to_string()
+}
+
 /// Whether a name is one of Kotlin's function types (`kotlin.Function0`..`Function22`, or the
 /// arity-less `kotlin.Function` they all extend).
 ///

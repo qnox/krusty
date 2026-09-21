@@ -233,7 +233,7 @@ impl<'a> FileLowering<'a> {
                             .enumerate()
                             .filter(|(ordinal, _)| !omitted.contains(&(*ordinal as u32)))
                             .map(|(ordinal, argument)| {
-                                crate::native::captures::physical_ty(
+                                super::super::super::captures::physical_ty(
                                     body.file.ir,
                                     class,
                                     ordinal as u32,

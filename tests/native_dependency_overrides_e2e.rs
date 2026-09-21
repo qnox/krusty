@@ -7,9 +7,10 @@
 //!
 //! - `invoke` on a function type, whose slot number is FIXED (the runtime names it), so an
 //!   override that cannot take that slot would be reached there anyway and still declines.
-//! - The runtime's COLLECTION dispatch. A receiver typed `List`, `Iterable` or `Iterator` goes to
-//!   a dispatch that knows only the collections this runtime makes, and no static type tells the
-//!   two apart — so a file that declares one of its own declines those members by name.
+//! - The runtime's own answers for a dependency member. A receiver typed by a runtime-known type
+//!   this file implements may be an object of the PROGRAM's, and those tables answer only for the
+//!   ones the runtime makes — no static type tells the two apart, which is why the answer is the
+//!   runtime's at all. So a member asked of such a type declines by name.
 //!
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
@@ -78,5 +79,28 @@ fn a_call_through_the_dependency_type_still_declines() {
          fun box(): String = walk(Pointed())\n",
         "DependencyTypedCall",
         "Iterator.hasNext",
+    );
+}
+
+/// A member asked of a type this file implements ITSELF declines, whatever the member.
+///
+/// `class Chars : CharsBase(s), CharSequence` and then `value: CharSequence` — the receiver may be
+/// a `Chars` or a string, and the table that answers `CharSequence.get` answers only for a string.
+#[test]
+fn a_member_of_a_type_this_file_implements_declines() {
+    expect_native_decline(
+        "open class CharsBase(protected val s: String) {\n\
+         \x20   val length: Int get() = s.length\n\
+         \x20   operator fun get(index: Int): Char = s[index]\n\
+         \x20   fun subSequence(startIndex: Int, endIndex: Int): CharSequence =\n\
+         \x20       s.subSequence(startIndex, endIndex)\n\
+         }\n\
+         class Chars(s: String) : CharsBase(s), CharSequence\n\
+         fun box(): String {\n\
+         \x20   val value: CharSequence = Chars(\"OK\")\n\
+         \x20   return \"\" + value[0] + value[1]\n\
+         }\n",
+        "ImplementedDependencyMember",
+        "this file implements itself",
     );
 }

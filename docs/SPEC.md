@@ -7828,11 +7828,12 @@ and behavior is checked by RUNNING the emitted program.
     `kotlin.Any`'s three and the runtime names that number itself — so a caller reads it rather
     than asking, and an override that cannot take that slot (its operands are not all references)
     would be reached there anyway. That one still declines.
-  - The runtime's COLLECTION dispatch. A receiver typed `List`, `Iterable` or `Iterator` goes to a
-    dispatch that knows only the collections this runtime makes, and no static type tells the two
-    apart — that is the whole reason the dispatch is the runtime's. So the guard is the FILE's: a
-    file declaring one of its own declines those members by name rather than reading a vtable for
-    an entry it does not have.
+  - The runtime's own answers for a dependency member. A receiver typed by a runtime-known type
+    this file implements may be an object of the PROGRAM's, and every such table answers only for
+    the objects the runtime MAKES — no static type tells the two apart, which is the whole reason
+    those answers are the runtime's. So the guard is the FILE's: a receiver typed by a dependency
+    this file implements declines by name, with the type it was asked of still in sight, and the
+    collection dispatch in particular declines wholesale where such a class exists.
 
   What remains missing is fixed slot numbers for the members of runtime-known types, which is what
   would let a call THROUGH such a type dispatch; that phase is in `docs/IMPLEMENTATION_PLAN.md`.

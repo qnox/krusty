@@ -191,6 +191,7 @@ pub fn lower_file(
         holders: HashMap::new(),
         references: HashMap::new(),
         declares_its_own_collection: declares_its_own_collection(ir),
+        implemented_dependencies: implemented_dependencies(ir),
     };
     lowering.declare_functions()?;
     lowering.declare_classes()?;
@@ -236,6 +237,35 @@ pub fn lower_file(
     })
 }
 
+/// The dependency types this file puts a class of its own behind, by Kotlin name.
+///
+/// Read from the OVERRIDE edges, which is where a class's answer for a dependency member is
+/// recorded whether or not its supertype list names the declaring type.
+fn implemented_dependencies(ir: &IrFile) -> std::collections::HashSet<String> {
+    let mut owners = std::collections::HashSet::new();
+    for edge in ir.function_overrides.values().flatten() {
+        if matches!(
+            edge.overridden,
+            crate::fir::ResolvedFunctionOverrideTarget::External(_)
+        ) {
+            owners.insert(super::super::intrinsics::kotlin_name_of(
+                edge.overridden_owner,
+            ));
+        }
+    }
+    for edge in ir.property_overrides.values().flatten() {
+        if matches!(
+            edge.overridden,
+            crate::fir::ResolvedPropertyOverrideTarget::External(_)
+        ) {
+            owners.insert(super::super::intrinsics::kotlin_name_of(
+                edge.overridden_owner,
+            ));
+        }
+    }
+    owners
+}
+
 /// Whether the file puts a class of its own behind one of the runtime's collection types.
 ///
 /// Read from the OVERRIDE edges rather than from the supertype lists: what matters is that a
@@ -244,8 +274,8 @@ pub fn lower_file(
 /// another dependency type the supertype list does not name.
 fn declares_its_own_collection(ir: &IrFile) -> bool {
     let owned = |owner: crate::types::TypeName| {
-        crate::native::intrinsics::is_list_type(owner)
-            || crate::native::intrinsics::iteration_role_of(Ty::Obj(owner, &[])).is_some()
+        super::super::intrinsics::is_list_type(owner)
+            || super::super::intrinsics::iteration_role_of(Ty::Obj(owner, &[])).is_some()
     };
     ir.function_overrides.values().flatten().any(|edge| {
         matches!(
@@ -302,6 +332,11 @@ struct FileLowering<'a> {
     /// callable references compare. Deduplicated here because two sites naming the same
     /// declaration must reach the SAME marker; that is the whole point of it.
     reference_identities: HashMap<String, DataId>,
+    /// The runtime-known types this file puts a class of its OWN behind, by their Kotlin name.
+    ///
+    /// A receiver typed by one of these may be an object of the program's rather than one the
+    /// runtime made, and the tables that answer a dependency member answer only for the runtime's.
+    implemented_dependencies: std::collections::HashSet<String>,
     /// Whether this file declares a class of its own behind one of the runtime's COLLECTION types.
     ///
     /// A receiver typed by one of those goes to the runtime's own dispatch, which knows only the
@@ -312,6 +347,12 @@ struct FileLowering<'a> {
 }
 
 impl<'a> FileLowering<'a> {
+    /// Whether a class of this file answers for the dependency type `internal`.
+    fn implements_dependency(&self, internal: crate::types::TypeName) -> bool {
+        self.implemented_dependencies
+            .contains(&super::super::intrinsics::kotlin_name_of(internal))
+    }
+
     fn signature_of(&self, params: &[Ty], ret: Ty) -> Result<Signature, Unsupported> {
         let mut signature = Signature::new(CallConv::SystemV);
         for param in params {
@@ -2320,6 +2361,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     // A member: the receiver is the runtime function's first argument, and
                     // everything crosses as a reference.
                     Some(receiver) => {
+                        // A receiver typed by a RUNTIME-KNOWN type this file puts a class of its
+                        // own behind may be one of those objects, and every table below answers
+                        // only for the ones the runtime MAKES. No static type tells the two apart
+                        // — that is why those answers are the runtime's at all — so the member
+                        // declines by name, with the type it was asked of still in sight.
+                        if let Some(internal) = self
+                            .type_of(receiver)
+                            .map(Ty::non_null)
+                            .and_then(|ty| ty.obj_internal())
+                        {
+                            if self.file.implements_dependency(internal) {
+                                return Err(format!(
+                                    "the member `{}.{name}` of a type this file implements itself",
+                                    internal.render().replace('/', ".")
+                                ));
+                            }
+                        }
                         // `f.equals(…)` and `f.hashCode()` on a function value need no case of
                         // their own. The receiver's static type does not say whether a lambda or a
                         // reference produced it, and does not have to: the OBJECT's table does, at
