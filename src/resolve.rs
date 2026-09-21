@@ -26447,10 +26447,22 @@ impl<'a> Checker<'a> {
                 }
                 self.record_selected_sam_arguments(args, &selected.applied_params());
                 let result = selected.callable.ret;
-                self.resolved_calls.insert(
-                    call,
-                    ResolvedCall::Companion(selected.member_with_return(result)),
-                );
+                let mut member = selected.member_with_return(result);
+                // An `operator fun of` is an ordinary member of the companion object, and this
+                // syntax writes no receiver expression to carry that instance. A qualified
+                // `Owner.of(...)` gets it from the spelled receiver; here the selected owner IS the
+                // singleton, so record it on the member. Without this the call is emitted one
+                // argument short of the declaration it selected.
+                if member.singleton_dispatch.is_none()
+                    && member.implicit_classifier_callable.is_none()
+                    && self.classifier_is_object(selected.callable.owner)
+                {
+                    member.singleton_dispatch = Some(Box::new(crate::libraries::SingletonDispatch {
+                        classifier: selected.callable.owner,
+                    }));
+                }
+                self.resolved_calls
+                    .insert(call, ResolvedCall::Companion(member));
                 return result;
             }
             Some(CallableCandidateSelection::MissingContext(_)) => {

@@ -7274,6 +7274,23 @@ and behavior is checked by RUNNING the emitted program.
   `box$MyLocalObject` rather than as a package that does not exist.
   Tests: the corpus cases are `codegen/box/casts/nativeCCEMessage/` (all four).
 
+- **A collection literal's `operator fun of` dispatches on the companion, not on nothing.**
+  `val list: MyList = ["O", "K"]` selects `MyList.Companion.of`, which is an ordinary MEMBER of
+  that companion object — the same declaration a spelled `MyList.of("O", "K")` reaches. The
+  literal spells no receiver, so the selected member reached the backend with no dispatch
+  receiver recorded and the call was emitted with the arguments alone: one value short of the
+  declaration it had selected, which the native code generator's verifier refused outright
+  (`mismatched argument count … got 1, expected 2`). Selection now records the singleton on the
+  committed member whenever the selected owner is an `object`, which covers a companion, a
+  companion block, and an `object` that declares `of` on itself. A companion EXTENSION keeps its
+  own path — it already carries the receiver it extends — and an implicit classifier callable
+  (`values`/`valueOf`) has no instance at all and keeps none.
+  Tests: `src/fir/body_check/collection_literal_tests.rs`
+  (`custom_collection_literal_keeps_the_selected_companion_operator`),
+  `tests/native_codegen_e2e.rs`
+  (`a_collection_literal_calls_its_companion_operator_on_the_companion`); the corpus cases are
+  `codegen/box/collectionLiterals/{genericCollection,multipleOfOverloads,nonGenericCollection,resolvesToOperator}.kt`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

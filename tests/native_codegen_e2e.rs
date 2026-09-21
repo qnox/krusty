@@ -2532,3 +2532,33 @@ fn a_break_in_an_expression_under_a_finally_still_runs_the_finally() {
         "OK\n1\n"
     );
 }
+
+#[test]
+fn a_collection_literal_calls_its_companion_operator_on_the_companion() {
+    if host().is_none() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // `operator fun of` is an ordinary member of the companion object, but the literal spells no
+    // receiver for it. The call used to be emitted with the arguments alone — one short of the
+    // declaration — which the code generator's verifier refused outright. Both overloads are
+    // exercised so the shortfall is visible at two different arities.
+    assert_eq!(
+        run("// LANGUAGE: +CollectionLiterals\n\
+             class MyList(val data: String) {\n\
+             \x20   companion object {\n\
+             \x20       operator fun of(vararg parts: String) = MyList(parts.size.toString())\n\
+             \x20       operator fun of(first: String, second: String) = MyList(first + second)\n\
+             \x20   }\n\
+             }\n\
+             fun main() {\n\
+             \x20   val pair: MyList = [\"O\", \"K\"]\n\
+             \x20   val many: MyList = [\"a\", \"b\", \"c\"]\n\
+             \x20   val none: MyList = []\n\
+             \x20   println(pair.data)\n\
+             \x20   println(many.data)\n\
+             \x20   println(none.data)\n\
+             }\n"),
+        "OK\n3\n0\n"
+    );
+}
