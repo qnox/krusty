@@ -73,3 +73,58 @@ fn a_try_finally_inside_a_spliced_lambda_runs_both_paths() {
     };
     assert_eq!(output, "OK");
 }
+
+/// A dependency that wraps its own `try` AROUND the lambda call. Both handlers then cover the
+/// spliced body, and the JVM takes the FIRST table entry that covers the pc and matches the thrown
+/// type (JVMS 2.10) — so the lambda's entry has to be listed before the host's. Relocated in the
+/// order they were collected (host first, lambda appended), the host's `catch` silently won:
+/// `guard`'s arm ran and returned -99 where the lambda's own `catch` should have returned 7. No
+/// verification error and no diagnostic — the wrong answer was simply computed.
+const GUARD_LIB: &str = r#"
+inline fun guard(f: () -> Int): Int {
+    return try { f() } catch (e: Throwable) { -99 }
+}
+"#;
+
+#[test]
+fn a_host_handler_around_the_call_does_not_shadow_the_lambdas_own_catch() {
+    const MAIN: &str = r#"
+        fun box(): String {
+            val n = guard {
+                try { throw IllegalStateException("inner"); 0 } catch (e: IllegalStateException) { 7 }
+            }
+            return if (n == 7) "OK" else "FAIL: " + n
+        }
+    "#;
+    let jdk = common::jdk_modules();
+    let Some(libout) = common::compile_lib_ref("spliced_lambda_try_host_guard", GUARD_LIB) else {
+        return;
+    };
+    let cp = [libout, common::stdlib_jar(), jdk.clone()];
+    assert_eq!(
+        common::expect_box_run(MAIN, "Main", &cp, Some(jdk.as_path())),
+        "OK"
+    );
+}
+
+/// The host's handler must still fire for what the lambda does NOT catch.
+#[test]
+fn a_host_handler_still_catches_what_the_lambda_does_not() {
+    const MAIN: &str = r#"
+        fun box(): String {
+            val n = guard {
+                try { throw java.io.IOException("inner"); 0 } catch (e: IllegalStateException) { 7 }
+            }
+            return if (n == -99) "OK" else "FAIL: " + n
+        }
+    "#;
+    let jdk = common::jdk_modules();
+    let Some(libout) = common::compile_lib_ref("spliced_lambda_try_host_guard", GUARD_LIB) else {
+        return;
+    };
+    let cp = [libout, common::stdlib_jar(), jdk.clone()];
+    assert_eq!(
+        common::expect_box_run(MAIN, "Main", &cp, Some(jdk.as_path())),
+        "OK"
+    );
+}

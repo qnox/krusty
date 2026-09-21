@@ -2645,7 +2645,7 @@ pub fn splice_unified(
         let old_idx = old_off.iter().position(|&o| o == bp as usize)?;
         offs.get(old2new[old_idx] + p).copied()
     };
-    let mut handlers = Vec::with_capacity(body.handlers.len());
+    let mut host_handlers = Vec::with_capacity(body.handlers.len());
     for h in &body.handlers {
         let start = byte_to_abs(h.start_pc)?;
         let end = byte_to_abs(h.end_pc)?;
@@ -2655,8 +2655,13 @@ pub fn splice_unified(
         } else {
             relocate_const(&body.source_cp, h.catch_type, cw)?
         };
-        handlers.push((start, end, handler, catch_type));
+        host_handlers.push((start, end, handler, catch_type));
     }
+    // A lambda's ranges are nested INSIDE the host's at the invoke site, and the JVM takes the
+    // first table entry that covers the pc and matches the thrown type (JVMS 2.10). So the lambda's
+    // entries go first; listed after the host's, a `catch` the host wraps around the call would
+    // shadow the lambda's own, silently — `guard { try { throw … } catch … }` ran the host's arm.
+    let mut handlers = Vec::new();
     // The lambda bodies' own handlers, relocated the same way their locals are below: a body is
     // spliced verbatim except for the adapter instructions cancelled off its ends, so a range is its
     // built offset less the cancelled prefix, and one that ran to the body's end now ends where the
@@ -2703,6 +2708,7 @@ pub fn splice_unified(
             ));
         }
     }
+    handlers.extend(host_handlers);
     let falls_through = caller_continuation_reachable(&final_insns, &offs, &handlers)?;
     // The host's live body locals at each lambda's invoke point — the host frame (decoded, before
     // relocation) with the largest old index ≤ the invoke. For a loop host that's the loop-body frame
