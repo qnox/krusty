@@ -7334,6 +7334,29 @@ and behavior is checked by RUNNING the emitted program.
   program above stops at the nullable LOCAL and the generic nullable parameter is covered by the
   corpus case on the native lane only.
 
+- **A property implemented at another representation is bridged, in both directions.**
+  `interface C { var size: Int }` implemented by `class B : C, A<Int>()` where `A<T>` declares
+  `var size: T`: the interface's accessors carry a machine integer and the inherited ones carry a
+  reference, so pointing the interface's program-wide number at `B`'s slot has a caller read that
+  integer as a pointer. The number takes an accessor bridge wearing the interface's carrier
+  instead, forwarding by DISPATCH so a further subclass's override is still reached. The same
+  holds on the CLASS chain, where `class D : B() { override var size: Int }` replaces a base slot
+  that carries a reference: the base keeps its slot and gets the bridge, and the override takes one
+  of its own. The entry carries the two property TYPES rather than two declaration ids, because
+  neither end need be a source accessor — a synthesized field access has no declaration to name.
+
+  What makes the shape hard to see is that NO declaration in the file says the property dispatches:
+  `A.size` need be neither `open` nor an override, and `B` overrides nothing — Kotlin asks for no
+  `open` because the implementing class declares nothing. So a property any class in the file hands
+  to an interface gets a slot on that ground alone.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`an_interface_property_implemented_at_another_representation_is_bridged`, which cross-checks the
+  two backends and REQUIRES the native lowering); the corpus cases are
+  `codegen/box/bridges/{test3,test5,test7,test8,test15,genericProperty}.kt`,
+  `codegen/box/basics/kt75483.kt`, `codegen/box/classes/kt6136.kt` and
+  `codegen/box/properties/{primitiveOverrideDefaultAccessor,primitiveOverrideDelegateAccessor}.kt`.
+  `bridges/test5.kt` and `bridges/test15.kt` leave the expected-failure ledger with it.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

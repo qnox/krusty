@@ -492,7 +492,8 @@ impl<'a> FileLowering<'a> {
                 model::Slot::FieldGetter { .. }
                 | model::Slot::FieldSetter { .. }
                 | model::Slot::ValueMember { .. }
-                | model::Slot::Bridge { .. } => {
+                | model::Slot::Bridge { .. }
+                | model::Slot::AccessorBridge { .. } => {
                     return Err("a functional interface with a synthesized member".to_string())
                 }
             });

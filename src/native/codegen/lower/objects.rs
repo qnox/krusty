@@ -306,6 +306,7 @@ impl<'a> FileLowering<'a> {
                         | Slot::FieldSetter { .. }
                         | Slot::ValueMember { .. }
                         | Slot::Bridge { .. }
+                        | Slot::AccessorBridge { .. }
                 )
             })
             .collect();
@@ -327,6 +328,28 @@ impl<'a> FileLowering<'a> {
                 let ret = base.ret;
                 let id = self.declare_local_function(
                     &format!("kt_bridge_{declared}_{target}_{target_slot}"),
+                    &params,
+                    ret,
+                )?;
+                self.accessors.insert(slot, id);
+                continue;
+            }
+            if let Slot::AccessorBridge {
+                declared, setter, ..
+            } = &slot
+            {
+                // The INTERFACE's accessor signature, which is the point of the entry: a caller
+                // reading this number through the interface reads what the interface declares.
+                let (params, ret) = if *setter {
+                    (vec![any(), *declared], Ty::Unit)
+                } else {
+                    (vec![any()], *declared)
+                };
+                // Named by position rather than by what it bridges: neither end need be a source
+                // accessor, so there is no declaration id to name it after, and two classes may
+                // need one for the same slot number.
+                let id = self.declare_local_function(
+                    &format!("kt_accessor_bridge_{}", self.accessors.len()),
                     &params,
                     ret,
                 )?;
@@ -568,7 +591,8 @@ impl<'a> FileLowering<'a> {
                 Slot::FieldGetter { .. }
                 | Slot::FieldSetter { .. }
                 | Slot::ValueMember { .. }
-                | Slot::Bridge { .. } => self.accessors[slot],
+                | Slot::Bridge { .. }
+                | Slot::AccessorBridge { .. } => self.accessors[slot],
             });
         }
         let name = self.kotlin_name(class);
@@ -755,6 +779,15 @@ impl<'a> FileLowering<'a> {
         {
             return self.define_bridge(*declared, *target_slot, *target, id);
         }
+        if let Slot::AccessorBridge {
+            declared,
+            implemented,
+            setter,
+            target_slot,
+        } = slot
+        {
+            return self.define_accessor_bridge(*declared, *implemented, *setter, *target_slot, id);
+        }
         if let Slot::ValueMember { class, member } = slot {
             return self.define_value_member(*class, *member, id);
         }
@@ -880,6 +913,49 @@ impl<'a> FileLowering<'a> {
                     return Err("a `Unit` answer where the base declares a primitive".to_string());
                 }
             }
+            body.terminate();
+            Ok(())
+        })
+    }
+
+    /// A property accessor's bridge: the interface's carrier in, the implementation's out.
+    ///
+    /// The same shape as [`Self::define_bridge`] and for the same reason, except that neither end
+    /// is named by a declaration — a synthesized field access has none — so the two property TYPES
+    /// stand in for the two signatures.
+    fn define_accessor_bridge(
+        &mut self,
+        declared: Ty,
+        implemented: Ty,
+        setter: bool,
+        target_slot: u32,
+        id: FuncId,
+    ) -> Result<(), Unsupported> {
+        let (params, result) = if setter {
+            (vec![any(), declared], Ty::Unit)
+        } else {
+            (vec![any()], declared)
+        };
+        let signature = self.signature_of(&params, result)?;
+        let name = format!("accessor bridge to slot {target_slot}");
+        self.emit_function(id, signature, result, &name, &mut |body, values| {
+            if setter {
+                let Some(value) = body.convert(values[1], Some(declared), implemented)? else {
+                    return Err("a `Unit` value crossing an accessor bridge".to_string());
+                };
+                body.dispatch(values[0], target_slot, &[implemented], Ty::Unit, &[value])?;
+                body.builder.ins().return_(&[]);
+                body.terminate();
+                return Ok(());
+            }
+            let answer = body.dispatch(values[0], target_slot, &[], implemented, &[])?;
+            let Some(answer) = answer else {
+                return Err("a `Unit` answer crossing an accessor bridge".to_string());
+            };
+            let Some(answer) = body.convert(answer, Some(implemented), declared)? else {
+                return Err("a `Unit` answer crossing an accessor bridge".to_string());
+            };
+            body.builder.ins().return_(&[answer]);
             body.terminate();
             Ok(())
         })

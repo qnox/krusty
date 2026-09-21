@@ -139,6 +139,25 @@ pub(super) enum Slot {
         target_slot: u32,
         target: FunId,
     },
+    /// The same thing for a property ACCESSOR reached through an INTERFACE that declares it with
+    /// a different representation: `interface C<T> { var size: T }` erases its accessors to a
+    /// reference while `class B : C<Int>, A()` inherits an unboxed machine integer. The
+    /// interface's program-wide number holds this rather than an alias of the class's own slot,
+    /// which would have a caller read that integer as a pointer.
+    ///
+    /// It carries TYPES where [`Slot::Bridge`] carries function ids, because neither end need be
+    /// a source accessor: either may be a synthesized field access, which has no declaration to
+    /// name. It forwards by DISPATCH for the same reason the method bridge does.
+    AccessorBridge {
+        /// The property type as the INTERFACE declares it: the carrier this entry wears.
+        declared: Ty,
+        /// The property type as the implementation has it: the carrier `target_slot` expects.
+        implemented: Ty,
+        /// Whether this stands in for the setter — which takes the value and answers nothing —
+        /// rather than the getter.
+        setter: bool,
+        target_slot: u32,
+    },
 }
 
 /// Which of `kotlin.Any`'s three a synthesized value-class member answers.
@@ -178,6 +197,11 @@ pub(super) struct ClassLayout {
     pub reference_offsets: Vec<u32>,
     pub vtable: Vec<Slot>,
     pub slots: HashMap<SlotKey, u32>,
+    /// Interface members this class implements through a declaration of a DIFFERENT
+    /// representation, by the interface's own spelling of the member. The interface's
+    /// program-wide number is filled with the bridge recorded here instead of an alias of this
+    /// class's slot — see [`Slot::AccessorBridge`].
+    pub interface_bridges: HashMap<SlotKey, Slot>,
 }
 
 /// The layouts of every class in a file, indexed by `ClassId`, plus the order in which a
@@ -512,13 +536,18 @@ fn place_interface_slots(
         vtable.resize(base as usize, Slot::Abstract);
         for member in &members {
             let implemented = interfaces[id as usize].contains(&member.interface);
+            let spellings = || std::iter::once(&member.key).chain(&member.aliases);
             let entry = if !implemented {
                 Slot::Abstract
+            } else if let Some(bridge) =
+                spellings().find_map(|key| layouts[id as usize].interface_bridges.get(key))
+            {
+                // The class implements the member with a different REPRESENTATION than the
+                // interface declares, so this number cannot alias its slot — it wears the
+                // interface's carrier and converts.
+                bridge.clone()
             } else {
-                match std::iter::once(&member.key)
-                    .chain(&member.aliases)
-                    .find_map(|key| layouts[id as usize].slots.get(key))
-                {
+                match spellings().find_map(|key| layouts[id as usize].slots.get(key)) {
                     // The class (or an ancestor) implements the member: its own slot already holds
                     // the most derived implementation, whatever further overrides did to it.
                     Some(&slot) => vtable[slot as usize].clone(),
@@ -775,6 +804,10 @@ fn layout_class(
         // an interface base's number is program-wide rather than this vtable's, so one there is
         // still declined.
         let mut bridged: Vec<(u32, FunId)> = Vec::new();
+        // The same, for a property accessor whose base declares a different representation. It is
+        // kept apart because neither end need be a source accessor, so the entry carries the two
+        // property TYPES rather than two declaration ids.
+        let mut accessor_bridged: Vec<(u32, Ty, Ty, bool)> = Vec::new();
         for &overridden in overridden_functions.get(&fid).into_iter().flatten() {
             let matches = same_representation(function, &ir.functions[overridden as usize]);
             let owner = ir.functions[overridden as usize]
@@ -833,14 +866,31 @@ fn layout_class(
                 None => match &own_key {
                     SlotKey::Getter(_, name) | SlotKey::Setter(_, name) => {
                         let setter = matches!(own_key, SlotKey::Setter(..));
-                        overridden_property_slot(
+                        match overridden_property_slot(
                             ir,
                             &overridden_properties,
                             &slots,
                             name,
                             setter,
                             &class.fq_name(),
-                        )?
+                        )? {
+                            // The base declares the property with a different REPRESENTATION, so
+                            // its slot cannot hold this accessor. This one takes a slot of its own
+                            // and the base's gets a bridge, exactly as a method's does.
+                            Some((slot, declared))
+                                if c_kind(declared) != c_kind(own_property_ty(class, name)) =>
+                            {
+                                accessor_bridged.push((
+                                    slot,
+                                    declared,
+                                    own_property_ty(class, name),
+                                    setter,
+                                ));
+                                None
+                            }
+                            Some((slot, _)) => Some(slot),
+                            None => None,
+                        }
                     }
                     _ => None,
                 },
@@ -870,13 +920,25 @@ fn layout_class(
                 target: fid,
             };
         }
+        for (base_slot, declared, implemented, setter) in accessor_bridged {
+            vtable[base_slot as usize] = Slot::AccessorBridge {
+                declared,
+                implemented,
+                setter,
+                target_slot: slot,
+            };
+        }
     }
 
     // Open or overriding properties with no source accessor still dispatch: synthesize the
     // field access as a slot.
     for property in &class.properties {
         let overrides = overridden_properties.contains_key(&property.name);
-        if !property.is_open && !overrides {
+        // A property a SUBCLASS hands to an interface is dispatched through as well, whether or
+        // not it is `open` here: `class B : C, A<Int>()` implements `C.size` with the `size` that
+        // `A` declares plainly, and the interface's number has to reach it. Kotlin needs no
+        // `open` for that — B overrides nothing — so the declaration alone cannot say it.
+        if !property.is_open && !overrides && !implements_an_interface(ir, id, &property.name) {
             continue;
         }
         let accessors = [
@@ -905,8 +967,17 @@ fn layout_class(
                 setter,
                 &class.fq_name(),
             )?;
-            let slot = match replaces {
-                Some(slot) => {
+            // A base declaring a different REPRESENTATION keeps its slot and takes a bridge, as
+            // above: a synthesized field access is exactly as unusable through the base's carrier
+            // as a source accessor would be.
+            let bridged = match replaces {
+                Some((slot, declared)) if c_kind(declared) != c_kind(property.ty) => {
+                    Some((slot, declared))
+                }
+                _ => None,
+            };
+            let slot = match replaces.filter(|_| bridged.is_none()) {
+                Some((slot, _)) => {
                     vtable[slot as usize] = entry;
                     slot
                 }
@@ -915,6 +986,14 @@ fn layout_class(
                     (vtable.len() - 1) as u32
                 }
             };
+            if let Some((base_slot, declared)) = bridged {
+                vtable[base_slot as usize] = Slot::AccessorBridge {
+                    declared,
+                    implemented: property.ty,
+                    setter,
+                    target_slot: slot,
+                };
+            }
             slots.insert(key, slot);
             for (owner, overridden_name) in overridden_properties
                 .get(&property.name)
@@ -934,7 +1013,8 @@ fn layout_class(
         }
     }
 
-    register_inherited_interface_members(ir, class, &mut slots)?;
+    let mut interface_bridges = HashMap::new();
+    register_inherited_interface_members(ir, class, &mut slots, &mut interface_bridges)?;
 
     // A `value class` is not a one-field class. Kotlin answers `equals`, `hashCode` and `toString`
     // by the value it wraps — `IC(1) == IC(1)` is true, and `IC(1).toString()` is `IC(n=1)` —
@@ -985,6 +1065,7 @@ fn layout_class(
         reference_offsets,
         vtable,
         slots,
+        interface_bridges,
     })
 }
 
@@ -999,6 +1080,7 @@ fn register_inherited_interface_members(
     ir: &IrFile,
     class: &IrClass,
     slots: &mut HashMap<SlotKey, u32>,
+    interface_bridges: &mut HashMap<SlotKey, Slot>,
 ) -> Result<(), Unsupported> {
     let module_function = |target: &ResolvedFunctionOverrideTarget| match target {
         ResolvedFunctionOverrideTarget::Module(callable) => {
@@ -1067,21 +1149,14 @@ fn register_inherited_interface_members(
         let (Some(owner), Some(interface)) = (implementation.class, overridden.class) else {
             continue;
         };
-        // The same representation check the METHOD path above makes, for the same reason and with
-        // the same consequence when it is missing. `interface C<T> { var size: T }` implemented by
-        // `class B : C<Int>, A()` where `A` declares `var size: Int` erases the interface's
-        // accessors to a REFERENCE while the inherited ones are an unboxed machine integer.
-        // Aliasing the interface's slot onto them has a caller read that integer as a pointer —
-        // a segmentation fault, where the contract is that a program this generator cannot emit is
-        // declined. A property is what `bridges/test7.kt` is about, which is why the method check
-        // did not catch it.
-        if c_kind(implementation.ty) != c_kind(overridden.ty) {
-            return Err(format!(
-                "an interface property whose implementation changes its representation                  (`{}.{}`; a bridge method is needed)",
-                ir.classes[owner as usize].fq_name(),
-                implementation.name
-            ));
-        }
+        // The same representation question the METHOD path above asks, for the same reason.
+        // `interface C<T> { var size: T }` implemented by `class B : C<Int>, A()` where `A`
+        // declares `var size: Int` erases the interface's accessors to a REFERENCE while the
+        // inherited ones are an unboxed machine integer. Aliasing the interface's number onto them
+        // would have a caller read that integer as a pointer; the number takes a bridge wearing
+        // the interface's carrier instead. A property is what `bridges/test7.kt` is about, which
+        // is why the method check did not catch it.
+        let bridged = c_kind(implementation.ty) != c_kind(overridden.ty);
         for setter in [false, true] {
             let (from, to) = if setter {
                 (
@@ -1095,6 +1170,16 @@ fn register_inherited_interface_members(
                 )
             };
             if let Some(&slot) = slots.get(&from) {
+                if bridged {
+                    interface_bridges
+                        .entry(to.clone())
+                        .or_insert(Slot::AccessorBridge {
+                            declared: overridden.ty,
+                            implemented: implementation.ty,
+                            setter,
+                            target_slot: slot,
+                        });
+                }
                 slots.entry(to).or_insert(slot);
             }
         }
@@ -1165,6 +1250,33 @@ fn inherited_slot(
     None
 }
 
+/// Whether any class in this file hands `owner`'s property `name` to an interface it implements.
+/// Such a property is reached through the interface's number and so has to dispatch, even where
+/// the declaration is neither `open` nor an override — the class that implements the interface
+/// declares nothing of its own.
+fn implements_an_interface(ir: &IrFile, owner: ClassId, name: &str) -> bool {
+    ir.property_overrides.values().flatten().any(|edge| {
+        edge.overridden_is_interface
+            && match &edge.implementation {
+                ResolvedPropertyOverrideTarget::Module(id) => ir
+                    .checked_properties
+                    .get(id)
+                    .is_some_and(|property| property.class == Some(owner) && property.name == name),
+                ResolvedPropertyOverrideTarget::External(_) => false,
+            }
+    })
+}
+
+/// The type `class` declares for its own property `name`, which is what its accessors carry.
+/// `Ty::Unit` for a name the class does not declare, which no accessor of this class is keyed by.
+fn own_property_ty(class: &IrClass, name: &str) -> Ty {
+    class
+        .properties
+        .iter()
+        .find(|property| property.name == name)
+        .map_or(Ty::Unit, |property| property.ty)
+}
+
 /// The slot key of a method of `owner`: a property accessor is keyed by its property.
 pub(super) fn function_key(ir: &IrFile, owner: ClassId, fid: FunId) -> SlotKey {
     let class = &ir.classes[owner as usize];
@@ -1188,7 +1300,7 @@ fn overridden_property_slot(
     name: &str,
     setter: bool,
     class_name: &str,
-) -> Result<Option<u32>, Unsupported> {
+) -> Result<Option<(u32, Ty)>, Unsupported> {
     // Only a CLASS base owns a slot to replace. An interface base owns a number in the program-wide
     // interface region instead, and that is pointed at this property afterwards rather than
     // replaced here.
@@ -1208,9 +1320,21 @@ fn overridden_property_slot(
     if setter && !slots.contains_key(&key) {
         return Ok(None);
     }
-    slots.get(&key).copied().map(Some).ok_or_else(|| {
-        format!("a property override with no slot to replace (`{class_name}.{name}`)")
-    })
+    // The base's own declared type travels with its slot, because whether the slot can simply be
+    // REPLACED depends on it: a base declaring `var size: T` carries a reference where an
+    // overriding `var size: Int` carries a machine integer, and replacing then has a caller
+    // reading the base's slot read that integer as a pointer.
+    let declared = ir.classes[*owner as usize]
+        .properties
+        .iter()
+        .find(|property| property.name == *overridden_name)
+        .map(|property| property.ty);
+    match (slots.get(&key).copied(), declared) {
+        (Some(slot), Some(declared)) => Ok(Some((slot, declared))),
+        _ => Err(format!(
+            "a property override with no slot to replace (`{class_name}.{name}`)"
+        )),
+    }
 }
 
 /// Implementation method → the method it overrides, for the methods `class` declares. Both ends

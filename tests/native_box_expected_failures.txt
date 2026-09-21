@@ -2,8 +2,6 @@
 # backend that the JVM lane fails on as well. Format: <path relative to the box corpus root><TAB><reason>.
 # A case not listed here that fails, or a case listed here that passes, fails the test — so this list
 # can only shrink honestly. See tests/kotlin_box_native_conformance.rs.
-bridges/test15.kt	the same missing bridge as bridges/test5.kt, through a longer inheritance chain; krusty's JVM backend rejects it with the identical `VerifyError: Bad type on operand stack`
-bridges/test5.kt	an interface member reached through a generic supertype needs a bridge, and krusty emits the implementation's own signature instead, so the call answers `fail 3`; krusty's JVM backend rejects the same program with `VerifyError: Bad type on operand stack`, so the missing bridge is common rather than this generator's
 callableReference/property/extensionPropertyReferenceWithTypeParameter.kt	`List<T>::foo` names a LOCAL extension function `foo` and the checker does not see it there, so the reference falls through to the top-level extension PROPERTY of the same name and the program answers "not" where it should answer "led" — reduced to that one reference, the checker reports `unresolved reference 'foo'`; krusty's JVM backend prints the identical "fail", so the resolution is the checker's, not the generator's
 classes/selfcreate.kt	an anonymous object passes its enclosing instance's `b` to its own superclass constructor; krusty's JVM backend rejects the same program with `VerifyError: Bad type on operand stack`
 contextParameters/classMemberAndTopLevelWithContext.kt	a context parameter picks the wrong receiver — krusty's JVM backend prints the identical "NOK", so this is the frontend's, not the generator's

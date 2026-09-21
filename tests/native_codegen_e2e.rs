@@ -2648,3 +2648,53 @@ fn a_floating_point_comparison_stays_ieee_when_an_operand_arrives_boxed() {
     common::expect_box_ok_with_stdlib(source, "Ieee");
     common::expect_native_box(source, "Ieee", "OK");
 }
+
+#[test]
+fn an_interface_property_implemented_at_another_representation_is_bridged() {
+    // `interface C { var size: Int }` implemented by `class B : C, A<Int>()` where `A<T>` declares
+    // `var size: T`. The interface's accessors carry a machine integer and the inherited ones carry
+    // a reference, so pointing the interface's number at them would have a caller read that integer
+    // as a pointer. The number takes a bridge wearing the interface's carrier instead — and the
+    // same holds in the other direction, where `D` overrides with an `Int` a base slot that carries
+    // a reference, so the base's own slot takes one too.
+    //
+    // A is neither `open` nor an override in `size`, and B overrides nothing: no declaration in the
+    // file says this property dispatches, which is why the fact has to be read off the interface it
+    // is handed to.
+    let source = "open class A<T> {\n\
+         \x20   open var size: T = 56 as T\n\
+         }\n\
+         interface C {\n\
+         \x20   var size: Int\n\
+         }\n\
+         open class B : C, A<Int>()\n\
+         open class D : B() {\n\
+         \x20   override var size: Int = 117\n\
+         }\n\
+         fun <T> widen(a: A<T>, value: T) {\n\
+         \x20   a.size = value\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val b = B()\n\
+         \x20   if (b.size != 56) return \"fail 1: ${b.size}\"\n\
+         \x20   b.size = 55\n\
+         \x20   if (b.size != 55) return \"fail 2: ${b.size}\"\n\
+         \x20   val c: C = b\n\
+         \x20   if (c.size != 55) return \"fail 3: ${c.size}\"\n\
+         \x20   c.size = 57\n\
+         \x20   if (c.size != 57) return \"fail 4: ${c.size}\"\n\
+         \x20   widen(b, 42)\n\
+         \x20   if (b.size != 42) return \"fail 5: ${b.size}\"\n\
+         \x20   val d = D()\n\
+         \x20   if (d.size != 117) return \"fail 6: ${d.size}\"\n\
+         \x20   widen(d, 42)\n\
+         \x20   if (d.size != 42) return \"fail 7: ${d.size}\"\n\
+         \x20   val dc: C = d\n\
+         \x20   if (dc.size != 42) return \"fail 8: ${dc.size}\"\n\
+         \x20   dc.size = 7\n\
+         \x20   if (d.size != 7) return \"fail 9: ${d.size}\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "IfaceProp");
+    common::expect_native_box(source, "IfaceProp", "OK");
+}
