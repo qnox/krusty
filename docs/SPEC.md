@@ -7768,10 +7768,15 @@ and behavior is checked by RUNNING the emitted program.
   An enum CONSTANT selects the same way: `ENTRY` on an enum whose primary takes a `String` and
   which also declares `constructor() : this("OK")` is a call to that secondary.
 
+  A class HEADER selects the same way: `class D : A(4)` where `A`'s `(Int)` constructor is
+  secondary is that selection written where a supertype is listed, and reading the primary's
+  parameter list for every base call made the arity disagree.
+
   Kotlin admits no two constructors of one class with the same parameter list, so a secondary
   matching the selection IS the selection and the primary is what remains when none does. A
   secondary carrying a PREFIX — an inner class's outer instance, or a local class's captures —
-  still declines: the delegation has no way to supply those operands.
+  still declines: the delegation has no way to supply those operands. So does a base call that
+  BOTH names a secondary and omits an argument: the defaults wrapper fills the primary's frame.
   Tests: `tests/native_secondary_constructors_e2e.rs` (both cross-checking the two backends and
   REQUIRING the native lowering); the corpus cases are `codegen/box/secondaryConstructors/`,
   `codegen/box/sealed/sealedInSameFile.kt` and `codegen/box/enum/emptyConstructor.kt`.

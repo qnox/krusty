@@ -1300,7 +1300,26 @@ impl<'a> FileLowering<'a> {
         let parent = match layout.superclass {
             Some(parent) => {
                 let parent_declaration = &self.ir.classes[parent as usize];
-                let params: Vec<Ty> = constructor_parameters(self.ir, parent);
+                // `class B : A(4)` names the constructor the checker selected, which may be a
+                // SECONDARY one — `sealed class A() { constructor(i: Int) : this() }` is that
+                // shape. Reading the primary's parameter list for every base call made the arity
+                // disagree and declined the file. Kotlin admits no two constructors of one class
+                // with the same parameter list, so a secondary matching the selection is it.
+                let sibling = if forwards_to_parent {
+                    None
+                } else {
+                    parent_declaration
+                        .secondary_ctors
+                        .iter()
+                        .position(|candidate| {
+                            candidate.prefix_params.is_empty()
+                                && candidate.params == declaration.super_ctor_params
+                        })
+                };
+                let params: Vec<Ty> = match sibling {
+                    Some(sibling) => parent_declaration.secondary_ctors[sibling].params.clone(),
+                    None => constructor_parameters(self.ir, parent),
+                };
                 if !forwards_to_parent && declaration.super_args.len() != params.len() {
                     return Err(format!(
                         "a superclass constructor call of a different arity (`{}`)",
@@ -1317,7 +1336,17 @@ impl<'a> FileLowering<'a> {
                     .omitted_super_arguments(class)
                     .map(|(_, omitted)| omitted)
                     .unwrap_or_default();
-                let parent_constructor = if omitted.is_empty() {
+                if sibling.is_some() && !omitted.is_empty() {
+                    // The wrapper below fills the PRIMARY's frame; a secondary's defaults are its
+                    // own and this does not reach them.
+                    return Err(format!(
+                        "a superclass secondary constructor call with defaulted arguments (`{}`)",
+                        declaration.fq_name()
+                    ));
+                }
+                let parent_constructor = if let Some(sibling) = sibling {
+                    self.classes[parent as usize].secondaries[sibling]
+                } else if omitted.is_empty() {
                     self.classes[parent as usize].constructor.ok_or_else(|| {
                         format!(
                             "a superclass with no primary constructor (`{}`)",

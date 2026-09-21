@@ -53,3 +53,27 @@ fn an_enum_constant_reaches_the_secondary_constructor_it_selected() {
     expect_box_ok_with_stdlib(source, "EnumSecondaryConstructor");
     expect_native_box(source, "EnumSecondaryConstructor", "OK");
 }
+
+/// A class HEADER naming the superclass's secondary constructor.
+///
+/// `class D : A(4)` where `A`'s `(Int)` constructor is secondary is the same selection the
+/// delegation above makes, written where a supertype is listed. Reading the primary's parameter
+/// list for every base call made the arity disagree and declined the file.
+#[test]
+fn a_supertype_list_reaches_the_constructor_the_checker_selected() {
+    let source = "sealed class A() {\n\
+         \x20   var trace: String = \"primary\"\n\
+         \x20   constructor(i: Int) : this() {\n\
+         \x20       trace = \"secondary \" + i\n\
+         \x20   }\n\
+         }\n\
+         class B : A()\n\
+         class D : A(4)\n\
+         fun box(): String {\n\
+         \x20   if (B().trace != \"primary\") return \"fail B\"\n\
+         \x20   if (D().trace != \"secondary 4\") return \"fail D: \" + D().trace\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "SupertypeSecondaryConstructor");
+    expect_native_box(source, "SupertypeSecondaryConstructor", "OK");
+}
