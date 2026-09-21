@@ -625,7 +625,9 @@ shared slot is always dead at the point it is reused.
   class-load time. The gate runs `box()` on a real JVM, which catches it; `VerifyError` is the
   expected failure mode, not silent divergence.
 * **The marker contract** must survive relocation into an unrelated constant pool. It is an
-  `invokestatic` to a synthetic name, which `relocate_insns` already handles like any other call.
+  a reserved `impdep1` (`0xfe`) instruction carrying a kind and an ordinal: no compiler emits it,
+  the relocation carries it like any other instruction, and it is overwritten with `nop`s the moment
+  its position has been read (`src/jvm/classfile/coroutine_markers.rs`).
 
 ## 9. Measuring
 

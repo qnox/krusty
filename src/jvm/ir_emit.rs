@@ -13972,9 +13972,9 @@ impl<'a> Emitter<'a> {
 
     /// Spill the locals that must survive suspension `ordinal`, and record which state to resume in.
     ///
-    /// Emitted BEFORE the call's operands: the sequence is stack-neutral, so it reads the same
-    /// whether the operands are already pushed or not, and placing it first keeps it out of the
-    /// operand emission it would otherwise have to thread through.
+    /// Emitted BEFORE the call's operands, which is also where the dependency's own stack prefix
+    /// still sits: this block empties that prefix into locals, so the operands are pushed onto a
+    /// clean stack and the call's own emission needs to know nothing about any of it.
     fn emit_machine_spills(&mut self, ordinal: usize, code: &mut CodeBuilder) {
         let Some(machine) = self.machine.clone() else {
             return;
@@ -14011,9 +14011,6 @@ impl<'a> Emitter<'a> {
         let Some(machine) = self.machine.clone() else {
             return;
         };
-        if machine.plan.suspensions.get(ordinal).is_none() {
-            return;
-        }
         let Some(suspension) = machine.plan.suspensions.get(ordinal) else {
             return;
         };
