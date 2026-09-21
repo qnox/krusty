@@ -153,3 +153,34 @@ fn equal_string_literals_are_one_object() {
         "OK",
     );
 }
+
+/// `for (c in s)` — the loop common lowering turns into a counted walk over the string.
+///
+/// The rewrite writes two intrinsics: the length, and the read at an index. The length was
+/// answered and the read was not, so every `for` over text declined — a loop nothing about the
+/// string runtime was missing.
+///
+/// The index is a machine integer and the answer a `Char`. A loop variable declared `Char?` asks
+/// for the box, which is why the conversion is made rather than the answer handed straight back.
+#[test]
+fn a_for_loop_over_text_reads_each_character_at_its_index() {
+    let source = "fun box(): String {\n\
+         \x20   var sum = 0\n\
+         \x20   for (c in \"239\") sum += c.code - '0'.code\n\
+         \x20   if (sum != 14) return \"fail sum: \" + sum\n\
+         \x20   var joined = \"\"\n\
+         \x20   for (c: Char? in \"abcd\") joined = joined + c\n\
+         \x20   if (joined != \"abcd\") return \"fail joined: \" + joined\n\
+         \x20   val text = \"hello\"\n\
+         \x20   if (text[1] != 'e') return \"fail index\"\n\
+         \x20   var reversed = \"\"\n\
+         \x20   for (i in text.indices) reversed = reversed + text[text.length - 1 - i]\n\
+         \x20   if (reversed != \"olleh\") return \"fail reversed: \" + reversed\n\
+         \x20   var empty = 0\n\
+         \x20   for (c in \"\") empty++\n\
+         \x20   if (empty != 0) return \"fail empty\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    assert_eq!(expect_box_run_with_stdlib(source, "ForOverText"), "OK");
+    expect_native_box(source, "ForOverText", "OK");
+}

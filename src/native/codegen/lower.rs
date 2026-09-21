@@ -2610,6 +2610,34 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 }
                 self.runtime_call("kt_string_plus", &[any(), any()], ret, &[left, right])
             }
+            // `s[i]`, and the read a `for (c in s)` loop is lowered into: common lowering turns
+            // that loop into a counted one over `StringLength` and this, so the two arrive
+            // together and only one of them was answered.
+            //
+            // The runtime answers a `Char`; a site that asked for a boxed one — `for (c: Char? in
+            // s)` — gets the conversion, which is why the answer is not handed straight back.
+            IrIntrinsic::StringGet => {
+                let (Some(receiver), [index]) = (receiver, args) else {
+                    return Err("a malformed string read".to_string());
+                };
+                let value = self.reference(receiver)?;
+                let Some(index) = self.coerce(*index, Ty::Int)? else {
+                    return Err("a `Unit` string index".to_string());
+                };
+                if self.terminated {
+                    return Ok(None);
+                }
+                let produced = self.runtime_call(
+                    "kt_string_get",
+                    &[any(), Ty::Int],
+                    Ty::Char,
+                    &[value, index],
+                )?;
+                let Some(produced) = produced else {
+                    return Ok(None);
+                };
+                self.convert(produced, Some(Ty::Char), ret)
+            }
             IrIntrinsic::ArrayGet => {
                 let (Some(receiver), [index]) = (receiver, args) else {
                     return Err("a malformed array read".to_string());

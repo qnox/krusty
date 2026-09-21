@@ -7586,6 +7586,17 @@ and behavior is checked by RUNNING the emitted program.
   the two backends); the corpus cases are all of
   `codegen/box/diagnostics/functions/tailRecursion/`.
 
+- **A `for` over text reads each character at its index.** Common lowering turns `for (c in s)`
+  into a counted walk writing two intrinsics — the length, and the read at an index. The length
+  was answered and the read was not, so every `for` over a string declined on a loop nothing about
+  the string runtime was missing.
+
+  The index is a machine integer and the answer a `Char`; a loop variable declared `Char?` asks for
+  the box, so the answer is converted to what the site asked for rather than handed straight back.
+  Tests: `tests/native_strings_e2e.rs` (`a_for_loop_over_text_reads_each_character_at_its_index`,
+  which cross-checks the two backends and REQUIRES the native lowering); the corpus cases are
+  `codegen/box/strings/forInString.kt` and the other `StringGet` cases.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
