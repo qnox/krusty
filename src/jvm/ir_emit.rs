@@ -11338,7 +11338,7 @@ fn emit_method_inner_with_holder(
             );
         }
         let at_markers = e.machine_marker_locals.clone();
-        match coroutine_machine::discover(&code, &allocated, machine_slots, &at_markers) {
+        match coroutine_machine::discover(&code, &allocated, machine_slots, &at_markers, e.cw) {
             Some(plan) => {
                 crate::trace_compiler!(
                     "suspend",
@@ -13970,12 +13970,22 @@ impl<'a> Emitter<'a> {
     /// one. `shift` is where the splice landed for a body laid out at offset 0 — a branchless splice
     /// is appended wherever the caller happens to be — and zero for one already laid out in place.
     fn record_spliced_locals(
-        &self,
+        &mut self,
         locals: &[(u16, u16, u16, String, String)],
         inline_only: bool,
         shift: usize,
         code: &mut CodeBuilder,
     ) {
+        // The machine needs these types whatever the debug settings are: a local the spliced body
+        // assigns between frames is typed by nothing else, and the spill plan cannot be read
+        // without it.
+        if !self.machine_suspensions.is_empty() {
+            for (_, _, slot, _, descriptor) in locals {
+                self.machine_slot_types
+                    .entry(*slot)
+                    .or_insert_with(|| ty_from_field_descriptor(descriptor));
+            }
+        }
         // An `@InlineOnly` body contributes no debug locals either, for the same reason.
         if !self.record_locals || inline_only {
             return;
@@ -19734,6 +19744,9 @@ impl<'a> Emitter<'a> {
             !self.slots.values().any(|(held, _)| *held == slot),
             "backend temporary at slot {slot} aliases a semantic local"
         );
+        // A temporary released before the plan is read is invisible to it otherwise, and a spill
+        // set cannot skip a slot the frames still describe.
+        self.record_machine_slot(slot, ty);
         self.temporaries.lease(slot, ty)
     }
 

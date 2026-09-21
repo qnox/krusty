@@ -115,6 +115,7 @@ pub(super) fn discover(
     allocated: &HashMap<u16, Ty>,
     machine: Option<MachineSlots>,
     at_markers: &HashMap<usize, Vec<VerifType>>,
+    cw: &crate::jvm::classfile::ClassWriter,
 ) -> Option<MachinePlan> {
     use crate::jvm::classfile::CoroutineMarker;
     use crate::jvm::suspend::cps::{ControlGraph, Handler, LocalLiveness};
@@ -209,12 +210,17 @@ pub(super) fn discover(
             }
             // A frame describes the host's locals; the ones this emitter allocated inside the
             // spliced body are assigned between frames and are known only to it.
-            let from_frame = typed.get(slot as usize).and_then(verif_spill_type);
+            let from_frame = typed
+                .get(slot as usize)
+                .and_then(verif_spill_type)
+                .or_else(|| local_table_type(code, slot, at))
+                .or_else(|| stored_reference_type(&insns, index, slot, cw));
             let Some(ty) = from_frame.or_else(|| allocated.get(&slot).copied()) else {
                 crate::trace_compiler!(
                     "suspend",
-                    "discover: slot {slot} live at {at} has no type in a frame of {} slots",
-                    typed.len()
+                    "discover: slot {slot} live at {at} has no type in a frame of {} slots (stores {:?})",
+                    typed.len(),
+                    stores_into(&insns, index, slot)
                 );
                 return None;
             };
@@ -230,6 +236,91 @@ pub(super) fn discover(
         suspensions,
         body_locals: code.max_locals,
     })
+}
+
+/// The type of a REFERENCE local the spliced body stores between frames, read off the instruction
+/// that produced the value.
+///
+/// A dependency compiled without a local-variable table names such a slot nowhere: no frame types
+/// it, no declaration in this file owns it, and the debug table is empty. What produced the value
+/// still says what it is — a call's return type, a `checkcast`, a field read.
+fn stored_reference_type(
+    insns: &[crate::jvm::inline::Insn],
+    index: usize,
+    slot: u16,
+    cw: &crate::jvm::classfile::ClassWriter,
+) -> Option<Ty> {
+    use crate::jvm::inline::Insn;
+    let store = insns.iter().take(index).rposition(|insn| {
+        matches!(insn, Insn::Plain { op, operands }
+            if matches!((*op, operands.first()), (0x3a, Some(&n)) if u16::from(n) == slot)
+                || (0x4b..=0x4e).contains(op) && u16::from(op - 0x4b) == slot)
+    })?;
+    let Insn::Plain { op, operands } = insns.get(store.checked_sub(1)?)? else {
+        return None;
+    };
+    let index_of = |operands: &[u8]| -> Option<u16> {
+        Some(u16::from_be_bytes([*operands.first()?, *operands.get(1)?]))
+    };
+    match op {
+        // A call's declared return type.
+        0xb6 | 0xb7 | 0xb8 | 0xb9 => {
+            let (_, _, descriptor) = cw.methodref_parts(index_of(operands)?)?;
+            let returns = descriptor.rsplit(')').next()?;
+            descriptor_reference_ty(returns)
+        }
+        // A narrowing the body performed itself, or an instance it just built.
+        0xc0 | 0xbb | 0xbd => {
+            let class = cw.class_name_at(index_of(operands)?)?;
+            Some(Ty::obj(class))
+        }
+        _ => None,
+    }
+}
+
+/// A field descriptor's `Ty`, for REFERENCES only: a primitive there would mean the store was not
+/// an `astore` and something is being misread.
+fn descriptor_reference_ty(descriptor: &str) -> Option<Ty> {
+    matches!(descriptor.as_bytes().first(), Some(b'L') | Some(b'['))
+        .then(|| crate::jvm::ir_emit::ty_from_field_descriptor(descriptor))
+}
+
+/// The store opcodes that write `slot` before instruction `index`. Diagnostic: it says what kind of
+/// value an untypeable slot holds.
+fn stores_into(insns: &[crate::jvm::inline::Insn], index: usize, slot: u16) -> Vec<u8> {
+    use crate::jvm::inline::Insn;
+    insns
+        .iter()
+        .take(index)
+        .filter_map(|insn| match insn {
+            Insn::Plain { op, operands } => {
+                let wrote = match (*op, operands.first()) {
+                    (0x36..=0x3a, Some(&n)) => Some(u16::from(n)),
+                    (0x3b..=0x4e, _) => Some(u16::from((op - 0x3b) % 4)),
+                    _ => None,
+                };
+                (wrote == Some(slot)).then_some(*op)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The type a spliced body's own local is declared with, from the debug table.
+///
+/// A local assigned between frames — `astore` into a slot the dependency's body owns — is typed by
+/// neither a frame nor this emitter's slot map. The splice copies the dependency's
+/// LocalVariableTable into the host, and that names the descriptor.
+fn local_table_type(code: &crate::jvm::classfile::CodeBuilder, slot: u16, at: usize) -> Option<Ty> {
+    let at = u16::try_from(at).ok()?;
+    code.local_entries()
+        .iter()
+        .find(|(start, length, entry_slot, _, _)| {
+            *entry_slot == slot
+                && *start <= at
+                && length.is_none_or(|length| at < start.saturating_add(length))
+        })
+        .map(|(_, _, _, _, descriptor)| crate::jvm::ir_emit::ty_from_field_descriptor(descriptor))
 }
 
 /// The slot-indexed locals of the last frame at or before `offset`.

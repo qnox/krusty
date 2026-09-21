@@ -277,11 +277,25 @@ Working today, each with a fixture in `tests/suspend_in_spliced_inline_e2e.rs`:
 | A `Long` (two-slot) local live across one | `a_long_local_survives_a_spliced_suspension` |
 | Through stdlib `run` / `let` / `repeat` | `…_spliced_stdlib_{run,let,repeat}_lambda_runs` |
 | An instance method's machine | `a_suspension_inside_a_spliced_lambda_of_a_member_runs` |
+| A PRIVATE member's machine (via `access$<name>`) | `…_of_a_private_member_runs` |
+| A body spliced into a `try` region (`runCatching { susp() }`) | `a_suspension_inside_a_spliced_try_region_runs` |
 
-Still bailing, by design: an OPEN or private member (the continuation re-enters with
-`invokevirtual`, which must reach this very body), and any shape where the emitter declines the
-splice — there the lambda is a real closure, its standalone `invoke` has been taken away, and the
-compile is declined rather than emitting an `invokedynamic` to a method that does not exist.
+Still bailing, by design: an OPEN member (the continuation re-enters with `invokevirtual`, which
+must reach this very body — kotlinc uses a `$suspendImpl` static for these), and any shape where the
+emitter declines the splice — there the lambda is a real closure, its standalone `invoke` has been
+taken away, and the compile is declined rather than emitting an `invokedynamic` to a method that
+does not exist.
+
+**The remaining corpus blocker is a MIXED function**: one the IR machine already owns (it has a
+suspension of its own) that ALSO carries a suspension inside a spliced lambda. The emit-time machine
+claims only functions the IR machine finds nothing in, so the in-lambda suspension still reaches
+emission with no continuation to pass. Two machines cannot share one method, so this is step 7 —
+migrating a shape family off the IR machine — not a patch on the gate.
+
+**A lambda's `inline_body` is not evidence** that its body runs in this frame: lowering attaches one
+wherever it can, including to the lambda of an ordinary function. Only the operand of a call to an
+inline function is spliced, and both the suspension walk and the impl-suppression walk apply that
+rule.
 
 **Correctness before byte parity.** Two deliberate divergences from kotlinc remain: the spill set is
 widened to every local the merged frames CLAIM at a resume (kotlinc spills exactly its liveness
