@@ -7384,6 +7384,31 @@ and behavior is checked by RUNNING the emitted program.
   Tests: `tests/native_codegen_e2e.rs` (`a_do_while_condition_reads_what_its_body_declares`); the
   corpus case is `codegen/box/controlStructures/kt3280.kt`.
 
+- **A `break` a diverging `finally` swallows does not leave its loop.** `while (true) { try
+  { break } finally { return x } }`: the `finally` returns before the `break` arrives, so the break
+  never completes and the loop is never left. The exit was marked reachable at the `break` site
+  regardless of whether the jump was then emitted, which made the position after the loop live —
+  and a function whose body is a `while (true)` nothing leaves may END there, that position being
+  `Nothing`. Marking it reachable turned such a function into one that falls off its end. The mark
+  now happens where the jump does.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`a_break_a_diverging_finally_swallows_does_not_leave_the_loop`); the corpus cases are
+  `codegen/box/finally/kt3894.kt`, `codegen/box/controlStructures/kt8148_break.kt` and
+  `codegen/box/controlStructures/breakContinueInExpressions/breakFromOuter.kt`.
+
+- **The end of a non-`Unit` function is the runtime's loud failure, not a decline.** Kotlin requires
+  such a function to return on every path and the frontend has already checked it, so the one way a
+  CHECKED program reaches the end is a `when` the frontend proved exhaustive whose subject matched
+  no branch. `when (a) { A.V -> return "OK" }` over a one-constant enum is the shape: it needs no
+  `else`, and this generator keeps the fall-through edge because proving exhaustiveness needs a
+  hierarchy it does not have. kotlinc puts `NoWhenBranchMatchedException` at exactly that point for
+  exactly that reason, and this now does the same — a few unreachable instructions, and never a
+  wrong answer.
+  Tests: `tests/native_codegen_e2e.rs`
+  (`an_exhaustive_when_whose_arms_all_return_ends_the_function`); the corpus cases are
+  `codegen/box/when/exhaustiveWhenReturn.kt`, `codegen/box/branching/when8.kt`,
+  `codegen/box/regressions/kt18779.kt` and `codegen/box/when/enumOptimization/kt15806.kt`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

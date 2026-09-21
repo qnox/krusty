@@ -2755,3 +2755,79 @@ fn a_do_while_condition_reads_what_its_body_declares() {
     common::expect_box_ok_with_stdlib(source, "DoWhileScope");
     common::expect_native_box(source, "DoWhileScope", "OK");
 }
+
+#[test]
+fn a_break_a_diverging_finally_swallows_does_not_leave_the_loop() {
+    // `while (true) { try { break } finally { return x } }`: the `finally` returns before the
+    // `break` arrives, so the break never completes and the loop is never left. The exit was
+    // marked reachable at the `break` regardless, which made the position after the loop live —
+    // and a function whose body is a `while (true)` nothing leaves may end there, because that
+    // position is `Nothing`. Marking it reachable turned such a function into one that falls off
+    // its end. The mark now happens where the jump does.
+    let source = "class Trace {\n\
+         \x20   var seen = \"\"\n\
+         \x20   operator fun plus(step: String): Trace {\n\
+         \x20       seen += step\n\
+         \x20       return this\n\
+         \x20   }\n\
+         \x20   override fun toString(): String = seen\n\
+         }\n\
+         fun swallowed(): Trace {\n\
+         \x20   val trace = Trace()\n\
+         \x20   while (true) {\n\
+         \x20       try {\n\
+         \x20           trace + \"Try\"\n\
+         \x20           break\n\
+         \x20       } finally {\n\
+         \x20           return trace + \"Finally\"\n\
+         \x20       }\n\
+         \x20   }\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val answered = swallowed().toString()\n\
+         \x20   if (answered != \"TryFinally\") return \"fail 1: $answered\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "SwallowedBreak");
+    common::expect_native_box(source, "SwallowedBreak", "OK");
+}
+
+#[test]
+fn an_exhaustive_when_whose_arms_all_return_ends_the_function() {
+    // A `when` over an enum or a sealed hierarchy needs no `else` because the frontend proved one
+    // unreachable. This generator cannot repeat that proof — it does not have the hierarchy — so
+    // the `when` keeps a fall-through edge, and a function whose every arm returns then looks like
+    // one that falls off its end. It was declined; the end is now the runtime's loud failure,
+    // which is where kotlinc puts `NoWhenBranchMatchedException` for the same reason.
+    let source = "enum class Single { ONLY }\n\
+         sealed class Outcome {\n\
+         \x20   class Failed(val why: String) : Outcome()\n\
+         \x20   class Worked(val answer: String) : Outcome()\n\
+         }\n\
+         fun overEnum(value: Single): String {\n\
+         \x20   when (value) {\n\
+         \x20       Single.ONLY -> return \"enum\"\n\
+         \x20   }\n\
+         }\n\
+         fun overSealed(outcome: Outcome): String {\n\
+         \x20   when (outcome) {\n\
+         \x20       is Outcome.Failed -> throw IllegalStateException(outcome.why)\n\
+         \x20       is Outcome.Worked -> return outcome.answer\n\
+         \x20   }\n\
+         }\n\
+         fun overBoolean(flag: Boolean): String {\n\
+         \x20   when (flag) {\n\
+         \x20       true -> return \"yes\"\n\
+         \x20       false -> return \"no\"\n\
+         \x20   }\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   if (overEnum(Single.ONLY) != \"enum\") return \"fail 1\"\n\
+         \x20   if (overSealed(Outcome.Worked(\"worked\")) != \"worked\") return \"fail 2\"\n\
+         \x20   if (overBoolean(true) != \"yes\") return \"fail 3\"\n\
+         \x20   if (overBoolean(false) != \"no\") return \"fail 4\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "ExhaustiveWhenEnd");
+    common::expect_native_box(source, "ExhaustiveWhenEnd", "OK");
+}

@@ -445,13 +445,20 @@ impl<'a> FileLowering<'a> {
                 fill(&mut body, &params)?;
                 if body.terminated {
                     body.builder.ins().trap(TrapCode::unwrap_user(1));
-                } else {
-                    if carried != Carrier::Void {
-                        return Err(format!(
-                            "a non-`Unit` function `{name}` that falls off its end"
-                        ));
-                    }
+                } else if carried == Carrier::Void {
                     body.builder.ins().return_(&[]);
+                } else {
+                    // Kotlin requires a non-`Unit` function to return on every path, and the
+                    // frontend has already checked it. The one way a checked program still reaches
+                    // here is a `when` the frontend proved EXHAUSTIVE whose subject matched no
+                    // branch — `when (a) { A.V -> return "OK" }` over a one-constant enum falls
+                    // through this generator's merge edge, because proving exhaustiveness needs a
+                    // hierarchy this generator does not have. So the end of such a function is the
+                    // runtime's loud failure, which is what kotlinc puts there too
+                    // (`NoWhenBranchMatchedException`): a few unreachable instructions, and never
+                    // a wrong answer.
+                    body.runtime_call("kt_no_when_branch_matched", &[], Ty::Unit, &[])?;
+                    body.builder.ins().trap(TrapCode::unwrap_user(1));
                 }
                 // After the body, because only the body knows whether any call was made: a frame
                 // with nothing to propagate through never creates the block at all.
@@ -927,12 +934,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             }
             IrExpr::Break { label } => {
                 let index = self.loop_index(label.as_deref(), "break")?;
-                self.loops[index].broken = true;
                 let target = self.loops[index].break_block;
                 self.run_finallys_for_jump(index)?;
                 if self.terminated {
+                    // A `finally` on the way out diverged — it returned or threw — so this `break`
+                    // never arrives. The loop is NOT broken by it: marking it so would make the
+                    // exit reachable, and the position after a `while (true)` nothing leaves is
+                    // exactly the `Nothing` that lets a function end there.
                     return Ok(());
                 }
+                self.loops[index].broken = true;
                 self.builder.ins().jump(target, &[]);
                 self.terminate();
             }
