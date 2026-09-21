@@ -510,6 +510,65 @@ fn overloaded_suspend_functions_get_their_own_continuations() {
     assert_eq!(output, "OK");
 }
 
+/// A `try` that produces the spliced body's VALUE, with the suspension as the `try` arm's value.
+/// The arm's raw `Object` result must be adapted before the `try`'s result slot takes it — the
+/// value-`try` desugar that does this for a function body stops at every lambda, so a spliced body
+/// gets its own.
+#[test]
+fn a_value_try_whose_arm_is_the_suspension_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun guarded(): Int = twice(1) { x -> try { one(x) } catch (e: Exception) { -1 } }
+        fun box(): String = runBlocking {
+            val n = guarded()
+            if (n == 5) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_value_try", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// The same, with the suspension nested in the arm's value expression: the desugar binds the arm
+/// through a typed local, and the hoist that follows lifts the suspension out of the expression.
+#[test]
+fn a_value_try_whose_arm_computes_with_the_suspension_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun guarded(): Int = twice(1) { x -> try { one(x) + 0 } catch (e: Exception) { -1 } }
+        fun box(): String = runBlocking {
+            val n = guarded()
+            if (n == 5) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_value_try_expr", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// The shape that worked before the desugar reached spliced bodies — the arm binds the suspension
+/// to a local first — and must keep working through it.
+#[test]
+fn a_value_try_whose_arm_binds_the_suspension_first_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun guarded(): Int = twice(1) { x -> try { val v = one(x); v } catch (e: Exception) { -1 } }
+        fun box(): String = runBlocking {
+            val n = guarded()
+            if (n == 5) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_value_try_bound", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
 /// The `catch` arm actually runs: the second iteration throws before its suspension. A spliced
 /// body's `try` ranges have to reach the enclosing method's exception table for this to hold —
 /// the splice used to drop them, leaving the handler as dead code.

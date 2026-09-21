@@ -85,12 +85,13 @@ pub(crate) fn frame_suspensions(
     found
 }
 
-/// Whether a SPLICED body suspends inside a `try` that produces a value.
+/// Whether a SPLICED body still suspends inside a `try` that produces a value, after normalization.
 ///
-/// The value-`try` desugar runs over a function body and stops at every lambda, so such an arm keeps
-/// the call's raw `Object` result and is stored straight into the arm's local, which the emitted
-/// frame then describes as a scalar. Until that desugar reaches spliced bodies, a machine must not
-/// claim one.
+/// Such an arm keeps the call's raw `Object` result and stores it straight into the arm's local,
+/// which the emitted frame then describes as a scalar. The value-`try` desugar the spliced body
+/// gets (`desugar_spliced_value_try`) binds the arms of a `try` that is the body's own value or a
+/// statement's operand; one nested deeper in an expression (`1 + try { … }`) is not reached, and a
+/// machine must not claim it.
 pub(crate) fn suspends_in_a_value_try(
     ir: &IrFile,
     body: ExprId,
