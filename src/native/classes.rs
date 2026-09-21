@@ -1231,16 +1231,6 @@ fn layout_class(
                 class.fq_name()
             ));
         }
-        if matches!(
-            c_kind(class.fields[0].ty),
-            CKind::Scalar("kt_float" | "kt_double")
-        ) {
-            // Its `toString` would have to render the value, which the runtime cannot do.
-            return Err(format!(
-                "a value class wrapping a floating-point value (`{}`)",
-                class.fq_name()
-            ));
-        }
         for (slot, member) in [
             (0, ValueMember::Equals),
             (1, ValueMember::HashCode),

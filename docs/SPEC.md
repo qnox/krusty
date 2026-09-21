@@ -7781,6 +7781,16 @@ and behavior is checked by RUNNING the emitted program.
   REQUIRING the native lowering); the corpus cases are `codegen/box/secondaryConstructors/`,
   `codegen/box/sealed/sealedInSameFile.kt` and `codegen/box/enum/emptyConstructor.kt`.
 
+- **A value class wrapping a floating-point value answers its members.** The three synthesized
+  members were declined on the premise that the runtime could not render the value. It can: a
+  floating-point value has a box and its own `toString`, which is the shortest decimal that reads
+  back as itself. `equals` and `hashCode` read the BITS, so NaN equals itself and the two zeroes
+  stay distinct — the rule Kotlin's own `equals` states, and the opposite of what `==` on the
+  machine answers.
+  Tests: `tests/value_class_e2e.rs`
+  (`a_value_class_wrapping_a_floating_point_value_answers_its_members`, which cross-checks the two
+  backends and REQUIRES the native lowering).
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
