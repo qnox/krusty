@@ -509,3 +509,25 @@ fn overloaded_suspend_functions_get_their_own_continuations() {
     };
     assert_eq!(output, "OK");
 }
+
+/// The `catch` arm actually runs: the second iteration throws before its suspension. A spliced
+/// body's `try` ranges have to reach the enclosing method's exception table for this to hold —
+/// the splice used to drop them, leaving the handler as dead code.
+#[test]
+fn a_value_try_catches_a_throw_on_the_direct_path() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun guarded(): Int = twice(1) { x ->
+            try { if (x == 2) throw IllegalStateException("x"); one(x) } catch (e: Exception) { -1 }
+        }
+        fun box(): String = runBlocking {
+            val n = guarded()
+            if (n == 1) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_value_try_throws", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}

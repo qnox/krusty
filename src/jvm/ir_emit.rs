@@ -13305,7 +13305,7 @@ impl<'a> Emitter<'a> {
         let mut lam_max_stack = 0u16;
         for (i, &a) in args.iter().enumerate() {
             let mut scratch = CodeBuilder::new(self.next_slot);
-            let (lam_insns, lam_fr, lam_locals_declared, lam_lines) = if let IrExpr::Lambda {
+            let lam = if let IrExpr::Lambda {
                 impl_fn,
                 arity,
                 captures,
@@ -13495,10 +13495,12 @@ impl<'a> Emitter<'a> {
                     lam_fr,
                     lam_locals_declared,
                     scratch.line_marks().to_vec(),
+                    scratch.resolved_exceptions(),
                 )
             } else {
                 continue;
             };
+            let (lam_insns, lam_fr, lam_locals_declared, lam_lines, lam_handlers) = lam;
             if code.max_locals < scratch.max_locals {
                 code.max_locals = scratch.max_locals;
             }
@@ -13510,6 +13512,7 @@ impl<'a> Emitter<'a> {
                 body: lam_insns,
                 locals: lam_locals_declared,
                 lines: lam_lines,
+                handlers: lam_handlers,
             });
         }
         if lam_splices.is_empty() {
