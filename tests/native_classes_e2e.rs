@@ -822,3 +822,66 @@ fn a_bridge_converts_its_arguments_as_well_as_its_answer() {
         "got 5\ngot 6\n"
     );
 }
+
+#[test]
+fn an_abstract_member_carries_the_default_its_override_is_called_with() {
+    if !available() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // Kotlin writes a default on the DECLARATION, and an interface member's declaration has no
+    // body. So `i.f()` has two halves that belong in different places: the argument is computed
+    // from the interface's own default, and which implementation then runs is decided by the
+    // receiver. Filling the argument must not settle the dispatch — the generator refused these
+    // outright rather than risk answering with the wrong implementation.
+    assert_eq!(
+        run("interface I {\n\
+             \x20   fun f(x: Int = 23): String\n\
+             }\n\
+             abstract class Base : I\n\
+             class C : Base(), I {\n\
+             \x20   override fun f(x: Int) = \"C:\" + x\n\
+             }\n\
+             class D : Base(), I {\n\
+             \x20   override fun f(x: Int) = \"D:\" + x\n\
+             }\n\
+             fun main() {\n\
+             \x20   val c: I = C()\n\
+             \x20   val d: I = D()\n\
+             \x20   println(c.f())\n\
+             \x20   println(d.f())\n\
+             \x20   println(c.f(42))\n\
+             }\n"),
+        "C:23\nD:23\nC:42\n"
+    );
+}
+
+#[test]
+fn a_default_on_an_abstract_member_reads_the_receiver_it_was_declared_on() {
+    if !available() {
+        eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
+        return;
+    }
+    // The default is an expression in the CALLEE's frame, so it may read the receiver — which is
+    // the whole reason it cannot be computed at the call site. Here it reads an abstract property
+    // each implementation answers differently, so a wrapper evaluating it against the wrong
+    // receiver, or once and for all, prints the wrong line.
+    assert_eq!(
+        run("interface Named {\n\
+             \x20   val tag: String\n\
+             \x20   fun greet(who: String = tag): String\n\
+             }\n\
+             class A : Named {\n\
+             \x20   override val tag = \"a\"\n\
+             \x20   override fun greet(who: String) = \"A->\" + who\n\
+             }\n\
+             class B : Named {\n\
+             \x20   override val tag = \"b\"\n\
+             \x20   override fun greet(who: String) = \"B->\" + who\n\
+             }\n\
+             fun main() {\n\
+             \x20   for (n in listOf<Named>(A(), B())) println(n.greet())\n\
+             }\n"),
+        "A->a\nB->b\n"
+    );
+}

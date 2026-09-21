@@ -61,7 +61,12 @@ impl<'a> FileLowering<'a> {
                 continue;
             }
             let declaration = &self.ir.functions[function as usize];
-            if declaration.body.is_none() {
+            // A body-less declaration is not necessarily uncallable. `interface I { fun f(x: Int =
+            // 23): String }` declares the DEFAULT on the abstract member — that is where Kotlin
+            // writes it — and `i.f()` fills the argument and then dispatches to whatever
+            // implements it. What has nothing to call is a body-less declaration with no receiver
+            // to dispatch on; the emit side refuses a member with no slot separately.
+            if declaration.body.is_none() && declaration.dispatch_receiver.is_none() {
                 return Err(format!(
                     "a call with a defaulted argument to `{}`, which has no body",
                     declaration.name
@@ -134,8 +139,9 @@ impl<'a> FileLowering<'a> {
             parameters.push(*ty);
         }
         let signature = self.signature_of(&parameters, declaration.ret)?;
-        let target = self.functions[key.function as usize]
-            .ok_or_else(|| "a defaulted call to a function with no body".to_string())?;
+        // Read, not required: a wrapper that dispatches never names the declaration's own body,
+        // and an abstract member has none to name.
+        let target = self.functions[key.function as usize];
         let slots: Vec<Ty> = declaration
             .dispatch_receiver
             .map(|owner| Ty::Obj(owner, &[]))
@@ -217,6 +223,9 @@ impl<'a> FileLowering<'a> {
                         body.dispatch(arguments[0], slot, &slots[1..], result, &arguments[1..])?
                     }
                     None => {
+                        let target = target.ok_or_else(|| {
+                            "a defaulted call to a function with no body".to_string()
+                        })?;
                         let func_ref = body.func_ref(target);
                         let call = body.emit_call(func_ref, &arguments)?;
                         body.builder.inst_results(call).first().copied()
