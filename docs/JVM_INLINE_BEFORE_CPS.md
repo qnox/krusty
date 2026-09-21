@@ -283,6 +283,7 @@ Working today, each with a fixture in `tests/suspend_in_spliced_inline_e2e.rs`:
 | A body spliced into a `try` region (`runCatching { susp() }`) | `a_suspension_inside_a_spliced_try_region_runs` |
 | A value-`try` in the spliced body around the suspension (`try { susp() } catch …`) | `a_value_try_whose_arm_is_the_suspension_runs`, `…_computes_with_the_suspension_runs`, `…_binds_the_suspension_first_runs` |
 | That `try`'s `catch` running, on the direct path and on a failed resumption | `a_value_try_catches_a_throw_on_the_direct_path`, `a_value_try_catches_a_failed_resumption` |
+| A lambda the inline function invokes at TWO sites (`f(1) + f(2)`, stdlib `maxOf`) | `a_lambda_invoked_at_two_sites_suspends_at_each`, `two_sites_with_different_live_sets_each_spill_their_own`, `…_stdlib_max_of_selector_runs` |
 
 **A value-`try` in a spliced body** gets the value-`try` desugar a function body gets
 (`desugar_spliced_value_try` in `src/jvm/suspend/hoisting.rs`), before the body is hoisted. A
@@ -327,6 +328,17 @@ body. Restoring before re-entry is what makes a suspension inside a `try` verify
 claims the locals the protected code assigned, and an edge from the region's own start cannot
 produce them. The blocks are emitted AFTER the body, so they cannot move the slots the body
 allocates — the plan was read from a first emission that had none of this code in it.
+
+**A lambda invoked at more than one site is built once per site.** The splice copies a lambda's
+body to every `FunctionN.invoke` of its parameter; a body that carries a suspension cannot be
+copied, because its marker names ONE state and each site is its own position with its own spill set
+(`f(1) + f(2)` holds the first result under the second call; `maxOf` has one call before its loop
+and one inside it). So when a lambda's first emission advanced the state count, the emitter
+re-emits it once per site from the same slot base — the copies differ in nothing but their marker
+ordinals — and `LambdaSplice::bodies` carries one body per site for the splice to place in host
+order. A body with no suspension is still built once. The discovery pass and the build pass both
+count sites off the dependency's bytecode (`SplicedFrame::site_counts`), which is what makes the
+numbering reproducible across them; `discover` keeps its duplicate-ordinal check as the safety net.
 
 **A lambda's `inline_body` is not evidence** that its body runs in this frame: lowering attaches one
 wherever it can, including to the lambda of an ordinary function. Only the operand of a call to an

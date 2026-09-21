@@ -53,6 +53,15 @@ inline fun twice(x: Int, f: (Int) -> Int): Int {
     }
     return acc
 }
+
+inline fun both3(f: (Int) -> Int): Int = f(1) + f(2)
+
+inline fun twoSites(f: (Int) -> Int): Int {
+    val a = f(1)
+    val s = "x"
+    val b = f(2)
+    return a + b + s.length
+}
 "#;
 
 #[test]
@@ -604,6 +613,63 @@ fn a_captured_array_under_a_suspension_is_typed_as_the_capture() {
         }
     "#;
     let Some(output) = run("suspend_spliced_captured_array", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// An inline function that invokes its lambda at TWO sites splices the body twice. Each copy is its
+/// own state: two positions cannot share one ordinal, one spill set and one `label`.
+#[test]
+fn a_lambda_invoked_at_two_sites_suspends_at_each() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun g(): Int = both3 { one(it) }
+        fun box(): String = runBlocking {
+            val n = g()
+            if (n == 5) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_two_sites", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// The two sites hold different locals across their suspension — the second one has the first
+/// site's result and a reference in scope — so each state needs its own spill set.
+#[test]
+fn two_sites_with_different_live_sets_each_spill_their_own() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun g(): Int = twoSites { one(it) }
+        fun box(): String = runBlocking {
+            val n = g()
+            if (n == 6) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_two_sites_live", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// A stdlib function with two selector sites: `maxOf` calls the selector once before its loop and
+/// once inside it.
+#[test]
+fn a_suspension_inside_a_spliced_stdlib_max_of_selector_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun f(xs: List<Int>): Int = xs.maxOf { one(it) }
+        fun box(): String = runBlocking {
+            val n = f(listOf(1, 5, 3))
+            if (n == 6) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_max_of", MAIN) else {
         return;
     };
     assert_eq!(output, "OK");
