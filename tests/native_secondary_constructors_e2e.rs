@@ -77,3 +77,40 @@ fn a_supertype_list_reaches_the_constructor_the_checker_selected() {
     expect_box_ok_with_stdlib(source, "SupertypeSecondaryConstructor");
     expect_native_box(source, "SupertypeSecondaryConstructor", "OK");
 }
+
+/// An INNER class's secondary constructors, which all lead with the outer instance.
+///
+/// A `this(…)` delegation passes that prefix on to the constructor it reaches — the call was one
+/// operand short of it, which Cranelift's verifier caught. A `super(…)` one reaches no constructor
+/// of this class at all, so it stores the prefix itself: an inner class's outer reference goes in
+/// BEFORE the base's constructor runs, which is Kotlin's own order and observable through a base
+/// `init` that calls an overridden method.
+///
+/// A class with NO primary constructor has only these, so leaving the store out left the field
+/// null and every read through it faulted.
+#[test]
+fn an_inner_classs_secondary_constructors_carry_the_outer_instance() {
+    let source = "class Outer(val s: String) {\n\
+         \x20   inner class Kept(val x: Int) {\n\
+         \x20       constructor() : this(7)\n\
+         \x20       fun outer() = s\n\
+         \x20   }\n\
+         \x20   inner class Fresh {\n\
+         \x20       val x: Int\n\
+         \x20       constructor(n: Int) { x = n }\n\
+         \x20       constructor(t: String) { x = t.length }\n\
+         \x20       fun outer() = s\n\
+         \x20   }\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val outer = Outer(\"OK\")\n\
+         \x20   if (outer.Kept().x != 7) return \"fail the delegating secondary\"\n\
+         \x20   if (outer.Kept().outer() != \"OK\") return \"fail its outer instance\"\n\
+         \x20   if (outer.Fresh(42).x != 42) return \"fail the Int constructor\"\n\
+         \x20   if (outer.Fresh(\"zzz\").x != 3) return \"fail the String constructor\"\n\
+         \x20   if (outer.Fresh(42).outer() != \"OK\") return \"fail an outer with no primary\"\n\
+         \x20   return outer.Fresh(\"zzz\").outer()\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "InnerSecondaryConstructor");
+    expect_native_box(source, "InnerSecondaryConstructor", "OK");
+}

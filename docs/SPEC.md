@@ -7773,10 +7773,19 @@ and behavior is checked by RUNNING the emitted program.
   parameter list for every base call made the arity disagree.
 
   Kotlin admits no two constructors of one class with the same parameter list, so a secondary
-  matching the selection IS the selection and the primary is what remains when none does. A
-  secondary carrying a PREFIX — an inner class's outer instance, or a local class's captures —
-  still declines: the delegation has no way to supply those operands. So does a base call that
-  BOTH names a secondary and omits an argument: the defaults wrapper fills the primary's frame.
+  matching the selection IS the selection and the primary is what remains when none does.
+
+  An INNER class's constructors all lead with the outer instance, and that PREFIX has to reach the
+  right place. A `this(…)` delegation passes it on to the constructor it reaches — the call was one
+  operand short of it. A `super(…)` one reaches no constructor of this class at all, so it stores
+  the prefix itself, and the outer reference goes in BEFORE the base's constructor runs: that is
+  Kotlin's own order and a base `init` calling an overridden method can observe it. A class with no
+  primary constructor has only these, so leaving the store out left the field null and every read
+  through it faulted.
+
+  A base call that BOTH names a secondary and omits an argument still declines: the defaults
+  wrapper fills the primary's frame, and a secondary's defaults are its own. So does a `super(…)`
+  to a parent whose own constructor carries a prefix, which this constructor was never handed.
   Tests: `tests/native_secondary_constructors_e2e.rs` (both cross-checking the two backends and
   REQUIRING the native lowering); the corpus cases are `codegen/box/secondaryConstructors/`,
   `codegen/box/sealed/sealedInSameFile.kt` and `codegen/box/enum/emptyConstructor.kt`.

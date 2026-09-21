@@ -665,6 +665,14 @@ impl<'a> FileLowering<'a> {
         // here in either case: a `this(…)` delegation reaches a constructor that runs them, and a
         // `super(…)` one belongs to a class with no primary constructor, whose initializers common
         // lowering has already folded into this constructor's body.
+        // How many of this constructor's own PREFIX operands the delegation passes on. An inner
+        // class's constructors all take the outer instance first, and a `this(…)` delegation
+        // reaches one of them — so the prefix this constructor was handed goes to it. A `super(…)`
+        // delegation passes none: the parent's prefix is the parent's own outer instance, which
+        // this constructor does not have.
+        let mut prefix_operands = 0usize;
+        // Whether this constructor writes its own prefix into the fields those parameters back.
+        let mut stores_its_prefix = false;
         let (target, target_params): (Option<FuncId>, Vec<Ty>) = match &secondary.delegate {
             crate::ir::CtorDelegateTarget::This {
                 target_params,
@@ -691,70 +699,92 @@ impl<'a> FileLowering<'a> {
                         })?;
                     self.classes[class as usize].secondaries[sibling]
                 };
+                prefix_operands = secondary.prefix_params.len();
                 (Some(target), target_params.clone())
             }
             crate::ir::CtorDelegateTarget::Super {
                 owner,
                 target_params,
                 ..
-            } => match self.ir.class_id_by_name(*owner) {
-                Some(parent) => {
-                    // The checker selected an EXACT constructor, and it may be a SECONDARY one:
-                    // `class E : A { constructor() : super() }` where `A`'s no-argument
-                    // constructor is secondary. Taking the primary for every `super(…)` called it
-                    // with the wrong arguments, which Cranelift's own verifier caught as a
-                    // mismatched argument count — a decline rather than a wrong answer, and one
-                    // that took every file holding such a constructor with it.
-                    //
-                    // Kotlin admits no two constructors of one class with the same parameter list,
-                    // so a secondary matching `target_params` is the selection and the primary is
-                    // what remains when none does.
-                    let sibling = self.ir.classes[parent as usize]
-                        .secondary_ctors
-                        .iter()
-                        .position(|candidate| candidate.params == *target_params);
-                    let target = match sibling {
-                        Some(sibling) => {
-                            // A secondary carrying a PREFIX — an inner class's outer instance, or
-                            // a local class's captures — takes operands this delegation has no
-                            // way to supply, so it declines rather than calling it one short.
-                            if !self.ir.classes[parent as usize].secondary_ctors[sibling]
-                                .prefix_params
-                                .is_empty()
-                            {
-                                return Err(format!(
-                                    "a delegation to a superclass secondary constructor with \
+            } => {
+                // A `super(…)` delegation does not reach a primary constructor, so the PREFIX
+                // this one was handed — an inner class's outer instance, a local class's captures
+                // — is stored here. A `this(…)` delegation needs none of this: the constructor it
+                // reaches stores them.
+                stores_its_prefix = true;
+                match self.ir.class_id_by_name(*owner) {
+                    Some(parent) => {
+                        // The checker selected an EXACT constructor, and it may be a SECONDARY one:
+                        // `class E : A { constructor() : super() }` where `A`'s no-argument
+                        // constructor is secondary. Taking the primary for every `super(…)` called it
+                        // with the wrong arguments, which Cranelift's own verifier caught as a
+                        // mismatched argument count — a decline rather than a wrong answer, and one
+                        // that took every file holding such a constructor with it.
+                        //
+                        // Kotlin admits no two constructors of one class with the same parameter list,
+                        // so a secondary matching `target_params` is the selection and the primary is
+                        // what remains when none does.
+                        let sibling = self.ir.classes[parent as usize]
+                            .secondary_ctors
+                            .iter()
+                            .position(|candidate| candidate.params == *target_params);
+                        let target = match sibling {
+                            Some(sibling) => {
+                                // A secondary carrying a PREFIX — an inner class's outer instance, or
+                                // a local class's captures — takes operands this delegation has no
+                                // way to supply, so it declines rather than calling it one short.
+                                if !self.ir.classes[parent as usize].secondary_ctors[sibling]
+                                    .prefix_params
+                                    .is_empty()
+                                {
+                                    return Err(format!(
+                                        "a delegation to a superclass secondary constructor with \
                                      compiler-supplied parameters (`{}`)",
-                                    owner.render()
-                                ));
+                                        owner.render()
+                                    ));
+                                }
+                                self.classes[parent as usize].secondaries[sibling]
                             }
-                            self.classes[parent as usize].secondaries[sibling]
-                        }
-                        None => self.classes[parent as usize].constructor.ok_or_else(|| {
-                            format!(
-                                "a delegation to a superclass with no primary constructor (`{}`)",
-                                owner.render()
-                            )
-                        })?,
-                    };
-                    (Some(target), target_params.clone())
-                }
-                // `kotlin.Any` is the root and declares no state, so `super()` reaching it has
-                // nothing to run — the same reason `define_constructor` calls no parent for a class
-                // whose only supertype is `Any`. Any OTHER superclass outside this file is a
-                // constructor this generator cannot see, and still declines.
-                None if super::super::super::intrinsics::is_any(*owner)
-                    && target_params.is_empty() =>
-                {
-                    (None, Vec::new())
-                }
-                None => {
-                    return Err(format!(
+                            None => {
+                                // A parent whose own constructor carries a PREFIX — an inner parent's
+                                // outer instance — wants an operand this constructor was never handed.
+                                if constructor_parameters(self.ir, parent).len()
+                                    != target_params.len()
+                                {
+                                    return Err(format!(
+                                        "a delegation to a superclass constructor with \
+                                     compiler-supplied parameters (`{}`)",
+                                        owner.render()
+                                    ));
+                                }
+                                self.classes[parent as usize].constructor.ok_or_else(|| {
+                                    format!(
+                                        "a delegation to a superclass with no primary constructor \
+                                     (`{}`)",
+                                        owner.render()
+                                    )
+                                })?
+                            }
+                        };
+                        (Some(target), target_params.clone())
+                    }
+                    // `kotlin.Any` is the root and declares no state, so `super()` reaching it has
+                    // nothing to run — the same reason `define_constructor` calls no parent for a class
+                    // whose only supertype is `Any`. Any OTHER superclass outside this file is a
+                    // constructor this generator cannot see, and still declines.
+                    None if super::super::super::intrinsics::is_any(*owner)
+                        && target_params.is_empty() =>
+                    {
+                        (None, Vec::new())
+                    }
+                    None => {
+                        return Err(format!(
                     "a secondary constructor delegating to a superclass outside this file (`{}`)",
                     owner.render()
                 ))
+                    }
                 }
-            },
+            }
             // An enum secondary constructor with no written `this(…)`: Kotlin initializes the
             // language enum base with the compiler-supplied entry name and ordinal, which this
             // generator has no base to initialize and no prefix storage to put them in. It is the
@@ -778,6 +808,52 @@ impl<'a> FileLowering<'a> {
             .and_then(|companion| self.classes[companion as usize].singleton)
             .map(|(_, getter)| getter);
         let name = format!("{}.<init>#{ordinal}", declaration.fq_name());
+        // Where each prefix parameter's field sits, or `None` for one that backs no field or was
+        // already written before the delegation.
+        let prefix_fields: Vec<Option<i32>> = if stores_its_prefix {
+            let layout = self.model.layout(class).clone();
+            declaration
+                .ctor_args
+                .iter()
+                .take(secondary.prefix_params.len())
+                .enumerate()
+                .map(|(parameter, argument)| {
+                    let written_early = declaration
+                        .pre_super_param_fields
+                        .iter()
+                        .any(|(pre, _)| *pre as usize == parameter);
+                    (argument.is_field && !written_early)
+                        .then(|| {
+                            layout
+                                .fields
+                                .get(parameter)
+                                .map(|field| field.offset as i32)
+                        })
+                        .flatten()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // An `inner` class stores its outer reference BEFORE the base's constructor runs, which is
+        // Kotlin's own order and observable: a base `init` calling an overridden method that reads
+        // the outer instance sees it set. A class with no PRIMARY constructor has only these, so
+        // leaving them out left the field null and every read through it faulted.
+        let pre_super_stores: Vec<(usize, i32)> = if stores_its_prefix {
+            let layout = self.model.layout(class).clone();
+            declaration
+                .pre_super_param_fields
+                .iter()
+                .filter_map(|&(parameter, field)| {
+                    Some((
+                        parameter as usize + 1,
+                        layout.fields.get(field as usize)?.offset as i32,
+                    ))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let arguments = secondary.delegate_args.clone();
         let prelude = secondary.delegate_prelude.clone();
         let body_expression = secondary.body;
@@ -797,7 +873,17 @@ impl<'a> FileLowering<'a> {
             if arguments.len() != target_params.len() {
                 return Err("a constructor delegation of a different arity".to_string());
             }
+            for &(slot, offset) in &pre_super_stores {
+                body.builder
+                    .ins()
+                    .store(trusted(), params[slot], this, offset);
+            }
             let mut operands = vec![this];
+            // The prefix this constructor was handed, passed on unchanged: a sibling of an inner
+            // class's constructor takes the same outer instance.
+            for index in 0..prefix_operands {
+                operands.push(params[index + 1]);
+            }
             for (&argument, ty) in arguments.iter().zip(&target_params) {
                 let Some(value) = body.coerce(argument, *ty)? else {
                     return Err("a `Unit` constructor delegation argument".to_string());
@@ -807,6 +893,17 @@ impl<'a> FileLowering<'a> {
             if let Some(target) = target {
                 let func_ref = body.func_ref(target);
                 body.emit_call(func_ref, &operands)?;
+            }
+            // The prefix parameters that BACK a field, written after the base's constructor has
+            // run — the same place the primary writes its own parameter-backed fields. A field
+            // already written before the delegation is not written again.
+            for (parameter, offsets) in prefix_fields.iter().enumerate() {
+                let Some(offset) = offsets else {
+                    continue;
+                };
+                body.builder
+                    .ins()
+                    .store(trusted(), params[parameter + 1], this, *offset);
             }
             if let Some(own) = body_expression {
                 body.statement(own)?;
@@ -1915,21 +2012,31 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // and fall back to the primary when the list is its own.
         let (constructor, params) = match selected {
             Some(selected) => {
-                let ordinal = declaration
-                    .secondary_ctors
-                    .iter()
-                    .position(|candidate| candidate.params == selected);
+                let ordinal = declaration.secondary_ctors.iter().position(|candidate| {
+                    // Either spelling of the same constructor: the declaration's own parameter
+                    // list, or that list behind the PREFIX an inner class's constructors lead
+                    // with. Which one the call node carries depends on whether the outer instance
+                    // was part of the selection it recorded.
+                    if candidate.params == selected {
+                        return true;
+                    }
+                    let mut physical = candidate.prefix_params.clone();
+                    physical.extend(candidate.params.iter().copied());
+                    !candidate.prefix_params.is_empty() && physical == selected
+                });
                 match ordinal {
                     Some(ordinal) => {
                         let secondary = &declaration.secondary_ctors[ordinal];
-                        if !secondary.prefix_params.is_empty() {
-                            return Err(format!(
-                                "a secondary constructor with compiler-supplied parameters (`{name}`)"
-                            ));
-                        }
+                        // A PREFIX is what an inner class's constructors all lead with — the outer
+                        // instance — and the construction supplies it as an ordinary argument, the
+                        // same way the primary's is supplied. So the physical list is the prefix
+                        // and then the declaration's own; the arity check below is what says
+                        // whether the call really carries one.
+                        let mut params = secondary.prefix_params.clone();
+                        params.extend(secondary.params.iter().copied());
                         (
                             self.file.classes[class as usize].secondaries[ordinal],
-                            secondary.params.clone(),
+                            params,
                         )
                     }
                     None if primary_declared == selected => (
