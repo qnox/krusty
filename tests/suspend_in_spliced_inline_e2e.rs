@@ -206,3 +206,24 @@ fn a_suspension_inside_a_spliced_stdlib_repeat_lambda_runs() {
     };
     assert_eq!(output, "OK");
 }
+
+/// An instance method's machine: the continuation keeps the receiver, because re-entering the
+/// method needs one.
+#[test]
+fn a_suspension_inside_a_spliced_lambda_of_a_member_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int = v + 1
+        class Holder(val base: Int) {
+            suspend fun total(): Int = twice(base) { one(it) }
+        }
+        fun box(): String = runBlocking {
+            val n = Holder(10).total()
+            if (n == 23) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_member", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}

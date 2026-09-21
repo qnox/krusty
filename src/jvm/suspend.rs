@@ -352,10 +352,12 @@ pub(crate) fn lower_suspend(
         // spliced into this very frame. Its machine is built during emission, where the spliced
         // body's own locals exist. The conjunction is the whole gate: this claims only functions
         // that would otherwise be emitted with no continuation to pass.
-        // Only a static function for now: a member's continuation has to capture its receiver, and
-        // the machine does not build that yet. A member keeps the diagnostic it has today.
+        // A member's continuation re-enters the method on the receiver it kept, so the call it makes
+        // has to reach exactly this body: an OPEN method would re-dispatch to an override, and a
+        // private one is not callable from the continuation class. Those keep the diagnostic they
+        // have today.
         let spliced_suspensions: Vec<ExprId> = match (has_susp, forward, body) {
-            (false, None, Some(b)) if ir.functions[fid as usize].is_static => {
+            (false, None, Some(b)) if machine_eligible(ir, fid) => {
                 cps::spliced_inline_suspensions(ir, b, &suspend_set)
             }
             _ => Vec::new(),
@@ -1854,6 +1856,27 @@ fn normalize_value_when(ir: &mut IrFile, expression: ExprId) -> Option<ExprId> {
 /// `IrFile::exprs` is a module-wide arena while `GetValue(n)` is function-local, so any type query
 /// based on a global scan is inherently ambiguous. Nested lambda bodies own another namespace and are
 /// deliberately skipped; only their capture expressions still belong to the enclosing function.
+/// Whether emission may own this function's coroutine machine.
+///
+/// A static function always may. An instance method may when the continuation can call it back and
+/// be sure of reaching this very body: `invokevirtual` on an OPEN method would land in an override,
+/// and a private method is not accessible from the continuation class at all.
+fn machine_eligible(ir: &IrFile, fid: u32) -> bool {
+    let function = &ir.functions[fid as usize];
+    if function.is_static {
+        return true;
+    }
+    let owner_is_interface = function.dispatch_receiver.as_ref().is_some_and(|receiver| {
+        ir.classes
+            .iter()
+            .any(|class| class.fq_name_matches(&receiver.render()) && class.is_interface)
+    });
+    function.dispatch_receiver.is_some()
+        && !owner_is_interface
+        && !ir.open_methods.contains(&fid)
+        && !ir.private_methods.contains(&fid)
+}
+
 fn function_value_types(ir: &IrFile, fid: u32, body: ExprId) -> HashMap<u32, Ty> {
     fn collect(ir: &IrFile, expression: ExprId, out: &mut HashMap<u32, Ty>) {
         match &ir.exprs[expression as usize] {

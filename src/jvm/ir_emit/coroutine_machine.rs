@@ -166,12 +166,25 @@ pub(super) fn discover(
             crate::trace_compiler!("suspend", "discover: no frame at or before {at}");
             return None;
         };
+        // What the resume has to put back is not only what liveness calls live across the call: a
+        // frame at the join claims every HOST local the merge asserts there, whether or not the body
+        // reads it again. A slot the frame types but the resume leaves unset fails verification, so
+        // the frame's own view is part of the set.
+        let mut slots: Vec<u16> = live.iter().collect();
+        for (slot, typed_as) in typed.iter().enumerate() {
+            let slot = slot as u16;
+            let described = !matches!(typed_as, VerifType::Top | VerifType::UninitializedThis);
+            if described && !slots.contains(&slot) {
+                slots.push(slot);
+            }
+        }
+        slots.sort_unstable();
         let mut spills = Vec::new();
         // A `long`/`double` occupies two slots and the liveness set holds both. It is spilled once,
         // under its first word; the second is the same value and has no type of its own (a frame
         // describes it as `top`).
         let mut high_word: Option<u16> = None;
-        for slot in live.iter() {
+        for slot in slots {
             if high_word == Some(slot) {
                 high_word = None;
                 continue;
@@ -312,6 +325,9 @@ pub(super) struct Machine {
     pub(super) slots: MachineSlots,
     /// Internal name of the continuation class this machine keeps its state in.
     pub(super) internal: String,
+    /// `Some(owner)` for an instance method: the continuation holds the receiver, because
+    /// re-entering the method needs one.
+    pub(super) receiver: Option<String>,
 }
 
 /// Build the continuation class a machine keeps its state in.
@@ -327,6 +343,7 @@ pub(super) fn build_continuation_class(
     plan: &MachinePlan,
     major: Option<u16>,
     source_file: Option<&str>,
+    receiver: Option<&str>,
 ) -> Vec<u8> {
     use crate::jvm::classfile::{ClassWriter, CodeBuilder, ACC_FINAL, ACC_PUBLIC};
     let mut cw = ClassWriter::new(internal, CONTINUATION_IMPL);
@@ -338,16 +355,31 @@ pub(super) fn build_continuation_class(
         cw.add_field(0, &name, descriptor);
     }
     cw.add_field(0, "result", "Ljava/lang/Object;");
+    // kotlinc's own order for an instance method: the resumed value, the receiver, then the label.
+    if let Some(owner) = receiver {
+        cw.add_field(ACC_FINAL, "this$0", &format!("L{owner};"));
+    }
     cw.add_field(0, "label", "I");
 
-    // `<init>(Continuation)` hands the completion straight to ContinuationImpl.
-    let mut ctor = CodeBuilder::new(2);
+    // `<init>` hands the completion straight to ContinuationImpl, keeping the receiver first when
+    // there is one.
+    let ctor_descriptor = match receiver {
+        Some(owner) => format!("(L{owner};L{CONTINUATION};)V"),
+        None => format!("(L{CONTINUATION};)V"),
+    };
+    let mut ctor = CodeBuilder::new(if receiver.is_some() { 3 } else { 2 });
+    if let Some(owner) = receiver {
+        let this = cw.fieldref(internal, "this$0", &format!("L{owner};"));
+        ctor.aload(0);
+        ctor.aload(1);
+        ctor.putfield(this, 1);
+    }
     ctor.aload(0);
-    ctor.aload(1);
+    ctor.aload(if receiver.is_some() { 2 } else { 1 });
     let super_ctor = cw.methodref(CONTINUATION_IMPL, "<init>", &format!("(L{CONTINUATION};)V"));
     ctor.invokespecial(super_ctor, 2, 0);
     ctor.ret_void();
-    cw.add_method(0, "<init>", &format!("(L{CONTINUATION};)V"), &ctor);
+    cw.add_method(0, "<init>", &ctor_descriptor, &ctor);
 
     // `invokeSuspend(Object)`: keep the value, mark the machine as resuming, and re-enter it.
     let mut invoke = CodeBuilder::new(2);
@@ -363,8 +395,15 @@ pub(super) fn build_continuation_class(
     invoke.ior();
     invoke.putfield(label, 1);
     // Every value parameter is passed as a zero: the machine restores the real ones from the fields
-    // above before it reads any of them.
+    // above before it reads any of them. An instance method is re-entered on the receiver the
+    // continuation kept.
     let mut words = 0;
+    if let Some(owner) = receiver {
+        let this = cw.fieldref(internal, "this$0", &format!("L{owner};"));
+        invoke.aload(0);
+        invoke.getfield(this, 1);
+        words += 1;
+    }
     if let Some((parameters, _)) = parse_outer_descriptor(outer_descriptor) {
         for parameter in &parameters {
             push_zero_descriptor(&mut invoke, parameter, &mut cw);
@@ -380,7 +419,10 @@ pub(super) fn build_continuation_class(
     invoke.checkcast(class);
     words += 1;
     let outer_ref = cw.methodref(outer, outer_method, outer_descriptor);
-    invoke.invokestatic(outer_ref, words, 1);
+    match receiver {
+        Some(_) => invoke.invokevirtual(outer_ref, words, 1),
+        None => invoke.invokestatic(outer_ref, words, 1),
+    }
     invoke.areturn();
     cw.add_method(
         ACC_PUBLIC | ACC_FINAL,

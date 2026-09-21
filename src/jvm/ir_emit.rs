@@ -4356,8 +4356,12 @@ fn emit_pass(
         // An interface's `$DefaultImpls` holder (its `name$default` synthetics), when any exist.
         out.extend(extra);
         out.extend(drain_lambda_classes(env, opts));
+        // A member's coroutine machine builds its continuation class while the method is emitted,
+        // which is after the facade drained the ones its own top-level functions produced.
+        out.extend(env.run.machine_classes.borrow_mut().drain(..));
     }
     out.extend(drain_lambda_classes(env, opts));
+    out.extend(env.run.machine_classes.borrow_mut().drain(..));
     if env.run.inline_bail.borrow().is_some() {
         return None;
     }
@@ -11294,6 +11298,8 @@ fn emit_method_inner_with_holder(
                 plan,
                 slots,
                 internal,
+                // An instance method is re-entered on its receiver, which the continuation keeps.
+                receiver: instance.then(|| owner.to_string()),
             });
             let completion = param_tys.len().saturating_sub(1) as u32 + u32::from(instance);
             let completion = e.slots.get(&completion).map(|&(slot, _)| slot);
@@ -11391,6 +11397,7 @@ fn emit_method_inner_with_holder(
                 &machine.plan,
                 Some(e.cw.major()),
                 source_file.as_deref(),
+                machine.receiver.as_deref(),
             );
             env.run
                 .machine_classes
@@ -13735,11 +13742,20 @@ impl<'a> Emitter<'a> {
         code.add_frame_if_new(fresh, before_any.clone(), Vec::new());
         code.new_obj(class);
         code.dup();
+        let constructor_descriptor = match &machine.receiver {
+            Some(owner) => format!("(L{owner};Lkotlin/coroutines/Continuation;)V"),
+            None => "(Lkotlin/coroutines/Continuation;)V".to_string(),
+        };
+        let mut words = 2;
+        if machine.receiver.is_some() {
+            code.aload(0);
+            words += 1;
+        }
         code.aload(completion);
-        let constructor =
-            self.cw
-                .methodref(&internal, "<init>", "(Lkotlin/coroutines/Continuation;)V");
-        code.invokespecial(constructor, 2, 0);
+        let constructor = self
+            .cw
+            .methodref(&internal, "<init>", &constructor_descriptor);
+        code.invokespecial(constructor, words, 0);
         code.astore(machine.slots.continuation);
 
         code.bind(have);
