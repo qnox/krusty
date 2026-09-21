@@ -531,3 +531,23 @@ fn a_value_try_catches_a_throw_on_the_direct_path() {
     };
     assert_eq!(output, "OK");
 }
+
+/// The callee fails AFTER suspending: the failure arrives as the resumption's `Result`, and is
+/// rethrown at the resume point INSIDE the body — inside the `try` — so the `catch` sees it. A
+/// rethrow in the dispatch's restore block, outside every range the body declares, would escape.
+#[test]
+fn a_value_try_catches_a_failed_resumption() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun boom(v: Int): Int { kotlinx.coroutines.yield(); throw IllegalStateException("b" + v) }
+        suspend fun guarded(): Int = twice(1) { x -> try { boom(x) } catch (e: IllegalStateException) { -1 } }
+        fun box(): String = runBlocking {
+            val n = guarded()
+            if (n == -2) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_value_try_resume_throws", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
