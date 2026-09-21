@@ -2,11 +2,15 @@
 //!
 //! The modifier is a promise about the STACK, not about speed: a function carrying it recurses to a
 //! depth chosen because the loop rewrite will remove the recursion, and a backend that emits an
-//! ordinary call instead does not answer slowly — it crashes. So the generator needs to know, for
-//! each `tailrec`, whether common lowering actually finished the rewrite, and to refuse the ones
-//! where it did not rather than discover the answer as a segmentation fault.
+//! ordinary call instead does not answer slowly — it crashes.
+//!
+//! The promise covers the TAIL calls and nothing else. A self-call with work after it is not one,
+//! and Kotlin says so: it reports NON_TAIL_RECURSIVE_CALL and every Kotlin backend emits the call.
+//! So a `tailrec` whose body still holds such a call is an ordinary program, compiled the way
+//! kotlinc compiles it — the one shape this generator declines is a `tailrec` Kotlin loops and
+//! this lowering does not.
 
-use super::common::{expect_native_box, expect_native_decline};
+use super::common::{expect_box_ok_with_stdlib, expect_native_box};
 
 #[test]
 fn a_rewritten_tailrec_runs_in_constant_stack() {
@@ -20,28 +24,24 @@ fn a_rewritten_tailrec_runs_in_constant_stack() {
 }
 
 #[test]
-fn a_tailrec_still_holding_a_self_call_is_declined() {
-    // `tailrec` is a promise about the modifier, not about every call in the body: `1 + walk(n - 1)`
-    // has work after it and is not a tail call, which Kotlin says too by reporting
-    // NON_TAIL_RECURSIVE_CALL for it. The rewrite loops the tail call beside it and correctly
-    // leaves this one, so the function recurses after all.
+fn a_tailrec_holding_a_non_tail_self_call_loops_the_one_that_is_a_tail_call() {
+    // `tailrec` is a promise about the tail calls, not about every call in the body: `1 + walk(…)`
+    // has work after it and is not one, which Kotlin says too by reporting NON_TAIL_RECURSIVE_CALL
+    // for it. The rewrite loops the tail call beside it and correctly leaves this one, so the
+    // function both runs flat and recurses — flat down the million, then seven frames deep.
     //
-    // What the generator must not do is emit it. The program would run to a segmentation fault at
-    // the depth the source wrote `tailrec` to make safe, and how deep a native stack goes is the
-    // machine's business rather than the language's.
-    //
-    // A loop around the tail call used to be this shape. It no longer is: the rewrite reaches a
-    // `return` inside a loop, and the `continue` it writes carries the synthetic loop's own label.
-    expect_native_decline(
-        "tailrec fun walk(n: Int): Int {\n\
+    // This was declined, on the premise that a surviving self-call is a rewrite that did not
+    // finish. It is not: kotlinc emits the same call, so declining refused a program kotlinc
+    // compiles the same way. The answer is cross-checked against the JVM backend rather than
+    // asserted here, because what `walk` answers is a fact about Kotlin and not about a target.
+    let source = "tailrec fun walk(n: Int): Int {\n\
          \x20   if (n <= 0) return 0\n\
          \x20   if (n == 7) return 1 + walk(n - 1)\n\
          \x20   return walk(n - 1)\n\
          }\n\
-         fun box(): String = if (walk(1000000) == 0) \"OK\" else \"fail\"\n",
-        "UnfinishedTailrec",
-        "common lowering leaves recursive",
-    );
+         fun box(): String = if (walk(1000000) == 1) \"OK\" else \"fail \" + walk(1000000)\n";
+    expect_box_ok_with_stdlib(source, "NonTailSelfCall");
+    expect_native_box(source, "NonTailSelfCall", "OK");
 }
 
 #[test]

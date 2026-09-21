@@ -63,18 +63,26 @@ fn a_todo_is_a_bottom_value_the_caller_never_reads() {
     );
 }
 
+/// A message block that RETURNS from the enclosing function still declines.
+///
+/// `lazyMessage` is a parameter of an `inline` declaration, so Kotlin lets the block written for it
+/// return from the caller. A klib publishes no body to splice, so what arrives is an ordinary
+/// function value, and a non-local return through one is a miscompile rather than a slower answer.
+///
+/// The decline comes from the block itself — the lowering finds no code behind the function value —
+/// rather than from a rule about preconditions, which is why this case is pinned here: the
+/// ordinary message form beside it IS realized (`tests/native_preconditions_e2e.rs`), so nothing
+/// else would notice if this one started being realized too.
 #[test]
-fn a_message_lambda_still_declines() {
-    // `lazyMessage` is a lambda of an `inline` declaration whose body is not here to splice, and
-    // Kotlin lets such a lambda return from the enclosing function. Invoking it as an ordinary
-    // function value would be a miscompile rather than a slower answer.
+fn a_message_block_that_returns_non_locally_still_declines() {
     expect_native_decline(
-        "fun box(): String {\n\
-         \x20   require(1 > 0) { \"never\" }\n\
-         \x20   return \"OK\"\n\
-         }\n",
-        "RequireWithAMessage",
-        "require",
+        "fun check(n: Int): String {\n\
+         \x20   require(n > 0) { return \"nonlocal\" }\n\
+         \x20   return \"ok\"\n\
+         }\n\
+         fun box(): String = if (check(-1) == \"nonlocal\") \"OK\" else \"fail\"\n",
+        "RequireWithANonLocalReturn",
+        "no code",
     );
 }
 

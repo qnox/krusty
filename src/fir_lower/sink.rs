@@ -1312,11 +1312,12 @@ impl<'a> CommonIrBodySink<'a> {
         let parameter_count = self.ir.functions[function as usize].params.len();
         let frame =
             tailrec.then(|| TailrecFrame::of_body(function, lowered.slots, parameter_count));
-        // A `tailrec` the rewrite above declines still recurses, and the native backend emits an
-        // ordinary call for that recursion. The source wrote `tailrec` because it recurses to a
-        // depth no stack survives, so a backend that cannot make it constant-stack on its own has
-        // to hear about it rather than discover it as a segfault at run time.
-        if tailrec_declared && frame.is_none() {
+        // A `tailrec` KOTLIN loops and this lowering does not. Only the context-parameter shape
+        // is one: an overridable member is one kotlinc refuses to loop as well, and a self-call
+        // the sweep leaves behind is one kotlinc leaves too — it reports NON_TAIL_RECURSIVE_CALL
+        // and emits the call. Recording either of those would have a backend decline programs
+        // kotlinc compiles, and compiles the same way.
+        if tailrec_declared && callable.shape.context_parameter_count != 0 {
             self.ir.unlooped_tailrec.insert(function);
         }
         let body = if let Some(frame) = frame {
@@ -1334,13 +1335,6 @@ impl<'a> CommonIrBodySink<'a> {
             .map_err(FirFileLoweringFailure::Body)?
         };
         self.ir.functions[function as usize].body = Some(body);
-        // The gate above says whether the rewrite was attempted; this says whether it finished.
-        // A self-call in a position the rewrite does not descend into survives in a function that
-        // was loop-rewritten everywhere else, and a backend told nothing about it emits an
-        // ordinary call — which is the stack overflow the modifier was written to prevent.
-        if tailrec && super::tailrec::recurses_into_itself(self.ir, body, function) {
-            self.ir.unlooped_tailrec.insert(function);
-        }
 
         self.attach_callable_defaults(
             callable,

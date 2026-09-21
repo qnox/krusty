@@ -7538,6 +7538,13 @@ and behavior is checked by RUNNING the emitted program.
   So the shape is a branch around a raise rather than a call with operands, and the message is
   rendered with `toString()` — `require(false) { 42 }` carries `"42"`. The checked value is
   evaluated once, which `requireNotNull(f())` is entitled to.
+
+  A message block that RETURNS from the enclosing function still declines. `lazyMessage` is a
+  parameter of an `inline` declaration, so Kotlin lets the block written for it return from the
+  caller; what arrives with no body to splice is an ordinary function value, and a non-local return
+  through one is a miscompile rather than a slower answer. The decline comes from the block — the
+  lowering finds no code behind the function value — which is why it is pinned by a test of its
+  own in `tests/native_throws_e2e.rs`.
   Tests: `tests/native_preconditions_e2e.rs` (all five, each cross-checking the two backends and
   REQUIRING the native lowering); the corpus cases are `codegen/box/contracts/nonNullSmartCast.kt`,
   `codegen/box/delegatedProperty/provideDelegate/setValue.kt` and the other `kotlin.require` cases.
@@ -7556,6 +7563,28 @@ and behavior is checked by RUNNING the emitted program.
   REQUIRING the native lowering); the corpus cases are
   `codegen/box/controlStructures/forIn*WithIndex*NameBasedDestructuring*.kt` and
   `codegen/box/inlineClasses/contextsAndAccessors/kt27513*.kt`.
+
+- **`tailrec` promises the tail calls and nothing else.** A self-call with work after it is not a
+  tail call, and Kotlin says so: it reports `NON_TAIL_RECURSIVE_CALL` and every Kotlin backend
+  emits the call. So a `tailrec` whose body still holds one is an ordinary program, and a backend
+  that declines it refuses a program kotlinc compiles — and compiles the same way.
+
+  Common lowering had recorded two shapes as "a rewrite that did not finish", and neither is one:
+
+  - A **surviving self-call** after the sweep. The sweep walks Kotlin's tail positions, so what it
+    leaves behind is what Kotlin leaves behind. `diagnostics/functions/tailRecursion` is the corpus
+    family written to exercise exactly this, at depths of 100 000 and 1 000 000: the tail call is
+    looped and the `NON_TAIL_RECURSIVE_CALL` beside it recurses a handful of frames.
+  - An **overridable member**. kotlinc refuses to loop that too, so leaving it recursive is
+    agreement rather than a gap.
+
+  What remains recorded is the one shape Kotlin loops and this lowering does not — a `tailrec` with
+  context parameters — because there a backend emitting the recursion overflows where kotlinc's
+  does not.
+  Tests: `tests/native_tailrec_e2e.rs`
+  (`a_tailrec_holding_a_non_tail_self_call_loops_the_one_that_is_a_tail_call`, which cross-checks
+  the two backends); the corpus cases are all of
+  `codegen/box/diagnostics/functions/tailRecursion/`.
 
 ## 8. Success criteria for the PoC
 

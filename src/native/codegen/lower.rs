@@ -489,11 +489,15 @@ impl<'a> FileLowering<'a> {
             // Declared as nothing above, so there is nothing to define either.
             return Ok(());
         };
-        // A `tailrec` the checked lowering could not rewrite into a loop still recurses, and this
+        // A `tailrec` Kotlin loops and the checked lowering does not still recurses, and this
         // generator emits an ordinary call for that recursion. The source wrote `tailrec` because
         // it recurses to a depth no stack survives, so accepting the function means emitting a
         // program that segfaults where it should print its answer. Decline instead: how deep a
         // native stack goes is the machine's business, and a gate must not depend on it.
+        //
+        // This is NOT every `tailrec` whose body still holds a self-call. A non-tail self-call is
+        // one kotlinc leaves recursive too — it reports NON_TAIL_RECURSIVE_CALL and emits the
+        // call — so declining those refused programs kotlinc compiles, and compiles the same way.
         if self.ir.unlooped_tailrec.contains(&(index as u32)) {
             return Err(format!(
                 "a `tailrec` function `{}` common lowering leaves recursive",
