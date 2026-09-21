@@ -2912,3 +2912,35 @@ fn a_class_may_extend_an_exception_the_runtime_owns() {
     common::expect_box_ok_with_stdlib(source, "RuntimeBase");
     common::expect_native_box(source, "RuntimeBase", "OK");
 }
+
+#[test]
+fn an_unsigned_field_hashes_as_the_signed_value_it_wraps() {
+    // Kotlin's unsigned integers are value classes, and `Ty::UInt` is a CONSTANT for
+    // `Obj(kotlin/UInt)` rather than a variant of its own — so a carrier reads one as the machine
+    // integer it wraps while a `match` that lists only the signed types misses it entirely. That
+    // is what a value or data class holding one hit: the field fell past every arm of the hash and
+    // was declined as a type the generator did not recognize, though it had already agreed the
+    // value was a scalar.
+    //
+    // The answers are Kotlin's own and nothing here is free to choose them, because a program can
+    // print a hash: `UByte` and `UShort` answer `data.toInt()` on the `Byte`/`Short` they wrap,
+    // which SIGN-extends — so `255u.toUByte()` hashes to -1, not 255.
+    let source = "value class Wrapped(val value: UInt)\n\
+         data class Row(val a: UByte, val b: UShort, val c: UInt, val d: ULong)\n\
+         fun box(): String {\n\
+         \x20   if (Wrapped(0u) != Wrapped(0u)) return \"fail 1\"\n\
+         \x20   if (Wrapped(7u).hashCode() != Wrapped(7u).hashCode()) return \"fail 2\"\n\
+         \x20   if (Wrapped(7u).hashCode() != 7u.hashCode()) return \"fail 3\"\n\
+         \x20   if (Wrapped(4294967295u).hashCode() != (4294967295u).hashCode()) return \"fail 4\"\n\
+         \x20   val row = Row(255u.toUByte(), 65535u.toUShort(), 4294967295u, 18446744073709551615uL)\n\
+         \x20   val same = Row(255u.toUByte(), 65535u.toUShort(), 4294967295u, 18446744073709551615uL)\n\
+         \x20   if (row != same) return \"fail 5\"\n\
+         \x20   if (row.hashCode() != same.hashCode()) return \"fail 6\"\n\
+         \x20   if (row.a.hashCode() != (255u.toUByte()).hashCode()) return \"fail 7\"\n\
+         \x20   if (row.b.hashCode() != (65535u.toUShort()).hashCode()) return \"fail 8\"\n\
+         \x20   if (row.d.hashCode() != (18446744073709551615uL).hashCode()) return \"fail 9\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "UnsignedHash");
+    common::expect_native_box(source, "UnsignedHash", "OK");
+}

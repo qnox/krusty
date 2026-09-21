@@ -7453,6 +7453,24 @@ and behavior is checked by RUNNING the emitted program.
   `codegen/box/controlStructures/tryCatchInExpressions/{multipleCatchBlocks,tryInsideTry}.kt` and
   `codegen/box/callableReference/adaptedReferences/manyDefaultsAndVararg.kt`.
 
+- **An unsigned field hashes as the signed value it wraps.** Kotlin's unsigned integers are value
+  classes, and `Ty::UInt` is a CONSTANT for `Obj(kotlin/UInt)` rather than a variant of its own —
+  so the carrier reads one as the machine integer it wraps, while a `match` listing only the signed
+  types misses it entirely. A value or data class holding one fell past every arm of the field hash
+  and was declined as a type the generator did not recognize, though it had already agreed the
+  value was a scalar. A constant pattern is invisible in exactly this way: nothing warns that the
+  arm is absent.
+
+  The answers are Kotlin's own, and a program can print a hash, so nothing here is free to choose
+  them: `UByte` and `UShort` answer `data.toInt()` on the `Byte`/`Short` they wrap, which
+  SIGN-extends — `255u.toUByte()` hashes to `-1`, not `255` — `UInt` answers its `Int` unchanged,
+  and `ULong` folds its `Long` exactly as `Long` does. Equality needed nothing: it compares the
+  carriers' bits, which is already right for an unsigned one.
+  Tests: `tests/native_codegen_e2e.rs` (`an_unsigned_field_hashes_as_the_signed_value_it_wraps`,
+  which cross-checks the two backends — the JVM lane runs against the real stdlib, so the
+  sign-extension is the library's answer rather than this file's claim); the corpus cases are
+  `codegen/box/inlineClasses/{kt27096,kt27132,kt34902,kt70461}.kt`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

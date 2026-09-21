@@ -2634,10 +2634,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let set = self.builder.ins().icmp(IntCC::NotEqual, operand, zero);
                 self.builder.ins().select(set, yes, no)
             }
-            Ty::Byte | Ty::Short => self.builder.ins().sextend(types::I32, operand),
+            // An unsigned integer hashes as the SIGNED value it wraps, because that is what
+            // Kotlin declares: `UByte` and `UShort` answer `data.toInt()` on their `Byte`/`Short`,
+            // which sign-extends, `UInt` answers its `Int` unchanged, and `ULong` folds its `Long`
+            // exactly as `Long` does. Nothing here may choose differently — a program can print a
+            // hash, and two programs that agree on everything else must agree on it.
+            Ty::Byte | Ty::Short | Ty::UByte | Ty::UShort => {
+                self.builder.ins().sextend(types::I32, operand)
+            }
             Ty::Char => self.builder.ins().uextend(types::I32, operand),
-            Ty::Int => operand,
-            Ty::Long => self.fold_to_int(operand),
+            Ty::Int | Ty::UInt => operand,
+            Ty::Long | Ty::ULong => self.fold_to_int(operand),
             // A floating-point value hashes by its BITS, which is what makes `NaN`'s hash a
             // number at all: `Float` gives its 32 directly, and `Double` folds its 64 exactly as
             // `Long` does. Reading the bits is a reinterpretation, not a conversion — a
