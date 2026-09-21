@@ -242,6 +242,44 @@ impl CodeBuilder {
         }
     }
 
+    /// The bytes with every local branch resolved, without touching the builder.
+    ///
+    /// A pass that reads the body's control flow before the method is linked — the coroutine
+    /// machine's discovery runs on the first emission, whose bytes are then discarded — would
+    /// otherwise decode every forward branch as a placeholder `[0, 0]`, which is a branch to itself.
+    /// `None` when a destination is still unbound, so such a pass declines rather than analyzes a
+    /// graph that is not the method's.
+    pub fn resolved_bytes(&self) -> Option<Vec<u8>> {
+        let mut bytes = self.bytes.clone();
+        for &(pos, label) in &self.fixups {
+            if label.builder != self.id {
+                continue;
+            }
+            let target = *self.labels.get(label.index as usize)?;
+            if target == usize::MAX {
+                return None;
+            }
+            let off = i16::try_from(target as i64 - (pos - 1) as i64).ok()?;
+            bytes
+                .get_mut(pos..pos + 2)?
+                .copy_from_slice(&off.to_be_bytes());
+        }
+        for &(pos, opcode, label) in &self.switch_fixups {
+            if label.builder != self.id {
+                continue;
+            }
+            let target = *self.labels.get(label.index as usize)?;
+            if target == usize::MAX {
+                return None;
+            }
+            let off = (target as i64 - opcode as i64) as i32;
+            bytes
+                .get_mut(pos..pos + 4)?
+                .copy_from_slice(&off.to_be_bytes());
+        }
+        Some(bytes)
+    }
+
     /// Branch operands whose destinations belong to an enclosing bytecode builder.
     pub fn external_branches(&self) -> Vec<(usize, Label)> {
         self.fixups
@@ -264,5 +302,37 @@ impl CodeBuilder {
             "an external inline branch reached final method linking"
         );
         self.link_local_branches();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::jvm::classfile::CodeBuilder;
+
+    /// Before `link()` a forward branch's operand is a placeholder, which decodes as a branch to
+    /// itself; the resolved view has the real offset and leaves the builder untouched.
+    #[test]
+    fn resolved_bytes_links_a_forward_branch_without_mutating_the_builder() {
+        let mut code = CodeBuilder::new(1);
+        let end = code.new_label();
+        code.iload(0);
+        code.ifeq(end);
+        code.nop();
+        code.bind(end);
+        code.ret_void();
+        assert_eq!(code.bytes[2..4], [0, 0]);
+        let resolved = code.resolved_bytes().expect("every label is bound");
+        // `ifeq` at 1 targets 5: the offset is measured from the opcode.
+        assert_eq!(resolved[2..4], [0, 4]);
+        assert_eq!(code.bytes[2..4], [0, 0]);
+    }
+
+    #[test]
+    fn resolved_bytes_declines_while_a_destination_is_unbound() {
+        let mut code = CodeBuilder::new(1);
+        let later = code.new_label();
+        code.iload(0);
+        code.ifeq(later);
+        assert!(code.resolved_bytes().is_none());
     }
 }

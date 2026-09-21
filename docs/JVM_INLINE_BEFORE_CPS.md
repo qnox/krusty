@@ -283,6 +283,9 @@ Working today, each with a fixture in `tests/suspend_in_spliced_inline_e2e.rs`:
 | A body spliced into a `try` region (`runCatching { susp() }`) | `a_suspension_inside_a_spliced_try_region_runs` |
 | A value-`try` in the spliced body around the suspension (`try { susp() } catch …`) | `a_value_try_whose_arm_is_the_suspension_runs`, `…_computes_with_the_suspension_runs`, `…_binds_the_suspension_first_runs` |
 | That `try`'s `catch` running, on the direct path and on a failed resumption | `a_value_try_catches_a_throw_on_the_direct_path`, `a_value_try_catches_a_failed_resumption` |
+| An accumulator the loop REWRITES across the suspension (`fold`, `reduce`) | `an_accumulator_rewritten_across_a_spliced_suspension_runs`, `stdlib_fold_and_reduce_with_a_suspending_operation_run` |
+| A spliced lambda's own parameter snapshot, typed in the lambda's numbering | `a_snapshot_of_a_spliced_lambda_parameter_is_typed_by_the_lambda` |
+| A `null`-typed local or operand across the suspension | `a_null_{local,operand}_…_is_rematerialized` |
 | A lambda the inline function invokes at TWO sites (`f(1) + f(2)`, stdlib `maxOf`) | `a_lambda_invoked_at_two_sites_suspends_at_each`, `two_sites_with_different_live_sets_each_spill_their_own`, `…_stdlib_max_of_selector_runs` |
 
 **A value-`try` in a spliced body** gets the value-`try` desugar a function body gets
@@ -345,8 +348,25 @@ wherever it can, including to the lambda of an ordinary function. Only the opera
 inline function is spliced, and both the suspension walk and the impl-suppression walk apply that
 rule.
 
+**A spill's type is the verifier's, computed.** The discovery pass runs a forward verification-type
+analysis over the spliced body (`src/jvm/suspend/cps/frame_types.rs`): seeded by the method's entry
+locals, every instruction's effect applied in order, joins meeting the way the verifier's do
+(references at `Object`, `null` at the other reference, differing primitives unusable), and a
+recorded frame REPLACING the computed state at its position — which is what the verifier holds
+there whatever arrives. The state at a suspension marker is exactly what the spill has to describe:
+the locals' types choose the continuation fields and the casts that read them back, and the operand
+stack under the call is the prefix the machine saves and restores — the host's own operands
+included, which the emitter no longer has to decline. A slot or operand the verifier holds as
+`null` is a constant, not a field: the resume rematerializes it with `aconst_null` and the join
+claims `null`, since an `Object` restore would be wider than what the code after the join was
+verified against. This is what an accumulator a
+loop rewrites across the suspension needs — its type at the join is the loop's merge, which no
+single frame in the body states — and it replaced reading the nearest frame, the emitter's own
+slot table, the dependency's debug locals and the producing instruction, each of which covered one
+case and guessed at the rest.
+
 **Correctness before byte parity.** Two deliberate divergences from kotlinc remain: the spill set is
-widened to every local the merged frames CLAIM at a resume (kotlinc spills exactly its liveness
+widened to every local a frame REACHABLE from the join claims (kotlinc spills exactly its liveness
 set), and suspensions inside a spliced body are hoisted to statement temps before the machine reads
 them. Both are what makes the shapes above run; neither is byte-identical. §7a still gates parity.
 
