@@ -958,12 +958,12 @@ fn a_value_try_whose_catch_arm_suspends_runs() {
     assert_eq!(output, "OK");
 }
 
-/// A non-local `return` of a value-`try` from the spliced body. The desugar reaches this shape,
-/// but the machine cannot emit a non-local return yet (it has to yield the CPS `Object`), so the
-/// function keeps the diagnostic it had before the machine existed rather than a class that fails
-/// verification.
+/// A non-local `return` whose value is a suspending value-`try`, from the spliced body. The
+/// machine emits it: `box_returns` boxes a return inside a retained `inline_body` to the CPS
+/// `Object` result, so the return leaves `early` with `one(1)` — it used to be declined and the
+/// whole file bailed with `call arity mismatch`.
 #[test]
-fn a_non_local_return_of_a_value_try_still_declines() {
+fn a_non_local_return_of_a_value_try_leaves_the_function() {
     const MAIN: &str = r#"
         import kotlinx.coroutines.runBlocking
         suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
@@ -973,27 +973,16 @@ fn a_non_local_return_of_a_value_try_still_declines() {
         }
         fun box(): String = runBlocking { "" + early() }
     "#;
-    let jdk = common::jdk_modules();
-    let Some(libout) = common::compile_lib_ref("suspend_spliced_nonlocal_return_try", LIB) else {
-        return;
-    };
-    let cp = [
-        libout,
-        common::stdlib_jar(),
-        common::coroutines_jar(),
-        jdk.clone(),
-    ];
-    let outcome = common::backend_outcome_in_process(MAIN, "Main", &cp, Some(jdk.as_path()))
-        .expect("the source is frontend-valid");
-    match outcome {
-        common::BackendOutcome::Rejected(diagnostics) => assert!(
-            diagnostics
-                .iter()
-                .any(|d| d.contains("call arity mismatch")),
-            "expected the pre-machine diagnostic, got {diagnostics:?}"
-        ),
-        common::BackendOutcome::Emitted => panic!("a non-local return under the machine emitted"),
-    }
+    let output = run("suspend_spliced_nonlocal_return_try", MAIN)
+        .expect("krusty must compile and run the value-try return");
+    let reference_library =
+        common::kotlinc_library(LIB).expect("reference compiler must build the inline fixture");
+    let reference = common::kotlinc_box_result_with_classpath(
+        MAIN,
+        &[reference_library, common::coroutines_jar()],
+    );
+    assert_eq!(reference, "2", "kotlinc value-try return result");
+    assert_eq!(output, reference, "krusty differs from kotlinc");
 }
 
 /// A spliced body whose only store into a local is fed by ANOTHER local — `onEach` copies its
