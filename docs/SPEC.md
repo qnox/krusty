@@ -8138,10 +8138,26 @@ and behavior is checked by RUNNING the emitted program.
   because a top-level delegated property's `KProperty` is built once in the file's initializer and
   the call site reads it from there — so the reference is that static's initializer. One level of
   static only: a chain of them would be following assignments rather than reading a declaration.
+  `Delegates.observable(initial) { property, old, new -> … }` is the second delegate, and the
+  reason the two entry points dispatch on the OBJECT rather than being chosen at the call site:
+  both are a `ReadWriteProperty<Any?, T>` there, and no static type separates them. Its callback
+  runs AFTER the write, which is Kotlin's order — a callback reading the property sees the new
+  value — and `observable`'s `beforeChange` is a constant `true`, so there is nothing to veto. The
+  `KProperty` travels through as the OBJECT the delegation passed, never read, which is what lets
+  this runtime hand a program its `name` with no reflection at all: it is the same object the
+  emitted code built, answering out of its own table.
+
+  `Delegates` itself joins the stateless runtime objects beside `Result.Companion`: it declares no
+  state, and every member of it this runtime answers takes its arguments alone. That is needed as
+  well as the member table, because `observable` is an `inline` declaration and its receiver is
+  materialized before the table that says the receiver is not read.
   Tests: `tests/native_not_null_delegate_e2e.rs` (a member property, a local one read through a
-  capture, a rewritten one, and the `IllegalStateException` a read-before-write raises with Kotlin's
-  own wording); corpus: `delegatedProperty/{delegateWithPrivateSet,protectedVarWithPrivateSet}.kt`
-  and `delegatedProperty/local/kt23117.kt`.
+  capture, a rewritten one, the `IllegalStateException` a read-before-write raises with Kotlin's
+  own wording, and two observables — one reporting each write with the property's name, one
+  notifying its instance); corpus:
+  `delegatedProperty/{delegateWithPrivateSet,protectedVarWithPrivateSet,kt9712,observable}.kt`,
+  `delegatedProperty/local/kt23117.kt` and
+  `nameBasedDestructuring/{fullForm,shortForm}ExtraPropType.kt`.
 
 ## 8. Success criteria for the PoC
 

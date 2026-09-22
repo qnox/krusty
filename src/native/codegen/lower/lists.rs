@@ -59,12 +59,13 @@ fn lazy_symbol(name: &str, arity: usize) -> Option<(&'static str, Vec<Ty>, Ty)> 
     })
 }
 
-/// Whether a type is the delegate `Delegates.notNull()` answers with.
+/// Whether a type is the one `Delegates.notNull()` and `Delegates.observable(…)` answer with.
 ///
-/// `ReadWriteProperty<Any?, T>` is what the declaration returns and what the delegate field is
-/// typed by. It is an INTERFACE a program may implement, so a file that does is declined before
-/// this is reached, by the guard every runtime-answered dependency member sits behind.
-fn is_not_null_var(ty: Ty) -> bool {
+/// `ReadWriteProperty<Any?, T>` is what both declarations return and what the delegate field is
+/// typed by — no static type separates the two, which is why the RUNTIME dispatches on the object.
+/// It is an INTERFACE a program may implement, so a file that does is declined before this is
+/// reached, by the guard every runtime-answered dependency member sits behind.
+fn is_read_write_property(ty: Ty) -> bool {
     ty.non_null()
         .obj_internal()
         .is_some_and(|internal| internal.matches("kotlin/properties/ReadWriteProperty"))
@@ -425,14 +426,17 @@ impl BodyLowering<'_, '_, '_> {
         self.runtime_call("kt_lazy_of", &[any()], any(), &[function])
     }
 
-    /// `getValue(thisRef, property)` / `setValue(thisRef, property, value)` on that delegate.
+    /// `getValue(thisRef, property)` / `setValue(thisRef, property, value)` on one of those delegates.
     ///
-    /// `thisRef` is nothing this delegate reads, and the delegation already evaluated whatever it
-    /// names, so it is dropped as a lazy's is. The PROPERTY is read, but not as an object: the
-    /// error a read-before-write raises names the property, and that name is a literal here, taken
-    /// from the reference operand's own declaration. A `KProperty` this file did not build has no
-    /// name to take, and the call declines rather than reporting a wrong one.
-    fn not_null_var_member(
+    /// `thisRef` is nothing either delegate reads, and the delegation already evaluated whatever it
+    /// names, so it is dropped as a lazy's is. The PROPERTY is carried differently by each half. On
+    /// a WRITE it travels through as the object it is, because an observable hands it to its
+    /// callback and nothing reads it on the way. On a READ only its NAME can matter — it is the
+    /// text of the error a `notNull` read-before-write raises — and the runtime cannot ask the
+    /// object for that, so the name is a literal here, taken from the reference operand's own
+    /// declaration. A `KProperty` this file did not build has no name to take, and the read
+    /// declines rather than reporting a wrong one.
+    fn read_write_property_member(
         &mut self,
         name: &str,
         receiver: u32,
@@ -443,13 +447,15 @@ impl BodyLowering<'_, '_, '_> {
             ("getValue", [_, property]) => {
                 let Some(text) = self.property_reference_name(*property) else {
                     return Some(Err(
-                        "a `notNull` delegate read through a `KProperty` this file did not build"
+                        "a delegated property read through a `KProperty` this file did not build"
                             .to_string(),
                     ));
                 };
-                Some(self.not_null_var_read(receiver, &text, ret))
+                Some(self.delegate_read(receiver, &text, ret))
             }
-            ("setValue", [_, _, value]) => Some(self.not_null_var_write(receiver, *value)),
+            ("setValue", [_, property, value]) => {
+                Some(self.delegate_write(receiver, *property, *value))
+            }
             _ => None,
         }
     }
@@ -507,7 +513,7 @@ impl BodyLowering<'_, '_, '_> {
         id
     }
 
-    fn not_null_var_read(
+    fn delegate_read(
         &mut self,
         receiver: u32,
         property: &str,
@@ -519,7 +525,7 @@ impl BodyLowering<'_, '_, '_> {
         }
         let name = self.string_literal(property.as_bytes())?;
         let Some(produced) = self.runtime_call(
-            "kt_not_null_var_get",
+            "kt_rw_property_get",
             &[any(), any()],
             any(),
             &[object, name],
@@ -530,12 +536,20 @@ impl BodyLowering<'_, '_, '_> {
         self.convert(produced, Some(any()), ret)
     }
 
-    fn not_null_var_write(
+    /// The write, which carries the PROPERTY itself: an observable hands it to its callback, and
+    /// nothing in the runtime reads it, so whatever object the delegation built travels straight
+    /// through.
+    fn delegate_write(
         &mut self,
         receiver: u32,
+        property: u32,
         value: u32,
     ) -> Result<Option<Value>, Unsupported> {
         let object = self.reference(receiver)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let named = self.reference(property)?;
         if self.terminated {
             return Ok(None);
         }
@@ -544,10 +558,10 @@ impl BodyLowering<'_, '_, '_> {
             return Ok(None);
         }
         self.runtime_call(
-            "kt_not_null_var_set",
-            &[any(), any()],
+            "kt_rw_property_set",
+            &[any(), any(), any()],
             Ty::Unit,
-            &[object, written],
+            &[object, named, written],
         )
     }
 
@@ -694,8 +708,8 @@ impl BodyLowering<'_, '_, '_> {
             // delegation already evaluated whatever they name.
             return Some(self.list_call(symbol, &carried, answer, receiver, &[], ret));
         }
-        if is_not_null_var(ty) {
-            return self.not_null_var_member(name, receiver, args, ret);
+        if is_read_write_property(ty) {
+            return self.read_write_property_member(name, receiver, args, ret);
         }
         if is_pair(ty) {
             let (symbol, carried, answer) = pair_symbol(name, args.len())?;

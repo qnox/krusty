@@ -1427,6 +1427,7 @@ static KRef kt_lazy_to_string(KRef self) {
    cannot ask the object for it, since a property reference answers `name` from a table of the
    emitted code's own. */
 static void kt_raise_uninitialized_property(KRef name);
+static KRef kt_invoke_three(KRef function, KRef first, KRef second, KRef third);
 
 typedef struct KNotNullVar {
     KObjectHeader header;
@@ -1456,7 +1457,59 @@ KRef kt_not_null_var(void) {
     return (KRef)var;
 }
 
-KRef kt_not_null_var_get(KRef self, KRef name) {
+/* `Delegates.observable(initial) { property, old, new -> … }`. Kotlin's `ObservableProperty`: the
+   value, and a callback run AFTER each write with the property and both values. The callback is an
+   ordinary function value, invoked through the one slot every function value declares.
+
+   The `KProperty` is not read here, only passed along — which is what lets this runtime carry it
+   without any reflection: whatever object the emitted code built for the delegation, the callback
+   receives that same object. */
+typedef struct KObservable {
+    KObjectHeader header;
+    KRef value;
+    KRef on_change;
+} KObservable;
+
+static const uint32_t kt_observable_offsets[] = {offsetof(KObservable, value),
+                                                 offsetof(KObservable, on_change)};
+
+static const kt_fn kt_observable_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
+                                             (kt_fn)kt_any_to_string};
+
+const KType kt_type_observable = {"kotlin.properties.ObservableProperty",
+                                  sizeof("kotlin.properties.ObservableProperty") - 1,
+                                  sizeof(KObservable),
+                                  2,
+                                  0,
+                                  kt_observable_offsets,
+                                  &kt_type_any,
+                                  kt_observable_vtable,
+                                  3,
+                                  0};
+
+KRef kt_observable(KRef initial, KRef on_change) {
+    KObservable *observable =
+        (KObservable *)kt_gc_allocate(&kt_type_observable, sizeof(KObservable));
+    observable->value = initial;
+    observable->on_change = on_change;
+    return (KRef)observable;
+}
+
+/* The two entry points a `ReadWriteProperty` receiver reaches, dispatching on the DESCRIPTOR. No
+   static type separates the delegates this runtime builds — `notNull()` and `observable(…)` are
+   both a `ReadWriteProperty<Any?, T>` at the call site — so the object says which it is, exactly as
+   every other runtime answer here does.
+
+   `get` is handed the property's NAME rather than the property, because the only thing it can need
+   is the text of the error a `notNull` read-before-write raises. `set` is handed the PROPERTY,
+   because an observable passes it to the callback. */
+KRef kt_rw_property_get(KRef self, KRef name) {
+    if (self == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    if (self->header.type == &kt_type_observable) {
+        return ((const KObservable *)self)->value;
+    }
     KRef value = ((const KNotNullVar *)self)->value;
     if (value == NULL) {
         kt_raise_uninitialized_property(name);
@@ -1465,7 +1518,21 @@ KRef kt_not_null_var_get(KRef self, KRef name) {
     return value;
 }
 
-void kt_not_null_var_set(KRef self, KRef value) { ((KNotNullVar *)self)->value = value; }
+void kt_rw_property_set(KRef self, KRef property, KRef value) {
+    if (self == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    if (self->header.type != &kt_type_observable) {
+        ((KNotNullVar *)self)->value = value;
+        return;
+    }
+    KObservable *observable = (KObservable *)self;
+    KRef old = observable->value;
+    observable->value = value;
+    /* AFTER the write, which is Kotlin's order: a callback reading the property sees the new
+       value. `beforeChange` is `observable`'s own constant true, so there is nothing to veto. */
+    (void)kt_invoke_three(observable->on_change, property, old, value);
+}
 
 /* ---- pairs --------------------------------------------------------------------------------- */
 
@@ -3161,6 +3228,15 @@ static KRef kt_invoke_two(KRef function, KRef first, KRef second) {
     return ((KRef(*)(KRef, KRef, KRef))function->header.type->vtable[KT_SLOT_INVOKE])(function,
                                                                                       first,
                                                                                       second);
+}
+
+static KRef kt_invoke_three(KRef function, KRef first, KRef second, KRef third) {
+    if (function == NULL || function->header.type->vtable == NULL ||
+        function->header.type->vtable_length <= KT_SLOT_INVOKE) {
+        KT_FAIL("krusty: a function value was expected here\n");
+    }
+    return ((KRef(*)(KRef, KRef, KRef, KRef))function->header.type->vtable[KT_SLOT_INVOKE])(
+        function, first, second, third);
 }
 
 /* Whether a predicate answered true for an element. The answer arrives BOXED, because a function

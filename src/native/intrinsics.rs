@@ -1483,7 +1483,9 @@ pub(super) fn class_name_accessor(
 pub(super) fn is_stateless_runtime_object(classifier: crate::types::TypeName) -> bool {
     matches!(
         kotlin_owner(&classifier.render()),
-        "kotlin/Result$Companion"
+        // The stdlib's standard delegates. `Delegates` declares no state and every member of it
+        // this runtime answers takes its arguments alone.
+        "kotlin/Result$Companion" | "kotlin/properties/Delegates"
     )
 }
 
@@ -1565,6 +1567,10 @@ pub(super) fn runtime_companion_member(
         // delegate it answers with starts empty — so this is the same shape: no receiver to read
         // and no operand to pass.
         ("kotlin/properties/Delegates", "notNull", []) => Some("kt_not_null_var"),
+        // `observable(initial) { property, old, new -> … }`: the initial value and the callback,
+        // both references, and the `KProperty` it later hands that callback is the one the
+        // delegation passes to `setValue` — nothing here reads it.
+        ("kotlin/properties/Delegates", "observable", [_, _]) => Some("kt_observable"),
         _ => None,
     }
 }

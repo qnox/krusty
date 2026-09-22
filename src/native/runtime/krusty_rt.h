@@ -470,8 +470,17 @@ kt_double kt_floating_range_end(KRef range);
 extern const KType kt_type_not_null_var;
 
 KRef kt_not_null_var(void);
-KRef kt_not_null_var_get(KRef self, KRef name);
-void kt_not_null_var_set(KRef self, KRef value);
+/* `Delegates.observable(initial) { property, old, new -> … }`: the value and a callback run after
+   each write. The `KProperty` is passed along, never read, which is what lets this carry it without
+   any reflection. */
+extern const KType kt_type_observable;
+KRef kt_observable(KRef initial, KRef on_change);
+/* The two entry points a `ReadWriteProperty` receiver reaches; the DESCRIPTOR says which delegate
+   it is, no static type separating them. `get` takes the property's NAME, the only thing it can
+   need (the text of a `notNull` read-before-write error); `set` takes the PROPERTY, which an
+   observable passes to its callback. */
+KRef kt_rw_property_get(KRef self, KRef name);
+void kt_rw_property_set(KRef self, KRef property, KRef value);
 
 /* ---- comparable ranges ------------------------------------------------------------------------
 
