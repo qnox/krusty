@@ -4535,7 +4535,55 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   anchors on its source range — never by name and arity, which cannot tell two overloads that tie
   on arity apart and left both of a tied pair unrendered. A member EXTENSION property is a separate
   declaration in a separate table (`ClassSig::member_ext_props`), consulted by the same identity,
-  and renders its receiver before the name while the diagnostic still points at the name. A nested
+  and renders its receiver before the name while the diagnostic still points at the name. It also
+  renders its OWN type parameters ahead of that receiver — `public final actual val <S> S.kept: S`
+  declares an `S` that shadows its owner's — with the names the source WROTE, since a rendering
+  shows what was written; resolution holds those formals under internal placeholder spellings and
+  the bounds are read from there. A receiver written as a classifier path that the file's scope
+  binds to NO classifier records that, and only that: the coarse child key says the scope bound
+  nothing, and `select_actual` compares the complete type shape. A type parameter is the case this
+  serves, and two of them are told apart positionally and by their DECLARED BOUNDS — a bound is
+  the whole of what such a receiver says about the values it admits, so two members differing only
+  there are different declarations. An unresolved or ambiguous spelling reaches the same key and is
+  excluded by the comparison instead, which demands a binding on both sides. Within one
+  declaration the positional map is read innermost first, so an own type parameter shadows an
+  enclosing one of the same spelling and the implementation may rename it. Refusing to key such a
+  A matched classifier still answers for the members it never implemented. A member actualizes by
+  its own identity, so a matched owner says nothing about them, and an owner implementing none of
+  them is otherwise accepted in silence; the implementation is the declaration that got it wrong,
+  so it is named once at its own name — `'actual class Owed<T> : Any' has no corresponding members
+  for expected class members:` — rather than each `expect` member being reported as unfilled from
+  the side that did not. The owed members are listed under that line as the common source DECLARED
+  them: `expect fun <S : Number> generic(s: S): S`, `expect val starred: List<*>`,
+  `expect fun defaulted(a: Int = ...): Int`. Every other rendering in this check is built from a
+  resolved signature and these cannot be — an `expect` subtree is excluded from the resolved model,
+  so neither the members nor their classifier is published — but the listing is source text in the
+  reference compiler too, so it is rendered from declaration syntax while that syntax is live. A
+  property parameter on an expected class's constructor is rejected outright, so methods and body
+  properties are the whole of what a classifier can owe. The listing follows a newline inside the
+  same diagnostic, so the differential harness — which compares one `: error:` line each — pins the
+  first line only; the listing is checked against the reference compiler directly. Test
+  `no_expect_for_actual_e2e::a_classifier_owing_expected_members_is_reported`.
+
+  An `expect`/`actual` pair must SPELL its type parameters alike, and a rename is an
+  incompatibility between two declarations already taken to be counterparts — `the 'expect' and
+  the 'actual' declarations are incompatible.` at the implementation — not an implementation that
+  answered for nothing, and not a member its owner is left owing. A differing upper BOUND is the
+  other answer: it means no counterpart was found at all, so the owner owes the member and the
+  implementation corresponds to nothing. The two are told apart by asking the input-shape
+  comparison twice, once requiring the names to agree and once positionally: only the second
+  answering is what a rename is. Tests
+  `no_expect_for_actual_e2e::a_renamed_type_parameter_is_an_incompatibility` and
+  `::a_member_whose_bound_differs_is_not_a_counterpart`.
+
+  member at all left an `expect` and an `actual` written identically pairing with nothing, and box
+  `multiplatform/k2/basic/expectActualFakeOverridesWithTypeParameters.kt` regressed; tests
+  `no_expect_for_actual_e2e::a_member_extension_on_its_own_type_parameter_matches`,
+  `::a_renamed_own_type_parameter_receiver_matches`,
+  `::a_member_extension_on_its_owners_type_parameter_matches`,
+  `::a_member_extension_function_on_a_type_parameter_matches`,
+  `::a_type_parameter_receiver_compares_its_bound` and
+  `::a_member_extension_property_renders_its_own_formals`. A nested
   classifier and a `companion object` are hoisted out of their owner by the parser, so neither
   rides a member list: each is recorded as an actualization target of its own where its modifier
   list is read, renders its OWN simple name, and a companion renders the word `companion` before
