@@ -771,6 +771,50 @@ kt_char kt_string_last(KRef self) {
     return kt_string_get(self, kt_string_length(self) - 1);
 }
 
+/* `s.single()`: the one char of a text of length one. Kotlin raises `NoSuchElementException` for an
+   empty text and `IllegalArgumentException` for a longer one — two different complaints, because
+   "there is none" and "there is more than one" are different mistakes. */
+kt_char kt_string_single(KRef self) {
+    if (kt_text_raise_when_empty(self)) {
+        return 0;
+    }
+    if (kt_string_length(self) != 1) {
+        kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception,
+                                  kt_string_utf8("Char sequence has more than one element.", 40)));
+        return 0;
+    }
+    return kt_string_get(self, 0);
+}
+
+/* `c in s`. `kt_string_contains` asks about one text inside another; this asks about a single unit,
+   which is a different question whenever the char is one Kotlin encodes in several bytes. */
+kt_boolean kt_string_contains_char(KRef self, kt_char value) {
+    kt_int length = kt_string_length(self);
+    for (kt_int at = 0; at < length; at++) {
+        if (kt_string_get(self, at) == value) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* `s.isNullOrBlank()` and `s.isNullOrEmpty()`: the null receiver is the point — these are the two
+   text questions Kotlin declares on a NULLABLE receiver, and null answers true to both. */
+kt_boolean kt_string_is_null_or_blank(KRef self) {
+    return self == NULL || kt_string_is_blank(self);
+}
+
+kt_boolean kt_string_is_null_or_empty(KRef self) {
+    return self == NULL || kt_string_is_empty(self);
+}
+
+/* `sb.clear()`: the builder emptied, answering the builder so a call can be chained. Kotlin's own
+   is `also { it.setLength(0) }`, which is exactly this. */
+KRef kt_string_builder_clear(KRef self) {
+    kt_string_builder_set_length(self, 0);
+    return self;
+}
+
 static kt_int kt_render_ulong(uint64_t value, char *buffer);
 
 /* Render a signed 64-bit value into `buffer` (at least 20 bytes); returns the length written. */
@@ -3587,6 +3631,28 @@ KRef kt_iterable_filter(KRef iterable, KRef predicate) {
 
 KRef kt_iterable_filter_not(KRef iterable, KRef predicate) {
     return kt_iterable_filtered(iterable, predicate, 0);
+}
+
+/* `s.takeWhile { … }` and `s.dropWhile { … }`: the longest prefix whose chars all satisfy the
+   predicate, and everything after it. One walk finds the boundary; which side of it is the answer
+   is all that separates the two. The predicate takes a `Char`, which crosses BOXED because a
+   function value's `invoke` takes references. */
+static kt_int kt_string_prefix_end(KRef self, KRef predicate) {
+    kt_int length = kt_string_length(self);
+    for (kt_int at = 0; at < length; at++) {
+        if (!kt_holds(predicate, kt_box_char(kt_string_get(self, at)))) {
+            return at;
+        }
+    }
+    return length;
+}
+
+KRef kt_string_take_while(KRef self, KRef predicate) {
+    return kt_string_substring(self, 0, kt_string_prefix_end(self, predicate));
+}
+
+KRef kt_string_drop_while(KRef self, KRef predicate) {
+    return kt_string_substring_from(self, kt_string_prefix_end(self, predicate));
 }
 
 /* `xs.first { … }` and `xs.firstOrNull { … }`. Kotlin raises `NoSuchElementException` when nothing

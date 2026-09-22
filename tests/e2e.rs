@@ -1119,6 +1119,7 @@ mod native_interface_bridges_e2e;
 mod native_interface_implementations_e2e;
 #[path = "native_iterable_walk_members_e2e.rs"]
 mod native_iterable_walk_members_e2e;
+
 #[path = "native_lists_e2e.rs"]
 mod native_lists_e2e;
 #[path = "native_maps_e2e.rs"]
@@ -1157,6 +1158,8 @@ mod native_string_members_e2e;
 mod native_strings_e2e;
 #[path = "native_tailrec_e2e.rs"]
 mod native_tailrec_e2e;
+#[path = "native_text_members_e2e.rs"]
+mod native_text_members_e2e;
 #[path = "native_unsigned_e2e.rs"]
 mod native_unsigned_e2e;
 #[path = "native_vararg_constructor_e2e.rs"]

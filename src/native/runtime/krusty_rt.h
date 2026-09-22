@@ -768,6 +768,18 @@ KRef kt_string_reversed(KRef self);
 /* `s.first()` / `s.last()`; both raise `NoSuchElementException` on empty text, as Kotlin does. */
 kt_char kt_string_first(KRef self);
 kt_char kt_string_last(KRef self);
+/* `s.single()`: the one char of a text of length one — `NoSuchElementException` when empty and
+   `IllegalArgumentException` when longer, which are Kotlin's two different complaints. */
+kt_char kt_string_single(KRef self);
+/* `c in s`: a single unit rather than one text inside another, which `kt_string_contains` asks. */
+kt_boolean kt_string_contains_char(KRef self, kt_char value);
+/* The two text questions Kotlin declares on a NULLABLE receiver; null answers true to both. */
+kt_boolean kt_string_is_null_or_blank(KRef self);
+kt_boolean kt_string_is_null_or_empty(KRef self);
+/* `s.takeWhile { … }` / `s.dropWhile { … }`: the longest prefix whose chars satisfy the predicate,
+   and everything after it. */
+KRef kt_string_take_while(KRef self, KRef predicate);
+KRef kt_string_drop_while(KRef self, KRef predicate);
 
 /* A string LITERAL, interned: equal literals are ONE object, as Kotlin promises. `slot` is a static
    per distinct text; see the definition for why the root is registered before the allocation. */
@@ -802,6 +814,8 @@ KRef kt_string_builder_append_new_line(KRef self);
 
 /* `sb.setLength(n)`, by UTF-16 unit as Kotlin counts: shorter truncates, longer pads with NUL. */
 void kt_string_builder_set_length(KRef self, kt_int length);
+/* `sb.clear()`: emptied, answering the builder so a call can be chained. */
+KRef kt_string_builder_clear(KRef self);
 
 /* Whether a value is one, for the entry points that serve both shapes. */
 kt_boolean kt_is_string_builder(KRef value);

@@ -7311,6 +7311,25 @@ and behavior is checked by RUNNING the emitted program.
   Tests: `tests/native_iterable_walk_members_e2e.rs`
   (`a_walk_finds_the_first_element_matching_a_predicate`).
 
+- **`c in s` and `t in s` are different entry points, not one with a converted operand.** The first
+  asks about a single UTF-16 unit and the second about one text inside another, and the two answers
+  differ whenever the char is one Kotlin encodes in several bytes. Both go through the
+  `ignoreCase` mechanism — the flag's default arrives as a materialized constant from a klib and as
+  an absent argument from a jar, and anything but a literal `false` still declines, case folding
+  being a question about Unicode the runtime holds no table for — so the selected entry point now
+  carries its OPERAND's type with it: a machine `Char` for one, a reference for the other.
+  Tests: `tests/native_text_members_e2e.rs` (`a_char_is_looked_for_inside_text`).
+
+- **`isNullOrBlank`/`isNullOrEmpty` take the null.** They are the only text members Kotlin declares
+  on a nullable receiver, and that is their whole point, so the null reaches the runtime instead of
+  being checked away at the call site.
+  Tests: `tests/native_text_members_e2e.rs` (`text_answers_whether_it_is_null_or_blank`).
+
+- **`single()` has two different complaints.** An empty text raises `NoSuchElementException` and a
+  longer one `IllegalArgumentException`: "there is none" and "there is more than one" are different
+  mistakes, and Kotlin reports them as such.
+  Tests: `tests/native_text_members_e2e.rs` (`text_answers_its_single_char`).
+
 - **A sort is STABLE, and `sortedBy` asks its selector once per COMPARISON.** The runtime sorts by
   insertion, so equal elements keep the order the walk gave them, which is what Kotlin promises.
   Kotlin's own `sortedBy` is `sortedWith(compareBy(selector))`, which calls the selector inside the

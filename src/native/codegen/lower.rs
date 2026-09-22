@@ -3007,9 +3007,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // only one the runtime answers — is recognizable right here: a literal
                         // `false` and nothing else. Anything else asks about Unicode case folding,
                         // which the runtime holds no table for, and declines below by name.
-                        if let Some(symbol) = super::super::intrinsics::case_sensitive_text_member(
-                            &owner, &name, params,
-                        ) {
+                        if let Some((symbol, operand_ty)) =
+                            super::super::intrinsics::case_sensitive_text_member(
+                                &owner, &name, params,
+                            )
+                        {
                             // `ignoreCase` has a DEFAULT, and the two providers hand that over
                             // differently: a klib call materializes the default as a constant
                             // argument, a jar call leaves the argument out. Both mean the same
@@ -3026,14 +3028,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                                 _ => false,
                             };
                             if sensitive {
-                                let arguments =
-                                    vec![self.reference(receiver)?, self.reference(args[0])?];
+                                // `c in s` hands the operand over as the machine `Char` it is;
+                                // every other member here takes text, which crosses as a
+                                // reference. The entry point says which, so neither is guessed.
+                                let Some(operand) = self.coerce(args[0], operand_ty)? else {
+                                    return Ok(None);
+                                };
+                                let arguments = vec![self.reference(receiver)?, operand];
                                 if self.terminated {
                                     return Ok(None);
                                 }
                                 let produced = self.runtime_call(
                                     symbol,
-                                    &[any(), any()],
+                                    &[any(), operand_ty],
                                     Ty::Boolean,
                                     &arguments,
                                 )?;

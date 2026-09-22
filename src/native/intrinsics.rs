@@ -1156,6 +1156,32 @@ pub(super) fn scalar_member(
             ("isNotBlank", []) => Some(("kt_string_is_not_blank", vec![reference], Ty::Boolean)),
             ("first", []) => Some(("kt_string_first", vec![reference], Ty::Char)),
             ("last", []) => Some(("kt_string_last", vec![reference], Ty::Char)),
+            ("single", []) => Some(("kt_string_single", vec![reference], Ty::Char)),
+            // Declared on a NULLABLE receiver — that is the whole point of them — so the null the
+            // reference may carry reaches the runtime rather than being checked away here.
+            ("isNullOrBlank", []) => {
+                Some(("kt_string_is_null_or_blank", vec![reference], Ty::Boolean))
+            }
+            ("isNullOrEmpty", []) => {
+                Some(("kt_string_is_null_or_empty", vec![reference], Ty::Boolean))
+            }
+            ("takeWhile", [_]) => Some((
+                "kt_string_take_while",
+                vec![reference, reference],
+                Ty::obj("kotlin/String"),
+            )),
+            ("dropWhile", [_]) => Some((
+                "kt_string_drop_while",
+                vec![reference, reference],
+                Ty::obj("kotlin/String"),
+            )),
+            // `sb.clear()` is Kotlin's own, declared beside the builder rather than on it, so it
+            // arrives as a member of the facade with the builder as its receiver.
+            ("clear", []) => Some((
+                "kt_string_builder_clear",
+                vec![reference],
+                Ty::obj("kotlin/text/StringBuilder"),
+            )),
             ("repeat", [Ty::Int]) => Some((
                 "kt_string_repeat",
                 vec![reference, Ty::Int],
@@ -1178,6 +1204,14 @@ pub(super) fn scalar_member(
         // `sb.setLength(n)` counts UTF-16 units, so the operand is an `Int` the generator must not
         // box to hand over. It answers nothing, which is why it is not one of the builder's
         // reference-carried members below.
+        ("kotlin/text/StringBuilder", "clear", []) => Some((
+            "kt_string_builder_clear",
+            vec![reference],
+            Ty::obj("kotlin/text/StringBuilder"),
+        )),
+        ("kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder", "single", []) => {
+            Some(("kt_string_single", vec![reference], Ty::Char))
+        }
         ("kotlin/text/StringBuilder", "setLength", [Ty::Int]) => Some((
             "kt_string_builder_set_length",
             vec![reference, Ty::Int],
@@ -1255,13 +1289,14 @@ pub(super) fn scalar_member(
 /// drops the argument, and declines when the flag is anything but a literal `false`. Case folding
 /// is a question about Unicode rather than about text, and the runtime holds no case table.
 ///
-/// The `Char` overload of `contains` is deliberately absent: its operand is a machine value, not a
-/// reference, and these entry points take text on both sides.
+/// The answer carries the OPERAND's type with the symbol, because the two `contains` overloads do
+/// not agree on it: text on both sides for one, and a `Char` — a machine value the generator must
+/// not box to ask about — for the other. Everything else here takes text.
 pub(super) fn case_sensitive_text_member(
     owner: &str,
     name: &str,
     params: &[Ty],
-) -> Option<&'static str> {
+) -> Option<(&'static str, Ty)> {
     let owner = kotlin_owner(owner);
     if declaration_package(owner) != "kotlin/text"
         && !matches!(owner, "kotlin/String" | "kotlin/CharSequence")
@@ -1271,20 +1306,27 @@ pub(super) fn case_sensitive_text_member(
     // Either shape of the declaration: with the `ignoreCase` parameter, as the `kotlin.text`
     // extension declares it, or without, as `java.lang.String`'s own member has it. The CALLER
     // decides whether the flag was asked for, by the arguments it holds.
-    let text = match params {
-        [text] | [text, Ty::Boolean] => text,
+    let operand = match params {
+        [operand] | [operand, Ty::Boolean] => *operand,
         _ => return None,
     };
-    if !matches!(*text, Ty::Obj(named, _) if is_char_sequence(named) || named.matches("kotlin/String"))
+    // `c in s` asks about one UTF-16 unit; `t in s` asks about one text inside another. They are
+    // different questions with different answers whenever the char is one Kotlin encodes in
+    // several bytes, so they are different entry points rather than one with a converted operand.
+    if operand.non_null() == Ty::Char {
+        return (name == "contains").then_some(("kt_string_contains_char", Ty::Char));
+    }
+    if !matches!(operand, Ty::Obj(named, _) if is_char_sequence(named) || named.matches("kotlin/String"))
     {
         return None;
     }
-    match name {
-        "startsWith" => Some("kt_string_starts_with"),
-        "endsWith" => Some("kt_string_ends_with"),
-        "contains" => Some("kt_string_contains"),
-        _ => None,
-    }
+    let symbol = match name {
+        "startsWith" => "kt_string_starts_with",
+        "endsWith" => "kt_string_ends_with",
+        "contains" => "kt_string_contains",
+        _ => return None,
+    };
+    Some((symbol, Ty::nullable(Ty::obj("kotlin/Any"))))
 }
 
 /// `x++` on a primitive, as the type it steps and the step itself.
