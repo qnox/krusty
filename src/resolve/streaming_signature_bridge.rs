@@ -4355,6 +4355,17 @@ pub(crate) fn finalized_streamed_signature_index(
             {
                 return Some(&property.annotations);
             }
+            // A member extension property lives in its own table because its selection key is the
+            // extension receiver, not the member name. Its annotations publish like any other
+            // declared property's.
+            if let Some(property) = class
+                .member_ext_props
+                .values()
+                .flatten()
+                .find(|property| property.stable_declaration == Some(declaration))
+            {
+                return Some(&property.annotations);
+            }
         }
         None
     }

@@ -779,21 +779,37 @@ pub(in crate::resolve) fn streamed_constructor_declaration(
 /// source `TypeRef`s or repeating classifier lookup. Annotation resolution owns the occurrence
 /// binding; this temporary signature projection only associates those facts with the stable
 /// declaration that will publish them into `ResolvedModuleIndex`.
+///
+/// An occurrence with no binding is skipped. Two rules produce that state and neither is a defect
+/// here: annotation resolution already reported an unresolvable reference, and the source-role gate
+/// in signature collection withdraws a target-less optional expectation from a platform file. This
+/// matches what the non-streamed source lookup drops, so the two paths agree on the same set.
 pub(in crate::resolve) fn streamed_resolved_declaration_annotations(
     headers: &crate::fir::StreamedHeaderModule,
     declaration: crate::fir::DeclarationId,
     bindings: &std::collections::HashMap<(u32, u32, u32), TypeName>,
-) -> Option<Vec<TypeName>> {
-    let source = headers.stub(declaration)?.source.raw();
-    let declaration = headers.syntax.declaration(declaration)?;
+) -> Vec<TypeName> {
+    let source = headers
+        .stub(declaration)
+        .expect("a compact declaration retains its stub")
+        .source
+        .raw();
+    let declaration = headers
+        .syntax
+        .declaration(declaration)
+        .expect("a compact declaration retains its header syntax");
     let mut annotations = Vec::new();
     for annotation in headers.syntax.type_operands(declaration.annotations) {
-        let span = headers.syntax.ty(*annotation)?.span;
+        let span = headers
+            .syntax
+            .ty(*annotation)
+            .expect("a declaration annotation retains its type syntax")
+            .span;
         if let Some(identity) = bindings.get(&(source, span.lo, span.hi)) {
             annotations.push(*identity);
         }
     }
-    Some(annotations)
+    annotations
 }
 
 pub(in crate::resolve) fn legacy_classifier_header(class: &ClassDecl) -> StreamedClassifierHeader {
