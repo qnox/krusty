@@ -68,6 +68,16 @@ inline fun twoSites(f: (Int) -> Int): Int {
     val b = f(2)
     return a + b + s.length
 }
+
+/// A `for` whose end and a following `while`'s head bind at ONE offset — the shape
+/// `CodeBuilder::build_stackmap` merges, with the call site inside the `while`.
+inline fun forThenWhile(xs: List<Int>, f: (Int) -> Int): Int {
+    var acc = 0
+    for (x in xs) acc = acc + x
+    var i = 0
+    while (i < 2) { acc = acc + f(i); i = i + 1 }
+    return acc
+}
 "#;
 
 #[test]
@@ -1029,6 +1039,84 @@ fn a_receiver_copy_in_a_spliced_body_is_typed() {
         }
     "#;
     let Some(output) = run("suspend_spliced_receiver_copy", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// Two labels bound at ONE bytecode offset, around a suspension.
+///
+/// The class file carries a single frame per offset — the MERGE of the frames the labels bound
+/// there registered, their locals truncated at the first divergence. The machine's frame analysis
+/// must read that same merged frame: reading them per label gave it whichever label was registered
+/// last, which can name a local the merge drops, and the spill planned from it would load a slot
+/// the verifier holds as `top`.
+///
+/// `for (…) …` immediately followed by `while (…) …` is the emitter shape that binds two labels at
+/// one offset (`build_stackmap`'s own comment names it). Here the suspension sits inside the
+/// `while`, so the merged frame is what the spill set is read against.
+#[test]
+fn a_suspension_after_two_labels_bound_at_one_offset_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun f(xs: List<Int>): Int = forThenWhile(xs) { one(it) }
+        fun box(): String = runBlocking {
+            val n = f(listOf(1, 2))
+            if (n == 6) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_shared_offset", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// The same two-labels-at-one-offset shape inside the SPLICED LAMBDA rather than the host body, so
+/// the frames that share the offset are the lambda's own relocated ones.
+#[test]
+fn a_suspension_after_a_loop_pair_inside_the_spliced_lambda_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun f(xs: List<Int>): Int = run {
+            var acc = 0
+            for (x in xs) acc = acc + x
+            var i = 0
+            while (i < 2) { acc = acc + one(i); i = i + 1 }
+            acc
+        }
+        fun box(): String = runBlocking {
+            val n = f(listOf(1, 2))
+            if (n == 6) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_lambda_loop_pair", MAIN) else {
+        return;
+    };
+    assert_eq!(output, "OK");
+}
+
+/// Two loops over DIFFERENT element types before the suspension: the second reuses the slots the
+/// first one's synthetics held, so the frames bound around them describe one slot two ways.
+#[test]
+fn a_suspension_after_two_loops_that_reuse_a_slot_runs() {
+    const MAIN: &str = r#"
+        import kotlinx.coroutines.runBlocking
+        suspend fun one(v: Int): Int { kotlinx.coroutines.yield(); return v + 1 }
+        suspend fun f(xs: List<Int>, ys: List<String>): Int = run {
+            var acc = 0
+            for (x in xs) acc = acc + x
+            for (y in ys) acc = acc + y.length
+            acc = acc + one(acc)
+            acc
+        }
+        fun box(): String = runBlocking {
+            val n = f(listOf(1, 2), listOf("ab"))
+            if (n == 11) "OK" else "FAIL: " + n
+        }
+    "#;
+    let Some(output) = run("suspend_spliced_slot_reuse", MAIN) else {
         return;
     };
     assert_eq!(output, "OK");

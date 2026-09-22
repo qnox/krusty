@@ -85,6 +85,55 @@ fn verif_eq(a: &VerifType, b: &VerifType, cp: &ConstPool) -> bool {
         _ => a == b,
     }
 }
+/// Merge the frames several labels registered at ONE bytecode offset into the single frame the
+/// class file carries there.
+///
+/// Several labels can be bound at the same offset — a loop's `end` and the following statement's
+/// `start`, or `next`/`end` in an all-diverging `when`. One frame is emitted for that offset, and
+/// it must hold on EVERY edge reaching it, so the frames are MERGED: the locals are their common
+/// prefix, everything past the first divergence reverting to `top`.
+///
+/// Keeping the first (a plain dedup) silently claimed a local that a later edge does not have.
+/// `for (v in …) …` immediately followed by `while (…) …` binds the loop's end and the while's head
+/// at one offset; the `for` frame still named its synthetic index, the `while`'s back edge chopped
+/// it, and the back edge became narrower than its own target — a class that fails verification
+/// ("Inconsistent stackmap frames").
+///
+/// `entries` must already be sorted by offset with a STABLE sort, so equal offsets are adjacent and
+/// keep their registration order.
+///
+/// This is the ONLY place the merge is defined. Everything that reasons about what the verifier
+/// holds at an offset — the `StackMapTable` writer and the coroutine machine's frame analysis —
+/// goes through it, so the emitted frame and the analysed one cannot drift apart: an analysis
+/// holding a MORE precise type than the frame the class file carries spills a local the verifier
+/// has as `top` there ("Bad local variable type").
+fn merge_frames_at_one_offset<K: Copy + PartialEq>(
+    entries: &[(K, &Vec<VerifType>, &Vec<VerifType>)],
+    cp: &ConstPool,
+) -> Vec<(K, Vec<VerifType>, Vec<VerifType>)> {
+    let mut out: Vec<(K, Vec<VerifType>, Vec<VerifType>)> = Vec::new();
+    for (off, locals, stack) in entries {
+        match out.last_mut() {
+            Some((previous_off, previous_locals, previous_stack)) if *previous_off == *off => {
+                let common = previous_locals
+                    .iter()
+                    .zip(locals.iter())
+                    .take_while(|(a, b)| verif_eq(a, b, cp))
+                    .count();
+                previous_locals.truncate(common);
+                // An operand stack that differs between edges into one offset is a lowering bug,
+                // not something a frame can reconcile; keep the shorter so the entry stays
+                // describable rather than asserting one edge's view over the other.
+                if stack.len() < previous_stack.len() {
+                    previous_stack.clone_from(stack);
+                }
+            }
+            _ => out.push((*off, (*locals).clone(), (*stack).clone())),
+        }
+    }
+    out
+}
+
 /// One pool entry a `super(…)` argument's evaluation interns before the super `<init>` Methodref,
 /// in code order: a construction's Class ref, a string constant's CONSTANT_String, or a
 /// constructor Methodref (`class Basic : Engine(Cfg(false), "basic")`).
@@ -1740,6 +1789,28 @@ impl ClassWriter {
     /// The internal name of the `CONSTANT_Class` at `index`, for the same reason.
     pub fn class_name_at(&self, index: u16) -> Option<&str> {
         self.cp.class_name(index)
+    }
+
+    /// The frames `code` will carry, by byte offset: one per offset, merged the way
+    /// `build_stackmap` writes them (see `merge_frames_at_one_offset`).
+    ///
+    /// The merge needs this class's constant pool to compare an eagerly interned `Object(index)`
+    /// against a lazily named `ObjectName`, which is why it lives here and not on `CodeBuilder`.
+    pub(crate) fn merged_frames(
+        &self,
+        code: &CodeBuilder,
+    ) -> Vec<(usize, Vec<VerifType>, Vec<VerifType>)> {
+        let mut entries: Vec<(usize, &Vec<VerifType>, &Vec<VerifType>)> = code
+            .frames
+            .iter()
+            .filter(|(lid, _, _)| !code.is_dead_bound(*lid))
+            .filter_map(|(lid, locals, stack)| {
+                let off = code.labels.get(*lid as usize).copied()?;
+                (off != usize::MAX).then_some((off, locals, stack))
+            })
+            .collect();
+        entries.sort_by_key(|&(off, _, _)| off);
+        merge_frames_at_one_offset(&entries, &self.cp)
     }
 
     /// The descriptor of the field reference at `index`, for the same reason.
@@ -3553,8 +3624,13 @@ impl CodeBuilder {
     }
 
     /// The recorded frames resolved to byte offsets: `(offset, locals, stack)` for each bound label.
-    /// Used to relocate a spliced lambda body's own frames into the host method. Unbound labels (offset
-    /// `usize::MAX`) and labels bound inside a dropped dead region are dropped.
+    /// Used to relocate a spliced lambda body's own frames into the host method, where they are
+    /// re-registered per label. Unbound labels (offset `usize::MAX`) and labels bound inside a
+    /// dropped dead region are dropped.
+    ///
+    /// PER LABEL, so several entries can share one offset — this is NOT what the class file carries
+    /// there. Anything reasoning about what the VERIFIER holds at an offset wants
+    /// [`ClassWriter::merged_frames`] instead.
     pub fn resolved_frames(&self) -> Vec<(usize, Vec<VerifType>, Vec<VerifType>)> {
         self.frames
             .iter()
@@ -3627,42 +3703,8 @@ impl CodeBuilder {
             .filter(|(off, _, _)| (*off as usize) < code_len)
             .collect();
         entries.sort_by_key(|&(off, _, _)| off);
-        // Several labels can be bound at the SAME offset — a loop's `end` and the following
-        // statement's `start`, or `next`/`end` in an all-diverging `when`. One frame is emitted for
-        // that offset, and it must hold on EVERY edge reaching it, so the frames are MERGED: the
-        // locals are their common prefix, everything past the first divergence reverting to `top`.
-        //
-        // Keeping the first (a plain dedup) silently claimed a local that a later edge does not have.
-        // `for (v in …) …` immediately followed by `while (…) …` binds the loop's end and the while's
-        // head at one offset; the `for` frame still named its synthetic index, the `while`'s back edge
-        // chopped it, and the back edge became narrower than its own target — a class that fails
-        // verification ("Inconsistent stackmap frames").
-        let merged: Vec<(u32, Vec<VerifType>, Vec<VerifType>)> = {
-            let mut out: Vec<(u32, Vec<VerifType>, Vec<VerifType>)> = Vec::new();
-            for (off, locals, stack) in entries {
-                match out.last_mut() {
-                    Some((previous_off, previous_locals, previous_stack))
-                        if *previous_off == off =>
-                    {
-                        let common = previous_locals
-                            .iter()
-                            .zip(locals.iter())
-                            .take_while(|(a, b)| verif_eq(a, b, cp))
-                            .count();
-                        previous_locals.truncate(common);
-                        // An operand stack that differs between edges into one offset is a lowering
-                        // bug, not something a frame can reconcile; keep the shorter so the entry
-                        // stays describable rather than asserting one edge's view over the other.
-                        if stack.len() < previous_stack.len() {
-                            previous_stack.clone_from(stack);
-                        }
-                    }
-                    _ => out.push((off, locals.clone(), stack.clone())),
-                }
-            }
-            out
-        };
-        let entries = merged;
+        // Labels bound at one offset share one emitted frame; see `merge_frames_at_one_offset`.
+        let entries = merge_frames_at_one_offset(&entries, cp);
 
         let mut body = Vec::new();
         u2(&mut body, entries.len() as u16);
@@ -4693,6 +4735,74 @@ mod tests {
             assert!(matches!(locals[1], VerifType::Top));
             assert!(matches!(locals[2], VerifType::Integer));
         }
+    }
+
+    /// The `StackMapTable` writer and the coroutine machine's frame analysis must read the SAME
+    /// frame at an offset several labels are bound at.
+    ///
+    /// The class file carries ONE frame per offset — the merge of the frames bound there. Reading
+    /// them PER LABEL instead (`resolved_frames`) hands the analysis whichever label was registered
+    /// last, which can be more precise than anything the verifier holds there. The spill it then
+    /// plans loads a slot the verifier has as `top` ("Bad local variable type"), and the join frame
+    /// claims a type the fall-through edge does not carry ("Inconsistent stackmap frames").
+    #[test]
+    fn the_machine_reads_the_frame_the_stackmap_writes_where_two_labels_share_an_offset() {
+        use crate::jvm::inline::{decode_stackmap, VType};
+
+        let mut cw = ClassWriter::new("Scratch", "java/lang/Object");
+        let mut code = CodeBuilder::new(3);
+        let first = code.new_label();
+        let second = code.new_label();
+        // Two labels at ONE offset agreeing on slot 0 and disagreeing on slot 1: the merge is their
+        // common prefix, so slot 1 is `top` there however either label described it.
+        code.add_frame_if_new(
+            first,
+            vec![VerifType::Integer, VerifType::Integer],
+            Vec::new(),
+        );
+        code.add_frame_if_new(
+            second,
+            vec![VerifType::Integer, VerifType::Float],
+            Vec::new(),
+        );
+        code.bind(first);
+        code.bind(second);
+        code.ret_void();
+
+        // Per label, both frames survive, and the LAST one types slot 1 — the state the analysis
+        // used to be seeded with.
+        let per_label = code.resolved_frames();
+        assert_eq!(per_label.len(), 2);
+        assert_eq!(per_label[1].1.len(), 2);
+
+        let merged = cw.merged_frames(&code);
+        let written = decode_stackmap(
+            &code
+                .build_stackmap(Some(&[]), &mut cw.cp)
+                .expect("a table is needed"),
+            Vec::new(),
+        )
+        .expect("the written table decodes");
+
+        assert_eq!(merged.len(), written.len());
+        for (merged, written) in merged.iter().zip(written.iter()) {
+            assert_eq!(merged.0, written.offset);
+            assert_eq!(
+                merged
+                    .1
+                    .iter()
+                    .map(|v| match v {
+                        VerifType::Integer => VType::Int,
+                        VerifType::Float => VType::Float,
+                        VerifType::Top => VType::Top,
+                        _ => unreachable!("the fixture uses primitives only"),
+                    })
+                    .collect::<Vec<_>>(),
+                written.locals
+            );
+        }
+        // …and that agreed frame is narrower than the per-label one the analysis would have taken.
+        assert_eq!(merged[0].1.len(), 1);
     }
 
     #[test]
