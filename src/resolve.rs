@@ -19440,7 +19440,7 @@ impl<'a> Checker<'a> {
                     .map(|(candidate, ..)| candidate.clone())
                     .collect::<Vec<_>>();
                 provisional_candidates.extend(candidates.iter().cloned());
-                record_anonymous_construction_captures(
+                let _ = record_anonymous_construction_captures(
                     self.file,
                     call,
                     &self.anonymous_lexical_scope,
@@ -19484,9 +19484,9 @@ impl<'a> Checker<'a> {
                 selected_receiver_candidates.extend(candidates);
                 candidates = selected_receiver_candidates;
                 // Finalize away receiver rungs the scratch body did not select. Pending inference
-                // remains provisional; the authoritative recheck below otherwise rebuilds every
-                // descendant storage coordinate against this exact list.
-                record_anonymous_construction_captures(
+                // remains provisional so an incomplete revisit cannot discard an established
+                // field.
+                let storage_field_remap = record_anonymous_construction_captures(
                     self.file,
                     call,
                     &self.anonymous_lexical_scope,
@@ -19505,18 +19505,23 @@ impl<'a> Checker<'a> {
                     },
                     &mut self.discovered_anonymous_captures,
                 );
-                // The scratch check above discovered exactly which receiver identities the body
-                // selects, but descendant constructions may have recorded `ClassStorage` ordinals
-                // against its provisional all-receivers ABI. Check the class once more against the
-                // authoritative capture list so every child consumes the same final field layout.
-                // This remains frontend work at the lexical construction site; lowering never
-                // repairs or re-resolves a capture coordinate.
-                if let Decl::Class(class) = self.file.decl(declaration) {
-                    let class = class.clone();
-                    let saved = self.take_body_state();
-                    self.set_anonymous_lexical_class_context(declaration);
-                    self.check_class(scope, &class, declaration);
-                    self.restore_body_state(saved);
+                // Descendants were checked while every addressable receiver rung occupied a
+                // provisional field. Rewrite their exact `ClassStorage` coordinates through the
+                // finalized field permutation instead of replaying the class body. Rechecking the
+                // whole subtree here doubles the work at every nesting level (and is exponential
+                // for deeply nested anonymous objects); the structural owner edge identifies the
+                // only constructions whose storage owner is this declaration.
+                if !remap_direct_anonymous_class_storage_captures(
+                    declaration,
+                    &self.anonymous_lexical_scope,
+                    &storage_field_remap,
+                    &mut self.discovered_anonymous_captures,
+                ) {
+                    self.diags.error(
+                        span,
+                        "anonymous capture storage identity was removed during finalization",
+                    );
+                    return Ty::Error;
                 }
                 if let Some(mut captures) = self.discovered_anonymous_captures.remove(&declaration)
                 {
@@ -38210,9 +38215,9 @@ fn record_anonymous_construction_captures(
     preserve_missing: bool,
     selected_local_callables: SelectedLocalCallableCaptures<'_>,
     captures: &mut HashMap<DeclId, Vec<AnonymousObjectCapture>>,
-) {
+) -> Vec<Option<u32>> {
     let Some(&declaration) = file.anonymous_object_classes.get(&construction) else {
-        return;
+        return Vec::new();
     };
     let bound = anonymous_body_bound_value_names(file, declaration);
     crate::trace_compiler!(
@@ -38296,19 +38301,22 @@ fn record_anonymous_construction_captures(
     // is temporarily `Pending`. A provisional revisit must neither replace the exact symbolic type
     // recorded by the earlier check nor renumber an established capture field. Descendant
     // constructions can already carry one of these ordinals as their resolved `ClassStorage`
-    // source, so retain the established order while discovery is provisional. The authoritative
-    // pass removes receiver rungs its checked body did not use, then checks that body again against
-    // the final field layout before any checked FIR escapes. This table crosses the retained-inline
-    // boundary and no pending semantic type may reach checked FIR.
+    // source, so retain the established order while discovery is provisional. The returned field
+    // permutation lets direct descendants update their exact storage coordinates after unused
+    // receiver rungs are removed. This table crosses the retained-inline boundary and no pending
+    // semantic type may reach checked FIR.
+    let mut field_remap = Vec::new();
     if let Some(previous) = captures.get(&declaration) {
+        field_remap.resize(previous.len(), None);
         let mut pending = selected;
         selected = Vec::with_capacity(previous.len().max(pending.len()));
-        for exact in previous {
+        for (previous_field, exact) in previous.iter().enumerate() {
             let Some(position) = pending
                 .iter()
                 .position(|capture| capture.name == exact.name && capture.source == exact.source)
             else {
                 if preserve_missing {
+                    field_remap[previous_field] = u32::try_from(selected.len()).ok();
                     selected.push(exact.clone());
                 }
                 continue;
@@ -38327,6 +38335,7 @@ fn record_anonymous_construction_captures(
                 capture.ty = exact.ty;
                 capture.storage_ty = exact.storage_ty;
             }
+            field_remap[previous_field] = u32::try_from(selected.len()).ok();
             selected.push(capture);
         }
         selected.extend(pending);
@@ -38336,6 +38345,41 @@ fn record_anonymous_construction_captures(
         "anonymous captures selected declaration={declaration:?} captures={selected:?}",
     );
     captures.insert(declaration, selected);
+    field_remap
+}
+
+/// Translate storage ordinals recorded by direct anonymous children while `owner` still exposed
+/// its provisional receiver prefix. The lexical-owner graph is the authoritative relationship:
+/// deeper descendants read storage from their immediate classifier, whose own finalization remaps
+/// them independently.
+fn remap_direct_anonymous_class_storage_captures(
+    owner: DeclId,
+    lexical_scope: &AnonymousLexicalClassScope,
+    storage_fields: &[Option<u32>],
+    captures: &mut HashMap<DeclId, Vec<AnonymousObjectCapture>>,
+) -> bool {
+    let direct_children = lexical_scope
+        .owners
+        .iter()
+        .filter_map(|(&declaration, &candidate_owner)| {
+            (candidate_owner == owner).then_some(declaration)
+        })
+        .collect::<Vec<_>>();
+    for declaration in direct_children {
+        let Some(child_captures) = captures.get_mut(&declaration) else {
+            continue;
+        };
+        for capture in child_captures {
+            let AnonymousObjectCaptureSource::ClassStorage { field } = &mut capture.source else {
+                continue;
+            };
+            let Some(Some(finalized_field)) = storage_fields.get(*field as usize) else {
+                return false;
+            };
+            *field = *finalized_field;
+        }
+    }
+    true
 }
 
 fn install_anonymous_object_captures(
