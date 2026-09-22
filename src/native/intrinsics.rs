@@ -1419,6 +1419,41 @@ pub(super) fn is_stateless_runtime_object(classifier: crate::types::TypeName) ->
     )
 }
 
+/// The runtime entry point answering the companion object of a BUILT-IN type, if this names one.
+///
+/// Each is declared in no file krusty compiles and carries no state — every member of one is a
+/// constant the frontend folds — so what a program can observe about it is its IDENTITY. The
+/// runtime holds one static object per companion, with a descriptor of its own so that
+/// `Int.Companion === Long.Companion` is false.
+///
+/// Apart from [`is_stateless_runtime_object`], which answers a NULL for an object nothing reads:
+/// that will not do here, because `o === Int.Companion` is exactly what the corpus asks.
+pub(super) fn builtin_companion(classifier: crate::types::TypeName) -> Option<&'static str> {
+    let suffix = match kotlin_owner(&classifier.render()) {
+        "kotlin/Byte$Companion" => "byte",
+        "kotlin/Short$Companion" => "short",
+        "kotlin/Int$Companion" => "int",
+        "kotlin/Long$Companion" => "long",
+        "kotlin/Char$Companion" => "char",
+        "kotlin/Boolean$Companion" => "boolean",
+        "kotlin/Float$Companion" => "float",
+        "kotlin/Double$Companion" => "double",
+        "kotlin/String$Companion" => "string",
+        _ => return None,
+    };
+    Some(match suffix {
+        "byte" => "kt_byte_companion",
+        "short" => "kt_short_companion",
+        "int" => "kt_int_companion",
+        "long" => "kt_long_companion",
+        "char" => "kt_char_companion",
+        "boolean" => "kt_boolean_companion",
+        "float" => "kt_float_companion",
+        "double" => "kt_double_companion",
+        _ => "kt_string_companion",
+    })
+}
+
 /// A member the runtime answers with a REFERENCE, whatever the call site's own type.
 ///
 /// `Result.getOrThrow()` on a `Result<Int>` answers the box that `Result` holds, and the site

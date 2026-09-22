@@ -3773,6 +3773,40 @@ static kt_int kt_set_hash_code(KRef self) {
 /* `[a, b]` — a set renders as a collection does, which is what Kotlin's own answers. */
 static KRef kt_set_to_string(KRef self) { return kt_list_to_string(((const KMap *)self)->keys); }
 
+/* The companion object of a BUILT-IN type.
+   
+   Each is declared in no file krusty compiles and carries no state: every member of one is a
+   constant the frontend folds. So the only thing a program can observe is its IDENTITY, which the
+   corpus does — `o === Int.Companion`, and `Int` written as a value is the same object as
+   `Int.Companion`. One static object per companion gives exactly that: static storage, so the
+   collector never sees it as an allocation and the address is stable for the program's life, the
+   same way `kt_unit()` is.
+   
+   A DESCRIPTOR of its own per companion, never one shared: `Int.Companion === Long.Companion` must
+   be false, and a shared type would also make `is` answer for the wrong one. `kotlin.Any`'s vtable,
+   because a companion overrides none of the three. */
+#define KT_COMPANION(suffix, kotlin_name)                                                          \
+    const KType kt_type_##suffix##_companion = {                                                   \
+        kotlin_name, sizeof(kotlin_name) - 1, sizeof(KObject), 0,                                  \
+        0,           NULL,                    &kt_type_any,    kt_any_vtable,                      \
+        3,           0};                                                                           \
+    KRef kt_##suffix##_companion(void) {                                                           \
+        static KObject object = {{&kt_type_##suffix##_companion}, {{NULL, NULL, 0}}};              \
+        return &object;                                                                            \
+    }
+
+KT_COMPANION(byte, "kotlin.Byte.Companion")
+KT_COMPANION(short, "kotlin.Short.Companion")
+KT_COMPANION(int, "kotlin.Int.Companion")
+KT_COMPANION(long, "kotlin.Long.Companion")
+KT_COMPANION(char, "kotlin.Char.Companion")
+KT_COMPANION(boolean, "kotlin.Boolean.Companion")
+KT_COMPANION(float, "kotlin.Float.Companion")
+KT_COMPANION(double, "kotlin.Double.Companion")
+KT_COMPANION(string, "kotlin.String.Companion")
+
+#undef KT_COMPANION
+
 /* Static storage, not the heap: the collector never sees it as an object, and nothing needs it
    to. */
 KRef kt_unit(void) {

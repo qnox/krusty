@@ -2691,6 +2691,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // An object the runtime realizes entirely has no instance and needs none: every member of
         // it is answered without reading the receiver. One provider materializes that receiver
         // before the call reaches the table that says so, and this is what it materializes.
+        // The companion object of a BUILT-IN type. Its members are constants the frontend folds,
+        // so the object itself is only ever an identity — and that identity is asked about:
+        // `o === Int.Companion` is a corpus case, and `Int` written as a value is the same object.
+        // The runtime holds one static object per companion, each with its own descriptor.
+        if let Some(symbol) = super::super::super::intrinsics::builtin_companion(classifier) {
+            return self.runtime_call(symbol, &[], any(), &[]);
+        }
         if super::super::super::intrinsics::is_stateless_runtime_object(classifier) {
             return Ok(Some(self.builder.ins().iconst(types::I64, 0)));
         }

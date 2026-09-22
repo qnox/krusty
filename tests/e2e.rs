@@ -1050,6 +1050,8 @@ mod native_array_snapshots_e2e;
 mod native_bottom_value_e2e;
 #[path = "native_builder_scope_e2e.rs"]
 mod native_builder_scope_e2e;
+#[path = "native_builtin_companions_e2e.rs"]
+mod native_builtin_companions_e2e;
 #[path = "native_classes_e2e.rs"]
 mod native_classes_e2e;
 #[path = "native_codegen_e2e.rs"]

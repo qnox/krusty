@@ -139,6 +139,30 @@ extern const KType kt_type_float;
 extern const KType kt_type_double;
 extern const KType kt_type_unit;
 
+/* The companion object of a built-in type. Declared in no file krusty compiles and carrying no
+   state — every member of one is a constant the frontend folds — so the only observable thing about
+   it is its IDENTITY, which `o === Int.Companion` asks about. One static object per companion, with
+   a descriptor of its own so that `Int.Companion === Long.Companion` is false. */
+extern const KType kt_type_byte_companion;
+extern const KType kt_type_short_companion;
+extern const KType kt_type_int_companion;
+extern const KType kt_type_long_companion;
+extern const KType kt_type_char_companion;
+extern const KType kt_type_boolean_companion;
+extern const KType kt_type_float_companion;
+extern const KType kt_type_double_companion;
+extern const KType kt_type_string_companion;
+
+KRef kt_byte_companion(void);
+KRef kt_short_companion(void);
+KRef kt_int_companion(void);
+KRef kt_long_companion(void);
+KRef kt_char_companion(void);
+KRef kt_boolean_companion(void);
+KRef kt_float_companion(void);
+KRef kt_double_companion(void);
+KRef kt_string_companion(void);
+
 /* The four unsigned integers. Each is a value class over a signed primitive and is carried as the
    machine integer it wraps, so a descriptor of its own is the only thing keeping a BOXED one from
    being an `Int`: `1u as? Int` must fail, and printing one must not print the signed number sharing

@@ -2330,6 +2330,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   runtime would answer `iterator` out of a wrapper that is not there.
   Tests: `tests/native_sequences_e2e.rs`.
 
+- **A built-in type's companion object is one static object per companion.** `Int.Companion` and its
+  relatives are declared in no file krusty compiles and carry no state — every member of one is a
+  constant the frontend folds — so the only thing a program can observe about one is its IDENTITY,
+  which the corpus asks directly (`o === Int.Companion`, and `Int` written as a value being the same
+  object). Static storage gives that: the collector never sees it as an allocation and the address is
+  stable for the program's life, exactly as `Unit` is. Each gets a DESCRIPTOR of its own, never a
+  shared one, because `Int.Companion === Long.Companion` must be false and a shared type would also
+  make `is` answer for the wrong one.
+  Tests: `tests/native_builtin_companions_e2e.rs`.
+
+- **A narrow integral constant keeps its own WIDTH in common IR.** `FirConstant` has no case
+  narrower than `Int` and no unsigned one, so the constant expression's checked TYPE is the only
+  thing carrying the width — which is why `lower_constant` already reads it to tell `UByte` from
+  `UInt`. It did not read it for the signed narrow pair, so a `Byte`-typed constant was recorded as
+  an `Int`.
+  That is invisible to a backend which boxes by the expected type and wrong for one which boxes by
+  the constant's SHAPE: the native backend boxed `Byte.MIN_VALUE` as an `Int`, so
+  `Byte.MIN_VALUE as Any is Byte` answered false and two equal bytes compared unequal once boxed
+  through a generic parameter. The JVM lane passed the same programs throughout, which is why this
+  went unseen until the companion objects let those cases compile at all.
+  Arithmetic is unaffected: `Byte + Byte` is an `Int` in Kotlin, and that promotion is the
+  operation's, not the constant's.
+  Tests: `tests/native_builtin_companions_e2e.rs`
+  (`a_narrow_constant_boxes_as_its_own_type`, `a_narrow_constant_still_promotes_for_arithmetic`).
+
 - **`assertEquals` compares booleans structurally, like everything else it compares.** It is
   generic, so `assertEquals(true, true)` has `Boolean` as its first parameter after substitution.
   Reading the parameter to decide how the operands cross handed two raw machine values to an entry
