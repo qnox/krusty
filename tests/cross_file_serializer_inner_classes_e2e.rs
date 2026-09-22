@@ -1,10 +1,9 @@
 //! A generated `$serializer` referenced from ANOTHER FILE of the same module must still get an
 //! `InnerClasses` row.
 //!
-//! The serialization plugin creates the nested class during lowering, so it is not a checker
-//! classifier and the module-symbols snapshot behind the `InnerClasses` resolver never records it.
-//! The file that DECLARES it registers a candidate of its own, which is why the same-file shape has
-//! always matched kotlinc and only the cross-file reference was missing a row.
+//! The serialization plugin publishes the exact generated classifier with its source header, so a
+//! sibling file can consume the same semantic declaration fact before that owner's IR is lowered.
+//! This prevents the JVM backend from recognizing the generated class by its rendered suffix.
 //!
 //! The comparison is against kotlinc's own table rather than a hand-written expectation: the row's
 //! `access_flags` carry `ACC_SYNTHETIC`, which `javap` does not print on an `InnerClasses` line, so

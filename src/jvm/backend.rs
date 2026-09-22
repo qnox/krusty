@@ -465,6 +465,7 @@ fn checked_module_inner_class_resolver(
                 abstract_class: shape.is_abstract,
                 final_class: !shape.is_abstract && !shape.is_extensible,
             }),
+        module.generated_classifiers().iter(),
         cp,
     )
 }
@@ -481,8 +482,9 @@ struct InnerModuleClassifier {
     final_class: bool,
 }
 
-fn module_inner_class_resolver_from_shapes(
+fn module_inner_class_resolver_from_shapes<'a>(
     classes: impl IntoIterator<Item = InnerModuleClassifier>,
+    generated: impl IntoIterator<Item = &'a crate::types::GeneratedClassifierFact>,
     cp: std::rc::Rc<crate::jvm::classpath::Classpath>,
 ) -> crate::jvm::classfile::InnerClassResolver {
     const PUBLIC: u16 = 0x0001;
@@ -552,31 +554,46 @@ fn module_inner_class_resolver_from_shapes(
             },
         );
     }
+    for class in generated {
+        let visibility = match class.visibility {
+            crate::types::Visibility::Protected => PROTECTED,
+            crate::types::Visibility::Private => PRIVATE,
+            _ => PUBLIC,
+        };
+        let mut access = visibility | if class.captures_outer { 0 } else { STATIC };
+        match class.kind {
+            crate::types::GeneratedClassifierKind::Annotation => {
+                access |= INTERFACE | ABSTRACT | ANNOTATION;
+            }
+            crate::types::GeneratedClassifierKind::Interface => {
+                access |= INTERFACE | ABSTRACT;
+            }
+            crate::types::GeneratedClassifierKind::Enum => access |= ENUM,
+            crate::types::GeneratedClassifierKind::Class => {}
+        }
+        if class.is_abstract {
+            access |= ABSTRACT;
+        }
+        if class.is_final {
+            access |= FINAL;
+        }
+        if class.compiler_generated {
+            access |= SYNTHETIC;
+        }
+        source.insert(
+            class.classifier.render(),
+            crate::jvm::classfile::InnerClassDetails {
+                outer: Some(class.lexical_owner.render()),
+                name: Some(class.source_name.to_string()),
+                access,
+            },
+        );
+    }
     let classpath = classpath_inner_class_resolver(cp);
-    // The serialization plugin's generated nested class is literally named `$serializer`, so its JVM
-    // name ends in a doubled `$` — a remainder the boundary rule above deliberately refuses, and a
-    // shape the checker's classifier snapshot never carries at all because the plugin creates the
-    // class during lowering. The file that DECLARES it registers a candidate of its own
-    // (`jvm::inner_classes`), so the row was missing only where the reference comes from ANOTHER
-    // FILE of the same module. Requiring the enclosing half to be a class this module declares is
-    // the same evidence the snapshot loop demands, and the flags are kotlinc's: measured
-    // `public static final synthetic` for a serialized class of public, internal and private
-    // visibility alike, the serializer itself always being public. `javap` does not print
-    // `ACC_SYNTHETIC` on an `InnerClasses` row, so read the raw `access_flags` when checking it.
     std::rc::Rc::new(move |internal: &str| {
         source
             .get(internal)
             .cloned()
-            .or_else(|| {
-                let outer = internal.strip_suffix("$$serializer")?;
-                module_names
-                    .contains(&crate::types::type_name(outer))
-                    .then(|| crate::jvm::classfile::InnerClassDetails {
-                        outer: Some(outer.to_string()),
-                        name: Some("$serializer".to_string()),
-                        access: PUBLIC | STATIC | FINAL | SYNTHETIC,
-                    })
-            })
             .or_else(|| classpath(internal))
     })
 }

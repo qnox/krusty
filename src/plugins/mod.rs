@@ -99,8 +99,11 @@ pub enum FrontendCallableOwner {
 pub struct FrontendClassContext<'a> {
     pub classifier: TypeName,
     pub kind: crate::libraries::TypeKind,
+    pub is_sealed: bool,
     pub type_parameters: &'a crate::types::TypeParameters<Vec<Ty>>,
     pub annotations: &'a [TypeName],
+    /// Resolved class-literal arguments grouped by the ordinal of the annotation occurrence.
+    pub annotation_class_arguments: &'a [(u32, TypeName)],
 }
 
 /// Applied annotations keyed by `ClassId`, plus target services required by native plugins.
@@ -391,6 +394,15 @@ pub trait IrPlugin {
     ) {
     }
 
+    /// Publish exact generated nested-class identities alongside the source classifier header.
+    /// Consumers must not reconstruct these declarations from annotation or JVM-name spellings.
+    fn publish_frontend_generated_classifiers(
+        &self,
+        _ctx: &FrontendClassContext<'_>,
+        _classifiers: &mut Vec<crate::types::GeneratedClassifierFact>,
+    ) {
+    }
+
     /// Attach plugin-owned expression plans after core has selected declarations and overloads.
     /// Implementations must identify an exact selected declaration; this hook is not a fallback name
     /// resolver and must never change the type checker's result.
@@ -598,6 +610,16 @@ impl PluginHost {
     ) {
         for plugin in &self.plugins {
             plugin.generate_frontend_declarations(ctx, members);
+        }
+    }
+
+    pub fn publish_frontend_generated_classifiers(
+        &self,
+        ctx: &FrontendClassContext<'_>,
+        classifiers: &mut Vec<crate::types::GeneratedClassifierFact>,
+    ) {
+        for plugin in &self.plugins {
+            plugin.publish_frontend_generated_classifiers(ctx, classifiers);
         }
     }
 
