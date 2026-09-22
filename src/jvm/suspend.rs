@@ -2438,20 +2438,27 @@ fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> boo
     found
 }
 
-/// How many functions with this one's continuation NAME the file declares before it.
+/// How many SUSPEND functions sharing this one's continuation NAME the file declares before it.
 ///
 /// A continuation class is named after the method it re-enters, so two overloads would share one —
 /// and they do not share a spill layout, so whichever class loses the name resumes against fields it
 /// does not have (`NoSuchFieldError`). Both machines number the later one.
+///
+/// Only a `suspend` overload counts. An ordinary overload of the same name declares no continuation,
+/// so it consumes none of the free ordinals this sequence hands out — it only contributes whatever
+/// anonymous objects its body declares, which are already named and therefore already excluded.
 fn same_name_ordinal(ir: &IrFile, fid: u32) -> usize {
     let function = &ir.functions[fid as usize];
     let bare = |name: &str| name.split('-').next().unwrap_or(name).to_string();
     let name = bare(&function.name);
     ir.functions
         .iter()
+        .enumerate()
         .take(fid as usize)
-        .filter(|other| {
-            bare(&other.name) == name && other.dispatch_receiver == function.dispatch_receiver
+        .filter(|(other_fid, other)| {
+            bare(&other.name) == name
+                && other.dispatch_receiver == function.dispatch_receiver
+                && ir.suspend_funs.contains(&(*other_fid as u32))
         })
         .count()
 }

@@ -80,6 +80,35 @@ fn same_named_suspend_overloads_share_one_ordinal_sequence() {
     );
 }
 
+const MIXED_OVERLOADS: &str = "\
+interface Holder { val first: String }
+suspend fun fetch(id: String): String = id + \"!\"
+fun make(id: String): Holder = object : Holder { override val first: String = id }
+suspend fun make(id: Int): Holder {
+    val after: String = fetch(id.toString())
+    return object : Holder { override val first: String = after }
+}
+fun make(id: Long): Holder = object : Holder { override val first: String = id.toString() }
+";
+
+/// Only a `suspend` overload reserves an ordinal, and the sequence stays in declaration order: the
+/// ordinary overload's object takes `$1`, the suspend one's continuation `$2` and its object `$3`,
+/// and the ordinary overload after it `$4`.
+#[test]
+fn only_the_suspend_overloads_reserve_an_ordinal() {
+    assert_eq!(
+        krusty_class_names("Mixed", MIXED_OVERLOADS),
+        [
+            "Holder",
+            "MixedKt",
+            "MixedKt$make$1",
+            "MixedKt$make$2",
+            "MixedKt$make$3",
+            "MixedKt$make$4",
+        ]
+    );
+}
+
 const NO_SUSPENSION_POINT: &str = "\
 interface Holder { val first: String }
 suspend fun make(id: String): Holder = object : Holder { override val first: String = id }
