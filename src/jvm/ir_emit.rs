@@ -17218,11 +17218,12 @@ impl<'a> Emitter<'a> {
             // Block in value position: run its statements for effect, leave the trailing value on the
             // stack. Scope block-locals (restore the slot map) so they don't leak into outer frames.
             IrExpr::Block { stmts, value } => {
+                let enclosing_statement_line = self.statement_line;
                 let saved = self.slots.clone();
                 self.block_depth += 1;
                 let mut dead = false;
                 for s in stmts {
-                    debug_lines::mark_statement(self.ir, *s, code);
+                    self.mark_statement_line(*s, code);
                     // A statement nets zero on the operand stack (its value is stored/discarded). Reset
                     // the tracked height to that baseline afterward: a branchy lambda splice (`takeIf`)
                     // tracks its internal branches only approximately and can leave `cur_stack` drifted
@@ -17238,13 +17239,14 @@ impl<'a> Emitter<'a> {
                 }
                 if !dead {
                     if let Some(v) = value {
-                        debug_lines::mark_statement(self.ir, *v, code);
+                        self.mark_statement_line(*v, code);
                         self.emit_value(*v, code);
                     }
                 }
                 self.close_scope_locals(code);
                 self.block_depth -= 1;
                 self.restore_slot_scope(saved);
+                self.statement_line = enclosing_statement_line;
             }
             IrExpr::Lambda {
                 impl_fn,
