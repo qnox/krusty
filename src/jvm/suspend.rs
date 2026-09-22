@@ -390,14 +390,15 @@ pub(crate) fn lower_suspend(
         // passes above stop at a lambda. Normalize them now, then re-read the suspensions — hoisting
         // rewrites the very expressions just collected. Each body is typed in its own lambda's value
         // numbering, not this function's. A value-`try` the desugar could not reach (one nested
-        // inside an expression) still keeps the call's raw `Object` in a scalar arm, and a non-local
-        // `return` is not boxed to the CPS result yet; such a body is declined after normalization,
-        // exactly as before the machine existed.
+        // inside an expression) still keeps the call's raw `Object` in a scalar arm; such a body is
+        // declined after normalization, exactly as before the machine existed.
+        //
+        // A non-local `return` out of such a body is NOT a reason to decline: `box_returns` walks a
+        // lambda's retained `inline_body`, so the return already yields the CPS `Object` result.
         let spliced_suspensions = match (spliced_suspensions.is_empty(), body) {
             (false, Some(b)) => {
                 hoist_spliced_inline_bodies(ir, b, &suspend_set, &orig_rets, &ret_ty);
-                let declined = cps::suspends_in_a_value_try(ir, b, &suspend_set)
-                    || cps::spliced_body_returns(ir, b, &suspend_set);
+                let declined = cps::suspends_in_a_value_try(ir, b, &suspend_set);
                 match declined {
                     true => Vec::new(),
                     false => cps::frame_suspensions(ir, b, &suspend_set),
