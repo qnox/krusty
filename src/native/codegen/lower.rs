@@ -2518,23 +2518,31 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         {
                             return self.experimental_bitwise(op, receiver, args, *ret);
                         }
-                        // `xs.toList()` / `xs.reversed()` on an ARRAY: a snapshot of its
-                        // elements as a list, each boxed on the way in. Keyed on the RECEIVER,
-                        // because the collections facade declares the same two names over lists,
+                        // A member of the collections facade over an ARRAY receiver — a snapshot
+                        // of its elements, or one of the `content…` questions. Keyed on the
+                        // RECEIVER, because the facade declares the same names over lists,
                         // sequences and ranges — the owner cannot say which receiver this is.
-                        if let Some(symbol) =
-                            super::super::intrinsics::array_snapshot(&owner, &name, params)
+                        if let Some((symbol, carried, answer)) =
+                            super::super::intrinsics::array_member(&owner, &name, params)
                         {
                             if self
                                 .type_of(receiver)
                                 .map(Ty::non_null)
                                 .is_some_and(|ty| ty.is_array())
                             {
-                                let value = self.reference(receiver)?;
+                                let mut operands = vec![self.reference(receiver)?];
+                                for argument in args {
+                                    operands.push(self.reference(*argument)?);
+                                }
                                 if self.terminated {
                                     return Ok(None);
                                 }
-                                return self.runtime_call(symbol, &[any()], *ret, &[value]);
+                                let produced =
+                                    self.runtime_call(symbol, &carried, answer, &operands)?;
+                                let Some(produced) = produced else {
+                                    return Ok(None);
+                                };
+                                return self.convert(produced, Some(answer), *ret);
                             }
                         }
                         // `s.startsWith(t)`, `s.endsWith(t)` and `t in s`, whose last parameter
@@ -2543,11 +2551,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // only one the runtime answers — is recognizable right here: a literal
                         // `false` and nothing else. Anything else asks about Unicode case folding,
                         // which the runtime holds no table for, and declines below by name.
-                        if let Some(symbol) =
-                            super::super::intrinsics::case_sensitive_text_member(
-                                &owner, &name, params,
-                            )
-                        {
+                        if let Some(symbol) = super::super::intrinsics::case_sensitive_text_member(
+                            &owner, &name, params,
+                        ) {
                             // `ignoreCase` has a DEFAULT, and the two providers hand that over
                             // differently: a klib call materializes the default as a constant
                             // argument, a jar call leaves the argument out. Both mean the same
@@ -2555,14 +2561,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             // rather than the signature is what makes them the same answer.
                             let sensitive = match args.len() {
                                 given if given + 1 == params.len() => true,
-                                given if given == params.len() => {
-                                    args.last().is_some_and(|flag| {
-                                        matches!(
-                                            self.file.ir.expr(*flag),
-                                            IrExpr::Const(IrConst::Boolean(false))
-                                        )
-                                    })
-                                }
+                                given if given == params.len() => args.last().is_some_and(|flag| {
+                                    matches!(
+                                        self.file.ir.expr(*flag),
+                                        IrExpr::Const(IrConst::Boolean(false))
+                                    )
+                                }),
                                 _ => false,
                             };
                             if sensitive {

@@ -2381,6 +2381,28 @@ KRef kt_array_to_list(KRef array) { return kt_array_snapshot(array, 0); }
 
 KRef kt_array_reversed(KRef array) { return kt_array_snapshot(array, 1); }
 
+/* `xs.reversedArray()`: a new ARRAY of the same element type, backwards.
+
+   Unlike `reversed()`, which answers a LIST of boxes, this keeps the elements where they were — in
+   an array wearing the receiver's own descriptor, so a primitive array stays primitive. The
+   elements are copied as BYTES: the descriptor's stride is what says how wide one is, and copying
+   by width is the one answer that serves a reference array and a `DoubleArray` alike. */
+KRef kt_array_reversed_array(KRef array) {
+    if (array == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    const KType *type = array->header.type;
+    kt_int length = ((const KArray *)array)->length;
+    KRef copy = kt_array_new(type, length);
+    size_t stride = (size_t)type->element_size;
+    const char *from = (const char *)array + type->instance_size;
+    char *to = (char *)copy + type->instance_size;
+    for (kt_int index = 0; index < length; index++) {
+        memcpy(to + (size_t)(length - 1 - index) * stride, from + (size_t)index * stride, stride);
+    }
+    return copy;
+}
+
 /* An annotation member's array, compared by CONTENT — `Arrays.equals`, which is what Kotlin gives
    an annotation instance's `equals` for an array member and what separates it from a data class's
    (that one compares arrays by identity).
@@ -2773,6 +2795,291 @@ void kt_iterable_for_each(KRef iterable, KRef action) {
     while (kt_iterator_has_next(iterator)) {
         kt_invoke_one(action, kt_iterator_next(iterator));
     }
+}
+
+/* A function value of TWO parameters, called the way `kt_invoke_one` calls one of one. */
+static KRef kt_invoke_two(KRef function, KRef first, KRef second) {
+    if (function == NULL || function->header.type->vtable == NULL ||
+        function->header.type->vtable_length <= KT_SLOT_INVOKE) {
+        KT_FAIL("krusty: a function value was expected here\n");
+    }
+    return ((KRef(*)(KRef, KRef, KRef))function->header.type->vtable[KT_SLOT_INVOKE])(function,
+                                                                                      first,
+                                                                                      second);
+}
+
+/* Whether a predicate answered true for an element. The answer arrives BOXED, because a function
+   value's `invoke` hands back a reference whatever its declared return type is. */
+static kt_boolean kt_holds(KRef predicate, KRef element) {
+    return kt_unbox_boolean(kt_invoke_one(predicate, element));
+}
+
+/* `xs.any { … }`, `xs.all { … }` and `xs.none { … }` — one walk, three readings of it. Each stops
+   at the first element that settles the question, which is Kotlin's own promise and is observable
+   through a predicate with a side effect. */
+kt_boolean kt_iterable_any(KRef iterable, KRef predicate) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        if (kt_holds(predicate, kt_iterator_next(iterator))) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+kt_boolean kt_iterable_all(KRef iterable, KRef predicate) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        if (!kt_holds(predicate, kt_iterator_next(iterator))) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+kt_boolean kt_iterable_none(KRef iterable, KRef predicate) {
+    return !kt_iterable_any(iterable, predicate);
+}
+
+/* `xs.any()` and `xs.none()` with no predicate: whether the walk yields anything at all. */
+kt_boolean kt_iterable_is_not_empty(KRef iterable) {
+    return kt_iterator_has_next(kt_iterable_iterator(iterable));
+}
+
+kt_boolean kt_iterable_is_empty(KRef iterable) { return !kt_iterable_is_not_empty(iterable); }
+
+/* `xs.count()` walks rather than reading a size: `count` is declared over `Iterable`, and the
+   walk is the only thing every iterable has. */
+kt_int kt_iterable_count(KRef iterable) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    kt_int counted = 0;
+    while (kt_iterator_has_next(iterator)) {
+        (void)kt_iterator_next(iterator);
+        counted++;
+    }
+    return counted;
+}
+
+kt_int kt_iterable_count_matching(KRef iterable, KRef predicate) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    kt_int counted = 0;
+    while (kt_iterator_has_next(iterator)) {
+        if (kt_holds(predicate, kt_iterator_next(iterator))) {
+            counted++;
+        }
+    }
+    return counted;
+}
+
+/* Every element a walk yields, collected without asking the iterable for a SIZE.
+
+   Not every iterable has one to give: `withIndex()` answers a lazy object that only knows how to
+   walk, and a filter's answer is shorter than its source by definition. The buffer is the growable
+   list the runtime already has, which doubles; the answer is a READ-ONLY list over an array of
+   exactly the right length, because a read-only list IS its array and nothing may see a spare
+   slot. */
+static KRef kt_frozen(KRef growing, kt_boolean reversed) {
+    kt_int size = kt_list_size(growing);
+    KRef elements = kt_array_new(&kt_type_array, size);
+    /* Built before the copy so the array is a root through it; `growing` is one in this frame. */
+    KRef result = kt_list_of(elements);
+    for (kt_int at = 0; at < size; at++) {
+        kt_elements_of(elements)[reversed ? size - 1 - at : at] = kt_list_get(growing, at);
+    }
+    return result;
+}
+
+/* `xs.filter { … }` and `xs.filterNot { … }`.
+
+   The predicate is asked once per element, which counting first and filling second would not
+   manage — a predicate may have a side effect, and Kotlin asks it once.
+
+   `keep` is what the predicate must answer for an element to survive, so one walk serves both
+   names. */
+static KRef kt_iterable_filtered(KRef iterable, KRef predicate, kt_boolean keep) {
+    KRef growing = kt_mutable_list_new();
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        KRef element = kt_iterator_next(iterator);
+        if (kt_holds(predicate, element) == keep) {
+            kt_mutable_list_add(growing, element);
+        }
+    }
+    return kt_frozen(growing, 0);
+}
+
+KRef kt_iterable_filter(KRef iterable, KRef predicate) {
+    return kt_iterable_filtered(iterable, predicate, 1);
+}
+
+KRef kt_iterable_filter_not(KRef iterable, KRef predicate) {
+    return kt_iterable_filtered(iterable, predicate, 0);
+}
+
+/* `xs.first { … }` and `xs.firstOrNull { … }`. Kotlin raises `NoSuchElementException` when nothing
+   matches, with its own wording; the raise is followed by a RETURN, because `kt_throw` records the
+   exception for the call site and comes back. */
+KRef kt_iterable_first_or_null(KRef iterable, KRef predicate) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        KRef element = kt_iterator_next(iterator);
+        if (kt_holds(predicate, element)) {
+            return element;
+        }
+    }
+    return NULL;
+}
+
+KRef kt_iterable_first_matching(KRef iterable, KRef predicate) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        KRef element = kt_iterator_next(iterator);
+        if (kt_holds(predicate, element)) {
+            return element;
+        }
+    }
+    kt_throw(kt_throwable_new(
+        &kt_type_no_such_element_exception,
+        kt_string_utf8("Collection contains no element matching the predicate.", 54)));
+    return NULL;
+}
+
+/* `xs.last { … }`: the LAST match, so the whole walk runs. */
+KRef kt_iterable_last_matching(KRef iterable, KRef predicate) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    KRef found = NULL;
+    kt_boolean any = 0;
+    while (kt_iterator_has_next(iterator)) {
+        KRef element = kt_iterator_next(iterator);
+        if (kt_holds(predicate, element)) {
+            found = element;
+            any = 1;
+        }
+    }
+    if (!any) {
+        kt_throw(kt_throwable_new(
+            &kt_type_no_such_element_exception,
+            kt_string_utf8("Collection contains no element matching the predicate.", 54)));
+        return NULL;
+    }
+    return found;
+}
+
+/* `xs.fold(initial) { acc, e -> … }`: the accumulator threaded through the walk. */
+KRef kt_iterable_fold(KRef iterable, KRef initial, KRef operation) {
+    KRef accumulator = initial;
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        accumulator = kt_invoke_two(operation, accumulator, kt_iterator_next(iterator));
+    }
+    return accumulator;
+}
+
+/* `xs.forEachIndexed { i, e -> … }`. The index is BOXED on the way in, because a function value
+   takes references; the lambda's own prologue unboxes it. */
+void kt_iterable_for_each_indexed(KRef iterable, KRef action) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    kt_int index = 0;
+    while (kt_iterator_has_next(iterator)) {
+        KRef element = kt_iterator_next(iterator);
+        (void)kt_invoke_two(action, kt_box_int(index), element);
+        index++;
+    }
+}
+
+/* `xs.toList()` and `xs.reversed()` over an ITERABLE: a snapshot of its elements, in order or
+   backwards. The array version of both is `kt_array_to_list`/`kt_array_reversed`; this one walks,
+   which is what a range and a lazy `withIndex()` need. */
+static KRef kt_iterable_snapshot(KRef iterable, kt_boolean reversed) {
+    KRef growing = kt_mutable_list_new();
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        kt_mutable_list_add(growing, kt_iterator_next(iterator));
+    }
+    return kt_frozen(growing, reversed);
+}
+
+KRef kt_iterable_to_list(KRef iterable) { return kt_iterable_snapshot(iterable, 0); }
+
+KRef kt_iterable_reversed(KRef iterable) { return kt_iterable_snapshot(iterable, 1); }
+
+/* `value in xs` and `xs.indexOf(value)` over an ITERABLE. Elements are compared with `equals`, as
+   Kotlin's own are — the list form already does, and a range's is the same question asked of the
+   numbers it yields. */
+kt_int kt_iterable_index_of(KRef iterable, KRef value) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    kt_int at = 0;
+    while (kt_iterator_has_next(iterator)) {
+        if (kt_equals(kt_iterator_next(iterator), value)) {
+            return at;
+        }
+        at++;
+    }
+    return -1;
+}
+
+kt_boolean kt_iterable_contains(KRef iterable, KRef value) {
+    return kt_iterable_index_of(iterable, value) >= 0;
+}
+
+/* `xs + x` and `xs + ys`: a NEW read-only list, never a change to the receiver — that is what
+   separates `plus` from `plusAssign`, and Kotlin's contract is that a `List` cannot be changed at
+   all. Which of the two a call means is the CALLER's answer, read from the physical parameter the
+   same way `plusAssign` reads it: after substitution an element of type `List<T>` and a collection
+   of them look alike, and only the declaration tells them apart. */
+static KRef kt_iterable_walked_into(KRef iterable, KRef growing) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        kt_mutable_list_add(growing, kt_iterator_next(iterator));
+    }
+    return growing;
+}
+
+KRef kt_iterable_plus_element(KRef iterable, KRef element) {
+    KRef growing = kt_iterable_walked_into(iterable, kt_mutable_list_new());
+    kt_mutable_list_add(growing, element);
+    return kt_frozen(growing, 0);
+}
+
+KRef kt_iterable_plus_all(KRef iterable, KRef tail) {
+    KRef growing = kt_iterable_walked_into(iterable, kt_mutable_list_new());
+    return kt_frozen(kt_iterable_walked_into(tail, growing), 0);
+}
+
+/* `xs.sumOf { … }`. Kotlin declares one per width the selector may answer, and the answer's TYPE
+   is the selector's — so which of these a call reaches is decided where the declaration is in
+   sight, and each unboxes what `invoke` hands back at the width its own name says. Summing at one
+   width and narrowing afterwards would not do: `Int` addition wraps and `Long` addition does not,
+   and a program that sums to an overflow is entitled to Kotlin's answer. */
+kt_int kt_iterable_sum_of_int(KRef iterable, KRef selector) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    kt_int total = 0;
+    while (kt_iterator_has_next(iterator)) {
+        total = (kt_int)((uint32_t)total
+                         + (uint32_t)kt_unbox_int(kt_invoke_one(selector,
+                                                                kt_iterator_next(iterator))));
+    }
+    return total;
+}
+
+kt_long kt_iterable_sum_of_long(KRef iterable, KRef selector) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    kt_long total = 0;
+    while (kt_iterator_has_next(iterator)) {
+        total = (kt_long)((uint64_t)total
+                          + (uint64_t)kt_unbox_long(kt_invoke_one(selector,
+                                                                  kt_iterator_next(iterator))));
+    }
+    return total;
+}
+
+kt_double kt_iterable_sum_of_double(KRef iterable, KRef selector) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    kt_double total = 0.0;
+    while (kt_iterator_has_next(iterator)) {
+        total += kt_unbox_double(kt_invoke_one(selector, kt_iterator_next(iterator)));
+    }
+    return total;
 }
 
 KRef kt_iterator_next(KRef iterator) {
@@ -3206,6 +3513,12 @@ void kt_require(kt_boolean value) {
     if (!value) {
         KT_THROW(kt_type_illegal_argument_exception, KT_MESSAGE("Failed requirement."));
     }
+}
+
+/* The overflow guard `forEachIndexed` and its relatives carry, spliced into a caller by an inline
+   stdlib body. Kotlin's own wording. */
+void kt_throw_index_overflow(void) {
+    KT_THROW(kt_type_arithmetic_exception, KT_MESSAGE("Index overflow has happened."));
 }
 
 void kt_check(kt_boolean value) {

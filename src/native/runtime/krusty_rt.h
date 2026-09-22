@@ -215,6 +215,10 @@ KRef kt_list_empty(void);
    writing through the array afterwards leaves the list as it was. */
 KRef kt_array_to_list(KRef array);
 KRef kt_array_reversed(KRef array);
+
+/* `xs.reversedArray()`: a new ARRAY of the same element type, backwards, elements copied by the
+   descriptor's stride so a primitive array stays primitive. */
+KRef kt_array_reversed_array(KRef array);
 /* An annotation member's array, by CONTENT — what Kotlin gives an annotation instance's `equals`,
    `hashCode` and `toString` for an array member, and what separates it from a data class's (that
    one compares arrays by identity). Each element is read through its box, so a `Float` element is
@@ -286,6 +290,44 @@ KRef kt_indexed_value(kt_int index, KRef value);
 kt_int kt_indexed_value_index(KRef self);
 KRef kt_indexed_value_value(KRef self);
 void kt_iterable_for_each(KRef iterable, KRef action);
+
+/* The other walks Kotlin declares over `Iterable`. Each takes the receiver and, where it has one,
+   the function value the program wrote — whose answer arrives boxed, because a function value's
+   `invoke` hands back a reference whatever its declared return type is.
+
+   `any`, `all` and `none` stop at the first element that settles the question, which Kotlin
+   promises and a predicate with a side effect can observe. `filter` asks its predicate once per
+   element for the same reason. `first`/`last` with a predicate raise `NoSuchElementException` when
+   nothing matches; the `OrNull` form answers NULL. */
+kt_boolean kt_iterable_any(KRef iterable, KRef predicate);
+kt_boolean kt_iterable_all(KRef iterable, KRef predicate);
+kt_boolean kt_iterable_none(KRef iterable, KRef predicate);
+kt_boolean kt_iterable_is_not_empty(KRef iterable);
+kt_boolean kt_iterable_is_empty(KRef iterable);
+kt_int kt_iterable_count(KRef iterable);
+kt_int kt_iterable_count_matching(KRef iterable, KRef predicate);
+KRef kt_iterable_filter(KRef iterable, KRef predicate);
+KRef kt_iterable_filter_not(KRef iterable, KRef predicate);
+KRef kt_iterable_first_matching(KRef iterable, KRef predicate);
+KRef kt_iterable_first_or_null(KRef iterable, KRef predicate);
+KRef kt_iterable_last_matching(KRef iterable, KRef predicate);
+KRef kt_iterable_fold(KRef iterable, KRef initial, KRef operation);
+void kt_iterable_for_each_indexed(KRef iterable, KRef action);
+KRef kt_iterable_to_list(KRef iterable);
+KRef kt_iterable_reversed(KRef iterable);
+kt_int kt_iterable_index_of(KRef iterable, KRef value);
+kt_boolean kt_iterable_contains(KRef iterable, KRef value);
+
+/* `xs + x` and `xs + ys`: a NEW read-only list. Which one a call means is decided by the CALLER
+   from the declaration's physical parameter, as it is for `plusAssign`. */
+/* `xs.sumOf { … }`, one per width the selector may answer: the answer's type is the selector's,
+   and summing at one width and narrowing afterwards would give a different answer on overflow. */
+kt_int kt_iterable_sum_of_int(KRef iterable, KRef selector);
+kt_long kt_iterable_sum_of_long(KRef iterable, KRef selector);
+kt_double kt_iterable_sum_of_double(KRef iterable, KRef selector);
+
+KRef kt_iterable_plus_element(KRef iterable, KRef element);
+KRef kt_iterable_plus_all(KRef iterable, KRef tail);
 
 /* ---- lazy ---------------------------------------------------------------------------------- */
 
@@ -427,6 +469,10 @@ void kt_not_implemented_reason(KRef reason);
 void kt_illegal_state(KRef message);
 void kt_require(kt_boolean value);
 void kt_check(kt_boolean value);
+
+/* `kotlin.collections.throwIndexOverflow()`, which an inline stdlib body splices into its caller:
+   `throw ArithmeticException("Index overflow has happened.")`. */
+void kt_throw_index_overflow(void);
 void kt_nothing_value_returned(void);
 /* A member access on `null`: the placeholder for NullPointerException. */
 void kt_null_receiver(void);

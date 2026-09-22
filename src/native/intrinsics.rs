@@ -212,6 +212,13 @@ pub(super) fn runtime_function(owner: &str, name: &str, params: &[Ty]) -> Option
         ("kotlin", "error", [_]) => Some("kt_illegal_state".to_string()),
         ("kotlin", "require", [Ty::Boolean]) => Some("kt_require".to_string()),
         ("kotlin", "check", [Ty::Boolean]) => Some("kt_check".to_string()),
+        // The overflow guard `forEachIndexed` and its relatives carry. A jar provider presents
+        // those as INLINE declarations, so their bodies are spliced into the caller and this call
+        // comes with them; a klib provider answers the walk itself and never mentions it. Kotlin's
+        // own is `throw ArithmeticException("Index overflow has happened.")`.
+        ("kotlin/collections", "throwIndexOverflow", []) => {
+            Some("kt_throw_index_overflow".to_string())
+        }
         _ => None,
     }
 }
@@ -862,21 +869,17 @@ pub(super) fn scalar_member(
         // `isEmpty` and its three relatives are INLINE extensions in `kotlin.text`, so a jar
         // provider presents them as members of the receiver's own type rather than of the text
         // facade — the same declaration under a second spelling, exactly as `charAt` is `get`.
-        (
-            "kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder",
-            "isEmpty",
-            [],
-        ) => Some(("kt_string_is_empty", vec![reference], Ty::Boolean)),
+        ("kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder", "isEmpty", []) => {
+            Some(("kt_string_is_empty", vec![reference], Ty::Boolean))
+        }
         (
             "kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder",
             "isNotEmpty",
             [],
         ) => Some(("kt_string_is_not_empty", vec![reference], Ty::Boolean)),
-        (
-            "kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder",
-            "isBlank",
-            [],
-        ) => Some(("kt_string_is_blank", vec![reference], Ty::Boolean)),
+        ("kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder", "isBlank", []) => {
+            Some(("kt_string_is_blank", vec![reference], Ty::Boolean))
+        }
         (
             "kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder",
             "isNotBlank",
@@ -1030,12 +1033,22 @@ pub(super) fn is_function_type_name(owner: crate::types::TypeName) -> bool {
     suffix.is_empty() || suffix.chars().all(|digit| digit.is_ascii_digit())
 }
 
-/// `xs.toList()` / `xs.reversed()` on an ARRAY: a snapshot of its elements as a list.
+/// A member of the collections facade the runtime answers for an ARRAY receiver, as
+/// `(symbol, carried, answer)`.
 ///
-/// Both are extensions of the collections facade, which also declares them over lists, sequences
-/// and ranges — so the owner cannot say which receiver this is and the caller asks the receiver.
-/// What the entry names is the runtime function for the ARRAY case only.
-pub(super) fn array_snapshot(owner: &str, name: &str, params: &[Ty]) -> Option<&'static str> {
+/// Every one of these is an extension, and the facade declares the same names over lists, sequences
+/// and ranges — so the owner cannot say which receiver this is and the CALLER asks the receiver.
+/// What an entry names is the runtime function for the array case only.
+///
+/// `toList` and `reversed` answer a LIST of boxes; `reversedArray` answers an array wearing the
+/// receiver's own descriptor, which is the whole of the difference between the last two. The
+/// `content…` three are the questions `Arrays.equals`/`hashCode`/`toString` answer — an array's own
+/// `equals` is identity, and these exist precisely because a program sometimes wants the other one.
+pub(super) fn array_member(
+    owner: &str,
+    name: &str,
+    params: &[Ty],
+) -> Option<(&'static str, Vec<Ty>, Ty)> {
     // The unsigned arrays get their own package: Kotlin declares `UIntArray.reversed()` in
     // `kotlin.collections.unsigned`, apart from the signed one it answers identically to. The
     // runtime reads the element's type from the array's descriptor, so both reach one entry.
@@ -1043,15 +1056,30 @@ pub(super) fn array_snapshot(owner: &str, name: &str, params: &[Ty]) -> Option<&
     if !matches!(
         package,
         "kotlin/collections" | "kotlin/collections/unsigned"
-    ) || !params.is_empty()
-    {
+    ) {
         return None;
     }
-    match name {
-        "toList" => Some("kt_array_to_list"),
-        "reversed" => Some("kt_array_reversed"),
-        _ => None,
-    }
+    let reference = Ty::nullable(Ty::obj("kotlin/Any"));
+    Some(match (name, params) {
+        ("toList", []) => ("kt_array_to_list", vec![reference], reference),
+        ("reversed", []) => ("kt_array_reversed", vec![reference], reference),
+        ("reversedArray", []) => ("kt_array_reversed_array", vec![reference], reference),
+        // The operand is declared nullable, and so may the receiver be: `contentEquals` is one of
+        // the few stdlib extensions written over `Array<T>?`, because comparing two arrays that
+        // may be absent is exactly what it is for. The runtime takes both as they come.
+        ("contentEquals", [_]) => (
+            "kt_array_content_equals",
+            vec![reference, reference],
+            Ty::Boolean,
+        ),
+        ("contentHashCode", []) => ("kt_array_content_hash_code", vec![reference], Ty::Int),
+        ("contentToString", []) => (
+            "kt_array_content_to_string",
+            vec![reference],
+            Ty::obj("kotlin/String"),
+        ),
+        _ => return None,
+    })
 }
 
 /// `a.mod(b)` — the remainder carrying the DIVISOR's sign, as (runtime symbol, operand type).

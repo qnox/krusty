@@ -2192,6 +2192,44 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `joining_renders_each_element_through_its_own_to_string`,
   `a_range_joins_the_same_way_a_list_does`, `joining_with_an_argument_still_declines`).
 
+- **The rest of `Iterable`'s members are walks the runtime makes, and TEXT does not reach them.**
+  `any`, `all`, `none`, `count`, `filter`, `filterNot`, `first`/`firstOrNull`/`last` with a
+  predicate, `fold`, `sumOf`, `forEachIndexed`, `toList`, `reversed`, `contains`, `indexOf` and
+  `plus` each take the function value the program wrote and hand it to the runtime, whose walk calls
+  its `invoke` per element. Which iterable the receiver is stays the runtime's question, as it is
+  for iteration itself: a list, a range, an array and a lazy `withIndex()` all reach one entry point
+  and the descriptor decides.
+  A predicate is asked exactly as often as Kotlin asks it — `any`/`all` stop at the element that
+  settles the question, `filter` asks once per element — because a predicate may have a side effect
+  and the count is observable.
+  Nothing asks the iterable for a SIZE: a lazy walk has none to give, and a filter's answer is
+  shorter than its source by definition. Each collects into the growable list the runtime already
+  has and freezes it into a read-only list, which IS its array, so no spare slot is ever visible.
+  `sumOf` is chosen by the CALL's own type, not by the declaration: a jar provider realizes a
+  function type as `Function1` and the width the selector answers is no longer written there.
+  Summing at one width and narrowing afterwards is a different answer on overflow, so a width with
+  no entry point declines rather than borrowing another's.
+  `plus` answers a NEW list and never changes the receiver; whether it appends one element or
+  concatenates is the PHYSICAL parameter's answer, exactly as it is for `plusAssign`.
+  TEXT is excluded by name. A string wears the iterable role so `for (c in s)` walks it, but
+  `s.contains(t)`, `s.reversed()` and `s.first()` are questions about TEXT — one text inside
+  another, a text reversed, its first unit — and the string entry points answer them. A collection's
+  answers to those names are about its ELEMENTS, so handing a string to them would compare a `Char`
+  against a whole string.
+  `IntRange.reversed()` is the RANGES facade's and answers a progression, not a list; it is a
+  different member under the same name and is claimed by the range path before this one.
+  Tests: `tests/native_collection_walks_e2e.rs`.
+
+- **An array answers the collections facade's `content…` questions and `reversedArray`.** An
+  array's own `equals` is identity, which is why `contentEquals`, `contentHashCode` and
+  `contentToString` exist at all; each is the runtime's, reading the element type from the array's
+  descriptor. `reversedArray` answers an ARRAY wearing the receiver's own descriptor — elements
+  copied by the descriptor's stride, so a primitive array stays primitive — where `reversed()`
+  answers a list of boxes. Which receiver a facade member is about is the CALLER's question: the
+  facade declares the same names over lists, sequences and ranges, so the owner cannot say.
+  Tests: `tests/native_collection_walks_e2e.rs`
+  (`an_array_reverses_into_an_array_and_answers_the_content_questions`).
+
 - **Slicing and ordering a string on the native target are by UTF-16 unit.** A krusty string holds
   UTF-8 and Kotlin indexes by UTF-16 code unit, so `substring`, `subSequence` and `compareTo` all
   walk the text rather than its bytes: `é` is two bytes and one unit, `𝄞` four bytes and two.

@@ -129,6 +129,81 @@ fn interface_symbol(
     })
 }
 
+/// Whether a type is TEXT, which wears the iterable role without being a collection.
+///
+/// `for (c in s)` walks a string, so text answers [`iteration_role_of`]; but `s.contains(t)`,
+/// `s.reversed()` and `s.first()` are questions about TEXT — one text inside another, a text
+/// reversed, its first unit — and the string entry points answer them further along the chain. A
+/// collection's answers to those names are about its ELEMENTS, so handing a string to them would
+/// compare a `Char` against a whole string. Hence [`walk_symbol`] is kept apart from
+/// [`interface_symbol`], and text does not reach it.
+fn is_text(ty: Ty) -> bool {
+    ty.non_null().obj_internal().is_some_and(|internal| {
+        [
+            "kotlin/String",
+            "kotlin/CharSequence",
+            "kotlin/text/StringBuilder",
+        ]
+        .iter()
+        .any(|candidate| internal.matches(candidate))
+            || super::super::super::intrinsics::is_char_sequence(internal)
+    })
+}
+
+/// A member Kotlin declares over `Iterable` that the runtime answers by WALKING the receiver.
+///
+/// Apart from [`interface_symbol`] only because a TEXT receiver must not reach these; see
+/// [`is_text`]. Everything else about them is the same — the receiver may be any of the iterables
+/// this runtime has, and the dispatch is the descriptor's.
+///
+/// Each takes the function value the program wrote and hands it to the runtime as a reference. A
+/// call that passes a DEFAULTED operand is not one of these: like `joinToString`, the arity matched
+/// on is the written one, and the stdlib's other overloads keep declining with their arguments
+/// still in sight.
+fn walk_symbol(
+    role: IterationRole,
+    name: &str,
+    arity: usize,
+    ret: Ty,
+) -> Option<(&'static str, Vec<Ty>, Ty)> {
+    if role != IterationRole::Iterable {
+        return None;
+    }
+    Some(match (name, arity) {
+        ("any", 1) => ("kt_iterable_any", vec![any(), any()], Ty::Boolean),
+        ("any", 0) => ("kt_iterable_is_not_empty", vec![any()], Ty::Boolean),
+        ("all", 1) => ("kt_iterable_all", vec![any(), any()], Ty::Boolean),
+        ("none", 1) => ("kt_iterable_none", vec![any(), any()], Ty::Boolean),
+        ("none", 0) => ("kt_iterable_is_empty", vec![any()], Ty::Boolean),
+        ("count", 0) => ("kt_iterable_count", vec![any()], Ty::Int),
+        ("count", 1) => ("kt_iterable_count_matching", vec![any(), any()], Ty::Int),
+        ("filter", 1) => ("kt_iterable_filter", vec![any(), any()], any()),
+        ("filterNot", 1) => ("kt_iterable_filter_not", vec![any(), any()], any()),
+        ("first", 1) => ("kt_iterable_first_matching", vec![any(), any()], any()),
+        ("firstOrNull", 1) => ("kt_iterable_first_or_null", vec![any(), any()], any()),
+        ("last", 1) => ("kt_iterable_last_matching", vec![any(), any()], any()),
+        ("fold", 2) => ("kt_iterable_fold", vec![any(), any(), any()], any()),
+        ("forEachIndexed", 1) => ("kt_iterable_for_each_indexed", vec![any(), any()], Ty::Unit),
+        ("toList", 0) => ("kt_iterable_to_list", vec![any()], any()),
+        ("reversed", 0) => ("kt_iterable_reversed", vec![any()], any()),
+        ("indexOf", 1) => ("kt_iterable_index_of", vec![any(), any()], Ty::Int),
+        ("contains", 1) => ("kt_iterable_contains", vec![any(), any()], Ty::Boolean),
+        // `sumOf` is declared once per width the selector may answer, and the ANSWER's type is
+        // the selector's — so the CALL's own type says which entry point sums it. Reading the
+        // declaration instead would not serve both providers: a jar realizes a function type as
+        // `Function1`, and the width the selector answers is no longer written there. Summing at
+        // one width and narrowing afterwards is a different answer on overflow, so a width with no
+        // entry point keeps declining rather than borrowing another's.
+        ("sumOf", 1) => match ret.non_null() {
+            Ty::Int => ("kt_iterable_sum_of_int", vec![any(), any()], Ty::Int),
+            Ty::Long => ("kt_iterable_sum_of_long", vec![any(), any()], Ty::Long),
+            Ty::Double => ("kt_iterable_sum_of_double", vec![any(), any()], Ty::Double),
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
 /// Whether a type is the `IndexedValue` a `withIndex` walk yields.
 fn is_indexed_value(ty: Ty) -> bool {
     ty.non_null()
@@ -226,6 +301,10 @@ fn list_symbol(name: &str, arity: usize, physical: &[Ty]) -> Option<(&'static st
         // the ELEMENT, the others take something to walk. The physical parameter is what tells
         // them apart, as it does for `remove`/`removeAt` above — after substitution an element of
         // type `List<T>` and a collection of them read alike.
+        // `xs + x` and `xs + ys`: a NEW list, never a change to the receiver. Which one a call
+        // means is the PHYSICAL parameter's answer, exactly as it is for `plusAssign` below.
+        ("plus", 1) if walkable => ("kt_iterable_plus_all", vec![any(), any()], any()),
+        ("plus", 1) => ("kt_iterable_plus_element", vec![any(), any()], any()),
         ("plusAssign", 1) if walkable => ("kt_mutable_list_add_all", vec![any(), any()], Ty::Unit),
         ("plusAssign", 1) => ("kt_mutable_list_plus_assign", vec![any(), any()], Ty::Unit),
         _ => return None,
@@ -484,12 +563,19 @@ impl BodyLowering<'_, '_, '_> {
             args.len()
         };
         let args = &args[args.len() - written..];
-        let (symbol, carried, answer) =
-            match role.and_then(|role| interface_symbol(role, name, written)) {
-                Some(symbol) => symbol,
-                None if is_list(ty) => list_symbol(name, written, physical)?,
-                None => return None,
-            };
+        let over_text = is_text(ty);
+        let selected = role.and_then(|role| {
+            interface_symbol(role, name, written).or_else(|| {
+                (!over_text)
+                    .then(|| walk_symbol(role, name, written, ret))
+                    .flatten()
+            })
+        });
+        let (symbol, carried, answer) = match selected {
+            Some(symbol) => symbol,
+            None if is_list(ty) => list_symbol(name, written, physical)?,
+            None => return None,
+        };
         Some(self.list_call(symbol, &carried, answer, receiver, args, ret))
     }
 
