@@ -1726,6 +1726,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 class,
                 index,
             } => self.field_read(receiver, class, index),
+            IrExpr::LateinitInitialized {
+                receiver,
+                class,
+                index,
+            } => self.lateinit_initialized(receiver, class, index),
             IrExpr::SingletonValue { classifier } => self.singleton(classifier),
             IrExpr::GetStatic(index) => self.static_read(index),
             IrExpr::NewArray { array_type, size } => self.new_array(array_type, size),
@@ -2343,6 +2348,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 *index,
                 self.file.ir.classes[*class as usize].fields[*index as usize].ty,
             ),
+            // The RAW field behind `::prop.isInitialized`, which carries what the field holds:
+            // the comparison against null is a node of its own around this one.
+            IrExpr::LateinitInitialized { class, index, .. } => {
+                super::super::captures::physical_ty(
+                    self.file.ir,
+                    *class,
+                    *index,
+                    self.file.ir.classes[*class as usize].fields[*index as usize].ty,
+                )
+            }
             IrExpr::GetStatic(index) => self.file.ir.statics[*index as usize].ty,
             IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => *array_type,
             IrExpr::InvokeFunction { ret, .. } => *ret,

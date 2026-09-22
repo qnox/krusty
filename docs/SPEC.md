@@ -2123,6 +2123,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `false` for an object that is one, since the program's class wears no marker either. Test:
   `tests/native_list_type_checks_e2e.rs`.
 
+- **`::prop.isInitialized` reads the field RAW, and the comparison is a node of its own.** It is
+  the one read of a `lateinit` field that must not carry the throw-if-null guard every other read
+  carries: the guard answers this question by throwing, and this answers it with a `Boolean`. Null
+  IS the evidence — which is why `lateinit` is only allowed on a type with a null to be
+  distinguished by. What the node yields is the FIELD, not the answer: common lowering wraps it in
+  the ordinary null comparison, so a backend building a `Boolean` here would have it compared
+  against null a second time and report every property initialized. kotlinc emits the same shape:
+  no reflection and no `KProperty` value, whatever the `::prop` spelling suggests. Test:
+  `tests/native_lateinit_initialized_e2e.rs`.
+
 - **A `Throwable` carries a CAUSE, and the two one-argument constructors are told apart by type.**
   Kotlin declares four: `()`, `(message)`, `(cause)` and `(message, cause)`. A single argument whose
   type is a `Throwable` is the cause and anything else is the message, and the two forms differ in

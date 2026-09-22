@@ -2321,6 +2321,43 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(value)
     }
 
+    /// The RAW value of a `lateinit` field, behind `::prop.isInitialized`.
+    ///
+    /// The one read of such a field that must NOT carry the throw-if-null guard: the guard answers
+    /// this question by throwing, and the caller answers it with a comparison instead. Null IS the
+    /// evidence — that is why `lateinit` is only allowed on a type with a null to be distinguished
+    /// by. The comparison is NOT built here: common lowering wraps this node in the ordinary
+    /// null-comparison node, so this answers the field and building a `Boolean` here would be
+    /// compared against null a second time.
+    pub(super) fn lateinit_initialized(
+        &mut self,
+        receiver: u32,
+        class: ClassId,
+        index: u32,
+    ) -> Result<Option<Value>, Unsupported> {
+        let Some(object) = self.receiver(receiver)? else {
+            return Ok(None);
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let offset = self.file.model.layout(class).fields[index as usize].offset as i32;
+        let ty = captures::physical_ty(
+            self.file.ir,
+            class,
+            index,
+            self.file.ir.classes[class as usize].fields[index as usize].ty,
+        );
+        let clif = carrier(ty).clif().expect("fields are never `Unit`");
+        // The RAW load, not `load_field`: that one carries the guard this is asking about.
+        Ok(Some(self.builder.ins().load(
+            clif,
+            trusted(),
+            object,
+            offset,
+        )))
+    }
+
     /// A `lateinit` read whose storage is not an instance field — a local slot or a top-level
     /// property — where common lowering names the guard as its own node instead of leaving it to
     /// be inferred from the field. The guard is the field read's, because it is the same guard:
