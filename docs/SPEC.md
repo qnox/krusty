@@ -5980,6 +5980,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/loop_backedge_narrowing_e2e.rs` (all eight, each answer taken from kotlinc 2.4.10
   first).
 
+- **A value class delegating an interface uses its own UNDERLYING VALUE, not a field of the
+  delegation's.** A value class has exactly one field, and `value class IC(val i: I) : I by i` names
+  that very field as the delegate. Kotlin synthesizes no `$$delegate_0` there — the underlying value
+  IS the delegate, and every forwarder reads it — and it could not: a second field is not a shape a
+  value class has.
+
+  Common lowering synthesized one anyway. That gave the class two fields, which the JVM emitter
+  turned into a `putfield` of the wrong type in `constructor-impl` — the class was rejected at load
+  with `VerifyError: Bad type on operand stack in putfield` — and which the native code generator
+  refused by name.
+
+  WHICH field the delegate is cannot be decided where the delegation field used to be created: the
+  property's own field does not exist yet at that point, and the delegate field was being pushed
+  ahead of it. So nothing is pushed for this shape and the edge is recorded later, where the
+  constructor's field indices are known. The delegate must be the first CONSTRUCTOR PARAMETER, which
+  is what the underlying value is; a value class delegating to anything else is not this shape and
+  keeps the ordinary field, to be refused as before rather than silently pointed at the wrong
+  storage.
+  Tests: `tests/value_class_delegation_e2e.rs`, each cross-checked against the reference compiler:
+  the forwarder reached through both types, the underlying value still readable as its own property,
+  a generic underlying type, and an ORDINARY class still delegating through a field of its own.
+  Corpus: `codegen/box/inlineClasses/delegationByUnderlyingType/` (all six).
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
