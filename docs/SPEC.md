@@ -6036,6 +6036,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `codegen/box/localClasses/innerOfLocalCaptureExtensionReceiver.kt` and
   `codegen/box/secondaryConstructors/callFromLocalSubClass.kt`.
 
+- **A collection literal's `operator fun of` dispatches on the companion, not on nothing.**
+  `val list: MyList = ["O", "K"]` selects `MyList.Companion.of`, which is an ordinary MEMBER of
+  that companion object — the same declaration a spelled `MyList.of("O", "K")` reaches. The literal
+  spells no receiver, so the selected member reached the backend with no dispatch receiver recorded
+  and the call would be made with the arguments alone: one value short of the declaration it had
+  selected. Selection now records the exact classifier-value receiver returned with the candidate
+  family, including when an inherited declaration has a non-object owner. A companion EXTENSION
+  keeps its own path — it already carries the receiver it
+  extends — and an implicit classifier callable (`values`/`valueOf`) has no instance at all and
+  keeps none.
+  Tests: `fir::body_check::collection_literal_tests::custom_collection_literal_keeps_the_selected_companion_operator`
+  and `inherited_collection_literal_operator_keeps_the_companion_receiver`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
