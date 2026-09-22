@@ -280,8 +280,10 @@ pub(crate) struct FrameTypes {
 
 impl FrameTypes {
     /// `entry` is the slot-indexed locals on entry; `frames` are the recorded frames as
-    /// `(instruction index, slot-indexed locals, stack)`. `None` when an instruction cannot be
-    /// modelled or the body does not verify under this model — the caller declines then.
+    /// `(instruction index, slot-indexed locals, stack)`, ONE per index — the frame the class file
+    /// will carry there (`ClassWriter::merged_frames`), not the per-label frames several labels
+    /// bound at one offset registered. `None` when an instruction cannot be modelled, two frames
+    /// share an index, or the body does not verify under this model — the caller declines then.
     pub(crate) fn analyze(
         insns: &[Insn],
         graph: &ControlGraph,
@@ -292,10 +294,25 @@ impl FrameTypes {
         if graph.exit() != insns.len() {
             return None;
         }
-        let recorded: HashMap<usize, FrameState> = frames
-            .iter()
-            .map(|(index, locals, stack)| (*index, FrameState::from_verif(locals, stack, pool)))
-            .collect();
+        let mut recorded: HashMap<usize, FrameState> = HashMap::with_capacity(frames.len());
+        for (index, locals, stack) in frames {
+            // One frame per position, and it has to be the one the class file carries. Several
+            // labels can be bound at ONE bytecode offset, and the verifier holds their MERGE there
+            // — the common prefix of their locals. Collecting them into a map instead let the last
+            // one win, which can be MORE precise than the merge: the analysis then types a slot the
+            // verifier has as `top`, and the spill planned from it loads an unset local ("Bad local
+            // variable type") while the join frame claims a type the fall-through edge never had
+            // ("Inconsistent stackmap frames"). Merging is the caller's job, so two frames at one
+            // index is a bug — decline rather than pick one.
+            let frame = FrameState::from_verif(locals, stack, pool);
+            if recorded.insert(*index, frame).is_some() {
+                crate::trace_compiler!(
+                    "suspend",
+                    "frame analysis: two frames recorded at {index}; they were not merged"
+                );
+                return None;
+            }
+        }
         let mut before: Vec<Option<FrameState>> = vec![None; insns.len() + 1];
         before[0] = Some(match recorded.get(&0) {
             Some(frame) => frame.clone(),
@@ -813,6 +830,29 @@ mod tests {
     ) -> FrameTypes {
         let graph = ControlGraph::build(insns, &[]).expect("graph");
         FrameTypes::analyze(insns, &graph, entry, frames, pool).expect("types")
+    }
+
+    /// Two frames at ONE index means the caller handed over per-label frames instead of the merged
+    /// frame the class file carries. Picking one of them would let the analysis hold a type the
+    /// verifier does not, so the analysis declines and the machine bails.
+    #[test]
+    fn two_frames_at_one_index_are_declined_rather_than_picked_between() {
+        let pool = FakePool::default();
+        // aload_0 ; return
+        let insns = [plain(0x2a), plain(0xb1)];
+        let graph = ControlGraph::build(&insns, &[]).expect("graph");
+        let frames = [
+            (1, vec![object("Main"), VerifType::Integer], Vec::new()),
+            (1, vec![object("Main"), VerifType::Float], Vec::new()),
+        ];
+        assert!(
+            FrameTypes::analyze(&insns, &graph, &[object("Main")], &frames, &pool).is_none(),
+            "an unmerged pair must decline"
+        );
+        // The same body with ONE frame at that index analyses.
+        assert!(
+            FrameTypes::analyze(&insns, &graph, &[object("Main")], &frames[..1], &pool).is_some()
+        );
     }
 
     #[test]

@@ -225,6 +225,36 @@ reached from the dispatch with an empty stack and has to reconstruct the join.
 so this strictly cannot regress. **v2 (step 5) spills the under-stack into scratch locals first**,
 as kotlinc does, and removes the restriction.
 
+### 5.3a The frame invariant: one frame per offset, and it is the merged one
+
+The spill set and its types are read off `FrameTypes::analyze`, a forward verification-type analysis
+over the spliced body seeded by the frames that body carries. Those frames must be the frames the
+*class file* will carry, because the class file is what the verifier checks.
+
+They are not the same thing by default. `CodeBuilder` records a frame PER LABEL, and several labels
+can be bound at ONE bytecode offset — a loop's `end` and the following statement's `start`,
+`next`/`end` in an all-diverging `when`. The `StackMapTable` writer merges them: the locals become
+their common prefix, everything past the first divergence reverting to `top`. So the per-label view
+(`CodeBuilder::resolved_frames`) can name a local the emitted frame drops.
+
+Feeding a per-label frame to the analysis lets it hold a type the verifier does not:
+
+* the spill planned from it loads a slot the verifier has as `top` — "Bad local variable type";
+* the join frame claims a type the fall-through edge never carried — "Inconsistent stackmap frames".
+
+So the merge has exactly one definition (`merge_frames_at_one_offset` in `src/jvm/classfile.rs`),
+the `StackMapTable` writer and the machine both go through it — the machine via
+`ClassWriter::merged_frames` — and `FrameTypes::analyze` declines outright if it is ever handed two
+frames at one index, rather than picking between them.
+
+This was found by review, not by a failure. A probe over the whole harness (the box corpus plus
+every e2e suite) found five shared-offset frame groups across four call sites, and at all four the
+last-registered label's frame already equalled the merge, so no spill plan changes. The invariant is
+pinned by `the_machine_reads_the_frame_the_stackmap_writes_where_two_labels_share_an_offset`
+(`src/jvm/classfile.rs`), which compares the merged frames against the `StackMapTable` the writer
+actually emits, and by
+`two_frames_at_one_index_are_declined_rather_than_picked_between` (`src/jvm/suspend/cps/frame_types.rs`).
+
 ### 5.4 Non-JVM backends
 
 Untouched. `InlineBodyPlan` realization and the IR coroutine lowering stay exactly where they are

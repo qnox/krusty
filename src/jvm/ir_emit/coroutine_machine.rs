@@ -194,8 +194,14 @@ pub(super) fn discover(
     };
     // The frames this body carries, by instruction index and slot: the splice relocated the
     // dependency's own, and this emitter recorded one at every label it bound.
-    let Some(frames) = code
-        .resolved_frames()
+    //
+    // MERGED by offset, because that is what the class file will carry: several labels can be bound
+    // at one offset — a loop's `end` and the following statement's `start` — and the verifier holds
+    // the merge of their frames there, not any one of them. Reading them per label handed this
+    // analysis whichever was registered last, which can name a local the merge drops; the spill
+    // planned from it then loads a slot the verifier has as `top`.
+    let Some(frames) = cw
+        .merged_frames(code)
         .into_iter()
         .map(|(at, locals, stack)| Some((index_of(at)?, expand_slots(&locals), stack)))
         .collect::<Option<Vec<(usize, Vec<VerifType>, Vec<VerifType>)>>>()
