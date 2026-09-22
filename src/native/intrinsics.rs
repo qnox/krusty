@@ -114,6 +114,16 @@ pub(super) fn throwable_descriptor(owner: crate::types::TypeName) -> Option<&'st
     })
 }
 
+/// Whether a superclass is `kotlin.Number`, the other base the runtime owns that a source class
+/// may extend.
+///
+/// It carries NO state — every member it declares is an abstract conversion — so a subclass of it
+/// is laid out exactly as a subclass of `kotlin.Any` is, and the descriptor exists already: boxed
+/// primitives point at it so that `is Number` has something to compare.
+pub(super) fn is_number_base(owner: crate::types::TypeName) -> bool {
+    kotlin_owner(&owner.render()) == "kotlin/Number"
+}
+
 /// How a `Throwable` constructor's single parameter supplies the message.
 pub(super) enum ThrowableMessage {
     /// `message: String?` — the string IS the message, and a `null` stays `null`.

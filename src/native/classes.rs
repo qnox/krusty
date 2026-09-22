@@ -125,6 +125,19 @@ const THROWABLE_REFERENCE_OFFSETS: &[u32] = &[THROWABLE_MESSAGE_OFFSET];
 /// [`crate::native::intrinsics::throwable_descriptor`]'s to know — this adds only the LAYOUT, which
 /// is a fact about emitting a subclass rather than about naming the base.
 pub(super) fn external_base(superclass: TypeName) -> Option<ExternalBase> {
+    // `kotlin.Number` carries NO state — every member it declares is an abstract conversion — so a
+    // subclass of it is laid out exactly as a subclass of `kotlin.Any` is, and it contributes
+    // `Any`'s own three slots. A caller reaching one of those conversions through a `Number`
+    // receiver is a separate question, answered where every runtime-known member is: the file knows
+    // the classes of its own that could stand behind the type, and a conversion takes no arguments.
+    if super::intrinsics::is_number_base(superclass) {
+        return Some(ExternalBase {
+            descriptor: "kt_type_number",
+            fields_end: HEADER_SIZE,
+            reference_offsets: &[],
+            any_slots: ["kt_any_equals", "kt_any_hash_code", "kt_any_to_string"],
+        });
+    }
     // Each of these wears `KThrowable`'s layout and `Throwable`'s own `toString`; only the
     // descriptor — and so the position in the `catch`-matching chain — differs.
     let descriptor = super::intrinsics::throwable_descriptor(superclass)?;

@@ -1817,9 +1817,9 @@ mod compiles_against_the_klib {
             "a class extending a stdlib exception compiles: {subclass:?}"
         );
 
-        // A base whose layout the runtime does NOT own still declines, and the decline is the
-        // generator's rather than the provider's: resolution reached the class either way.
-        let unowned = diagnostics(
+        // `kotlin.Number` is the other base the runtime owns, and it carries no state at all, so
+        // a subclass of it emits as well.
+        let number = diagnostics(
             &root,
             "class N : Number() {\n\
              \x20   override fun toByte(): Byte = 0\n\
@@ -1828,6 +1828,23 @@ mod compiles_against_the_klib {
              \x20   override fun toInt(): Int = 0\n\
              \x20   override fun toLong(): Long = 0\n\
              \x20   override fun toShort(): Short = 0\n\
+             }\nfun box(): String = \"OK\"\n",
+        );
+        assert!(
+            number.is_empty(),
+            "a class extending `kotlin.Number` compiles: {number:?}"
+        );
+
+        // A base whose layout the runtime does NOT own still declines, and the decline is the
+        // generator's rather than the provider's: resolution reached the class either way.
+        let unowned = diagnostics(
+            &root,
+            "class L : AbstractMutableList<Int>() {\n\
+             \x20   override val size: Int get() = 0\n\
+             \x20   override fun get(index: Int): Int = 0\n\
+             \x20   override fun add(index: Int, element: Int) {}\n\
+             \x20   override fun removeAt(index: Int): Int = 0\n\
+             \x20   override fun set(index: Int, element: Int): Int = 0\n\
              }\nfun box(): String = \"OK\"\n",
         );
         assert!(

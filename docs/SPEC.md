@@ -8093,6 +8093,26 @@ and behavior is checked by RUNNING the emitted program.
   (`::a_file_that_declares_its_own_sequence_walks_it`,
   `::a_declared_sequence_still_declines_the_members_it_endangers`).
 
+- **A source class may extend `kotlin.Number`.** It is the second base the runtime owns, beside
+  the `kotlin.Throwable` family and `kotlin.Enum`, and the simplest: it carries NO state — every
+  member it declares is an abstract conversion — so a subclass of it is laid out exactly as a
+  subclass of `kotlin.Any` is and contributes `Any`'s own three slots. The descriptor was there
+  already: a boxed primitive points at it so `is Number` has something to compare, and a subclass of
+  the program's now points at the same one, which is what makes `MyNumber(7) is Number` true and
+  `MyNumber(7) is Int` false.
+
+  Relaxing this alone was tried once and reverted, because `numberToDouble(FortyTwo)` reached the
+  boxed-primitive intrinsic with an object that is not one and the program ABORTED. What closes that
+  is the receiver dispatch for a nullary member of a type this file implements, which now reads the
+  SCALAR table as well as the iteration one: `kotlin.Number`'s six conversions are there, each
+  nullary and each answering at its own width, so a call through a `Number` receiver tests the
+  object against each class of this file that could stand behind the type and falls through to the
+  runtime — which is how a boxed primitive and a program's object reach the same call site and each
+  get the right answer.
+  Tests: `tests/native_number_subclass_e2e.rs` (through the class, the `is` questions, and the
+  shared call site); corpus: `primitiveTypes/numberToChar/` (all six) and
+  `primitiveTypes/virtualCallToCustomNumber.kt`.
+
 - **A range whose bounds are ordered by `Comparable`, and the integral ranges reached through
   `ClosedRange<T>`.** Kotlin declares `rangeTo` on `Comparable<T>` and answers a
   `ComparableRange<T>`, seen through `ClosedRange<T>`: it keeps the two bounds as OBJECTS and asks

@@ -789,8 +789,17 @@ impl BodyLowering<'_, '_, '_> {
             return None;
         }
         let ty = self.type_of(receiver)?;
-        let role = super::super::super::intrinsics::iteration_role_of(ty)?;
-        let (symbol, _, answer) = interface_symbol(role, name, 0)?;
+        // Which runtime entry point would have answered this. Two tables reach a nullary member of
+        // a runtime-known type: the ITERATION one, keyed on the role a receiver plays, and the
+        // SCALAR one, keyed on the owner — `kotlin.Number`'s six conversions are there, each of
+        // them nullary and each answering at its own width.
+        let (symbol, answer) = super::super::super::intrinsics::iteration_role_of(ty)
+            .and_then(|role| interface_symbol(role, name, 0))
+            .map(|(symbol, _, answer)| (symbol, answer))
+            .or_else(|| {
+                super::super::super::intrinsics::scalar_member(&internal.render(), name, &[])
+                    .map(|(symbol, _, answer)| (symbol, answer))
+            })?;
         let declared = self.file.implementors_of(internal);
         let implementors: Vec<(ClassId, u32, Ty)> = declared
             .iter()
