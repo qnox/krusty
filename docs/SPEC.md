@@ -2071,15 +2071,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   top-level property has no receiver either way. A reference to a `val` wears no mutable marker.
   Test: `tests/native_reflection_type_checks_e2e.rs`.
 
-- **A declaration with a REIFIED type parameter has no body to emit.** Kotlin permits a reified
-  type parameter only on an `inline` function, and such a function is spliced at every call site
-  precisely so that `is T` and `T::class` have a type to name. Its own body is therefore never
-  called, and compiling it would have to answer what `T` is where nothing has said — which is what
-  made `inline fun <reified T> Any?.isTOrNull() = this is T?` decline on a type parameter that had
-  reached the generator unsubstituted. krusty's native target emits no body for one, the same
-  treatment a lambda that returns non-locally already gets: a call site that somehow named it finds
-  no symbol and declines rather than reaching a body that cannot be right. Test:
-  `tests/native_reified_declarations_e2e.rs`.
+- **A declaration with a REIFIED type parameter keeps its symbol, and traps where its body cannot
+  be lowered.** Kotlin permits a reified type parameter only on an `inline` function, and such a
+  function is spliced at every call site precisely so that `is T` and `T::class` have a type to
+  name. Its own body is therefore never the one that runs, and compiling it would have to answer
+  what `T` is where nothing has said — which is what made `inline fun <reified T> Any?.isTOrNull()
+  = this is T?` decline on a type parameter that had reached the generator unsubstituted. krusty's
+  native target lowers the body FIRST and keeps it when it lowers — `inline fun <reified T, U>
+  keep(value: U): U = value` names `T` nowhere — and puts a trap there only when it does not.
+  A trap rather than NO symbol, which is what this rule first said: a reified MEMBER holds a vtable
+  slot, and a table has no way to decline one entry the way a call site does, so leaving the symbol
+  out left the slot naming nothing at all. The trap is unreachable by Kotlin's own rule — an
+  `inline` member may not be `open` — and says so loudly rather than jumping at a body that could
+  not be right. Test: `tests/native_reified_declarations_e2e.rs`.
 
 - **A nested class's `simpleName` is the segment after what encloses it.** A package is spelled
   with dots and NESTING with `$` — `A$Companion` is the companion of `A` — so a simple name read by
@@ -2120,8 +2124,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   uses: a call may treat `Collection` as a list because every question a list answers a collection
   answers the same way, while a check may not, since a set is a `Collection` and wears no list
   marker. And a file that declares a collection of its own keeps declining rather than answering
-  `false` for an object that is one, since the program's class wears no marker either. Test:
-  `tests/native_list_type_checks_e2e.rs`.
+  `false` for an object that is one, since the program's class wears no marker either.
+  It is narrower in the other direction too, and for the mirror reason: `MutableList` and
+  `ArrayList` decline, because BOTH kinds of list wear this marker — the immutable one included —
+  so `listOf(1) is MutableList<*>` would have answered `true` where Kotlin/Native answers false.
+  The exact spelling matters for a second reason: the descriptor a check compares against is the one
+  a CLASS LITERAL reads a name off, and this one is named `kotlin.collections.List`. While the
+  marker answered for `ArrayList` as well, `java.util.ArrayList::class.simpleName` said `List`.
+  Test: `tests/native_list_type_checks_e2e.rs`.
 
 - **`::prop.isInitialized` reads the field RAW, and the comparison is a node of its own.** It is
   the one read of a `lateinit` field that must not carry the throw-if-null guard every other read
@@ -2220,6 +2230,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `for` loop over one and `withIndex` on one all answer for text the program wrote; the chars
   iterator the runtime already had needs no case of its own. Both or neither, as with the
   iterator's pair.
+  A `Sequence` of the program's is one of these classes: its one member IS `iterator`, so the walk
+  and the thunk are the same. What the shape adds is the narrowing above — the class is recorded as
+  a sequence as well as as a walkable, and a receiver typed by it takes only the members that are
+  lazy either way.
   What still declines is a shape the walk does not reach: `Map` and `Map.Entry` declare none of
   these members, so a file that puts a class of its own behind one of them declines every walking
   member over that shape, since no static type tells one implementor from another within it. A
@@ -2570,9 +2584,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `withIndex` — and the rest DECLINE at the call site, where the type the program named is in sight.
   That is a decline and not a slower answer: answering eagerly would be a different program.
   `equals` and `hashCode` are IDENTITY, which is what Kotlin answers, `Sequence` declaring neither.
-  A file that declares its own `Sequence` declines, like one that declares its own list or map: the
-  runtime would answer `iterator` out of a wrapper that is not there.
-  Tests: `tests/native_sequences_e2e.rs`.
+  A class of the PROGRAM that implements `Sequence` is walked through the very thunks a program's
+  `Iterable` is walked through — its one member is `iterator()`, the descriptor carries the slot and
+  the dispatch is virtual, so who made the object never matters — and it carries the same narrowing:
+  the shape a class answers for is read off its override edges, so a receiver typed by the program's
+  own sequence class is offered the lazy members and declines the eager ones exactly as a receiver
+  typed `Sequence` does. What makes an eager `map` wrong is the type the program named, not who made
+  the object behind it.
+  Tests: `tests/native_sequences_e2e.rs`, `tests/native_sequence_walks_e2e.rs`.
 
 - **A built-in type's companion object is one static object per companion.** `Int.Companion` and its
   relatives are declared in no file krusty compiles and carry no state — every member of one is a

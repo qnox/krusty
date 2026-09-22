@@ -215,6 +215,7 @@ pub fn lower_file(
         // a thunk could be emitted for, and only the model knows that.
         unwalkable_collections: std::collections::HashSet::new(),
         walkable_classes: std::collections::HashMap::new(),
+        sequence_classes: std::collections::HashSet::new(),
         declares_its_own_comparable: declares_its_own_comparable(ir),
         implemented_dependencies: implemented_dependencies(ir),
     };
@@ -469,6 +470,12 @@ struct FileLowering<'a> {
     /// role too — `xs.withIndex()` on a class of the program is the same walk as on a list.
     walkable_classes:
         std::collections::HashMap<crate::types::TypeName, super::super::intrinsics::IterationRole>,
+    /// Those among them that answer for `kotlin.sequences.Sequence`.
+    ///
+    /// They play the `Iterable` role — the walk is the same — and a receiver typed by one is
+    /// offered the same NARROW set of members a receiver typed `Sequence` is, for the same reason:
+    /// this runtime's walks are eager, and an eager `map` over a sequence is not Kotlin's.
+    sequence_classes: std::collections::HashSet<crate::types::TypeName>,
     /// The shapes among those that the runtime cannot walk an object of this file's behind; see
     /// [`unwalkable_collections`].
     unwalkable_collections: std::collections::HashSet<super::super::intrinsics::CollectionShape>,
@@ -541,8 +548,11 @@ impl<'a> FileLowering<'a> {
                 None
             };
             if let Some(role) = role {
-                self.walkable_classes
-                    .insert(self.ir.classes[id as usize].fq_name, role);
+                let name = self.ir.classes[id as usize].fq_name;
+                self.walkable_classes.insert(name, role);
+                if slots.sequence {
+                    self.sequence_classes.insert(name);
+                }
             }
         }
         let mut record = |owner: &crate::types::TypeName, overridden| {
@@ -579,6 +589,14 @@ impl<'a> FileLowering<'a> {
     pub(super) fn walkable_role(&self, ty: Ty) -> Option<super::super::intrinsics::IterationRole> {
         let internal = ty.non_null().obj_internal()?;
         self.walkable_classes.get(&internal).copied()
+    }
+
+    /// Whether a class of THIS FILE standing behind `ty` answers for `kotlin.sequences.Sequence`;
+    /// see [`Self::sequence_classes`].
+    pub(super) fn walks_as_a_sequence(&self, ty: Ty) -> bool {
+        ty.non_null()
+            .obj_internal()
+            .is_some_and(|internal| self.sequence_classes.contains(&internal))
     }
 
     /// Whether a class of this file could stand behind a receiver of type `ty` AND the runtime has
@@ -640,6 +658,22 @@ impl<'a> FileLowering<'a> {
         self.signature_of(&params, function.ret)
     }
 
+    /// Whether a function declares a REIFIED type parameter.
+    ///
+    /// Kotlin permits one only on an `inline` function, and splices such a function at every call
+    /// site precisely so that `is T` and `T::class` have a type to name. Its own body is therefore
+    /// never the one that runs — which is what lets [`Self::define_function`] put a trap where a
+    /// body it cannot lower would go, instead of declining the file for a declaration nothing
+    /// calls.
+    fn declares_a_reified_parameter(&self, id: crate::ir::FunId) -> bool {
+        self.ir.signatures.get(&id).is_some_and(|signature| {
+            signature
+                .type_params
+                .iter()
+                .any(|parameter| parameter.reified)
+        })
+    }
+
     fn declare_functions(&mut self) -> Result<(), Unsupported> {
         for (index, function) in self.ir.functions.iter().enumerate() {
             // A lambda whose body returns NON-LOCALLY is valid only spliced into the caller it
@@ -648,27 +682,10 @@ impl<'a> FileLowering<'a> {
             // the return and fell through, which is a wrong answer rather than a decline. Common
             // lowering marks these; leaving one undeclared is how a call site that names it comes
             // to decline, which is the same mechanism the branch below relies on.
-            // A function with a REIFIED type parameter is inline-only by Kotlin's own rule: a
-            // type parameter may be reified only on an `inline` function, and such a function is
-            // spliced at every call site precisely so that `is T` and `T::class` have a type to
-            // name. Its own body therefore is never called, and compiling it would ask what `T` is
-            // where nothing has said — which is exactly the decline `is T` used to raise. A call
-            // site that somehow named it finds no id and declines, as for the shapes below.
-            let reified = self
+            if self
                 .ir
-                .signatures
-                .get(&(index as crate::ir::FunId))
-                .is_some_and(|signature| {
-                    signature
-                        .type_params
-                        .iter()
-                        .any(|parameter| parameter.reified)
-                });
-            if reified
-                || self
-                    .ir
-                    .inline_only_fns
-                    .contains(&(index as crate::ir::FunId))
+                .inline_only_fns
+                .contains(&(index as crate::ir::FunId))
                 || function.body.is_none()
             {
                 // Nothing to emit, and therefore nothing to DECLARE: an exported symbol that is
@@ -862,13 +879,44 @@ impl<'a> FileLowering<'a> {
         ));
         let name = function.name.clone();
         let ret = function.ret;
-        self.emit_function(id, signature, ret, &name, &mut |lowering, params| {
-            for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
-                let variable = lowering.declare_value(slot as u32, *ty)?;
-                lowering.builder.def_var(variable, *value);
-            }
-            lowering.statement(body)
-        })
+        let attempt = self.emit_function(
+            id,
+            signature.clone(),
+            ret,
+            &name,
+            &mut |lowering, params| {
+                for (slot, (value, ty)) in params.iter().zip(&slots).enumerate() {
+                    let variable = lowering.declare_value(slot as u32, *ty)?;
+                    lowering.builder.def_var(variable, *value);
+                }
+                lowering.statement(body)
+            },
+        );
+        // A REIFIED declaration whose body this generator cannot lower gets a TRAP for a body.
+        //
+        // Such a function is `inline` by Kotlin's own rule and is spliced at every call site, so
+        // the body emitted here is never the one that runs — and lowering it asks what `T` is
+        // where nothing has said, which is how `inline fun <reified T> Any?.isTOrNull() = this is
+        // T?` came to decline a whole file from its DECLARATION rather than from any use.
+        // Emitting the trap instead keeps the symbol, which a vtable slot and a linker both need,
+        // and says so loudly if a call ever did arrive. The body is still lowered FIRST and kept
+        // when it lowers: `inline fun <reified T, U> keep(value: U): U = value` touches `T`
+        // nowhere, and a call to it is dispatched through the class's own table like any other.
+        // Nothing of the failed attempt is committed — `emit_function` defines the function in the
+        // module only once the body is whole.
+        match attempt {
+            Ok(()) => Ok(()),
+            Err(_) if self.declares_a_reified_parameter(index as crate::ir::FunId) => self
+                .emit_function(id, signature, ret, &name, &mut |lowering, _| {
+                    // Nothing but the TRAP `emit_function` puts after a terminated body, in the
+                    // entry block — `terminate` would open a dead block for it instead and leave
+                    // the entry without a terminator at all. The flag is set directly for that
+                    // reason.
+                    lowering.terminated = true;
+                    Ok(())
+                }),
+            Err(reason) => Err(reason),
+        }
     }
 
     /// `kt_program_entry`: what the runtime's `_start` calls. Records the stack bottom for the

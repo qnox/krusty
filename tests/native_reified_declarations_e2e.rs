@@ -92,3 +92,27 @@ fn a_named_companions_simple_name_is_the_name_it_was_given() {
          }\n";
     every_backend_agrees_with_kotlinc("NamedCompanionSimpleName", source);
 }
+
+/// A reified declaration whose body DOES lower keeps it, and a call reaches it.
+///
+/// `keep` names `T` nowhere, so nothing about its body needs the type a call site substitutes —
+/// and the trap is only for a body this generator cannot lower. Emitting one for every reified
+/// declaration instead left a MEMBER's vtable slot with no symbol to name, which is a table that
+/// cannot be built rather than a call that declines.
+#[test]
+fn a_reified_declaration_that_lowers_keeps_its_body() {
+    let source = "class Host {\n\
+         \x20   inline fun <reified T, U> keep(value: U): U = value\n\
+         }\n\
+         fun box(): String =\n\
+         \x20   if (Host().keep<String, Int>(42) == 42) \"OK\" else \"fail\"\n";
+    every_backend_agrees_with_kotlinc("ReifiedMemberKeepsItsBody", source);
+}
+
+/// The same at top level, where no table is involved and only the symbol is.
+#[test]
+fn a_top_level_reified_declaration_that_lowers_keeps_its_body() {
+    let source = "inline fun <reified T, U> keep(value: U): U = value\n\
+         fun box(): String = if (keep<String, Int>(42) == 42) \"OK\" else \"fail\"\n";
+    every_backend_agrees_with_kotlinc("ReifiedTopLevelKeepsItsBody", source);
+}

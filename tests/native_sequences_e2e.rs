@@ -103,10 +103,29 @@ fn a_file_that_declares_its_own_sequence_walks_it() {
     expect_native_box(source, "DeclaredSequence", "OK");
 }
 
-/// A file that declares its own `Sequence` still declines a SEQUENCE receiver's other members.
+/// A SEQUENCE receiver holding an object of the file's own takes the lazy members too.
 ///
-/// The shape the file implements is the sequence's, and `withIndex` is not a nullary member the
-/// receiver test can carry — so the decline stands exactly where the hazard is.
+/// `withIndex` is not a nullary member a receiver test can carry, and it needs none: the class's
+/// `iterator` sits in its descriptor as a thunk, and `kt_iterable_with_index` reaches it there. So
+/// the type the program named decides — `Sequence` offers the lazy members — and which object
+/// stands behind it does not.
+#[test]
+fn a_declared_sequence_answers_the_lazy_members_through_the_interface() {
+    let source = "class Counting<out T>(private val source: Sequence<T>) : Sequence<T> {\n\
+         \x20   override fun iterator() = source.iterator()\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val xs: Sequence<String> = Counting(listOf(\"O\", \"K\").asSequence())\n\
+         \x20   var text = \"\"\n\
+         \x20   for ((_, x) in xs.withIndex()) text += x\n\
+         \x20   return text\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "DeclaredSequenceIndexed");
+    expect_native_box(source, "DeclaredSequenceIndexed", "OK");
+}
+
+/// The EAGER members keep declining through that receiver, for the reason they always did: the
+/// transform would run for every element where Kotlin runs it per element consumed.
 #[test]
 fn a_declared_sequence_still_declines_the_members_it_endangers() {
     expect_native_decline(
@@ -115,11 +134,10 @@ fn a_declared_sequence_still_declines_the_members_it_endangers() {
          }\n\
          fun box(): String {\n\
          \x20   val xs: Sequence<String> = Counting(listOf(\"O\", \"K\").asSequence())\n\
-         \x20   var text = \"\"\n\
-         \x20   for ((_, x) in xs.withIndex()) text += x\n\
-         \x20   return text\n\
+         \x20   val mapped = xs.map { it }\n\
+         \x20   return if (mapped === xs) \"same\" else \"OK\"\n\
          }\n",
-        "DeclaredSequenceIndexed",
-        "withIndex",
+        "DeclaredSequenceMapped",
+        "map",
     );
 }

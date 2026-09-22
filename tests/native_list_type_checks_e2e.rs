@@ -117,3 +117,47 @@ fn a_file_that_declares_its_own_collection_declines_the_check() {
          }\n";
     expect_native_decline(source, "OwnCollectionDeclines", "is` check against");
 }
+
+/// `List::class` names the marker, and the marker is named `kotlin.collections.List`.
+///
+/// The descriptor an `is` compares against is the one a class literal READS A NAME off, so the
+/// marker may answer only for the spelling it is named after. It once answered for `ArrayList` and
+/// `MutableList` too, and `java.util.ArrayList::class.simpleName` then said `List`.
+#[test]
+fn the_list_marker_names_the_interface_it_stands_for() {
+    let source = "fun box(): String {\n\
+         \x20   val k = List::class\n\
+         \x20   if (k.simpleName != \"List\") return \"fail simple \" + k.simpleName\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("ListMarkerIsNamedList", source);
+}
+
+/// A class literal over a list type the marker is NOT named after keeps its own name.
+#[test]
+fn a_growable_lists_class_literal_keeps_its_own_name() {
+    let source = "fun box(): String =\n\
+         \x20   if (java.util.ArrayList::class.simpleName == \"ArrayList\") \"OK\"\n\
+         \x20   else \"fail \" + java.util.ArrayList::class.simpleName\n";
+    assert_eq!(
+        kotlinc_box_result(source),
+        "OK",
+        "GrowableListClassLiteral: unexpected kotlinc result"
+    );
+    expect_box_ok_with_stdlib(source, "GrowableListClassLiteral");
+}
+
+/// The MUTABLE spellings decline rather than answering from the marker: both kinds of list the
+/// runtime builds wear it, the immutable one included, so `listOf(1) is MutableList<*>` would have
+/// answered `true` where Kotlin/Native answers false.
+#[test]
+fn a_mutable_list_check_declines_rather_than_answering_from_the_marker() {
+    expect_native_decline(
+        "fun box(): String {\n\
+         \x20   val x: Any = listOf(1, 2, 3)\n\
+         \x20   return if (x is MutableList<*>) \"fail\" else \"OK\"\n\
+         }\n",
+        "MutableListCheckDeclines",
+        "MutableList",
+    );
+}

@@ -881,8 +881,10 @@ impl BodyLowering<'_, '_, '_> {
         // answer.
         let role = super::super::super::intrinsics::iteration_role_of(ty)
             .or_else(|| self.file.walkable_role(ty))?;
-        // A SEQUENCE takes only the members that are lazy either way; see `is_sequence`.
-        if is_sequence(ty) && !lazy_over_a_sequence(name) {
+        // A SEQUENCE takes only the members that are lazy either way; see `is_sequence`. A class
+        // of this file that answers for `Sequence` is narrowed the same way: what makes an eager
+        // `map` wrong is the type the program named, not who made the object behind it.
+        if (is_sequence(ty) || self.file.walks_as_a_sequence(ty)) && !lazy_over_a_sequence(name) {
             return None;
         }
         let written = self.written_arity(name, args);

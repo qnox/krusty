@@ -74,6 +74,11 @@ pub(super) struct WalkSlots {
     pub(super) next: u32,
     pub(super) length: u32,
     pub(super) char_at: u32,
+    /// Whether the class answers for `kotlin.sequences.Sequence` rather than for an eager
+    /// iterable. The walk is the same one — a sequence hands out an iterator like anything else —
+    /// but the set of MEMBERS a receiver of it may be asked is narrower, because every walk this
+    /// runtime has is eager; see [`super::lists::walking_member`].
+    pub(super) sequence: bool,
 }
 
 impl WalkSlots {
@@ -694,9 +699,21 @@ impl<'a> FileLowering<'a> {
                     let (params, ret) = any_member(symbol).expect("a kotlin.Any member");
                     self.import(symbol, &params, ret)?
                 }
-                Slot::Function(fid) => {
-                    self.functions[*fid as usize].expect("a vtable entry has a body")
-                }
+                Slot::Function(fid) => match self.functions[*fid as usize] {
+                    Some(id) => id,
+                    // A member this file emits no body for — one common lowering spliced into an
+                    // `inline` caller and then cleared, or one it marked inline-only. A table
+                    // cannot decline per entry the way a call site can, and there is no symbol to
+                    // name, so the FILE declines. A reified declaration never arrives here: it
+                    // keeps its symbol, with a trap for a body where the body could not be
+                    // lowered; see `FileLowering::define_function`.
+                    None => {
+                        return Err(format!(
+                            "a vtable entry for `{}`, which this file emits no body for",
+                            self.ir.functions[*fid as usize].name
+                        ));
+                    }
+                },
                 Slot::Abstract => self.import("kt_abstract_method_called", &[], Ty::Unit)?,
                 Slot::FieldGetter { .. }
                 | Slot::FieldSetter { .. }
@@ -924,6 +941,7 @@ impl<'a> FileLowering<'a> {
         let mut iterable = false;
         let mut iterator = false;
         let mut text = false;
+        let mut sequence = false;
         for edge in ir
             .function_overrides
             .get(&declaration.fq_name)
@@ -941,6 +959,13 @@ impl<'a> FileLowering<'a> {
                 edge.name.as_str(),
             ) {
                 (Some(CollectionShape::Iterable), "iterator") => iterable = true,
+                // A SEQUENCE is walked exactly as an iterable is: its one member is `iterator`,
+                // and the thunk the descriptor carries dispatches to it the same way. What the
+                // shape adds is the narrowing the receiver carries afterwards.
+                (Some(CollectionShape::Sequence), "iterator") => {
+                    iterable = true;
+                    sequence = true;
+                }
                 (Some(CollectionShape::Iterator), "hasNext" | "next") => iterator = true,
                 (Some(CollectionShape::Text), "get" | "subSequence") => text = true,
                 _ => {}
@@ -968,6 +993,9 @@ impl<'a> FileLowering<'a> {
         let mut slots = WalkSlots::default();
         if iterable {
             slots.iterator = self.walk_slot(class, "iterator");
+            // Only where the iterator was actually found: a class with no slot to walk through is
+            // no sequence of this file's either, and the flag must not outlive the walk it narrows.
+            slots.sequence = sequence && slots.iterator != 0;
         }
         if iterator {
             slots.has_next = self.walk_slot(class, "hasNext");

@@ -846,19 +846,24 @@ pub(super) fn is_list_type(internal: crate::types::TypeName) -> bool {
     )
 }
 
-/// Whether a type name is one an `is` answers with the runtime's LIST marker.
+/// Whether a type name is the one an `is` answers with the runtime's LIST marker.
 ///
-/// Narrower than [`is_list_type`], which also admits `Collection` because every question a list
-/// answers a collection answers the same way. A CHECK cannot take that: a set is a `Collection` and
-/// wears no list marker, so answering `x is Collection<*>` from it would say `false` of an object
-/// that is one. Only the spellings every object wearing the marker really is.
+/// Narrower than [`is_list_type`] in BOTH directions, and for the same reason each way: the marker
+/// says only "this object is a `kotlin.collections.List`", so the name it answers for has to be one
+/// every object wearing it really is and one no object without it could be.
+///
+/// `Collection` is out because a SET is one and wears no marker, so `x is Collection<*>` would have
+/// said `false` of an object that is one. `MutableList` and `ArrayList` are out for the mirror
+/// reason: both kinds of list the runtime builds wear this marker, the immutable one included, so
+/// `listOf(1) is MutableList<*>` would have said `true` where Kotlin/Native says false. Those two
+/// keep declining, as they did before the marker existed — the runtime has nothing that tells one
+/// kind from the other in a check.
+///
+/// It is also the descriptor `List::class` names, which is why the spelling has to be exact: a
+/// class literal reads the descriptor's own Kotlin name, and `kt_type_list_interface` is named
+/// `kotlin.collections.List` and nothing else.
 pub(super) fn is_list_check_type(internal: crate::types::TypeName) -> bool {
-    matches!(
-        kotlin_owner(&internal.render()),
-        "kotlin/collections/List"
-            | "kotlin/collections/MutableList"
-            | "kotlin/collections/ArrayList"
-    )
+    kotlin_owner(&internal.render()) == "kotlin/collections/List"
 }
 
 /// The growable list the runtime provides, if this names one.
