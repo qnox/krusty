@@ -105,15 +105,11 @@
 1	src/resolve.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `other`
 1	src/resolve/callable_reference_selection.rs	redundant closure: help: replace the closure with the function itself: `is_assignable`
 1	src/resolve/callable_reference_selection.rs	this `match` expression can be replaced with `?`
-1	src/resolve/delegated_properties.rs	large size difference between variants: the entire enum is at least 1288 bytes
-1	src/resolve/delegated_properties.rs	large size difference between variants: the entire enum is at least 1320 bytes
-1	src/resolve/delegated_properties.rs	large size difference between variants: the entire enum is at least 368 bytes
 1	src/resolve/delegated_properties.rs	this `if` statement can be collapsed
 1	src/resolve/delegated_properties.rs	using `contains()` instead of `iter().any()` is more efficient: help: try: `arguments.contains(&ret)`
 1	src/resolve/generic_call_bindings.rs	this function has too many arguments (8/7)
 1	src/resolve/interface_delegation.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if setter { Ty::Unit } else { property_type }`
 1	src/resolve/interface_delegation.rs	you are using an explicit closure for copying elements
-1	src/resolve/member_extension_selection.rs	large size difference between variants: the entire enum is at least 952 bytes
 1	src/resolve/operator_calls.rs	this function has too many arguments (9/7)
 1	src/resolve/scope.rs	this `if` can be collapsed into the outer `match`
 1	src/resolve/scope.rs	very complex type used. Consider factoring parts into `type` definitions
@@ -132,7 +128,6 @@
 1	src/symbol_resolver.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/symbol_resolver/generic_inference.rs	this function has too many arguments (8/7)
 1	src/symbol_resolver/generic_inference.rs	this function has too many arguments (9/7)
-1	src/symbol_resolver/overload_selection.rs	large size difference between variants: the entire enum is at least 1344 bytes
 1	src/symbol_resolver/sam.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/types.rs	redundant guard
 1	src/types.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let (base, nested) = split_nested_name(segment)?;`

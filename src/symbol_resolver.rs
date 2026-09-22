@@ -2602,7 +2602,7 @@ impl<'a> SymbolResolver<'a> {
             expected_result,
         ) {
             ReceiverFunctionSelection::Selected((selected, params, ret, _)) => {
-                CandidateSelection::Selected((selected, params, ret))
+                CandidateSelection::Selected((*selected, params, ret))
             }
             ReceiverFunctionSelection::None => CandidateSelection::None,
             ReceiverFunctionSelection::Ambiguous(_) => CandidateSelection::Ambiguous,

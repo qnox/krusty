@@ -186,6 +186,6 @@ impl<'a> SymbolResolver<'a> {
             };
             merge_specialized_return(provider, inferred)
         };
-        ReceiverFunctionSelection::Selected((selected, params, ret, applied_receiver))
+        ReceiverFunctionSelection::Selected((Box::new(selected), params, ret, applied_receiver))
     }
 }
