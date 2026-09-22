@@ -1046,6 +1046,8 @@ mod named_ctor_args_e2e;
 mod named_super_arg_e2e;
 #[path = "narrowed_this_member_call_e2e.rs"]
 mod narrowed_this_member_call_e2e;
+#[path = "nested_anon_object_capture_e2e.rs"]
+mod nested_anon_object_capture_e2e;
 #[path = "nested_class_ctor_scope_e2e.rs"]
 mod nested_class_ctor_scope_e2e;
 #[path = "nested_class_supertype_e2e.rs"]
