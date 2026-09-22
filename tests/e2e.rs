@@ -1345,6 +1345,8 @@ mod scope_chain_e2e;
 mod scope_function_value_arg_e2e;
 #[path = "sealed_cross_file_metadata_e2e.rs"]
 mod sealed_cross_file_metadata_e2e;
+#[path = "sealed_data_object_parity_e2e.rs"]
+mod sealed_data_object_parity_e2e;
 #[path = "sealed_interface_nested_e2e.rs"]
 mod sealed_interface_nested_e2e;
 #[path = "sealed_object_value_match_e2e.rs"]

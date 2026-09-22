@@ -2202,6 +2202,10 @@ pub struct IrFile {
     /// name), not classifier identity. Keeping it on `ClassId` avoids guessing lexical nesting from
     /// a JVM `$` spelling, where a backticked `$` is indistinguishable from a physical separator.
     class_source_qualified_names: std::collections::HashMap<ClassId, KtString>,
+    /// Exact stable-FIR declaration order for every source-declared classifier. Class metadata
+    /// consumes this semantic order directly; a backend must not reconstruct it from debug lines,
+    /// arena layout, or classifier spelling.
+    class_source_orders: std::collections::HashMap<ClassId, u32>,
     /// Stable `(classifier declaration, interface-delegation ordinal)` to its generated storage
     /// field. Common lowering predeclares this source-ordered layout once and both checked
     /// constructor initializers and forwarding-plan materialization consume the exact coordinate.
@@ -3098,6 +3102,19 @@ impl IrFile {
 
     pub(crate) fn class_source_qualified_name(&self, class: ClassId) -> Option<KtString> {
         self.class_source_qualified_names.get(&class).cloned()
+    }
+
+    pub(crate) fn record_class_source_order(&mut self, class: ClassId, source_order: u32) {
+        assert!(
+            self.class_source_orders
+                .insert(class, source_order)
+                .is_none(),
+            "a source classifier has one stable declaration order"
+        );
+    }
+
+    pub(crate) fn class_source_order(&self, class: ClassId) -> Option<u32> {
+        self.class_source_orders.get(&class).copied()
     }
 
     pub fn with_package(package: Option<String>) -> Self {
