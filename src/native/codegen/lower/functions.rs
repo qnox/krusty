@@ -553,6 +553,27 @@ impl<'a> FileLowering<'a> {
         Ok((vtable, interfaces, kotlin_name))
     }
 
+    /// Why a lambda's body function was not emitted, for a thunk that needs to call it.
+    ///
+    /// Three shapes reach `declare_functions`'s skip, and they are not one question: a body the
+    /// checked lowering CLEARED after splicing it into an inline caller is an orphan nothing should
+    /// have reached, while a body kept out because it returns NON-LOCALLY is live and deliberately
+    /// unreachable by name. Naming which one it is turns a single unfollowable decline into a
+    /// report that says what to look at.
+    fn missing_body_reason(&self, impl_fn: u32) -> String {
+        if self.ir.functions[impl_fn as usize].body.is_none() {
+            return "a lambda whose body was cleared after splicing".to_string();
+        }
+        if self
+            .ir
+            .inline_only_fns
+            .contains(&(impl_fn as crate::ir::FunId))
+        {
+            return "a lambda that returns non-locally, which only its caller can run".to_string();
+        }
+        "a lambda whose body has no code".to_string()
+    }
+
     /// A SAM object's entry point: the captures it carries, then the interface method's own
     /// arguments converted to what the lambda body declares.
     fn define_sam_thunk(
@@ -567,8 +588,8 @@ impl<'a> FileLowering<'a> {
         let body = &self.ir.functions[impl_fn as usize];
         let declared = carried_parameters(self.ir, impl_fn);
         let produced = body.ret;
-        let target = self.functions[impl_fn as usize]
-            .ok_or_else(|| "a lambda whose body has no code".to_string())?;
+        let target =
+            self.functions[impl_fn as usize].ok_or_else(|| self.missing_body_reason(impl_fn))?;
         if declared.len() != capture_offsets.len() + parameters.len() {
             return Err("a functional interface method of a different arity".to_string());
         }
@@ -635,8 +656,8 @@ impl<'a> FileLowering<'a> {
         let body = &self.ir.functions[impl_fn as usize];
         let parameters = carried_parameters(self.ir, impl_fn);
         let ret = body.ret;
-        let target = self.functions[impl_fn as usize]
-            .ok_or_else(|| "a lambda whose body has no code".to_string())?;
+        let target =
+            self.functions[impl_fn as usize].ok_or_else(|| self.missing_body_reason(impl_fn))?;
         let signature = self.signature_of(&vec![any(); arity + 1], any())?;
         let capture_offsets = capture_offsets.to_vec();
         let name = format!("{base}_invoke");

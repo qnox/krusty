@@ -82,7 +82,10 @@ fn a_message_block_that_returns_non_locally_still_declines() {
          }\n\
          fun box(): String = if (check(-1) == \"nonlocal\") \"OK\" else \"fail\"\n",
         "RequireWithANonLocalReturn",
-        "no code",
+        // The decline names WHY the body was not emitted: this lambda returns from `check`, which
+        // only a caller that spliced it can do, and `require` is a dependency whose body this
+        // target cannot splice.
+        "returns non-locally",
     );
 }
 
