@@ -180,6 +180,8 @@ fn run_backend_passes_after_plugins(
     ) {
         return Err(SkipReason::Suspend);
     }
+    // After the suspend transform: the body moved onto the static is the finished state machine.
+    crate::jvm::suspend_interface_impls::lower_suspend_interface_impls(ir);
     crate::jvm::ir_emit::realize_lambda_impl_names(ir);
     crate::jvm::ir_emit::mark_must_inline_lambdas(ir);
     crate::jvm::ir_emit::reparent_lambda_impls(ir);
