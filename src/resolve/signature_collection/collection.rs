@@ -2986,7 +2986,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .unwrap_or_default()
                         .into_iter()
                         .filter_map(|(ordinal, path)| {
-                            Some((ordinal, class_names.get_class(&path)?))
+                            Some((ordinal, class_names.classifier_binding(&path).ok()?))
                         })
                         .collect();
                     let semantic_tparam_names = classifier_header

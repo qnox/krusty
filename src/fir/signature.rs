@@ -3356,9 +3356,11 @@ impl ResolvedModuleIndex {
                 .map(|annotations| annotations.len() * std::mem::size_of::<TypeName>())
                 .sum::<usize>()
             + self.declaration_annotation_string_arguments.len()
-            + self.declaration_annotation_class_arguments.len()
                 * (std::mem::size_of::<(DeclarationId, u32)>()
                     + std::mem::size_of::<Box<[Box<str>]>>())
+            + self.declaration_annotation_class_arguments.len()
+                * (std::mem::size_of::<(DeclarationId, u32)>()
+                    + std::mem::size_of::<Box<[TypeName]>>())
             + self
                 .declaration_annotation_string_arguments
                 .values()
@@ -3369,6 +3371,11 @@ impl ResolvedModuleIndex {
                             .map(|argument| argument.len())
                             .sum::<usize>()
                 })
+                .sum::<usize>()
+            + self
+                .declaration_annotation_class_arguments
+                .values()
+                .map(|arguments| arguments.len() * std::mem::size_of::<TypeName>())
                 .sum::<usize>()
             + (self.invisible_reference_suppressions.len()
                 + self.invisible_member_suppressions.len()

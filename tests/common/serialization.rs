@@ -143,7 +143,6 @@ fn krusty_box_files(sources: &[(&str, &str)], stem: &str) -> String {
 
 /// The multi-file form of [`both_compilers_box`]: the file split is itself the discriminator for a
 /// serializer a sibling file declares.
-#[allow(dead_code)]
 pub(super) fn both_compilers_box_files(sources: &[(&str, &str)], stem: &str) -> String {
     let reference = reference_box_files(sources, stem);
     let actual = krusty_box_files(sources, stem);

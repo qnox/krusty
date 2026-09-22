@@ -5239,16 +5239,9 @@ impl crate::types::ClassifierAnnotationSource for JvmLibraries {
         SymbolSource::classifier(self, classifier).map(|shape| shape.annotations.clone())
     }
 
-    fn classifier_reference_shape(
-        &self,
-        classifier: TypeName,
-    ) -> Option<crate::types::ClassifierReferenceShape> {
-        SymbolSource::classifier(self, classifier).map(|shape| {
-            crate::types::ClassifierReferenceShape {
-                is_object: shape.kind == crate::libraries::TypeKind::Object,
-                type_parameter_count: shape.own_type_parameter_count,
-            }
-        })
+    fn classifier_is_object(&self, classifier: TypeName) -> Option<bool> {
+        SymbolSource::classifier(self, classifier)
+            .map(|shape| shape.kind == crate::libraries::TypeKind::Object)
     }
 }
 

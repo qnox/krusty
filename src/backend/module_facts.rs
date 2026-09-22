@@ -659,16 +659,9 @@ impl crate::types::ClassifierAnnotationSource for CheckedBackendClassifiers<'_> 
         BackendClassifierSource::classifier(self, classifier).map(|fact| fact.annotations.to_vec())
     }
 
-    fn classifier_reference_shape(
-        &self,
-        classifier: TypeName,
-    ) -> Option<crate::types::ClassifierReferenceShape> {
-        BackendClassifierSource::classifier(self, classifier).map(|fact| {
-            crate::types::ClassifierReferenceShape {
-                is_object: fact.kind == crate::libraries::TypeKind::Object,
-                type_parameter_count: fact.own_type_parameter_count,
-            }
-        })
+    fn classifier_is_object(&self, classifier: TypeName) -> Option<bool> {
+        BackendClassifierSource::classifier(self, classifier)
+            .map(|fact| fact.kind == crate::libraries::TypeKind::Object)
     }
 }
 
