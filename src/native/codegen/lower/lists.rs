@@ -829,7 +829,14 @@ impl BodyLowering<'_, '_, '_> {
         let (symbol, carried, answer) = super::super::super::intrinsics::iteration_role_of(ty)
             .and_then(|role| interface_symbol(role, name, args.len()))
             .or_else(|| super::super::super::intrinsics::scalar_member(&owner, name, params))
-            .or_else(|| super::maps::runtime_symbol(&owner, name, args.len()))?;
+            .or_else(|| super::maps::runtime_symbol(&owner, name, args.len()))
+            // `Comparable.compareTo` is answered from the DESCRIPTOR rather than from a table
+            // keyed on a shape, so it is named here rather than found: one member, one entry
+            // point, both operands references and the answer an `Int`.
+            .or_else(|| {
+                super::super::super::intrinsics::is_comparable_compare_to(&owner, name, params)
+                    .then(|| ("kt_compare_any", vec![any(), any()], Ty::Int))
+            })?;
         // An operand list the two sides state differently in LENGTH is not something a conversion
         // reconciles; the runtime entry point leads with the receiver, so one more than the
         // arguments is what it takes.

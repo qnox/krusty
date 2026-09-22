@@ -8109,9 +8109,17 @@ and behavior is checked by RUNNING the emitted program.
   declaration accepts. This dispatch has no bridge to put in front of an implementor's arm, so those
   members decline rather than reaching an override Kotlin would have skipped. Every one of them
   takes an argument, which is why the nullary members are untouched.
+  `Comparable.compareTo` takes the same path, and is NAMED there rather than found: its answer is
+  read from the receiver's DESCRIPTOR rather than from a table keyed on a shape, so there is one
+  member and one entry point. A file that overrides it knows the classes that could be behind a
+  `Comparable` receiver, so the call site tests for them and falls through to the descriptor — which
+  is how a class of the program's and a boxed primitive reach one call site and each get their own
+  order. A file that merely NAMES `Comparable` among its supertypes, or declares an enum, still
+  declines: there is no override edge to read the implementors from.
   Tests: `tests/native_implemented_dependency_dispatch_e2e.rs`
   (`::a_member_with_arguments_dispatches_on_the_receiver_too`, whose index operand is counted so
-  that evaluating it twice would fail, and `::a_member_with_a_special_bridge_declines`).
+  that evaluating it twice would fail, and `::a_member_with_a_special_bridge_declines`), and
+  `tests/native_comparable_e2e.rs::a_declared_comparable_is_ordered_by_its_own_compare_to`.
 
 - **`kotlin.Comparator` is a functional interface the RUNTIME knows, so its conversion makes no
   object of its own.** A `fun interface` declared in this file becomes an object wearing that
