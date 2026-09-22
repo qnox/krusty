@@ -234,6 +234,8 @@ mod classpath_function_reference_e2e;
 mod classpath_hidden_deprecated_e2e;
 #[path = "classpath_inline_splice_e2e.rs"]
 mod classpath_inline_splice_e2e;
+#[path = "classpath_inline_splice_parity_e2e.rs"]
+mod classpath_inline_splice_parity_e2e;
 #[path = "classpath_inner_classes_e2e.rs"]
 mod classpath_inner_classes_e2e;
 #[path = "classpath_is_smartcast_e2e.rs"]
@@ -1373,6 +1375,8 @@ mod smart_cast_member_extension_e2e;
 mod smartcast_and_e2e;
 #[path = "source_fallback_companion_props_e2e.rs"]
 mod source_fallback_companion_props_e2e;
+#[path = "spliced_lambda_try_e2e.rs"]
+mod spliced_lambda_try_e2e;
 #[path = "spread_in_annotation_e2e.rs"]
 mod spread_in_annotation_e2e;
 #[path = "spread_operator_e2e.rs"]
@@ -1419,6 +1423,8 @@ mod suspend_collection_hof_e2e;
 mod suspend_collection_hof_suspend_lambda_e2e;
 #[path = "suspend_continuation_owner_e2e.rs"]
 mod suspend_continuation_owner_e2e;
+#[path = "suspend_in_spliced_inline_e2e.rs"]
+mod suspend_in_spliced_inline_e2e;
 
 #[path = "suspend_conversion_e2e.rs"]
 mod suspend_conversion_e2e;

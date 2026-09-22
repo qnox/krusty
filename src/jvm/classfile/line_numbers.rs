@@ -65,6 +65,37 @@ impl CodeBuilder {
         }
     }
 
+    /// Record `line` at an offset BEHIND the current one — a spliced body's own line marks, whose
+    /// positions the splice fixes and which are added once its bytes are already in place.
+    ///
+    /// The table must stay ascending by pc, so a mark that would land before the last one already
+    /// recorded is refused rather than silently reordering it.
+    pub fn add_line_mark_at(&mut self, pc: u16, line: u16) {
+        // A `LineNumberTable` `start_pc` must index the code array (JVMS 4.7.12). A spliced body
+        // whose bytes were dropped as unreachable leaves its recorded positions past the end, and an
+        // entry there makes the whole class unloadable.
+        if self.bytes.len() > u16::MAX as usize || pc as usize >= self.bytes.len() {
+            return;
+        }
+        match self.line_marks.last() {
+            Some((last_pc, _)) if *last_pc > pc => {}
+            Some((last_pc, last_line)) if *last_pc == pc => {
+                if *last_line != line {
+                    let entry = self.line_marks.last_mut().expect("just observed");
+                    entry.1 = line;
+                }
+            }
+            // The line already in effect needs no entry of its own.
+            Some((_, last_line)) if *last_line == line => {}
+            _ => self.line_marks.push((pc, line)),
+        }
+    }
+
+    /// The line in effect at the current offset, if any mark has been recorded.
+    pub fn current_line(&self) -> Option<u16> {
+        self.line_marks.last().map(|&(_, line)| line)
+    }
+
     /// Record `line` at the current offset as an entry the NEXT mark at that offset must append
     /// after rather than replace.
     ///

@@ -41,6 +41,7 @@ pub mod property_storage;
 mod ranges;
 mod reified_operations;
 mod shared_captures;
+pub mod source_map;
 pub mod suspend;
 mod top_level_properties;
 mod value_class_declarations;

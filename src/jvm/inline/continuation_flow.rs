@@ -78,6 +78,8 @@ mod tests {
             stackmap: None,
             handlers: vec![],
             locals: vec![],
+            lines: Vec::new(),
+            source_file: None,
             bootstrap_methods: Vec::new(),
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
@@ -102,6 +104,8 @@ mod tests {
             stackmap: None,
             handlers: vec![],
             locals: vec![],
+            lines: Vec::new(),
+            source_file: None,
             bootstrap_methods: Vec::new(),
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");

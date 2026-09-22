@@ -11,6 +11,36 @@ pub(super) fn lambda_implementation_name(origin: &IrLambdaOrigin) -> String {
     format!("{enclosing}$lambda${}", origin.implementation_ordinal)
 }
 
+/// The name a dependency's own debug local carries once its body is spliced into a caller.
+///
+/// kotlinc suffixes an inlined value with `$iv` and leaves its inline-depth markers (`$i$f$…`,
+/// `$i$a$…`) alone — those already name the inlining they belong to. The suffix is a property of
+/// being inlined rather than of the declaration, which is why it is applied here and not stored.
+pub(super) fn spliced_local_name(name: &str) -> String {
+    if name.starts_with("$i$f$") || name.starts_with("$i$a$") {
+        name.to_string()
+    } else {
+        format!("{name}$iv")
+    }
+}
+
+/// The name of the inline-depth marker a spliced lambda body opens with.
+///
+/// kotlinc spells it `$i$a$-<inline callee>-<the lambda's own class>`, and names that class after
+/// the declaration the lambda appears in. The lambda is inlined and no such class is emitted, so
+/// this string is the only place the name exists.
+pub(super) fn spliced_lambda_marker_name(
+    callee: &str,
+    owner: &str,
+    enclosing: &str,
+    ordinal: u32,
+) -> String {
+    // A debug-table name is an UNQUALIFIED name (JVMS 4.2.2): `/` is illegal in one, and a class
+    // loader rejects the whole class over it. The owner contributes its simple name only.
+    let owner = owner.rsplit('/').next().unwrap_or(owner);
+    format!("$i$a$-{callee}-{owner}${enclosing}${}", ordinal + 1)
+}
+
 /// Render one source/debug local at the JVM boundary. Common lowering records source spelling,
 /// inline depth, and stable lambda identity; only this module owns kotlinc's `$this$`, `$iv`, and
 /// `_u24` conventions.
@@ -61,6 +91,16 @@ pub(super) fn render(
 
 #[cfg(test)]
 mod tests {
+    /// A packaged owner contributes only its simple name: a debug-table name may not contain `/`,
+    /// and a class carrying one is rejected at load with `Illegal field name`.
+    #[test]
+    fn a_spliced_lambda_marker_never_carries_a_qualified_owner() {
+        let name =
+            super::spliced_lambda_marker_name("firstOrNull", "lib/Catalog", "findResource", 0);
+        assert_eq!(name, "$i$a$-firstOrNull-Catalog$findResource$1");
+        assert!(!name.contains('/'));
+    }
+
     use super::*;
     use crate::ir::{IrExpr, IrFunction};
     use crate::types::Ty;

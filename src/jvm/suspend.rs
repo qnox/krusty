@@ -27,11 +27,13 @@
 //! own parameters — its continuation would also have to capture them) skip the file.
 
 mod bottom_completion;
+pub(crate) mod cps;
+pub(crate) use cps::EmitTimeMachines;
 mod debug_metadata;
 mod get_or_create;
 mod hoisting;
 mod live_scopes;
-use hoisting::hoist_suspensions;
+use hoisting::{hoist_spliced_inline_bodies, hoist_suspensions};
 use live_scopes::{
     live_temp_scopes, merge_live_temps, reconcile_positional_spill_locals, ScopeWalk,
 };
@@ -183,6 +185,7 @@ pub(crate) fn lower_suspend(
     facade: &str,
     continuation_metadata: &mut ContinuationMetadataMap,
     default_call_operands: &mut crate::jvm::default_call_operands::DefaultCallOperands,
+    emit_time_machines: &mut EmitTimeMachines,
 ) -> bool {
     realize_safe_coroutine_points(ir);
     let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
@@ -345,14 +348,73 @@ pub(crate) fn lower_suspend(
         }
         let has_susp =
             forward.is_none() && body.is_some_and(|b| expr_calls_suspend(ir, b, &suspend_set));
+        // The IR machine sees no suspension here, but one lives inside a lambda whose body will be
+        // spliced into this very frame. Its machine is built during emission, where the spliced
+        // body's own locals exist. The conjunction is the whole gate: this claims only functions
+        // that would otherwise be emitted with no continuation to pass.
+        // A member's continuation re-enters the method on the receiver it kept, so the call it makes
+        // has to reach exactly this body: an OPEN method would re-dispatch to an override, and a
+        // private one is not callable from the continuation class. Those keep the diagnostic they
+        // have today.
+        //
+        // A function that ALSO has suspensions of its own is taken whole: one method has one
+        // dispatch, so the two kinds cannot be split between the IR machine and this one. The IR
+        // machine never saw the spliced kind, so such a function does not compile today at all.
+        let spliced_suspensions: Vec<ExprId> = match (forward, body) {
+            (None, Some(b)) if machine_eligible(ir, fid) => {
+                match cps::spliced_inline_suspensions(ir, b, &suspend_set).is_empty() {
+                    true => Vec::new(),
+                    false => cps::frame_suspensions(ir, b, &suspend_set),
+                }
+            }
+            _ => Vec::new(),
+        };
+        #[cfg(feature = "trace")]
+        if spliced_suspensions.is_empty() && forward.is_none() {
+            if let Some(b) = body {
+                let ignored = cps::spliced_inline_suspensions(ir, b, &suspend_set);
+                if !ignored.is_empty() {
+                    crate::trace_compiler!(
+                        "suspend",
+                        "machine NOT eligible fid={fid} name={} static={} open={} private={} n={}",
+                        ir.functions[fid as usize].name,
+                        ir.functions[fid as usize].is_static,
+                        ir.open_methods.contains(&fid),
+                        ir.private_methods.contains(&fid),
+                        ignored.len()
+                    );
+                }
+            }
+        }
+        // Those bodies have never been through the value-`try` desugar or suspension hoisting: the
+        // passes above stop at a lambda. Normalize them now, then re-read the suspensions — hoisting
+        // rewrites the very expressions just collected. Each body is typed in its own lambda's value
+        // numbering, not this function's. A value-`try` the desugar could not reach (one nested
+        // inside an expression) still keeps the call's raw `Object` in a scalar arm, and a non-local
+        // `return` is not boxed to the CPS result yet; such a body is declined after normalization,
+        // exactly as before the machine existed.
+        let spliced_suspensions = match (spliced_suspensions.is_empty(), body) {
+            (false, Some(b)) => {
+                hoist_spliced_inline_bodies(ir, b, &suspend_set, &orig_rets, &ret_ty);
+                let declined = cps::suspends_in_a_value_try(ir, b, &suspend_set)
+                    || cps::spliced_body_returns(ir, b, &suspend_set);
+                match declined {
+                    true => Vec::new(),
+                    false => cps::frame_suspensions(ir, b, &suspend_set),
+                }
+            }
+            _ => spliced_suspensions,
+        };
+        let emit_time_machine = !spliced_suspensions.is_empty();
         // A `suspendCoroutineUninterceptedOrReturn` block that reads its continuation is a
         // first-class suspension point (common lowering records it separately from callable nodes): the
         // machine passes ITSELF as the continuation, so `it.resume(v)` re-enters this machine at
         // the resume label — kotlinc's protocol (coroutines/tailCallToNothing).
         crate::trace_compiler!(
             "suspend",
-            "fn fid={fid} name={} has_susp={has_susp}",
-            ir.functions[fid as usize].name
+            "fn fid={fid} name={} has_susp={has_susp} spliced_suspensions={}",
+            ir.functions[fid as usize].name,
+            spliced_suspensions.len()
         );
         let is_static = ir.functions[fid as usize].is_static;
         // Keep the declared signature before it is consumed — the class's `@Metadata` and the method's
@@ -392,7 +454,7 @@ pub(crate) fn lower_suspend(
             // `Continuation` parameter itself. A body that DOES get a machine resolves the
             // placeholder to the machine WRAPPER inside `build_state_machine` (cont_v), so
             // `c.resume(v)` re-enters this machine.
-            if !has_susp {
+            if !has_susp && !emit_time_machine {
                 rewrite_current_continuation(ir, b, p_old);
             }
             // The pre-splice scope lists (captured above) hold PRE-shift local indices — shift them
@@ -434,6 +496,29 @@ pub(crate) fn lower_suspend(
             if !box_returns(ir, b) {
                 return false;
             }
+        } else if emit_time_machine {
+            // Emission owns this machine. Give every spliced suspension its continuation operand as
+            // an `IrExpr::CurrentContinuation`: one `aload` either way, so the discovery pass (which
+            // resolves it to `$completion`) allocates exactly the slots the emitting pass will.
+            let b = body.expect("a spliced-inline suspension implies a body");
+            let mut recorded = Vec::new();
+            for &call in &spliced_suspensions {
+                let cont = ir.add_expr(IrExpr::CurrentContinuation);
+                if !append_continuation(ir, call, cont, default_call_operands) {
+                    return false;
+                }
+                recorded.push(cps::SplicedSuspension { call });
+            }
+            if !box_returns(ir, b) {
+                return false;
+            }
+            ensure_tail_return(ir, b, orig_rets[fid as usize] == Ty::Unit);
+            // The standalone `invoke` of each such lambda is not emitted: it has no continuation of
+            // its own to pass, and every call to it is spliced.
+            for implementation in cps::spliced_suspension_lambda_impls(ir, b, &suspend_set) {
+                ir.inline_only_fns.insert(implementation);
+            }
+            emit_time_machines.record(fid, recorded);
         } else if !has_susp {
             // Leaf: box the returns (no state machine). The CPS method returns `Object`, so an expression
             // / statement body that falls through (no `return`) must get a terminal return — a value body
@@ -1803,7 +1888,52 @@ fn normalize_value_when(ir: &mut IrFile, expression: ExprId) -> Option<ExprId> {
 /// `IrFile::exprs` is a module-wide arena while `GetValue(n)` is function-local, so any type query
 /// based on a global scan is inherently ambiguous. Nested lambda bodies own another namespace and are
 /// deliberately skipped; only their capture expressions still belong to the enclosing function.
+/// Whether emission may own this function's coroutine machine.
+///
+/// A static function always may. An instance method may when the continuation can call it back and
+/// be sure of reaching this very body: `invokevirtual` on an OPEN method would land in an override,
+/// and a private method is not accessible from the continuation class at all.
+fn machine_eligible(ir: &IrFile, fid: u32) -> bool {
+    let function = &ir.functions[fid as usize];
+    if function.is_static {
+        return true;
+    }
+    let owner_is_interface = function.dispatch_receiver.as_ref().is_some_and(|receiver| {
+        ir.classes
+            .iter()
+            .any(|class| class.fq_name_matches(&receiver.render()) && class.is_interface)
+    });
+    function.dispatch_receiver.is_some() && !owner_is_interface && !ir.open_methods.contains(&fid)
+}
+
 fn function_value_types(ir: &IrFile, fid: u32, body: ExprId) -> HashMap<u32, Ty> {
+    function_value_types_with(ir, fid, &ir.functions[fid as usize].params, body)
+}
+
+/// The value-type table of a lambda's `inline_body`, numbered as the impl method is: captures, then
+/// the lambda's own parameters, then the locals the body declares. A `suspend`-typed lambda may
+/// already have been through this pass — it precedes the frame it is spliced into in `suspend_funs`
+/// — and then carries a trailing `Continuation` at the index its body's first local uses. The
+/// declared signature is the one the body was numbered against.
+pub(super) fn spliced_body_value_types(
+    ir: &IrFile,
+    impl_fn: u32,
+    body: ExprId,
+) -> HashMap<u32, Ty> {
+    let params = ir
+        .suspend_declared_sigs
+        .get(&impl_fn)
+        .map(|(params, _)| params.as_slice())
+        .unwrap_or(&ir.functions[impl_fn as usize].params);
+    function_value_types_with(ir, impl_fn, params, body)
+}
+
+fn function_value_types_with(
+    ir: &IrFile,
+    fid: u32,
+    params: &[Ty],
+    body: ExprId,
+) -> HashMap<u32, Ty> {
     fn collect(ir: &IrFile, expression: ExprId, out: &mut HashMap<u32, Ty>) {
         match &ir.exprs[expression as usize] {
             IrExpr::Variable {
@@ -1830,7 +1960,7 @@ fn function_value_types(ir: &IrFile, fid: u32, body: ExprId) -> HashMap<u32, Ty>
     if let Some(receiver) = physical_receiver {
         out.insert(0, Ty::obj_name(receiver));
     }
-    for (index, ty) in function.params.iter().copied().enumerate() {
+    for (index, ty) in params.iter().copied().enumerate() {
         out.insert(receiver_offset + index as u32, ty);
     }
     // A generated `SuspendLambda.invokeSuspend` reloads captures and own lambda parameters from the
@@ -2299,6 +2429,33 @@ fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> boo
     found
 }
 
+/// How many functions with this one's continuation NAME the file declares before it.
+///
+/// A continuation class is named after the method it re-enters, so two overloads would share one —
+/// and they do not share a spill layout, so whichever class loses the name resumes against fields it
+/// does not have (`NoSuchFieldError`). Both machines number the later one.
+pub(crate) fn same_name_ordinal(ir: &IrFile, fid: u32) -> usize {
+    let function = &ir.functions[fid as usize];
+    let bare = |name: &str| name.split('-').next().unwrap_or(name).to_string();
+    let name = bare(&function.name);
+    ir.functions
+        .iter()
+        .take(fid as usize)
+        .filter(|other| {
+            bare(&other.name) == name && other.dispatch_receiver == function.dispatch_receiver
+        })
+        .count()
+}
+
+/// The continuation class for `fid`: `<owner>$<function>$1`, and `$2`, `$3`, … for the overloads
+/// that follow it.
+pub(crate) fn continuation_class_name(owner: &str, function: &str, ordinal: usize) -> String {
+    match ordinal {
+        0 => format!("{owner}${function}$1"),
+        n => format!("{owner}${function}${}", n + 1),
+    }
+}
+
 /// Build the coroutine state machine for `fid` (whose body `b` is a top-level block). The body is
 /// flattened into a state graph: each suspension point (including one inside an `if`/`when` branch value)
 /// ends a state and starts a resume state, and control flow becomes `label = next` transitions through a
@@ -2623,7 +2780,8 @@ fn build_state_machine(
     // kotlinc names `create-SCm-oBs`'s continuation `<Owner>$create$1`. `-` can't occur in a Kotlin
     // identifier, so it only ever separates the mangle hash — strip from the first `-`.
     let cont_fname = fname.split('-').next().unwrap_or(&fname);
-    let cont_internal = format!("{cont_owner}${cont_fname}$1");
+    let cont_internal =
+        continuation_class_name(&cont_owner, cont_fname, same_name_ordinal(ir, fid));
     let cont_ty = Ty::obj(&cont_internal);
 
     let base = max_value_index(ir) + 1;

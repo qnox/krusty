@@ -365,6 +365,13 @@ pub struct MethodCode {
     /// Debug locals from the declaration body. Provider-side structural decoders use their source
     /// names only after bytecode flow has identified the exact semantic local role.
     pub locals: Vec<MethodLocal>,
+    /// The body's `LineNumberTable` as `(start_pc, line)`. Splicing a body puts the DEPENDENCY's
+    /// source inside another class, so these lines only mean anything alongside a source map that
+    /// says which file they belong to. Empty when the method carries no table.
+    pub lines: Vec<(u16, u16)>,
+    /// The defining class's `SourceFile` — the simple name a source map has to name the inlined
+    /// lines against. `None` when the class declares none.
+    pub source_file: Option<String>,
     /// The DEFINING class's `BootstrapMethods` entries, as `(method handle cp index, static argument
     /// cp indices)`. An `invokedynamic` names one by index into this table rather than into the
     /// constant pool, so relocating the instruction into another class means re-interning the entry
@@ -455,12 +462,24 @@ pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<Me
                 let nca = r.u2().ok()?;
                 let mut stackmap = None;
                 let mut locals = Vec::new();
+                let mut lines = Vec::new();
                 for _ in 0..nca {
                     let an = utf8(r.u2().ok()?).to_string();
                     let al = r.u4().ok()? as usize;
                     let body = r.take(al).ok()?;
                     if an == "StackMapTable" {
                         stackmap = Some(body.to_vec());
+                    } else if an == "LineNumberTable" {
+                        let mut line_reader = Reader { b: body, i: 0 };
+                        let count = line_reader.u2().ok()?;
+                        for _ in 0..count {
+                            let start_pc = line_reader.u2().ok()?;
+                            let line = line_reader.u2().ok()?;
+                            lines.push((start_pc, line));
+                        }
+                        if line_reader.i != body.len() {
+                            return None;
+                        }
                     } else if an == "LocalVariableTable" {
                         let mut local_reader = Reader { b: body, i: 0 };
                         let count = local_reader.u2().ok()?;
@@ -483,7 +502,9 @@ pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<Me
                         }
                     }
                 }
-                found = Some((max_stack, max_locals, code, stackmap, handlers, locals));
+                found = Some((
+                    max_stack, max_locals, code, stackmap, handlers, locals, lines,
+                ));
                 continue;
             }
             r.take(attr_len).ok()?;
@@ -492,7 +513,7 @@ pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<Me
             return None; // method found but has no Code (abstract/native)
         }
     }
-    let (max_stack, max_locals, code, stackmap, handlers, locals) = found?;
+    let (max_stack, max_locals, code, stackmap, handlers, locals, lines) = found?;
     // `BootstrapMethods` is a CLASS attribute, so it lies past the methods. An `invokedynamic` in the
     // body indexes it rather than the constant pool, so a splice into another class cannot relocate
     // one without it. Reached by finishing the scan rather than by parsing the class a second time:
@@ -501,7 +522,7 @@ pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<Me
     // in it names an entry by index, and an index into a table this reader could not parse is not
     // something to guess at. Declining the body costs a real call at the call site; guessing costs
     // a relocated entry naming the wrong handle.
-    let bootstrap_methods = read_bootstrap_methods(&mut r, &cp)?;
+    let (bootstrap_methods, source_file) = read_class_attributes(&mut r, &cp)?;
     Some(MethodCode {
         max_stack,
         max_locals,
@@ -510,12 +531,15 @@ pub fn read_method_code(bytes: &[u8], name: &str, descriptor: &str) -> Option<Me
         stackmap,
         handlers,
         locals,
+        lines,
+        source_file,
         bootstrap_methods,
     })
 }
 
 /// One method's `Code` attribute as the single-method scan recovers it, before the class attributes
-/// that follow it are read: `(max_stack, max_locals, code, StackMapTable, handlers, debug locals)`.
+/// that follow it are read: `(max_stack, max_locals, code, StackMapTable, handlers, debug locals,
+/// line table)`.
 type ScannedCode = (
     u16,
     u16,
@@ -523,11 +547,13 @@ type ScannedCode = (
     Option<Vec<u8>>,
     Vec<ExcEntry>,
     Vec<MethodLocal>,
+    Vec<(u16, u16)>,
 );
 
-/// The defining class's `BootstrapMethods` entries, as `(method handle cp index, static argument cp
-/// indices)`. `r` must be positioned at the start of the CLASS attribute table, which is why the
-/// method scan runs to completion rather than stopping at the method it wanted.
+/// The class attributes a spliced body needs: its `BootstrapMethods` entries as `(method handle cp
+/// index, static argument cp indices)`, and its `SourceFile`. `r` must be positioned at the start of
+/// the CLASS attribute table, which is why the method scan runs to completion rather than stopping
+/// at the method it wanted.
 ///
 /// `Some(vec![])` means the class DECLARES no such attribute — a class with no `invokedynamic`,
 /// which is most of them. `None` means the table is there but could not be read: a truncated
@@ -537,17 +563,31 @@ type ScannedCode = (
 /// the whole body untrustworthy.
 ///
 /// Exact consumption is checked rather than assumed. JVMS 4.7.23 fixes the attribute's length from
+/// What [`read_class_attributes`] recovers: the `BootstrapMethods` entries (each a method handle
+/// index and its static arguments) and the `SourceFile` name, absent when the class declares none.
+type ClassAttributes = (Vec<(u16, Vec<u16>)>, Option<String>);
+
 /// its own contents, so a body with bytes left over — or one that wanted more than it declared —
 /// is not a `BootstrapMethods` attribute this reader understands, and guessing at the remainder is
 /// how a relocated entry silently names the wrong handle.
-fn read_bootstrap_methods(r: &mut Reader, cp: &[C]) -> Option<Vec<(u16, Vec<u16>)>> {
+fn read_class_attributes(r: &mut Reader, cp: &[C]) -> Option<ClassAttributes> {
+    let named = |index: u16, wanted: &str| matches!(cp.get(index as usize), Some(C::Utf8(name)) if name == wanted);
     let nattr = r.u2().ok()?;
+    let mut bootstrap_methods = Vec::new();
+    let mut source_file = None;
     for _ in 0..nattr {
         let name_index = r.u2().ok()?;
         let len = r.u4().ok()? as usize;
         let body = r.take(len).ok()?;
-        let is_bootstrap = matches!(cp.get(name_index as usize), Some(C::Utf8(name)) if name == "BootstrapMethods");
-        if !is_bootstrap {
+        if named(name_index, "SourceFile") {
+            let mut value = Reader { b: body, i: 0 };
+            let index = value.u2().ok()?;
+            if let Some(C::Utf8(name)) = cp.get(index as usize) {
+                source_file = Some(name.clone());
+            }
+            continue;
+        }
+        if !named(name_index, "BootstrapMethods") {
             continue;
         }
         let mut entries = Reader { b: body, i: 0 };
@@ -565,9 +605,9 @@ fn read_bootstrap_methods(r: &mut Reader, cp: &[C]) -> Option<Vec<(u16, Vec<u16>
         if entries.i != body.len() {
             return None;
         }
-        return Some(out);
+        bootstrap_methods = out;
     }
-    Some(Vec::new())
+    Some((bootstrap_methods, source_file))
 }
 
 pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {

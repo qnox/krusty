@@ -3355,6 +3355,150 @@ pub fn byte_diff_against_kotlinc_cp_target(
     )))
 }
 
+/// Compare ONE method's instruction sequence against the reference compiler's, with a dependency
+/// the reference compiler built.
+///
+/// Whole-class identity also covers the constant pool, the debug tables and `SourceDebugExtension`,
+/// which diverge for reasons of their own; this instrument answers the narrower question a splice
+/// change is actually about — whether the emitted code is the same instructions in the same order,
+/// over the same local slots. Pool indices are normalized away because two pools interned in
+/// different orders describe the same references.
+#[allow(dead_code)]
+pub fn method_code_diff_against_kotlinc_lib(
+    name: &str,
+    lib: &str,
+    src: &str,
+    class: &str,
+    method: &str,
+) -> Option<Result<(), String>> {
+    let libout = kotlinc_lib_out(&[("Lib.kt", lib)])?;
+    let dir = scratch_dir()?;
+    let kref = dir.join("ref");
+    let kout = dir.join("krusty");
+    std::fs::create_dir_all(&kref).ok()?;
+    std::fs::create_dir_all(&kout).ok()?;
+    let src_path = dir.join(format!("{name}.kt"));
+    std::fs::write(&src_path, src).ok()?;
+    let (code, stderr) = kotlinc_compile(&[
+        "-d".to_string(),
+        kref.to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        libout.to_string_lossy().into_owned(),
+        src_path.to_string_lossy().into_owned(),
+    ])?;
+    assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
+
+    let classpath = [libout, stdlib_jar()];
+    let classes = compile_in_process_metadata_cp(src, name, &classpath)
+        .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
+    let (_, krusty_bytes) = classes
+        .iter()
+        .find(|(emitted, _)| emitted == class)
+        .unwrap_or_else(|| panic!("{name}: krusty did not emit {class}"));
+    let krusty_path = kout.join(format!("{class}.class"));
+    if let Some(parent) = krusty_path.parent() {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+    std::fs::write(&krusty_path, krusty_bytes).ok()?;
+
+    let reference = disassembled_method(&kref, class, method)?;
+    let actual = disassembled_method(&kout, class, method)?;
+    let _ = std::fs::remove_dir_all(&dir);
+    if reference == actual {
+        return Some(Ok(()));
+    }
+    Some(Err(format!(
+        "{name}/{class}.{method}: instruction sequences differ\n--- kotlinc ---\n{reference}\n--- krusty ---\n{actual}"
+    )))
+}
+
+/// Whether `bytes` contains a CALL to `callee` — a method reference an instruction names, rather
+/// than the name appearing anywhere in the class.
+///
+/// A spliced inline function's name still occurs in the class: its inline-depth marker
+/// (`$i$f$<callee>`) is a debug-table entry, and the source map names the file it came from. Those
+/// are not calls, and the reference compiler emits them too, so a byte search for the name answers
+/// a different question from the one a splice test is asking.
+#[allow(dead_code)]
+pub fn class_calls_method(bytes: &[u8], class: &str, callee: &str) -> Option<bool> {
+    let dir = scratch_dir()?;
+    let path = dir.join(format!("{class}.class"));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+    std::fs::write(&path, bytes).ok()?;
+    let out = std::process::Command::new(format!("{}/bin/javap", java_home()))
+        .args(["-p", "-c", "-cp"])
+        .arg(&dir)
+        .arg(class.replace('/', "."))
+        .output()
+        .ok()?;
+    let text = String::from_utf8(out.stdout).ok()?;
+    let _ = std::fs::remove_dir_all(&dir);
+    Some(
+        text.lines()
+            .any(|line| line.contains("// Method ") && line.contains(&format!(".{callee}:"))),
+    )
+}
+
+/// One method's instructions and its `LocalVariableTable`, with constant-pool indices and trailing
+/// comments normalized away.
+///
+/// The `LineNumberTable` is deliberately excluded: a spliced body's line numbers are output lines
+/// that only a `SourceDebugExtension` gives meaning to, and krusty does not emit one yet
+/// (`docs/JVM_INLINE_BEFORE_CPS.md` a5/a6). Including it would fail for a reason this instrument is
+/// not measuring.
+#[allow(dead_code)]
+fn disassembled_method(dir: &Path, class: &str, method: &str) -> Option<String> {
+    let out = std::process::Command::new(format!("{}/bin/javap", java_home()))
+        .args(["-p", "-c", "-l", "-cp"])
+        .arg(dir)
+        .arg(class.replace('/', "."))
+        .output()
+        .ok()?;
+    let text = String::from_utf8(out.stdout).ok()?;
+    let mut body = String::new();
+    let mut inside = false;
+    let mut skipping_lines = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with(method) && trimmed.contains('(') {
+            inside = true;
+            continue;
+        }
+        if inside {
+            if trimmed.is_empty() {
+                break;
+            }
+            if trimmed == "Code:" {
+                continue;
+            }
+            if trimmed == "LineNumberTable:" {
+                skipping_lines = true;
+                continue;
+            }
+            if trimmed == "LocalVariableTable:" {
+                skipping_lines = false;
+                body.push_str("LocalVariableTable\n");
+                continue;
+            }
+            if skipping_lines {
+                continue;
+            }
+            // `12: invokestatic  #23    // Method one:(I)I` → `12: invokestatic #`
+            let code = trimmed.split("//").next().unwrap_or(trimmed).trim();
+            let normalized = code
+                .split_whitespace()
+                .map(|token| if token.starts_with('#') { "#" } else { token })
+                .collect::<Vec<_>>()
+                .join(" ");
+            body.push_str(normalized.trim_end_matches(','));
+            body.push('\n');
+        }
+    }
+    (!body.is_empty()).then_some(body)
+}
+
 #[cfg(test)]
 mod scratch_tests {
     #[test]
