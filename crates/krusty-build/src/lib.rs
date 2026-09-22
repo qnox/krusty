@@ -16,12 +16,14 @@
 //! * [`abi`] — an ABI model carrying no method bodies, and its fingerprint. This is the artifact a
 //!   dependent compiles against and the hash every dependent's cache key folds in.
 //! * [`cache`] — the cache key. Every input that can change emitted bytes is in it by default.
+//! * [`store`] — the content-addressed artifact store. Its one job beyond lookup is integrity: a
+//!   partially written entry must never read as a hit.
 //!
 //! # What is NOT here YET
 //!
-//! The artifact store and the driver that ties everything together. Each lands on top of this one,
-//! in that order: the store is keyed by [`cache`] key, and the driver walks the [`graph`] through
-//! all of the above.
+//! The driver that ties everything together, and the build environment that runs the real
+//! compiler under it. Both land on top of this one: the driver walks the [`graph`] through all of
+//! the above.
 //!
 //! No build providers (Gradle/Maven/BSP/JPS) and no parallel scheduling either. The providers are
 //! ~10,000 lines living in `crates/krusty-lsp/src/project/` and lifting them is its own change;
@@ -44,9 +46,11 @@ pub mod cache;
 pub mod digest;
 pub mod graph;
 pub mod model;
+pub mod store;
 
 pub use abi::{AbiClass, AbiFingerprint, AbiMember, MemberKind};
 pub use cache::{CacheKey, CacheKeyInputs, FileDigest};
 pub use digest::{digest_bytes, Digest, Hasher};
 pub use graph::{GraphError, ModuleGraph};
 pub use model::{Module, ModuleId, ModuleOutput, SourceRoot, SourceRootKind};
+pub use store::{ArtifactStore, CachedModule, MissReason};
