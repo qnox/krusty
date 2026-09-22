@@ -3374,6 +3374,20 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 };
                 self.field_equals(*left, *right, ty)
             }
+            // A data class rendering an ARRAY property shows its CONTENTS, not the identity an
+            // array's own `toString` answers — `data class D(val xs: IntArray)` prints
+            // `D(xs=[1, 2])`. That is the same rendering `xs.contentToString()` asks for, and the
+            // runtime already answers it for every array it lays out.
+            IrIntrinsic::DataClassArrayToString { .. } => {
+                let [value] = args else {
+                    return Err("a malformed data-class array rendering".to_string());
+                };
+                let array = self.reference(*value)?;
+                if self.terminated {
+                    return Ok(None);
+                }
+                self.runtime_call("kt_array_content_to_string", &[any()], any(), &[array])
+            }
             IrIntrinsic::Assert { mode } => self.checked_assertion(mode, args),
             other => Err(format!("the `{other:?}` intrinsic")),
         }

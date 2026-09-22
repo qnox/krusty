@@ -2152,6 +2152,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   that way, and reading the primary's frame for it would fill a frame that does not exist. Test:
   `tests/native_secondary_constructor_defaults_e2e.rs`.
 
+- **A data class renders an ARRAY property's contents, and compares it by identity.** `data class
+  D(val xs: IntArray)` prints `D(xs=[1, 2])`: the generated `toString` shows what an array holds
+  rather than the identity the array's own `toString` answers, which is the same rendering
+  `xs.contentToString()` asks for and reaches the same runtime entry point. Only `toString` is
+  special this way — `equals` and `hashCode` on such a property stay the array's own, so two data
+  classes holding equal contents are UNEQUAL. That is Kotlin's rule rather than an omission, and
+  krusty's native target keeps the two apart. Test:
+  `tests/native_data_class_array_rendering_e2e.rs`.
+
 - **A `Throwable` carries a CAUSE, and the two one-argument constructors are told apart by type.**
   Kotlin declares four: `()`, `(message)`, `(cause)` and `(message, cause)`. A single argument whose
   type is a `Throwable` is the cause and anything else is the message, and the two forms differ in

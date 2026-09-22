@@ -1815,6 +1815,8 @@ mod native_builtin_supertypes_e2e;
 #[path = "native_class_literals_e2e.rs"]
 mod native_class_literals_e2e;
 
+#[path = "native_data_class_array_rendering_e2e.rs"]
+mod native_data_class_array_rendering_e2e;
 #[path = "native_float_identity_e2e.rs"]
 mod native_float_identity_e2e;
 #[path = "native_function_type_checks_e2e.rs"]
