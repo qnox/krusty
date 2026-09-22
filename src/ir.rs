@@ -655,6 +655,12 @@ pub enum IrCallableReferenceTarget {
         owner: Option<TypeName>,
         name: Box<str>,
     },
+    /// A DEPENDENCY declaration, by the provider-owned identity that names it. Kept opaque, as
+    /// every other dependency edge is: the owner spelling, the published name and whatever the
+    /// declaration is realized as are the target's to read from its provider.
+    External {
+        declaration: crate::fir::ExternalCallableId,
+    },
 }
 
 /// A checked callable-reference value after common invocation lowering. `adapter` is an exact
@@ -2540,6 +2546,18 @@ pub struct IrFile {
     /// with suspension points, builds the state machine + continuation class. Common lowering keeps a
     /// `suspend fun` plain, mirroring how value classes stay plain until their target pass.
     pub suspend_funs: Vec<u32>,
+    /// `FunId`s the source declared `tailrec` that KOTLIN loops and the checked lowering does not.
+    /// The declaration promises constant stack and the body still recurses, so a backend that
+    /// cannot supply the guarantee itself must decline the function rather than emit a program that
+    /// overflows the stack at a depth the source expects to survive. (The JVM lane reaches the same
+    /// conclusion by skipping the file in `ir_lower`; this table is how the CHECKED lowering states
+    /// the same fact to its own consumers.)
+    ///
+    /// Only the context-parameter shape qualifies. A `tailrec` that was loop-transformed is absent,
+    /// and so are the two shapes that look like failures and are not: an overridable member, which
+    /// kotlinc refuses to loop as well, and a self-call the sweep leaves behind, which kotlinc also
+    /// leaves — it reports NON_TAIL_RECURSIVE_CALL for exactly those and emits the call.
+    pub unlooped_tailrec: std::collections::HashSet<u32>,
     /// Methods the source declares WITHOUT `override` — a fresh declaration rather than an override of a
     /// supertype member. A language fact nothing else in the IR records: `IrFunction` carries a signature,
     /// not the modifier, and a SYNTHESIZED method (absent here) is deliberately indistinguishable from an
@@ -3027,6 +3045,46 @@ pub struct IrFunctionOverride {
 }
 
 impl IrFile {
+    /// Is this a declaration initializer whose store Kotlin requires be LEFT OUT?
+    ///
+    /// `var x = 0` in a class body stores nothing: kotlinc omits an initializer that writes the
+    /// value a fresh object's storage already holds (`null`, a zero of any width, `false`). The
+    /// omission is observable, not an optimization — a base-class constructor that dispatches to an
+    /// override runs BEFORE the subclass's initializers, so a value it wrote through that override
+    /// survives exactly because the declaration's own store was never emitted
+    /// (`codegen/box/secondaryConstructors/fieldInitializerOptimization.kt`). A later
+    /// `init { x = 0 }` is a different statement with different meaning, which is why the store's
+    /// exact identity comes from `property_initializer_stores` rather than from its shape.
+    ///
+    /// Every target krusty emits for clears an object's storage when it allocates — the JVM by its
+    /// own rule, the native runtime in `kt_gc_allocate` — so this is one rule, not one per backend.
+    pub fn is_elided_initializer_store(&self, expression: ExprId) -> bool {
+        self.property_initializer_stores.contains(&expression)
+            && matches!(self.expr(expression), IrExpr::SetField { value, .. }
+                if self.is_storage_default(*value))
+    }
+
+    /// Is `expression` the value a freshly allocated object's storage already holds?
+    pub fn is_storage_default(&self, expression: ExprId) -> bool {
+        match self.expr(expression) {
+            IrExpr::Const(IrConst::Boolean(false))
+            | IrExpr::Const(IrConst::Byte(0))
+            | IrExpr::Const(IrConst::Short(0))
+            | IrExpr::Const(IrConst::Int(0))
+            | IrExpr::Const(IrConst::Long(0))
+            | IrExpr::Const(IrConst::Char(0))
+            | IrExpr::Const(IrConst::Null) => true,
+            IrExpr::Const(IrConst::Float(value)) => value.to_bits() == 0,
+            IrExpr::Const(IrConst::Double(value)) => value.to_bits() == 0,
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => self.is_storage_default(*arg),
+            _ => false,
+        }
+    }
+
     pub(crate) fn record_generated_secondary_constructor(
         &mut self,
         class: ClassId,
