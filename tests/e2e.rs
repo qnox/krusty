@@ -902,6 +902,8 @@ mod labeled_lambda_return_e2e;
 mod labeled_lambda_return_expected_e2e;
 #[path = "labeled_receiver_lambda_e2e.rs"]
 mod labeled_receiver_lambda_e2e;
+#[path = "labeled_return_null_join_e2e.rs"]
+mod labeled_return_null_join_e2e;
 #[path = "labeled_super_e2e.rs"]
 mod labeled_super_e2e;
 #[path = "labeled_this_e2e.rs"]
