@@ -7271,6 +7271,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `codegen/box/localClasses/innerOfLocalCaptureExtensionReceiver.kt` and
   `codegen/box/secondaryConstructors/callFromLocalSubClass.kt`.
 
+### Smart casts
+
+- **A narrowing recorded for a bare member access belongs to the implicit `this` inside it, not to
+  the value the access produces.** `resolve` records `narrowed_this_member` against the *access*
+  (`node` for an implicit `this.node`) so the lowerer narrows the `this` it loads before reading the
+  field. When such an access is itself a call's receiver — `node.tag()` — the checked call path must
+  not read that map again: the access has already applied the narrowing, and casting a second time
+  checks the PROPERTY's value against the receiver's narrowed type. `node.tag()` inside
+  `if (this is Light)` emitted `checkcast Light` twice, the second on the `Node` that `getNode`
+  answered, which the JVM verifier rejects outright (`Type 'Light' is not assignable to 'Node'`) and
+  the native backend turns into a `ClassCastException`. Only `selected_value_smartcasts` — a cast of
+  the receiver's OWN value — belongs at a call's receiver.
+  Tests: `tests/narrowed_this_member_call_e2e.rs`
+  (`a_member_read_on_narrowed_this_may_be_a_calls_receiver`,
+  `a_narrowed_read_carries_its_siblings_as_arguments`); the corpus case is
+  `codegen/box/smartCasts/kt44814.kt`.
+
 ### Native target (`src/native/`)
 
 The native backend has no `kotlinc` to be differential against — Kotlin/Native's output is LLVM
