@@ -1167,6 +1167,8 @@ mod extension_receiver_specificity_e2e;
 mod int_when_switch_e2e;
 #[path = "loop_backedge_narrowing_e2e.rs"]
 mod loop_backedge_narrowing_e2e;
+#[path = "nested_data_class_tostring_recipe_e2e.rs"]
+mod nested_data_class_tostring_recipe_e2e;
 #[path = "operator_expected_result_seeding_e2e.rs"]
 mod operator_expected_result_seeding_e2e;
 #[path = "operator_inc_dec_e2e.rs"]
