@@ -310,13 +310,11 @@ pub(super) fn add_child_serializer_cache(
             line: 0,
             source_order: u32::MAX,
         });
-        // Built from the interned identity directly; `external_static_field` would take the
-        // rendered spelling and intern it again.
-        let read = ir.add_expr(IrExpr::ExternalStaticField {
-            owner: serialized,
-            name: "$childSerializers".to_string(),
-            descriptor: "[Lkotlin/Lazy;".to_string(),
-        });
+        // Read the static just declared rather than describing the field again: a read built from a
+        // DESCRIPTOR carries the erased type, so returning it coerces to the accessor's declared
+        // type and emits a `checkcast [Lkotlin/Lazy;` the reference compiler does not. kotlinc's
+        // accessor body is `getstatic; areturn`.
+        let read = ir.add_expr(IrExpr::GetStatic(static_index));
         let ret = ir.add_expr(IrExpr::Return(Some(read)));
         let body = ir.add_expr(IrExpr::Block {
             stmts: vec![ret],
