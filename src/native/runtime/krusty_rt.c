@@ -1991,6 +1991,99 @@ static KRef kt_floating_range_to_string(KRef self) {
 
 #undef KT_RANGE_TYPE
 
+/* ---- comparable ranges ----------------------------------------------------------------------
+
+   `"a".."c"`, and every other `a..b` whose bounds are ordered by `Comparable` rather than by a
+   machine comparison. Kotlin's `rangeTo` for those answers a `ComparableRange<T>`, seen through
+   `ClosedRange<T>`; it holds the two bounds as OBJECTS and asks each one how it compares, which is
+   exactly what `kt_compare_any` does here.
+
+   No walk, for the reason a floating-point range has none: `Comparable` names no successor, so
+   there is nothing to step by. A pair of bounds and the question `value in it`. */
+typedef struct KComparableRange {
+    KObjectHeader header;
+    KRef start;
+    KRef end;
+} KComparableRange;
+
+static const uint32_t kt_comparable_range_offsets[] = {offsetof(KComparableRange, start),
+                                                       offsetof(KComparableRange, end)};
+
+static kt_boolean kt_comparable_range_equals(KRef self, KRef other);
+static kt_int kt_comparable_range_hash_code(KRef self);
+static KRef kt_comparable_range_to_string(KRef self);
+
+static const kt_fn kt_comparable_range_vtable[] = {(kt_fn)kt_comparable_range_equals,
+                                                   (kt_fn)kt_comparable_range_hash_code,
+                                                   (kt_fn)kt_comparable_range_to_string};
+
+const KType kt_type_comparable_range = {"kotlin.ranges.ComparableRange",
+                                        sizeof("kotlin.ranges.ComparableRange") - 1,
+                                        sizeof(KComparableRange),
+                                        2,
+                                        0,
+                                        kt_comparable_range_offsets,
+                                        &kt_type_any,
+                                        kt_comparable_range_vtable,
+                                        3,
+                                        0};
+
+KRef kt_comparable_range(KRef start, KRef end) {
+    KComparableRange *range =
+        (KComparableRange *)kt_gc_allocate(&kt_type_comparable_range, sizeof(KComparableRange));
+    range->start = start;
+    range->end = end;
+    return (KRef)range;
+}
+
+/* `start > end`, which is Kotlin's own `isEmpty` for this class. */
+kt_boolean kt_comparable_range_is_empty(KRef range) {
+    const KComparableRange *self = (const KComparableRange *)range;
+    return kt_compare_any(self->start, self->end) > 0;
+}
+
+/* `value >= start && value <= end`, each comparison the VALUE's own. Kotlin's `ComparableRange`
+   asks the same way round, which matters for a `compareTo` that is not symmetric. */
+kt_boolean kt_comparable_range_contains(KRef range, KRef value) {
+    const KComparableRange *self = (const KComparableRange *)range;
+    return kt_compare_any(value, self->start) >= 0 && kt_compare_any(value, self->end) <= 0;
+}
+
+KRef kt_comparable_range_start(KRef range) { return ((const KComparableRange *)range)->start; }
+
+KRef kt_comparable_range_end(KRef range) { return ((const KComparableRange *)range)->end; }
+
+/* Kotlin's own three, which are `ClosedRange`'s documented contract: two empty ranges are equal
+   whatever their bounds, `-1` hashes an empty one, and an empty range renders as an EMPTY string
+   rather than as its bounds. */
+static kt_boolean kt_comparable_range_equals(KRef self, KRef other) {
+    if (other == NULL || other->header.type != &kt_type_comparable_range) {
+        return false;
+    }
+    if (kt_comparable_range_is_empty(self) && kt_comparable_range_is_empty(other)) {
+        return true;
+    }
+    const KComparableRange *a = (const KComparableRange *)self;
+    const KComparableRange *b = (const KComparableRange *)other;
+    return kt_equals(a->start, b->start) && kt_equals(a->end, b->end);
+}
+
+static kt_int kt_comparable_range_hash_code(KRef self) {
+    if (kt_comparable_range_is_empty(self)) {
+        return -1;
+    }
+    const KComparableRange *range = (const KComparableRange *)self;
+    return (kt_int)(31u * (uint32_t)kt_hash_code(range->start) +
+                    (uint32_t)kt_hash_code(range->end));
+}
+
+static KRef kt_comparable_range_to_string(KRef self) {
+    const KComparableRange *range = (const KComparableRange *)self;
+    KRef text = kt_string_plus(kt_to_string(range->start), kt_string_utf8("..", 2));
+    return kt_string_plus(text, kt_to_string(range->end));
+}
+
+
 /* `"$first..$last"`, with a `CharRange`'s bounds rendered as the characters they are. */
 static KRef kt_range_to_string(KRef self) {
     const KRange *range = (const KRange *)self;

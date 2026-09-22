@@ -8093,6 +8093,32 @@ and behavior is checked by RUNNING the emitted program.
   (`::a_file_that_declares_its_own_sequence_walks_it`,
   `::a_declared_sequence_still_declines_the_members_it_endangers`).
 
+- **A range whose bounds are ordered by `Comparable`, and the integral ranges reached through
+  `ClosedRange<T>`.** Kotlin declares `rangeTo` on `Comparable<T>` and answers a
+  `ComparableRange<T>`, seen through `ClosedRange<T>`: it keeps the two bounds as OBJECTS and asks
+  each one how it compares. The runtime gets a shape for it beside the integral and floating ones —
+  two references, no step and no walk, because `Comparable` names no successor — and every
+  comparison goes through `kt_compare_any`, which reads the value's own descriptor. Its three
+  inherited members are `ClosedRange`'s documented contract: two EMPTY ranges are equal whatever
+  their bounds, an empty one hashes to `-1`, and `toString` is `"$start..$endInclusive"`.
+
+  Whether the runtime may answer for one is a separate question, and it is the one
+  `Comparable.compareTo` already asks: the order is read from a descriptor, so a class of the
+  program's standing behind the element has none there. A file that declares its own `Comparable`
+  therefore does not reach this shape at all — the construction is handed back to the general
+  `rangeTo` path — rather than being ordered by a table that cannot order it.
+
+  The same interface carries the INTEGRAL ranges: `fun f(r: ClosedRange<Int>)` names `ClosedRange`
+  where the object is an `IntRange`, and the TYPE ARGUMENT is what says which element it is —
+  `range_element` keys on the owner and the owner here names only the interface. A bound read
+  through it is the erased `T`, so it goes back through the element's own width before it is boxed,
+  which is what makes `(('a'..'c') as ClosedRange<Char>).start` read as the character it was built
+  from. A type PARAMETER is deliberately not a reference element: the object behind a
+  `ClosedRange<T>` in a generic body may be any of the three shapes, and only a concrete element
+  rules the other two out.
+  Tests: `tests/native_comparable_ranges_e2e.rs`; corpus: `ranges/contains/inExtensionRange.kt`,
+  `::inRangeLiteralComposition.kt`, `::inOptimizableIntRange.kt`, `::inOptimizableLongRange.kt`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

@@ -136,6 +136,60 @@ fn floating_range_symbol(name: &str, arity: usize) -> Option<(&'static str, Ty)>
     })
 }
 
+/// An INTEGRAL range held under the interface `ClosedRange<T>`, as its element.
+///
+/// `fun f(range: ClosedRange<Int>) = x in range` names the interface rather than `IntRange`, and
+/// `range_element` deliberately leaves the interface out because a user class may implement it. It
+/// is safe to read here for the reason [`floating_range`] is: a file that declares such an
+/// implementation is declined at every member asked of a type it implements itself, before this is
+/// reached — and nothing else in this runtime wears the interface over a machine element.
+fn closed_range_element(ty: Ty) -> Option<Ty> {
+    let Ty::Obj(internal, arguments) = ty.non_null() else {
+        return None;
+    };
+    if !internal.matches("kotlin/ranges/ClosedRange") {
+        return None;
+    }
+    match arguments.first().map(|argument| argument.non_null()) {
+        Some(element @ (Ty::Int | Ty::Long | Ty::Char | Ty::UInt | Ty::ULong)) => Some(element),
+        _ => None,
+    }
+}
+
+/// A COMPARABLE range: `"a".."c"`, and every other `a..b` whose bounds are ordered by `Comparable`
+/// rather than by a machine comparison.
+///
+/// The TYPE ARGUMENT says which: a reference element is one no machine comparison reaches, so the
+/// bounds are kept as objects and each comparison is the value's own. A type PARAMETER is not one
+/// — `Ty::Obj` excludes it — because the object behind a `ClosedRange<T>` in a generic body may be
+/// any of the three shapes, and only a concrete element rules the other two out.
+///
+/// Whether the runtime may ANSWER for such a range is a second question, asked by
+/// [`FileLowering::declares_its_own_comparable`] at each site: the order is read from the value's
+/// descriptor, so it is the runtime's own, and a class of the program's standing behind the
+/// element has none there. That is the position `Comparable.compareTo` already takes.
+fn comparable_range_element(ty: Ty) -> Option<Ty> {
+    let Ty::Obj(internal, arguments) = ty.non_null() else {
+        return None;
+    };
+    if !internal.matches("kotlin/ranges/ClosedRange") {
+        return None;
+    }
+    let argument = arguments.first()?.non_null();
+    (matches!(argument, Ty::Obj(..)) && carrier(argument) == Carrier::Ref).then_some(argument)
+}
+
+/// The runtime function answering one member of a comparable range, and what it answers with.
+fn comparable_range_symbol(name: &str, arity: usize) -> Option<(&'static str, Ty)> {
+    Some(match (name, arity) {
+        ("contains", 1) => ("kt_comparable_range_contains", Ty::Boolean),
+        ("isEmpty", 0) => ("kt_comparable_range_is_empty", Ty::Boolean),
+        ("start", 0) => ("kt_comparable_range_start", any()),
+        ("endInclusive", 0) => ("kt_comparable_range_end", any()),
+        _ => return None,
+    })
+}
+
 /// Whether this names text the runtime walks by UTF-16 unit.
 ///
 /// Every `CharSequence` this target can produce IS a string — `subSequence` answers one and
@@ -263,6 +317,12 @@ impl BodyLowering<'_, '_, '_> {
             if let Some((kind, element)) = floating_range(ret) {
                 return Some(self.floating_range_of(kind, element, receiver, args[0], ret));
             }
+            // `"a".."c"`: the same shape one level up, with the bounds kept as OBJECTS. Kotlin
+            // declares this `rangeTo` on `Comparable<T>`, so the receiver is whatever the program
+            // is ordering and the type it RETURNS is what says the element is a reference.
+            if comparable_range_element(ret).is_some() && !self.file.declares_its_own_comparable {
+                return Some(self.comparable_range_of(receiver, args[0], ret));
+            }
         }
         // A member of one. The RECEIVER is what says so, never the owner: `contains` is declared
         // on the facade as well as on the interface, and `start` on the interface a user class may
@@ -271,6 +331,13 @@ impl BodyLowering<'_, '_, '_> {
             let (_, element) = self.type_of(receiver).and_then(floating_range)?;
             let (symbol, answer) = floating_range_symbol(name, args.len())?;
             return Some(self.floating_range_call(symbol, answer, element, receiver, args, ret));
+        }
+        // A member of a COMPARABLE range, keyed on the receiver for the same reason.
+        if comparable_range_element(self.type_of(receiver)?).is_some()
+            && !self.file.declares_its_own_comparable
+        {
+            let (symbol, answer) = comparable_range_symbol(name, args.len())?;
+            return Some(self.comparable_range_call(symbol, answer, receiver, args, ret));
         }
         // `a until b` is an extension function of the ranges facade, not a member of the range it
         // answers, so the type it RETURNS is what says which range to build.
@@ -339,9 +406,88 @@ impl BodyLowering<'_, '_, '_> {
         {
             return Some(self.facade_range_contains(receiver, args[0]));
         }
+        // A member of an integral range held under the INTERFACE, whose element the owner does not
+        // name; see [`closed_range_element`]. The receiver answers it, and the bound it hands back
+        // is boxed at the element's own width rather than left at the runtime's 64 bits, because
+        // `ClosedRange`'s own declaration types it as the erased `T`.
+        if let Some(element) = self.type_of(receiver).and_then(closed_range_element) {
+            let (symbol, carried) = range_symbol(name, args.len())?;
+            return Some(self.closed_range_call(symbol, carried, element, receiver, args, ret));
+        }
         let element = range_element(crate::types::type_name(owner))?;
         let (symbol, carried) = range_symbol(name, args.len())?;
         Some(self.range_call(symbol, carried, element, receiver, args, ret))
+    }
+
+    /// `a..b` on a receiver ordered by `Comparable`: the range object, its bounds kept as objects.
+    fn comparable_range_of(
+        &mut self,
+        start: u32,
+        end: u32,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let first = self.reference(start)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let last = self.reference(end)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.runtime_call("kt_comparable_range", &[any(), any()], ret, &[first, last])
+    }
+
+    /// One member of a comparable range. Every operand crosses as a REFERENCE, which is what the
+    /// bounds are: the comparison is the value's own `compareTo`, read from its descriptor.
+    fn comparable_range_call(
+        &mut self,
+        symbol: &str,
+        answer: Ty,
+        receiver: u32,
+        args: &[u32],
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let object = self.reference(receiver)?;
+        let mut params = vec![any()];
+        let mut operands = vec![object];
+        for argument in args {
+            let value = self.reference(*argument)?;
+            if self.terminated {
+                return Ok(None);
+            }
+            params.push(any());
+            operands.push(value);
+        }
+        if self.terminated {
+            return Ok(None);
+        }
+        let Some(produced) = self.runtime_call(symbol, &params, answer, &operands)? else {
+            return Ok(None);
+        };
+        self.convert(produced, Some(answer), ret)
+    }
+
+    /// One member of an integral range reached through `ClosedRange<T>`. The call is `range_call`'s
+    /// — the runtime reads every bound at 64 bits — and only the ANSWER differs: the site's type is
+    /// the erased `T`, so a bound goes back through the ELEMENT's width before it is boxed, which
+    /// is what makes `(range as ClosedRange<Char>).start` read as the character it was built from.
+    fn closed_range_call(
+        &mut self,
+        symbol: &str,
+        carried: Ty,
+        element: Ty,
+        receiver: u32,
+        args: &[u32],
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        if carried != Ty::Long {
+            return self.range_call(symbol, carried, element, receiver, args, ret);
+        }
+        let Some(produced) = self.range_call(symbol, carried, element, receiver, args, element)?
+        else {
+            return Ok(None);
+        };
+        self.convert(produced, Some(element), ret)
     }
 
     /// `a..b` on a floating-point receiver: the range object, built at the width the result names.
@@ -734,14 +880,25 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Option<(String, String, Ty)> {
         let property = self.file.provider.external_property(target)?;
         let getter = self.file.provider.external_callable(property.getter)?;
-        // An integral range is keyed on the OWNER, which names a concrete range type. A
-        // floating-point one cannot be: its `start` is declared on `ClosedRange`, an interface a
-        // user class may implement, so the RECEIVER is what says this is one of the runtime's.
+        // An integral range named by a CONCRETE range type is keyed on the owner. Every other
+        // shape declares `start` and `endInclusive` on `ClosedRange`, an interface a user class
+        // may implement, so there the RECEIVER is what says this is one of the runtime's — and
+        // which of the three it is, since the interface is shared.
         if range_element(getter.callable.owner).is_some() {
             range_symbol(&property.name, 0)?;
         } else {
-            floating_range(self.type_of(receiver)?)?;
-            floating_range_symbol(&property.name, 0)?;
+            let ty = self.type_of(receiver)?;
+            if floating_range(ty).is_some() {
+                floating_range_symbol(&property.name, 0)?;
+            } else if comparable_range_element(ty).is_some()
+                && !self.file.declares_its_own_comparable
+            {
+                comparable_range_symbol(&property.name, 0)?;
+            } else if closed_range_element(ty).is_some() {
+                range_symbol(&property.name, 0)?;
+            } else {
+                return None;
+            }
         }
         Some((
             getter.callable.owner.render(),
