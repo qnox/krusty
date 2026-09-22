@@ -1823,6 +1823,8 @@ mod native_context_parameter_sam_e2e;
 mod native_data_class_array_rendering_e2e;
 #[path = "native_float_identity_e2e.rs"]
 mod native_float_identity_e2e;
+#[path = "native_function_slot_bridge_e2e.rs"]
+mod native_function_slot_bridge_e2e;
 #[path = "native_function_type_checks_e2e.rs"]
 mod native_function_type_checks_e2e;
 #[path = "native_lateinit_initialized_e2e.rs"]

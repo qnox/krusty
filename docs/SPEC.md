@@ -2284,6 +2284,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameters.
   Tests: `tests/native_context_parameter_sam_e2e.rs`.
 
+- **A class implementing a FUNCTION TYPE puts its `invoke` at the fixed function number, or a
+  converting stand-in there.** A function value's body sits right after `kotlin.Any`'s three and
+  the runtime names that number itself (`KT_SLOT_INVOKE`), so every caller through a function type
+  READS it rather than asking — passing and reading references, which is the one signature every
+  function value shares. A class whose `invoke` carries references throughout stands there itself.
+  `class A : (Int) -> Int` does not: a caller would read a machine integer as a pointer. That one
+  takes a slot of its own and the fixed number holds a stand-in that unboxes each operand, forwards
+  and boxes the answer — the same shape the uniform lambda entry point already had, with the
+  difference that the signature it wears belongs to `kotlin.Function{N}`, which is declared in no
+  file this target compiles, so it is written out from the ARITY rather than read off a
+  declaration. It forwards by DISPATCH, so a subclass's override is reached through the same
+  number.
+  The table has to be GROWN to reach that number: `kotlin.Any`'s three are all a class starts with,
+  and the fourth entry is the one wanted. Growing it before the method takes a slot of its own is
+  also what keeps the two numbers apart, since the method would otherwise be pushed at exactly the
+  index the stand-in wants and a stand-in forwarding through its own number dispatches to itself.
+  What DECLINES is a class implementing more than one function type: `object Test : () -> Unit,
+  (Boolean) -> Unit` declares two bodies that both belong at one number, and whichever took it, a
+  call through the other type would reach the wrong one — which is what
+  `codegen/box/funInterface/intersectionTypeToFunInterfaceConversion.kt` showed by answering `KK`
+  for `OK`. Declining beats picking.
+  Tests: `tests/native_function_slot_bridge_e2e.rs`.
+
 - **A list is the array a vararg call already built, with a header.** `listOf(...)` reaches a
   backend with its elements packed into an `Array<T>`, and krusty's native target wraps that array
   rather than copying it — which is what Kotlin's own `listOf(vararg)` does, and what makes the

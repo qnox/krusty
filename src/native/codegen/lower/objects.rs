@@ -398,6 +398,7 @@ impl<'a> FileLowering<'a> {
                         | Slot::ValueMember { .. }
                         | Slot::AnnotationMember { .. }
                         | Slot::Bridge { .. }
+                        | Slot::FunctionBridge { .. }
                         | Slot::AccessorBridge { .. }
                 )
             })
@@ -425,6 +426,19 @@ impl<'a> FileLowering<'a> {
                     },
                     &params,
                     ret,
+                )?;
+                self.accessors.insert(slot, id);
+                continue;
+            }
+            if let Slot::FunctionBridge { arity, .. } = &slot {
+                // `kotlin.Function{N}.invoke`'s own signature, which is what a caller reading the
+                // function slot passes and reads: the receiver and every operand a reference, and
+                // a reference back.
+                let params = vec![any(); arity + 1];
+                let id = self.declare_local_function(
+                    &format!("kt_function_bridge_{}", self.accessors.len()),
+                    &params,
+                    any(),
                 )?;
                 self.accessors.insert(slot, id);
                 continue;
@@ -720,6 +734,7 @@ impl<'a> FileLowering<'a> {
                 | Slot::ValueMember { .. }
                 | Slot::AnnotationMember { .. }
                 | Slot::Bridge { .. }
+                | Slot::FunctionBridge { .. }
                 | Slot::AccessorBridge { .. } => self.accessors[slot],
             });
         }
@@ -1414,6 +1429,14 @@ impl<'a> FileLowering<'a> {
         {
             return self.define_bridge(*declared, *target_slot, *target, id);
         }
+        if let Slot::FunctionBridge {
+            arity,
+            target_slot,
+            target,
+        } = slot
+        {
+            return self.define_function_bridge(*arity, *target_slot, *target, id);
+        }
         if let Slot::AccessorBridge {
             declared,
             implemented,
@@ -1492,6 +1515,70 @@ impl<'a> FileLowering<'a> {
     /// It forwards by DISPATCH and not by calling the override, which is what keeps it right under
     /// a further subclass: `Y : Z` replaces the target slot with its own body, and this reaches
     /// whatever the receiver actually is rather than the override that happened to need the bridge.
+    /// The FUNCTION SLOT's stand-in: `kotlin.Function{N}.invoke`'s signature, converted onto the
+    /// override's own and dispatched through its slot; see [`Slot::FunctionBridge`].
+    ///
+    /// Apart from [`Self::define_bridge`] only in where the signature it WEARS comes from. That
+    /// one reads a base declaration of this file; there is none here, because `kotlin.Function{N}`
+    /// is declared in no file this target compiles — so the signature is written out, which is the
+    /// one every function value shares: references throughout.
+    fn define_function_bridge(
+        &mut self,
+        arity: usize,
+        target_slot: u32,
+        target: crate::ir::FunId,
+        id: FuncId,
+    ) -> Result<(), Unsupported> {
+        let params = vec![any(); arity + 1];
+        let signature = self.signature_of(&params, any())?;
+        let forwarded = super::functions::carried_parameters(self.ir, target);
+        let forwarded_ret = self.ir.functions[target as usize].ret;
+        if forwarded.len() != arity {
+            return Err(format!(
+                "a function-slot bridge to `{}`, which takes {} of {arity} operands",
+                self.ir.functions[target as usize].name,
+                forwarded.len()
+            ));
+        }
+        let name = format!(
+            "function bridge to `{}`",
+            self.ir.functions[target as usize].name
+        );
+        self.emit_function(id, signature, any(), &name, &mut |body, values| {
+            let mut arguments = Vec::with_capacity(forwarded.len());
+            for (index, &want) in forwarded.iter().enumerate() {
+                // From the REFERENCE the caller passed: a function type's operands are boxed, and
+                // this is the same unboxing the uniform lambda entry point makes.
+                let Some(value) = body.convert(values[index + 1], Some(any()), want)? else {
+                    return Err("a `Unit` operand crossing the function slot".to_string());
+                };
+                arguments.push(value);
+            }
+            let answer = body.dispatch(
+                values[0],
+                target_slot,
+                &forwarded,
+                forwarded_ret,
+                &arguments,
+            )?;
+            let answer = match answer {
+                Some(answer) => body.convert(answer, Some(forwarded_ret), any())?,
+                None => None,
+            };
+            let answer = match answer {
+                Some(answer) => answer,
+                // A `Unit` body answering a caller that reads a reference: the runtime owns that
+                // singleton, and it is the Kotlin value such a call gets back.
+                None => body
+                    .runtime_call("kt_unit", &[], any(), &[])?
+                    .expect("`kt_unit` returns the singleton"),
+            };
+            body.builder.ins().return_(&[answer]);
+            body.terminate();
+            Ok(())
+        })
+    }
+
     fn define_bridge(
         &mut self,
         declared: crate::ir::FunId,

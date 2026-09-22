@@ -12,7 +12,7 @@
 //!
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
-use super::common::{expect_box_ok_with_stdlib, expect_native_box, expect_native_decline};
+use super::common::{expect_box_ok_with_stdlib, expect_native_box};
 
 /// Called as a function value, and through the function type it wears.
 #[test]
@@ -41,16 +41,19 @@ fn a_class_implementing_a_function_type_is_called_like_one() {
     expect_native_box(source, "FunctionTypeClass", "OK");
 }
 
-/// An `invoke` carrying MACHINE operands still declines: a caller through the function type passes
-/// and reads references, so this one needs a bridge rather than the slot.
+/// An `invoke` carrying MACHINE operands is reached through a converting STAND-IN.
+///
+/// A caller through the function type passes and reads references, so this one cannot stand in the
+/// fixed number itself; it takes a slot of its own and the number holds a stand-in that unboxes,
+/// forwards and boxes back. Written with the `Function1` spelling rather than `(Int) -> Int`,
+/// because the two name the same type and a class may say either.
+/// See `tests/native_function_slot_bridge_e2e.rs` for the rest of the shape.
 #[test]
-fn an_invoke_carrying_machine_operands_still_declines() {
-    expect_native_decline(
-        "class Doubler : Function1<Int, Int> {\n\
+fn an_invoke_carrying_machine_operands_goes_through_a_stand_in() {
+    let source = "class Doubler : Function1<Int, Int> {\n\
          \x20   override fun invoke(x: Int): Int = x * 2\n\
          }\n\
-         fun box(): String = if (Doubler()(21) == 42) \"OK\" else \"fail\"\n",
-        "MachineInvoke",
-        "cannot take the function slot",
-    );
+         fun box(): String = if (Doubler()(21) == 42) \"OK\" else \"fail\"\n";
+    expect_box_ok_with_stdlib(source, "MachineInvoke");
+    expect_native_box(source, "MachineInvoke", "OK");
 }

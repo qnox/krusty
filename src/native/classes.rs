@@ -209,6 +209,30 @@ pub(super) enum Slot {
         target_slot: Option<u32>,
         target: FunId,
     },
+    /// The FUNCTION SLOT's own stand-in: `invoke` overriding `kotlin.Function{N}.invoke` where
+    /// the override does not carry references throughout.
+    ///
+    /// A caller through a function type reads a FIXED number (`KT_SLOT_INVOKE`) and passes and
+    /// reads references there, because that is the one signature every function value shares.
+    /// `class A : (Int) -> Int { override fun invoke(p: Int) = p + 1 }` carries machine integers
+    /// instead, so its body cannot stand in that number — a caller would read an integer as a
+    /// pointer. This stands there and converts, forwarding to the method's own slot.
+    ///
+    /// It carries an ARITY rather than a declaration id, which is what separates it from
+    /// [`Slot::Bridge`]: the signature it wears belongs to `kotlin.Function{N}`, which is declared
+    /// in no file this target compiles, so there is no `FunId` to read it off. Every operand and
+    /// the result are references, and the arity is the whole of the rest.
+    ///
+    /// It forwards by DISPATCH for the same reason [`Slot::Bridge`] does: a further subclass
+    /// replaces `target` with its own body, and naming the override would keep running the wrong
+    /// one.
+    FunctionBridge {
+        /// How many operands `invoke` takes, not counting the receiver.
+        arity: usize,
+        /// The slot the real `invoke` occupies, and the method whose carriers it expects.
+        target_slot: u32,
+        target: FunId,
+    },
     /// The same thing for a property ACCESSOR reached through an INTERFACE that declares it with
     /// a different representation: `interface C<T> { var size: T }` erases its accessors to a
     /// reference while `class B : C<Int>, A()` inherits an unboxed machine integer. The
@@ -1015,6 +1039,33 @@ fn layout_class(
         (None, None) => any_vtable(),
     };
 
+    // A class implementing MORE THAN ONE function type has more `invoke`s than there are fixed
+    // numbers to put them in. `KT_SLOT_INVOKE` is one number, and `object Test : () -> Unit,
+    // (Boolean) -> Unit` declares two bodies that both belong there — whichever took it, a call
+    // through the other function type would reach the wrong one (`intersectionTypeToFun`
+    // `InterfaceConversion.kt` answered `KK` for `OK`). Decline rather than pick.
+    {
+        let invokes = ir
+            .function_overrides
+            .get(&class.fq_name_id())
+            .into_iter()
+            .flatten()
+            .filter(|edge| {
+                edge.name == "invoke"
+                    && matches!(edge.overridden, ResolvedFunctionOverrideTarget::External(_))
+                    && super::intrinsics::is_function_type_name(edge.overridden_owner)
+            })
+            .map(|edge| edge.overridden_owner)
+            .collect::<std::collections::HashSet<_>>();
+        if invokes.len() > 1 {
+            return Err(format!(
+                "a class implementing {} function types at once (`{}`)",
+                invokes.len(),
+                class.fq_name()
+            ));
+        }
+    }
+
     // Which methods are property accessors, so their slots are keyed by the property. A property
     // whose accessor has no BODY — an abstract `val` in an interface — carries no accessor id, and
     // its accessor reaches the method list as an ordinary method; matching the declared accessor
@@ -1062,6 +1113,32 @@ fn layout_class(
             .cloned()
             .unwrap_or(SlotKey::Function(fid));
 
+        // The edge by which this method overrides `kotlin.Function{N}.invoke`, if it does. Read
+        // once, because both the fixed slot below and the stand-in that covers the case where the
+        // method cannot take it are the same question about the same edge.
+        let invoke_edge = ir
+            .function_overrides
+            .get(&class.fq_name_id())
+            .into_iter()
+            .flatten()
+            .find(|edge| {
+                // Either shape of implementation reference. An edge for a method the checked
+                // lowering built names it by CALLABLE and leaves `implementation_function` empty,
+                // which a pre-filter on that field alone used to drop — and dropping it is why
+                // `invoke` never took the slot by this route at all.
+                edge.implementation_function == Some(fid)
+                    || ir
+                        .checked_callable_functions
+                        .get(match &edge.implementation {
+                            ResolvedFunctionOverrideTarget::Module(callable) => callable,
+                            ResolvedFunctionOverrideTarget::External(_) => return false,
+                        })
+                        == Some(&fid)
+            })
+            .filter(|edge| {
+                edge.name == "invoke"
+                    && super::intrinsics::is_function_type_name(edge.overridden_owner)
+            });
         let replaces = match any_slot(function) {
             Some(slot) => {
                 let (params, ret) = any_slot_signature(slot);
@@ -1075,28 +1152,15 @@ fn layout_class(
             // `invoke` on a class implementing a FUNCTION TYPE takes the one other fixed slot this
             // target has: the runtime names it (`KT_SLOT_INVOKE`) and every caller through a
             // function type reads it, a lambda's body included.
-            None => ir
-                .function_overrides
-                .get(&class.fq_name_id())
-                .into_iter()
-                .flatten()
-                .filter(|edge| {
-                    matches!(
-                        edge.implementation,
-                        ResolvedFunctionOverrideTarget::External(_)
-                    ) || edge.implementation_function == Some(fid)
-                })
-                .find(|edge| {
-                    edge.implementation_function == Some(fid)
-                        || ir
-                            .checked_callable_functions
-                            .get(match &edge.implementation {
-                                ResolvedFunctionOverrideTarget::Module(callable) => callable,
-                                ResolvedFunctionOverrideTarget::External(_) => return false,
-                            })
-                            == Some(&fid)
-                })
-                .and_then(|edge| external_invoke_slot(ir, edge, function)),
+            None => invoke_edge.and_then(|edge| external_invoke_slot(ir, edge, function)),
+        };
+        // Whether the FUNCTION SLOT needs a stand-in for this method: it is an `invoke` over a
+        // function type that could not take the slot outright, because it does not carry
+        // references throughout. `replaces` is `None` for it, so the method takes a slot of its
+        // own below and the fixed number gets the converting entry once that slot is known.
+        let function_bridge = match (replaces, invoke_edge) {
+            (None, Some(_)) => Some(function.params.len()),
+            _ => None,
         };
         // What this method overrides, split by what each target owns: a class base owns a slot in
         // this vtable to replace, while an interface base owns a number in the program-wide
@@ -1210,6 +1274,15 @@ fn layout_class(
                 },
             },
         };
+        // The FUNCTION SLOT is the fourth entry and `kotlin.Any`'s three are all a class starts
+        // with, so a class whose `invoke` wants that number has to GROW the table to reach it —
+        // whether the method stands there itself or a converting stand-in does. Growing it before
+        // the method takes a slot of its own is also what keeps the two numbers apart in the
+        // second case: the method would otherwise be pushed at exactly the index the stand-in
+        // wants, and a stand-in forwarding through its own number dispatches to itself.
+        if invoke_edge.is_some() && vtable.len() <= FUNCTION_SLOT as usize {
+            vtable.resize(FUNCTION_SLOT as usize + 1, Slot::Abstract);
+        }
         let slot = match replaces {
             Some(slot) => {
                 vtable[slot as usize] = entry;
@@ -1221,6 +1294,19 @@ fn layout_class(
             }
         };
         slots.insert(own_key, slot);
+        // The FUNCTION SLOT, once this method's own is known — reserved just above, so the two
+        // are never the same number.
+        if let Some(arity) = function_bridge {
+            debug_assert_ne!(
+                slot, FUNCTION_SLOT,
+                "the stand-in forwards through its own number"
+            );
+            vtable[FUNCTION_SLOT as usize] = Slot::FunctionBridge {
+                arity,
+                target_slot: slot,
+                target: fid,
+            };
+        }
         for (key, bridge) in interface_keys {
             // The number wears the INTERFACE's signature and converts; the slot map still points
             // at this method, because everything else that reads the map wants the
@@ -1833,6 +1919,10 @@ fn overridden_property_slot(
 /// Only when every operand and the result are REFERENCES. A caller through the function type
 /// passes and reads references, and an `invoke(x: Int): Int` carries machine integers — that one
 /// needs a bridge and declines instead of being pointed at.
+/// The vtable number every function value's body occupies, which the runtime names as
+/// `KT_SLOT_INVOKE`: right after `kotlin.Any`'s three.
+const FUNCTION_SLOT: u32 = 3;
+
 fn external_invoke_slot(
     ir: &IrFile,
     edge: &crate::ir::IrFunctionOverride,
@@ -1846,7 +1936,8 @@ fn external_invoke_slot(
         return None;
     }
     let reference = |ty: Ty| c_kind(ty) == CKind::Ref;
-    (function.params.iter().copied().all(reference) && reference(function.ret)).then_some(3)
+    (function.params.iter().copied().all(reference) && reference(function.ret))
+        .then_some(FUNCTION_SLOT)
 }
 
 /// Implementation method → the method it overrides, for the methods `class` declares. Both ends
@@ -1902,19 +1993,9 @@ fn overridden_functions(
                 // already gives a FIXED number: a function value's body sits right after
                 // `kotlin.Any`'s three and the runtime names that number itself
                 // (`KT_SLOT_INVOKE`), so every caller through a function type reads it rather
-                // than asking. One that cannot take that slot — its operands are not all
-                // references — would be reached there anyway, so it declines instead.
-                if any_slot(function).is_none()
-                    && edge.name == "invoke"
-                    && super::intrinsics::is_function_type_name(edge.overridden_owner)
-                    && external_invoke_slot(ir, edge, function).is_none()
-                {
-                    return Err(format!(
-                        "an override of `invoke` that cannot take the function slot (`{}.{}`)",
-                        class.fq_name(),
-                        function.name
-                    ));
-                }
+                // than asking. One that cannot take that slot outright — its operands are not all
+                // references — gets a `Slot::FunctionBridge` there instead, placed where the
+                // method's own slot is known; nothing is recorded here.
             }
         }
     }
