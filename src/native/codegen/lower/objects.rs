@@ -39,7 +39,9 @@ mod ktype {
     pub const WALK_ITERATOR: u32 = 80;
     pub const WALK_HAS_NEXT: u32 = 88;
     pub const WALK_NEXT: u32 = 96;
-    pub const SIZE: usize = 104;
+    pub const WALK_LENGTH: u32 = 104;
+    pub const WALK_CHAR_AT: u32 = 112;
+    pub const SIZE: usize = 120;
 }
 
 /// Where an object keeps its type: the header is one pointer.
@@ -56,6 +58,10 @@ pub(super) struct WalkMembers {
     pub(super) iterator: Option<FuncId>,
     pub(super) has_next: Option<FuncId>,
     pub(super) next: Option<FuncId>,
+    /// For a class implementing `kotlin.CharSequence`, which is walked by its LENGTH and its
+    /// indexed read: Kotlin's `CharSequence` declares no iterator at all.
+    pub(super) length: Option<FuncId>,
+    pub(super) char_at: Option<FuncId>,
 }
 
 /// The same, as the SLOTS the declaration pass reads out of the override edges, before the thunks
@@ -66,12 +72,14 @@ pub(super) struct WalkSlots {
     pub(super) iterator: u32,
     pub(super) has_next: u32,
     pub(super) next: u32,
+    pub(super) length: u32,
+    pub(super) char_at: u32,
 }
 
 impl WalkSlots {
     /// Whether the class declares any of the three, so a subclass knows whether to inherit.
     fn is_empty(self) -> bool {
-        self.iterator == 0 && self.has_next == 0 && self.next == 0
+        self.iterator == 0 && self.has_next == 0 && self.next == 0 && self.length == 0
     }
 }
 
@@ -584,6 +592,8 @@ impl<'a> FileLowering<'a> {
             (ktype::WALK_ITERATOR, walk.iterator),
             (ktype::WALK_HAS_NEXT, walk.has_next),
             (ktype::WALK_NEXT, walk.next),
+            (ktype::WALK_LENGTH, walk.length),
+            (ktype::WALK_CHAR_AT, walk.char_at),
         ] {
             let Some(thunk) = thunk else {
                 continue;
@@ -740,6 +750,7 @@ impl<'a> FileLowering<'a> {
             (slots.iterator, "iterator", any()),
             (slots.has_next, "hasNext", Ty::Boolean),
             (slots.next, "next", any()),
+            (slots.length, "length", Ty::Int),
         ] {
             if biased == 0 {
                 continue;
@@ -770,10 +781,62 @@ impl<'a> FileLowering<'a> {
             match name {
                 "iterator" => members.iterator = Some(thunk),
                 "hasNext" => members.has_next = Some(thunk),
+                "length" => members.length = Some(thunk),
                 _ => members.next = Some(thunk),
             }
         }
+        // The indexed read takes an ARGUMENT, which is the whole of what separates it from the
+        // four above: the index crosses unboxed, at the width the declaration states.
+        if slots.char_at != 0 {
+            let slot = slots.char_at - 1;
+            let declared = self.walk_slot_result(class, slot)?;
+            let name = format!("{base}_walk_get");
+            let thunk = self.declare_local_function(&name, &[any(), Ty::Int], Ty::Char)?;
+            let signature = self.signature_of(&[any(), Ty::Int], Ty::Char)?;
+            let parameter = self.walk_slot_parameter(class, slot)?;
+            self.emit_function(thunk, signature, Ty::Char, &name, &mut |body, params| {
+                let Some(index) = body.convert(params[1], Some(Ty::Int), parameter)? else {
+                    return Err(format!("a `Unit` index in `{name}`"));
+                };
+                let Some(produced) =
+                    body.dispatch(params[0], slot, &[parameter], declared, &[index])?
+                else {
+                    return Err(format!("a `Unit` answer from `{name}`"));
+                };
+                let Some(value) = body.convert(produced, Some(declared), Ty::Char)? else {
+                    return Err(format!("a `Unit` answer from `{name}`"));
+                };
+                body.builder.ins().return_(&[value]);
+                body.terminate();
+                Ok(())
+            })?;
+            members.char_at = Some(thunk);
+        }
         Ok(members)
+    }
+
+    /// The type the entry in `slot` takes as its ONE parameter, for the thunk that dispatches
+    /// through it to convert the operand to.
+    fn walk_slot_parameter(&self, class: ClassId, slot: u32) -> Result<Ty, Unsupported> {
+        let entry = self
+            .model
+            .layout(class)
+            .vtable
+            .get(slot as usize)
+            .cloned()
+            .ok_or_else(|| format!("a walk through slot {slot}, which no table has"))?;
+        let fid = match entry {
+            Slot::Function(fid) => fid,
+            Slot::Bridge { declared, .. } => declared,
+            other => return Err(format!("a walk through the vtable entry {other:?}")),
+        };
+        match self.ir.functions[fid as usize].params.as_slice() {
+            [parameter] => Ok(*parameter),
+            _ => Err(format!(
+                "a walk through `{}`, which takes no one operand",
+                self.ir.functions[fid as usize].name
+            )),
+        }
     }
 
     /// What the entry in `slot` of this class's table ANSWERS, for the thunk that dispatches
@@ -820,6 +883,7 @@ impl<'a> FileLowering<'a> {
         // half a pair is no walk.
         let mut iterable = false;
         let mut iterator = false;
+        let mut text = false;
         for edge in ir
             .function_overrides
             .get(&declaration.fq_name)
@@ -838,7 +902,27 @@ impl<'a> FileLowering<'a> {
             ) {
                 (Some(CollectionShape::Iterable), "iterator") => iterable = true,
                 (Some(CollectionShape::Iterator), "hasNext" | "next") => iterator = true,
+                (Some(CollectionShape::Text), "get" | "subSequence") => text = true,
                 _ => {}
+            }
+        }
+        // `length` is a PROPERTY, so it reaches the class through a property-override edge rather
+        // than a function one — and a `CharSequence` implementor that overrode nothing else would
+        // be missed without it.
+        for edge in ir
+            .property_overrides
+            .get(&declaration.fq_name)
+            .into_iter()
+            .flatten()
+        {
+            if matches!(
+                edge.overridden,
+                crate::fir::ResolvedPropertyOverrideTarget::External(_)
+            ) && matches!(
+                super::super::super::intrinsics::collection_shape(edge.overridden_owner),
+                Some(CollectionShape::Text)
+            ) {
+                text = true;
             }
         }
         let mut slots = WalkSlots::default();
@@ -855,12 +939,43 @@ impl<'a> FileLowering<'a> {
                 slots.next = 0;
             }
         }
+        if text {
+            slots.length = self.walk_accessor_slot(class, "length");
+            slots.char_at = self.walk_slot_of(class, "get", 1);
+            // Both or neither, for the reason the iterator's pair is: text is walked by its
+            // length AND its indexed read, and half of that is no walk.
+            if slots.length == 0 || slots.char_at == 0 {
+                slots.length = 0;
+                slots.char_at = 0;
+            }
+        }
         if slots.is_empty() {
             if let Some(parent) = self.model.layout(class).superclass {
                 return self.walk_slots(parent);
             }
         }
         slots
+    }
+
+    /// The slot of a class's own `name` PROPERTY GETTER, PLUS ONE so that 0 says it has none.
+    ///
+    /// By NAME up the chain, because a base's accessor need not be a method at all: a field-backed
+    /// property's accessors are synthesized, and Kotlin rejects a fresh redeclaration of an
+    /// inherited property, so a property of that name IS that one.
+    fn walk_accessor_slot(&self, class: ClassId, name: &str) -> u32 {
+        let mut at = Some(class);
+        while let Some(id) = at {
+            if self.ir.classes[id as usize]
+                .properties
+                .iter()
+                .any(|property| property.name == name)
+            {
+                let key = super::super::super::classes::SlotKey::Getter(id, name.to_string());
+                return self.model.slot(class, &key).map_or(0, |slot| slot + 1);
+            }
+            at = self.model.layout(id).superclass;
+        }
+        0
     }
 
     /// The slot of a class's own nullary `name`, PLUS ONE so that 0 says it has none; see
@@ -870,9 +985,14 @@ impl<'a> FileLowering<'a> {
     /// from a base of this file rather than declare it — and a slot number assigned at the
     /// declaring class is valid for every subclass.
     fn walk_slot(&self, class: ClassId, name: &str) -> u32 {
+        self.walk_slot_of(class, name, 0)
+    }
+
+    /// The same for a member of the given ARITY.
+    fn walk_slot_of(&self, class: ClassId, name: &str, arity: usize) -> u32 {
         let mut current = Some(class);
         while let Some(id) = current {
-            if let Some((slot, _, _)) = self.member_slot(id, name, 0) {
+            if let Some((slot, _, _)) = self.member_slot(id, name, arity) {
                 return slot + 1;
             }
             current = self.model.layout(id).superclass;

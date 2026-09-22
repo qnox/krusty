@@ -1150,6 +1150,8 @@ mod native_unsigned_e2e;
 mod native_vararg_constructor_e2e;
 #[path = "native_walkable_collection_e2e.rs"]
 mod native_walkable_collection_e2e;
+#[path = "native_walkable_text_e2e.rs"]
+mod native_walkable_text_e2e;
 #[path = "nested_class_ctor_scope_e2e.rs"]
 mod nested_class_ctor_scope_e2e;
 #[path = "nested_class_supertype_e2e.rs"]

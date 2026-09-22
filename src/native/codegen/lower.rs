@@ -481,10 +481,12 @@ impl<'a> FileLowering<'a> {
         use super::super::intrinsics::IterationRole;
         for id in 0..self.ir.classes.len() as ClassId {
             let slots = self.walk_slots(id);
-            let role = if slots.iterator != 0 {
+            let role = if slots.iterator != 0 || slots.length != 0 {
                 // `Iterable` wins over `Iterator` for a class that answers for both. The two roles
                 // differ in which members a receiver is asked for, and a class handing out an
-                // iterator is asked for that one first.
+                // iterator is asked for that one first. TEXT plays the same role: its own members
+                // are `length` and the indexed read, but a walk of it asks for an iterator and
+                // the runtime makes one over those two.
                 Some(IterationRole::Iterable)
             } else if slots.has_next != 0 && slots.next != 0 {
                 Some(IterationRole::Iterator)

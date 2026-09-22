@@ -996,6 +996,11 @@ pub(super) enum CollectionShape {
     MapEntry,
     /// A lazy sequence, which is no `Iterable` either.
     Sequence,
+    /// TEXT — `String`, `CharSequence`, `StringBuilder`. A `for` loop walks it as the `Iterable`
+    /// shape is walked, but its OWN members are `length` and the indexed read rather than an
+    /// iterator, so a class of the program behind one is reached differently from one behind a
+    /// list. That is the whole reason it is a shape of its own.
+    Text,
 }
 
 /// The shape a type NAME belongs to. The narrow kinds are asked first: every one of them is an
@@ -1015,14 +1020,12 @@ pub(super) fn collection_shape(internal: crate::types::TypeName) -> Option<Colle
         return Some(CollectionShape::Iterable);
     }
     // TEXT is walkable here and is no collection at all, so [`iteration_role`] does not name it —
-    // [`iteration_role_of`] reaches it from the TYPE instead. It belongs to the shape all the same:
-    // a `class Chars(…) : CharSequence` is a program's object behind a receiver whose `get` the
-    // runtime answers by reading a string's header.
+    // [`iteration_role_of`] reaches it from the TYPE instead.
     if matches!(
         kotlin_owner(&internal.render()),
         "kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder"
     ) {
-        return Some(CollectionShape::Iterable);
+        return Some(CollectionShape::Text);
     }
     match iteration_role(internal)? {
         IterationRole::Iterable => Some(CollectionShape::Iterable),

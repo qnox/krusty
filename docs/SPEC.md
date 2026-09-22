@@ -2027,15 +2027,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   of its own — `Iterator<T>.next(): T` is exactly that shape — and half a pair is no walk. A class
   answering for `Iterable` is walkable when its `iterator` resolves; one answering for `Iterator`
   when BOTH of its two do.
-  What still declines is a shape the walk does not reach: `Map` and `Map.Entry` declare none of the
-  three, and `CharSequence` shares the iterable shape with a list while declaring no `iterator` at
-  all — so a file that puts a class of its own behind one of those declines every walking member
-  over that shape, since no static type tells one implementor from another within it. A member
-  Kotlin gives a SPECIAL BRIDGE — `Collection.contains`, `List.indexOf`/`lastIndexOf` — is never a
-  walk's to answer where the file implements the receiver's type: the bridge decides by whether the
-  argument can be what the declaration accepts, and a walk would compare elements instead
-  (`codegen/box/bridges/strListContains.kt`).
-  Tests: `tests/native_walkable_collection_e2e.rs`.
+  TEXT is walked the same way, through two more thunks. `String`, `CharSequence` and
+  `StringBuilder` are a SHAPE OF THEIR OWN: a `for` loop walks them as it walks a list, but their
+  own members are `length` and the indexed read rather than an iterator — Kotlin's `CharSequence`
+  declares no `iterator` at all. `kt_string_length` and `kt_string_get` reach those two for an
+  object that is neither a string nor a builder, so `s[i]` through a `CharSequence` receiver, a
+  `for` loop over one and `withIndex` on one all answer for text the program wrote; the chars
+  iterator the runtime already had needs no case of its own. Both or neither, as with the
+  iterator's pair.
+  What still declines is a shape the walk does not reach: `Map` and `Map.Entry` declare none of
+  these members, so a file that puts a class of its own behind one of them declines every walking
+  member over that shape, since no static type tells one implementor from another within it. A
+  member Kotlin gives a SPECIAL BRIDGE — `Collection.contains`, `List.indexOf`/`lastIndexOf` — is
+  never a walk's to answer where the file implements the receiver's type: the bridge decides by
+  whether the argument can be what the declaration accepts, and a walk would compare elements
+  instead (`codegen/box/bridges/strListContains.kt`).
+  Tests: `tests/native_walkable_collection_e2e.rs`, `tests/native_walkable_text_e2e.rs`,
+  `tests/native_collection_shape_guard_e2e.rs`.
 
 - **A delegated property's `KProperty` metadata is a property reference, and a LOCAL one answers
   only its name.** `val x: Int by D()` hands the delegate an object so `getValue(thisRef, property)`

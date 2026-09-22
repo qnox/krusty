@@ -249,6 +249,12 @@ static const char *kt_text_of(KRef self, kt_int *byte_length);
    This walks the bytes on every call, which is what a string that stores UTF-8 costs; it is also
    what makes the answer right for text a JVM-shaped length would have to be stored alongside. */
 kt_int kt_string_length(KRef self) {
+    /* Text the PROGRAM wrote: a class implementing `kotlin.CharSequence`, whose own `length` its
+       descriptor records. Asked first, because `kt_text_of` reads a string's own storage and an
+       object of the program's holds none. */
+    if (self != NULL && self->header.type->walk_length != NULL) {
+        return self->header.type->walk_length(self);
+    }
     kt_int byte_length = 0;
     const char *bytes = kt_text_of(self, &byte_length);
     kt_int units = 0;
@@ -270,6 +276,9 @@ kt_int kt_string_length(KRef self) {
    costs, and it is the same cost `length` already pays; a program that wants to iterate cheaply
    iterates the string rather than its indices. */
 kt_char kt_string_get(KRef self, kt_int index) {
+    if (self != NULL && self->header.type->walk_char_at != NULL) {
+        return self->header.type->walk_char_at(self, index);
+    }
     kt_int byte_length = 0;
     const char *bytes = kt_text_of(self, &byte_length);
     kt_int unit = 0;
@@ -3125,6 +3134,12 @@ KRef kt_iterable_iterator(KRef iterable) {
        through a dispatch when its own shape already answered. */
     if (iterable != NULL && iterable->header.type->walk_iterator != NULL) {
         return iterable->header.type->walk_iterator(iterable);
+    }
+    /* Text the PROGRAM wrote is walked the way this runtime's own text is: by index, against the
+       length. `kt_string_length` and `kt_string_get` reach its own members, so the chars iterator
+       needs no case of its own. */
+    if (iterable != NULL && iterable->header.type->walk_length != NULL) {
+        return kt_walk_of(&kt_type_chars_iterator, iterable);
     }
     return kt_range_iterator(iterable);
 }

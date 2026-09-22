@@ -12,7 +12,7 @@
 //!
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
-use super::common::{expect_box_ok_with_stdlib, expect_native_box, expect_native_decline};
+use super::common::{expect_box_ok_with_stdlib, expect_native_box};
 
 /// A file declaring its own ITERATOR still has its lists answered. The iterator it hands out is
 /// its own object; a list it builds is the runtime's, and nothing about the former reaches the
@@ -60,23 +60,26 @@ fn a_declared_map_entry_leaves_the_lists_and_the_text_alone() {
     expect_native_box(source, "DeclaredEntryAndLists", "OK");
 }
 
-/// The coarseness INSIDE a shape is deliberate. Text is walked by the same runtime dispatch a list
-/// is, and a `CharSequence` of the program's could stand behind either receiver — so a file that
-/// declares one still declines a list member, exactly as it did before the guard grew precise.
+/// TEXT is a shape of its own, and a walkable one. `String`, `CharSequence` and `StringBuilder`
+/// are walked by a `for` loop as a list is, which is why they once shared the iterable shape and a
+/// file declaring a `CharSequence` declined every list member. Their OWN members are `length` and
+/// the indexed read rather than an iterator, though, and a class of the program records a thunk
+/// for each — so text of the program's is reached, and a list receiver in the same file is left
+/// alone.
 #[test]
-fn a_declared_char_sequence_still_declines_a_list_member() {
-    expect_native_decline(
-        "class Chars(private val text: String) : CharSequence {\n\
+fn a_declared_char_sequence_is_walked_and_leaves_the_lists_alone() {
+    let source = "class Chars(private val text: String) : CharSequence {\n\
          \x20   override val length: Int get() = text.length\n\
          \x20   override fun get(index: Int): Char = text[index]\n\
          \x20   override fun subSequence(startIndex: Int, endIndex: Int): CharSequence =\n\
          \x20       Chars(text.substring(startIndex, endIndex))\n\
          }\n\
          fun box(): String {\n\
-         \x20   if (Chars(\"OK\").length != 2) return \"fail length\"\n\
+         \x20   val chars = Chars(\"OK\")\n\
+         \x20   if (chars.length != 2) return \"fail length\"\n\
+         \x20   if (\"\" + chars[0] + chars[1] != \"OK\") return \"fail read\"\n\
          \x20   return if (listOf(1, 2, 3).contains(2)) \"OK\" else \"fail contains\"\n\
-         }\n",
-        "DeclaredCharsAndLists",
-        "contains",
-    );
+         }\n";
+    expect_box_ok_with_stdlib(source, "DeclaredCharsAndLists");
+    expect_native_box(source, "DeclaredCharsAndLists", "OK");
 }

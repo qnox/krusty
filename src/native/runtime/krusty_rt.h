@@ -96,6 +96,13 @@ typedef struct KType {
     struct KObject *(*walk_iterator)(struct KObject *self);
     kt_boolean (*walk_has_next)(struct KObject *self);
     struct KObject *(*walk_next)(struct KObject *self);
+    /* The same for a class of the program that implements `kotlin.CharSequence`, which is walked
+       by its LENGTH and its indexed read rather than by an iterator — Kotlin's `CharSequence`
+       declares no `iterator` at all. `kt_string_length` and `kt_string_get` reach these for an
+       object that is neither a string nor a builder, which is what lets every question this
+       runtime answers about TEXT be asked of text the program wrote. */
+    kt_int (*walk_length)(struct KObject *self);
+    kt_char (*walk_char_at)(struct KObject *self, kt_int index);
 } KType;
 
 
