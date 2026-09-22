@@ -2772,6 +2772,46 @@ const KType kt_type_with_index = {"kotlin.collections.IndexingIterable",
                                   3,
                                   0};
 
+/* What `asSequence()` answers: the source iterable, kept until somebody asks it for an iterator.
+
+   The same shape as `withIndex()` above and lazy for the same reason, but its own type — because
+   what separates a `Sequence` from an `Iterable` here is which members may be asked of it. Every
+   walk this runtime has is EAGER, and an eager `map` on a sequence is not Kotlin's: the transform
+   would run for every element where Kotlin runs it per element consumed, which a side effect sees
+   and an endless sequence never survives. So a sequence is offered only the members whose answer is
+   the same either way — its iterator, and the lazy `withIndex` — and the rest decline at the call
+   site, where the type the program named is still in sight.
+
+   `equals` and `hashCode` are IDENTITY, which is what Kotlin answers: `Sequence` declares neither,
+   so two sequences over the same elements are different objects and stay that way. */
+typedef struct KSequence {
+    KObjectHeader header;
+    KRef source;
+} KSequence;
+
+static const uint32_t kt_sequence_offsets[] = {offsetof(KSequence, source)};
+
+const KType kt_type_sequence = {"kotlin.sequences.Sequence",
+                                sizeof("kotlin.sequences.Sequence") - 1,
+                                sizeof(KSequence),
+                                1,
+                                0,
+                                kt_sequence_offsets,
+                                &kt_type_any,
+                                kt_any_vtable,
+                                3,
+                                0};
+
+KRef kt_sequence_of(KRef source) {
+    KSequence *wrapper = (KSequence *)kt_gc_allocate(&kt_type_sequence, sizeof(KSequence));
+    wrapper->source = source;
+    return (KRef)wrapper;
+}
+
+kt_boolean kt_is_sequence(KRef value) {
+    return value != NULL && value->header.type == &kt_type_sequence;
+}
+
 /* The iterator it hands out: the source's own, plus the count. */
 typedef struct KIndexingIterator {
     KObjectHeader header;
@@ -2823,6 +2863,11 @@ KRef kt_iterable_iterator(KRef iterable) {
        and what a `for ((k, v) in m)` destructures. */
     if (kt_is_map(iterable)) {
         return kt_iterable_iterator(kt_map_entries(iterable));
+    }
+    /* A SEQUENCE is walked as its source: that is the whole of what the wrapper holds, and asking
+       it for an iterator is the one member Kotlin's `Sequence` declares. */
+    if (kt_is_sequence(iterable)) {
+        return kt_iterable_iterator(((const KSequence *)iterable)->source);
     }
     if (iterable != NULL && iterable->header.type == &kt_type_with_index) {
         KRef source = kt_iterable_iterator(((const KWithIndex *)iterable)->source);

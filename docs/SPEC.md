@@ -2314,6 +2314,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   than guessed.
   Tests: `tests/native_math_bits_e2e.rs`.
 
+- **`asSequence()` answers a lazy wrapper, and a sequence is offered fewer members than an
+  iterable.** The wrapper holds the source until something asks it for an iterator, which is the one
+  member `Sequence` declares — and it holds a SOURCE rather than a cursor, so the same sequence walks
+  again from the start.
+  It is its own type rather than the source itself, because what separates a `Sequence` from an
+  `Iterable` here is which members may be asked. Every walk this runtime has is EAGER, and an eager
+  `map` on a sequence is not Kotlin's: the transform would run for every element where Kotlin runs it
+  per element consumed, which a side effect sees and an endless sequence never survives. So a
+  sequence takes only the members whose answer is the same either way — its iterator and the lazy
+  `withIndex` — and the rest DECLINE at the call site, where the type the program named is in sight.
+  That is a decline and not a slower answer: answering eagerly would be a different program.
+  `equals` and `hashCode` are IDENTITY, which is what Kotlin answers, `Sequence` declaring neither.
+  A file that declares its own `Sequence` declines, like one that declares its own list or map: the
+  runtime would answer `iterator` out of a wrapper that is not there.
+  Tests: `tests/native_sequences_e2e.rs`.
+
 - **`assertEquals` compares booleans structurally, like everything else it compares.** It is
   generic, so `assertEquals(true, true)` has `Boolean` as its first parameter after substitution.
   Reading the parameter to decide how the operands cross handed two raw machine values to an entry

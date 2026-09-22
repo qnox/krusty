@@ -286,6 +286,15 @@ KRef kt_iterable_join_to_string(KRef iterable);
    element — a Kotlin data class, so its `equals`, `hashCode` and `toString` are the data class's
    and not identity's. */
 KRef kt_iterable_with_index(KRef iterable);
+
+/* `xs.asSequence()`: the source, kept until somebody asks for an iterator. Lazy like `withIndex`,
+   and its own type — what separates a `Sequence` from an `Iterable` here is which members may be
+   asked of it. Every walk this runtime has is EAGER, and an eager `map` on a sequence is not
+   Kotlin's, so a sequence is offered only its iterator and the lazy `withIndex`; the rest decline
+   at the call site. `equals`/`hashCode` are identity, which is what `Sequence` answers. */
+extern const KType kt_type_sequence;
+KRef kt_sequence_of(KRef source);
+kt_boolean kt_is_sequence(KRef value);
 KRef kt_indexed_value(kt_int index, KRef value);
 kt_int kt_indexed_value_index(KRef self);
 KRef kt_indexed_value_value(KRef self);

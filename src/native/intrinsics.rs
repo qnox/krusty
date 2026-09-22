@@ -694,6 +694,11 @@ pub(super) fn iteration_role(internal: crate::types::TypeName) -> Option<Iterati
         ("kotlin/collections/MutableMap", IterationRole::Iterable),
         ("kotlin/collections/HashMap", IterationRole::Iterable),
         ("kotlin/collections/LinkedHashMap", IterationRole::Iterable),
+        // A SEQUENCE. Iterating one is the one member `Sequence` declares, and the wrapper the
+        // runtime makes holds the source it walks — so the role is the same and the dispatch is
+        // the descriptor's. Which OTHER members a sequence may be asked is narrower than an
+        // iterable's, and that is [`lists::is_sequence`]'s to enforce, not this table's.
+        ("kotlin/sequences/Sequence", IterationRole::Iterable),
         ("kotlin/ranges/IntRange", IterationRole::Iterable),
         ("kotlin/ranges/LongRange", IterationRole::Iterable),
         ("kotlin/ranges/CharRange", IterationRole::Iterable),
@@ -859,6 +864,11 @@ pub(super) fn is_comparable_supertype(internal: crate::types::TypeName) -> bool 
         kotlin_owner(&internal.render()),
         "kotlin/Comparable" | "kotlin/Enum"
     )
+}
+
+/// Whether a type name is the SEQUENCE the native runtime makes.
+pub(super) fn is_sequence_type(internal: crate::types::TypeName) -> bool {
+    kotlin_owner(&internal.render()) == "kotlin/sequences/Sequence"
 }
 
 /// Whether a type name is the MAP the native runtime builds.

@@ -115,6 +115,10 @@ fn interface_symbol(
         // it may stop early. The object it makes keeps the source until something asks it for an
         // iterator, and that iterator counts as it walks.
         (IterationRole::Iterable, "withIndex", 0) => ("kt_iterable_with_index", vec![any()], any()),
+        // `xs.asSequence()`: the receiver, kept until something asks it for an iterator. Lazy, as
+        // Kotlin's is, and it answers for any iterable this runtime has — including text, whose
+        // sequence walks its characters.
+        (IterationRole::Iterable, "asSequence", 0) => ("kt_sequence_of", vec![any()], any()),
         // `joinToString()` with every parameter left at its default, and no other form of it. The
         // stdlib declares six, all defaulted, and this backend has no `$default` synthetic of a
         // dependency to call — so the defaults would have to be written here, and the only one
@@ -148,6 +152,25 @@ fn is_text(ty: Ty) -> bool {
         .any(|candidate| internal.matches(candidate))
             || super::super::super::intrinsics::is_char_sequence(internal)
     })
+}
+
+/// Whether a type is the SEQUENCE the runtime makes.
+///
+/// A sequence is offered a NARROWER set of members than an iterable. Every walk this runtime has is
+/// eager, and an eager `map` on a sequence is not Kotlin's: the transform would run for every
+/// element where Kotlin runs it per element consumed, which a side effect sees and an endless
+/// sequence never survives. So only the members whose answer is the same either way are answered —
+/// its iterator, and the lazy `withIndex` — and the rest decline at the call site, where the type
+/// the program named is still in sight.
+fn is_sequence(ty: Ty) -> bool {
+    ty.non_null()
+        .obj_internal()
+        .is_some_and(super::super::super::intrinsics::is_sequence_type)
+}
+
+/// Whether a member may be asked of a SEQUENCE receiver; see [`is_sequence`].
+fn lazy_over_a_sequence(name: &str) -> bool {
+    matches!(name, "iterator" | "withIndex")
 }
 
 /// A member Kotlin declares over `Iterable` that the runtime answers by WALKING the receiver.
@@ -563,6 +586,10 @@ impl BodyLowering<'_, '_, '_> {
             args.len()
         };
         let args = &args[args.len() - written..];
+        // A SEQUENCE takes only the members that are lazy either way; see `is_sequence`.
+        if is_sequence(ty) && !lazy_over_a_sequence(name) {
+            return None;
+        }
         let over_text = is_text(ty);
         let selected = role.and_then(|role| {
             interface_symbol(role, name, written).or_else(|| {
