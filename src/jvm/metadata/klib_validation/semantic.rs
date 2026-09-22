@@ -46,6 +46,63 @@ fn semantic_qname(
     Ok(name)
 }
 
+/// The compile-time value a `const val` declares, decoded from the `Annotation.Argument.Value`
+/// message its property record carries.
+///
+/// A `const val` is folded at every use site, so a reader that validates this message and throws
+/// it away leaves `Int.MAX_VALUE` as a runtime property READ of a companion object — which has no
+/// storage on a target that compiles the stdlib itself, and which the native code generator
+/// declined by name 100-odd times across the box corpus.
+///
+/// `None` for a value that is not a compile-time constant of a type Kotlin can fold: a class
+/// literal, an enum entry, a nested annotation or an array. Those are annotation arguments, not
+/// `const val` initializers, and the same message carries both.
+fn semantic_constant(
+    body: &[u8],
+    strings: &[String],
+) -> Result<Option<crate::libraries::LibConst>, PackageFragmentDecodeError> {
+    let mut cursor = Cursor::new(body, 0);
+    let mut kind = None;
+    let mut integral = None;
+    let mut float = None;
+    let mut double = None;
+    let mut string = None;
+    while !cursor.at_end() {
+        let (number, wire) = field(&mut cursor, "constant value")?;
+        match (number, wire) {
+            (1, 0) => kind = Some(cursor.varint("constant value kind")?),
+            // `int_value` is a protobuf `sint64`: zigzag, so a negative constant is not a
+            // ten-byte varint. `Int.MIN_VALUE` is exactly the value that says so.
+            (2, 0) => {
+                let raw = cursor.varint("constant integral value")?;
+                integral = Some(((raw >> 1) as i64) ^ -((raw & 1) as i64));
+            }
+            (3, 5) => float = Some(f32::from_bits(cursor.fixed32("constant float value")?)),
+            (4, 1) => double = Some(f64::from_bits(cursor.fixed64("constant double value")?)),
+            (5, 0) => {
+                let id = cursor.varint("constant string value")?;
+                string = Some(semantic_string(strings, id, "constant string value")?);
+            }
+            (_, wire) => cursor.skip(wire, "constant value")?,
+        }
+    }
+    use crate::libraries::LibConst;
+    // BYTE 0, CHAR 1, SHORT 2, INT 3, LONG 4, FLOAT 5, DOUBLE 6, BOOLEAN 7, STRING 8, and past
+    // that the forms a `const val` cannot take.
+    Ok(match kind {
+        // Every sub-`Int` width, `Char` and `Boolean` alike, is carried as the `Int` the library
+        // constant model records — the same shape a classfile's `ConstantValue` arrives in.
+        Some(0 | 1 | 2 | 3 | 7) => integral
+            .and_then(|value| i32::try_from(value).ok())
+            .map(LibConst::Int),
+        Some(4) => integral.map(LibConst::Long),
+        Some(5) => float.map(LibConst::Float),
+        Some(6) => double.map(LibConst::Double),
+        Some(8) => string.map(|value| LibConst::Str(crate::kt_string::KtString::from(value))),
+        _ => None,
+    })
+}
+
 fn validate_annotation_value(
     body: &[u8],
     strings: &[String],
@@ -353,6 +410,9 @@ impl SemanticTables<'_> {
         let node = parse_type_node(body)
             .ok_or_else(|| semantic_error(format!("invalid semantic type in {context}")))?;
         let flexible_upper = self.validate_type_edges(body, type_parameters, depth, context)?;
+        // Read before the arguments are consumed: what the annotations say about this type is a
+        // fact about the whole node, and the loop below moves part of it.
+        let shape = self.function_type_shape(&node, body, context)?;
         let mut arguments = Vec::with_capacity(node.arguments.len());
         for argument in node.arguments {
             let argument = match argument {
@@ -369,6 +429,7 @@ impl SemanticTables<'_> {
                         internal: "kotlin/Any".to_string(),
                         args: Vec::new(),
                         nullable: true,
+                        shape: metadata::FunctionTypeShape::default(),
                     }))
                 }
             };
@@ -393,6 +454,7 @@ impl SemanticTables<'_> {
                 internal: semantic_qname(self.strings, self.qnames, id, context)?,
                 args: arguments,
                 nullable,
+                shape,
             });
         }
         let name = if let Some(id) = node.type_parameter_id {
@@ -407,6 +469,53 @@ impl SemanticTables<'_> {
             )));
         };
         Ok(metadata::BuiltinTy::Param { name, nullable })
+    }
+
+    /// What the annotations on this type say it MEANS beyond its classifier and arguments.
+    ///
+    /// `(T) -> R` and `T.() -> R` are the same `Function1` with the same arguments; only
+    /// `kotlin.ExtensionFunctionType` tells them apart, and a reader that validated the annotation
+    /// and dropped it published a block with no `this` — `with("OK") { this }` reported "'this' is
+    /// not defined in this context".
+    fn function_type_shape(
+        &self,
+        node: &ParsedTypeNode<'_>,
+        body: &[u8],
+        context: &str,
+    ) -> Result<metadata::FunctionTypeShape, PackageFragmentDecodeError> {
+        let mut shape = metadata::FunctionTypeShape {
+            suspend: metadata::parse_type_facts(body).suspend_fun,
+            ..Default::default()
+        };
+        for annotation in &node.annotations {
+            let Some(id) = annotation.class_id() else {
+                continue;
+            };
+            match semantic_qname(self.strings, self.qnames, id, context)?.as_str() {
+                "kotlin/ExtensionFunctionType" => shape.receiver = true,
+                "kotlin/ContextFunctionTypeParams" => {
+                    let count = annotation
+                        .int_arguments()
+                        .find_map(|(name, value)| {
+                            (semantic_string(self.strings, name, context).ok().as_deref()
+                                == Some("count"))
+                            .then_some(value)
+                        })
+                        .ok_or_else(|| {
+                            semantic_error(format!(
+                                "a context function type in {context} declares no count"
+                            ))
+                        })?;
+                    shape.context_count = usize::try_from(count).map_err(|_| {
+                        semantic_error(format!(
+                            "a context function type in {context} declares {count} parameters"
+                        ))
+                    })?;
+                }
+                _ => {}
+            }
+        }
+        Ok(shape)
     }
 
     fn ty_by_id(
@@ -431,10 +540,16 @@ impl SemanticTables<'_> {
             .is_some_and(|first| id >= first && !definitely_non_null)
         {
             Ok(match ty {
-                metadata::BuiltinTy::Class { internal, args, .. } => metadata::BuiltinTy::Class {
+                metadata::BuiltinTy::Class {
+                    internal,
+                    args,
+                    shape,
+                    ..
+                } => metadata::BuiltinTy::Class {
                     internal,
                     args,
                     nullable: true,
+                    shape,
                 },
                 metadata::BuiltinTy::Param { name, .. } => metadata::BuiltinTy::Param {
                     name,
@@ -723,9 +838,17 @@ fn semantic_function(
         return Err(semantic_error("duplicate function contract"));
     }
     if let Some(contract) = contracts.first() {
+        // A contract's `is-instance` type may be written INLINE or as an id, and an id indexes the
+        // table of the declaration container this function belongs to — its package or its class —
+        // not the function. A function carries a table of its own only sometimes; when it does it
+        // is the nearer one and wins, and when it does not the container's is the only one there
+        // is. Reading the function's own unconditionally made "absent" of every id a contract
+        // wrote: in the Kotlin/Native stdlib's `kotlin.test` fragment, ten functions declare
+        // contracts and not one of them declares a type table, while the package declares eighty
+        // types for them to mean.
         let (types, first_nullable) = match contract_type_table {
             Some(table) => (table.types, table.first_nullable),
-            None => (Vec::new(), None),
+            None => (tables.types.clone(), tables.first_nullable),
         };
         let contract_tables = SemanticTables {
             strings: tables.strings,
@@ -820,6 +943,9 @@ fn semantic_function(
     } else {
         None
     };
+    // The WRITTEN parameter count, before `member_params` is moved into the member below.
+    let written = member_params.len();
+    let leading = top_params.len() - written;
     let member = metadata::BuiltinMember {
         name: name.clone(),
         params: member_params,
@@ -830,6 +956,13 @@ fn semantic_function(
         is_abstract: function.is_abstract,
         formals: formals.clone(),
         ret_nullable,
+        // A FUNCTION has no compile-time value; only a `const val` does.
+        constant: None,
+        // The WRITTEN parameters only: a member's leading context parameters belong to the
+        // top-level shape below, where they are physical, and `member_params` excludes them.
+        param_names: param_names[param_names.len() - written..].to_vec(),
+        param_defaults: param_defaults[param_defaults.len() - written..].to_vec(),
+        vararg: vararg.and_then(|index| index.checked_sub(leading)),
     };
     let top = top_level.then_some(metadata::BuiltinFunction {
         name,
@@ -860,7 +993,9 @@ fn semantic_property(
     body: &[u8],
     tables: &SemanticTables<'_>,
     inherited: &std::collections::HashMap<u64, String>,
-) -> Result<metadata::BuiltinMember, PackageFragmentDecodeError> {
+    top_level: bool,
+) -> Result<(metadata::BuiltinMember, Option<metadata::BuiltinProperty>), PackageFragmentDecodeError>
+{
     validate_annotation_fields(
         body,
         &[14, 15, 16, 33, 34, 35, 170, 177, 178, 181, 182, 183],
@@ -877,6 +1012,13 @@ fn semantic_property(
     let mut return_id = None;
     let mut legacy_flags = None;
     let mut modern_flags = None;
+    // The extension receiver is separated from the other semantic types this loop validates,
+    // because it is the one that DECIDES what the declaration is: `val Collection<*>.indices` is
+    // findable only through its receiver, while a member property has none at all.
+    let mut receiver_body = None;
+    let mut receiver_id = None;
+    let mut context_count = 0usize;
+    let mut constant = None;
     while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "property declaration")?;
         match (number, wire) {
@@ -884,17 +1026,29 @@ fn semantic_property(
             (2, 0) => name = Some(cursor.varint("property name")?),
             (3, 2) => return_body = Some(cursor.length_delimited("property return type")?.0),
             (9, 0) => return_id = Some(cursor.varint("property return type id")?),
-            (5 | 12 | 18, 2) => {
+            (5, 2) => {
+                let nested = cursor.length_delimited("property receiver type")?.0;
+                tables.ty(nested, &type_parameters, 0, "property receiver type")?;
+                receiver_body = Some(nested);
+            }
+            (10, 0) => {
+                let id = cursor.varint("property receiver type id")?;
+                tables.ty_by_id(id, &type_parameters, 0, "property receiver")?;
+                receiver_id = Some(id);
+            }
+            (12 | 18, 2) => {
                 let nested = cursor.length_delimited("property semantic type")?.0;
                 tables.ty(nested, &type_parameters, 0, "property semantic type")?;
+                context_count += usize::from(number == 12);
             }
-            (10 | 19, 0) => {
+            (19, 0) => {
                 let id = cursor.varint("property semantic type id")?;
-                tables.ty_by_id(id, &type_parameters, 0, "property receiver")?;
+                tables.ty_by_id(id, &type_parameters, 0, "property semantic type")?;
             }
             (13, 0) => {
                 let id = cursor.varint("property context receiver type id")?;
                 tables.ty_by_id(id, &type_parameters, 0, "property context receiver")?;
+                context_count += 1;
             }
             (13, 2) => {
                 let (packed, base) =
@@ -903,11 +1057,13 @@ fn semantic_property(
                 while !packed.at_end() {
                     let id = packed.varint("property context receiver type id")?;
                     tables.ty_by_id(id, &type_parameters, 0, "property context receiver")?;
+                    context_count += 1;
                 }
             }
             (173, 2) => {
                 let value = cursor.length_delimited("property compile-time value")?.0;
                 validate_annotation_value(value, tables.strings, tables.qnames)?;
+                constant = semantic_constant(value, tables.strings)?;
             }
             (11, 0) => modern_flags = Some(cursor.varint("property flags")?),
             (6 | 17, 2) => {
@@ -936,8 +1092,12 @@ fn semantic_property(
     let flags = modern_flags
         .or(legacy_flags)
         .unwrap_or(crate::metadata::property_flags::DEFAULT);
-    Ok(metadata::BuiltinMember {
-        name,
+    let receiver = match (receiver_body, receiver_id) {
+        (None, None) => None,
+        (body, id) => Some(tables.type_ref(body, id, &type_parameters, "property receiver")?),
+    };
+    let member = metadata::BuiltinMember {
+        name: name.clone(),
         params: Vec::new(),
         ret: ret.clone(),
         is_property: true,
@@ -945,9 +1105,25 @@ fn semantic_property(
         is_infix: false,
         is_abstract: flags & crate::metadata::property_flags::MODALITY_MASK
             == crate::metadata::property_flags::MODALITY_ABSTRACT,
-        formals,
+        formals: formals.clone(),
         ret_nullable: ret.nullable(),
-    })
+        constant: constant.clone(),
+        // A property takes no value parameters; its setter's is not a source parameter list.
+        param_names: Vec::new(),
+        param_defaults: Vec::new(),
+        vararg: None,
+    };
+    let top = top_level.then(|| metadata::BuiltinProperty {
+        name,
+        receiver,
+        ty: ret,
+        formals,
+        visibility: metadata::builtin_class_visibility(flags),
+        is_var: flags & crate::metadata::property_flags::IS_VAR != 0,
+        context_count,
+        constant,
+    });
+    Ok((member, top))
 }
 
 fn validate_type_alias(
@@ -1004,20 +1180,26 @@ fn validate_type_alias(
     Ok(())
 }
 
-fn validate_enum_entry(
+/// One enum entry's NAME.
+///
+/// Kept rather than merely validated: `AnnotationTarget.FUNCTION` and
+/// `InvocationKind.EXACTLY_ONCE` are ordinary references a program writes, and a classifier that
+/// publishes no entries answers none of them.
+fn semantic_enum_entry(
     body: &[u8],
     strings: &[String],
     qnames: &[QName],
-) -> Result<(), PackageFragmentDecodeError> {
+) -> Result<String, PackageFragmentDecodeError> {
     validate_annotation_fields(body, &[2, 170], strings, qnames, "enum entry")?;
     let mut cursor = Cursor::new(body, 0);
+    let mut name = None;
     let mut names = 0;
     while !cursor.at_end() {
         let (number, wire) = field(&mut cursor, "enum entry")?;
         if number == 1 {
             require_wire(&cursor, wire, 0, "enum entry")?;
             let id = cursor.varint("enum-entry name id")?;
-            semantic_string(strings, id, "enum entry")?;
+            name = Some(semantic_string(strings, id, "enum entry")?);
             names += 1;
         } else {
             cursor.skip(wire, "enum entry")?;
@@ -1028,7 +1210,7 @@ fn validate_enum_entry(
             "enum entry has {names} name fields"
         )));
     }
-    Ok(())
+    name.ok_or_else(|| semantic_error("enum entry has no name"))
 }
 
 fn semantic_constructor(
@@ -1140,6 +1322,9 @@ fn semantic_class(
     let mut supertype_ids = Vec::new();
     let mut supertype_bodies = Vec::new();
     let mut constructors = Vec::new();
+    let mut enum_entries = Vec::new();
+    let mut sealed_subclasses = Vec::new();
+    let mut inline_class_property = None;
     let mut functions = Vec::new();
     let mut properties = Vec::new();
     let mut type_aliases = Vec::new();
@@ -1169,19 +1354,20 @@ fn semantic_class(
             }
             (16, 0) => {
                 let id = cursor.varint("sealed-subclass qualified-name id")?;
-                semantic_qname(strings, qnames, id, "sealed subclass")?;
+                sealed_subclasses.push(semantic_qname(strings, qnames, id, "sealed subclass")?);
             }
             (16, 2) => {
                 let (packed, base) = cursor.length_delimited("sealed-subclass names")?;
                 let mut packed = Cursor::new(packed, base);
                 while !packed.at_end() {
                     let id = packed.varint("sealed-subclass qualified-name id")?;
-                    semantic_qname(strings, qnames, id, "sealed subclass")?;
+                    sealed_subclasses.push(semantic_qname(strings, qnames, id, "sealed subclass")?);
                 }
             }
             (17, 0) => {
                 let id = cursor.varint("inline-class property name id")?;
-                semantic_string(strings, id, "inline-class property")?;
+                inline_class_property =
+                    Some(semantic_string(strings, id, "inline-class property")?);
             }
             (6, 2) => supertype_bodies.push(cursor.length_delimited("class supertype")?.0),
             (8, 2) => constructors.push(cursor.length_delimited("class constructor")?.0),
@@ -1190,7 +1376,7 @@ fn semantic_class(
             (11, 2) => type_aliases.push(cursor.length_delimited("class type alias")?.0),
             (13, 2) => {
                 let entry = cursor.length_delimited("enum entry")?.0;
-                validate_enum_entry(entry, strings, qnames)?;
+                enum_entries.push(semantic_enum_entry(entry, strings, qnames)?);
             }
             (18 | 20, 2) => {
                 let nested = cursor.length_delimited("class semantic type")?.0;
@@ -1245,7 +1431,7 @@ fn semantic_class(
         members.push(member);
     }
     for body in properties {
-        members.push(semantic_property(body, &tables, &type_parameters)?);
+        members.push(semantic_property(body, &tables, &type_parameters, false)?.0);
     }
     for body in type_aliases {
         validate_type_alias(body, &tables, &type_parameters)?;
@@ -1264,9 +1450,18 @@ fn semantic_class(
             companion_name,
             type_params,
             nullable_member_returns,
+            enum_entries,
+            sealed_subclasses,
+            inline_class_property,
             kind: metadata::builtin_class_kind(header.flags),
+            // `IS_FUN`. Read from the same flag word the kind and modality come from, and dropped
+            // until now: every `fun interface` a klib declares was published as an ordinary one,
+            // so no lambda converted to `Comparator` and `Comparator { a, b -> … }` was not a
+            // constructor at all.
+            is_fun_interface: header.flags & (1 << 14) != 0,
             visibility: metadata::builtin_class_visibility(header.flags),
             is_expect: header.flags & (1 << 12) != 0,
+            modality: metadata::builtin_class_modality(header.flags),
             is_nested,
             access: metadata::builtin_class_access(header.flags),
         },
@@ -1311,7 +1506,11 @@ pub(super) fn parse(
             );
         }
         for body in message_bodies(package, 4, "package declaration")? {
-            semantic_property(body, &tables, &std::collections::HashMap::new())?;
+            let (_, property) =
+                semantic_property(body, &tables, &std::collections::HashMap::new(), true)?;
+            result.properties.push(
+                property.ok_or_else(|| semantic_error("top-level property lost its identity"))?,
+            );
         }
         for body in message_bodies(package, 5, "package declaration")? {
             validate_type_alias(body, &tables, &std::collections::HashMap::new())?;

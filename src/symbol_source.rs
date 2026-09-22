@@ -82,6 +82,29 @@ pub trait SymbolSource {
         std::rc::Rc::new(ResolvedSymbols::default())
     }
 
+    /// What this provider realizes an already-selected dependency callable as.
+    ///
+    /// The identity is opaque and this provider assigned it, so only this provider can answer —
+    /// which is the whole point of the pair. A backend holds the identity through checking and
+    /// lowering and asks here when it finally has to emit something, rather than carrying a
+    /// provider's own spelling around. The default answers nothing, for a source that publishes no
+    /// dependency declarations.
+    fn external_callable(
+        &self,
+        _identity: crate::fir::ExternalCallableId,
+    ) -> Option<crate::libraries::ExternalCallableRealization> {
+        None
+    }
+
+    /// The same, for a dependency PROPERTY: its semantic name and the physical accessors this
+    /// provider interned for it.
+    fn external_property(
+        &self,
+        _identity: crate::fir::ExternalPropertyId,
+    ) -> Option<crate::libraries::ExternalPropertyRealization> {
+        None
+    }
+
     /// The upper semantic face paired with a platform type's retained lower bound.
     /// This is a relation over resolved identities, not a declaration lookup: core inference must
     /// not reconstruct platform-specific flexible pairs from classifier spellings.
