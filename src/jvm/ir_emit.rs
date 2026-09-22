@@ -9304,6 +9304,16 @@ fn emit_interface_class(
             // `@Nullable` on each reference parameter and on a reference return. Having no body is
             // why it gets no debug tables — it is not a reason to drop its annotations.
             let ann = |t: Ty| -> Option<&'static str> {
+                // A bare type parameter erases to its bound, and kotlinc annotates it only when
+                // that bound is NON-NULL. `<T>` carries the implicit `Any?` bound and can be
+                // instantiated with a nullable type, so neither `@NotNull` nor `@Nullable` is true
+                // of the position; `<T : Any>` is known non-null and gets `@NotNull`. The bound
+                // travels on the type itself, so this needs no signature lookup.
+                if let Ty::TyParam(_, bound) = t {
+                    if matches!(bound, Ty::Nullable(_)) {
+                        return None;
+                    }
+                }
                 let d = crate::jvm::names::type_descriptor(t);
                 if !(d.starts_with('L') || d.starts_with('[')) {
                     return None;
