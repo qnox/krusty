@@ -35,7 +35,14 @@ use operation_relocation::clone_below_representation_wrapper;
 /// The stdlib value classes whose underlying is JVM-native unsigned (no synthesized `-impl` members —
 /// their box/unbox lives on the classpath). All erase to a signed primitive, so they contribute nothing
 /// to the erasure map and are skipped when probing referenced classes.
-type Under = HashMap<TypeName, Ty>;
+/// The erasure map, under this pass's historical name. The rules that read it — `erase`,
+/// `nullable_is_boxed`, `is_ref` — are `crate::value_classes`', because they answer what Kotlin
+/// says a value class IS rather than anything about the JVM. What stays here is everything this
+/// target then does with the answer: the mangling, the `box-impl`/`unbox-impl` methods, the
+/// descriptors and the bridges.
+use crate::value_classes::{
+    erase, is_ref, nullable_is_boxed, underlying_null_capable, Erasure as Under,
+};
 
 fn is_native_unsigned(fq: TypeName) -> bool {
     fq.matches("kotlin/UByte")
@@ -5040,35 +5047,6 @@ fn record_reference_array_element_boundary(
     }
 }
 
-/// Whether a NULLABLE value class `X?` is represented BOXED. Only true when its underlying erases to a
-/// primitive (a primitive can't carry null, so `X?` keeps the boxed `X`). Over a reference underlying,
-/// `X?` erases to that underlying reference — represented unboxed, exactly like a non-null `X`.
-fn nullable_is_boxed(x: TypeName, under: &Under) -> bool {
-    // `X?` stays UNBOXED (its underlying reference carries null) only when the underlying is a NON-NULL
-    // reference. Over a primitive (can't hold null) OR a NULLABLE reference (where `X(null)` and a `null`
-    // `X?` would otherwise be indistinguishable), `X?` is the boxed `X`.
-    under
-        .get(&x)
-        .map(|u| !is_ref(&erase(u, under)) || underlying_null_capable(u, under))
-        .unwrap_or(false)
-}
-
-/// Whether a value class's unboxed representation can hold `null` — true when ANY level of the nested
-/// underlying chain is declared nullable (`X(val v: Int?)`; `ZN(val z: Z1?)` → `ZN2(val z: ZN)` null-capable
-/// through `Z1?`). `erase` collapses a nullable-over-non-null-reference to a non-null underlying, so this
-/// walks the UNERASED chain to see the `?` erasure drops.
-fn underlying_null_capable(t: &Ty, under: &Under) -> bool {
-    if t.is_nullable() {
-        return true;
-    }
-    match t.obj_internal() {
-        Some(fq_name) => under
-            .get(&fq_name)
-            .is_some_and(|u| underlying_null_capable(u, under)),
-        None => false,
-    }
-}
-
 /// Whether a NON-NULL value-class type's unboxed underlying can hold null (so a `checkNotNullParameter`
 /// on it would wrongly reject a legal value). True when the value class's field type erases to a
 /// nullable reference (`X(val v: Int?)` → `Integer`; `X(val v: String?)` → `String?`).
@@ -6350,22 +6328,6 @@ fn sam_declares_vc_return(
         .is_some_and(|(_, ret)| ret.non_null().obj_internal() == Some(x))
 }
 
-fn erase(t: &Ty, under: &Under) -> Ty {
-    if let Some(fq_name) = t.non_null().obj_internal() {
-        let nullable = t.is_nullable();
-        if let Some(u) = under.get(&fq_name) {
-            // A non-null `X` always erases to its underlying. A nullable `X?` erases ONLY when it is NOT
-            // boxed (`nullable_is_boxed` is the single source of truth — over a non-null reference that
-            // carries `null` itself); otherwise it stays the boxed `X` so `X(null)` ≠ `null`. Delegating
-            // keeps erasure consistent with the box/unbox analysis for arbitrarily nested chains.
-            if !nullable || !nullable_is_boxed(fq_name, under) {
-                return erase(u, under);
-            }
-        }
-    }
-    *t
-}
-
 /// Select the physical result carried through a suspend function's erased `Object` boundary.
 ///
 /// The declared type remains the semantic identity used for overloads and metadata. This target pass
@@ -6389,43 +6351,6 @@ fn suspend_result_representation(
         })
     } else {
         Some(crate::ir::IrValueClassSuspendResult::Carrier(carrier))
-    }
-}
-
-/// Whether the erased type occupies a JVM *reference* slot. A non-null Kotlin primitive class
-/// (`kotlin/Int`, `kotlin/Boolean`, …) emits as a JVM primitive (`I`, `Z`, …), so it is NOT a
-/// reference; its NULLABLE form is the boxed wrapper (`Integer`), which is. Everything else that is a
-/// `Class` is a reference.
-fn is_ref(t: &Ty) -> bool {
-    if t.is_nullable() {
-        return true;
-    }
-    // A Kotlin type parameter always occupies an erased JVM reference slot, even when its upper
-    // bound names a primitive-like Kotlin class. Treating `T` as non-reference loses the boxing
-    // boundary in `Holder<T>(value: T)` and stores an unboxed value-class carrier as `Integer`
-    // instead of the value class's boxed wrapper.
-    if matches!(t.non_null(), Ty::TyParam(..)) {
-        return true;
-    }
-    // A JVM scalar (`Int`/`Long`/… AND the unsigned `UInt`/`ULong`, which are unboxed primitives) is NOT a
-    // reference. Check this FIRST — `kotlin_class_internal(UInt)` is "kotlin/UInt" but `unboxed_primitive`
-    // only knows the signed wrappers, so the descriptor check below would misclassify it as a reference.
-    if t.is_jvm_scalar() {
-        return false;
-    }
-    // A FUNCTION type realizes as a `FunctionN` object and an array as its array class — both are
-    // references with no `kotlin_class_internal`, and the `None => false` fallback below silently
-    // stripped their `checkNotNullParameter` guards (kotlinc guards a `block: () -> Unit` like any
-    // other non-null reference parameter).
-    if matches!(t, Ty::Fun(_)) || t.is_array() {
-        return true;
-    }
-    // `kotlin_class_internal` (not `obj_internal`): a bare `Ty::String` variant is a REFERENCE but has no
-    // `obj_internal()` — treating it as a non-reference makes `nullable_is_boxed` think a `String`-backed
-    // value class is primitive-like (`Str?` wrongly boxed instead of unboxed to `String?`).
-    match t.kotlin_class_internal() {
-        Some(fq_name) => Ty::obj(&fq_name.render()).unboxed_primitive().is_none(),
-        None => false,
     }
 }
 

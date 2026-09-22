@@ -22,6 +22,13 @@ fn custom_collection_literal_keeps_the_selected_companion_operator() {
     };
     let target = call.target.module().expect("source companion operator");
     assert_eq!(index.callable_name(target), Some("of"));
+    // The operator is an ordinary member of the companion object, so the checked call must carry
+    // that singleton as its dispatch receiver even though the syntax spells no receiver. A call
+    // emitted without it is one argument short of the declaration it selected.
+    assert!(
+        call.dispatch_receiver.is_some(),
+        "a companion `operator fun of` dispatches on its companion instance"
+    );
     assert!(call.extension_receiver.is_none());
     assert_eq!(root.ty.get(), Ty::obj("MyList"));
 }
