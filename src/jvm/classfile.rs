@@ -2415,6 +2415,14 @@ impl ClassWriter {
         code: &CodeBuilder,
         signature: Option<&str>,
     ) {
+        // The last gate before a body becomes a class file's `Code`. A coroutine marker is
+        // `impdep1`, reserved by JVMS §6.2 for an implementation's own use and rejected by nothing —
+        // it would simply run, over a continuation slot the declining path never assigned. The walk
+        // is instruction-by-instruction because `0xfe` also occurs inside operands.
+        debug_assert!(
+            markers_in(&code.bytes).is_none_or(|found| found.is_empty()),
+            "a coroutine marker reached the class file in {name}{desc}",
+        );
         let n = self.cp.utf8(name);
         let d = self.cp.utf8(desc);
         let sig = signature.map(|s| self.cp.utf8(s));

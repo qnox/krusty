@@ -11301,27 +11301,46 @@ fn emit_method_inner_with_holder(
     // the dispatch and the state it re-enters can be emitted around the same body.
     let machine_states = match (machine_slots, env.run.machine_plan(fid)) {
         (Some(slots), Some(plan)) => {
-            let internal = coroutine_machine::continuation_internal(
-                owner,
-                &f.name,
-                crate::jvm::suspend::same_name_ordinal(ir, fid),
-            );
-            e.machine = Some(coroutine_machine::Machine {
-                plan,
-                slots,
-                internal,
-                // An instance method is re-entered on its receiver, which the continuation keeps.
-                receiver: instance.then(|| owner.to_string()),
-                // A private method is not callable from the continuation class, whether it is a
-                // member or a top-level function; a synthetic static on the owner is.
-                bridge: ir
-                    .private_methods
-                    .contains(&fid)
-                    .then(|| coroutine_machine::access_bridge_name(&f.name)),
-            });
+            // The continuation the machine is re-entered on is the trailing `$completion`
+            // parameter. Resolve it BEFORE anything is armed: arming is what makes the body emit
+            // markers and spills, and a machine armed for a prologue that then declined would leave
+            // both behind — markers no erasure pass is reached for, over a slot never assigned.
             let completion = param_tys.len().saturating_sub(1) as u32 + u32::from(instance);
-            let completion = e.slots.get(&completion).map(|&(slot, _)| slot);
-            completion.and_then(|completion| e.emit_machine_prologue(completion, &mut code))
+            match e.slots.get(&completion).map(|&(slot, _)| slot) {
+                Some(completion) => {
+                    let internal = coroutine_machine::continuation_internal(
+                        owner,
+                        &f.name,
+                        crate::jvm::suspend::same_name_ordinal(ir, fid),
+                    );
+                    e.machine = Some(coroutine_machine::Machine {
+                        plan,
+                        slots,
+                        internal,
+                        // An instance method is re-entered on its receiver, which the continuation
+                        // keeps.
+                        receiver: instance.then(|| owner.to_string()),
+                        // A private method is not callable from the continuation class, whether it
+                        // is a member or a top-level function; a synthetic static on the owner is.
+                        bridge: ir
+                            .private_methods
+                            .contains(&fid)
+                            .then(|| coroutine_machine::access_bridge_name(&f.name)),
+                    });
+                    e.emit_machine_prologue(completion, &mut code)
+                }
+                // No continuation to dispatch on, so there is no machine to build. Decline the
+                // compile — as a discovery pass that found no marker does — and emit the rest of
+                // this method with nothing armed, so the bytes that get discarded carry neither a
+                // marker nor a read of a slot that was never assigned.
+                None => {
+                    crate::trace_compiler!("suspend", "machine fid={fid} NO CONTINUATION SLOT");
+                    e.machine_suspensions.clear();
+                    env.run
+                        .set_inline_bail("a coroutine machine with no continuation parameter");
+                    None
+                }
+            }
         }
         _ => None,
     };
@@ -11359,7 +11378,6 @@ fn emit_method_inner_with_holder(
                     .set_inline_bail("suspension inside a lambda that was not spliced");
             }
         }
-        let _ = code.erase_markers();
     }
     // The implicit `return` for a `Unit` function is dead code when the body already diverges
     // (`fun foo() { throw … }`): an unreachable `return` after `athrow` has no stack-map frame and
@@ -11423,7 +11441,6 @@ fn emit_method_inner_with_holder(
             };
             code.add_frame_if_new(target, collapse_locals(&restored), stack);
         }
-        let _ = code.erase_markers();
         e.emit_machine_states(&resumes, &mut code);
         e.emit_machine_default(default, &mut code);
         if let Some(machine) = e.machine.clone() {
@@ -11515,6 +11532,12 @@ fn emit_method_inner_with_holder(
             slot += slot_words(*t);
         }
     }
+    // Every coroutine marker, on every path out of this function. A marker exists to survive being
+    // relocated into a spliced inline body and is read once the bytes are final; `impdep1` is
+    // reserved by JVMS §6.2 and must never reach a class file. Erasing here — after the last byte
+    // is emitted and before the code is linked, with no `return` in between — is what makes that a
+    // property of method emission rather than of whichever machine branch happened to run.
+    let _ = code.erase_markers();
     code.ensure_locals(e.next_slot);
     code.link();
     // Top-level/`static` functions are always `final` (kotlinc emits `public static final`). An
@@ -20804,6 +20827,21 @@ mod fail_soft_tests {
         facade: &str,
         run: &EmitRun,
     ) -> Option<Vec<(String, Vec<u8>)>> {
+        emit_for_test_with_machines(
+            ir,
+            facade,
+            run,
+            &crate::jvm::suspend::EmitTimeMachines::default(),
+        )
+    }
+
+    /// [`emit_for_test`] with the emit-time coroutine machines a suspend pass would have recorded.
+    pub(super) fn emit_for_test_with_machines(
+        ir: &IrFile,
+        facade: &str,
+        run: &EmitRun,
+        emit_time_machines: &crate::jvm::suspend::EmitTimeMachines,
+    ) -> Option<Vec<(String, Vec<u8>)>> {
         let continuations = crate::jvm::suspend::ContinuationMetadataMap::default();
         let property_realizations =
             crate::jvm::property_realizations::PropertyRealizations::default();
@@ -20813,7 +20851,6 @@ mod fail_soft_tests {
             crate::jvm::default_call_operands::DefaultCallOperands::default();
         let bridge_returns =
             crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations::default();
-        let emit_time_machines = crate::jvm::suspend::EmitTimeMachines::default();
         emit_all_with_checked_classifiers(
             ir,
             facade,
@@ -20823,7 +20860,7 @@ mod fail_soft_tests {
                     facade: None,
                     continuations: &continuations,
                     bridge_returns: &bridge_returns,
-                    emit_time_machines: &emit_time_machines,
+                    emit_time_machines,
                 },
                 signature_symbols: &NoClassifiers,
                 property_realizations: &property_realizations,
@@ -20999,5 +21036,47 @@ mod fail_soft_tests {
             param_checks: vec![],
         });
         assert!(emit_for_test(&ir, "TestKt", &EmitRun::default()).is_none());
+    }
+
+    // A machine recorded for a function with no `$completion` parameter cannot resolve the
+    // continuation it is re-entered on. Arming it anyway and letting the prologue decline emitted a
+    // body full of coroutine markers (`impdep1`, reserved by JVMS §6.2) over a continuation slot
+    // nothing assigned, and reached NO erasure pass: both are inside the branch that runs only when
+    // the prologue succeeded. The decision belongs before the machine is armed.
+    #[test]
+    fn a_machine_that_cannot_resolve_its_continuation_declines_before_it_is_armed() {
+        let mut ir = IrFile::default();
+        let suspension = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
+        let function = ir.add_fun(IrFunction {
+            name: "box".into(),
+            params: Vec::new(),
+            ret: Ty::Unit,
+            body: Some(suspension),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let mut machines = crate::jvm::suspend::EmitTimeMachines::default();
+        machines.record(
+            function,
+            vec![crate::jvm::suspend::cps::SplicedSuspension { call: suspension }],
+        );
+        // The EMITTING pass: a plan is already in hand, so the machine is what this emission builds.
+        let run = EmitRun::default();
+        run.record_machine_plan(
+            function,
+            coroutine_machine::MachinePlan {
+                suspensions: vec![coroutine_machine::SuspensionPlan::default()],
+                body_locals: 0,
+            },
+        );
+        assert!(
+            emit_for_test_with_machines(&ir, "TestKt", &run, &machines).is_none(),
+            "a machine that cannot be built declines the compile instead of emitting half of one",
+        );
+        assert_eq!(
+            run.inline_bail().as_deref(),
+            Some("a coroutine machine with no continuation parameter"),
+        );
     }
 }

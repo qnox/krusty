@@ -10,9 +10,13 @@
 //!
 //! So the emitter writes a marker instruction at each position and looks for it once the method's
 //! bytes are final. `impdep1` (`0xfe`) is reserved by JVMS §6.2 for an implementation's own use and
-//! no compiler emits it, which is exactly the guarantee needed. Every marker is overwritten with
-//! `nop`s the moment its label is bound, so none can reach a class file; [`Self::marker_positions`]
-//! and [`Self::erase_markers`] are always used as a pair.
+//! no compiler emits it, which is exactly the guarantee needed.
+//!
+//! Nothing rejects a marker that escapes: `impdep1` is reserved, not illegal, so a surviving one
+//! would simply run. [`CodeBuilder::erase_markers`] is therefore called unconditionally at the end
+//! of method emission — after the last byte and before the code is linked — rather than by whichever
+//! branch read the positions, and [`crate::jvm::classfile::ClassWriter::add_method_sig`] carries a
+//! debug-only assertion that none reached the class file.
 
 use super::CodeBuilder;
 
