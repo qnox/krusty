@@ -480,10 +480,20 @@ static kt_int kt_string_offset(KRef self, kt_int index) {
     return 0;
 }
 
+/* These read a STRING's own storage fields to share its bytes, so a receiver that is not a string
+   must be turned into one first. A `StringBuilder` is a legal receiver — every one of these is
+   declared over `CharSequence` — and its layout is not a string's, so without this the fields read
+   would be whatever a builder holds at those offsets. `kt_string_length` and `kt_to_string` are the
+   two that already answer for both. */
+static KRef kt_as_string(KRef self) {
+    return self != NULL && self->header.type == &kt_type_string_builder ? kt_to_string(self) : self;
+}
+
 KRef kt_string_substring(KRef self, kt_int start, kt_int end) {
     if (start < 0 || end < start) {
         kt_index_out_of_bounds(start, end);
     }
+    self = kt_as_string(self);
     kt_int from = kt_string_offset(self, start);
     kt_int to = kt_string_offset(self, end);
     /* The storage is shared, not copied: the receiver's own text already holds these bytes, and
@@ -492,6 +502,7 @@ KRef kt_string_substring(KRef self, kt_int start, kt_int end) {
 }
 
 KRef kt_string_substring_from(KRef self, kt_int start) {
+    self = kt_as_string(self);
     kt_int from = kt_string_offset(self, start);
     kt_int length = self->as.string.byte_length;
     return kt_string_of(self->as.string.storage, self->as.string.bytes + from, length - from);
@@ -784,6 +795,133 @@ kt_char kt_string_single(KRef self) {
         return 0;
     }
     return kt_string_get(self, 0);
+}
+
+/* The digits of a text as a magnitude, for the `toInt`/`toLong` family.
+
+   `ok` is cleared when the text is not a number at all — empty, a lone sign, anything but ASCII
+   digits, any whitespace — because Kotlin's parse accepts none of those. `limit` is the largest
+   magnitude the caller will take, checked BEFORE each multiply so a long run of digits cannot wrap
+   the accumulator instead of being refused.
+
+   The sign comes back separately rather than being applied here: the two bounds are not symmetric
+   — `Int.MIN_VALUE` has no positive counterpart — so only the caller can say which one applies. */
+static uint64_t kt_text_magnitude(KRef self, uint64_t limit, kt_boolean *negative, kt_boolean *ok) {
+    *negative = 0;
+    *ok = 0;
+    kt_int length = kt_string_length(self);
+    kt_int at = 0;
+    if (length == 0) {
+        return 0;
+    }
+    kt_char lead = kt_string_get(self, 0);
+    if (lead == '-' || lead == '+') {
+        *negative = lead == '-';
+        at = 1;
+    }
+    if (at >= length) {
+        return 0;
+    }
+    uint64_t value = 0;
+    for (; at < length; at++) {
+        kt_char unit = kt_string_get(self, at);
+        if (unit < '0' || unit > '9') {
+            return 0;
+        }
+        uint64_t digit = (uint64_t)(unit - '0');
+        if (value > (limit - digit) / 10) {
+            return 0;
+        }
+        value = value * 10 + digit;
+    }
+    *ok = 1;
+    return value;
+}
+
+/* Kotlin's wording for a text that is not the number it was asked to be. */
+static void kt_raise_number_format(KRef self) {
+    KRef message = kt_string_plus(
+        kt_string_plus(kt_string_utf8("For input string: \"", 19), self),
+        kt_string_utf8("\"", 1));
+    kt_throw(kt_throwable_new(&kt_type_number_format_exception, message));
+}
+
+/* `s.toInt()` / `s.toLong()` and their `OrNull` forms. One parse, four readings of it: the
+   exceptional forms raise where the null-answering ones hand back nothing, which is the only
+   difference Kotlin draws between them.
+
+   Out of range is not a different mistake from "not a number" here — both are
+   `NumberFormatException`, as on the JVM — so the magnitude limit does the work of both. */
+static kt_boolean kt_text_signed(KRef self, uint64_t negative_limit, int64_t *answer) {
+    kt_boolean negative = 0;
+    kt_boolean ok = 0;
+    uint64_t magnitude = kt_text_magnitude(self, negative_limit, &negative, &ok);
+    if (!ok) {
+        return 0;
+    }
+    if (!negative && magnitude > negative_limit - 1) {
+        return 0;
+    }
+    *answer = negative ? -(int64_t)magnitude : (int64_t)magnitude;
+    return 1;
+}
+
+#define KT_INT_NEGATIVE_LIMIT 2147483648ULL
+#define KT_LONG_NEGATIVE_LIMIT 9223372036854775808ULL
+
+kt_int kt_string_to_int(KRef self) {
+    int64_t answer = 0;
+    if (!kt_text_signed(self, KT_INT_NEGATIVE_LIMIT, &answer)) {
+        kt_raise_number_format(self);
+        return 0;
+    }
+    return (kt_int)answer;
+}
+
+kt_long kt_string_to_long(KRef self) {
+    int64_t answer = 0;
+    if (!kt_text_signed(self, KT_LONG_NEGATIVE_LIMIT, &answer)) {
+        kt_raise_number_format(self);
+        return 0;
+    }
+    return (kt_long)answer;
+}
+
+KRef kt_string_to_int_or_null(KRef self) {
+    int64_t answer = 0;
+    if (self == NULL || !kt_text_signed(self, KT_INT_NEGATIVE_LIMIT, &answer)) {
+        return NULL;
+    }
+    return kt_box_int((kt_int)answer);
+}
+
+KRef kt_string_to_long_or_null(KRef self) {
+    int64_t answer = 0;
+    if (self == NULL || !kt_text_signed(self, KT_LONG_NEGATIVE_LIMIT, &answer)) {
+        return NULL;
+    }
+    return kt_box_long((kt_long)answer);
+}
+
+/* `sb[i] = c`. The builder stores UTF-8, so replacing one UTF-16 unit is not a byte write: the
+   text is rebuilt around the index and the builder refilled with it. `sb[0]++` is the corpus shape
+   and reaches here as a read followed by this. */
+void kt_string_builder_set(KRef self, kt_int index, kt_char value) {
+    kt_int length = kt_string_length(self);
+    if (index < 0 || index >= length) {
+        kt_throw(kt_throwable_new(&kt_type_index_out_of_bounds_exception,
+                                  kt_string_utf8("index out of bounds", 19)));
+        return;
+    }
+    /* Through the builder's TEXT, taken ONCE: the substrings below would each convert it again
+       (see `kt_as_string`), and the second would be of a text the first no longer names. */
+    KRef text = kt_to_string(self);
+    KRef head = kt_string_substring(text, 0, index);
+    KRef tail = kt_string_substring_from(text, index + 1);
+    KRef replaced =
+        kt_string_plus(kt_string_plus(head, kt_to_string(kt_box_char(value))), tail);
+    kt_string_builder_set_length(self, 0);
+    (void)kt_string_builder_append(self, replaced);
 }
 
 /* `c in s`. `kt_string_contains` asks about one text inside another; this asks about a single unit,

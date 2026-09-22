@@ -10,7 +10,9 @@
 //!
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
-use super::common::{expect_box_ok_with_stdlib, expect_native_box, kotlinc_box_result};
+use super::common::{
+    expect_box_ok_with_stdlib, expect_native_box, expect_native_decline, kotlinc_box_result,
+};
 
 /// Require kotlinc's answer, krusty's JVM answer and the NATIVE answer to agree.
 fn every_backend_agrees_with_kotlinc(stem: &str, source: &str) {
@@ -110,4 +112,98 @@ fun box(): String {
 }
 "#;
     every_backend_agrees_with_kotlinc("native_text_builder_clear", source);
+}
+
+/// The parse Kotlin makes: an optional sign, ASCII digits and nothing else.
+#[test]
+fn text_parses_itself_as_an_integer() {
+    let source = r#"
+fun refused(run: () -> Unit): Boolean =
+    try { run(); false } catch (e: NumberFormatException) { true }
+
+fun box(): String {
+    if ("123".toInt() != 123) return "fail plain"
+    if ("-123".toInt() != -123) return "fail negative"
+    if ("+7".toInt() != 7) return "fail signed"
+    if ("0".toInt() != 0) return "fail zero"
+    if ("2147483647".toInt() != Int.MAX_VALUE) return "fail max"
+    if ("-2147483648".toInt() != Int.MIN_VALUE) return "fail min"
+    if ("9223372036854775807".toLong() != Long.MAX_VALUE) return "fail long max"
+    if (!refused { "".toInt() }) return "fail empty"
+    if (!refused { "-".toInt() }) return "fail lone sign"
+    if (!refused { "12x".toInt() }) return "fail trailing"
+    if (!refused { " 12".toInt() }) return "fail space"
+    if (!refused { "2147483648".toInt() }) return "fail over max"
+    if (!refused { "-2147483649".toInt() }) return "fail under min"
+    if (!refused { "99999999999999999999999".toInt() }) return "fail far over"
+    return "OK"
+}
+"#;
+    every_backend_agrees_with_kotlinc("native_text_to_int", source);
+}
+
+/// The `OrNull` forms answer nothing where the others raise.
+#[test]
+fn text_parses_itself_as_an_integer_or_nothing() {
+    let source = r#"
+fun box(): String {
+    if ("123".toIntOrNull() != 123) return "fail plain"
+    if ("12x".toIntOrNull() != null) return "fail bad"
+    if ("".toIntOrNull() != null) return "fail empty"
+    if ("2147483648".toIntOrNull() != null) return "fail over max"
+    if ("2147483648".toLongOrNull() != 2147483648L) return "fail long"
+    if ("9223372036854775808".toLongOrNull() != null) return "fail long over max"
+    return "OK"
+}
+"#;
+    every_backend_agrees_with_kotlinc("native_text_to_int_or_null", source);
+}
+
+/// `sb[i] = c` replaces one UTF-16 unit; `sb[i]++` is a read and one of these.
+#[test]
+fn a_builder_replaces_one_of_its_units() {
+    let source = r#"
+fun box(): String {
+    val sb = StringBuilder("NK")
+    sb[0]++
+    if (sb.toString() != "OK") return "fail step " + sb.toString()
+    val other = StringBuilder("abc")
+    other[1] = 'X'
+    if (other.toString() != "aXc") return "fail middle " + other.toString()
+    other[2] = 'Z'
+    if (other.toString() != "aXZ") return "fail last " + other.toString()
+    other[0] = 'q'
+    if (other.toString() != "qXZ") return "fail first " + other.toString()
+    return "OK"
+}
+"#;
+    every_backend_agrees_with_kotlinc("native_text_builder_set", source);
+}
+
+/// `sb.substring(…)` is the builder's OWN member under a jar provider, and the runtime has none.
+///
+/// Worth pinning because the shape is a trap rather than a gap. Every text member here is declared
+/// over `CharSequence`, which a builder is, and `kt_string_substring` shares a STRING's storage by
+/// reading its fields directly — so a builder reaching it would read whatever a builder holds at
+/// those offsets. A jar provider resolves the call to `java.lang.StringBuilder.substring` and it
+/// declines by name; the runtime guards the receiver anyway, because a klib provider has no such
+/// class to resolve to and the same call lands in the `kotlin.text` facade.
+#[test]
+fn a_builders_own_substring_is_declined_by_name() {
+    let source = r#"
+fun box(): String {
+    val sb = StringBuilder("abcd")
+    return if (sb.substring(1, 3) == "bc") "OK" else "fail"
+}
+"#;
+    assert_eq!(
+        kotlinc_box_result(source),
+        "OK",
+        "unexpected kotlinc result"
+    );
+    expect_native_decline(
+        source,
+        "native_text_builder_substring",
+        "java.lang.StringBuilder.substring",
+    );
 }

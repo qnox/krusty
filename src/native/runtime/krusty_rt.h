@@ -773,6 +773,13 @@ kt_char kt_string_last(KRef self);
 kt_char kt_string_single(KRef self);
 /* `c in s`: a single unit rather than one text inside another, which `kt_string_contains` asks. */
 kt_boolean kt_string_contains_char(KRef self, kt_char value);
+/* `s.toInt()` / `s.toLong()` and their `OrNull` forms. The parse is Kotlin's: an optional sign,
+   ASCII digits and nothing else, refused when the magnitude runs past the type's bound. The
+   exceptional forms raise `NumberFormatException`; the others answer a box, or null. */
+kt_int kt_string_to_int(KRef self);
+kt_long kt_string_to_long(KRef self);
+KRef kt_string_to_int_or_null(KRef self);
+KRef kt_string_to_long_or_null(KRef self);
 /* The two text questions Kotlin declares on a NULLABLE receiver; null answers true to both. */
 kt_boolean kt_string_is_null_or_blank(KRef self);
 kt_boolean kt_string_is_null_or_empty(KRef self);
@@ -814,6 +821,8 @@ KRef kt_string_builder_append_new_line(KRef self);
 
 /* `sb.setLength(n)`, by UTF-16 unit as Kotlin counts: shorter truncates, longer pads with NUL. */
 void kt_string_builder_set_length(KRef self, kt_int length);
+/* `sb[i] = c`: the builder stores UTF-8, so one UTF-16 unit is replaced by rebuilding the text. */
+void kt_string_builder_set(KRef self, kt_int index, kt_char value);
 /* `sb.clear()`: emptied, answering the builder so a call can be chained. */
 KRef kt_string_builder_clear(KRef self);
 

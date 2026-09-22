@@ -7320,6 +7320,26 @@ and behavior is checked by RUNNING the emitted program.
   carries its OPERAND's type with it: a machine `Char` for one, a reference for the other.
   Tests: `tests/native_text_members_e2e.rs` (`a_char_is_looked_for_inside_text`).
 
+- **A text entry point that SHARES the receiver's storage must be given a string.**
+  `kt_string_substring` reads a string's own storage fields directly so the result can name the
+  same bytes, but every text member here is declared over `CharSequence`, and a `StringBuilder` is
+  one with a different layout — the fields read would be whatever a builder holds at those offsets,
+  which in practice reads as a length of zero. `kt_string_length` and `kt_to_string` are the two
+  that already answer for both, so the receiver is converted before the fields are read. A jar
+  provider resolves `sb.substring(…)` to `java.lang.StringBuilder.substring` and it declines by
+  name; a klib provider has no such class, and the same call lands in the `kotlin.text` facade.
+  Tests: `tests/native_text_members_e2e.rs` (`a_builders_own_substring_is_declined_by_name`,
+  `a_builder_replaces_one_of_its_units`).
+
+- **`String.toInt()` accepts an optional sign and ASCII digits, and nothing else.** No whitespace,
+  no radix prefix, no trailing text; a magnitude past the type's bound is the same
+  `NumberFormatException` as a text that is not a number at all, as on the JVM. The bound is not
+  symmetric — `Int.MIN_VALUE` has no positive counterpart — so the sign is read before the limit is
+  applied, and the accumulator is checked BEFORE each multiply so a long run of digits is refused
+  rather than wrapping.
+  Tests: `tests/native_text_members_e2e.rs` (`text_parses_itself_as_an_integer`,
+  `text_parses_itself_as_an_integer_or_nothing`).
+
 - **`isNullOrBlank`/`isNullOrEmpty` take the null.** They are the only text members Kotlin declares
   on a nullable receiver, and that is their whole point, so the null reaches the runtime instead of
   being checked away at the call site.

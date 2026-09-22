@@ -1157,6 +1157,29 @@ pub(super) fn scalar_member(
             ("first", []) => Some(("kt_string_first", vec![reference], Ty::Char)),
             ("last", []) => Some(("kt_string_last", vec![reference], Ty::Char)),
             ("single", []) => Some(("kt_string_single", vec![reference], Ty::Char)),
+            // `sb[i] = c`: Kotlin declares it beside the builder rather than on it, so it arrives
+            // as a member of the facade with the builder as its receiver. Both operands are
+            // machine values the generator must not box to hand over.
+            ("set", [Ty::Int, Ty::Char]) => Some((
+                "kt_string_builder_set",
+                vec![reference, Ty::Int, Ty::Char],
+                Ty::Unit,
+            )),
+            // The parse is the runtime's because the answer is a machine value: a generator that
+            // open-coded it would have to walk the encoding anyway. The `OrNull` forms answer a
+            // BOX or null, which is the only difference Kotlin draws between the two pairs.
+            ("toInt", []) => Some(("kt_string_to_int", vec![reference], Ty::Int)),
+            ("toLong", []) => Some(("kt_string_to_long", vec![reference], Ty::Long)),
+            ("toIntOrNull", []) => Some((
+                "kt_string_to_int_or_null",
+                vec![reference],
+                Ty::nullable(Ty::obj("kotlin/Int")),
+            )),
+            ("toLongOrNull", []) => Some((
+                "kt_string_to_long_or_null",
+                vec![reference],
+                Ty::nullable(Ty::obj("kotlin/Long")),
+            )),
             // Declared on a NULLABLE receiver — that is the whole point of them — so the null the
             // reference may carry reaches the runtime rather than being checked away here.
             ("isNullOrBlank", []) => {
