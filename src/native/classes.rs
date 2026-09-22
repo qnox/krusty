@@ -676,6 +676,19 @@ fn place_interface_slots(
             // such a class abstract for the same reason; common IR does not, so the shape is read
             // here. An entry WITHOUT a body is an instance of the enum class, and then the trap is
             // reachable and this does not apply.
+            // An interface member this class plainly implements, which no KEY named. A member
+            // EXTENSION's override is in no override table — the frontend records none for one —
+            // and neither is the member an interface DELEGATION fills for a SECOND interface that
+            // declares the same one. Both leave a number with nothing in it while the method that
+            // fills it sits in this very vtable. Reading it by signature is the rule the
+            // superclass chain already uses (see `inherited_slot`), asked of the interface region.
+            let entry = match entry {
+                Slot::Abstract if implemented => {
+                    interface_member_by_signature(ir, id, layouts, &vtable, member)
+                        .unwrap_or(Slot::Abstract)
+                }
+                entry => entry,
+            };
             let entries_carry_it = is_enum(&ir.classes[id as usize])
                 && !ir.classes[id as usize].enum_entries.is_empty()
                 && ir.classes[id as usize]
@@ -688,6 +701,16 @@ fn place_interface_slots(
                 && !ir.classes[id as usize].is_interface
                 && !entries_carry_it
             {
+                crate::trace_compiler!(
+                    "native",
+                    "interface member unfilled class={} member={} key={:?} aliases={:?} slots={:?} bridges={:?}",
+                    ir.classes[id as usize].fq_name(),
+                    member_name(ir, member),
+                    member.key,
+                    member.aliases,
+                    layouts[id as usize].slots.keys().collect::<Vec<_>>(),
+                    layouts[id as usize].interface_bridges.keys().collect::<Vec<_>>(),
+                );
                 return Err(format!(
                     "an interface member with no implementation found (`{}` in `{}`)",
                     member_name(ir, member),
@@ -711,6 +734,85 @@ fn member_name(ir: &IrFile, member: &InterfaceMember) -> String {
         SlotKey::Any(slot) => format!("kotlin.Any slot {slot}"),
     };
     format!("{interface}.{name}")
+}
+
+/// The entry one of this class's OWN methods fills an interface member with, where no key named it.
+///
+/// Two shapes reach here. A member EXTENSION's override is in no override table — the frontend
+/// records none for one — so nothing aliased the interface's spelling onto the override's slot. And
+/// a member an interface DELEGATION supplies is recorded against the ONE interface it forwards to,
+/// so a second interface declaring the same member is left empty although `Interface by delegate`
+/// answers it too. In both the implementation is already in this vtable; what is missing is the
+/// number pointing at it.
+///
+/// What says which method that is, is the language's own rule rather than a guess: a class
+/// implementing an interface must implement its members, and Kotlin rejects a fresh redeclaration
+/// of an inherited member ("hides member of supertype and needs `override`"). So a method of this
+/// class matching the member by name and machine signature IS that implementation.
+///
+/// The match must be UNIQUE. Two members whose Kotlin signatures differ can share a machine one —
+/// `String` and `Any` are both references — and choosing between them would be the guess this
+/// deliberately does not make. Where it cannot tell, it answers nothing and the caller declines,
+/// which is what it did before.
+fn interface_member_by_signature(
+    ir: &IrFile,
+    id: ClassId,
+    layouts: &[ClassLayout],
+    vtable: &[Slot],
+    member: &InterfaceMember,
+) -> Option<Slot> {
+    let machine = |function: &IrFunction| {
+        (
+            function.name.clone(),
+            function
+                .params
+                .iter()
+                .copied()
+                .map(c_kind)
+                .collect::<Vec<_>>(),
+            c_kind(function.ret),
+        )
+    };
+    // The interface's own declaration, which only a method key names. A property's key carries a
+    // name and a declaring class rather than a declaration, and the member extensions this repairs
+    // reach the region as methods.
+    let declared = std::iter::once(&member.key)
+        .chain(&member.aliases)
+        .find_map(|key| match key {
+            SlotKey::Function(fid) => Some(&ir.functions[*fid as usize]),
+            _ => None,
+        })?;
+    let wanted = machine(declared);
+    // Every method of this class and its ancestors that has a slot here, so an implementation a
+    // BASE class supplies fills the number too.
+    let mut found: Option<u32> = None;
+    let mut at = Some(id);
+    while let Some(class) = at {
+        for &candidate in &ir.classes[class as usize].methods {
+            let function = &ir.functions[candidate as usize];
+            if machine(function) != wanted {
+                continue;
+            }
+            let Some(&slot) = layouts[id as usize]
+                .slots
+                .get(&function_key(ir, class, candidate))
+            else {
+                continue;
+            };
+            match found {
+                // One slot reached by two spellings is one implementation, not two candidates.
+                Some(existing) if existing == slot => {}
+                Some(_) => return None,
+                None => found = Some(slot),
+            }
+        }
+        at = ir.class_id_by_name(ir.classes[class as usize].superclass);
+    }
+    match vtable.get(found? as usize) {
+        // The slot this class reached is itself empty, so it answers nothing the member wants.
+        Some(Slot::Abstract) | None => None,
+        Some(entry) => Some(entry.clone()),
+    }
 }
 
 /// A total order over slot keys, so an interface's members are numbered the same way on every

@@ -2033,6 +2033,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   PROGRAM declared. Test: `tests/native_dependency_property_reference_e2e.rs`
   (`a_dependency_property_reference_answers_its_name`), `tests/native_walkable_text_e2e.rs`.
 
+- **A class implements an interface member it never registers an override for.** Two shapes leave
+  an interface's dispatch number empty although the method filling it is already in the class's own
+  table. A MEMBER EXTENSION's override — `override fun Int.foo()` of an `interface Base { fun
+  Int.foo(): String }`, and the accessor of `override val Int.a` — is recorded in no override
+  table, because the frontend keeps none for one. And a member an `Interface by delegate` clause
+  supplies is recorded against the one interface it forwards to, so `class Z(val a: A) : A by a, B`
+  leaves `B.foo` empty although the delegation answers it: in Kotlin one member overrides every
+  inherited one it matches. krusty's native target reads the number by signature in both cases,
+  which is the rule it already uses up the superclass chain — a class implementing an interface
+  must implement its members, and Kotlin rejects a fresh redeclaration of an inherited one, so a
+  method matching by name and machine signature IS that implementation. The match must be UNIQUE:
+  two members whose Kotlin signatures differ can share a machine one, since `String` and `Any` are
+  both references, and the target declines rather than choose. Test:
+  `tests/native_interface_implementations_e2e.rs`.
+
 - **The runtime walks a collection the PROGRAM declared, through three thunks its descriptor
   carries.** Every walking entry point of krusty's native runtime — `withIndex`, `contains`,
   `count`, `map`, `joinToString`, the `for` loop itself — reaches its elements through `iterator()`,
