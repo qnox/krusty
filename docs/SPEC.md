@@ -2097,6 +2097,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   bounds of a counted loop and for all three operands of a membership test. Test:
   `tests/native_range_bound_control_e2e.rs`.
 
+- **`===` between floating-point values is the machine's comparison, not a bit comparison.**
+  Kotlin's identity equality between primitives is its `==` — that is the whole of what the
+  deprecation warning on the form says about it — so for `Float` and `Double` it carries IEEE's
+  answers with it: `NaN === NaN` is FALSE and `-0.0 === 0.0` is TRUE, both confirmed against
+  kotlinc. Comparing the bits would answer the opposite of each, and boxing the two sides to
+  compare addresses would answer that no two values are ever identical. Test:
+  `tests/native_float_identity_e2e.rs`.
+
 - **A `Throwable` carries a CAUSE, and the two one-argument constructors are told apart by type.**
   Kotlin declares four: `()`, `(message)`, `(cause)` and `(message, cause)`. A single argument whose
   type is a `Throwable` is the cause and anything else is the message, and the two forms differ in

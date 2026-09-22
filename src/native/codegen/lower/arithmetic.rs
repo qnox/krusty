@@ -318,8 +318,18 @@ impl BodyLowering<'_, '_, '_> {
                     return Ok(None);
                 }
                 let (left, right, ty, _) = self.unify(left, lhs_ty, right, rhs_ty)?;
+                // On FLOATING-POINT values it is the machine's comparison, not a bit comparison.
+                // `===` between primitives is Kotlin's `==` — that is the whole of what the
+                // deprecation warning says about it — so it carries IEEE's answers with it: `NaN`
+                // is identical to nothing, itself included, and `-0.0` is identical to `0.0`. A bit
+                // comparison would answer the opposite of both.
                 if ty.is_float() {
-                    return Err("identity equality on floating-point values".to_string());
+                    let condition = float_comparison(match op {
+                        IrBinOp::RefEq => IrBinOp::Eq,
+                        _ => IrBinOp::Ne,
+                    })
+                    .expect("an equality");
+                    return Ok(Some(self.builder.ins().fcmp(condition, left, right)));
                 }
                 let condition = comparison(op, true).expect("identity");
                 return Ok(Some(self.builder.ins().icmp(condition, left, right)));
