@@ -34,11 +34,46 @@ mod ktype {
     pub const REFERENCE_RECEIVER_OFFSET: u32 = 68;
     /// Only a callable reference's descriptor has one; see the note on `KType`.
     pub const REFERENCE_TARGET: u32 = 72;
-    pub const SIZE: usize = 80;
+    /// The three thunks through which the runtime walks an object of a class of this file; see
+    /// the note on `KType`. Absent for every type but such a class.
+    pub const WALK_ITERATOR: u32 = 80;
+    pub const WALK_HAS_NEXT: u32 = 88;
+    pub const WALK_NEXT: u32 = 96;
+    pub const SIZE: usize = 104;
 }
 
 /// Where an object keeps its type: the header is one pointer.
 const TYPE_OFFSET: i32 = 0;
+
+/// The thunks through which the runtime WALKS an object of a class of this file: its own
+/// `iterator`, `hasNext` and `next`, each behind a fixed signature this side can call.
+///
+/// See the note on `KType::walk_iterator` for why a thunk rather than a vtable slot: an emitted
+/// method has the signature its DECLARATION states, and neither `hasNext`'s machine `Boolean` nor
+/// an `Iterator<Int>`'s unboxed element is something the runtime could read from a slot number.
+#[derive(Clone, Copy, Default)]
+pub(super) struct WalkMembers {
+    pub(super) iterator: Option<FuncId>,
+    pub(super) has_next: Option<FuncId>,
+    pub(super) next: Option<FuncId>,
+}
+
+/// The same, as the SLOTS the declaration pass reads out of the override edges, before the thunks
+/// that dispatch to them are emitted.
+#[derive(Clone, Copy, Default)]
+pub(super) struct WalkSlots {
+    /// Each PLUS ONE, so that 0 says the class declares none — slot 0 is `kotlin.Any.equals`.
+    pub(super) iterator: u32,
+    pub(super) has_next: u32,
+    pub(super) next: u32,
+}
+
+impl WalkSlots {
+    /// Whether the class declares any of the three, so a subclass knows whether to inherit.
+    fn is_empty(self) -> bool {
+        self.iterator == 0 && self.has_next == 0 && self.next == 0
+    }
+}
 
 /// The emitted items of one class.
 pub(super) struct ClassItems {
@@ -468,6 +503,10 @@ impl<'a> FileLowering<'a> {
         // A callable reference's declaration identity, and the byte offset of its bound receiver
         // — 0 when it binds none. The two travel together because only a reference has either.
         reference_target: Option<(DataId, u32)>,
+        // How to reach this type's own `iterator`/`hasNext`/`next`, for a class of this file the
+        // runtime may be asked to walk. Empty for everything else, which is every type emitted
+        // here but a class.
+        walk: WalkMembers,
     ) -> Result<(), Unsupported> {
         let references = if reference_offsets.is_empty() {
             None
@@ -537,9 +576,21 @@ impl<'a> FileLowering<'a> {
             ktype::REFERENCE_RECEIVER_OFFSET,
             reference_target.map_or(0, |(_, receiver)| receiver),
         );
+
         let mut description = DataDescription::new();
         description.define(bytes.into_boxed_slice());
         description.set_align(8);
+        for (offset, thunk) in [
+            (ktype::WALK_ITERATOR, walk.iterator),
+            (ktype::WALK_HAS_NEXT, walk.has_next),
+            (ktype::WALK_NEXT, walk.next),
+        ] {
+            let Some(thunk) = thunk else {
+                continue;
+            };
+            let func_ref = self.module.declare_func_in_data(thunk, &mut description);
+            description.write_function_addr(offset, func_ref);
+        }
         for (offset, data) in [
             (ktype::NAME, Some(name_data)),
             (ktype::REFERENCE_OFFSETS, references),
@@ -623,6 +674,7 @@ impl<'a> FileLowering<'a> {
             .into_iter()
             .map(|interface| self.classes[interface as usize].descriptor)
             .collect();
+        let walk = self.define_walk_members(class, &base)?;
         self.define_type_descriptor(
             descriptor,
             &base,
@@ -633,7 +685,199 @@ impl<'a> FileLowering<'a> {
             superclass,
             &interfaces,
             None,
+            walk,
         )
+    }
+
+    /// The slot a class's own `name` of this ARITY takes, with the parameter types it declares and
+    /// the type it answers.
+    ///
+    /// The arity is the only thing matched on beyond the name. Kotlin admits overloads that differ
+    /// in parameter TYPES at one arity, and this would pick whichever came first — so a class with
+    /// two of them is refused by the caller, which counts the candidates rather than trusting this.
+    pub(super) fn member_slot(
+        &self,
+        class: ClassId,
+        name: &str,
+        arity: usize,
+    ) -> Option<(u32, Vec<Ty>, Ty)> {
+        let ir = self.ir;
+        let mut matching = ir.classes[class as usize]
+            .methods
+            .iter()
+            .copied()
+            .filter(|&fid| {
+                let function = &ir.functions[fid as usize];
+                function.name == name
+                    && function.params.len() == arity
+                    && function.dispatch_receiver.is_some()
+            });
+        let fid = matching.next()?;
+        if matching.next().is_some() {
+            return None;
+        }
+        let key = model::function_key(ir, class, fid);
+        let slot = self.model.slot(class, &key)?;
+        let function = &ir.functions[fid as usize];
+        Some((slot, function.params.clone(), function.ret))
+    }
+
+    /// The three thunks through which the runtime walks an object of this class, emitted here; see
+    /// [`WalkMembers`].
+    ///
+    /// Each dispatches VIRTUALLY on the slot [`Self::walk_slots`] found, so one thunk serves the
+    /// whole subtree below the class that declares the member — a subclass overriding it is
+    /// reached through the same thunk, which is also why a subclass inherits the pointer rather
+    /// than needing one of its own.
+    fn define_walk_members(
+        &mut self,
+        class: ClassId,
+        base: &str,
+    ) -> Result<WalkMembers, Unsupported> {
+        let slots = self.walk_slots(class);
+        let mut members = WalkMembers::default();
+        for (biased, name, answers) in [
+            (slots.iterator, "iterator", any()),
+            (slots.has_next, "hasNext", Ty::Boolean),
+            (slots.next, "next", any()),
+        ] {
+            if biased == 0 {
+                continue;
+            }
+            let slot = biased - 1;
+            // What the SLOT answers, which is not what the thunk does: `next` on an
+            // `Iterator<Int>` answers an unboxed machine integer and the runtime reads a
+            // reference, so the conversion is the ordinary boundary one. Read from the slot
+            // rather than from the member's declaration, because the slot is what the dispatch
+            // lands on and the two need not agree — an entry standing in for a base whose
+            // signature has another representation wears the BASE's.
+            let declared = self.walk_slot_result(class, slot)?;
+            let thunk =
+                self.declare_local_function(&format!("{base}_walk_{name}"), &[any()], answers)?;
+            let signature = self.signature_of(&[any()], answers)?;
+            let label = format!("{base}_walk_{name}");
+            self.emit_function(thunk, signature, answers, &label, &mut |body, params| {
+                let Some(produced) = body.dispatch(params[0], slot, &[], declared, &[])? else {
+                    return Err(format!("a `Unit` answer from `{label}`"));
+                };
+                let Some(value) = body.convert(produced, Some(declared), answers)? else {
+                    return Err(format!("a `Unit` answer from `{label}`"));
+                };
+                body.builder.ins().return_(&[value]);
+                body.terminate();
+                Ok(())
+            })?;
+            match name {
+                "iterator" => members.iterator = Some(thunk),
+                "hasNext" => members.has_next = Some(thunk),
+                _ => members.next = Some(thunk),
+            }
+        }
+        Ok(members)
+    }
+
+    /// What the entry in `slot` of this class's table ANSWERS, for the thunk that dispatches
+    /// through it to convert from.
+    fn walk_slot_result(&self, class: ClassId, slot: u32) -> Result<Ty, Unsupported> {
+        let entry = self
+            .model
+            .layout(class)
+            .vtable
+            .get(slot as usize)
+            .cloned()
+            .ok_or_else(|| format!("a walk through slot {slot}, which no table has"))?;
+        match entry {
+            Slot::Function(fid) => Ok(self.ir.functions[fid as usize].ret),
+            // A stand-in for a base whose signature has another representation wears that base's,
+            // which is what a caller reading the slot gets.
+            Slot::Bridge { declared, .. } => Ok(self.ir.functions[declared as usize].ret),
+            other => Err(format!("a walk through the vtable entry {other:?}")),
+        }
+    }
+
+    /// Where a class of this file keeps its own `iterator`, `hasNext` and `next`, for the runtime
+    /// to walk an object of it; see [`WalkMembers`].
+    ///
+    /// Read from the OVERRIDE edges, the same source [`implemented_collections`] reads: what makes
+    /// a class walkable is that a member of it ANSWERS for `kotlin.collections.Iterable` or
+    /// `Iterator`, which is exactly what an edge to one of their declarations records — and it
+    /// holds for a class reaching the type through another dependency type its supertype list does
+    /// not name.
+    ///
+    /// A class declaring none of the three inherits its superclass's, because a slot number
+    /// assigned at the declaring class is valid for every subclass and a subclass is walked
+    /// through the same member. Inherited as a WHOLE rather than per member: a class that declares
+    /// one of them declares the shape's answer, and mixing its number with a parent's for the
+    /// other two would describe neither.
+    pub(super) fn walk_slots(&self, class: ClassId) -> WalkSlots {
+        use super::super::super::intrinsics::CollectionShape;
+        let ir = self.ir;
+        let declaration = &ir.classes[class as usize];
+        // Which ROLE the class answers for, read from the edges; WHICH members to look up then
+        // follows from the role rather than from the edges. An override whose result is the
+        // interface's own type parameter records no edge of its own — `Iterator<T>.next(): T` is
+        // exactly that shape — so a class answering `hasNext` would have been half-recorded, and
+        // half a pair is no walk.
+        let mut iterable = false;
+        let mut iterator = false;
+        for edge in ir
+            .function_overrides
+            .get(&declaration.fq_name)
+            .into_iter()
+            .flatten()
+        {
+            if !matches!(
+                edge.overridden,
+                crate::fir::ResolvedFunctionOverrideTarget::External(_)
+            ) {
+                continue;
+            }
+            match (
+                super::super::super::intrinsics::collection_shape(edge.overridden_owner),
+                edge.name.as_str(),
+            ) {
+                (Some(CollectionShape::Iterable), "iterator") => iterable = true,
+                (Some(CollectionShape::Iterator), "hasNext" | "next") => iterator = true,
+                _ => {}
+            }
+        }
+        let mut slots = WalkSlots::default();
+        if iterable {
+            slots.iterator = self.walk_slot(class, "iterator");
+        }
+        if iterator {
+            slots.has_next = self.walk_slot(class, "hasNext");
+            slots.next = self.walk_slot(class, "next");
+            // Both or neither: a walk asks an iterator for `hasNext` AND `next`, and half a pair
+            // would leave the other read as something this class is not.
+            if slots.has_next == 0 || slots.next == 0 {
+                slots.has_next = 0;
+                slots.next = 0;
+            }
+        }
+        if slots.is_empty() {
+            if let Some(parent) = self.model.layout(class).superclass {
+                return self.walk_slots(parent);
+            }
+        }
+        slots
+    }
+
+    /// The slot of a class's own nullary `name`, PLUS ONE so that 0 says it has none; see
+    /// [`WalkSlots`].
+    ///
+    /// Searched up the super chain, because a class answering for the role may inherit the member
+    /// from a base of this file rather than declare it — and a slot number assigned at the
+    /// declaring class is valid for every subclass.
+    fn walk_slot(&self, class: ClassId, name: &str) -> u32 {
+        let mut current = Some(class);
+        while let Some(id) = current {
+            if let Some((slot, _, _)) = self.member_slot(id, name, 0) {
+                return slot + 1;
+            }
+            current = self.model.layout(id).superclass;
+        }
+        0
     }
 
     /// A `constructor(…)` other than the primary: delegate, then run this constructor's body.
@@ -2767,37 +3011,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         self.dispatch(object, slot, &carried, ret, &arguments)
     }
 
-    /// The slot a class's own `name` of this ARITY takes, with the parameter types it declares and
-    /// the type it answers.
-    ///
-    /// The arity is the only thing matched on beyond the name. Kotlin admits overloads that differ
-    /// in parameter TYPES at one arity, and this would pick whichever came first — so a class with
-    /// two of them is refused by the caller, which counts the candidates rather than trusting this.
+    /// The slot a class's own `name` of this ARITY takes; see [`FileLowering::member_slot`].
     pub(super) fn member_slot(
         &self,
         class: ClassId,
         name: &str,
         arity: usize,
     ) -> Option<(u32, Vec<Ty>, Ty)> {
-        let ir = self.file.ir;
-        let mut matching = ir.classes[class as usize]
-            .methods
-            .iter()
-            .copied()
-            .filter(|&fid| {
-                let function = &ir.functions[fid as usize];
-                function.name == name
-                    && function.params.len() == arity
-                    && function.dispatch_receiver.is_some()
-            });
-        let fid = matching.next()?;
-        if matching.next().is_some() {
-            return None;
-        }
-        let key = model::function_key(ir, class, fid);
-        let slot = self.file.model.slot(class, &key)?;
-        let function = &ir.functions[fid as usize];
-        Some((slot, function.params.clone(), function.ret))
+        self.file.member_slot(class, name, arity)
     }
 
     /// A member asked of a type this file implements ITSELF, chosen by what the receiver turns

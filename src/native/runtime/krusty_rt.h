@@ -34,6 +34,9 @@ typedef bool     kt_boolean;
    cast is defined C, where a cast through `void *` is not. */
 typedef void (*kt_fn)(void);
 
+/* Named here so the walking members below can be typed; the reference typedefs come further on. */
+struct KObject;
+
 typedef struct KType {
     const char *name;                  /* qualified Kotlin name, for toString */
     uint32_t name_length;
@@ -74,6 +77,25 @@ typedef struct KType {
        thing they share. A bound `foo::bar` gets a different one from an unbound `Foo::bar`,
        because those must not be equal however much else they have in common. */
     const void *reference_target;
+    /* On a class of the PROGRAM that implements `kotlin.collections.Iterable` or
+       `kotlin.collections.Iterator`: how to ask an object of it for its iterator, or that iterator
+       for its next element. NULL where the type answers for neither, which is every type but such
+       a class.
+
+       This is how the runtime walks an object it did not make. Every walking entry point below —
+       `withIndex`, `contains`, `map`, `joinToString` — reaches its elements through
+       `kt_iterable_iterator` and the two iterator members, and those know only the shapes this
+       runtime builds.
+
+       A POINTER rather than a vtable slot, because a slot alone would not say how to call what is
+       in it: an emitted method has the signature its DECLARATION states, so `hasNext` answers an
+       unboxed machine value and `next` answers whatever the element type is, which for an
+       `Iterator<Int>` is not a reference at all. Each of these is a small emitted thunk with the
+       fixed signature written here, which dispatches to the member VIRTUALLY — so a subclass
+       overriding it is reached through the same thunk — and hands back what this side can read. */
+    struct KObject *(*walk_iterator)(struct KObject *self);
+    kt_boolean (*walk_has_next)(struct KObject *self);
+    struct KObject *(*walk_next)(struct KObject *self);
 } KType;
 
 

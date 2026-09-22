@@ -357,6 +357,7 @@ impl<'a> FileLowering<'a> {
                         any_type,
                         &interfaces,
                         marker,
+                        super::objects::WalkMembers::default(),
                     )?;
                 }
                 None => {
@@ -411,6 +412,7 @@ impl<'a> FileLowering<'a> {
                         any_type,
                         &[],
                         marker,
+                        super::objects::WalkMembers::default(),
                     )?;
                     self.define_thunk(thunk, &base, impl_fn, &capture_offsets, arity)?;
                 }
@@ -685,6 +687,7 @@ impl<'a> FileLowering<'a> {
             any_type,
             &[],
             None,
+            super::objects::WalkMembers::default(),
         )?;
         self.holders.insert(key, descriptor);
         Ok(descriptor)

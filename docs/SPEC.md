@@ -2011,6 +2011,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`a_reference_to_a_member_a_source_form_spells_calls_it`,
   `a_reference_to_an_arrays_indexed_access_reads_it`).
 
+- **The runtime walks a collection the PROGRAM declared, through three thunks its descriptor
+  carries.** Every walking entry point of krusty's native runtime — `withIndex`, `contains`,
+  `count`, `map`, `joinToString`, the `for` loop itself — reaches its elements through `iterator()`,
+  `hasNext()` and `next()`, and those knew only the shapes the runtime builds. A class of the
+  program puts its own members at a vtable slot assigned per program, which the runtime cannot
+  guess, so such a receiver declined. Its descriptor now carries a small emitted thunk for each of
+  the three, with a fixed signature this side can call — a POINTER rather than a slot number,
+  because an emitted method has the signature its declaration states and neither `hasNext`'s
+  machine `Boolean` nor an `Iterator<Int>`'s unboxed element could be read from a number. Each
+  thunk dispatches VIRTUALLY, so one serves the whole subtree below the class that declares the
+  member.
+  WHICH members to look up follows from the ROLE the class answers for, not from the override
+  edges one by one: an override whose result is the interface's own type parameter records no edge
+  of its own — `Iterator<T>.next(): T` is exactly that shape — and half a pair is no walk. A class
+  answering for `Iterable` is walkable when its `iterator` resolves; one answering for `Iterator`
+  when BOTH of its two do.
+  What still declines is a shape the walk does not reach: `Map` and `Map.Entry` declare none of the
+  three, and `CharSequence` shares the iterable shape with a list while declaring no `iterator` at
+  all — so a file that puts a class of its own behind one of those declines every walking member
+  over that shape, since no static type tells one implementor from another within it. A member
+  Kotlin gives a SPECIAL BRIDGE — `Collection.contains`, `List.indexOf`/`lastIndexOf` — is never a
+  walk's to answer where the file implements the receiver's type: the bridge decides by whether the
+  argument can be what the declaration accepts, and a walk would compare elements instead
+  (`codegen/box/bridges/strListContains.kt`).
+  Tests: `tests/native_walkable_collection_e2e.rs`.
+
 - **A delegated property's `KProperty` metadata is a property reference, and a LOCAL one answers
   only its name.** `val x: Int by D()` hands the delegate an object so `getValue(thisRef, property)`
   can ask the property about itself; for a member property that object is exactly the reference

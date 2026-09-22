@@ -192,9 +192,17 @@ pub fn lower_file(
         holders: HashMap::new(),
         references: HashMap::new(),
         implemented_collections: implemented_collections(ir),
+        // Filled once the class model can be consulted: which classes are walkable is which ones
+        // a thunk could be emitted for, and only the model knows that.
+        unwalkable_collections: std::collections::HashSet::new(),
+        walkable_classes: std::collections::HashMap::new(),
         declares_its_own_comparable: declares_its_own_comparable(ir),
         implemented_dependencies: implemented_dependencies(ir),
     };
+    // Before anything reads a role: the walking members a class answers for decide both which
+    // receivers play an iteration role and which shapes still decline, and both are read while
+    // bodies are lowered.
+    lowering.resolve_walkable_classes();
     lowering.declare_functions()?;
     lowering.declare_classes()?;
     lowering.declare_statics()?;
@@ -405,6 +413,18 @@ struct FileLowering<'a> {
     /// shape listed here declines by name instead of being answered wrongly. A receiver of any
     /// OTHER shape is answered as usual; see [`implemented_collections`].
     implemented_collections: std::collections::HashSet<super::super::intrinsics::CollectionShape>,
+    /// The classes of THIS FILE the runtime can walk, by the role their own members answer for.
+    ///
+    /// A class implementing `kotlin.collections.Iterable` or `Iterator` records where its own
+    /// `iterator`/`hasNext`/`next` sit in its descriptor (`objects::WalkSlots`), which is what
+    /// lets the runtime's walking entry points reach an object it did not make. This says which
+    /// class that is, so a receiver typed by the class rather than by the interface plays the
+    /// role too — `xs.withIndex()` on a class of the program is the same walk as on a list.
+    walkable_classes:
+        std::collections::HashMap<crate::types::TypeName, super::super::intrinsics::IterationRole>,
+    /// The shapes among those that the runtime cannot walk an object of this file's behind; see
+    /// [`unwalkable_collections`].
+    unwalkable_collections: std::collections::HashSet<super::super::intrinsics::CollectionShape>,
     /// Whether this file declares a class an object of which could stand behind a `Comparable<T>`;
     /// see [`declares_its_own_comparable`].
     declares_its_own_comparable: bool,
@@ -441,6 +461,82 @@ impl<'a> FileLowering<'a> {
     fn implements_dependency(&self, internal: crate::types::TypeName) -> bool {
         self.implemented_dependencies
             .contains(&super::super::intrinsics::kotlin_name_of(internal))
+    }
+
+    /// Decide which classes of this file the runtime can WALK, and which collection shapes it
+    /// therefore still cannot.
+    ///
+    /// A class is walkable exactly when a thunk could be emitted for the members a walk goes
+    /// through: its own `iterator`, or its own `hasNext` AND `next`. That is one question, asked
+    /// here once, so that the role a receiver plays and the thunks an object carries can never
+    /// disagree — a class recorded as walkable whose descriptor holds no thunk would have its
+    /// objects read as something they are not.
+    ///
+    /// The shapes are the converse: a shape is UNWALKABLE where any class of this file behind it
+    /// is not walkable, because no static type tells one implementor from another within a shape.
+    /// `class Chars : CharSequence` is the case that makes it necessary — `CharSequence` shares
+    /// the iterable shape with a list, since text is walked by the same dispatch, but it declares
+    /// no `iterator`.
+    fn resolve_walkable_classes(&mut self) {
+        use super::super::intrinsics::IterationRole;
+        for id in 0..self.ir.classes.len() as ClassId {
+            let slots = self.walk_slots(id);
+            let role = if slots.iterator != 0 {
+                // `Iterable` wins over `Iterator` for a class that answers for both. The two roles
+                // differ in which members a receiver is asked for, and a class handing out an
+                // iterator is asked for that one first.
+                Some(IterationRole::Iterable)
+            } else if slots.has_next != 0 && slots.next != 0 {
+                Some(IterationRole::Iterator)
+            } else {
+                None
+            };
+            if let Some(role) = role {
+                self.walkable_classes
+                    .insert(self.ir.classes[id as usize].fq_name, role);
+            }
+        }
+        let mut record = |owner: &crate::types::TypeName, overridden| {
+            if self.walkable_classes.contains_key(owner) {
+                return;
+            }
+            self.unwalkable_collections
+                .extend(super::super::intrinsics::collection_shape(overridden));
+        };
+        for (owner, edges) in &self.ir.function_overrides {
+            for edge in edges {
+                if matches!(
+                    edge.overridden,
+                    crate::fir::ResolvedFunctionOverrideTarget::External(_)
+                ) {
+                    record(owner, edge.overridden_owner);
+                }
+            }
+        }
+        for (owner, edges) in &self.ir.property_overrides {
+            for edge in edges {
+                if matches!(
+                    edge.overridden,
+                    crate::fir::ResolvedPropertyOverrideTarget::External(_)
+                ) {
+                    record(owner, edge.overridden_owner);
+                }
+            }
+        }
+    }
+
+    /// The iteration role a receiver typed by a CLASS OF THIS FILE plays, for a class the runtime
+    /// can walk; see [`Self::resolve_walkable_classes`].
+    pub(super) fn walkable_role(&self, ty: Ty) -> Option<super::super::intrinsics::IterationRole> {
+        let internal = ty.non_null().obj_internal()?;
+        self.walkable_classes.get(&internal).copied()
+    }
+
+    /// Whether a class of this file could stand behind a receiver of type `ty` AND the runtime has
+    /// no way to walk one; see [`Self::resolve_walkable_classes`].
+    pub(super) fn implements_unwalkable_collection_of(&self, ty: Ty) -> bool {
+        super::super::intrinsics::collection_shape_of(ty)
+            .is_some_and(|shape| self.unwalkable_collections.contains(&shape))
     }
 
     /// Whether a class of this file could stand behind a receiver of type `ty` — that is, whether
@@ -2514,6 +2610,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                                 if let Some(realized) = self.implemented_member(
                                     internal, &name, params, receiver, args, *ret,
                                 ) {
+                                    return realized;
+                                }
+                                // A member the runtime answers by WALKING needs no arm of its
+                                // own: it reaches an object's elements through `iterator`,
+                                // `hasNext` and `next`, and a class of this file carries a thunk
+                                // for each of its own in its descriptor — so the walk answers for
+                                // an object of the program as readily as for one the runtime
+                                // made. Asked by MEMBER, not by the receiver's shape: a shape
+                                // says nothing about which member the call is, and
+                                // `CharSequence` is walkable where `value[0]` is no walk.
+                                if let Some(realized) =
+                                    self.walking_member(&name, receiver, args, *ret)
+                                {
                                     return realized;
                                 }
                                 return Err(format!(

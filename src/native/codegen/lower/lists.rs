@@ -745,46 +745,92 @@ impl BodyLowering<'_, '_, '_> {
             let (symbol, carried, answer) = indexed_value_symbol(name, args.len())?;
             return Some(self.list_call(symbol, &carried, answer, receiver, args, ret));
         }
-        // A receiver typed by a COLLECTION type goes to the runtime's own dispatch, which knows
-        // only the collections this runtime makes — a range and a list. A file DECLARING an
-        // implementation of one puts an object of its own behind that type, and the runtime would
-        // read a vtable with no such entry, so a receiver of a shape this file implements declines
-        // by name instead. No static type tells the two apart WITHIN a shape — that is the whole
-        // reason the dispatch is the runtime's — but a shape the file implements nothing of is no
-        // hazard at all: a file declaring its own `Sequence` leaves every list receiver alone.
-        if self.file.implements_collection_of(ty) {
+        if let Some(realized) = self.walking_member(name, receiver, args, ret) {
+            return Some(realized);
+        }
+        // A LIST's OWN members — indexed access, size, removal — are about the runtime's list
+        // REPRESENTATION rather than about walking, and no thunk of a class's would reach one. A
+        // file putting a class of its own behind a list declines them; see
+        // [`FileLowering::implements_collection_of`].
+        if !is_list(ty) || self.file.implements_collection_of(ty) {
             return None;
         }
-        let role = super::super::super::intrinsics::iteration_role_of(ty);
-        // `joinToString()` written with nothing in the parentheses reaches this backend with six
-        // operands or with none, depending only on which provider selected the declaration: a
-        // klib has no `$default` synthetic to call, so an omitted argument is materialized as the
-        // declaration's own default instead. The two are the same call, and the arity this
-        // matches on is the WRITTEN one.
-        let written = if name == "joinToString" && self.is_defaulted_join(args) {
-            0
-        } else {
-            args.len()
-        };
+        let written = self.written_arity(name, args);
         let args = &args[args.len() - written..];
+        let (symbol, carried, answer) = list_symbol(name, written, physical)?;
+        Some(self.list_call(symbol, &carried, answer, receiver, args, ret))
+    }
+
+    /// A member the runtime answers by WALKING the receiver, and nothing else.
+    ///
+    /// The walk reaches an object's elements through `iterator`, `hasNext` and `next`, which the
+    /// runtime can ask of an object of the PROGRAM too: a walkable class carries a thunk for each
+    /// of its own in its descriptor (`objects::WalkMembers`). So this is the one group of members
+    /// a receiver of a shape this file implements need not decline — and it is asked by MEMBER
+    /// rather than by shape, because a shape says nothing about which member a call is:
+    /// `CharSequence` is walkable and `value[0]` is not a walk.
+    ///
+    /// `Map` and `Map.Entry` declare none of the three, so a class of this file behind one of
+    /// those is still beyond a walk's reach; see
+    /// [`FileLowering::implements_unwalkable_collection_of`].
+    pub(super) fn walking_member(
+        &mut self,
+        name: &str,
+        receiver: u32,
+        args: &[u32],
+        ret: Ty,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        let ty = self.type_of(receiver)?;
+        if self.file.implements_unwalkable_collection_of(ty) {
+            return None;
+        }
+        // A member Kotlin gives a SPECIAL BRIDGE is not a walk's to answer where this file puts a
+        // class of its own behind the receiver's type. `Collection<E>.contains(x as E)` answers
+        // the OVERRIDE for an implementor of the program's — the bridge is what decides, by
+        // whether the argument can be what the declaration accepts — and a walk would compare
+        // elements instead, which is a different question with a different answer
+        // (`codegen/box/bridges/strListContains.kt`). Where the file implements nothing of the
+        // shape the receiver is the runtime's own and the walk IS the member.
+        if self.file.implements_collection_of(ty)
+            && ty.non_null().obj_internal().is_some_and(|internal| {
+                super::super::super::intrinsics::has_special_bridge(internal, name)
+            })
+        {
+            return None;
+        }
+        // A receiver typed by a runtime-known collection type, or by a CLASS OF THIS FILE whose
+        // own members answer for one — the runtime walks either. The two are the same walk, and a
+        // program that wrote `xs.withIndex()` over a collection of its own is entitled to the same
+        // answer.
+        let role = super::super::super::intrinsics::iteration_role_of(ty)
+            .or_else(|| self.file.walkable_role(ty))?;
         // A SEQUENCE takes only the members that are lazy either way; see `is_sequence`.
         if is_sequence(ty) && !lazy_over_a_sequence(name) {
             return None;
         }
+        let written = self.written_arity(name, args);
+        let args = &args[args.len() - written..];
         let over_text = is_text(ty);
-        let selected = role.and_then(|role| {
-            interface_symbol(role, name, written).or_else(|| {
-                (!over_text)
-                    .then(|| walk_symbol(role, name, written, ret))
-                    .flatten()
-            })
-        });
-        let (symbol, carried, answer) = match selected {
-            Some(symbol) => symbol,
-            None if is_list(ty) => list_symbol(name, written, physical)?,
-            None => return None,
-        };
+        let (symbol, carried, answer) = interface_symbol(role, name, written).or_else(|| {
+            (!over_text)
+                .then(|| walk_symbol(role, name, written, ret))
+                .flatten()
+        })?;
         Some(self.list_call(symbol, &carried, answer, receiver, args, ret))
+    }
+
+    /// How many operands the call was WRITTEN with.
+    ///
+    /// `joinToString()` written with nothing in the parentheses reaches this backend with six
+    /// operands or with none, depending only on which provider selected the declaration: a klib
+    /// has no `$default` synthetic to call, so an omitted argument is materialized as the
+    /// declaration's own default instead. The two are the same call.
+    fn written_arity(&self, name: &str, args: &[u32]) -> usize {
+        if name == "joinToString" && self.is_defaulted_join(args) {
+            0
+        } else {
+            args.len()
+        }
     }
 
     /// A ZERO-ARGUMENT collection member asked of a type this file implements ITSELF.

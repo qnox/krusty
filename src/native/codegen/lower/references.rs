@@ -283,6 +283,7 @@ impl<'a> FileLowering<'a> {
             any_type,
             &[],
             None,
+            super::objects::WalkMembers::default(),
         )?;
         self.define_reference_equals(equals, &base, descriptor, None)?;
         self.define_reference_name(name, &base, property)?;
@@ -442,6 +443,7 @@ impl<'a> FileLowering<'a> {
             any_type,
             &[],
             None,
+            super::objects::WalkMembers::default(),
         )?;
 
         self.define_reference_equals(equals, &base, descriptor, receiver_offset)?;

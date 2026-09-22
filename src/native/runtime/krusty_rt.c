@@ -1887,7 +1887,32 @@ KT_RANGE_TYPE(kt_type_char_iterator, "kotlin.collections.CharIterator", KRangeIt
 KT_RANGE_TYPE(kt_type_uint_iterator, "kotlin.collections.UIntIterator", KRangeIterator, kt_any_vtable)
 KT_RANGE_TYPE(kt_type_ulong_iterator, "kotlin.collections.ULongIterator", KRangeIterator, kt_any_vtable)
 
+/* Whether this is one of the RANGES this runtime makes. Asked before a range's struct is read
+   through, because everything that is not one of this runtime's own shapes and not a walkable
+   class of the program ends up at the range reader — and a value read as a struct it is not is a
+   wrong answer where a refusal is the honest one. */
+static kt_boolean kt_is_range(KRef value) {
+    return value != NULL
+           && (value->header.type == &kt_type_int_range || value->header.type == &kt_type_long_range
+               || value->header.type == &kt_type_char_range
+               || value->header.type == &kt_type_uint_range
+               || value->header.type == &kt_type_ulong_range);
+}
+
+/* The same for the iterator a range hands out. */
+static kt_boolean kt_is_range_iterator(KRef value) {
+    return value != NULL
+           && (value->header.type == &kt_type_int_iterator
+               || value->header.type == &kt_type_long_iterator
+               || value->header.type == &kt_type_char_iterator
+               || value->header.type == &kt_type_uint_iterator
+               || value->header.type == &kt_type_ulong_iterator);
+}
+
 KRef kt_range_iterator(KRef range) {
+    if (!kt_is_range(range)) {
+        KT_FAIL("krusty: this value cannot be walked\n");
+    }
     const KRange *bounds = (const KRange *)range;
     const KType *type = range->header.type == &kt_type_long_range    ? &kt_type_long_iterator
                         : range->header.type == &kt_type_char_range  ? &kt_type_char_iterator
@@ -1965,12 +1990,18 @@ kt_boolean kt_range_iterator_has_next(KRef iterator) {
     if (kt_walk_is(iterator)) {
         return kt_walk_has_next(iterator);
     }
+    if (!kt_is_range_iterator(iterator)) {
+        KT_FAIL("krusty: this value is no iterator\n");
+    }
     return ((const KRangeIterator *)iterator)->has_next;
 }
 
 kt_long kt_range_iterator_next(KRef iterator) {
     if (kt_walk_is(iterator)) {
         return kt_walk_next_long(iterator);
+    }
+    if (!kt_is_range_iterator(iterator)) {
+        KT_FAIL("krusty: this value is no iterator\n");
     }
     KRangeIterator *self = (KRangeIterator *)iterator;
     if (!self->has_next) {
@@ -3089,6 +3120,12 @@ KRef kt_iterable_iterator(KRef iterable) {
         counting->at = 0;
         return (KRef)counting;
     }
+    /* A class of the PROGRAM that implements `kotlin.collections.Iterable`: its own `iterator()`,
+       at the slot its descriptor records. Last, so that nothing this runtime makes is reached
+       through a dispatch when its own shape already answered. */
+    if (iterable != NULL && iterable->header.type->walk_iterator != NULL) {
+        return iterable->header.type->walk_iterator(iterable);
+    }
     return kt_range_iterator(iterable);
 }
 
@@ -3106,6 +3143,9 @@ kt_boolean kt_iterator_has_next(KRef iterator) {
     }
     if (iterator != NULL && iterator->header.type == &kt_type_indexing_iterator) {
         return kt_iterator_has_next(((const KIndexingIterator *)iterator)->source);
+    }
+    if (iterator != NULL && iterator->header.type->walk_has_next != NULL) {
+        return iterator->header.type->walk_has_next(iterator);
     }
     return kt_range_iterator_has_next(iterator);
 }
@@ -3146,7 +3186,10 @@ static kt_int kt_iterable_size(KRef iterable) {
         iterable->header.type != &kt_type_ulong_range &&
         iterable->header.type != &kt_type_long_range &&
         iterable->header.type != &kt_type_char_range) {
-        KT_FAIL("krusty: this iterable cannot be counted\n");
+        /* A collection of the PROGRAM's, which this side reaches only through its iterator: its
+           count is not a question the descriptor answers, and walking it to find out would walk
+           it twice. -1 says so, and the one caller sizes its result as it goes instead. */
+        return -1;
     }
     /* How many elements the WALK yields, which is not `last - first + 1` unless the step is 1 and
        the walk ascends. A progression wears a range's descriptor here -- one struct serves both --
@@ -3183,8 +3226,21 @@ static kt_int kt_iterable_size(KRef iterable) {
    every call the loop makes — each of which may collect, and each of which may allocate whatever
    the transform returns. Elements already written are traced through the array like any other
    reference, so there is nothing to defer and no barrier to write. */
+static KRef kt_frozen(KRef growing, kt_boolean reversed);
+
 KRef kt_iterable_map(KRef iterable, KRef transform) {
     kt_int size = kt_iterable_size(iterable);
+    if (size < 0) {
+        /* A receiver whose count is not known without walking it; see `kt_iterable_size`. The
+           result grows rather than being sized once, which costs a copy or two and keeps the walk
+           single — and a walk's side effects are what a program can see. */
+        KRef growing = kt_mutable_list_new();
+        KRef walk = kt_iterable_iterator(iterable);
+        while (kt_iterator_has_next(walk)) {
+            kt_mutable_list_add(growing, kt_invoke_one(transform, kt_iterator_next(walk)));
+        }
+        return kt_frozen(growing, 0);
+    }
     KRef elements = kt_array_new(&kt_type_array, size);
     KRef result = kt_list_of(elements);
     KRef iterator = kt_iterable_iterator(iterable);
@@ -3588,6 +3644,9 @@ KRef kt_iterator_next(KRef iterator) {
         kt_int at = counting->at;
         counting->at = at + 1;
         return kt_indexed_value(at, element);
+    }
+    if (iterator->header.type->walk_next != NULL) {
+        return iterator->header.type->walk_next(iterator);
     }
     kt_long value = kt_range_iterator_next(iterator);
     if (iterator->header.type == &kt_type_long_iterator) {
