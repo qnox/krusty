@@ -1024,6 +1024,7 @@ impl BodyFirChecker<'_> {
                 name: capture.name.clone().into_boxed_str(),
                 ty,
                 shared_cell: capture.shared_cell,
+                capture_identity,
                 source,
             });
         }

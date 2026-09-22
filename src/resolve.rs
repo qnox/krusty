@@ -19496,6 +19496,12 @@ impl<'a> Checker<'a> {
                     },
                     &mut self.discovered_anonymous_captures,
                 );
+                if let Some(mut captures) = self.discovered_anonymous_captures.remove(&declaration)
+                {
+                    self.extend_anonymous_superclass_captures(scope, declaration, &mut captures);
+                    self.discovered_anonymous_captures
+                        .insert(declaration, captures);
+                }
                 return self.anonymous_object_type(scope, declaration);
             }
             let captures = self

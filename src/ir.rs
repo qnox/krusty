@@ -2258,6 +2258,10 @@ pub struct IrFile {
     /// the holder representation from this exact coordinate without inferring it from a field name,
     /// constructor position, or expression shape.
     pub shared_class_capture_fields: std::collections::HashMap<(ClassId, u32), Ty>,
+    /// Exact semantic closure identity for every local/anonymous-class capture field. Transitive
+    /// superclass forwarding consumes this coordinate instead of matching synthetic field names.
+    pub(crate) class_capture_identities:
+        std::collections::HashMap<(ClassId, u32), crate::fir::ClassCaptureIdentity>,
     /// Body-local static functions physically owned by a class. Their `$default` ABI uses the
     /// ordinary function marker rather than constructor/value-class markers.
     pub class_static_local_functions: std::collections::HashSet<FunId>,
