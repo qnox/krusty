@@ -23,6 +23,7 @@ mod exceptions;
 use arithmetic::{arithmetic_result, scalar_bound};
 mod functions;
 mod lists;
+mod maps;
 mod objects;
 mod ranges;
 mod references;
@@ -1614,6 +1615,22 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     None => Err(format!("`{name}` of a receiver that is not a list")),
                 }
             }
+            // `m.size`, `m.keys`, `entry.value`: the same runtime answer an explicit call to the
+            // getter would get, and reached the same way — by the receiver.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.map_getter(target, receiver).is_some() => {
+                let name = self
+                    .map_getter(target, receiver)
+                    .expect("checked by the guard");
+                let answer = maps::map_getter_ty(&name);
+                match self.map_member(&name, receiver, &[], answer) {
+                    Some(realized) => realized,
+                    None => Err(format!("`{name}` of a receiver that is not a map")),
+                }
+            }
             // `::foo.name` — `KCallable.name` of a reference written right here, which is the
             // DECLARATION's own name and therefore known already.
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
@@ -2101,6 +2118,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             lists::indexed_value_getter_ty(&name)
                         }
                         Some(receiver) if self.list_getter(*target, *receiver).is_some() => Ty::Int,
+                        Some(receiver) if self.map_getter(*target, *receiver).is_some() => {
+                            let name = self
+                                .map_getter(*target, *receiver)
+                                .expect("checked by the guard");
+                            maps::map_getter_ty(&name)
+                        }
                         Some(receiver) => self.range_getter(*target, *receiver)?.2,
                         None => return None,
                     },
@@ -2443,6 +2466,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         {
                             return realized;
                         }
+                        // A map, a set, or one entry of a map. Before the list path would be
+                        // wrong and after it is harmless: the two answer for disjoint receivers,
+                        // and each asks the receiver rather than the owner.
+                        if let Some(realized) = self.map_member(&name, receiver, args, *ret) {
+                            return realized;
+                        }
                         // `a to b`: an extension of the tuples facade, so its left operand is the
                         // receiver here rather than an argument.
                         if let Some(realized) =
@@ -2697,6 +2726,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             .is_some_and(|ty| ty.non_null().is_reference_array());
                         if let Some(realized) =
                             self.list_construction(&owner, &name, packs_a_vararg, args)
+                        {
+                            return realized;
+                        }
+                        // `mapOf(…)` / `setOf(…)` and their relatives, read the same way and for
+                        // the same reason: the vararg parameter is what separates the two
+                        // declarations Kotlin gives each name.
+                        if let Some(realized) =
+                            self.map_construction(&owner, &name, packs_a_vararg, args)
                         {
                             return realized;
                         }

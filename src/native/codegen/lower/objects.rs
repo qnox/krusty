@@ -1951,6 +1951,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 _ => Err(format!("this constructor of `{name}`")),
             };
         }
+        // `HashMap()` / `HashSet()` and their linked spellings, the runtime's growable tables.
+        // Declared in no file either, for the reason the list above is not. Only the EMPTY form is
+        // realized: the capacity overloads are hints with nothing observable depending on them but
+        // arrive with a load factor beside them, and a copy constructor takes a collection whose
+        // walk would have to be the map's own — both decline with what they were passed in sight.
+        if let Some(kind) = super::super::super::intrinsics::runtime_table(internal) {
+            return match args {
+                [] => self.runtime_call(&format!("kt_{kind}_new"), &[], any(), &[]),
+                _ => Err(format!("this constructor of `{name}`")),
+            };
+        }
         // `StringBuilder()`, the runtime's growable text buffer. Declared in no file either, for
         // the same reason the list above is not. The capacity overload is a HINT; `StringBuilder(s)`
         // COPIES the text, because a builder is about to be written through and the string it was

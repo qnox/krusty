@@ -2782,6 +2782,16 @@ KRef kt_iterable_iterator(KRef iterable) {
     if (iterable != NULL && iterable->header.type == &kt_type_string) {
         return kt_walk_of(&kt_type_chars_iterator, iterable);
     }
+    /* A SET is iterated as the list of its elements: that list IS the set's order, which is the
+       insertion order a `LinkedHashSet` promises. */
+    if (kt_is_set(iterable)) {
+        return kt_list_iterator(kt_map_keys_list(iterable));
+    }
+    /* A MAP is walked as its entries, which is what Kotlin's `Map.iterator()` extension answers
+       and what a `for ((k, v) in m)` destructures. */
+    if (kt_is_map(iterable)) {
+        return kt_iterable_iterator(kt_map_entries(iterable));
+    }
     if (iterable != NULL && iterable->header.type == &kt_type_with_index) {
         KRef source = kt_iterable_iterator(((const KWithIndex *)iterable)->source);
         KIndexingIterator *counting = (KIndexingIterator *)kt_gc_allocate(
@@ -2832,6 +2842,9 @@ static kt_int kt_iterable_size(KRef iterable) {
     }
     if (iterable->header.type == &kt_type_list || kt_is_mutable_list(iterable)) {
         return kt_list_size(iterable);
+    }
+    if (kt_is_set(iterable) || kt_is_map(iterable)) {
+        return kt_map_size(iterable);
     }
     if (kt_is_array(iterable->header.type)) {
         return kt_length_of(iterable);
@@ -3298,6 +3311,390 @@ static KRef kt_list_to_string(KRef self) {
     }
     return kt_string_plus(text, kt_string_utf8("]", 1));
 }
+
+
+/* ---- maps and sets --------------------------------------------------------------------------
+
+   A map is two growable lists side by side: its keys in insertion order, and the values beside
+   them at the same positions. A SET is the same object with no values, which is what Kotlin's own
+   `LinkedHashSet` is — a map whose values nothing reads.
+
+   Lookup is LINEAR, by `equals` over the keys. Kotlin's is by hash, and the difference is speed
+   and nothing else: a hash map answers the same question, and the maps a program writes in a box
+   test hold a handful of entries. What a hash map would NOT give is the order, and order is the
+   observable part: `mapOf` answers a `LinkedHashMap`, whose iteration, `toString` and `keys` are
+   in insertion order. Keeping the keys in a list rather than in buckets is what that promise asks
+   for. The unordered spellings — `hashMapOf`, `HashSet()` — answer this object too, because their
+   order is unspecified and insertion order is one of the orders left unspecified.
+
+   Both growable lists are reference fields the collector traces, and every element inside them is
+   traced through the array each list already holds. */
+typedef struct KMap {
+    KObjectHeader header;
+    KRef keys;
+    /* The values, at the same positions as the keys — or NULL for a set, which has none. */
+    KRef values;
+} KMap;
+
+static const uint32_t kt_map_offsets[] = {offsetof(KMap, keys), offsetof(KMap, values)};
+
+static kt_boolean kt_map_equals(KRef self, KRef other);
+static kt_int kt_map_hash_code(KRef self);
+static KRef kt_map_to_string(KRef self);
+static kt_boolean kt_set_equals(KRef self, KRef other);
+static kt_int kt_set_hash_code(KRef self);
+static KRef kt_set_to_string(KRef self);
+
+static const kt_fn kt_map_vtable[] = {(kt_fn)kt_map_equals, (kt_fn)kt_map_hash_code,
+                                      (kt_fn)kt_map_to_string};
+static const kt_fn kt_set_vtable[] = {(kt_fn)kt_set_equals, (kt_fn)kt_set_hash_code,
+                                      (kt_fn)kt_set_to_string};
+
+#define KT_MAP_TYPE(identifier, kotlin_name, table)                                                \
+    const KType identifier = {kotlin_name, sizeof(kotlin_name) - 1,                                \
+                              sizeof(KMap), 2,                                                     \
+                              0,           kt_map_offsets,                                         \
+                              &kt_type_any, table,                                                 \
+                              3,           0};
+
+KT_MAP_TYPE(kt_type_map, "kotlin.collections.LinkedHashMap", kt_map_vtable)
+KT_MAP_TYPE(kt_type_set, "kotlin.collections.LinkedHashSet", kt_set_vtable)
+
+/* One entry of a map, which `entries` hands out and a destructuring reads through
+   `component1`/`component2`. It is a VIEW of nothing: the pair is copied out, so writing to the
+   map afterwards leaves an entry already taken alone. Kotlin's own entry is a view and setting
+   through it writes back, which `MutableMap.MutableEntry.setValue` is for; nothing here answers
+   that member, so the copy is not observable. */
+typedef struct KMapEntry {
+    KObjectHeader header;
+    KRef key;
+    KRef value;
+} KMapEntry;
+
+static const uint32_t kt_map_entry_offsets[] = {offsetof(KMapEntry, key),
+                                                offsetof(KMapEntry, value)};
+
+static kt_boolean kt_map_entry_equals(KRef self, KRef other);
+static kt_int kt_map_entry_hash_code(KRef self);
+static KRef kt_map_entry_to_string(KRef self);
+
+static const kt_fn kt_map_entry_vtable[] = {(kt_fn)kt_map_entry_equals,
+                                            (kt_fn)kt_map_entry_hash_code,
+                                            (kt_fn)kt_map_entry_to_string};
+
+const KType kt_type_map_entry = {"kotlin.collections.Map.Entry",
+                                 sizeof("kotlin.collections.Map.Entry") - 1,
+                                 sizeof(KMapEntry),
+                                 2,
+                                 0,
+                                 kt_map_entry_offsets,
+                                 &kt_type_any,
+                                 kt_map_entry_vtable,
+                                 3,
+                                 0};
+
+kt_boolean kt_is_map(KRef value) { return value != NULL && value->header.type == &kt_type_map; }
+
+kt_boolean kt_is_set(KRef value) { return value != NULL && value->header.type == &kt_type_set; }
+
+/* The keys, which for a set ARE its elements — so one walk serves both and iterating a set is
+   iterating this list. */
+KRef kt_map_keys_list(KRef self) { return ((const KMap *)self)->keys; }
+
+static KRef kt_map_shaped(const KType *type, kt_boolean valued) {
+    KMap *map = (KMap *)kt_gc_allocate(type, sizeof(KMap));
+    /* Both fields are stored before either allocation, so a collection triggered by one never
+       traces an uninitialized field. */
+    map->keys = NULL;
+    map->values = NULL;
+    map->keys = kt_mutable_list_new();
+    if (valued) {
+        map->values = kt_mutable_list_new();
+    }
+    return (KRef)map;
+}
+
+KRef kt_map_new(void) { return kt_map_shaped(&kt_type_map, 1); }
+
+KRef kt_set_new(void) { return kt_map_shaped(&kt_type_set, 0); }
+
+kt_int kt_map_size(KRef self) { return kt_list_size(((const KMap *)self)->keys); }
+
+kt_boolean kt_map_is_empty(KRef self) { return kt_map_size(self) == 0; }
+
+/* Where a key sits, or -1. By `equals`, as Kotlin's own lookup is: two strings with the same text
+   are one key, and so are two boxes holding the same number. */
+static kt_int kt_map_index_of(KRef self, KRef key) {
+    return kt_list_index_of(((const KMap *)self)->keys, key);
+}
+
+kt_boolean kt_map_contains_key(KRef self, KRef key) { return kt_map_index_of(self, key) >= 0; }
+
+kt_boolean kt_map_contains_value(KRef self, KRef value) {
+    const KMap *map = (const KMap *)self;
+    return map->values != NULL && kt_list_contains(map->values, value);
+}
+
+/* `m[k]`. Kotlin answers NULL for an absent key, which is why `Map.get` is declared nullable and
+   why a map whose values are nullable cannot tell the two apart either. */
+KRef kt_map_get(KRef self, KRef key) {
+    kt_int at = kt_map_index_of(self, key);
+    if (at < 0) {
+        return NULL;
+    }
+    const KMap *map = (const KMap *)self;
+    return map->values == NULL ? kt_list_get(map->keys, at) : kt_list_get(map->values, at);
+}
+
+KRef kt_map_get_or_default(KRef self, KRef key, KRef fallback) {
+    kt_int at = kt_map_index_of(self, key);
+    return at < 0 ? fallback : kt_list_get(((const KMap *)self)->values, at);
+}
+
+/* `m.put(k, v)`, answering the value that was there. An existing key keeps its POSITION, which is
+   what a `LinkedHashMap` promises: re-putting a key does not move it to the end. */
+KRef kt_map_put(KRef self, KRef key, KRef value) {
+    KMap *map = (KMap *)self;
+    kt_int at = kt_map_index_of(self, key);
+    if (at >= 0) {
+        return kt_mutable_list_set(map->values, at, value);
+    }
+    kt_mutable_list_add(map->keys, key);
+    kt_mutable_list_add(map->values, value);
+    return NULL;
+}
+
+/* `m[k] = v`, which answers `Unit` rather than the previous value — so it is its own entry point
+   rather than a result the caller has to remember to drop. */
+void kt_map_set(KRef self, KRef key, KRef value) { (void)kt_map_put(self, key, value); }
+
+KRef kt_map_remove(KRef self, KRef key) {
+    KMap *map = (KMap *)self;
+    kt_int at = kt_map_index_of(self, key);
+    if (at < 0) {
+        return NULL;
+    }
+    (void)kt_mutable_list_remove_at(map->keys, at);
+    return kt_mutable_list_remove_at(map->values, at);
+}
+
+void kt_map_clear(KRef self) {
+    KMap *map = (KMap *)self;
+    kt_mutable_list_clear(map->keys);
+    if (map->values != NULL) {
+        kt_mutable_list_clear(map->values);
+    }
+}
+
+/* `s.add(x)` / `x in s` / `s.remove(x)`: a set keeps each element once, so adding one it already
+   holds changes nothing and says so. */
+kt_boolean kt_set_contains(KRef self, KRef value) { return kt_map_contains_key(self, value); }
+
+kt_boolean kt_set_add(KRef self, KRef value) {
+    if (kt_map_contains_key(self, value)) {
+        return false;
+    }
+    kt_mutable_list_add(((KMap *)self)->keys, value);
+    return true;
+}
+
+kt_boolean kt_set_remove(KRef self, KRef value) {
+    kt_int at = kt_map_index_of(self, value);
+    if (at < 0) {
+        return false;
+    }
+    (void)kt_mutable_list_remove_at(((KMap *)self)->keys, at);
+    return true;
+}
+
+/* `mapOf(a to b, …)` and `setOf(a, …)`, from the array a vararg call already packed. The array
+   belongs to the CALLER, so its contents are copied in rather than shared: a map can be written
+   through, and writing to one must not reach back into the caller's array. */
+KRef kt_map_of(KRef pairs) {
+    KRef map = kt_map_new();
+    kt_int length = kt_length_of(pairs);
+    for (kt_int at = 0; at < length; at++) {
+        KRef pair = kt_elements_of(pairs)[at];
+        (void)kt_map_put(map, kt_pair_first(pair), kt_pair_second(pair));
+    }
+    return map;
+}
+
+/* `mapOf(a to b)`: the ONE-pair form Kotlin declares beside the vararg one. */
+KRef kt_map_of_pair(KRef pair) {
+    KRef map = kt_map_new();
+    (void)kt_map_put(map, kt_pair_first(pair), kt_pair_second(pair));
+    return map;
+}
+
+KRef kt_set_of(KRef elements) {
+    KRef set = kt_set_new();
+    kt_int length = kt_length_of(elements);
+    for (kt_int at = 0; at < length; at++) {
+        (void)kt_set_add(set, kt_elements_of(elements)[at]);
+    }
+    return set;
+}
+
+/* `m.keys`, `m.values` and `m.entries`. Kotlin's are VIEWS onto the map; these are snapshots, and
+   the difference shows only where a program keeps one across a write to the map. Answering a
+   snapshot is the same trade `toList()` on an array makes, and it is what lets each of them be an
+   object this runtime already has. */
+KRef kt_map_keys(KRef self) {
+    KRef keys = kt_set_new();
+    KRef source = ((const KMap *)self)->keys;
+    kt_int size = kt_list_size(source);
+    for (kt_int at = 0; at < size; at++) {
+        (void)kt_set_add(keys, kt_list_get(source, at));
+    }
+    return keys;
+}
+
+KRef kt_map_values(KRef self) {
+    const KMap *map = (const KMap *)self;
+    KRef source = map->values == NULL ? map->keys : map->values;
+    kt_int size = kt_list_size(source);
+    KRef elements = kt_array_new(&kt_type_array, size);
+    KRef result = kt_list_of(elements);
+    for (kt_int at = 0; at < size; at++) {
+        kt_elements_of(elements)[at] = kt_list_get(source, at);
+    }
+    return result;
+}
+
+static KRef kt_map_entry_new(KRef key, KRef value) {
+    KMapEntry *entry = (KMapEntry *)kt_gc_allocate(&kt_type_map_entry, sizeof(KMapEntry));
+    entry->key = key;
+    entry->value = value;
+    return (KRef)entry;
+}
+
+KRef kt_map_entries(KRef self) {
+    const KMap *map = (const KMap *)self;
+    KRef entries = kt_set_new();
+    kt_int size = kt_list_size(map->keys);
+    for (kt_int at = 0; at < size; at++) {
+        KRef key = kt_list_get(map->keys, at);
+        KRef value = map->values == NULL ? key : kt_list_get(map->values, at);
+        (void)kt_set_add(entries, kt_map_entry_new(key, value));
+    }
+    return entries;
+}
+
+KRef kt_map_entry_key(KRef entry) { return ((const KMapEntry *)entry)->key; }
+
+KRef kt_map_entry_value(KRef entry) { return ((const KMapEntry *)entry)->value; }
+
+/* Kotlin's own three for an entry: `k=v`, the two hashes xored, and equality by both halves. */
+static kt_boolean kt_map_entry_equals(KRef self, KRef other) {
+    if (other == NULL || other->header.type != &kt_type_map_entry) {
+        return false;
+    }
+    const KMapEntry *a = (const KMapEntry *)self;
+    const KMapEntry *b = (const KMapEntry *)other;
+    return kt_equals(a->key, b->key) && kt_equals(a->value, b->value);
+}
+
+static kt_int kt_map_entry_hash_code(KRef self) {
+    const KMapEntry *entry = (const KMapEntry *)self;
+    kt_int key = entry->key == NULL ? 0 : kt_hash_code(entry->key);
+    kt_int value = entry->value == NULL ? 0 : kt_hash_code(entry->value);
+    return key ^ value;
+}
+
+static KRef kt_map_entry_to_string(KRef self) {
+    const KMapEntry *entry = (const KMapEntry *)self;
+    KRef text = kt_string_plus(kt_to_string(entry->key), kt_string_utf8("=", 1));
+    return kt_string_plus(text, kt_to_string(entry->value));
+}
+
+/* Two maps are equal when they hold the same entries, whatever ORDER they hold them in — Kotlin's
+   `Map.equals` says nothing about order and a `LinkedHashMap` equals a `HashMap` of the same
+   entries. The hash is the sum of the entry hashes, which is order-independent for the same
+   reason. */
+static kt_boolean kt_map_equals(KRef self, KRef other) {
+    if (other == NULL || other->header.type != &kt_type_map) {
+        return false;
+    }
+    const KMap *a = (const KMap *)self;
+    if (kt_map_size(self) != kt_map_size(other)) {
+        return false;
+    }
+    kt_int size = kt_list_size(a->keys);
+    for (kt_int at = 0; at < size; at++) {
+        KRef key = kt_list_get(a->keys, at);
+        if (!kt_map_contains_key(other, key)) {
+            return false;
+        }
+        if (!kt_equals(kt_list_get(a->values, at), kt_map_get(other, key))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static kt_int kt_map_hash_code(KRef self) {
+    const KMap *map = (const KMap *)self;
+    kt_int size = kt_list_size(map->keys);
+    uint32_t total = 0;
+    for (kt_int at = 0; at < size; at++) {
+        KRef key = kt_list_get(map->keys, at);
+        KRef value = kt_list_get(map->values, at);
+        uint32_t left = key == NULL ? 0u : (uint32_t)kt_hash_code(key);
+        uint32_t right = value == NULL ? 0u : (uint32_t)kt_hash_code(value);
+        total += left ^ right;
+    }
+    return (kt_int)total;
+}
+
+/* `{a=1, b=2}`, in insertion order, each half rendered through its own `toString`. */
+static KRef kt_map_to_string(KRef self) {
+    const KMap *map = (const KMap *)self;
+    KRef text = kt_string_utf8("{", 1);
+    kt_int size = kt_list_size(map->keys);
+    for (kt_int at = 0; at < size; at++) {
+        if (at != 0) {
+            text = kt_string_plus(text, kt_string_utf8(", ", 2));
+        }
+        text = kt_string_plus(text, kt_to_string(kt_list_get(map->keys, at)));
+        text = kt_string_plus(text, kt_string_utf8("=", 1));
+        text = kt_string_plus(text, kt_to_string(kt_list_get(map->values, at)));
+    }
+    return kt_string_plus(text, kt_string_utf8("}", 1));
+}
+
+/* Two sets are equal when each holds what the other does, whatever order; the hash is the sum of
+   the element hashes, which says the same thing. */
+static kt_boolean kt_set_equals(KRef self, KRef other) {
+    if (other == NULL || other->header.type != &kt_type_set) {
+        return false;
+    }
+    if (kt_map_size(self) != kt_map_size(other)) {
+        return false;
+    }
+    KRef keys = ((const KMap *)self)->keys;
+    kt_int size = kt_list_size(keys);
+    for (kt_int at = 0; at < size; at++) {
+        if (!kt_set_contains(other, kt_list_get(keys, at))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static kt_int kt_set_hash_code(KRef self) {
+    KRef keys = ((const KMap *)self)->keys;
+    kt_int size = kt_list_size(keys);
+    uint32_t total = 0;
+    for (kt_int at = 0; at < size; at++) {
+        KRef element = kt_list_get(keys, at);
+        total += element == NULL ? 0u : (uint32_t)kt_hash_code(element);
+    }
+    return (kt_int)total;
+}
+
+/* `[a, b]` — a set renders as a collection does, which is what Kotlin's own answers. */
+static KRef kt_set_to_string(KRef self) { return kt_list_to_string(((const KMap *)self)->keys); }
 
 /* Static storage, not the heap: the collector never sees it as an object, and nothing needs it
    to. */

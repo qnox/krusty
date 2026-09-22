@@ -662,6 +662,17 @@ pub(super) fn iteration_role(internal: crate::types::TypeName) -> Option<Iterati
             "kotlin/collections/MutableIterator",
             IterationRole::Iterator,
         ),
+        // The SETS. A set is walked as the list of its elements, which is its insertion order —
+        // and a `Map` is walked as its ENTRIES, which is what Kotlin's `Map.iterator()` extension
+        // answers, so both reach the same descriptor dispatch a list does.
+        ("kotlin/collections/Set", IterationRole::Iterable),
+        ("kotlin/collections/MutableSet", IterationRole::Iterable),
+        ("kotlin/collections/HashSet", IterationRole::Iterable),
+        ("kotlin/collections/LinkedHashSet", IterationRole::Iterable),
+        ("kotlin/collections/Map", IterationRole::Iterable),
+        ("kotlin/collections/MutableMap", IterationRole::Iterable),
+        ("kotlin/collections/HashMap", IterationRole::Iterable),
+        ("kotlin/collections/LinkedHashMap", IterationRole::Iterable),
         ("kotlin/ranges/IntRange", IterationRole::Iterable),
         ("kotlin/ranges/LongRange", IterationRole::Iterable),
         ("kotlin/ranges/CharRange", IterationRole::Iterable),
@@ -746,6 +757,30 @@ pub(super) fn is_list_type(internal: crate::types::TypeName) -> bool {
 /// the path `Any()` and the throwables already take: the runtime allocates it.
 pub(super) fn is_array_list(internal: crate::types::TypeName) -> bool {
     kotlin_owner(&internal.render()) == "kotlin/collections/ArrayList"
+}
+
+/// The growable MAP or SET the runtime provides, if this names one, as the runtime's suffix.
+///
+/// Declared in no file krusty compiles, so constructing one takes the path `Any()`, the throwables
+/// and `ArrayList` already take: the runtime allocates it. The ordered and unordered spellings are
+/// one object here — the map this runtime builds is insertion-ordered, and an unordered one leaves
+/// its order unspecified, of which insertion order is one.
+pub(super) fn runtime_table(internal: crate::types::TypeName) -> Option<&'static str> {
+    // Both spellings, because a jar provider names these `java.util.HashMap` and the mapping
+    // `kotlin_owner` makes does not cover them: Kotlin's `kotlin.collections.HashMap` is a
+    // TYPEALIAS to the Java class rather than a mapped builtin, so the provider hands over the
+    // Java name and there is nothing to normalize it to.
+    match kotlin_owner(&internal.render()) {
+        "kotlin/collections/HashMap"
+        | "kotlin/collections/LinkedHashMap"
+        | "java/util/HashMap"
+        | "java/util/LinkedHashMap" => Some("map"),
+        "kotlin/collections/HashSet"
+        | "kotlin/collections/LinkedHashSet"
+        | "java/util/HashSet"
+        | "java/util/LinkedHashSet" => Some("set"),
+        _ => None,
+    }
 }
 
 /// A qualified name with the FILE FACADE a nested class is qualified by removed, or `None` when it

@@ -1088,6 +1088,8 @@ mod native_gc_stress_e2e;
 mod native_interface_bridges_e2e;
 #[path = "native_lists_e2e.rs"]
 mod native_lists_e2e;
+#[path = "native_maps_e2e.rs"]
+mod native_maps_e2e;
 #[path = "native_preconditions_e2e.rs"]
 mod native_preconditions_e2e;
 #[path = "native_property_reference_e2e.rs"]

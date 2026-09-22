@@ -607,6 +607,61 @@ KRef kt_string_builder_append_new_line(KRef self);
 /* Whether a value is one, for the entry points that serve both shapes. */
 kt_boolean kt_is_string_builder(KRef value);
 
+/* ---- maps and sets ---------------------------------------------------------------------------
+
+   A map is two growable lists side by side: its keys in insertion order and the values beside them
+   at the same positions. A SET is the same object with no values, which is what a `LinkedHashSet`
+   is — a map whose values nothing reads.
+
+   Lookup is LINEAR, by `equals`. Kotlin's is by hash, and the difference is speed and nothing
+   else. What a hash map would not give is the ORDER, which is observable: `mapOf` answers a
+   `LinkedHashMap`, whose iteration, `toString` and `keys` are in insertion order. The unordered
+   spellings answer this object too, their order being unspecified.
+
+   `keys`, `values` and `entries` are SNAPSHOTS where Kotlin's are views — the same trade
+   `toList()` on an array makes, visible only to a program that keeps one across a write. */
+extern const KType kt_type_map;
+extern const KType kt_type_set;
+extern const KType kt_type_map_entry;
+
+kt_boolean kt_is_map(KRef value);
+kt_boolean kt_is_set(KRef value);
+/* The list of a map's keys, which for a set ARE its elements — so one walk serves both. */
+KRef kt_map_keys_list(KRef self);
+
+KRef kt_map_new(void);
+KRef kt_set_new(void);
+/* `mapOf(a to b, …)` / `setOf(a, …)`, from the array a vararg call already packed. The contents
+   are copied in: the array belongs to the caller, and a map can be written through. */
+KRef kt_map_of(KRef pairs);
+KRef kt_set_of(KRef elements);
+/* `mapOf(a to b)`: the one-pair form Kotlin declares beside the vararg one. */
+KRef kt_map_of_pair(KRef pair);
+
+kt_int kt_map_size(KRef self);
+kt_boolean kt_map_is_empty(KRef self);
+/* `m[k]`, NULL for an absent key — which is why Kotlin declares `Map.get` nullable. */
+KRef kt_map_get(KRef self, KRef key);
+KRef kt_map_get_or_default(KRef self, KRef key, KRef fallback);
+/* `put` answers the value that was there; `set` is `m[k] = v` and answers `Unit`. An existing key
+   keeps its POSITION, which is what a `LinkedHashMap` promises. */
+KRef kt_map_put(KRef self, KRef key, KRef value);
+void kt_map_set(KRef self, KRef key, KRef value);
+KRef kt_map_remove(KRef self, KRef key);
+void kt_map_clear(KRef self);
+kt_boolean kt_map_contains_key(KRef self, KRef key);
+kt_boolean kt_map_contains_value(KRef self, KRef value);
+KRef kt_map_keys(KRef self);
+KRef kt_map_values(KRef self);
+KRef kt_map_entries(KRef self);
+
+kt_boolean kt_set_contains(KRef self, KRef value);
+kt_boolean kt_set_add(KRef self, KRef value);
+kt_boolean kt_set_remove(KRef self, KRef value);
+
+KRef kt_map_entry_key(KRef entry);
+KRef kt_map_entry_value(KRef entry);
+
 /* ---- exceptions ---------------------------------------------------------------------------- */
 
 /* The `Throwable` hierarchy a `catch` clause names. Each link is Kotlin's own, so matching a clause

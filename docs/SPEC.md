@@ -2250,6 +2250,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   this is reached.
   Tests: `tests/native_floating_ranges_e2e.rs`.
 
+- **A map is two lists side by side, and a set is a map with no values.** `mapOf` answers a
+  `LinkedHashMap`, whose iteration, `toString` and `keys` are in INSERTION ORDER — so the keys live
+  in a growable list with the values beside them at matching positions, rather than in buckets.
+  A set is the same object without the values, which is what `LinkedHashSet` is.
+  Lookup is LINEAR, by `equals`. Kotlin's is by hash, and the difference is speed and nothing else:
+  a hash map answers the same question, and the maps a box test writes hold a handful of entries.
+  What a hash table would not give is the order, and order is the observable part.
+  The unordered spellings — `hashMapOf`, `HashSet()`, and the `java.util` names a jar provider hands
+  over for them — answer this object too, because their order is unspecified and insertion order is
+  one of the orders left unspecified. Nothing may pin what one of those prints.
+  `put` on an existing key keeps its POSITION, which is what a `LinkedHashMap` promises. `keys`,
+  `values` and `entries` are SNAPSHOTS where Kotlin's are views — the same trade `toList()` on an
+  array makes, visible only to a program that keeps one across a write. A `Map` is walked as its
+  ENTRIES, which is what Kotlin's `Map.iterator()` extension answers and what `for ((k, v) in m)`
+  destructures.
+  Equality says nothing about order, for a map or a set, and the hash is a sum over the entries for
+  the same reason. A null VALUE is a value and not an absent key, which `containsKey` is for.
+  Which call reaches the runtime is decided by the RECEIVER, never by the owner: `get` is declared
+  on `Map`, which a user class may implement, and a file that declares one is declined at every
+  member asked of a type it implements itself.
+  Tests: `tests/native_maps_e2e.rs`.
+
 - **`assertEquals` compares booleans structurally, like everything else it compares.** It is
   generic, so `assertEquals(true, true)` has `Boolean` as its first parameter after substitution.
   Reading the parameter to decide how the operands cross handed two raw machine values to an entry
