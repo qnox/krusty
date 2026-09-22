@@ -2272,6 +2272,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   member asked of a type it implements itself.
   Tests: `tests/native_maps_e2e.rs`.
 
+- **`compareTo` asked of a `Comparable` receiver is the DESCRIPTOR's answer, and a file with its own
+  `Comparable` declines.** The receiver's descriptor says what to compare, exactly as `equals` and
+  `toString` on such a receiver already read it: a boxed primitive at its own width, a string by
+  UTF-16 unit, the unsigned integers read unsigned. Each side is unboxed at its own descriptor's
+  field rather than through one reader, because the boxes share a union and a `Byte`'s payload read
+  as an `Int` reads bytes nothing wrote.
+  Kotlin's order on the floating types is TOTAL where the machine's `<` is not — `-0.0` below `0.0`,
+  every NaN above everything including itself — and that is the order `Comparable<Double>` answers
+  with. The same two values compared as PRIMITIVES are equal, and both answers are right: which one
+  a program gets is what its static type decides.
+  Two values of different types have no order between them, which `Comparable<Any>` runs into; the
+  JVM raises `ClassCastException` there and so does this.
+  A file that declares a `Comparable` of its own DECLINES: an object of the program's could stand
+  behind that type and no static type tells it from one the runtime made. Three shapes count, none
+  of them an override edge — a class that NAMES `Comparable` among its supertypes without overriding
+  anything there (`interface A : Comparable<A>`, whose implementor overrides `A`'s spelling), an
+  ENUM, whose comparison `kotlin.Enum` supplies by an ordinal this generator lays out and the
+  runtime cannot read, and a class reaching `Comparable` through a supertype declared elsewhere,
+  whose evidence is an override of an external `compareTo`. Naming it anywhere in the file is enough
+  without walking the hierarchy: the class that names it is itself declared there.
+  Tests: `tests/native_comparable_e2e.rs`.
+
 - **`assertEquals` compares booleans structurally, like everything else it compares.** It is
   generic, so `assertEquals(true, true)` has `Boolean` as its first parameter after substitution.
   Reading the parameter to decide how the operands cross handed two raw machine values to an entry

@@ -783,6 +783,27 @@ pub(super) fn runtime_table(internal: crate::types::TypeName) -> Option<&'static
     }
 }
 
+/// Whether this names `kotlin.Comparable.compareTo` — the ONE member of that type, asked of a
+/// receiver the static type says nothing more about than `Comparable`.
+///
+/// The answer is the runtime's, read from the receiver's DESCRIPTOR. Whether the runtime may give
+/// it is the CALLER's question, not this one's: an object of the program's could stand behind that
+/// type too, and only the file knows whether it declares one.
+pub(super) fn is_comparable_compare_to(owner: &str, name: &str, params: &[Ty]) -> bool {
+    kotlin_owner(owner) == "kotlin/Comparable" && name == "compareTo" && params.len() == 1
+}
+
+/// Whether a type name is `kotlin.Comparable` or the base whose comparison an enum inherits.
+///
+/// Both are what a DECLARED class naming one of them makes observable: an object of the program's
+/// standing behind a `Comparable` receiver, which the runtime's descriptor tables cannot order.
+pub(super) fn is_comparable_supertype(internal: crate::types::TypeName) -> bool {
+    matches!(
+        kotlin_owner(&internal.render()),
+        "kotlin/Comparable" | "kotlin/Enum"
+    )
+}
+
 /// Whether a type name is the MAP the native runtime builds.
 ///
 /// `MutableMap`, `HashMap` and `LinkedHashMap` are one object there: the map that runtime builds is

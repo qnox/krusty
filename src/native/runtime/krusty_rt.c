@@ -3963,6 +3963,78 @@ static void kt_fail_cast(KRef object, const KType *type) {
     kt_throw(kt_throwable_new(&kt_type_class_cast_exception, message));
 }
 
+/* `a.compareTo(b)` where the static type says only `Comparable`.
+
+   The DESCRIPTOR says what to compare, exactly as `kt_equals` and `kt_to_string` read it, and only
+   the orders the RUNTIME defines are here: a boxed primitive at its own width — with Kotlin's total
+   order for the floating ones, where -0.0 sits below 0.0 and every NaN above everything — a string
+   by UTF-16 unit, and the unsigned integers read unsigned. A program's own `Comparable` is not
+   among them: an object of the program's could stand behind that type too and no static type tells
+   the two apart, so a file that declares one declines at the CALL SITE, where the type it named is
+   still in sight.
+
+   Each side is unboxed at its OWN descriptor's field, not through one reader: the boxes share a
+   union, so reading a `Byte`'s payload as an `Int` reads bytes that were never written.
+
+   Two values of different types have no order between them, which is what `Comparable<Any>` runs
+   into. The JVM raises `ClassCastException` there and so does this; `kt_throw` records it and comes
+   back, so the raise is followed by a return. */
+kt_int kt_compare_any(KRef a, KRef b) {
+    if (a == NULL || b == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    const KType *type = a->header.type;
+    if (type != b->header.type) {
+        kt_fail_cast(b, type);
+        return 0;
+    }
+    if (type == &kt_type_string) {
+        return kt_string_compare_to(a, b);
+    }
+    if (type == &kt_type_byte) {
+        return kt_compare_byte(kt_unbox_byte(a), kt_unbox_byte(b));
+    }
+    if (type == &kt_type_short) {
+        return kt_compare_short(kt_unbox_short(a), kt_unbox_short(b));
+    }
+    if (type == &kt_type_int) {
+        return kt_compare_int(kt_unbox_int(a), kt_unbox_int(b));
+    }
+    if (type == &kt_type_long) {
+        return kt_compare_long(kt_unbox_long(a), kt_unbox_long(b));
+    }
+    if (type == &kt_type_char) {
+        return kt_compare_char(kt_unbox_char(a), kt_unbox_char(b));
+    }
+    if (type == &kt_type_boolean) {
+        return kt_compare_boolean(kt_unbox_boolean(a), kt_unbox_boolean(b));
+    }
+    if (type == &kt_type_float) {
+        return kt_compare_float(kt_unbox_float(a), kt_unbox_float(b));
+    }
+    if (type == &kt_type_double) {
+        return kt_compare_double(kt_unbox_double(a), kt_unbox_double(b));
+    }
+    /* The unsigned four. Each box holds the signed type's bits, so the comparison is the one the
+       widths share once both sides are read as unsigned. */
+    if (type == &kt_type_ubyte || type == &kt_type_ushort || type == &kt_type_uint) {
+        uint32_t left = type == &kt_type_ubyte    ? (uint8_t)kt_unbox_ubyte(a)
+                        : type == &kt_type_ushort ? (uint16_t)kt_unbox_ushort(a)
+                                                  : (uint32_t)kt_unbox_uint(a);
+        uint32_t right = type == &kt_type_ubyte    ? (uint8_t)kt_unbox_ubyte(b)
+                         : type == &kt_type_ushort ? (uint16_t)kt_unbox_ushort(b)
+                                                   : (uint32_t)kt_unbox_uint(b);
+        return left < right ? -1 : (left > right ? 1 : 0);
+    }
+    if (type == &kt_type_ulong) {
+        uint64_t left = (uint64_t)kt_unbox_ulong(a);
+        uint64_t right = (uint64_t)kt_unbox_ulong(b);
+        return left < right ? -1 : (left > right ? 1 : 0);
+    }
+    KT_FAIL("krusty: a comparison of a type the runtime has no order for\n");
+    return 0;
+}
+
 KRef kt_cast(KRef object, const KType *type) {
     if (object != NULL && !kt_is_instance(object, type)) {
         kt_fail_cast(object, type);

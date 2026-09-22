@@ -1058,6 +1058,8 @@ mod native_codegen_e2e;
 mod native_collection_indices_e2e;
 #[path = "native_collection_walks_e2e.rs"]
 mod native_collection_walks_e2e;
+#[path = "native_comparable_e2e.rs"]
+mod native_comparable_e2e;
 #[path = "native_concurrency_e2e.rs"]
 mod native_concurrency_e2e;
 #[path = "native_delegated_properties_e2e.rs"]

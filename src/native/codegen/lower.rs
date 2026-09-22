@@ -192,6 +192,7 @@ pub fn lower_file(
         holders: HashMap::new(),
         references: HashMap::new(),
         declares_its_own_collection: declares_its_own_collection(ir),
+        declares_its_own_comparable: declares_its_own_comparable(ir),
         implemented_dependencies: implemented_dependencies(ir),
     };
     lowering.declare_functions()?;
@@ -297,6 +298,48 @@ fn declares_its_own_collection(ir: &IrFile) -> bool {
     })
 }
 
+/// Whether this file declares a class an object of which could stand behind a `Comparable<T>`.
+///
+/// `compareTo` asked of a receiver typed only by `Comparable` is answered by the DESCRIPTOR — a
+/// boxed primitive at its own width and with Kotlin's total order for the floating ones, a string
+/// by UTF-16 unit — and those tables answer only for the objects the RUNTIME makes. An object of
+/// the program's could stand behind that type too, and no static type tells the two apart, which is
+/// why the answer is the runtime's at all. So a file that declares one declines instead.
+///
+/// Three shapes count, and none of them is an override edge — which is why this is not
+/// [`implemented_dependencies`]. A class may NAME `Comparable` among its supertypes without
+/// overriding anything there: `interface A : Comparable<A>` is that, and its implementor overrides
+/// `A`'s spelling rather than `Comparable`'s. An ENUM is a `Comparable` with nothing written at
+/// all, `kotlin.Enum` supplying the comparison — whose ordinal is a field this generator lays out
+/// and the runtime cannot read. And a class may reach `Comparable` through a supertype declared
+/// somewhere else entirely, which no name in this file spells; overriding an external `compareTo`
+/// is the evidence of that one.
+///
+/// Naming `Comparable` anywhere in the file is enough, without walking the hierarchy: the class
+/// that names it is itself declared here, so a single pass over the declarations finds it.
+fn declares_its_own_comparable(ir: &IrFile) -> bool {
+    let named = |class: &crate::ir::IrClass| {
+        std::iter::once(class.superclass)
+            .chain(class.interfaces.iter())
+            .chain(
+                class
+                    .supertypes
+                    .iter()
+                    .copied()
+                    .filter_map(Ty::obj_internal),
+            )
+            .any(super::super::intrinsics::is_comparable_supertype)
+    };
+    ir.classes.iter().any(|class| {
+        !class.enum_entries.is_empty() || class.enum_entry_of.is_some() || named(class)
+    }) || ir.function_overrides.values().flatten().any(|edge| {
+        matches!(
+            edge.overridden,
+            crate::fir::ResolvedFunctionOverrideTarget::External(_)
+        ) && edge.name == "compareTo"
+    })
+}
+
 struct FileLowering<'a> {
     ir: &'a IrFile,
     provider: &'a Rc<dyn SemanticPlatform>,
@@ -351,6 +394,9 @@ struct FileLowering<'a> {
     /// that type would have its vtable read for an entry it does not have, so where such a class
     /// exists those members decline by name instead of being answered wrongly.
     declares_its_own_collection: bool,
+    /// Whether this file declares a class an object of which could stand behind a `Comparable<T>`;
+    /// see [`declares_its_own_comparable`].
+    declares_its_own_comparable: bool,
 }
 
 impl<'a> FileLowering<'a> {
@@ -2629,6 +2675,32 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                                 };
                                 return self.convert(produced, Some(Ty::Boolean), *ret);
                             }
+                        }
+                        // `x.compareTo(y)` where the static type says only `Comparable`. The
+                        // receiver's DESCRIPTOR says what to compare, exactly as `equals` and
+                        // `toString` on such a receiver already read it — a boxed primitive at its
+                        // own width, with Kotlin's TOTAL order for the floating ones, and a string
+                        // by UTF-16 unit. A file that declares a `Comparable` of its own keeps
+                        // declining: an object of the program's could stand behind that type and
+                        // the runtime has no order for it.
+                        if super::super::intrinsics::is_comparable_compare_to(&owner, &name, params)
+                            && !self.file.declares_its_own_comparable
+                        {
+                            let operands =
+                                vec![self.reference(receiver)?, self.reference(args[0])?];
+                            if self.terminated {
+                                return Ok(None);
+                            }
+                            let produced = self.runtime_call(
+                                "kt_compare_any",
+                                &[any(), any()],
+                                Ty::Int,
+                                &operands,
+                            )?;
+                            let Some(produced) = produced else {
+                                return Ok(None);
+                            };
+                            return self.convert(produced, Some(Ty::Int), *ret);
                         }
                         // A member that asks about a NUMBER rather than an object, carried as one:
                         // `s[i]` must not box its index to reach the runtime.

@@ -870,6 +870,13 @@ kt_double kt_mod_double(kt_double a, kt_double b);
 kt_int kt_compare_float(kt_float a, kt_float b);
 kt_int kt_compare_double(kt_double a, kt_double b);
 
+/* `a.compareTo(b)` where the static type says only `Comparable`. The DESCRIPTOR says what to
+   compare, and only the orders the runtime defines are here: a boxed primitive at its own width
+   (Kotlin's TOTAL order for the floating ones), a string by UTF-16 unit, the unsigned integers read
+   unsigned. A program's own `Comparable` is not among them — a file that declares one declines at
+   the call site. Two values of different types raise `ClassCastException`, as the JVM does. */
+kt_int kt_compare_any(KRef a, KRef b);
+
 /* The `kotlin.Unit` singleton. */
 KRef kt_unit(void);
 
