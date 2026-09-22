@@ -1,14 +1,14 @@
 //! A data class's `toString` RECIPE is seeded under its simple name.
 //!
 //! Two paths build the `makeConcatWithConstants` recipe: the lowering, and the pool-seeding path.
-//! The lowering splits the internal name on both separators and is correct — it is the recipe
-//! `toString` actually invokes, so the rendered string is right (`Inner(id=1)`), and
-//! `nested_data_class_tostring_e2e` pins that.
+//! Both now take the name from the classifier's own identity — `TypeName::nested_segment_ref` —
+//! so they agree on one spelling and intern one constant.
 //!
-//! The seeding path split on `/` alone, so a nested class kept its outer prefix. Its recipe is
-//! never invoked, but it is interned and it gets a `BootstrapMethods` entry of its own: the class
-//! carried a dead nested-name constant and two bootstrap methods where kotlinc has one. This pins
-//! the bytes rather than the value.
+//! They did not. The lowering was already right, so the rendered string was right (`Inner(id=1)`)
+//! and `nested_data_class_tostring_e2e` pins that. The seeding path split on `/` alone, so a
+//! nested class kept its outer prefix: a recipe that is never invoked, but that is interned and
+//! takes a `BootstrapMethods` entry of its own, leaving the class with a dead nested-name constant
+//! and two bootstrap methods where kotlinc has one. This pins the bytes rather than the value.
 use super::common;
 
 const SRC: &str = "class Holder {\n\
