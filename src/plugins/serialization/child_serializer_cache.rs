@@ -341,103 +341,6 @@ pub(super) fn add_child_serializer_cache(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::add_child_serializer_cache;
-    use crate::ir::{IrExpr, IrFile};
-    use crate::plugins::{synthetic_class, PluginContext};
-    use crate::types::Ty;
-
-    use super::class_ty;
-
-    fn holder(element: Ty) -> (IrFile, crate::ir::ClassId, Vec<(String, Ty)>) {
-        let mut ir = IrFile::default();
-        let mut holder = synthetic_class("demo/Holder");
-        holder.fields = vec![crate::ir::IrField::new("tags".to_string(), element)];
-        holder.ctor_param_count = 1;
-        let class_id = ir.add_class(holder);
-        (ir, class_id, vec![("tags".to_string(), element)])
-    }
-
-    /// A cached slot whose serializer cannot be constructed REFUSES the file.
-    ///
-    /// `List<demo/Unknown>` needs a cache — it is a collection — and `Unknown` has no `$serializer`
-    /// in the arena, so no element serializer can be built for it. Dropping the cache and letting
-    /// every use build its own would be a second lowering deciding the compilation, so the plugin
-    /// publishes an unsupported residual and `jvm_can_emit` declines instead.
-    ///
-    /// Driven directly rather than through a source fixture: reproducing this needs a shape the
-    /// REFERENCE compiler accepts and krusty cannot derive, which is a moving target, while the
-    /// invariant is not.
-    #[test]
-    fn an_underivable_cached_slot_refuses_the_file() {
-        let element = Ty::obj_args("kotlin/collections/List", &[class_ty("demo/Unknown")]);
-        let (mut ir, class_id, fields) = holder(element);
-        let serialized = ir.classes[class_id as usize].fq_name_id();
-
-        add_child_serializer_cache(
-            &mut ir,
-            &PluginContext::default(),
-            class_id,
-            serialized,
-            &fields,
-        );
-
-        let cache = ir
-            .statics
-            .iter()
-            .find(|s| s.name == "$childSerializers")
-            .expect("the refusal is published as the cache's own initializer");
-        assert!(
-            matches!(
-                ir.expr(cache.init),
-                IrExpr::PluginPlaceholder {
-                    plugin: "serialization",
-                    ..
-                }
-            ),
-            "an underivable required slot publishes an unsupported residual, not a null"
-        );
-        assert!(
-            !crate::jvm::ir_emit::jvm_can_emit(&ir),
-            "and that residual must make the file undecidable rather than emit a broken cache"
-        );
-    }
-
-    /// The companion case: every cached slot derives, so the cache is built and the file emits.
-    #[test]
-    fn a_derivable_cached_slot_builds_the_cache() {
-        let element = Ty::obj_args("kotlin/collections/List", &[Ty::String]);
-        let (mut ir, class_id, fields) = holder(element);
-        let serialized = ir.classes[class_id as usize].fq_name_id();
-
-        add_child_serializer_cache(
-            &mut ir,
-            &PluginContext::default(),
-            class_id,
-            serialized,
-            &fields,
-        );
-
-        let cache = ir
-            .statics
-            .iter()
-            .find(|s| s.name == "$childSerializers")
-            .expect("a `List<String>` element serializer derives, so the cache is built");
-        assert!(
-            !matches!(ir.expr(cache.init), IrExpr::PluginPlaceholder { .. }),
-            "a derivable slot publishes a real initializer"
-        );
-        assert!(
-            ir.classes[class_id as usize]
-                .methods
-                .iter()
-                .any(|&m| ir.functions[m as usize].name == "access$get$childSerializers$cp"),
-            "and the accessor the `$serializer` reads it through"
-        );
-    }
-}
-
 /// The generated `childSerializers()` body: the per-element `KSerializer[]` the runtime reads a
 /// class's element serializers out of.
 ///
@@ -554,5 +457,102 @@ impl ChildSerializersBody<'_> {
         stmts.push(ret);
         let body = ir.add_expr(IrExpr::Block { stmts, value: None });
         ir.functions[function as usize].body = Some(body);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::add_child_serializer_cache;
+    use crate::ir::{IrExpr, IrFile};
+    use crate::plugins::{synthetic_class, PluginContext};
+    use crate::types::Ty;
+
+    use super::class_ty;
+
+    fn holder(element: Ty) -> (IrFile, crate::ir::ClassId, Vec<(String, Ty)>) {
+        let mut ir = IrFile::default();
+        let mut holder = synthetic_class("demo/Holder");
+        holder.fields = vec![crate::ir::IrField::new("tags".to_string(), element)];
+        holder.ctor_param_count = 1;
+        let class_id = ir.add_class(holder);
+        (ir, class_id, vec![("tags".to_string(), element)])
+    }
+
+    /// A cached slot whose serializer cannot be constructed REFUSES the file.
+    ///
+    /// `List<demo/Unknown>` needs a cache — it is a collection — and `Unknown` has no `$serializer`
+    /// in the arena, so no element serializer can be built for it. Dropping the cache and letting
+    /// every use build its own would be a second lowering deciding the compilation, so the plugin
+    /// publishes an unsupported residual and `jvm_can_emit` declines instead.
+    ///
+    /// Driven directly rather than through a source fixture: reproducing this needs a shape the
+    /// REFERENCE compiler accepts and krusty cannot derive, which is a moving target, while the
+    /// invariant is not.
+    #[test]
+    fn an_underivable_cached_slot_refuses_the_file() {
+        let element = Ty::obj_args("kotlin/collections/List", &[class_ty("demo/Unknown")]);
+        let (mut ir, class_id, fields) = holder(element);
+        let serialized = ir.classes[class_id as usize].fq_name_id();
+
+        add_child_serializer_cache(
+            &mut ir,
+            &PluginContext::default(),
+            class_id,
+            serialized,
+            &fields,
+        );
+
+        let cache = ir
+            .statics
+            .iter()
+            .find(|s| s.name == "$childSerializers")
+            .expect("the refusal is published as the cache's own initializer");
+        assert!(
+            matches!(
+                ir.expr(cache.init),
+                IrExpr::PluginPlaceholder {
+                    plugin: "serialization",
+                    ..
+                }
+            ),
+            "an underivable required slot publishes an unsupported residual, not a null"
+        );
+        assert!(
+            !crate::jvm::ir_emit::jvm_can_emit(&ir),
+            "and that residual must make the file undecidable rather than emit a broken cache"
+        );
+    }
+
+    /// The companion case: every cached slot derives, so the cache is built and the file emits.
+    #[test]
+    fn a_derivable_cached_slot_builds_the_cache() {
+        let element = Ty::obj_args("kotlin/collections/List", &[Ty::String]);
+        let (mut ir, class_id, fields) = holder(element);
+        let serialized = ir.classes[class_id as usize].fq_name_id();
+
+        add_child_serializer_cache(
+            &mut ir,
+            &PluginContext::default(),
+            class_id,
+            serialized,
+            &fields,
+        );
+
+        let cache = ir
+            .statics
+            .iter()
+            .find(|s| s.name == "$childSerializers")
+            .expect("a `List<String>` element serializer derives, so the cache is built");
+        assert!(
+            !matches!(ir.expr(cache.init), IrExpr::PluginPlaceholder { .. }),
+            "a derivable slot publishes a real initializer"
+        );
+        assert!(
+            ir.classes[class_id as usize]
+                .methods
+                .iter()
+                .any(|&m| ir.functions[m as usize].name == "access$get$childSerializers$cp"),
+            "and the accessor the `$serializer` reads it through"
+        );
     }
 }
