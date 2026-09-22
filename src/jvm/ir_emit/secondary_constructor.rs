@@ -362,20 +362,10 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             // types are already erased and whose owner prepends nothing.
             (signature != sc_desc).then_some(signature)
         })();
-        cw.add_method_sig(
-            sc_access,
-            "<init>",
-            &sc_desc,
-            &sctor,
-            sc_signature.as_deref(),
-        );
-        if let Some((pc, line)) =
-            delegation_pc.zip((sc.lines.delegation_line != 0).then_some(sc.lines.delegation_line))
-        {
-            cw.set_method_lines("<init>", &sc_desc, &[(pc, line)]);
-        }
-        cw.set_method_parameters("<init>", &sc_desc, &method_parameters);
-        if sc.generated_debug.records_locals() {
+        // The debug locals are built BEFORE the method is added so their names and descriptors can
+        // be interned first: `add_method` computes the `StackMapTable`, which interns each
+        // parameter's verification type, and kotlinc's writer visits the locals before the frames.
+        let debug_locals = sc.generated_debug.records_locals().then(|| {
             assert_eq!(
                 owner_prefix_tys.len() + sc.named_params.len(),
                 sc_param_tys.len(),
@@ -394,11 +384,30 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 locals.push((name.clone(), type_descriptor(*physical), slot));
                 slot += slot_words(*physical);
             }
+            locals
+        });
+        if let Some(locals) = &debug_locals {
+            cw.reserve_method_lvt(locals);
+        }
+        cw.add_method_sig(
+            sc_access,
+            "<init>",
+            &sc_desc,
+            &sctor,
+            sc_signature.as_deref(),
+        );
+        if let Some((pc, line)) =
+            delegation_pc.zip((sc.lines.delegation_line != 0).then_some(sc.lines.delegation_line))
+        {
+            cw.set_method_lines("<init>", &sc_desc, &[(pc, line)]);
+        }
+        cw.set_method_parameters("<init>", &sc_desc, &method_parameters);
+        if let Some(locals) = &debug_locals {
             cw.set_method_debug(
                 "<init>",
                 &sc_desc,
                 sc.generated_debug.line().map(|line| (0, line)),
-                &locals,
+                locals,
             );
         }
         // Declared constructor annotations, with the same `Deprecated` / `ACC_SYNTHETIC` companions

@@ -2478,6 +2478,21 @@ impl ClassWriter {
         }
     }
 
+    /// Intern a method's `LocalVariableTable` names and descriptors BEFORE its code is added.
+    ///
+    /// ASM visits `visitLocalVariable` before `visitMaxs`, so kotlinc's pool carries a local's name
+    /// and descriptor ahead of every class constant the frame computation introduces. krusty builds
+    /// the `StackMapTable` inside `add_method`, which interns each parameter's verification type —
+    /// so without this reservation a parameter whose class appears NOWHERE else in the class file
+    /// (the serialization constructor's marker) lands ahead of the local names instead of behind
+    /// them.
+    pub fn reserve_method_lvt(&mut self, locals: &[(String, String, u16)]) {
+        for (name, descriptor, _) in locals {
+            self.cp.utf8(name);
+            self.cp.utf8(descriptor);
+        }
+    }
+
     pub fn add_method_sig(
         &mut self,
         access: u16,
