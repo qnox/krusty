@@ -28,7 +28,9 @@ pub mod gc;
 #[allow(dead_code)]
 mod classes;
 #[allow(dead_code)]
+#[allow(dead_code)]
 mod intrinsics;
+pub mod libraries;
 mod linker;
 mod prebuilt;
 pub mod runtime;
