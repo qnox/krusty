@@ -595,6 +595,29 @@ fn tail_value(
             }
             Ok(generated(ir, IrExpr::Block { stmts, value: None }, origin))
         }
+        // A `Unit` function's block can end in a bare `return`. Everything that runs before it and
+        // after nothing else is still in TAIL position — `f(x); return` is a tail call in Kotlin,
+        // and the source wrote `tailrec` because that call recurses to a depth no stack survives.
+        // Only the statement immediately before the `return` qualifies: anything earlier has code
+        // after it.
+        IrExpr::Block {
+            mut stmts,
+            value: None,
+        } if result == Ty::Unit
+            && matches!(
+                stmts.last().map(|last| ir.expr(*last)),
+                Some(IrExpr::Return(None))
+            )
+            && stmts.len() > 1 =>
+        {
+            let returned = stmts.pop().expect("checked non-empty just above");
+            let tail = stmts
+                .pop()
+                .expect("checked for a second statement just above");
+            stmts.push(tail_value(ir, tail, frame, result, origin)?);
+            stmts.push(returned);
+            Ok(generated(ir, IrExpr::Block { stmts, value: None }, origin))
+        }
         IrExpr::Block { mut stmts, value } => {
             if let Some(value) = value {
                 stmts.push(tail_value(ir, value, frame, result, origin)?);
