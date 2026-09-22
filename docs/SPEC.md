@@ -2141,6 +2141,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `class A(a: Tr<Int>) : Tr<Int> by a`'s `a.prop` arrive in an `Int` position as a reference with
   nothing to convert it by. Test: `tests/native_virtual_call_result_e2e.rs`.
 
+- **A SECONDARY constructor's defaults are its own, and the wrapper filling them names which
+  constructor it fills.** A primary constructor's defaults live on the CLASS, beside its
+  parameters; a secondary's live on the constructor. krusty's native target fills both the same
+  way — a wrapper takes the operands actually supplied, evaluates each missing default into the
+  frame in declaration order so a later one may read an earlier parameter, then runs the
+  constructor — but what the wrapper is keyed on has to name WHICH constructor it fills, since two
+  constructors of one class omitting the same ordinal are two frames and two wrappers. The same
+  key answers a `super(…)` delegation: a base whose only constructor is a secondary is reached
+  that way, and reading the primary's frame for it would fill a frame that does not exist. Test:
+  `tests/native_secondary_constructor_defaults_e2e.rs`.
+
 - **A `Throwable` carries a CAUSE, and the two one-argument constructors are told apart by type.**
   Kotlin declares four: `()`, `(message)`, `(cause)` and `(message, cause)`. A single argument whose
   type is a `Throwable` is the cause and anything else is the message, and the two forms differ in

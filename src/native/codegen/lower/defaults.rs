@@ -297,6 +297,10 @@ impl BodyLowering<'_, '_, '_> {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(super) struct CtorOmission {
     pub class: ClassId,
+    /// Which constructor of that class, as an index into `secondary_ctors`, or `None` for the
+    /// PRIMARY one. A secondary's defaults live on the constructor rather than on the class, so
+    /// the two cannot share a wrapper even when they omit the same ordinals.
+    pub secondary: Option<usize>,
     /// PHYSICAL constructor-parameter ordinals the construction leaves out, ascending. A
     /// construction's own `defaults` are SOURCE-value ordinals, which begin after the compiler's
     /// leading operands (`default_prefix_count`) — captures and an outer receiver, which are never
@@ -305,6 +309,71 @@ pub(super) struct CtorOmission {
 }
 
 impl<'a> FileLowering<'a> {
+    /// The physical parameter frame of one of a class's constructors — the primary's, or a
+    /// SECONDARY's, which leads with the compiler-supplied prefix every constructor of the class
+    /// shares before its own declared parameters.
+    fn constructor_frame_of(&self, class: ClassId, secondary: Option<usize>) -> Option<Vec<Ty>> {
+        let Some(index) = secondary else {
+            return Some(self.constructor_frame(class));
+        };
+        let constructor = self.ir.classes[class as usize].secondary_ctors.get(index)?;
+        let mut frame = constructor.prefix_params.clone();
+        frame.extend(constructor.params.iter().copied());
+        Some(frame)
+    }
+
+    /// The defaults of one of a class's constructors, parallel to the frame above.
+    ///
+    /// The primary's live on the CLASS, as expression ids beside its parameters; a secondary's
+    /// live on the constructor. Both are answered in PHYSICAL ordinals, so the prefix a secondary
+    /// leads with is padded out — nothing omits a compiler-supplied operand.
+    fn constructor_defaults_of(
+        &self,
+        class: ClassId,
+        secondary: Option<usize>,
+    ) -> Option<Vec<Option<u32>>> {
+        let declaration = &self.ir.classes[class as usize];
+        let Some(index) = secondary else {
+            return self
+                .ir
+                .class_ctor_defaults_name(declaration.fq_name_id())
+                .cloned();
+        };
+        let constructor = declaration.secondary_ctors.get(index)?;
+        let mut defaults = vec![None; constructor.prefix_params.len()];
+        defaults.extend(constructor.defaults.iter().copied());
+        Some(defaults)
+    }
+
+    /// Which constructor of `class` a selected parameter list names: `None` for the primary, and
+    /// the index of the secondary that declares exactly those parameters otherwise.
+    ///
+    /// A construction that names no list is the primary's, which is what an enum constant and a
+    /// `super(…)` delegation both leave unsaid.
+    pub(super) fn selected_constructor(
+        &self,
+        class: ClassId,
+        selected: Option<&[Ty]>,
+    ) -> Option<Option<usize>> {
+        let declaration = &self.ir.classes[class as usize];
+        let primary: Vec<Ty> = declaration
+            .ctor_args
+            .iter()
+            .map(|argument| argument.ty)
+            .collect();
+        let Some(selected) = selected else {
+            return Some(None);
+        };
+        if selected == primary {
+            return Some(None);
+        }
+        declaration
+            .secondary_ctors
+            .iter()
+            .position(|candidate| candidate.params == selected)
+            .map(Some)
+    }
+
     /// The physical parameter frame of a class's primary constructor.
     fn constructor_frame(&self, class: ClassId) -> Vec<Ty> {
         self.ir.classes[class as usize]
@@ -320,11 +389,12 @@ impl<'a> FileLowering<'a> {
     /// Which physical ordinals a construction omits, or `None` when it omits nothing.
     pub(super) fn omitted_constructor_arguments(
         expression: &IrExpr,
-    ) -> Option<(TypeName, Vec<u32>)> {
+    ) -> Option<(TypeName, Option<Vec<Ty>>, Vec<u32>)> {
         let IrExpr::New {
             internal,
             defaults,
             default_prefix_count,
+            ctor_params,
             ..
         } = expression
         else {
@@ -338,14 +408,17 @@ impl<'a> FileLowering<'a> {
             .map(|ordinal| ordinal + default_prefix_count)
             .collect();
         omitted.sort_unstable();
-        Some((*internal, omitted))
+        Some((*internal, ctor_params.clone(), omitted))
     }
 
     /// The physical ordinals a class's primary `super(…)` delegation omits, if any.
     ///
     /// The IR records SEMANTIC ordinals — a backend's own prefix is not its to know — so they are
     /// shifted past the superclass's compiler-supplied leading parameters here.
-    pub(super) fn omitted_super_arguments(&self, class: ClassId) -> Option<(TypeName, Vec<u32>)> {
+    pub(super) fn omitted_super_arguments(
+        &self,
+        class: ClassId,
+    ) -> Option<(TypeName, Option<Vec<Ty>>, Vec<u32>)> {
         let declaration = &self.ir.classes[class as usize];
         let omitted = self
             .ir
@@ -358,14 +431,23 @@ impl<'a> FileLowering<'a> {
         let prefix = self.ir.classes[parent as usize].constructor_prefix_count;
         let mut physical: Vec<u32> = omitted.iter().map(|ordinal| ordinal + prefix).collect();
         physical.sort_unstable();
-        Some((declaration.superclass, physical))
+        // WHICH of the base's constructors the supertype call names, by the parameter list the
+        // class recorded for it. A base whose only constructor is a SECONDARY is reached this way
+        // — `class C : B()` where `B`'s one constructor defaults its argument — and reading the
+        // primary's frame for it would fill a frame that does not exist.
+        Some((
+            declaration.superclass,
+            Some(declaration.super_ctor_params.clone()),
+            physical,
+        ))
     }
 
     /// Declare a wrapper for every omission shape the file's constructions use.
     pub(super) fn declare_default_constructors(&mut self) -> Result<(), Unsupported> {
         // A `class B : A()` whose base leaves arguments out needs the same wrapper a `A()` written
         // as an expression would, and the delegation is not an expression, so both are collected.
-        let shapes: Vec<(TypeName, Vec<u32>)> = (0..self.ir.classes.len() as ClassId)
+        let shapes: Vec<(TypeName, Option<Vec<Ty>>, Vec<u32>)> = (0..self.ir.classes.len()
+            as ClassId)
             .filter_map(|class| self.omitted_super_arguments(class))
             .chain(
                 self.ir
@@ -386,25 +468,39 @@ impl<'a> FileLowering<'a> {
                     }
                     let mut omitted = entry.default_parameters.clone();
                     omitted.sort_unstable();
-                    Some((class.fq_name_id(), omitted))
+                    Some((class.fq_name_id(), None, omitted))
                 })
             }))
             .collect();
-        for (internal, omitted) in shapes {
-            // A construction naming a class this file does not declare, or a SECONDARY
-            // constructor, declares no wrapper; the call site then finds none and declines there,
-            // rather than this phase failing the whole file for one construction.
+        for (internal, selected, omitted) in shapes {
+            // A construction naming a class this file does not declare, or a constructor whose
+            // parameter list names none of this class's, declares no wrapper; the call site then
+            // finds none and declines there, rather than this phase failing the whole file for one
+            // construction.
             let Some(class) = self.ir.class_id_by_name(internal) else {
                 continue;
             };
-            if self.classes[class as usize].constructor.is_none() {
+            let Some(secondary) = self.selected_constructor(class, selected.as_deref()) else {
+                continue;
+            };
+            let declared = match secondary {
+                None => self.classes[class as usize].constructor,
+                Some(index) => self.classes[class as usize].secondaries.get(index).copied(),
+            };
+            if declared.is_none() {
                 continue;
             }
-            let key = CtorOmission { class, omitted };
+            let key = CtorOmission {
+                class,
+                secondary,
+                omitted,
+            };
             if self.default_constructors.contains_key(&key) {
                 continue;
             }
-            let frame = self.constructor_frame(class);
+            let Some(frame) = self.constructor_frame_of(class, secondary) else {
+                continue;
+            };
             let mut parameters = vec![Ty::Obj(self.ir.classes[class as usize].fq_name_id(), &[])];
             for (ordinal, ty) in frame.iter().enumerate() {
                 if key.omitted.contains(&(ordinal as u32)) {
@@ -413,8 +509,12 @@ impl<'a> FileLowering<'a> {
                 parameters.push(*ty);
             }
             let symbol = format!(
-                "kt_{}__init__defaults{}",
+                "kt_{}__init{}__defaults{}",
                 self.class_base(class),
+                match secondary {
+                    None => String::new(),
+                    Some(index) => format!("#{index}"),
+                },
                 key.omitted
                     .iter()
                     .map(|ordinal| format!("_{ordinal}"))
@@ -446,16 +546,16 @@ impl<'a> FileLowering<'a> {
     ) -> Result<(), Unsupported> {
         let declaration = self.ir.classes[key.class as usize].clone();
         let name = declaration.fq_name();
-        let Some(defaults) = self
-            .ir
-            .class_ctor_defaults_name(declaration.fq_name_id())
-            .cloned()
-        else {
+        let Some(defaults) = self.constructor_defaults_of(key.class, key.secondary) else {
             return Err(format!(
                 "a construction with a defaulted argument of `{name}`, whose defaults were not recorded"
             ));
         };
-        let frame = self.constructor_frame(key.class);
+        let Some(frame) = self.constructor_frame_of(key.class, key.secondary) else {
+            return Err(format!(
+                "a construction with a defaulted argument of `{name}`, whose constructor is absent"
+            ));
+        };
         let mut parameters = vec![Ty::Obj(declaration.fq_name_id(), &[])];
         let mut supplied = Vec::new();
         for (ordinal, ty) in frame.iter().enumerate() {
@@ -466,9 +566,14 @@ impl<'a> FileLowering<'a> {
             parameters.push(*ty);
         }
         let signature = self.signature_of(&parameters, Ty::Unit)?;
-        let target = self.classes[key.class as usize]
-            .constructor
-            .expect("checked when the wrapper was declared");
+        let target = match key.secondary {
+            None => self.classes[key.class as usize].constructor,
+            Some(index) => self.classes[key.class as usize]
+                .secondaries
+                .get(index)
+                .copied(),
+        }
+        .expect("checked when the wrapper was declared");
         let mut slots = vec![Ty::Obj(declaration.fq_name_id(), &[])];
         slots.extend(frame.iter().copied());
         let omitted = key.omitted.clone();
@@ -528,36 +633,47 @@ impl BodyLowering<'_, '_, '_> {
     ) -> Result<Option<Value>, Unsupported> {
         let name = internal.render();
         let class = self.file.class_of(internal, "construction of")?;
-        let declaration = &self.file.ir.classes[class as usize];
-        let primary: Vec<Ty> = declaration
-            .ctor_args
-            .iter()
-            .map(|argument| argument.ty)
-            .collect();
-        // Only the PRIMARY constructor's defaults are filled here: a secondary's live on the
-        // constructor rather than the class, and naming one by its parameter list cannot be done
-        // against a list with holes in it.
-        if selected.is_some_and(|selected| selected != primary) {
+        // Which constructor the selection names — the primary's, or a secondary's, whose defaults
+        // live on the constructor rather than on the class.
+        let Some(secondary) = self.file.selected_constructor(class, selected) else {
             return Err(format!(
-                "a defaulted call to a secondary constructor (`{name}`)"
+                "a defaulted call to a constructor of `{name}` this file does not declare"
             ));
-        }
+        };
         let key = super::defaults::CtorOmission {
             class,
+            secondary,
             omitted: omitted.to_vec(),
         };
         let Some(&id) = self.file.default_constructors.get(&key) else {
             return Err(format!("a constructor default argument (`{name}`)"));
         };
-        let parameters: Vec<Ty> = self.file.ir.classes[class as usize]
-            .ctor_args
-            .iter()
-            .enumerate()
-            .filter(|(ordinal, _)| !omitted.contains(&(*ordinal as u32)))
-            .map(|(ordinal, argument)| {
-                captures::physical_ty(self.file.ir, class, ordinal as u32, argument.ty)
-            })
-            .collect();
+        let parameters: Vec<Ty> = match secondary {
+            // The primary's frame reads each parameter's PHYSICAL type, which a value-class
+            // parameter's carrier differs from.
+            None => self.file.ir.classes[class as usize]
+                .ctor_args
+                .iter()
+                .enumerate()
+                .filter(|(ordinal, _)| !omitted.contains(&(*ordinal as u32)))
+                .map(|(ordinal, argument)| {
+                    captures::physical_ty(self.file.ir, class, ordinal as u32, argument.ty)
+                })
+                .collect(),
+            // A secondary's parameters are its own, and back no field, so there is no physical
+            // form of them to look up.
+            Some(index) => {
+                let constructor = &self.file.ir.classes[class as usize].secondary_ctors[index];
+                let mut frame = constructor.prefix_params.clone();
+                frame.extend(constructor.params.iter().copied());
+                frame
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(ordinal, _)| !omitted.contains(&(*ordinal as u32)))
+                    .map(|(_, ty)| ty)
+                    .collect()
+            }
+        };
         if args.len() != parameters.len() {
             return Err(format!(
                 "a construction supplying {} of {} arguments (`{name}`)",

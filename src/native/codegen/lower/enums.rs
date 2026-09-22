@@ -219,6 +219,9 @@ impl<'a> FileLowering<'a> {
                     } else {
                         let key = super::defaults::CtorOmission {
                             class,
+                            // An enum constant names the enum's PRIMARY constructor; a secondary
+                            // is reached by a constant's own body, which is a subclass instead.
+                            secondary: None,
                             omitted: omitted.clone(),
                         };
                         let Some(&wrapper) = body.file.default_constructors.get(&key) else {

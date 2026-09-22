@@ -1894,28 +1894,24 @@ impl<'a> FileLowering<'a> {
                 // because a default belongs to the callee's frame either way.
                 let omitted: Vec<u32> = self
                     .omitted_super_arguments(class)
-                    .map(|(_, omitted)| omitted)
+                    .map(|(_, _, omitted)| omitted)
                     .unwrap_or_default();
-                if sibling.is_some() && !omitted.is_empty() {
-                    // The wrapper below fills the PRIMARY's frame; a secondary's defaults are its
-                    // own and this does not reach them.
-                    return Err(format!(
-                        "a superclass secondary constructor call with defaulted arguments (`{}`)",
-                        declaration.fq_name()
-                    ));
-                }
-                let parent_constructor = if let Some(sibling) = sibling {
-                    self.classes[parent as usize].secondaries[sibling]
-                } else if omitted.is_empty() {
-                    self.classes[parent as usize].constructor.ok_or_else(|| {
-                        format!(
-                            "a superclass with no primary constructor (`{}`)",
-                            parent_declaration.fq_name()
-                        )
-                    })?
+                let parent_constructor = if omitted.is_empty() {
+                    match sibling {
+                        Some(sibling) => self.classes[parent as usize].secondaries[sibling],
+                        None => self.classes[parent as usize].constructor.ok_or_else(|| {
+                            format!(
+                                "a superclass with no primary constructor (`{}`)",
+                                parent_declaration.fq_name()
+                            )
+                        })?,
+                    }
                 } else {
+                    // The wrapper fills whichever constructor's frame the delegation names — a
+                    // secondary's defaults are its own, and the key says which.
                     let key = defaults::CtorOmission {
                         class: parent,
+                        secondary: sibling,
                         omitted: omitted.clone(),
                     };
                     *self.default_constructors.get(&key).ok_or_else(|| {

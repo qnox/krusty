@@ -1831,6 +1831,8 @@ mod native_range_bound_control_e2e;
 mod native_reflection_type_checks_e2e;
 #[path = "native_reified_declarations_e2e.rs"]
 mod native_reified_declarations_e2e;
+#[path = "native_secondary_constructor_defaults_e2e.rs"]
+mod native_secondary_constructor_defaults_e2e;
 #[path = "native_throwable_cause_e2e.rs"]
 mod native_throwable_cause_e2e;
 #[path = "native_virtual_call_result_e2e.rs"]
