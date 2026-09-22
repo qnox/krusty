@@ -91,10 +91,16 @@ fn a_list_type_argument_constructs_the_element_serializer() {
             "the reference constructs ArrayListSerializer in {method}:\n{want:#?}"
         );
         let got = members(&krusty, method);
+        // Building the list serializer is this change's contract; CONSTRUCTING it rather than
+        // fetching it from the stdlib factory is #1062's, and the two serialize identically.
+        // `ListSerializer(x)` is an inline stdlib function over `ArrayListSerializer(x)`, so both
+        // spellings satisfy this; #1062 narrows it to the construction the reference emits.
         assert!(
-            got.iter()
-                .any(|row| row.contains("ArrayListSerializer.\"<init>\"")),
-            "krusty must construct ArrayListSerializer in {method}:\n{got:#?}"
+            got.iter().any(|row| {
+                row.contains("ArrayListSerializer.\"<init>\"")
+                    || row.contains("BuiltinSerializersKt.ListSerializer")
+            }),
+            "krusty must build the list serializer in {method}:\n{got:#?}"
         );
         assert!(
             got.iter()
