@@ -56,10 +56,10 @@ pub fn collect_signatures_with_cp(
     })
 }
 
-/// Production migration entry: explicit declaration lookup candidates come from compact stable
-/// headers, while body/local/annotation candidates remain on the legacy file scan until Pass 2 is
-/// streamed. Semantic classifier selection is still the ordinary resolver below.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Test-only entry for exercising compact headers without the production local-class context.
+/// Production always supplies that context through
+/// [`collect_signatures_with_cp_headers_and_local_contexts`].
+#[cfg(test)]
 pub(crate) fn collect_signatures_with_cp_headers(
     files: &[File],
     headers: &crate::fir::StreamedHeaderModule,
