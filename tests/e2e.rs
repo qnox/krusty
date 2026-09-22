@@ -1442,6 +1442,9 @@ mod suspend_continuation_owner_e2e;
 #[path = "suspend_in_spliced_inline_e2e.rs"]
 mod suspend_in_spliced_inline_e2e;
 
+#[path = "inline_lambda_operand_stack_e2e.rs"]
+mod inline_lambda_operand_stack_e2e;
+
 #[path = "suspend_conversion_e2e.rs"]
 mod suspend_conversion_e2e;
 #[path = "suspend_debug_metadata_e2e.rs"]
