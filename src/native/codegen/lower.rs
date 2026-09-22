@@ -2180,7 +2180,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// its bits prints `-1879048193` for `0x8fffffffU`, and one compared as that `Int` answers
     /// `0uL >= ULong.MAX_VALUE` true.
     fn type_of(&self, id: u32) -> Option<Ty> {
-        let physical = self.physical_type_of(id)?;
+        let Some(physical) = self.physical_type_of(id) else {
+            // Every path that leaves an expression untyped comes through here, so this is where a
+            // decline naming only the two carriers becomes followable.
+            let rendered = format!("{:?}", self.file.ir.expr(id));
+            crate::trace_compiler!(
+                "native",
+                "untyped expression {id}: {}",
+                &rendered[..rendered.len().min(200)]
+            );
+            return None;
+        };
         let logical = self.file.ir.logical_types.get(&id).copied();
         // The checked type wins whenever it is unsigned, the value is a SCALAR rather than a
         // pointer to one, and it is no WIDER than that scalar: `expression` has narrowed the value
@@ -2321,6 +2331,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     let function = self.file.ir.checked_callable_functions.get(&(*source)?)?;
                     self.file.ir.functions[*function as usize].ret
                 }
+                // A VIRTUAL call yields what the slot it dispatches through carries, which is the
+                // DECLARED return rather than the one this receiver's class narrows it to. For a
+                // generic member that is a type parameter, so the value is a reference — and
+                // saying so is what lets a site wanting a machine value unbox it. Leaving it
+                // undetermined is what made `class A(a: Tr<Int>) : Tr<Int> by a`'s `a.prop`
+                // reach an `Int` position as a reference with nothing to convert it by.
+                Callee::Virtual {
+                    params: Some((_, ret)),
+                    ..
+                } => *ret,
                 _ => return None,
             },
             IrExpr::New { internal, .. }

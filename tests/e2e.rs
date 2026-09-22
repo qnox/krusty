@@ -1833,6 +1833,8 @@ mod native_reflection_type_checks_e2e;
 mod native_reified_declarations_e2e;
 #[path = "native_throwable_cause_e2e.rs"]
 mod native_throwable_cause_e2e;
+#[path = "native_virtual_call_result_e2e.rs"]
+mod native_virtual_call_result_e2e;
 mod serializer_metadata_class_id_e2e;
 #[path = "common/kotlin_metadata.rs"]
 mod serializer_metadata_test_support;

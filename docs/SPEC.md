@@ -2133,6 +2133,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   no reflection and no `KProperty` value, whatever the `::prop` spelling suggests. Test:
   `tests/native_lateinit_initialized_e2e.rs`.
 
+- **A VIRTUAL call yields what its SLOT carries, not what the receiver's class narrows it to.** The
+  member a virtual call dispatches through declares the type, and for a generic member that is a
+  type parameter — so the value crossing the slot is a reference even where both ends of the
+  program say `Int`. krusty's native target types such a call by that declared return, which is
+  what lets a site wanting a machine value unbox it; leaving the call untyped made
+  `class A(a: Tr<Int>) : Tr<Int> by a`'s `a.prop` arrive in an `Int` position as a reference with
+  nothing to convert it by. Test: `tests/native_virtual_call_result_e2e.rs`.
+
 - **A `Throwable` carries a CAUSE, and the two one-argument constructors are told apart by type.**
   Kotlin declares four: `()`, `(message)`, `(cause)` and `(message, cause)`. A single argument whose
   type is a `Throwable` is the cause and anything else is the message, and the two forms differ in
