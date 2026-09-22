@@ -105,6 +105,42 @@ fn reference_site(expr: &IrExpr) -> Option<(&crate::fir::PropertyId, Option<u32>
 }
 
 impl<'a> FileLowering<'a> {
+    /// The Kotlin name of the declaration a callable-reference node names, which `KCallable.name`
+    /// answers.
+    ///
+    /// `None` when the expression is not such a node, or when the declaration's name cannot be
+    /// read — a reference that cannot say its own name gets no `name` member rather than a wrong
+    /// one.
+    pub(super) fn reference_declaration_name(&self, id: u32) -> Option<String> {
+        let IrExpr::CallableReference(reference) = self.ir.expr(id) else {
+            return None;
+        };
+        match &reference.target {
+            crate::ir::IrCallableReferenceTarget::Local { name, .. } => Some(name.to_string()),
+            // Kotlin calls a constructor reference `<init>`, which is the name it answers too.
+            crate::ir::IrCallableReferenceTarget::Constructor { .. } => Some("<init>".to_string()),
+            // The declaration name is kept beside the call precisely so a reference's identity does
+            // not depend on whatever the emitted method ended up being called.
+            crate::ir::IrCallableReferenceTarget::Module(id) => self
+                .ir
+                .referenced_module_callables
+                .get(id)
+                .map(|callable| callable.name.to_string()),
+            // A dependency declaration publishes its Kotlin name through the provider; the
+            // spelling it is realized under is an emit handle and not what `name` answers.
+            crate::ir::IrCallableReferenceTarget::External { declaration } => {
+                let realization = self.provider.external_callable(*declaration)?;
+                Some(
+                    realization
+                        .callable
+                        .reflection_name
+                        .clone()
+                        .unwrap_or_else(|| realization.callable.name.clone()),
+                )
+            }
+        }
+    }
+
     /// Why a property-reference site was not realized, named rather than numbered.
     ///
     /// The declare pass skips a site it cannot realize and leaves the decline to the lowering, so
@@ -620,7 +656,7 @@ impl<'a> FileLowering<'a> {
     }
 
     /// `name(self)`: the property's Kotlin name.
-    fn define_reference_name(
+    pub(super) fn define_reference_name(
         &mut self,
         id: FuncId,
         base: &str,
@@ -714,7 +750,12 @@ impl BodyLowering<'_, '_, '_> {
         args: &[u32],
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
-        if !self.type_of(receiver).is_some_and(is_property_reference) {
+        let ty = self.type_of(receiver)?;
+        // `KCallable` is the type a FUNCTION reference and a property reference share, and `name`
+        // is the only member it declares — so a read through it answers from the slot both tables
+        // put that member in, without either side having to say which of the two the value is.
+        // `get`/`set` are a property's own, so those stay on a type that names a property.
+        if !is_property_reference(ty) && !(name == "name" && args.is_empty() && is_callable(ty)) {
             return None;
         }
         let slot = match (name, args.len()) {
@@ -780,31 +821,7 @@ impl BodyLowering<'_, '_, '_> {
         {
             return None;
         }
-        match &reference.target {
-            crate::ir::IrCallableReferenceTarget::Local { name, .. } => Some(name.to_string()),
-            // Kotlin calls a constructor reference `<init>`, which is the name it answers too.
-            crate::ir::IrCallableReferenceTarget::Constructor { .. } => Some("<init>".to_string()),
-            // The declaration name is kept beside the call precisely so a reference's identity does
-            // not depend on whatever the emitted method ended up being called.
-            crate::ir::IrCallableReferenceTarget::Module(id) => self
-                .file
-                .ir
-                .referenced_module_callables
-                .get(id)
-                .map(|callable| callable.name.to_string()),
-            // A dependency declaration publishes its Kotlin name through the provider; the
-            // spelling it is realized under is an emit handle and not what `name` answers.
-            crate::ir::IrCallableReferenceTarget::External { declaration } => {
-                let realization = self.file.provider.external_callable(*declaration)?;
-                Some(
-                    realization
-                        .callable
-                        .reflection_name
-                        .clone()
-                        .unwrap_or_else(|| realization.callable.name.clone()),
-                )
-            }
-        }
+        self.file.reference_declaration_name(receiver)
     }
 
     /// The name, with the receiver still EVALUATED: `(state++)::toString.name` answers a constant
@@ -830,7 +847,8 @@ impl BodyLowering<'_, '_, '_> {
         target: crate::fir::ExternalPropertyId,
         receiver: u32,
     ) -> Option<Result<Option<Value>, Unsupported>> {
-        if !self.type_of(receiver).is_some_and(is_property_reference) {
+        let ty = self.type_of(receiver)?;
+        if !is_property_reference(ty) && !is_callable(ty) {
             return None;
         }
         let property = self.file.provider.external_property(target)?;
@@ -974,6 +992,26 @@ fn reference_receiver(ty: Ty) -> Option<bool> {
 /// Spelled out rather than matched by prefix: the set is closed — Kotlin declares these nine and no
 /// more — and a prefix would also claim any future or unrelated name that happens to begin the same
 /// way, which is how a member of something else ends up dispatched through these slots.
+/// Is this the type of a reference to a FUNCTION — one whose object carries the `name` member a
+/// property reference's does, at the same slot?
+///
+/// `KFunction` and its arities only. A `FunctionN` is the type of an ordinary lambda too, whose
+/// object has no such slot, and nothing that wears one of these is ever a lambda: a reflective
+/// reference is what Kotlin gives these types to.
+fn is_callable(ty: Ty) -> bool {
+    let Some(internal) = ty.non_null().obj_internal() else {
+        return false;
+    };
+    let rendered = internal.render();
+    let Some(name) = rendered.strip_prefix("kotlin/reflect/") else {
+        return false;
+    };
+    let Some(arity) = name.strip_prefix("KFunction") else {
+        return false;
+    };
+    arity.chars().all(|digit| digit.is_ascii_digit())
+}
+
 fn is_property_reference(ty: Ty) -> bool {
     let Some(internal) = ty.non_null().obj_internal() else {
         return false;

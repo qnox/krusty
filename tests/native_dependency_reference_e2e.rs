@@ -60,6 +60,30 @@ fn two_references_to_one_dependency_declaration_are_equal() {
     every_backend_agrees_with_kotlinc("DependencyReferenceEquality", source);
 }
 
+/// `KCallable.name` answers the declaration's own name, which the provider publishes beside the
+/// spelling the declaration is realized under — and a program reads it through a VARIABLE, so the
+/// object answers it rather than the site folding it.
+#[test]
+fn a_dependency_reference_answers_its_declarations_name() {
+    let source = "fun box(): String {\n\
+         \x20   val f = \"KOTLIN\"::get\n\
+         \x20   return if (f.name == \"get\") \"OK\" else \"fail \" + f.name\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("DependencyReferenceName", source);
+}
+
+/// A reference to a declaration of THIS FILE answers its name the same way, through the same slot.
+#[test]
+fn a_module_reference_answers_its_name_through_a_variable() {
+    let source = "fun target(value: Int): Int = value\n\
+         fun box(): String {\n\
+         \x20   val f = ::target\n\
+         \x20   if (f(1) != 1) return \"fail call\"\n\
+         \x20   return if (f.name == \"target\") \"OK\" else \"fail \" + f.name\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("ModuleReferenceName", source);
+}
+
 /// A reference that BINDS its receiver evaluates that receiver once, where it is written — not
 /// again at each call.
 #[test]

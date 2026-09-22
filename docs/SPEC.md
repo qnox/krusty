@@ -2501,20 +2501,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`a_reference_written_in_a_class_body_is_realized`, `a_reference_in_an_init_block_is_realized`,
   `a_local_delegated_property_of_a_class_body_is_realized`).
 
-- **`::foo.name` is a compile-time constant on the native target.** A callable reference is a
-  lambda object there: it carries the code, not the declaration, so nothing in the emitted object
-  knows what the source called it — and it does not have to. The one place a program can ask is
-  `KCallable.name` on a reference written right at the read, where the node itself names the
-  declaration, so the name is folded at compile time and no reflection metadata has to exist for
-  it. A constructor reference answers `<init>`, which is the name Kotlin gives it. A reference
-  reaching the read through a variable still declines: there the node is a read, not a reference,
-  and the declaration is no longer in hand.
-  The receiver is still EVALUATED — `x::foo.name` runs `x` and then answers the constant — because
-  the constant is the answer, not the expression.
+- **`KCallable.name` needs no reflection metadata on the native target.** A callable reference's
+  object carries the declaration's name in a member of its own, and at the SAME slot a property
+  reference's `name` takes — which is what lets a read through `KCallable`, the one type both wear,
+  reach it without the site having to know which of the two it has. `KFunction{N}` is admitted
+  there beside `KProperty{N}`; a plain `Function{N}` is not, because an ordinary lambda wears that
+  type and has no such member. Where the REFERENCE is the read's receiver the name is folded at
+  compile time instead, since the declaration is in the very node being lowered, and the two
+  answers are required to agree. A constructor reference answers `<init>`, which is the name Kotlin
+  gives it. The receiver is still EVALUATED — `x::foo.name` runs `x` and then answers the constant
+  — because the constant is the answer, not the expression.
   Tests: `tests/native_callable_name_e2e.rs`
   (`a_top_level_function_reference_answers_its_name`, `a_constructor_reference_is_called_init`,
   `the_bound_receiver_is_still_evaluated`,
-  `a_reference_reaching_the_read_through_a_variable_declines`).
+  `a_reference_reaching_the_read_through_a_variable_answers_the_same_name`).
 
 - **`x in a..b` builds no range.** The checker leaves the membership test as its BOUNDS rather than
   as a range object, so the whole of it is two comparisons — and each form puts them somewhere

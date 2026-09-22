@@ -1,12 +1,13 @@
 //! `KCallable.name` of a callable reference, through krusty's own code generator and runtime.
 //!
-//! A function reference is a lambda object here: it carries the code, not the declaration, so
-//! nothing in the emitted object knows what the source called it. It does not have to. The one
-//! place a program can ask — `::foo.name` — names the declaration in the very node being lowered,
-//! so the answer is a compile-time constant and each program below pins one.
+//! A reference's object carries the declaration's name in a member of its own, at the slot a
+//! property reference's `name` takes — which is what lets a read through `KCallable`, the type
+//! both wear, reach it without knowing which of the two it has. Where the REFERENCE is the read's
+//! receiver the answer is folded at the site instead, since the declaration is in the very node
+//! being lowered; the two must agree, and the programs below ask both ways.
 //!
-//! What the constant must NOT do is swallow the receiver: `x::foo` evaluates `x`, and a program
-//! that can see that happen is the last test here.
+//! What the fold must NOT do is swallow the receiver: `x::foo` evaluates `x`, and a program that
+//! can see that happen is one of the tests here.
 
 use super::common::expect_native_box;
 
@@ -83,23 +84,18 @@ fn the_bound_receiver_is_still_evaluated() {
 }
 
 #[test]
-fn a_reference_reaching_the_read_through_a_variable_declines() {
+fn a_reference_reaching_the_read_through_a_variable_answers_the_same_name() {
     // The fold needs the REFERENCE at the read. Stored in a variable, the read's receiver is a
-    // variable read and the declaration is no longer in hand — so the generator declines rather
-    // than inventing a name, which is the honest answer until the object carries one itself.
-    //
-    // The decline NAMES the property. It used to read `Checked(ExternalPropertyRead)`, the node's
-    // shape, which every dependency property in the corpus shares — so the backlog carried one row
-    // for eighteen unrelated properties and could not be worked from. Asserting the name here is
-    // what keeps that phrasing from silently regressing to the shape.
-    super::common::expect_native_decline(
+    // variable read and the declaration is no longer in hand — so this answer comes from the
+    // object instead, and has to be the same one.
+    expect_native_box(
         "fun greet() {}\n\
          fun box(): String {\n\
          \x20   val reference = ::greet\n\
          \x20   return if (reference.name == \"greet\") \"OK\" else \"fail: ${reference.name}\"\n\
          }\n",
         "StoredCallableName",
-        "a read of the property `kotlin/reflect/KCallable.name`",
+        "OK",
     );
 }
 
