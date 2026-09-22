@@ -4553,8 +4553,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   them is otherwise accepted in silence; the implementation is the declaration that got it wrong,
   so it is named once at its own name — `'actual class Owed<T> : Any' has no corresponding members
   for expected class members:` — rather than each `expect` member being reported as unfilled from
-  the side that did not. The reference compiler lists the owed members after that line; krusty
-  reports the line alone, since an `expect` member has no collected coordinate of its own. Test
+  the side that did not. The owed members are listed under that line as the common source DECLARED
+  them: `expect fun <S : Number> generic(s: S): S`, `expect val starred: List<*>`,
+  `expect fun defaulted(a: Int = ...): Int`. Every other rendering in this check is built from a
+  resolved signature and these cannot be — an `expect` subtree is excluded from the resolved model,
+  so neither the members nor their classifier is published — but the listing is source text in the
+  reference compiler too, so it is rendered from declaration syntax while that syntax is live. A
+  property parameter on an expected class's constructor is rejected outright, so methods and body
+  properties are the whole of what a classifier can owe. The listing follows a newline inside the
+  same diagnostic, so the differential harness — which compares one `: error:` line each — pins the
+  first line only; the listing is checked against the reference compiler directly. Test
   `no_expect_for_actual_e2e::a_classifier_owing_expected_members_is_reported`.
 
   An `expect`/`actual` pair must SPELL its type parameters alike, and a rename is an

@@ -1393,6 +1393,13 @@ fn a_member_extension_property_renders_its_own_formals() {
 /// owner that implements none of them was otherwise accepted in silence — the module compiled. The
 /// reference compiler names the implementation once, at its own name, rather than reporting each
 /// `expect` member as unfilled from the side that did not get it wrong.
+///
+/// The fixture declares every member shape the listing under that line has to render — a nullable
+/// type, a generic argument, a star projection, a function type, a default, a `vararg`, a bounded
+/// own formal, an extension receiver and a `suspend` modifier. Only the first line reaches this
+/// comparison: the listing follows a newline inside the same diagnostic and the reference
+/// compiler's own output interleaves source echoes, so the two cannot be compared as text. The
+/// shapes are asserted here so that a renderer which panics or drops one is still caught.
 #[test]
 fn a_classifier_owing_expected_members_is_reported() {
     let (reference, krusty) = both_split(
@@ -1403,7 +1410,17 @@ fn a_classifier_owing_expected_members_is_reported() {
              \n\
              expect class Owed<T> {\n\
              \x20   val simple: Int\n\
-             \x20   fun takes(a: Int, b: String): Int\n\
+             \x20   var mutable: String?\n\
+             \x20   fun unitFun()\n\
+             \x20   fun takes(a: Int, b: List<String>): Int\n\
+             \x20   fun defaulted(a: Int = 1): Int\n\
+             \x20   fun <S : Number> generic(s: S): S\n\
+             \x20   val T.onReceiver: Int\n\
+             \x20   val <S> S.own: S\n\
+             \x20   fun higher(f: (Int) -> String): Int\n\
+             \x20   val starred: List<*>\n\
+             \x20   fun varargs(vararg xs: Int): Int\n\
+             \x20   suspend fun suspends(): Int\n\
              }\n",
         )],
         &[(

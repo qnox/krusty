@@ -957,6 +957,14 @@ where
     } else {
         Vec::new()
     };
+    // Read in the same breath and for the same reason: a classifier that implements none of its
+    // expectation's members lists what it owes, and those are `expect` declarations whose syntax
+    // is live only here.
+    let expected_members = if multiplatform {
+        no_expect_for_actual::expected_members(&files, &pass1_headers)
+    } else {
+        std::collections::HashMap::new()
+    };
     let source_classifiers = pass1_headers.source_classifier_names();
     let platform_sources = sources
         .iter()
@@ -1199,6 +1207,7 @@ where
             no_expect_for_actual::report_unactualized_members(
                 &unactualized_members,
                 &unmatched_actuals,
+                &expected_members,
                 &symbols,
                 &pass1_headers,
                 diags,

@@ -33,6 +33,7 @@
 //! identity, and the syntax it is found in is not the syntax the classifier itself is found in —
 //! and they live in [`members`].
 
+mod expected;
 mod members;
 mod resolved;
 
@@ -169,6 +170,77 @@ pub(super) fn report_unmarked_implementations(
             "declaration must be marked with 'actual'.".to_string(),
         );
     }
+}
+
+/// Every `expect` classifier's members, rendered as the source wrote them and keyed by the
+/// identity actualization pairs them under.
+///
+/// The check otherwise walks `actual` declarations only. A classifier that implements none of its
+/// expectation's members has to name what it owes, and those are `expect` declarations — read here
+/// from the same syntax, with the same identities, while that syntax is still live.
+pub(in crate::frontend) fn expected_members(
+    files: &[File],
+    headers: &crate::fir::StreamedHeaderModule,
+) -> std::collections::HashMap<crate::fir::DeclarationId, String> {
+    let mut expected = std::collections::HashMap::new();
+    for (index, file) in files.iter().enumerate() {
+        let source = crate::fir::SourceFileId::from_raw(index as u32);
+        let identities = headers.source_declarations(source);
+        let slots = file
+            .decls
+            .iter()
+            .enumerate()
+            .map(|(slot, declaration)| (*declaration, slot))
+            .collect::<std::collections::HashMap<_, _>>();
+        for expectation in &file.expect_decls {
+            let Decl::Class(class) = file.decl(expectation.declaration) else {
+                continue;
+            };
+            let Some(owner) = slots
+                .get(&expectation.declaration)
+                .and_then(|slot| identities.get(*slot).copied())
+            else {
+                continue;
+            };
+            // The inventory interns a member under its owner, its range, its kind and its position
+            // in the list the classifier keeps it in — the same anchor the `actual` side is read
+            // with, so the two name the same declaration.
+            let identity = |range, kind, sibling: usize| {
+                headers.declaration_at(crate::fir::DeclarationAnchor {
+                    source,
+                    range,
+                    owner: Some(owner),
+                    kind,
+                    sibling: u32::try_from(sibling).ok()?,
+                })
+            };
+            // Methods and body properties are the whole of what an `expect` classifier can owe:
+            // the reference compiler rejects a property parameter on an expected class's
+            // constructor outright, so `class.props` is empty for any source that reached here.
+            for (sibling, function) in class.methods.iter().enumerate() {
+                if let Some(stable) = identity(
+                    function.span,
+                    crate::fir::DeclarationKind::Function,
+                    sibling,
+                ) {
+                    expected.insert(stable, expected::written_function(function));
+                }
+            }
+            for (sibling, property) in class.body_props.iter().enumerate() {
+                if let (Some(stable), Some(rendered)) = (
+                    identity(
+                        property.span,
+                        crate::fir::DeclarationKind::Property,
+                        sibling,
+                    ),
+                    expected::written_property(property),
+                ) {
+                    expected.insert(stable, rendered);
+                }
+            }
+        }
+    }
+    expected
 }
 
 pub(super) fn collect(
@@ -319,6 +391,7 @@ pub(super) fn collect(
 pub(super) fn report_unactualized_members(
     owed: &[crate::fir::UnactualizedMembers],
     unmatched: &[UnmatchedActual],
+    expected: &std::collections::HashMap<crate::fir::DeclarationId, String>,
     symbols: &SymbolTable,
     headers: &crate::fir::StreamedHeaderModule,
     diags: &mut DiagSink,
@@ -347,10 +420,20 @@ pub(super) fn report_unactualized_members(
             }
             _ => Err("has no resolved classifier signature"),
         };
+        // The reference compiler lists what the classifier owes under the line that names it,
+        // each member as the common source declared it.
+        let listing = owed
+            .expected
+            .iter()
+            .filter_map(|member| expected.get(member))
+            .map(|member| format!("\n\n    {member}"))
+            .collect::<String>();
         match subject {
             Ok(rendered) => diags.error(
                 actual.name,
-                format!("'{rendered}' has no corresponding members for expected class members:"),
+                format!(
+                    "'{rendered}' has no corresponding members for expected class members:{listing}"
+                ),
             ),
             Err(unreachable) => diags.error(
                 actual.name,
