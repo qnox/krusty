@@ -15,11 +15,14 @@
 //! build touches no C toolchain; building krusty needs a C cross-compiler (clang) or gets no native
 //! targets, and says so.
 //!
-//! What is here so far is the TARGET — the architecture and operating system a build names — and
-//! the prebuilt runtime that target's link will draw on. The linker and the code generator follow.
+//! What is here so far is the TARGET — the architecture and operating system a build names — the
+//! prebuilt runtime that target's link draws on, and the LINKER that draws on it. The code
+//! generator whose objects it links follows.
 
+mod linker;
 mod prebuilt;
 mod target;
 
+pub use linker::{can_link, link_program, ProgramLinkError};
 pub use prebuilt::{prebuilt_available, runtime_objects};
 pub use target::{Arch, NativeTarget, Os};

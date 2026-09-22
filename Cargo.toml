@@ -25,6 +25,9 @@ stacker = "0.1.24"
 # Heap profiler, OFF by default (optional dep, enabled only by the `dhat-heap` feature) so normal
 # builds pay zero cost. See the `dhat-heap` feature.
 dhat = { version = "0.3", optional = true }
+# Reading the prebuilt runtime's relocatable objects and writing the executable krusty links them
+# into. Only the linker uses it; the code generator brings its own dependency when it lands.
+object = "0.40.0"
 
 [features]
 # Opt-in compiler tracing (`trace_compiler!`). OFF by default so release/gate/conformance builds pay
