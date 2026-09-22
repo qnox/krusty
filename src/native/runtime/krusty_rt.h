@@ -566,6 +566,10 @@ void kt_check(kt_boolean value);
 /* `kotlin.collections.throwIndexOverflow()`, which an inline stdlib body splices into its caller:
    `throw ArithmeticException("Index overflow has happened.")`. */
 void kt_throw_index_overflow(void);
+/* Kotlin's `assert`, on the FAILING side only: the caller branches on the condition, which is what
+   keeps `lazyMessage` from being computed on the passing path. The message arrives as the FUNCTION
+   and is invoked here; NULL is the form that wrote none, whose text Kotlin fixes. */
+void kt_assertion_failed(KRef lazy_message);
 void kt_nothing_value_returned(void);
 /* A member access on `null`: the placeholder for NullPointerException. */
 void kt_null_receiver(void);

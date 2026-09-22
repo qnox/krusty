@@ -8121,6 +8121,27 @@ and behavior is checked by RUNNING the emitted program.
   that evaluating it twice would fail, and `::a_member_with_a_special_bridge_declines`), and
   `tests/native_comparable_e2e.rs::a_declared_comparable_is_ordered_by_its_own_compare_to`.
 
+- **`assert` is an intrinsic because its MODE decides before anything is evaluated.**
+  `always-disable` evaluates NEITHER child, so a condition with a side effect does not have it, and
+  a program can see that. Enabled, the condition is evaluated and branched on, and the failure side
+  raises `AssertionError` — `"Assertion failed"` where no message was written.
+
+  The message ARGUMENT is an ordinary argument and is evaluated with the others, whether or not the
+  assertion holds; what `lazyMessage` makes lazy is the INVOCATION, which happens beside the
+  failure and nowhere else. Building it on the failing side only is what this generator did first,
+  and the two-sided gate caught it: `assert(c, xs.filter { … }::errorMessage)` must filter either
+  way. The message crosses as the FUNCTION it is and the runtime invokes it, beside the failure it
+  reports.
+
+  That eagerness is NATIVE's, not the JVM's: there `assert` is an `inline` function whose whole
+  body — the argument evaluation included — sits inside the `$assertionsDisabled` guard, which is
+  why Kotlin's own test data marks the case `TARGET_BACKEND: NATIVE`. The `Runtime` mode is the one
+  this target does not answer: whether assertions are on is a question about how the program was
+  BUILT, and nothing in this generator can see that yet — answering it either way would be a guess
+  a program can observe.
+  Tests: `tests/native_assert_e2e.rs` (enabled, the eager-argument/lazy-invocation split, and
+  disabled); corpus: `assert/{alwaysEnable,alwaysDisable,assertEnabledInConditionAndMessage,assertEnabledWithFunctionReference,assertDisabledWithFunctionReference}.kt`.
+
 - **`kotlin.Comparator` is a functional interface the RUNTIME knows, so its conversion makes no
   object of its own.** A `fun interface` declared in this file becomes an object wearing that
   interface's table, because a caller reaches its member through a program-wide member number.

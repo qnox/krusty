@@ -4499,6 +4499,27 @@ static void kt_raise_uninitialized_property(KRef name) {
     KT_THROW(kt_type_illegal_state_exception, message);
 }
 
+/* Kotlin's `assert(value)` and `assert(value) { message }`, on the failing side. The generator
+   branches on the condition and reaches this only when it is false, which is what keeps the message
+   from being computed on the passing path — Kotlin's `lazyMessage` is lazy exactly there.
+
+   The message arrives as the FUNCTION rather than as text, and is invoked here through the one slot
+   every function value declares, as `kt_lazy_value` invokes an initializer. NULL is the form that
+   wrote no message, whose text Kotlin fixes as "Assertion failed". */
+void kt_assertion_failed(KRef lazy_message) {
+    if (lazy_message == NULL) {
+        KT_THROW(kt_type_assertion_error, KT_MESSAGE("Assertion failed"));
+        return;
+    }
+    if (lazy_message->header.type->vtable == NULL ||
+        lazy_message->header.type->vtable_length <= KT_SLOT_INVOKE) {
+        KT_FAIL("krusty: an assertion message is not a function value\n");
+    }
+    KRef message =
+        ((KRef(*)(KRef))lazy_message->header.type->vtable[KT_SLOT_INVOKE])(lazy_message);
+    KT_THROW(kt_type_assertion_error, kt_to_string(message));
+}
+
 void kt_check(kt_boolean value) {
     if (!value) {
         KT_THROW(kt_type_illegal_state_exception, KT_MESSAGE("Check failed."));

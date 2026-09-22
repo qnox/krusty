@@ -3127,7 +3127,75 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 };
                 self.field_equals(*left, *right, ty)
             }
+            IrIntrinsic::Assert { mode } => self.checked_assertion(mode, args),
             other => Err(format!("the `{other:?}` intrinsic")),
+        }
+    }
+
+    /// Kotlin's `assert(value)` / `assert(value) { message }`.
+    ///
+    /// The MODE decides before anything is evaluated, which is the whole of what makes this an
+    /// intrinsic rather than a call: `always-disable` evaluates NEITHER child, so a condition with
+    /// a side effect does not have it — the corpus asks that directly.
+    ///
+    /// Enabled, the condition is evaluated and branched on, and the message is computed only on
+    /// the failing side: `lazyMessage` is lazy exactly there. It crosses as the FUNCTION it is,
+    /// invoked by the runtime beside the failure it reports rather than here.
+    ///
+    /// The `Runtime` mode is the one this target does not answer. Whether assertions are on is a
+    /// question about how the program was BUILT, and nothing in this generator can see that yet —
+    /// answering it either way would be a guess a program can observe.
+    fn checked_assertion(
+        &mut self,
+        mode: crate::types::AssertionMode,
+        args: &[u32],
+    ) -> Result<Option<Value>, Unsupported> {
+        match mode {
+            crate::types::AssertionMode::AlwaysDisabled => Ok(None),
+            crate::types::AssertionMode::Runtime => Err(
+                "an `assert` whose enabling is decided at run time, which this target does not \
+                 answer yet"
+                    .to_string(),
+            ),
+            crate::types::AssertionMode::AlwaysEnabled => {
+                let [condition, message @ ..] = args else {
+                    return Err("a malformed `assert`".to_string());
+                };
+                if message.len() > 1 {
+                    return Err("an `assert` with more than a condition and a message".to_string());
+                }
+                let Some(value) = self.coerce(*condition, Ty::Boolean)? else {
+                    return Ok(None);
+                };
+                if self.terminated {
+                    return Ok(None);
+                }
+                // The message ARGUMENT is an ordinary argument and is evaluated here, before the
+                // branch: `assert(c, xs.filter { … }::message)` filters whether or not the
+                // assertion holds, and the corpus asks exactly that. What `lazyMessage` makes lazy
+                // is the INVOCATION, which happens beside the failure and nowhere else.
+                let lazy = match message {
+                    [function] => self.reference(*function)?,
+                    _ => self.builder.ins().iconst(types::I64, 0),
+                };
+                if self.terminated {
+                    return Ok(None);
+                }
+                let failed = self.builder.create_block();
+                let passed = self.builder.create_block();
+                self.builder.ins().brif(value, passed, &[], failed, &[]);
+
+                self.continue_in(failed);
+                self.builder.seal_block(failed);
+                self.runtime_call("kt_assertion_failed", &[any()], Ty::Unit, &[lazy])?;
+                if !self.terminated {
+                    self.builder.ins().jump(passed, &[]);
+                }
+
+                self.continue_in(passed);
+                self.builder.seal_block(passed);
+                Ok(None)
+            }
         }
     }
 

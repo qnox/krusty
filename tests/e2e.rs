@@ -1046,6 +1046,8 @@ mod named_super_arg_e2e;
 mod narrowed_this_member_call_e2e;
 #[path = "native_array_snapshots_e2e.rs"]
 mod native_array_snapshots_e2e;
+#[path = "native_assert_e2e.rs"]
+mod native_assert_e2e;
 #[path = "native_bottom_value_e2e.rs"]
 mod native_bottom_value_e2e;
 #[path = "native_builder_scope_e2e.rs"]
