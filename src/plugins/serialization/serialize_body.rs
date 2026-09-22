@@ -357,10 +357,14 @@ impl SerializeBody<'_> {
                         lhs: cur,
                         rhs: def,
                     });
-                    let cond = ir.add_expr(IrExpr::PrimitiveBinOp {
-                        op: crate::ir::IrBinOp::Or,
-                        lhs: should,
-                        rhs: neq,
+                    // SHORT-CIRCUIT, as kotlinc shapes it: ask the encoder first and answer
+                    // `true` without reading the property at all, otherwise fall through to the
+                    // comparison. `IrBinOp::Or` here is the EAGER form — it holds the left operand
+                    // in a temp and combines with `ior`, which is a different method body from
+                    // kotlinc's for every defaulted property in the class.
+                    let encode_anyway = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+                    let cond = ir.add_expr(IrExpr::When {
+                        branches: vec![(Some(should), encode_anyway), (None, neq)],
                     });
                     stmts.push(ir.add_expr(IrExpr::When {
                         branches: vec![(Some(cond), enc_stmt)],
