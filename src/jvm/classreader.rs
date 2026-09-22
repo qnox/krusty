@@ -563,13 +563,14 @@ type ScannedCode = (
 /// the whole body untrustworthy.
 ///
 /// Exact consumption is checked rather than assumed. JVMS 4.7.23 fixes the attribute's length from
+/// What [`read_class_attributes`] recovers: the `BootstrapMethods` entries (each a method handle
+/// index and its static arguments) and the `SourceFile` name, absent when the class declares none.
+type ClassAttributes = (Vec<(u16, Vec<u16>)>, Option<String>);
+
 /// its own contents, so a body with bytes left over — or one that wanted more than it declared —
 /// is not a `BootstrapMethods` attribute this reader understands, and guessing at the remainder is
 /// how a relocated entry silently names the wrong handle.
-fn read_class_attributes(
-    r: &mut Reader,
-    cp: &[C],
-) -> Option<(Vec<(u16, Vec<u16>)>, Option<String>)> {
+fn read_class_attributes(r: &mut Reader, cp: &[C]) -> Option<ClassAttributes> {
     let named = |index: u16, wanted: &str| matches!(cp.get(index as usize), Some(C::Utf8(name)) if name == wanted);
     let nattr = r.u2().ok()?;
     let mut bootstrap_methods = Vec::new();
