@@ -2064,6 +2064,27 @@ pub struct ResolvedAnnotation {
 /// typed values without gaining name lookup, callable selection, or backend access.
 pub trait ClassifierAnnotationSource {
     fn classifier_annotations(&self, classifier: TypeName) -> Option<Vec<ResolvedAnnotation>>;
+
+    /// How a consumer may REFERENCE this classifier: whether its single instance is a static field
+    /// (an `object`) and how many type parameters it declares. A plugin that names a classifier it
+    /// does not declare needs both — reading `INSTANCE` off a class that has none is a link-time
+    /// failure, and constructing one takes an argument per type parameter. `None` when the source
+    /// does not know the classifier.
+    fn classifier_reference_shape(
+        &self,
+        _classifier: TypeName,
+    ) -> Option<ClassifierReferenceShape> {
+        None
+    }
+}
+
+/// See [`ClassifierAnnotationSource::classifier_reference_shape`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClassifierReferenceShape {
+    /// The classifier declares exactly one instance, reachable as a static `INSTANCE` field.
+    pub is_object: bool,
+    /// Type parameters the classifier itself declares.
+    pub type_parameter_count: usize,
 }
 
 /// A resolved annotation application, including its declaration-ordered element values and

@@ -5238,6 +5238,18 @@ impl crate::types::ClassifierAnnotationSource for JvmLibraries {
     ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
         SymbolSource::classifier(self, classifier).map(|shape| shape.annotations.clone())
     }
+
+    fn classifier_reference_shape(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::types::ClassifierReferenceShape> {
+        SymbolSource::classifier(self, classifier).map(|shape| {
+            crate::types::ClassifierReferenceShape {
+                is_object: shape.kind == crate::libraries::TypeKind::Object,
+                type_parameter_count: shape.own_type_parameter_count,
+            }
+        })
+    }
 }
 
 impl JvmLibraries {

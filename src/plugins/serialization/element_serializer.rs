@@ -31,6 +31,13 @@ pub(super) enum ElementSerializerPlan {
     Polymorphic(TypeName),
     LocalSingleton(ClassId),
     ExternalSingleton(TypeName),
+    /// A custom serializer CLASS declared outside this file, constructed with one `KSerializer` per
+    /// type parameter of the class it serves: `SlotSerializer(<serializer for the argument>)`. The
+    /// external twin of [`Self::LocalConstructed`].
+    ExternalConstructed {
+        serializer: TypeName,
+        arguments: Vec<ElementSerializerPlan>,
+    },
     Builtin(TypeName),
 }
 
@@ -384,12 +391,35 @@ pub(super) fn element_serializer_plan(
     // off the classpath, which is exactly what kotlinc emits
     // (`getstatic dep/Inner$$serializer.INSTANCE`). Deriving one here is impossible — the plugin only
     // generates serializers for what this file declares.
-    // Scope: the non-generic shape. A generic dependency serializer is built through
-    // `Foo.Companion.serializer(<argument serializers>)`, which needs the companion's ABI read back
-    // from the classpath; until then such a field stays underivable and the caller bails cleanly.
-    if type_args.is_empty() {
-        if let Some(serializer) = ctx.external_serializer(fq_name) {
+    // A GENERIC one is CONSTRUCTED rather than read as a singleton, and both facts come from the
+    // provider: an `object` is reachable as a static `INSTANCE` and takes no arguments, while a
+    // serializer class takes one `KSerializer` per type parameter it declares. A generated
+    // `Foo.Companion.serializer(<argument serializers>)` still needs the companion's ABI read back,
+    // so a shape that is not this one falls through to the derivations below and, failing those,
+    // leaves the element underivable for the caller to bail on.
+    if let Some(serializer) = ctx.external_serializer(fq_name) {
+        if type_args.is_empty() {
             return Some(ElementSerializerPlan::ExternalSingleton(serializer));
+        }
+        let constructed = ctx
+            .external_serializer_shape(serializer)
+            .is_some_and(|shape| !shape.is_object && shape.type_parameter_count == type_args.len());
+        if constructed {
+            let arguments = type_args
+                .iter()
+                .map(|argument| {
+                    let readable = match argument {
+                        Ty::OutProjection(inner) | Ty::StarProjection(inner) => **inner,
+                        Ty::InProjection(_) => return None,
+                        _ => *argument,
+                    };
+                    element_serializer_plan(ir, ctx, &readable)
+                })
+                .collect::<Option<Vec<_>>>()?;
+            return Some(ElementSerializerPlan::ExternalConstructed {
+                serializer,
+                arguments,
+            });
         }
     }
     if let Some(builtin) = builtin_element_serializer(ty) {
@@ -482,6 +512,26 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
                 owner: serializer,
                 ty: serializer,
                 field: "INSTANCE".to_string(),
+            })
+        }
+        ElementSerializerPlan::ExternalConstructed {
+            serializer,
+            arguments,
+        } => {
+            let arity = arguments.len();
+            let arguments = arguments
+                .into_iter()
+                .map(|argument| emit_element_serializer(ir, argument))
+                .collect::<Vec<_>>();
+            let parameters = format!("L{KSERIALIZER_FQ};").repeat(arity);
+            ir.add_expr(IrExpr::New {
+                internal: serializer,
+                args: arguments,
+                ctor_params: None,
+                ctor_desc: Some(format!("({parameters})V")),
+                external_target: None,
+                defaults: Box::new([]),
+                default_prefix_count: 0,
             })
         }
         ElementSerializerPlan::Builtin(serializer) => ir.add_expr(IrExpr::ExternalStaticInstance {

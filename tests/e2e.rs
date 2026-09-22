@@ -1339,8 +1339,6 @@ mod sam_conversion_e2e;
 mod sam_generic_lambda_param_e2e;
 #[path = "sam_lambda_expected_result_e2e.rs"]
 mod sam_lambda_expected_result_e2e;
-#[path = "sibling_generic_custom_serializer_e2e.rs"]
-mod sibling_generic_custom_serializer_e2e;
 #[path = "same_file_custom_serializer_e2e.rs"]
 mod same_file_custom_serializer_e2e;
 #[path = "same_package_classpath_e2e.rs"]
@@ -1389,6 +1387,8 @@ mod session_subsystems_e2e;
 mod shadowed_method_tparam_e2e;
 #[path = "short_circuit_e2e.rs"]
 mod short_circuit_e2e;
+#[path = "sibling_generic_custom_serializer_e2e.rs"]
+mod sibling_generic_custom_serializer_e2e;
 #[path = "smart_cast_member_extension_e2e.rs"]
 mod smart_cast_member_extension_e2e;
 #[path = "smartcast_and_e2e.rs"]

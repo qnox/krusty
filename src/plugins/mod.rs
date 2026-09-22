@@ -118,6 +118,12 @@ pub struct PluginContext {
     /// kotlinx.serialization cores but not in supported older ones, and emitting a reference to a
     /// class that is not there fails at class-load rather than at compile time.
     runtime_serializers: std::collections::HashSet<TypeName>,
+    /// How each external serializer may be REFERENCED: an `object` is read as a static instance, a
+    /// class is constructed with one argument per type parameter. A plugin cannot see a classifier
+    /// it does not declare, and guessing either fact produces a reference that only fails when the
+    /// JVM resolves it.
+    external_serializer_shapes:
+        std::collections::HashMap<TypeName, crate::types::ClassifierReferenceShape>,
 }
 
 impl Default for PluginContext {
@@ -127,6 +133,7 @@ impl Default for PluginContext {
             target_type_descriptor: no_target_type_descriptor,
             external_serializers: std::collections::HashMap::new(),
             runtime_serializers: std::collections::HashSet::new(),
+            external_serializer_shapes: std::collections::HashMap::new(),
         }
     }
 }
@@ -138,6 +145,7 @@ impl Clone for PluginContext {
             target_type_descriptor: self.target_type_descriptor,
             external_serializers: self.external_serializers.clone(),
             runtime_serializers: self.runtime_serializers.clone(),
+            external_serializer_shapes: self.external_serializer_shapes.clone(),
         }
     }
 }
@@ -181,6 +189,24 @@ impl PluginContext {
     /// already exists outside this file.
     pub fn external_serializer(&self, classifier: TypeName) -> Option<TypeName> {
         self.external_serializers.get(&classifier).copied()
+    }
+
+    /// Record how each external serializer may be referenced.
+    pub fn with_external_serializer_shapes(
+        mut self,
+        shapes: std::collections::HashMap<TypeName, crate::types::ClassifierReferenceShape>,
+    ) -> Self {
+        self.external_serializer_shapes = shapes;
+        self
+    }
+
+    /// See [`Self::with_external_serializer_shapes`]. `None` when the provider does not know the
+    /// serializer, in which case a consumer must decline rather than assume a shape.
+    pub fn external_serializer_shape(
+        &self,
+        serializer: TypeName,
+    ) -> Option<crate::types::ClassifierReferenceShape> {
+        self.external_serializer_shapes.get(&serializer).copied()
     }
 
     /// `ClassId`s carrying the exact resolved annotation identity.
@@ -417,8 +443,19 @@ pub fn run_enabled(
     {
         return;
     }
+    let external = external_serializers(ir, classifiers);
+    let external_shapes = external
+        .values()
+        .filter_map(|&serializer| {
+            Some((
+                serializer,
+                classifiers.classifier_reference_shape(serializer)?,
+            ))
+        })
+        .collect();
     let ctx = ctx
-        .with_external_serializers(external_serializers(ir, classifiers))
+        .with_external_serializers(external)
+        .with_external_serializer_shapes(external_shapes)
         .with_runtime_serializers(runtime_serializers(classifiers));
     enabled_plugins(module_name).run(ir, &ctx);
 }
@@ -446,15 +483,20 @@ fn external_serializers(
             let application = annotations
                 .iter()
                 .find(|annotation| annotation.annotation == serializable);
+            // `@Serializable`'s only element is `with`, so its class-valued argument IS the
+            // serializer whether or not the provider carried the element name: a dependency read
+            // from a class file names its elements, while a sibling file of this module publishes
+            // the resolved identity positionally. The same-file path reads the first value for the
+            // same reason.
             let custom = application.and_then(|annotation| {
-                annotation.arguments.iter().find_map(|(name, value)| {
-                    (name == "with")
-                        .then_some(value)
-                        .and_then(|value| match value {
-                            crate::types::AnnotationValue::Class(serializer) => Some(*serializer),
-                            _ => None,
-                        })
-                })
+                annotation
+                    .arguments
+                    .iter()
+                    .filter(|(name, _)| name.is_empty() || name == "with")
+                    .find_map(|(_, value)| match value {
+                        crate::types::AnnotationValue::Class(serializer) => Some(*serializer),
+                        _ => None,
+                    })
             });
             custom
                 .or_else(|| application.map(|_| classifier.nested_child("$serializer")))

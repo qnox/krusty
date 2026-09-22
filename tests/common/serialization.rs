@@ -133,9 +133,8 @@ fn reference_box_files(sources: &[(&str, &str)], stem: &str) -> String {
 
 fn krusty_box_files(sources: &[(&str, &str)], stem: &str) -> String {
     let jars = runtime_jars();
-    let classes = common::compile_in_process_files(sources, &jars, None).unwrap_or_else(|| {
-        panic!("krusty failed to compile the {stem} fixture")
-    });
+    let classes = common::compile_in_process_files(sources, &jars, None)
+        .unwrap_or_else(|| panic!("krusty failed to compile the {stem} fixture"));
     let box_class =
         common::find_box_class(&classes).unwrap_or_else(|| panic!("no box class for {stem}"));
     common::run_box(&classes, &box_class, &jars)

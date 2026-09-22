@@ -62,7 +62,10 @@ fun box(): String {\n\
 \x20   return if (json == \"{\\\"field\\\":\\\"deep\\\"}\") \"OK\" else \"FAIL: \" + json\n\
 }\n";
     assert_eq!(
-        both_compilers_box_files(&[("Slot.kt", SLOT), ("Main.kt", main)], "sibling_generic_direct"),
+        both_compilers_box_files(
+            &[("Slot.kt", SLOT), ("Main.kt", main)],
+            "sibling_generic_direct"
+        ),
         "OK"
     );
 }
