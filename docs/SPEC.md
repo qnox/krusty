@@ -2270,6 +2270,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and not about this object.
   Tests: `tests/native_property_reference_e2e.rs`.
 
+- **A CONTEXT PARAMETER of a `fun interface` method is a leading value parameter, and a SAM
+  conversion needs nothing for it.** `context(c: C) fun foo(x: Int): Int` records `c` as the first
+  entry of the method's own parameter list — that is how the callable header keeps a context
+  parameter — so the object a SAM conversion builds carries the same captures it always did and its
+  thunk wears the interface member's own signature. Every operand is handed on POSITIONALLY, which
+  is the treatment an extension receiver already got: neither is a shape the thunk has to know
+  about, because both arrive in the order the declaration states. krusty's native target declined
+  the conversion whenever the method declared one, which was a guess about a difference that is not
+  there; the ordering is pinned by a two-parameter case rather than inferred from a single one.
+  Nothing here is a claim about the CONTEXT's own resolution, which is the frontend's: what this
+  says is only that the backend has no per-shape work left once the header has ordered the
+  parameters.
+  Tests: `tests/native_context_parameter_sam_e2e.rs`.
+
 - **A list is the array a vararg call already built, with a header.** `listOf(...)` reaches a
   backend with its elements packed into an `Array<T>`, and krusty's native target wraps that array
   rather than copying it — which is what Kotlin's own `listOf(vararg)` does, and what makes the

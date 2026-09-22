@@ -477,9 +477,6 @@ impl<'a> FileLowering<'a> {
         if target.suspend {
             return Err("a suspend functional interface".to_string());
         }
-        if target.context_count > 0 {
-            return Err("a functional interface method with context parameters".to_string());
-        }
         let Some(interface) = self.ir.class_id_by_name(target.classifier) else {
             return Err(format!(
                 "a functional interface declared outside this file (`{}`)",
