@@ -126,6 +126,191 @@ fn normalize_when_statement_body(
     }
 }
 
+/// Hoist the suspensions inside the bodies of lambdas that will be SPLICED into this frame.
+///
+/// A suspension leaves the method at the `areturn` that yields `COROUTINE_SUSPENDED`, and the
+/// operand stack does not survive that — only locals do, in the continuation's spill fields. So a
+/// suspension has to stand alone, with its result bound to a local, exactly as this pass arranges
+/// for the suspensions the IR machine can see. `f(one(it) + one(it))` reaches the second call with
+/// the first one's result on the stack; bound to temps, both are ordinary statements.
+///
+/// The bodies are rewritten in place where they are blocks; a bare expression body becomes one, so
+/// the lambda's `inline_body` is repointed at the new block.
+///
+/// Each body is typed in ITS OWN value numbering. An `inline_body` is a copy of the lambda's body
+/// numbered as the impl method is — captures first, then the lambda's parameters, then the locals
+/// the body declares — so the enclosing function's parameter/local table says nothing about the
+/// `s` in `s = s + one(x)`, and reads its capture 0 as whatever the enclosing parameter 0 is. The
+/// snapshot that keeps `s` off the stack across the suspension is typed from the impl method's
+/// declared parameters and the body's own declarations instead; what neither names still declines,
+/// as it must.
+///
+/// `ret` is the ENCLOSING function's return type: the only statement in a spliced body it types is
+/// a non-local `return`, which leaves that function. The body's own value is typed by the value
+/// itself (see [`desugar_spliced_value_try`]).
+pub(super) fn hoist_spliced_inline_bodies(
+    ir: &mut IrFile,
+    body: ExprId,
+    suspend_set: &HashSet<u32>,
+    orig_rets: &[Ty],
+    ret: &Ty,
+) {
+    let mut seen = HashSet::new();
+    hoist_spliced_walk(ir, body, suspend_set, orig_rets, ret, &mut seen);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hoist_spliced_walk(
+    ir: &mut IrFile,
+    expression: ExprId,
+    suspend_set: &HashSet<u32>,
+    orig_rets: &[Ty],
+    ret: &Ty,
+    seen: &mut HashSet<ExprId>,
+) {
+    if !seen.insert(expression) {
+        return;
+    }
+    if let IrExpr::Lambda {
+        impl_fn,
+        captures,
+        inline_body: Some(inner),
+        ..
+    } = ir.exprs[expression as usize].clone()
+    {
+        // A nested spliced body runs in this frame too, so normalize the innermost first.
+        hoist_spliced_walk(ir, inner, suspend_set, orig_rets, ret, seen);
+        let mut value_types = spliced_body_value_types(ir, impl_fn, inner);
+        let rewritten =
+            hoist_spliced_body(ir, inner, suspend_set, orig_rets, ret, &mut value_types);
+        if rewritten != inner {
+            if let IrExpr::Lambda { inline_body, .. } = &mut ir.exprs[expression as usize] {
+                *inline_body = Some(rewritten);
+            }
+        }
+        for capture in captures {
+            hoist_spliced_walk(ir, capture, suspend_set, orig_rets, ret, seen);
+        }
+        return;
+    }
+    let mut children = Vec::new();
+    crate::ir::for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
+    for child in children {
+        hoist_spliced_walk(ir, child, suspend_set, orig_rets, ret, seen);
+    }
+}
+
+/// The value-`try` desugar for a spliced body, run before the body is hoisted.
+///
+/// A suspending arm's value is the call's raw `Object`; a `try` used as a VALUE would store it
+/// straight into the result slot the emitter types by the `try`'s own type, and the frame would
+/// describe an `int` that never was one. The desugar binds each arm's value to a typed local first,
+/// where the machine adapts it — the same normalization a function body gets, which stops at every
+/// lambda and so never reached a spliced body.
+///
+/// The desugar over a function body types a value-`try` by the statement consuming it, and a `try`
+/// in `return` position by the function's return type. A spliced body has one consumer the function
+/// body never has: its own tail VALUE, which the lambda yields. That one is typed by the `try`
+/// itself (or the coercion around it) — the enclosing function's return type is the wrong context
+/// for it, and is used only for the non-local `return` a spliced body may contain, which does leave
+/// that function.
+///
+/// Returns the body to use: a bare `try` becomes a block binding it.
+fn desugar_spliced_value_try(
+    ir: &mut IrFile,
+    body: ExprId,
+    suspend_set: &HashSet<u32>,
+    ret: &Ty,
+) -> ExprId {
+    let (mut stmts, value) = match ir.exprs[body as usize].clone() {
+        IrExpr::Block { stmts, value } => (stmts, value),
+        _ => (Vec::new(), Some(body)),
+    };
+    let bound = value.and_then(|value| {
+        let ty = spliced_value_try_type(ir, value)?;
+        bind_value_try_to_fresh_local(ir, value, &ty, suspend_set)
+    });
+    let block = match (bound, ir.exprs[body as usize].clone()) {
+        (None, IrExpr::Block { .. }) => body,
+        (None, _) => return body,
+        (Some((declaration, value_try, get)), _) => {
+            stmts.push(declaration);
+            stmts.push(value_try);
+            let block = IrExpr::Block {
+                stmts,
+                value: Some(get),
+            };
+            match ir.exprs[body as usize] {
+                IrExpr::Block { .. } => {
+                    ir.exprs[body as usize] = block;
+                    body
+                }
+                _ => ir.add_expr(block),
+            }
+        }
+    };
+    // The statement forms (`val v = try { … }`, `x = try { … }`, `return try { … }`), and every
+    // block the body owns short of a nested lambda.
+    desugar_value_try(ir, block, suspend_set, ret);
+    // A `try` used as a statement of the body may still carry its checked type; only the value the
+    // body yields is a consumer here.
+    normalize_statement_try_results(ir, block, false);
+    block
+}
+
+/// The type a spliced body's tail value-`try` binds to, when that value is a suspending `try`
+/// (possibly under the result coercion an expression body wraps around it): the coercion's target,
+/// else the `try`'s own checked type.
+fn spliced_value_try_type(ir: &IrFile, value: ExprId) -> Option<Ty> {
+    match &ir.exprs[value as usize] {
+        IrExpr::TypeOp {
+            arg, type_operand, ..
+        } if matches!(ir.exprs[*arg as usize], IrExpr::Try { .. }) => Some(*type_operand),
+        IrExpr::Try { result, .. } => Some(*result),
+        _ => ir.logical_types.get(&value).copied(),
+    }
+}
+
+/// One spliced body, normalized. Returns the body to use — the same id when it was a block.
+fn hoist_spliced_body(
+    ir: &mut IrFile,
+    body: ExprId,
+    suspend_set: &HashSet<u32>,
+    orig_rets: &[Ty],
+    ret: &Ty,
+    value_types: &mut HashMap<u32, Ty>,
+) -> ExprId {
+    let body = desugar_spliced_value_try(ir, body, suspend_set, ret);
+    match ir.exprs[body as usize].clone() {
+        IrExpr::Block { stmts, value } => {
+            let mut out = Vec::with_capacity(stmts.len());
+            for stmt in stmts {
+                hoist_stmt(ir, stmt, suspend_set, orig_rets, value_types, &mut out);
+            }
+            let value = value.map(|v| {
+                let mut prelude = Vec::new();
+                let hoisted = hoist_expr(ir, v, suspend_set, orig_rets, value_types, &mut prelude);
+                out.extend(prelude);
+                hoisted
+            });
+            ir.exprs[body as usize] = IrExpr::Block { stmts: out, value };
+            body
+        }
+        _ => {
+            let mut prelude = Vec::new();
+            let hoisted = hoist_expr(ir, body, suspend_set, orig_rets, value_types, &mut prelude);
+            if prelude.is_empty() {
+                body
+            } else {
+                ir.add_expr(IrExpr::Block {
+                    stmts: prelude,
+                    value: Some(hoisted),
+                })
+            }
+        }
+    }
+}
+
 pub(super) fn hoist_suspensions(
     ir: &mut IrFile,
     b: ExprId,
@@ -1188,6 +1373,11 @@ fn hoist_operands_in_order(
                     );
                     return None;
                 };
+                crate::trace_compiler!(
+                    "suspend",
+                    "hoist_operands_in_order: snapshot operand {i} ({:?}) as {ty:?}",
+                    ir.exprs[x as usize]
+                );
                 snapshot_ty[i] = Some(ty);
             }
         }

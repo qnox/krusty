@@ -310,13 +310,11 @@ pub(super) fn add_child_serializer_cache(
             line: 0,
             source_order: u32::MAX,
         });
-        // Built from the interned identity directly; `external_static_field` would take the
-        // rendered spelling and intern it again.
-        let read = ir.add_expr(IrExpr::ExternalStaticField {
-            owner: serialized,
-            name: "$childSerializers".to_string(),
-            descriptor: "[Lkotlin/Lazy;".to_string(),
-        });
+        // Read the static just declared rather than describing the field again: a read built from a
+        // DESCRIPTOR carries the erased type, so returning it coerces to the accessor's declared
+        // type and emits a `checkcast [Lkotlin/Lazy;` the reference compiler does not. kotlinc's
+        // accessor body is `getstatic; areturn`.
+        let read = ir.add_expr(IrExpr::GetStatic(static_index));
         let ret = ir.add_expr(IrExpr::Return(Some(read)));
         let body = ir.add_expr(IrExpr::Block {
             stmts: vec![ret],
@@ -338,6 +336,140 @@ pub(super) fn add_child_serializer_cache(
             accessor: acc,
             cached,
         })
+    }
+}
+
+/// The generated `childSerializers()` body: the per-element `KSerializer[]` the runtime reads a
+/// class's element serializers out of.
+///
+/// It lives beside the cache because that is what it now consumes — each cached element is READ
+/// from the `Lazy[]` slot the cache pass published rather than rebuilt here, and the method opens
+/// by loading that array. The arms for everything else (contextual, type-parameter, an explicitly
+/// named serializer, a derived one) are unchanged; they are here so the whole decision of what an
+/// element's serializer IS sits in one module instead of straddling the plugin facade.
+pub(super) struct ChildSerializersBody<'a> {
+    pub(super) function: u32,
+    /// The `$serializer` class index — the owner of a type-parameter serializer field.
+    pub(super) serializer_class: u32,
+    pub(super) serialized_class: ClassId,
+    /// The class the PROPERTIES are declared on, for the per-property annotation questions.
+    pub(super) declaring_class: ClassId,
+    pub(super) fields: &'a [(String, Ty)],
+    /// Element types as the SERIALIZER sees them, which is not always the field's own type.
+    pub(super) serializer_field_types: &'a [Ty],
+    pub(super) type_parameter_serializer_fields: &'a [Option<u32>],
+    /// The serialized class's cache plan, or `None` when it has no cache.
+    pub(super) plan: Option<ChildSerializerCachePlan>,
+}
+
+impl ChildSerializersBody<'_> {
+    pub(super) fn generate(self, ir: &mut IrFile, ctx: &PluginContext) {
+        let Self {
+            function,
+            serializer_class,
+            serialized_class,
+            declaring_class,
+            fields,
+            serializer_field_types,
+            type_parameter_serializer_fields,
+            plan,
+        } = self;
+        // Return the per-field element-serializer array (arity == field count): one
+        // `KSerializer` singleton per property. A nested `@Serializable` field uses the
+        // krusty-generated `<T>$serializer.INSTANCE`; a directly-supported field uses the
+        // builtin `…Serializer.INSTANCE`. An unsupported field type contributes `null`
+        // (placeholder) so the array arity still matches the descriptor's element count.
+        // The serialized class's cache PLAN, as the pass that built it published
+        // it: which elements have a slot, and the accessor to reach them through.
+        // kotlinc reads `$childSerializers` once at the top of the method and takes
+        // each cached element out of it, rather than rebuilding the serializer the
+        // cache already holds. The local is the first free one after the receiver,
+        // and the result array lands above it.
+        let serialized = ir.classes[serialized_class as usize].fq_name_id();
+
+        let cache_local = plan.as_ref().map(|_| {
+            u32::try_from(ir.functions[function as usize].params.len())
+                .expect("too many childSerializers parameters")
+                + 1
+        });
+        let elements: Vec<ExprId> = serializer_field_types
+            .iter()
+            .enumerate()
+            .map(|(i, _ty)| {
+                if let Some(cached) = cached_element(
+                    ir,
+                    plan.as_ref(),
+                    cache_local,
+                    i,
+                    serializer_field_types.len(),
+                    &serializer_field_types[i],
+                ) {
+                    cached
+                } else if let Some(inst) = super::contextual_serializer_for(
+                    ir,
+                    property_is_contextual(ctx, ir, declaring_class, &fields[i].0),
+                    &serializer_field_types[i],
+                ) {
+                    // `@Contextual` / file-level `@UseContextualSerialization` property.
+                    inst
+                } else if let Some(fidx) = type_parameter_serializer_fields[i] {
+                    // Type-parameter element: `this.typeSerialK` (the ctor-supplied serializer).
+                    let this = ir.add_expr(IrExpr::GetValue(0));
+                    ir.add_expr(IrExpr::GetField {
+                        receiver: this,
+                        class: serializer_class,
+                        index: fidx,
+                    })
+                } else if let Some(internal) =
+                    field_serializer_of(ctx, ir, declaring_class, &fields[i].0)
+                {
+                    // Explicit per-property serializer: `new X()` (or `X.INSTANCE`),
+                    // wrapped `.nullable` for a nullable property.
+                    let base = super::build_field_serializer_instance(ir, internal);
+                    if super::is_nullable(&serializer_field_types[i]) {
+                        super::wrap_nullable_serializer(ir, base)
+                    } else {
+                        base
+                    }
+                } else if let Some(e) = super::element_serializer_expr(
+                    ir,
+                    ctx,
+                    &serializer_field_types[i],
+                )
+                .map(|base| {
+                    // A NULLABLE property's element serializer is the base one wrapped
+                    // `.nullable`, narrowed to the `KSerializer` that wrapper takes. Only the
+                    // explicit-serializer arm above did this, so every nullable property whose
+                    // serializer is DERIVED from its type published the non-null serializer.
+                    if super::is_nullable(&serializer_field_types[i]) {
+                        let narrowed =
+                            super::deserialize_body::narrowed(ir, base, super::KSERIALIZER_FQ);
+                        super::wrap_nullable_serializer(ir, narrowed)
+                    } else {
+                        base
+                    }
+                }) {
+                    // Nested @Serializable (generic `Foo<A>` → `Foo.serializer(A_ser)`,
+                    // or non-generic `Foo$serializer.INSTANCE`) | builtin `…Serializer`.
+                    e
+                } else {
+                    ir.add_expr(IrExpr::Const(IrConst::Null))
+                }
+            })
+            .collect();
+        let arr = ir.add_expr(IrExpr::Vararg {
+            array_type: Ty::obj_args("kotlin/Array", &[class_ty(super::KSERIALIZER_FQ)]),
+            spreads: vec![false; elements.len()],
+            elements,
+        });
+        let ret = ir.add_expr(IrExpr::Return(Some(arr)));
+        let mut stmts = Vec::with_capacity(2);
+        if let (Some(local), Some(plan)) = (cache_local, plan.as_ref()) {
+            stmts.push(load_cache_statement(ir, plan, local, serialized));
+        }
+        stmts.push(ret);
+        let body = ir.add_expr(IrExpr::Block { stmts, value: None });
+        ir.functions[function as usize].body = Some(body);
     }
 }
 
@@ -435,124 +567,5 @@ mod tests {
                 .any(|&m| ir.functions[m as usize].name == "access$get$childSerializers$cp"),
             "and the accessor the `$serializer` reads it through"
         );
-    }
-}
-
-/// The generated `childSerializers()` body: the per-element `KSerializer[]` the runtime reads a
-/// class's element serializers out of.
-///
-/// It lives beside the cache because that is what it now consumes — each cached element is READ
-/// from the `Lazy[]` slot the cache pass published rather than rebuilt here, and the method opens
-/// by loading that array. The arms for everything else (contextual, type-parameter, an explicitly
-/// named serializer, a derived one) are unchanged; they are here so the whole decision of what an
-/// element's serializer IS sits in one module instead of straddling the plugin facade.
-pub(super) struct ChildSerializersBody<'a> {
-    pub(super) function: u32,
-    /// The `$serializer` class index — the owner of a type-parameter serializer field.
-    pub(super) serializer_class: u32,
-    pub(super) serialized_class: ClassId,
-    /// The class the PROPERTIES are declared on, for the per-property annotation questions.
-    pub(super) declaring_class: ClassId,
-    pub(super) fields: &'a [(String, Ty)],
-    /// Element types as the SERIALIZER sees them, which is not always the field's own type.
-    pub(super) serializer_field_types: &'a [Ty],
-    pub(super) type_parameter_serializer_fields: &'a [Option<u32>],
-    /// The serialized class's cache plan, or `None` when it has no cache.
-    pub(super) plan: Option<ChildSerializerCachePlan>,
-}
-
-impl ChildSerializersBody<'_> {
-    pub(super) fn generate(self, ir: &mut IrFile, ctx: &PluginContext) {
-        let Self {
-            function,
-            serializer_class,
-            serialized_class,
-            declaring_class,
-            fields,
-            serializer_field_types,
-            type_parameter_serializer_fields,
-            plan,
-        } = self;
-        // Return the per-field element-serializer array (arity == field count): one
-        // `KSerializer` singleton per property. A nested `@Serializable` field uses the
-        // krusty-generated `<T>$serializer.INSTANCE`; a directly-supported field uses the
-        // builtin `…Serializer.INSTANCE`. An unsupported field type contributes `null`
-        // (placeholder) so the array arity still matches the descriptor's element count.
-        // The serialized class's cache PLAN, as the pass that built it published
-        // it: which elements have a slot, and the accessor to reach them through.
-        // kotlinc reads `$childSerializers` once at the top of the method and takes
-        // each cached element out of it, rather than rebuilding the serializer the
-        // cache already holds. The local is the first free one after the receiver,
-        // and the result array lands above it.
-        let serialized = ir.classes[serialized_class as usize].fq_name_id();
-
-        let cache_local = plan.as_ref().map(|_| {
-            u32::try_from(ir.functions[function as usize].params.len())
-                .expect("too many childSerializers parameters")
-                + 1
-        });
-        let elements: Vec<ExprId> = serializer_field_types
-            .iter()
-            .enumerate()
-            .map(|(i, _ty)| {
-                if let Some(cached) = cached_element(
-                    ir,
-                    plan.as_ref(),
-                    cache_local,
-                    i,
-                    serializer_field_types.len(),
-                    &serializer_field_types[i],
-                ) {
-                    cached
-                } else if let Some(inst) = super::contextual_serializer_for(
-                    ir,
-                    property_is_contextual(ctx, ir, declaring_class, &fields[i].0),
-                    &serializer_field_types[i],
-                ) {
-                    // `@Contextual` / file-level `@UseContextualSerialization` property.
-                    inst
-                } else if let Some(fidx) = type_parameter_serializer_fields[i] {
-                    // Type-parameter element: `this.typeSerialK` (the ctor-supplied serializer).
-                    let this = ir.add_expr(IrExpr::GetValue(0));
-                    ir.add_expr(IrExpr::GetField {
-                        receiver: this,
-                        class: serializer_class,
-                        index: fidx,
-                    })
-                } else if let Some(internal) =
-                    field_serializer_of(ctx, ir, declaring_class, &fields[i].0)
-                {
-                    // Explicit per-property serializer: `new X()` (or `X.INSTANCE`),
-                    // wrapped `.nullable` for a nullable property.
-                    let base = super::build_field_serializer_instance(ir, internal);
-                    if super::is_nullable(&serializer_field_types[i]) {
-                        super::wrap_nullable_serializer(ir, base)
-                    } else {
-                        base
-                    }
-                } else if let Some(e) =
-                    super::element_serializer_expr(ir, ctx, &serializer_field_types[i])
-                {
-                    // Nested @Serializable (generic `Foo<A>` → `Foo.serializer(A_ser)`,
-                    // or non-generic `Foo$serializer.INSTANCE`) | builtin `…Serializer`.
-                    e
-                } else {
-                    ir.add_expr(IrExpr::Const(IrConst::Null))
-                }
-            })
-            .collect();
-        let arr = ir.add_expr(IrExpr::Vararg {
-            array_type: Ty::obj_args("kotlin/Array", &[class_ty(super::KSERIALIZER_FQ)]),
-            spreads: vec![false; elements.len()],
-            elements,
-        });
-        let ret = ir.add_expr(IrExpr::Return(Some(arr)));
-        let mut stmts = Vec::with_capacity(2);
-        if let (Some(local), Some(plan)) = (cache_local, plan.as_ref()) {
-            stmts.push(load_cache_statement(ir, plan, local, serialized));
-        }
-        stmts.push(ret);
-        let body = ir.add_expr(IrExpr::Block { stmts, value: None });
-        ir.functions[function as usize].body = Some(body);
     }
 }

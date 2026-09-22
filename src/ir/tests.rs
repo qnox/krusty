@@ -414,6 +414,7 @@ fn toplevel_default_stub_safe_value_class_param_pre_mangling() {
     c.fields.push(IrField {
         name: "s".to_string(),
         ty: Ty::String,
+        constructor_store_line: 0,
         type_param: None,
         default: None,
         flags: IrfFlags::default().with_is_final(true),

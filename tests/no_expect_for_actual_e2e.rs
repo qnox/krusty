@@ -1217,6 +1217,295 @@ fn a_star_imported_classifier_of_another_package_does_not_pair() {
     );
 }
 
+/// A member EXTENSION whose receiver is the member's OWN type parameter still pairs.
+///
+/// `val <S> S.kept: S` declares an `S` that shadows its owner's, so the receiver names no
+/// classifier at all — its identity is positional within the declaration. Refusing to key such a
+/// member left the `expect` and an `actual` written exactly like it pairing with nothing, and the
+/// implementation reported as actualizing nothing; box
+/// `multiplatform/k2/basic/expectActualFakeOverridesWithTypeParameters.kt` caught it.
+///
+/// `stray` actualizes nothing, so the complete ledger this compares is not empty and `kept`'s
+/// silence is its absence from a report that names something else.
+#[test]
+fn a_member_extension_on_its_own_type_parameter_matches() {
+    let (reference, krusty) = both_split(
+        "OwnTypeParameterReceiver",
+        &[(
+            "OwnTypeParameterReceiverCommon.kt",
+            "package plib\n\
+             \n\
+             expect class Holder<S> {\n\
+             \x20   val <S> S.kept: S\n\
+             }\n",
+        )],
+        &[(
+            "OwnTypeParameterReceiverPlatform.kt",
+            "package plib\n\
+             \n\
+             actual class Holder<S> {\n\
+             \x20   actual val <S> S.kept: S get() = this\n\
+             \x20   actual val <S> S.stray: S get() = this\n\
+             }\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert!(
+        !reference.is_empty(),
+        "the fixture must make the reference compiler report something"
+    );
+}
+
+/// A member extension on the OWNER's type parameter is the same category as one on its own.
+///
+/// `val O.kept: Int` names a type parameter the classifier declares. No scope binds it to a
+/// classifier either, so it keys the same way — but through the enclosing half of the positional
+/// map rather than the declaration's own.
+#[test]
+fn a_member_extension_on_its_owners_type_parameter_matches() {
+    let (reference, krusty) = both_split(
+        "OwnerTypeParameterReceiver",
+        &[(
+            "OwnerTypeParameterReceiverCommon.kt",
+            "package plib\n\
+             \n\
+             expect class Owned<O> {\n\
+             \x20   val O.kept: Int\n\
+             }\n",
+        )],
+        &[(
+            "OwnerTypeParameterReceiverPlatform.kt",
+            "package plib\n\
+             \n\
+             actual class Owned<O> {\n\
+             \x20   actual val O.kept: Int get() = 1\n\
+             \x20   actual val O.stray: Int get() = 2\n\
+             }\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert!(
+        !reference.is_empty(),
+        "the fixture must make the reference compiler report something"
+    );
+}
+
+/// A member extension FUNCTION on a type-parameter receiver keys like the property does.
+///
+/// It reaches the other input-shape comparison — the one that also counts value parameters — so it
+/// is a distinct source form and is asserted separately.
+#[test]
+fn a_member_extension_function_on_a_type_parameter_matches() {
+    let (reference, krusty) = both_split(
+        "TypeParameterReceiverFunction",
+        &[(
+            "TypeParameterReceiverFunctionCommon.kt",
+            "package plib\n\
+             \n\
+             expect class Calls<O> {\n\
+             \x20   fun <S> S.kept(): S\n\
+             }\n",
+        )],
+        &[(
+            "TypeParameterReceiverFunctionPlatform.kt",
+            "package plib\n\
+             \n\
+             actual class Calls<O> {\n\
+             \x20   actual fun <S> S.kept(): S = this\n\
+             \x20   actual fun <S> S.stray(): S = this\n\
+             }\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert!(
+        !reference.is_empty(),
+        "the fixture must make the reference compiler report something"
+    );
+}
+
+/// Two type-parameter receivers that differ only by their UPPER BOUND are different declarations.
+///
+/// A receiver written as a type parameter binds to no classifier, so the key says only that. The
+/// bound is the whole of what such a receiver says about the values it admits, and without
+/// comparing it an implementation with an unrelated bound paired with the `expect` and the check
+/// went silent where the reference compiler does not. Asserted on a TOP-LEVEL pair, which reaches
+/// the same input-shape comparison without also asking what a classifier reports for a member it
+/// never had actualized.
+#[test]
+fn a_type_parameter_receiver_compares_its_bound() {
+    let (reference, krusty) = both_split(
+        "TypeParameterReceiverBound",
+        &[(
+            "TypeParameterReceiverBoundCommon.kt",
+            "package plib\n\
+             \n\
+             expect fun <S : Number> S.kept(): Int\n",
+        )],
+        &[(
+            "TypeParameterReceiverBoundPlatform.kt",
+            "package plib\n\
+             \n\
+             actual fun <S : CharSequence> S.kept(): Int = 1\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert!(
+        !reference.is_empty(),
+        "an unrelated upper bound is not an implementation of the expectation"
+    );
+}
+
+/// A member extension property renders EVERY own formal, with its bound.
+///
+/// The `<S>` case is reached through a receiver no scope binds. This one is on a bound receiver
+/// and declares two formals, one of them bounded, so the rendering is exercised where the keying
+/// is not in question — and a renderer that dropped a formal or mis-indexed a bound would differ
+/// from the reference compiler here.
+#[test]
+fn a_member_extension_property_renders_its_own_formals() {
+    let (reference, krusty) = both_split(
+        "MemberExtensionFormals",
+        &[(
+            "MemberExtensionFormalsCommon.kt",
+            "package plib\n\
+             \n\
+             expect class Rendered\n",
+        )],
+        &[(
+            "MemberExtensionFormalsPlatform.kt",
+            "package plib\n\
+             \n\
+             actual class Rendered {\n\
+             \x20   actual val <S : Comparable<S>, T> Map<S, T>.stray: Int get() = 1\n\
+             }\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert!(
+        !reference.is_empty(),
+        "the fixture must make the reference compiler report something"
+    );
+}
+
+/// A classifier that implements NONE of its expectation's members is reported on the classifier.
+///
+/// A member actualizes by its own identity, so a matched owner says nothing about them, and an
+/// owner that implements none of them was otherwise accepted in silence — the module compiled. The
+/// reference compiler names the implementation once, at its own name, rather than reporting each
+/// `expect` member as unfilled from the side that did not get it wrong.
+///
+/// The fixture declares every member shape the listing under that line has to render — a nullable
+/// type, a generic argument, a star projection, a function type, a default, a `vararg`, a bounded
+/// own formal, an extension receiver and a `suspend` modifier. Only the first line reaches this
+/// comparison: the listing follows a newline inside the same diagnostic and the reference
+/// compiler's own output interleaves source echoes, so the two cannot be compared as text. The
+/// shapes are asserted here so that a renderer which panics or drops one is still caught.
+#[test]
+fn a_classifier_owing_expected_members_is_reported() {
+    let (reference, krusty) = both_split(
+        "OwedMembers",
+        &[(
+            "OwedMembersCommon.kt",
+            "package plib\n\
+             \n\
+             expect class Owed<T> {\n\
+             \x20   val simple: Int\n\
+             \x20   var mutable: String?\n\
+             \x20   fun unitFun()\n\
+             \x20   fun takes(a: Int, b: List<String>): Int\n\
+             \x20   fun defaulted(a: Int = 1): Int\n\
+             \x20   fun <S : Number> generic(s: S): S\n\
+             \x20   val T.onReceiver: Int\n\
+             \x20   val <S> S.own: S\n\
+             \x20   fun higher(f: (Int) -> String): Int\n\
+             \x20   val starred: List<*>\n\
+             \x20   fun varargs(vararg xs: Int): Int\n\
+             \x20   suspend fun suspends(): Int\n\
+             }\n",
+        )],
+        &[(
+            "OwedMembersPlatform.kt",
+            "package plib\n\
+             \n\
+             actual class Owed<T> {\n\
+             }\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert!(
+        !reference.is_empty(),
+        "a classifier that implements none of its expectation's members is an error"
+    );
+}
+
+/// A RENAMED type parameter is an incompatibility between counterparts, not a refusal to pair.
+///
+/// The reference compiler requires an `expect`/`actual` pair to spell its type parameters alike,
+/// and reports a rename between two declarations it already considers each other's — saying the
+/// implementation answered for nothing names the wrong fault, and says nothing about the owner
+/// owing the member either.
+#[test]
+fn a_renamed_type_parameter_is_an_incompatibility() {
+    let (reference, krusty) = both_split(
+        "RenamedTypeParameter",
+        &[(
+            "RenamedTypeParameterCommon.kt",
+            "package plib\n\
+             \n\
+             expect class Renamed<S> {\n\
+             \x20   val <S> S.kept: S\n\
+             }\n",
+        )],
+        &[(
+            "RenamedTypeParameterPlatform.kt",
+            "package plib\n\
+             \n\
+             actual class Renamed<S> {\n\
+             \x20   actual val <T> T.kept: T get() = this\n\
+             }\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert!(
+        !reference.is_empty(),
+        "a renamed type parameter is an error, not an accepted pair"
+    );
+}
+
+/// A MEMBER whose upper bound differs is not its expectation's counterpart at all.
+///
+/// The distinction is the reference compiler's: a rename is an incompatibility BETWEEN
+/// counterparts, while an unrelated upper bound means no counterpart was found — so the owner is
+/// left owing the member and the implementation answers for nothing. Both are asserted, because a
+/// rule that reported one of them as the other is right on one case and wrong on the other.
+#[test]
+fn a_member_whose_bound_differs_is_not_a_counterpart() {
+    let (reference, krusty) = both_split(
+        "MemberBoundDiffers",
+        &[(
+            "MemberBoundDiffersCommon.kt",
+            "package plib\n\
+             \n\
+             expect class Bounded {\n\
+             \x20   val <S : Number> S.kept: Int\n\
+             }\n",
+        )],
+        &[(
+            "MemberBoundDiffersPlatform.kt",
+            "package plib\n\
+             \n\
+             actual class Bounded {\n\
+             \x20   actual val <S : CharSequence> S.kept: Int get() = 1\n\
+             }\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert!(
+        !reference.is_empty(),
+        "an unrelated upper bound is not an implementation of the expectation"
+    );
+}
+
 /// A `typealias` that actualizes an `expect class` also answers for the members keyed on it.
 ///
 /// A member EXTENSION on the expect classifier is keyed by its receiver, and the platform fragment
@@ -1267,5 +1556,45 @@ fn an_alias_is_reported_where_the_source_writes_it() {
          actual val trailing: Int get() = 2\n\
          actual typealias Third = Long\n",
         "Interleaved",
+    );
+}
+
+/// A stdlib classifier written as its SIMPLE name against its fully qualified one — `String`
+/// against `kotlin.String` — is one classifier, and the pair matches.
+///
+/// This is the spelling question on the one import form no source writes: `kotlin.*` is a DEFAULT
+/// import, in scope without an `import` line, so the file's own import list cannot supply it. A
+/// resolver that reaches the simple name only through a written import answers nothing for
+/// `String` here and pairs the two declarations with nothing, where
+/// `an_imported_and_a_qualified_spelling_of_one_classifier_match` — whose classifier IS reached
+/// through a written import — passes either way.
+///
+/// Both directions are asserted, because a rule that canonicalizes only the qualified side is
+/// right on one of them and wrong on the other.
+#[test]
+fn a_default_imported_classifier_matches_its_qualified_spelling() {
+    let (reference, krusty) = both_split(
+        "DefaultImportSpelling",
+        &[(
+            "DefaultImportSpellingCommon.kt",
+            "package plib\n\
+             \n\
+             expect fun takes(value: String): Int\n\
+             expect fun gives(value: kotlin.String): Int\n",
+        )],
+        &[(
+            "DefaultImportSpellingPlatform.kt",
+            "package plib\n\
+             \n\
+             actual fun takes(value: kotlin.String): Int = 1\n\
+             actual fun gives(value: String): Int = 2\n\
+             actual fun stray(value: String): Int = 3\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert!(
+        !reference.is_empty(),
+        "`stray` actualizes nothing, so `takes` and `gives` are silent in a report that names \
+         something else rather than in an empty one"
     );
 }

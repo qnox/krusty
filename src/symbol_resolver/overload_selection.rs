@@ -13,7 +13,9 @@ pub(crate) enum CandidateSelectionWithTies<T> {
 
 pub(crate) enum ReceiverFunctionSelection {
     None,
-    Selected((FunctionInfo, Vec<Ty>, Ty, Ty)),
+    /// `FunctionInfo` alone is ~1.2 KiB and is what makes this variant large; the rest of the
+    /// tuple is a `Vec` and two `Copy` `Ty`s, so only the callable is boxed.
+    Selected((Box<FunctionInfo>, Vec<Ty>, Ty, Ty)),
     Ambiguous(Vec<FunctionInfo>),
 }
 
@@ -181,4 +183,14 @@ pub(super) fn integer_literal_overload_with_ties<T>(
         },
         equivalent_conflicts,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReceiverFunctionSelection;
+
+    #[test]
+    fn a_receiver_selection_carries_a_pointer_to_its_callable() {
+        assert_eq!(std::mem::size_of::<ReceiverFunctionSelection>(), 96);
+    }
 }

@@ -12,6 +12,7 @@ use crate::jvm::classfile::{
     ClassWriter, CodeBuilder, InnerClassResolver, Label, VerifType, MAJOR_JAVA8,
 };
 use crate::jvm::classreader::{MethodCode, C};
+use crate::jvm::constructor_debug::property_line;
 use crate::jvm::inline::MethodBodies;
 use crate::jvm::names::{
     mapped_builtin_virtual_name, method_descriptor, property_getter_name, property_setter_name,
@@ -27,11 +28,14 @@ mod bottom_values;
 mod bridge_emission;
 mod call_operands;
 mod constructor_defaults;
+mod coroutine_machine;
+mod data_class_pool_seed;
 mod debug_lines;
 mod enum_entry_subclass;
 mod enum_metadata;
 mod field_write;
 mod function_debug;
+mod implicit_reference_coercion;
 mod inline_body_emission;
 mod interface_compatibility;
 mod member_schedule;
@@ -42,6 +46,7 @@ mod return_emission;
 mod try_emission;
 use try_emission::FinallyRegion;
 mod secondary_constructor;
+mod static_fields;
 mod vararg;
 mod when;
 
@@ -56,6 +61,10 @@ struct InlineStaticTarget<'a> {
     name: &'a str,
     descriptor: &'a str,
     splice_desc: &'a str,
+    /// An `@InlineOnly` callee, which contributes NO debug information to the caller: the reference
+    /// compiler gives such a body no inline-depth marker, no locals, no line entries and no source
+    /// map, so that it is invisible in a stack trace. Splicing one must be equally invisible.
+    inline_only: bool,
 }
 
 /// kotlinc realizes a NAMED `object` declaration's property backing fields as STATIC fields on the
@@ -178,6 +187,26 @@ pub(crate) struct EmitRun {
     /// lexical nesting, while Java 8 bytecode does not; the declaring class owns one synthetic
     /// static access bridge and every cross-owner call targets it.
     private_member_access_bridges: std::cell::RefCell<std::collections::HashSet<u32>>,
+    /// Spill plans discovered for the suspend functions whose coroutine machine emission owns.
+    /// Absent on the discovery pass and present on the one that builds the machine.
+    machine_plans: std::cell::RefCell<coroutine_machine::MachinePlans>,
+    /// Continuation classes synthesized for the machines this emission builds, drained with the
+    /// facade they belong to.
+    machine_classes: std::cell::RefCell<Vec<(String, Vec<u8>)>>,
+}
+
+impl EmitRun {
+    fn has_machine_plan(&self, function: u32) -> bool {
+        self.machine_plans.borrow().contains_key(&function)
+    }
+
+    fn record_machine_plan(&self, function: u32, plan: coroutine_machine::MachinePlan) {
+        self.machine_plans.borrow_mut().insert(function, plan);
+    }
+
+    fn machine_plan(&self, function: u32) -> Option<coroutine_machine::MachinePlan> {
+        self.machine_plans.borrow().get(&function).cloned()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -274,6 +303,7 @@ pub(super) struct EmitEnv<'a> {
     bodies: &'a dyn MethodBodies,
     run: &'a EmitRun,
     continuation_metadata: &'a crate::jvm::suspend::ContinuationMetadataMap,
+    emit_time_machines: &'a crate::jvm::suspend::EmitTimeMachines,
     bridge_return_adaptations: &'a crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
     /// Semantic classifier declarations used only while translating Kotlin generic types into JVM
     /// `Signature` attributes. Declaration-site variance is a Kotlin fact; spelling it as JVM
@@ -949,24 +979,6 @@ fn data_copy_fn_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
     (COPY_FN_FLAGS & !crate::metadata::property_flags::VISIBILITY_MASK) | (visibility << 1)
 }
 
-/// Whether a type is an ARRAY whose element is star-projected, so its JVM descriptor cannot be
-/// derived from the metadata record.
-///
-/// An array's descriptor is built from its element's ERASURE, and a star projection records no
-/// bound to erase — `Array<List<*>>` is `[Ljava/util/List;` but nothing in the proto says so. A bare
-/// `List<*>` erases to its own classifier and stays derivable, so only the array form needs the
-/// explicit `JvmMethodSignature` (measured on kotlinc 2.4.10).
-pub(super) fn array_of_star_projection(ty: crate::types::Ty) -> bool {
-    ty.array_elem().is_some_and(|element| {
-        matches!(element.non_null(), crate::types::Ty::StarProjection(_))
-            || element
-                .non_null()
-                .type_args()
-                .iter()
-                .any(|argument| matches!(argument, crate::types::Ty::StarProjection(_)))
-    })
-}
-
 /// Compute a class's `@kotlin.Metadata` from its IR — WIRING [`crate::metadata::class_builder::build_class`]
 /// into emission. Covers a class with a primary constructor of `val`/`var` properties plus real declared
 /// members (emitted with derived [`function_flags`]), and the data/value-class synthesized sets. Returns
@@ -1304,8 +1316,9 @@ fn build_class_metadata(
                         field.is_final()
                             && index >= c.ctor_param_count
                             && const_fields.contains(&index)
-                    }) || hoisted_static_for(ir, c, property_index)
-                        .is_some_and(|s| !s.is_var && const_value_idx_peek(ir, s.init)),
+                    }) || hoisted_static_for(ir, c, property_index).is_some_and(
+                        |s| !s.is_var && static_fields::const_value_idx_peek(ir, s.init),
+                    ),
                     is_const: false,
                     is_abstract: c.is_interface && property.getter.is_none(),
                     has_backing_field: !c.is_annotation
@@ -1766,11 +1779,14 @@ fn build_class_metadata(
                     // The physical descriptor rides along whenever a reader could not derive it from
                     // the proto types: a VC/suspend-rewritten member (`declared`), a signature
                     // mentioning a TYPE PARAMETER (`vararg parts: T` erases to `[Ljava/lang/Object;`
-                    // — nothing in the record names that), or a vararg (kotlinc records it there
-                    // too). Derivable signatures omit it, kotlinc's usual shape. A value-class
-                    // rewrite that only MANGLED the name still has a derivable descriptor when no
-                    // erasure happened (`f(): V?` stays `()LI$V;` — nullable value classes box), so
-                    // kotlinc records just the name there; an erased shape (`h(): V` → `()I`) is not
+                    // — nothing in the record names that), a vararg (kotlinc records it there too),
+                    // or a `kotlin/Array` anywhere in the signature, which a name-keyed table cannot
+                    // map because the descriptor depends on the type ARGUMENT. That last one is the
+                    // same rule the facade path applies, and the same predicate states it.
+                    // Derivable signatures omit it, kotlinc's usual shape. A value-class rewrite
+                    // that only MANGLED the name still has a derivable descriptor when no erasure
+                    // happened (`f(): V?` stays `()LI$V;` — nullable value classes box), so kotlinc
+                    // records just the name there; an erased shape (`h(): V` → `()I`) is not
                     // derivable and keeps the descriptor.
                     jvm_sig: ((declared.is_some()
                         && (is_suspend
@@ -1780,10 +1796,10 @@ fn build_class_metadata(
                             })))
                         || ir.fn_vararg_index.contains_key(&fid)
                         || matches!(metadata_ret, crate::types::Ty::TyParam(..))
-                        || array_of_star_projection(metadata_ret)
+                        || crate::metadata::descriptor_needs_recording(metadata_ret)
                         || metadata_params.iter().any(|parameter| {
                             matches!(parameter, crate::types::Ty::TyParam(..))
-                                || array_of_star_projection(*parameter)
+                                || crate::metadata::descriptor_needs_recording(*parameter)
                         }))
                     .then(|| crate::jvm::names::method_descriptor(&f.params, f.ret)),
                     jvm_sig_name: (name != f.name).then(|| f.name.clone()),
@@ -2127,15 +2143,29 @@ fn build_class_metadata(
     // Every DECLARED direct nested classifier joins `Class.nestedClassName` (f7) — kotlinc records
     // them all, not only sealed subtypes. Declaration origin and the exact identity-tree relation
     // keep synthesized classes out without interpreting their backend spellings.
-    let mut nested_names: Vec<String> = ir
+    // Common IR carries the stable declaration order selected by the frontend. The IR arena and
+    // debug lines are representation facts and do not define this metadata order.
+    let mut source_nested: Vec<(u32, String)> = ir
         .classes
         .iter()
-        .filter(|candidate| {
+        .enumerate()
+        .filter(|(_, candidate)| {
             candidate.is_source_declared
                 && !candidate.is_local_class
                 && candidate.fq_name.nested_owner() == Some(c.fq_name)
         })
-        .map(|candidate| candidate.fq_name.nested_segment_ref().to_string())
+        .map(|(index, candidate)| {
+            (
+                ir.class_source_order(index as crate::ir::ClassId)
+                    .expect("a source classifier carries its stable declaration order"),
+                candidate.fq_name.nested_segment_ref().to_string(),
+            )
+        })
+        .collect();
+    source_nested.sort_by_key(|(source_order, _)| *source_order);
+    let mut nested_names: Vec<String> = source_nested
+        .into_iter()
+        .map(|(_, segment)| segment)
         .collect();
     // A producer can generate a classifier that Kotlin code names (`Foo.$serializer`) and publish
     // that fact on the owning class. Other synthesized implementation classes stay out on their
@@ -2701,86 +2731,18 @@ fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_, '_>, cw: &mut ClassWriter)
     // member methods (whose bodies intern their own constants in between) — so `emit_class` reserves
     // each name at its emission site instead.
     if synthesizes_data_class_members(c) {
-        let simple = fq_name.rsplit('/').next().unwrap_or(fq_name);
-        // The synthesized members cover the PRIMARY-CONSTRUCTOR properties only; a body property has a
-        // backing field in `c.fields` but no `componentN` and no `copy` parameter (see
-        // `build_class_metadata`, which takes the same prefix).
-        let component_fields = &c.fields[..(c.ctor_param_count as usize).min(c.fields.len())];
-        let data_fields: Vec<(String, String)> = component_fields
-            .iter()
-            .map(|f| (f.name.clone(), desc(f.ty)))
-            .collect();
-        // Derive the JVM-only dispatch owner from each property's semantic type. The physical field
-        // may already have been erased by a backend pass, so prefer the property declaration.
-        let hashcode_owners: Vec<Option<String>> = component_fields
-            .iter()
-            .enumerate()
-            .map(|(index, field)| {
-                let semantic_ty = c
-                    .properties
-                    .iter()
-                    .find(|property| property.backing_field == Some(index as u32))
-                    .map_or(field.ty, |property| property.ty);
-                data_class_hashcode_owner(ir, bodies, semantic_ty)
-            })
-            .collect();
-        let mut data_accessors = Vec::new();
-        for property in &c.properties {
-            if property.is_private {
-                continue;
-            }
-            let Some(field) = property
-                .backing_field
-                .and_then(|index| c.fields.get(index as usize))
-            else {
-                continue;
-            };
-            let accessor_ty = declared_property_accessor_jvm(ir, property, field);
-            let accessor_desc = desc(accessor_ty);
-            let field_sig = field_sig_of(field);
-            let getter = property
-                .getter_jvm_name
-                .clone()
-                .unwrap_or_else(|| crate::names::property_getter_name(&property.name));
-            data_accessors.push(crate::jvm::classfile::DataAccessorInfo {
-                name: getter,
-                desc: format!("(){accessor_desc}"),
-                setter_kind: 0,
-                signature: field_sig.as_ref().map(|signature| format!("(){signature}")),
-            });
-            if property.is_var {
-                let setter = property
-                    .setter_jvm_name
-                    .clone()
-                    .unwrap_or_else(|| crate::names::property_setter_name(&property.name));
-                let guarded = accessor_ty.is_reference()
-                    && !property.ty.is_nullable()
-                    && is_nonnull_reference_field(ir, fq_name, &field.name, field.ty);
-                data_accessors.push(crate::jvm::classfile::DataAccessorInfo {
-                    name: setter,
-                    desc: format!("({accessor_desc})V"),
-                    setter_kind: if guarded { 2 } else { 1 },
-                    signature: field_sig.map(|signature| format!("({signature})V")),
-                });
-            }
-        }
-        // `copy`'s generic Signature shares the ctor's parameter list, returning `self` instead of `void`.
-        let copy_sig = ctor_sig
-            .and_then(|s| s.strip_suffix('V'))
-            .map(|params| format!("{params}L{fq_name};"));
-        cw.seed_data_class_pool(
-            fq_name,
-            &ctor_desc,
-            simple,
-            &data_fields,
-            &crate::jvm::classfile::DataMemberInfo {
-                accessors: &data_accessors,
-                hashcode_owners: &hashcode_owners,
-                copy_sig: copy_sig.as_deref(),
-                copy_is_private: data_copy_fid(ir, c)
-                    .is_some_and(|fid| ir.private_methods.contains(&fid)),
+        data_class_pool_seed::seed_data_class_members(
+            data_class_pool_seed::DataClassPoolSeed {
+                ir,
+                class: c,
+                bodies,
+                fq_name,
+                ctor_signature: ctor_sig,
+                ctor_desc: &ctor_desc,
                 field_sigs: &field_sigs,
+                field_sig_of: &field_sig_of,
             },
+            cw,
         );
     }
 }
@@ -3391,7 +3353,7 @@ fn emit_jvm_interface_companion_surface(
         .map(|(_, s)| s)
     {
         let descriptor = ir_type_desc(&s.ty);
-        if let Some(value) = const_value_idx(ir, s.init, cw) {
+        if let Some(value) = static_fields::const_value_idx(ir, s.init, cw) {
             cw.add_field_const(0x0019, &s.name, &descriptor, value);
         } else {
             cw.add_field(0x0019, &s.name, &descriptor);
@@ -3401,7 +3363,10 @@ fn emit_jvm_interface_companion_surface(
     let clinit_statics: Vec<&crate::ir::IrStatic> = ir
         .statics
         .iter()
-        .filter(|s| s.owner_matches(&fq_name) && !(s.is_const && const_value_idx_peek(ir, s.init)))
+        .filter(|s| {
+            s.owner_matches(&fq_name)
+                && !(s.is_const && static_fields::const_value_idx_peek(ir, s.init))
+        })
         .collect();
     if c.companion_class.is_some() || !clinit_statics.is_empty() {
         cw.reserve_method_name("<clinit>");
@@ -3810,6 +3775,9 @@ pub fn mark_must_inline_lambdas(ir: &mut IrFile) {
 pub(crate) struct EmitMetadata<'a> {
     pub facade: Option<&'a KotlinMetadata>,
     pub continuations: &'a crate::jvm::suspend::ContinuationMetadataMap,
+    /// Suspend functions whose state machine this emission owns, because their only suspension is
+    /// inside a body it splices. See `docs/JVM_INLINE_BEFORE_CPS.md`.
+    pub emit_time_machines: &'a crate::jvm::suspend::EmitTimeMachines,
     pub bridge_returns: &'a crate::jvm::bridge_return_adaptations::BridgeReturnAdaptations,
 }
 
@@ -3835,6 +3803,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         bodies,
         run,
         continuation_metadata: facts.metadata.continuations,
+        emit_time_machines: facts.metadata.emit_time_machines,
         bridge_return_adaptations: facts.metadata.bridge_returns,
         signature_symbols: facts.signature_symbols,
         jvm_default: opts.jvm_default,
@@ -3945,7 +3914,11 @@ fn emit_all_with_class_meta_impl(
         })
         .copied()
         .collect();
-    if dead.is_empty() && rescued.is_empty() {
+    // A coroutine machine the emission owns is built on the second pass, from what the first one
+    // learned about the post-splice frame: those functions need the re-emit whether or not any
+    // lambda turned out dead.
+    let machines_to_build = !env.run.machine_plans.borrow().is_empty();
+    if dead.is_empty() && rescued.is_empty() && !machines_to_build {
         return Some(first);
     }
     env.run.dead_lambdas.borrow_mut().clone_from(&dead);
@@ -4088,6 +4061,7 @@ fn emit_pass(
     // second pass emits a call site for a class that only existed in the discarded first output.
     env.run.lambda_classes.borrow_mut().clear();
     env.run.lambda_classes_written.borrow_mut().clear();
+    env.run.machine_classes.borrow_mut().clear();
     if !jvm_can_emit(ir) {
         crate::trace_compiler!(
             "lower",
@@ -4295,7 +4269,7 @@ fn emit_pass(
             );
         }
     }
-    emit_statics(ir, facade, &mut cw, env, opts.param_assertions);
+    static_fields::emit_statics(ir, facade, &mut cw, env, opts.param_assertions);
     // kotlinc emits the `<File>Kt` facade class ONLY when the file has top-level callables/properties
     // (or a facade `@Metadata` payload). A file of only classes/objects gets no facade — emitting an
     // empty one is an ABI divergence (spurious extra class). A facade static is owner-less.
@@ -4307,6 +4281,7 @@ fn emit_pass(
         }
         out.push((facade.to_string(), cw.finish()));
         out.extend(drain_lambda_classes(env, opts));
+        out.extend(env.run.machine_classes.borrow_mut().drain(..));
     }
     // Each class — with its optional `@Metadata` (the provider returns `None` for the default emit).
     for c in &ir.classes {
@@ -4320,8 +4295,12 @@ fn emit_pass(
         // An interface's `$DefaultImpls` holder (its `name$default` synthetics), when any exist.
         out.extend(extra);
         out.extend(drain_lambda_classes(env, opts));
+        // A member's coroutine machine builds its continuation class while the method is emitted,
+        // which is after the facade drained the ones its own top-level functions produced.
+        out.extend(env.run.machine_classes.borrow_mut().drain(..));
     }
     out.extend(drain_lambda_classes(env, opts));
+    out.extend(env.run.machine_classes.borrow_mut().drain(..));
     if env.run.inline_bail.borrow().is_some() {
         return None;
     }
@@ -4859,342 +4838,6 @@ fn collapse_locals(slots: &[VerifType]) -> Vec<VerifType> {
         i += if wide { 2 } else { 1 };
     }
     out
-}
-
-/// The constant-pool index for a `const val`'s `ConstantValue` attribute when its initializer is a
-/// compile-time literal; `None` otherwise (then the field is initialized in `<clinit>` as before).
-fn const_value_idx(ir: &IrFile, init: crate::ir::ExprId, cw: &mut ClassWriter) -> Option<u16> {
-    use crate::ir::{IrConst, IrExpr};
-    match ir.expr(init) {
-        IrExpr::Const(c) => Some(match c {
-            IrConst::Boolean(b) => cw.const_int(*b as i32),
-            IrConst::Byte(v) => cw.const_int(*v as i32),
-            IrConst::Short(v) => cw.const_int(*v as i32),
-            IrConst::Int(v) => cw.const_int(*v),
-            // `UByte`/`UShort` ride in the `B`/`S` their value class wraps.
-            IrConst::UByte(v) => cw.const_int(i32::from(*v as i8)),
-            IrConst::UShort(v) => cw.const_int(i32::from(*v as i16)),
-            IrConst::UInt(v) => cw.const_int(*v as i32),
-            IrConst::ULong(v) => cw.const_long(*v as i64),
-            IrConst::Char(c) => cw.const_int(*c as i32),
-            IrConst::Long(v) => cw.const_long(*v),
-            IrConst::Float(v) => cw.const_float(*v),
-            IrConst::Double(v) => cw.const_double(*v),
-            IrConst::String(s) => cw.const_string_kt(s),
-            IrConst::Null => return None,
-        }),
-        _ => None,
-    }
-}
-
-/// Whether `init` is a `ConstantValue`-eligible literal (mirrors [`const_value_idx`] without interning).
-fn const_value_idx_peek(ir: &IrFile, init: crate::ir::ExprId) -> bool {
-    matches!(ir.expr(init), crate::ir::IrExpr::Const(c) if !matches!(c, crate::ir::IrConst::Null))
-}
-
-fn emit_statics(
-    ir: &IrFile,
-    facade: &str,
-    cw: &mut ClassWriter,
-    env: &EmitEnv,
-    param_assertions: bool,
-) {
-    // Statics OWNED by a specific class (a companion `const val`) are emitted on that class, not the
-    // facade — see `emit_owned_consts`.
-    let signature_formatter = JvmSignatureFormatter::new(ir, env);
-    let facade_statics: Vec<(u32, &crate::ir::IrStatic)> = ir
-        .statics
-        .iter()
-        .enumerate()
-        .filter(|(_, property)| property.is_facade_owned())
-        .map(|(index, property)| (index as u32, property))
-        .collect();
-    if facade_statics.is_empty() {
-        return;
-    }
-    for &(static_index, s) in &facade_statics {
-        // kotlinc: `const val` → `public static final`; a plain `val` → `private static final`; a `var`
-        // → `private static` (mutated through the synthesized setter). The private field is read/written
-        // directly only from within the facade; other classes go through the get/set accessors.
-        let acc = if ir.is_jvm_field_static(static_index) {
-            0x0009 | if s.is_var { 0 } else { 0x0010 } // PUBLIC | STATIC [| FINAL]
-        } else if s.is_const {
-            0x0019 // PUBLIC | STATIC | FINAL
-        } else if s.is_var {
-            0x000A // PRIVATE | STATIC
-        } else {
-            0x001A // PRIVATE | STATIC | FINAL
-        };
-        let desc = ir_type_desc(&s.ty);
-        // A PARAMETERIZED type (`val xs: List<String>`) carries its full generic `Signature`, exactly
-        // as the same property declared inside a class does — the facade's field table is a different
-        // emitter, and without this a top-level property's element type was lost to erasure.
-        let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
-        // A reference-typed facade static carries kotlinc's nullability annotation like any other
-        // backing field.
-        let nullability = field_nullability_kind(ir, facade, &s.name, s.ty);
-        let field_ann = match nullability {
-            1 => Some("Lorg/jetbrains/annotations/NotNull;"),
-            2 => Some("Lorg/jetbrains/annotations/Nullable;"),
-            _ => None,
-        };
-        // A `const val` initialized by a compile-time literal carries a `ConstantValue` attribute (the
-        // JVM initializes the field; its `<clinit>` store is omitted below) — byte-identical to kotlinc.
-        // LATE adds: kotlinc visits the facade's fields AFTER its methods, so a backing field's name
-        // first interns at its accessor body and the const payload lands after the `<clinit>` window.
-        let cv = (s.is_const && const_value_idx_peek(ir, s.init))
-            .then(|| match ir.expr(s.init) {
-                crate::ir::IrExpr::Const(c) if !matches!(c, crate::ir::IrConst::Null) => {
-                    Some(c.clone())
-                }
-                _ => None,
-            })
-            .flatten();
-        cw.add_field_late_sig(
-            acc,
-            &s.name,
-            &desc,
-            signatures.field.as_deref(),
-            cv,
-            field_ann,
-        );
-    }
-    // Which statics a CLASS body (a different JVM class than the facade) reads/writes — a PRIVATE
-    // top-level property has no public accessors, so those references need kotlinc's `access$get<X>$p` /
-    // `access$set<X>$p` bridges (emitted below, only when actually referenced).
-    let mut cross_get: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    let mut cross_set: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    {
-        let mut roots: Vec<u32> = Vec::new();
-        for c in &ir.classes {
-            for &fid in &c.methods {
-                if let Some(b) = ir.functions.get(fid as usize).and_then(|f| f.body) {
-                    roots.push(b);
-                }
-            }
-            roots.extend(c.init_body);
-            roots.extend(c.super_arg_prelude.iter().copied());
-            roots.extend(c.super_args.iter().copied());
-            for sc in &c.secondary_ctors {
-                roots.extend(sc.body);
-                roots.extend(sc.delegate_prelude.iter().copied());
-                roots.extend(sc.delegate_args.iter().copied());
-            }
-            for en in &c.enum_entries {
-                roots.extend(en.args.iter().copied());
-            }
-        }
-        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        let mut stack = roots;
-        while let Some(cur) = stack.pop() {
-            if !seen.insert(cur) {
-                continue;
-            }
-            match &ir.exprs[cur as usize] {
-                IrExpr::GetStatic(i) => {
-                    cross_get.insert(*i);
-                }
-                IrExpr::SetStatic { index, .. } => {
-                    cross_set.insert(*index);
-                }
-                _ => {}
-            }
-            crate::ir::for_each_child(&ir.exprs, cur, &mut |ch| stack.push(ch));
-        }
-    }
-    // Accessors: a plain top-level `val`/`var` gets a `public static final getX()` (and `setX()` for a
-    // `var`), so other classes read/write it the way kotlinc compiles cross-file property access. A
-    // `const val` is `public static final` with no accessor (kotlinc inlines const reads). A PRIVATE
-    // property gets NO public accessors — only the `access$…$p` bridges, and only when referenced.
-    for (sidx, s) in ir
-        .statics
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.is_facade_owned())
-    {
-        // A `const val` inlines (no accessor); a CUSTOM-accessor property emits its `getX`/`setX` as
-        // ordinary facade methods (from `ir.functions`), so skip the trivial auto-accessor here.
-        if s.is_const || s.custom_accessor || ir.is_jvm_field_static(sidx as u32) {
-            continue;
-        }
-        let jt = jvm_declared_ty(&s.ty);
-        let desc = type_descriptor(jt);
-        if s.visibility.is_private() {
-            if cross_get.contains(&(sidx as u32)) {
-                let mut g = CodeBuilder::new(0);
-                let fref = cw.fieldref(facade, &s.name, &desc);
-                g.getstatic(fref, slot_words(jt) as i32);
-                emit_return(jt, &mut g);
-                g.ensure_locals(0);
-                g.link();
-                cw.add_method(
-                    0x1019, /* PUBLIC | STATIC | FINAL | SYNTHETIC */
-                    &format!("access${}$p", property_getter_name(&s.name)),
-                    &format!("(){desc}"),
-                    &g,
-                );
-            }
-            if s.is_var && cross_set.contains(&(sidx as u32)) {
-                let words = slot_words(jt);
-                let mut st = CodeBuilder::new(words);
-                load(jt, 0, &mut st);
-                let fref = cw.fieldref(facade, &s.name, &desc);
-                st.putstatic(fref, slot_words(jt) as i32);
-                st.ret_void();
-                st.ensure_locals(words);
-                st.link();
-                cw.add_method(
-                    0x1019,
-                    &format!("access${}$p", property_setter_name(&s.name)),
-                    &format!("({desc})V"),
-                    &st,
-                );
-            }
-            continue;
-        }
-        // kotlinc visits the accessor's name, descriptor, and nullability annotation BEFORE its
-        // body's field cluster; the accessor maps to the property's declaration line.
-        //
-        // An accessor's nullability is the PROPERTY's, which for a value-class-typed static whose
-        // storage was erased is no longer readable off `s.ty` — that holds the carrier now. Reading
-        // it there published a non-null `String` setter for a `var x: Label?` and refused the null
-        // the property accepts, so the declaration's own recorded type answers instead.
-        let accessor_ty = s.erased_declared_ty.unwrap_or(s.ty);
-        let nullability = field_nullability_kind(ir, facade, &s.name, accessor_ty);
-        let acc_ann = match nullability {
-            1 => Some("Lorg/jetbrains/annotations/NotNull;"),
-            2 => Some("Lorg/jetbrains/annotations/Nullable;"),
-            _ => None,
-        };
-        // The accessors erase the property's type arguments in their descriptors, so each carries the
-        // same generic `Signature` its backing field does — kotlinc signs `getXs()` as
-        // `()Ljava/util/List<Ljava/lang/String;>;` and `setXs(List)` as `(Ljava/util/List<…>;)V`.
-        let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
-        let gname = property_getter_name(&s.name);
-        cw.reserve_method_name(&gname);
-        cw.seed_utf8(&format!("(){desc}"));
-        // kotlinc interns an accessor's `Signature` between its descriptor and its nullability
-        // annotation, BEFORE the body's field cluster.
-        if let Some(signature) = &signatures.getter {
-            cw.seed_utf8(signature);
-        }
-        if let Some(a) = acc_ann {
-            cw.seed_utf8(a);
-        }
-        let mut g = CodeBuilder::new(0);
-        if s.line != 0 {
-            g.mark_line(s.line);
-        }
-        let fref = cw.fieldref(facade, &s.name, &desc);
-        g.getstatic(fref, slot_words(jt) as i32);
-        emit_return(jt, &mut g);
-        finish_code_sig::<0x0019>(
-            cw,
-            &gname,
-            &format!("(){desc}"),
-            &mut g,
-            0,
-            signatures.getter.as_deref(),
-        );
-        cw.set_method_nullability(&gname, &format!("(){desc}"), acc_ann, &[None]);
-        if s.is_var {
-            // A value-class-typed property's setter carries the value-class mangle: the parameter
-            // it takes is the carrier, and a value-class PARAMETER always mangles.
-            let sname = s
-                .setter_jvm_name
-                .clone()
-                .unwrap_or_else(|| property_setter_name(&s.name));
-            cw.reserve_method_name(&sname);
-            cw.seed_utf8(&format!("({desc})V"));
-            if let Some(signature) = &signatures.setter {
-                cw.seed_utf8(signature);
-            }
-            let words = slot_words(jt);
-            let mut st = CodeBuilder::new(words);
-            // kotlinc guards a non-null reference setter parameter with checkNotNullParameter("<set-?>").
-            // `-Xno-param-assertions` removes it, like every other parameter guard.
-            if param_assertions && jt.is_reference() && nullability == 1 {
-                st.aload(0);
-                st.push_string("<set-?>", cw);
-                let m = cw.methodref(
-                    "kotlin/jvm/internal/Intrinsics",
-                    "checkNotNullParameter",
-                    "(Ljava/lang/Object;Ljava/lang/String;)V",
-                );
-                st.invokestatic(m, 2, 0);
-            }
-            // The store maps to the property line at the POST-GUARD pc (kotlinc's shape).
-            if s.line != 0 {
-                st.mark_line(s.line);
-            }
-            load(jt, 0, &mut st);
-            let fref = cw.fieldref(facade, &s.name, &desc);
-            st.putstatic(fref, slot_words(jt) as i32);
-            st.ret_void();
-            finish_code_sig::<0x0019>(
-                cw,
-                &sname,
-                &format!("({desc})V"),
-                &mut st,
-                words,
-                signatures.setter.as_deref(),
-            );
-            cw.set_method_nullability(&sname, &format!("({desc})V"), None, &[acc_ann]);
-            // The setter's value parameter is kotlinc's synthetic `<set-?>`, live for the body.
-            cw.set_method_debug(
-                &sname,
-                &format!("({desc})V"),
-                None,
-                &[("<set-?>".to_string(), desc.clone(), 0)],
-            );
-        }
-    }
-    // A store the JVM already performs is pure redundancy: kotlinc emits no `<clinit>` store for a
-    // `const val` folded into a `ConstantValue`, nor for an initializer that IS the field's default
-    // (`val absent: String? = null`, `var count: Int = 0`) — the same elision instance fields get
-    // from `elide_default_property_stores`.
-    let should_store = |s: &crate::ir::IrStatic| {
-        !(crate::jvm::property_storage::is_jvm_default(ir, s.init)
-            || s.is_const && const_value_idx_peek(ir, s.init))
-    };
-    // kotlinc visits `<clinit>` (name + descriptor) before the initializer constants its body
-    // interns. With nothing left to store there is NO `<clinit>` at all, so reserve only when a
-    // store will be emitted.
-    if !facade_statics
-        .iter()
-        .any(|(_, property)| should_store(property))
-    {
-        return;
-    }
-    cw.reserve_method_name("<clinit>");
-    cw.seed_utf8("()V");
-    let mut e = Emitter::new(
-        ir,
-        cw,
-        env,
-        facade,
-        facade,
-        Ty::Unit,
-        facade_statics.iter().map(|(_, property)| property.init),
-    );
-    let mut code = CodeBuilder::new(0);
-    // Each store maps to its property's declaration line (kotlinc's `<clinit>` LineNumberTable).
-    // `add_method` drops a `<clinit>`'s inline marks (they are curated), so collect + set after.
-    let mut clinit_lines: Vec<(u16, u32)> = Vec::new();
-    for &(_, s) in &facade_statics {
-        if !should_store(s) {
-            continue;
-        }
-        if s.line != 0 {
-            clinit_lines.push((code.bytes.len() as u16, s.line));
-        }
-        e.emit_static_initializer_store(facade, s, &mut code);
-    }
-    code.ret_void();
-    finish_code::<0x0008>(e.cw, "<clinit>", "()V", &mut code, e.next_slot);
-    if !clinit_lines.is_empty() {
-        e.cw.set_method_lines("<clinit>", "()V", &clinit_lines);
-    }
 }
 
 /// The StackMapTable verification type of a JVM value type — the free-function twin of
@@ -6336,7 +5979,6 @@ fn emit_class(
                 let mut slot = 1u16;
                 for (i, t) in param_tys.iter().enumerate() {
                     if let Some(field_i) = ctor_param_fields.get(i).copied().flatten() {
-                        let name = &c.fields[field_i].name;
                         // Fields already stored before `super(…)` are not stored again here. The cutoff
                         // is semantic constructor metadata, independent of their physical ABI names.
                         if !c
@@ -6347,9 +5989,7 @@ fn emit_class(
                             // kotlinc maps this field store to the parameter's own source line —
                             // capture the pc where it starts.
                             let pc = ctor.bytes.len() as u16;
-                            if let Some(line) =
-                                crate::jvm::constructor_debug::property_line(ir, c, name)
-                            {
+                            if let Some(line) = property_line(ir, c, field_i as u32) {
                                 ctor_lines.push((pc, line));
                             }
                             ctor.aload(0);
@@ -6763,7 +6403,8 @@ fn emit_class(
             .iter()
             .enumerate()
             .filter(|s| {
-                s.1.owner_matches(&fq_name) && !(s.1.is_const && const_value_idx_peek(ir, s.1.init))
+                s.1.owner_matches(&fq_name)
+                    && !(s.1.is_const && static_fields::const_value_idx_peek(ir, s.1.init))
             })
             .map(|(index, s)| (index as u32, s))
             .collect();
@@ -6819,7 +6460,8 @@ fn emit_class(
             .iter()
             .filter(|property| {
                 property.owner_matches(&fq_name)
-                    && !(property.is_const && const_value_idx_peek(ir, property.init))
+                    && !(property.is_const
+                        && static_fields::const_value_idx_peek(ir, property.init))
             })
             .collect();
         // An INTERFACE's companion self-hosts its singleton: a package-private `static final
@@ -8809,16 +8451,15 @@ fn emit_annotation_equals(
     cb.ireturn();
     cb.set_needs_stackmap();
     cb.link();
+    let locals = [
+        ("this".to_string(), format!("L{fq};"), 0u16),
+        ("other".to_string(), "Ljava/lang/Object;".to_string(), 1),
+    ];
+    // Before the method, so the local names precede the class constants the frame computation
+    // interns — kotlinc's writer visits the locals first. See `reserve_method_lvt`.
+    cw.reserve_method_lvt(&locals);
     cw.add_method(0x0011, "equals", "(Ljava/lang/Object;)Z", &cb);
-    cw.set_method_debug(
-        "equals",
-        "(Ljava/lang/Object;)Z",
-        None,
-        &[
-            ("this".to_string(), format!("L{fq};"), 0),
-            ("other".to_string(), "Ljava/lang/Object;".to_string(), 1),
-        ],
-    );
+    cw.set_method_debug("equals", "(Ljava/lang/Object;)Z", None, &locals);
     // `equals(Object?)` accepts null and answers false, so its parameter is `@Nullable` — kotlinc
     // stamps it, and a Java caller reads the contract from it.
     cw.set_method_nullability(
@@ -9264,6 +8905,16 @@ fn emit_interface_class(
             // `@Nullable` on each reference parameter and on a reference return. Having no body is
             // why it gets no debug tables — it is not a reason to drop its annotations.
             let ann = |t: Ty| -> Option<&'static str> {
+                // A bare type parameter erases to its bound, and kotlinc annotates it only when
+                // that bound is NON-NULL. `<T>` carries the implicit `Any?` bound and can be
+                // instantiated with a nullable type, so neither `@NotNull` nor `@Nullable` is true
+                // of the position; `<T : Any>` is known non-null and gets `@NotNull`. The bound
+                // travels on the type itself, so this needs no signature lookup.
+                if let Ty::TyParam(_, bound) = t {
+                    if matches!(bound, Ty::Nullable(_)) {
+                        return None;
+                    }
+                }
                 let d = crate::jvm::names::type_descriptor(t);
                 if !(d.starts_with('L') || d.starts_with('[')) {
                     return None;
@@ -9303,28 +8954,60 @@ fn emit_interface_class(
         // to the abstract method via `invokeinterface`. kotlinc emits it ON THE INTERFACE (call sites use
         // it) AND, under a mode that keeps the compatibility holder, a copy on the
         // `<Iface>$DefaultImpls` class (`public final`).
-        if let Some(defaults) = ir.param_defaults(fid) {
-            // `disable` puts NOTHING executable on the interface, the `$default` stub included: call
-            // sites go to the holder's copy instead.
-            if bodies_on_interface {
-                emit_default_stub(ir, fid, &fq_name, facade, &mut cw, defaults, env, true);
-            }
-            // `-jvm-default=no-compatibility` emits NO `$DefaultImpls` at all. Emitting one anyway
-            // would publish a holder class the build says does not exist — a downstream compilation
-            // resolving against it links to a class kotlinc would never have produced.
-            if emits_default_impls {
-                let di = default_impls.get_or_insert_with(|| {
-                    let mut w =
-                        new_writer(&format!("{fq_name}$DefaultImpls"), "java/lang/Object", opts);
-                    w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
-                    w
-                });
-                if enable_compat {
-                    // The interface owns the real default application; the holder's copy is a
-                    // thin synthetic forward to it (kotlinc's `enable` shape).
-                    emit_default_stub_forward(ir, fid, &fq_name, di);
-                } else {
-                    emit_default_stub(ir, fid, &fq_name, facade, di, defaults, env, true);
+        let deferred_suspend_declaration = ir
+            .jvm_suspend_interface_bodies
+            .values()
+            .any(|(_, declaration)| *declaration == fid);
+        let default_fid = ir
+            .jvm_suspend_interface_bodies
+            .get(&fid)
+            .map(|(_, declaration)| *declaration)
+            .unwrap_or(fid);
+        if !deferred_suspend_declaration {
+            if let Some(defaults) = ir.param_defaults(default_fid) {
+                // `disable` puts NOTHING executable on the interface, the `$default` stub included: call
+                // sites go to the holder's copy instead.
+                if bodies_on_interface {
+                    emit_default_stub(
+                        ir,
+                        default_fid,
+                        &fq_name,
+                        facade,
+                        &mut cw,
+                        defaults,
+                        env,
+                        true,
+                    );
+                }
+                // `-jvm-default=no-compatibility` emits NO `$DefaultImpls` at all. Emitting one anyway
+                // would publish a holder class the build says does not exist — a downstream compilation
+                // resolving against it links to a class kotlinc would never have produced.
+                if emits_default_impls {
+                    let di = default_impls.get_or_insert_with(|| {
+                        let mut w = new_writer(
+                            &format!("{fq_name}$DefaultImpls"),
+                            "java/lang/Object",
+                            opts,
+                        );
+                        w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
+                        w
+                    });
+                    if enable_compat {
+                        // The interface owns the real default application; the holder's copy is a
+                        // thin synthetic forward to it (kotlinc's `enable` shape).
+                        emit_default_stub_forward(ir, default_fid, &fq_name, di);
+                    } else {
+                        emit_default_stub(
+                            ir,
+                            default_fid,
+                            &fq_name,
+                            facade,
+                            di,
+                            defaults,
+                            env,
+                            true,
+                        );
+                    }
                 }
             }
         }
@@ -9648,7 +9331,7 @@ fn emit_enum_class(
         for (argument, ty) in c.ctor_args.iter().zip(&all_param_tys) {
             if argument.is_field {
                 let name = &c.fields[field_i].name;
-                if let Some(line) = crate::jvm::constructor_debug::property_line(ir, c, name) {
+                if let Some(line) = property_line(ir, c, field_i as u32) {
                     store_lines.push((ctor.bytes.len() as u16, line));
                 }
                 ctor.aload(0);
@@ -11009,6 +10692,48 @@ fn emit_method_inner_with_holder(
         e.slots.insert(vi, (slot, *t));
         e.next_slot += slot_words(*t);
     }
+    // A function whose coroutine machine emission owns reads its continuation from a slot this
+    // emitter picks. While the frame is being discovered that is the `$completion` parameter, which
+    // is one `aload` exactly like the machine's own local, so both passes allocate the same slots.
+    // A function whose coroutine machine emission owns gets its machine's own locals FIRST, right
+    // above the parameters and below everything the body allocates. Leasing them as backend
+    // temporaries is what makes every frame describe them — including the merged frames of a spliced
+    // lambda, which are built from the emitter's own slot view. Reserved identically on both passes,
+    // so the spill plan the first one reads is expressed in the slots the second one uses.
+    let machine_slots = env.emit_time_machines.suspensions(fid).map(|suspensions| {
+        let result = e.next_slot;
+        let continuation = result + 1;
+        let suspended = continuation + 1;
+        e.next_slot = suspended + 1;
+        let object = Ty::nullable(Ty::obj("kotlin/Any"));
+        e.lease_temporary(result, object);
+        // Typed as the machine's OWN continuation class: every read of this slot goes on to touch
+        // its `label`, `result` and spill fields, which the supertype does not declare.
+        e.lease_temporary(
+            continuation,
+            Ty::obj(&coroutine_machine::continuation_internal(
+                owner,
+                &f.name,
+                crate::jvm::suspend::same_name_ordinal(ir, fid),
+            )),
+        );
+        e.lease_temporary(suspended, object);
+        e.continuation_slot = Some(continuation);
+        e.machine_suspensions = suspensions
+            .iter()
+            .map(|suspension| suspension.call)
+            .collect();
+        crate::trace_compiler!(
+            "suspend",
+            "machine wanted fid={fid} calls={:?}",
+            suspensions.iter().map(|s| s.call).collect::<Vec<_>>()
+        );
+        coroutine_machine::MachineSlots {
+            result,
+            continuation,
+            suspended,
+        }
+    });
     // kotlinc's writer visits a method HEADER before its code, so the name, descriptor, generic
     // `Signature` and annotation types precede every constant the body introduces. krusty builds the
     // body first, so reserve those entries here to land them in the same order.
@@ -11037,7 +10762,16 @@ fn emit_method_inner_with_holder(
             method_sig.as_deref(),
             &method_descriptor(&param_tys, ret),
         ),
-        None => method_sig,
+        None => match ir.jvm_suspend_interface_bodies.get(&fid).copied() {
+            Some((receiver, _)) => holder_method_signature(
+                &signature_formatter,
+                ir,
+                receiver,
+                method_sig.as_deref(),
+                &method_descriptor(f.params.get(1..).unwrap_or_default(), ret),
+            ),
+            None => method_sig,
+        },
     };
     let ann_of = |t: Ty| -> Option<&'static str> {
         let d = crate::jvm::names::type_descriptor(t);
@@ -11215,7 +10949,88 @@ fn emit_method_inner_with_holder(
             }
         }
     }
+    // Building the machine: everything the discovery pass learned is in hand, so the entry,
+    // the dispatch and the state it re-enters can be emitted around the same body.
+    let machine_states = match (machine_slots, env.run.machine_plan(fid)) {
+        (Some(slots), Some(plan)) => {
+            // The continuation the machine is re-entered on is the trailing `$completion`
+            // parameter. Resolve it BEFORE anything is armed: arming is what makes the body emit
+            // markers and spills, and a machine armed for a prologue that then declined would leave
+            // both behind — markers no erasure pass is reached for, over a slot never assigned.
+            let completion = param_tys.len().saturating_sub(1) as u32 + u32::from(instance);
+            match e.slots.get(&completion).map(|&(slot, _)| slot) {
+                Some(completion) => {
+                    let internal = coroutine_machine::continuation_internal(
+                        owner,
+                        &f.name,
+                        crate::jvm::suspend::same_name_ordinal(ir, fid),
+                    );
+                    e.machine = Some(coroutine_machine::Machine {
+                        plan,
+                        slots,
+                        internal,
+                        // An instance method is re-entered on its receiver, which the continuation
+                        // keeps.
+                        receiver: instance.then(|| owner.to_string()),
+                        // A private method is not callable from the continuation class, whether it
+                        // is a member or a top-level function; a synthetic static on the owner is.
+                        bridge: ir
+                            .private_methods
+                            .contains(&fid)
+                            .then(|| coroutine_machine::access_bridge_name(&f.name)),
+                    });
+                    e.emit_machine_prologue(completion, &mut code)
+                }
+                // No continuation to dispatch on, so there is no machine to build. Decline the
+                // compile — as a discovery pass that found no marker does — and emit the rest of
+                // this method with nothing armed, so the bytes that get discarded carry neither a
+                // marker nor a read of a slot that was never assigned.
+                None => {
+                    crate::trace_compiler!("suspend", "machine fid={fid} NO CONTINUATION SLOT");
+                    e.machine_suspensions.clear();
+                    env.run
+                        .set_inline_bail("a coroutine machine with no continuation parameter");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    // The verifier's view of the frame on entry: what the discovery pass computes every later
+    // state from. Taken before the body runs, while the parameters are the only locals assigned.
+    let entry_locals = machine_slots
+        .filter(|_| !e.machine_suspensions.is_empty() && !env.run.has_machine_plan(fid))
+        .map(|slots| e.verif_slots_upto(slots.result));
     e.emit(body, &mut code);
+    // Discovery: this body is the post-splice bytecode the spill set has to be read from. Read it,
+    // then erase the markers so nothing synthetic can reach a class file even though these bytes are
+    // about to be discarded.
+    if let Some(entry_locals) = entry_locals {
+        // One state per site emitted, which is what the markers name.
+        let expected = e.machine_next_ordinal;
+        match coroutine_machine::discover(&code, machine_slots, &entry_locals, e.cw, expected) {
+            Some(plan) => {
+                crate::trace_compiler!(
+                    "suspend",
+                    "machine plan fid={fid} body_locals={} suspensions={:?}",
+                    plan.body_locals,
+                    plan.suspensions
+                );
+                env.run.record_machine_plan(fid, plan);
+            }
+            None => {
+                // No marker means the body never reached the suspension: the emitter declined the
+                // splice, so the lambda is a real closure after all and its suspension belongs to a
+                // method that has no continuation to pass. Routing has already taken the standalone
+                // `invoke` away — emitting now would leave an `invokedynamic` pointing at a method
+                // that does not exist. Decline the whole compile instead, as this shape did before
+                // the machine existed.
+                crate::trace_compiler!("suspend", "machine plan fid={fid} DECLINED");
+                env.run
+                    .set_inline_bail("suspension inside a lambda that was not spliced");
+            }
+        }
+    }
     // The implicit `return` for a `Unit` function is dead code when the body already diverges
     // (`fun foo() { throw … }`): an unreachable `return` after `athrow` has no stack-map frame and
     // the verifier rejects it. Skip it exactly when the body can't fall through.
@@ -11227,6 +11042,91 @@ fn emit_method_inner_with_holder(
             code.mark_line(close);
         }
         code.ret_void();
+    }
+    // The dispatch's states live inside the spliced body, where only a marker could name them.
+    // Bind each one where its marker ended up, then erase every marker: they exist to survive the
+    // splice, not to reach a class file.
+    if let Some((_, resumes, default)) = machine_states {
+        let source_file = e.cw.source_file_name();
+        // Bind the states BEFORE the default block: that block ends in `athrow`, and binding an
+        // offset is refused once the stream is dead.
+        let found = code.marker_positions().unwrap_or_default();
+        for (at, kind, ordinal) in found {
+            let is_resume = match kind {
+                crate::jvm::classfile::CoroutineMarker::Resume => true,
+                crate::jvm::classfile::CoroutineMarker::Join => false,
+                crate::jvm::classfile::CoroutineMarker::Suspension => continue,
+            };
+            // Bind the label the dispatch's restore block jumps to (the resume point) and the join
+            // the two paths out of the suspension meet at, and record their frames: the entry
+            // locals plus what this state restored — with nothing on the stack at the resume
+            // point, and the resumed value at the join.
+            let (Some(entry), Some(machine)) = (e.machine_entry_locals.clone(), e.machine.clone())
+            else {
+                continue;
+            };
+            let Some(suspension) = machine.plan.suspensions.get(ordinal as usize) else {
+                continue;
+            };
+            let target = match is_resume {
+                true => e.machine_resumes.get(ordinal as usize),
+                false => e.machine_joins.get(ordinal as usize),
+            };
+            let Some(&target) = target else {
+                continue;
+            };
+            let mut restored = expand_collapsed_locals(&entry);
+            // Every spill, the constant-`null` ones included: the restore leaves those holding
+            // `null`, and the frame has to say so rather than `Object`.
+            for &(slot, ty) in &suspension.spills {
+                let slot = slot as usize;
+                if restored.len() <= slot {
+                    restored.resize(slot + 1, VerifType::Top);
+                }
+                restored[slot] = verif_of(ir_ty_to_jvm(&ty));
+            }
+            // The marker sits AT the position: it is the first instruction there, and becomes `nop`s.
+            code.bind_target_at(target, at);
+            let stack = match is_resume {
+                true => Vec::new(),
+                false => vec![VerifType::ObjectName("java/lang/Object".into())],
+            };
+            code.add_frame_if_new(target, collapse_locals(&restored), stack);
+        }
+        e.emit_machine_states(&resumes, &mut code);
+        e.emit_machine_default(default, &mut code);
+        if let Some(machine) = e.machine.clone() {
+            let bytes =
+                coroutine_machine::build_continuation_class(coroutine_machine::ContinuationClass {
+                    internal: &machine.internal,
+                    outer: owner,
+                    outer_method: &f.name,
+                    outer_descriptor: &reserved_desc,
+                    plan: &machine.plan,
+                    major: Some(e.cw.major()),
+                    source_file: source_file.as_deref(),
+                    receiver: machine.receiver.as_deref(),
+                    bridge: machine.bridge.as_deref(),
+                });
+            env.run
+                .machine_classes
+                .borrow_mut()
+                .push((machine.internal.clone(), bytes));
+            // The bridge itself lives on the owner, beside the method it re-enters.
+            if let Some(bridge) = machine.bridge.as_deref() {
+                if let Some((name, descriptor, body)) = coroutine_machine::build_access_bridge(
+                    e.cw,
+                    owner,
+                    &f.name,
+                    &reserved_desc,
+                    instance,
+                ) {
+                    debug_assert_eq!(name, bridge);
+                    // `public static final synthetic`, as kotlinc emits it.
+                    e.cw.add_method(0x1019, &name, &descriptor, &body);
+                }
+            }
+        }
     }
     // The `$i$f$<name>` marker's LocalVariableTable entry covers the body from the post-store pc —
     // kotlinc writes it even when no other local is recorded. LVT strings intern EAGERLY, right
@@ -11284,6 +11184,12 @@ fn emit_method_inner_with_holder(
             slot += slot_words(*t);
         }
     }
+    // Every coroutine marker, on every path out of this function. A marker exists to survive being
+    // relocated into a spliced inline body and is read once the bytes are final; `impdep1` is
+    // reserved by JVMS §6.2 and must never reach a class file. Erasing here — after the last byte
+    // is emitted and before the code is linked, with no `return` in between — is what makes that a
+    // property of method emission rather than of whichever machine branch happened to run.
+    let _ = code.erase_markers();
     code.ensure_locals(e.next_slot);
     code.link();
     // Top-level/`static` functions are always `final` (kotlinc emits `public static final`). An
@@ -11993,6 +11899,12 @@ fn method_signature_shape(
     }
     if let Some(generic) = ir.signatures.get(&fid) {
         return jvm_method_signature(formatter, generic, f);
+    }
+    if let (Some((params, ret)), Some(_)) = (
+        ir.member_semantic_sigs.get(&fid),
+        ir.suspend_declared_sigs.get(&fid),
+    ) {
+        return suspend_method_sig(formatter, params, ret);
     }
     if let Some((params, ret)) = ir.member_semantic_sigs.get(&fid) {
         // A member using ENCLOSING-CLASS type parameters signs with bare references (`(TT;)TT;`)
@@ -12797,6 +12709,29 @@ struct Emitter<'a> {
     /// yet registered in `slots` (queried before its declaration emits — e.g. an inline result temp).
     var_types: HashMap<u32, Ty>,
     next_slot: u16,
+    /// Where `IrExpr::CurrentContinuation` reads the continuation from, for a function whose
+    /// coroutine machine this emission owns. `None` for every other function.
+    continuation_slot: Option<u16>,
+    /// The suspensions of the function being emitted, by call expression, in machine order. Empty
+    /// for every function whose machine the IR pass owns.
+    machine_suspensions: HashSet<u32>,
+    /// The next state's ordinal. A state belongs to an emission SITE, not to an expression: an
+    /// inline function that invokes its lambda twice splices the same body twice, and each copy
+    /// suspends on its own locals. Both passes emit the same sequence, so both number it alike.
+    machine_next_ordinal: usize,
+    /// The machine being built, on the pass that builds it.
+    machine: Option<coroutine_machine::Machine>,
+    /// The locals the dispatch can prove at a resume: the state on entry, before the body stored
+    /// anything. A resume's only predecessor is that dispatch.
+    machine_entry_locals: Option<Vec<VerifType>>,
+    /// Where each state re-enters the body. The dispatch's restore block jumps here, so these are
+    /// the enclosing method's labels; a `Resume` marker says where the splice put each one. The
+    /// block there rethrows a failed resumption INSIDE the body, where a `try` around the
+    /// suspension can catch it, then falls into the join.
+    machine_resumes: Vec<Label>,
+    /// Where the two paths out of a suspension meet, with the call's result on the stack; a `Join`
+    /// marker says where the splice put each one.
+    machine_joins: Vec<Label>,
     ret: Ty,
     /// Active loops: `(continue target, break target, checked common-IR target identity,
     /// active-finalizer depth on entry)`. FIR checking resolves a source label to a control target;
@@ -12882,6 +12817,13 @@ impl<'a> Emitter<'a> {
             label_unassigned_values: HashMap::new(),
             var_types: collect_body_var_types(ir, roots),
             next_slot: 0,
+            continuation_slot: None,
+            machine_suspensions: HashSet::new(),
+            machine_next_ordinal: 0,
+            machine_entry_locals: None,
+            machine_resumes: Vec::new(),
+            machine_joins: Vec::new(),
+            machine: None,
             ret,
             loop_stack: Vec::new(),
             pending_stack: Vec::new(),
@@ -12933,9 +12875,13 @@ impl<'a> Emitter<'a> {
     /// with that lambda's body. Handles `require(cond) { msg }` / `check(cond) { msg }` and the like —
     /// where the lambda runs only on a branch. v1: zero-arg (Function0) lambdas with branchless bodies,
     /// at an empty operand-stack baseline. Returns `false` (caller falls back / skips) on any other shape.
+    #[allow(clippy::too_many_arguments)]
     fn try_inline_unified(
         &mut self,
         call_expression: u32,
+        owner: &str,
+        callee: &str,
+        inline_only: bool,
         descriptor: &str,
         args: &[u32],
         body: &crate::jvm::classreader::MethodCode,
@@ -12956,12 +12902,35 @@ impl<'a> Emitter<'a> {
         if params.len() != args.len() {
             return false;
         }
-        let top_local = base + body.max_locals;
+        let lambda_parameters: Vec<usize> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, &argument)| {
+                matches!(
+                    self.ir.expr(argument),
+                    IrExpr::Lambda {
+                        inline_body: Some(_),
+                        ..
+                    }
+                )
+            })
+            .map(|(i, _)| i)
+            .collect();
+        // ONE plan for the caller frame: where the relocated host body ends, and where each
+        // substituted lambda's own locals begin. A substituted lambda's parameter slot is closed by
+        // the splice, so the body occupies that many slots fewer; and a lambda's locals go at the
+        // first slot free WHERE ITS INVOKE IS, not above every host local, because the reference
+        // compiler reuses slots belonging to host locals that are not written yet.
+        let spliced_frame =
+            crate::jvm::inline::spliced_frame(body, descriptor, &lambda_parameters, base);
+        let top_local = spliced_frame
+            .as_ref()
+            .map_or(base + body.max_locals, |frame| frame.top_local);
         self.next_slot = self.next_slot.max(top_local);
         // Build each lambda argument's pre-relocated body (leaving its boxed result on the stack), and
         // its own (branchy-predicate) frames — resolved to byte offsets within the body, relocated below.
         let mut lam_splices: Vec<crate::jvm::inline::LambdaSplice> = Vec::new();
-        let mut lam_frames: Vec<ResolvedFrames> = Vec::new();
+        let mut lam_frames: Vec<Vec<ResolvedFrames>> = Vec::new();
         // Capture initializers belong to lambda-creation time, in argument evaluation order. A
         // capture that is already a caller local needs no code; every other checked value is
         // materialized once when its lambda operand is reached, then the spliced body reads that
@@ -12973,8 +12942,7 @@ impl<'a> Emitter<'a> {
         // would otherwise overflow the host's stack). Propagated to `splice_inline` below.
         let mut lam_max_stack = 0u16;
         for (i, &a) in args.iter().enumerate() {
-            let mut scratch = CodeBuilder::new(self.next_slot);
-            let (lam_insns, lam_fr) = if let IrExpr::Lambda {
+            let (bodies, frames, lam_max_locals, lam_stack) = if let IrExpr::Lambda {
                 impl_fn,
                 arity,
                 captures,
@@ -13046,67 +13014,166 @@ impl<'a> Emitter<'a> {
                     };
                     cap_slots.push((slot, cap_tys[k]));
                 }
-                // Build the lambda body into a scratch builder. The host left the lambda's `arity`
-                // arguments on the stack (as `Object`, the erased `FunctionN.invoke` parameters);
-                // unbox a primitive parameter, or `checkcast` a specific reference parameter to its
-                // type, then store it (top = last). Then run the body, then box the result to `Object`
-                // (matching the replaced `invoke`'s `Object` result).
-                scratch.set_stack(arity as u16);
-                let mut param_slots: Vec<(u16, Ty)> = cap_slots;
-                param_slots.extend(std::iter::repeat_n((0u16, Ty::Error), arity));
-                for j in (0..arity).rev() {
-                    let jt = lam_tys[j];
-                    if jt.is_jvm_scalar() {
-                        // `FunctionN.invoke` hands every argument over as `Object`. Select its adapter
-                        // from the lambda's semantic parameter before using the physical carrier for
-                        // the local slot; otherwise `UInt` is mistaken for boxed `Int` here.
-                        unbox_prim(
+                // This lambda's own locals start where the host's frame is free at the invoke, not
+                // above every host local. `None` only when the body could not be decoded, in which
+                // case the splice below declines too.
+                let ordinal = lambda_parameters
+                    .iter()
+                    .position(|&parameter| parameter == i)
+                    .expect("a substituted lambda is one of the collected lambda parameters");
+                // Above the host's frame, and above every slot this lambda's own captures occupy:
+                // a capture is live for the whole body that reads it, so a parameter placed on one
+                // overwrites the value the body was given.
+                let capture_ceiling = cap_slots
+                    .iter()
+                    .map(|&(slot, ty)| slot + slot_words(ty))
+                    .max()
+                    .unwrap_or(0);
+                let lambda_slot_base = spliced_frame
+                    .as_ref()
+                    .and_then(|frame| frame.lambda_bases.get(ordinal).copied())
+                    .unwrap_or(self.next_slot)
+                    .max(capture_ceiling);
+                // How many sites the host invokes this lambda from. One body serves them all unless
+                // the body carries a suspension: then each site is a state of this machine, and a
+                // state is one position with its own spill set, so the body is built once per site
+                // and each copy marks its suspensions with its own ordinals. The copies are laid out
+                // from the same slot base, so they differ in nothing but those ordinals — which is
+                // what lets the discovery pass and the build pass number them alike.
+                let sites = spliced_frame
+                    .as_ref()
+                    .and_then(|frame| frame.site_counts.get(ordinal).copied())
+                    .unwrap_or(1)
+                    .max(1);
+                let slot_base = self.next_slot;
+                let states_before = self.machine_next_ordinal;
+                let mut bodies: Vec<crate::jvm::inline::LambdaBody> = Vec::new();
+                let mut frames: Vec<ResolvedFrames> = Vec::new();
+                let mut lam_max_locals = 0u16;
+                let mut lam_stack = 0u16;
+                loop {
+                    self.next_slot = slot_base;
+                    // Build the lambda body into a scratch builder. The host left the lambda's `arity`
+                    // arguments on the stack (as `Object`, the erased `FunctionN.invoke` parameters);
+                    // unbox a primitive parameter, or `checkcast` a specific reference parameter to its
+                    // type, then store it (top = last). Then run the body, then box the result to `Object`
+                    // (matching the replaced `invoke`'s `Object` result).
+                    let mut scratch = CodeBuilder::new(self.next_slot);
+                    scratch.set_stack(arity as u16);
+                    let mut lam_locals_declared: Vec<(u16, u16, String, String)> = Vec::new();
+                    let mut lambda_slot = lambda_slot_base;
+                    let mut param_slots: Vec<(u16, Ty)> = cap_slots.clone();
+                    param_slots.extend(std::iter::repeat_n((0u16, Ty::Error), arity));
+                    for j in (0..arity).rev() {
+                        let jt = lam_tys[j];
+                        if jt.is_jvm_scalar() {
+                            // `FunctionN.invoke` hands every argument over as `Object`. Select its adapter
+                            // from the lambda's semantic parameter before using the physical carrier for
+                            // the local slot; otherwise `UInt` is mistaken for boxed `Int` here.
+                            unbox_prim(
+                                self.cw,
+                                &mut scratch,
+                                semantic_scalar_adapter(lam_semantic_tys[j], jt),
+                            );
+                        } else if let Some(internal) = checkcast_internal(jt) {
+                            let ci = self.cw.class_ref(&internal);
+                            scratch.checkcast(ci);
+                        }
+                        let slot = lambda_slot;
+                        lambda_slot += slot_words(jt);
+                        self.next_slot = self.next_slot.max(lambda_slot);
+                        store(jt, slot, &mut scratch);
+                        param_slots[n_cap + j] = (slot, jt);
+                        // Its scope opens once the store completes, and runs to the end of the body.
+                        if self.record_locals {
+                            if let Some(name) = self
+                                .ir
+                                .fn_params
+                                .get(&impl_fn)
+                                .and_then(|info| info.names.get(n_cap + j))
+                            {
+                                lam_locals_declared.push((
+                                    u16::try_from(scratch.bytes.len()).unwrap_or(u16::MAX),
+                                    slot,
+                                    name.clone(),
+                                    crate::jvm::names::type_descriptor(jt),
+                                ));
+                            }
+                        }
+                    }
+                    // The reference compiler opens an inlined lambda body with its own inline-depth
+                    // marker — `iconst_0; istore` into a `$i$a$-<callee>-<caller>` local — exactly as it
+                    // opens an inlined function body with `$i$f$<callee>`. The host's marker arrives
+                    // inside the relocated host body; this one has no other source, because the lambda
+                    // body is emitted from IR rather than relocated.
+                    let depth_marker = lambda_slot;
+                    lambda_slot += 1;
+                    self.next_slot = self.next_slot.max(lambda_slot);
+                    scratch.push_int(0, self.cw);
+                    store(Ty::Int, depth_marker, &mut scratch);
+                    if self.record_locals {
+                        if let Some(origin) = self.ir.lambda_origins.get(&impl_fn) {
+                            lam_locals_declared.push((
+                                u16::try_from(scratch.bytes.len()).unwrap_or(u16::MAX),
+                                depth_marker,
+                                crate::jvm::debug_local_names::spliced_lambda_marker_name(
+                                    callee,
+                                    &self.owner,
+                                    &origin.implementation_name,
+                                    origin.implementation_ordinal,
+                                ),
+                                "I".to_string(),
+                            ));
+                        }
+                    }
+                    let body_ret =
+                        self.emit_fn_body_inline(inline_body, &param_slots, &mut scratch);
+                    if body_ret.is_jvm_scalar() {
+                        // The erased `invoke` result is `Object`, so reverse the same semantic adapter
+                        // choice after the inline body leaves its physical carrier on the stack. Use
+                        // the BODY's value type, not the contextual lambda declaration return: a block
+                        // accepted as `() -> Any?` can still produce a primitive `Boolean`/`Int` here.
+                        box_prim_free(
                             self.cw,
                             &mut scratch,
-                            semantic_scalar_adapter(lam_semantic_tys[j], jt),
+                            semantic_scalar_adapter(body_value_ty, body_ret),
                         );
-                    } else if let Some(internal) = checkcast_internal(jt) {
-                        let ci = self.cw.class_ref(&internal);
-                        scratch.checkcast(ci);
                     }
-                    let slot = self.next_slot;
-                    self.next_slot += slot_words(jt);
-                    store(jt, slot, &mut scratch);
-                    param_slots[n_cap + j] = (slot, jt);
+                    scratch.link_local_branches(); // enclosing-loop transfers remain owned by the caller
+                    let lam_fr = scratch.resolved_frames(); // branchy predicate body → its own frames
+                    let Some(lam_insns) = crate::jvm::inline::disassemble_lambda(
+                        &scratch.bytes,
+                        &scratch.external_branches(),
+                    ) else {
+                        return false;
+                    };
+                    lam_max_locals = lam_max_locals.max(scratch.max_locals);
+                    lam_stack = lam_stack.max(scratch.max_stack);
+                    frames.push(lam_fr);
+                    bodies.push(crate::jvm::inline::LambdaBody {
+                        body: lam_insns,
+                        locals: lam_locals_declared,
+                        lines: scratch.line_marks().to_vec(),
+                        handlers: scratch.resolved_exceptions(),
+                    });
+                    let suspends = self.machine_next_ordinal > states_before;
+                    if !suspends || bodies.len() >= sites {
+                        break;
+                    }
                 }
-                let body_ret = self.emit_fn_body_inline(inline_body, &param_slots, &mut scratch);
-                if body_ret.is_jvm_scalar() {
-                    // The erased `invoke` result is `Object`, so reverse the same semantic adapter
-                    // choice after the inline body leaves its physical carrier on the stack. Use
-                    // the BODY's value type, not the contextual lambda declaration return: a block
-                    // accepted as `() -> Any?` can still produce a primitive `Boolean`/`Int` here.
-                    box_prim_free(
-                        self.cw,
-                        &mut scratch,
-                        semantic_scalar_adapter(body_value_ty, body_ret),
-                    );
-                }
-                scratch.link_local_branches(); // enclosing-loop transfers remain owned by the caller
-                let lam_fr = scratch.resolved_frames(); // branchy predicate body → its own frames
-                let Some(lam_insns) = crate::jvm::inline::disassemble_lambda(
-                    &scratch.bytes,
-                    &scratch.external_branches(),
-                ) else {
-                    return false;
-                };
-                (lam_insns, lam_fr)
+                (bodies, frames, lam_max_locals, lam_stack)
             } else {
                 continue;
             };
-            if code.max_locals < scratch.max_locals {
-                code.max_locals = scratch.max_locals;
+            if code.max_locals < lam_max_locals {
+                code.max_locals = lam_max_locals;
             }
-            self.next_slot = self.next_slot.max(scratch.max_locals);
-            lam_max_stack = lam_max_stack.max(scratch.max_stack);
-            lam_frames.push(lam_fr);
+            self.next_slot = self.next_slot.max(lam_max_locals);
+            lam_max_stack = lam_max_stack.max(lam_stack);
+            lam_frames.push(frames);
             lam_splices.push(crate::jvm::inline::LambdaSplice {
                 param_index: i,
-                body: lam_insns,
+                bodies,
             });
         }
         if lam_splices.is_empty() {
@@ -13122,15 +13189,20 @@ impl<'a> Emitter<'a> {
             self.cw,
             reified,
         ) else {
+            crate::trace_compiler!("splice", "probe declined ({descriptor})");
             return false;
         };
         // The splice records frames if it has a join, any lambda body has frames, OR the HOST body itself
         // records frames (a loop HOF's loop frames). All of these are bound relative to an empty operand
         // baseline (no caller operand prefix is threaded into them), so a non-empty baseline must bail —
         // `records_frame` makes a parent operand sequence spill earlier operands so we reach here at 0.
+        // Per lambda, per BODY, the frames that body records: a lambda argument always has a body, so
+        // the question is whether any body actually produced a frame — not whether one exists.
         let needs_frames = probe.join_required
             || !probe.frames.is_empty()
-            || lam_frames.iter().any(|f| !f.is_empty())
+            || lam_frames
+                .iter()
+                .any(|bodies| bodies.iter().any(|frames| !frames.is_empty()))
             || !probe.external_branches.is_empty();
         if needs_frames && code.stack_height() != 0 {
             crate::trace_compiler!(
@@ -13165,6 +13237,7 @@ impl<'a> Emitter<'a> {
             // The host's stack must cover the host body PLUS the deepest spliced lambda body (a safe upper
             // bound on the real peak) — else a deep lambda body overflows the host's operand stack.
             let ret_words = if probe.falls_through { ret_words } else { 0 };
+            let splice_start = code.bytes.len();
             code.splice_inline(
                 &probe.bytes,
                 &probe.external_branches,
@@ -13174,6 +13247,15 @@ impl<'a> Emitter<'a> {
                 ret_words,
                 probe.falls_through,
             );
+            self.record_spliced_lines(
+                &probe.lines,
+                owner,
+                body.source_file.as_deref(),
+                inline_only,
+                splice_start,
+                code,
+            );
+            self.record_spliced_locals(&probe.locals, inline_only, splice_start, code);
             return true;
         }
         // RE-splice at the real method offset (so any switch in the host/lambda body pads correctly), then
@@ -13188,6 +13270,7 @@ impl<'a> Emitter<'a> {
             self.cw,
             reified,
         ) else {
+            crate::trace_compiler!("splice", "probe declined ({descriptor})");
             return false;
         };
         let capture_frame_locals = capture_materializations
@@ -13205,7 +13288,7 @@ impl<'a> Emitter<'a> {
             code.add_frame_if_new(l, locals, st);
         }
         for site in &bs.lambda_sites {
-            let frames = &lam_frames[site.lambda_index];
+            let frames = &lam_frames[site.lambda_index][site.body_index];
             let host_ctx = &site.host_locals;
             // The lambda body's frames were compiled against an EMPTY operand base; rebase each onto the
             // host operand-stack prefix sitting below the lambda value (e.g. a `map` destination). Empty
@@ -13215,9 +13298,16 @@ impl<'a> Emitter<'a> {
                 .as_ref()
                 .map(|p| p.iter().map(vtype_to_verif).collect())
                 .unwrap_or_default();
+            // A body's frames are byte offsets into it as built, and it is spliced verbatim: the
+            // splice only ever cancels instructions off a body with NO frames, so there is nothing
+            // here to remap.
             for (fb, locals, stack) in frames {
                 let off = site.byte_start + fb;
-                let merged = self.merge_lambda_frame_locals(base, top_local, host_ctx, locals);
+                let lambda_base = spliced_frame
+                    .as_ref()
+                    .and_then(|frame| frame.lambda_bases.get(site.lambda_index).copied())
+                    .unwrap_or(top_local);
+                let merged = self.merge_lambda_frame_locals(base, lambda_base, host_ctx, locals);
                 let merged = self.overlay_frame_locals(merged, &capture_frame_locals);
                 let mut st = op_prefix.clone();
                 st.extend(stack.iter().cloned());
@@ -13243,6 +13333,15 @@ impl<'a> Emitter<'a> {
             ret_words,
             bs.falls_through,
         );
+        self.record_spliced_lines(
+            &bs.lines,
+            owner,
+            body.source_file.as_deref(),
+            inline_only,
+            0,
+            code,
+        );
+        self.record_spliced_locals(&bs.locals, inline_only, 0, code);
         if bs.join_required {
             let join = code.new_label();
             self.bind(join, code);
@@ -13276,6 +13375,380 @@ impl<'a> Emitter<'a> {
         collapse_locals(&slots)
     }
 
+    /// Record a spliced body's line marks, mapping the dependency's lines into output lines the
+    /// caller's source map gives meaning to.
+    ///
+    /// The dependency's own numbers cannot be written down as they are: two files would then claim
+    /// the same lines. The map reserves a fresh output range for this region and says where it came
+    /// from, which is what a debugger reads back. A spliced lambda's marks are the caller's own
+    /// source and pass through untouched.
+    fn record_spliced_lines(
+        &mut self,
+        lines: &[(u16, u16, bool)],
+        owner: &str,
+        source_file: Option<&str>,
+        inline_only: bool,
+        shift: usize,
+        code: &mut CodeBuilder,
+    ) {
+        if lines.is_empty() {
+            return;
+        }
+        // An `@InlineOnly` body is meant to be invisible: the reference compiler gives it no line
+        // entries and no source map, so a stack trace never names it.
+        let source_file = (!inline_only).then_some(source_file).flatten();
+        let dependency = lines.iter().filter(|(_, _, inlined)| *inlined);
+        let first = dependency.clone().map(|&(_, line, _)| line).min();
+        let last = dependency.map(|&(_, line, _)| line).max();
+        let call_line = code.current_line().unwrap_or(1);
+        // The highest line the class's own code can claim. `source_line_count` already counts the
+        // position past the last line, where a synthesized mark (a closing brace's implicit return)
+        // is recorded.
+        let claimable = u16::try_from(self.ir.source_line_count)
+            .unwrap_or(u16::MAX)
+            .max(1);
+        let offset = match (source_file, first, last) {
+            (Some(source_file), Some(first), Some(last)) => self
+                .cw
+                .source_map_for_inlining(claimable)
+                .and_then(|map| map.inline_region(source_file, owner, first, last, call_line)),
+            // Without the dependency's file name there is nothing to map its lines against, so its
+            // marks are dropped rather than written as lines of the caller's own file.
+            _ => None,
+        };
+        for &(at, line, inlined) in lines {
+            let Ok(at) = u16::try_from(at as usize + shift) else {
+                continue;
+            };
+            if !inlined {
+                code.add_line_mark_at(at, line);
+                continue;
+            }
+            let Some(offset) = offset else {
+                continue;
+            };
+            let Ok(output) = u16::try_from(i32::from(line) + offset) else {
+                continue;
+            };
+            code.add_line_mark_at(at, output);
+        }
+    }
+
+    /// The machine's entry: take or make the continuation, read what a resume left in it, and
+    /// dispatch to the state it stopped in.
+    ///
+    /// Returns the label the body starts at, one label per suspension for the dispatch to re-enter,
+    /// and the label of the state that cannot happen.
+    fn emit_machine_prologue(
+        &mut self,
+        completion: u16,
+        code: &mut CodeBuilder,
+    ) -> Option<(Label, Vec<Label>, Label)> {
+        let machine = self.machine.clone()?;
+        let internal = machine.internal.clone();
+        let class = self.cw.class_ref(&internal);
+        let label_field = self.cw.fieldref(&internal, "label", "I");
+        let result_field = self.cw.fieldref(&internal, "result", "Ljava/lang/Object;");
+        let fresh = code.new_label();
+        let have = code.new_label();
+        let body = code.new_label();
+        let default = code.new_label();
+        let resumes: Vec<Label> = (0..machine.plan.suspensions.len())
+            .map(|_| code.new_label())
+            .collect();
+
+        // A continuation of our own type whose label carries the resume bit is this machine being
+        // re-entered; anything else is a fresh call.
+        code.aload(completion);
+        code.instance_of(class);
+        code.ifeq(fresh);
+        code.aload(completion);
+        code.checkcast(class);
+        code.astore(machine.slots.continuation);
+        code.aload(machine.slots.continuation);
+        code.getfield(label_field, 1);
+        code.push_int(i32::MIN, self.cw);
+        code.iand();
+        code.ifeq(fresh);
+        code.aload(machine.slots.continuation);
+        code.dup();
+        code.getfield(label_field, 1);
+        code.push_int(i32::MIN, self.cw);
+        code.isub();
+        code.putfield(label_field, 1);
+        code.goto(have);
+
+        // The machine's own locals are not assigned yet on the way in: the entry branch happens
+        // before any of them is stored, and a frame claiming otherwise describes a frame the
+        // incoming edge cannot produce.
+        let entry = self.verif_locals_upto(self.next_slot);
+        let unset = |locals: &[VerifType], slots: &[u16]| -> Vec<VerifType> {
+            let mut expanded = expand_collapsed_locals(locals);
+            for &slot in slots {
+                if let Some(at) = expanded.get_mut(slot as usize) {
+                    *at = VerifType::Top;
+                }
+            }
+            collapse_locals(&expanded)
+        };
+        let before_any = unset(
+            &entry,
+            &[
+                machine.slots.result,
+                machine.slots.continuation,
+                machine.slots.suspended,
+            ],
+        );
+        let after_continuation = unset(&entry, &[machine.slots.result, machine.slots.suspended]);
+        code.bind(fresh);
+        code.add_frame_if_new(fresh, before_any.clone(), Vec::new());
+        code.new_obj(class);
+        code.dup();
+        let constructor_descriptor = match &machine.receiver {
+            Some(owner) => format!("(L{owner};Lkotlin/coroutines/Continuation;)V"),
+            None => "(Lkotlin/coroutines/Continuation;)V".to_string(),
+        };
+        let mut words = 2;
+        if machine.receiver.is_some() {
+            code.aload(0);
+            words += 1;
+        }
+        code.aload(completion);
+        let constructor = self
+            .cw
+            .methodref(&internal, "<init>", &constructor_descriptor);
+        code.invokespecial(constructor, words, 0);
+        code.astore(machine.slots.continuation);
+
+        code.bind(have);
+        code.add_frame_if_new(have, after_continuation, Vec::new());
+        code.aload(machine.slots.continuation);
+        code.getfield(result_field, 1);
+        code.astore(machine.slots.result);
+        let suspended = self.cw.methodref(
+            "kotlin/coroutines/intrinsics/IntrinsicsKt",
+            "getCOROUTINE_SUSPENDED",
+            "()Ljava/lang/Object;",
+        );
+        code.invokestatic(suspended, 0, 1);
+        code.astore(machine.slots.suspended);
+        code.aload(machine.slots.continuation);
+        code.getfield(label_field, 1);
+        let mut targets = Vec::with_capacity(resumes.len() + 1);
+        targets.push(body);
+        targets.extend(resumes.iter().copied());
+        code.tableswitch(0, targets.len() as i32 - 1, default, &targets);
+
+        self.machine_entry_locals = Some(entry.clone());
+        let throw_on_failure =
+            self.cw
+                .methodref("kotlin/ResultKt", "throwOnFailure", "(Ljava/lang/Object;)V");
+
+        // A state's restores are emitted AFTER the body, in `emit_machine_states`: they must not
+        // allocate or touch a slot before the body is laid out, because the plan being realized
+        // here was read from a first emission that had none of this code in it.
+        let joins: Vec<Label> = (0..machine.plan.suspensions.len())
+            .map(|_| code.new_label())
+            .collect();
+        self.machine_joins = joins;
+        let resume_points: Vec<Label> = (0..machine.plan.suspensions.len())
+            .map(|_| code.new_label())
+            .collect();
+        self.machine_resumes = resume_points;
+
+        code.bind(body);
+        code.add_frame_if_new(body, entry, Vec::new());
+        code.aload(machine.slots.result);
+        code.invokestatic(throw_on_failure, 1, 0);
+        code.set_needs_stackmap();
+        Some((body, resumes, default))
+    }
+
+    /// The dispatch's states, emitted AFTER the body they re-enter.
+    ///
+    /// Each restores its own spills and jumps to the resume point inside the body, so nothing the
+    /// machine adds sits between the `try` ranges the body declares and the locals they describe: a
+    /// handler's frame claims the body's locals, and an edge from a restore that had not run yet
+    /// cannot produce them. Placing the block after the body also keeps the slot allocation
+    /// identical to the first emission, which is where the plan was read.
+    ///
+    /// A failed resumption is NOT rethrown here: the block is outside every `try` range the body
+    /// declares, so a `catch` around the suspension would never see the callee's exception. The
+    /// resume point inside the body does that (see [`Self::emit_machine_check`]).
+    fn emit_machine_states(&mut self, states: &[Label], code: &mut CodeBuilder) {
+        let Some(machine) = self.machine.clone() else {
+            return;
+        };
+        let entry = self.machine_entry_locals.clone().unwrap_or_default();
+        for (ordinal, suspension) in machine.plan.suspensions.iter().enumerate() {
+            let (Some(&state), Some(&resume)) =
+                (states.get(ordinal), self.machine_resumes.get(ordinal))
+            else {
+                continue;
+            };
+            code.bind_external_target(state);
+            code.set_stack_height(0);
+            code.add_frame_if_new(state, entry.clone(), Vec::new());
+            for (slot, ty, field, descriptor) in coroutine_machine::suspension_fields(suspension) {
+                code.aload(machine.slots.continuation);
+                let reference = self.cw.fieldref(&machine.internal, &field, descriptor);
+                let jvm = ir_ty_to_jvm(&ty);
+                code.getfield(reference, slot_words(jvm) as i32);
+                // Only a reference spill widens on the way in — it is stored in an `Object` field,
+                // so the read has to be narrowed back. A primitive field already has the slot's own
+                // type, and casting an `int` is not something the verifier will accept.
+                if descriptor == "Ljava/lang/Object;" {
+                    if let Some(internal) = checkcast_internal(jvm) {
+                        let class = self.cw.class_ref(&internal);
+                        code.checkcast(class);
+                    }
+                }
+                store(jvm, slot, code);
+            }
+            // A slot the verifier held as `null` at the suspension is a constant, not a field.
+            for slot in coroutine_machine::constant_null_slots(suspension) {
+                code.aconst_null();
+                code.astore(slot);
+            }
+            code.goto(resume);
+        }
+    }
+
+    /// The state a resume cannot legally be in: re-entering a machine that never suspended.
+    fn emit_machine_default(&mut self, default: Label, code: &mut CodeBuilder) {
+        let locals = self.verif_locals_upto(self.next_slot);
+        code.bind(default);
+        code.add_frame_if_new(default, locals, Vec::new());
+        let class = self.cw.class_ref("java/lang/IllegalStateException");
+        code.new_obj(class);
+        code.dup();
+        code.push_string("call to 'resume' before 'invoke' with coroutine", self.cw);
+        let constructor = self.cw.methodref(
+            "java/lang/IllegalStateException",
+            "<init>",
+            "(Ljava/lang/String;)V",
+        );
+        code.invokespecial(constructor, 2, 0);
+        code.athrow();
+    }
+
+    /// Spill the locals that must survive suspension `ordinal`, and record which state to resume in.
+    ///
+    /// Emitted BEFORE the call's operands, which is also where the dependency's own stack prefix
+    /// still sits: this block empties that prefix into locals, so the operands are pushed onto a
+    /// clean stack and the call's own emission needs to know nothing about any of it.
+    fn emit_machine_spills(&mut self, ordinal: usize, code: &mut CodeBuilder) {
+        let Some(machine) = self.machine.clone() else {
+            return;
+        };
+        let Some(suspension) = machine.plan.suspensions.get(ordinal) else {
+            return;
+        };
+        // What the dependency left on the stack under this call goes into locals first — top value
+        // into the last slot — so the call's own operands are pushed onto an empty stack and nothing
+        // is lost to the `areturn` a suspension leaves through.
+        for &(slot, ty) in suspension.prefix.iter().rev() {
+            store(ir_ty_to_jvm(&ty), slot, code);
+        }
+        for (slot, ty, field, descriptor) in coroutine_machine::suspension_fields(suspension) {
+            code.aload(machine.slots.continuation);
+            load(ir_ty_to_jvm(&ty), slot, code);
+            let reference = self.cw.fieldref(&machine.internal, &field, descriptor);
+            code.putfield(reference, slot_words(ir_ty_to_jvm(&ty)) as i32);
+        }
+        code.aload(machine.slots.continuation);
+        code.push_int(ordinal as i32 + 1, self.cw);
+        let label = self.cw.fieldref(&machine.internal, "label", "I");
+        code.putfield(label, 1);
+    }
+
+    /// The `COROUTINE_SUSPENDED` check that follows a suspension's call, and the state the dispatch
+    /// re-enters at.
+    ///
+    /// The call's result is on the stack. If the callee suspended, this frame returns that sentinel
+    /// and the machine is re-entered later at the marked position, which restores the spilled locals
+    /// and pushes the resumed value instead. Both paths join with one value on the stack, so
+    /// whatever consumes the call cannot tell which one ran.
+    fn emit_machine_check(&mut self, ordinal: usize, code: &mut CodeBuilder) {
+        let Some(machine) = self.machine.clone() else {
+            return;
+        };
+        let Some(suspension) = machine.plan.suspensions.get(ordinal) else {
+            return;
+        };
+        let join = code.new_label();
+        code.dup();
+        code.aload(machine.slots.suspended);
+        code.if_acmpne(join);
+        code.aload(machine.slots.suspended);
+        code.areturn();
+        // The resume point: where the dispatch's restore block re-enters, with the spills restored
+        // and nothing on the stack. A resumption that failed is rethrown HERE, inside the body —
+        // inside any `try` the body wraps around the suspension, which is the only place a `catch`
+        // there can see the callee's exception — and a successful one pushes its value and falls
+        // into the join. kotlinc lays its state out at this same position, for the same reason.
+        //
+        // The `areturn` above ended the stream and nothing in this builder branches here, so the
+        // position is declared an external arrival. The marker names it for the enclosing method,
+        // which owns both the label the restore block jumps to and the frame — one recorded in this
+        // builder would be merged with the host's locals when the body is relocated, claiming locals
+        // the dispatch cannot produce.
+        let resume = code.new_label();
+        code.bind_external_target(resume);
+        code.set_stack_height(0);
+        if let Ok(marker) = u16::try_from(ordinal) {
+            code.coroutine_marker(crate::jvm::classfile::CoroutineMarker::Resume, marker);
+        }
+        let throw_on_failure =
+            self.cw
+                .methodref("kotlin/ResultKt", "throwOnFailure", "(Ljava/lang/Object;)V");
+        code.aload(machine.slots.result);
+        code.invokestatic(throw_on_failure, 1, 0);
+        code.aload(machine.slots.result);
+        // Where the two paths meet: the call that did not suspend, and the resume point above, both
+        // with the call's result on the stack.
+        code.bind(join);
+        if let Ok(marker) = u16::try_from(ordinal) {
+            code.coroutine_marker(crate::jvm::classfile::CoroutineMarker::Join, marker);
+        }
+        // Both paths meet here holding only the call's result, so the dependency's own values go
+        // back on the stack AFTER the join — once, for the two of them. The code the splice wrapped
+        // around this one then finds exactly what it pushed, with the result on top.
+        if !suspension.prefix.is_empty() {
+            let result = machine.slots.result;
+            code.astore(result);
+            for &(slot, ty) in &suspension.prefix {
+                load(ir_ty_to_jvm(&ty), slot, code);
+            }
+            code.aload(result);
+        }
+        code.set_needs_stackmap();
+    }
+
+    /// Describe a spliced body's own locals in the caller's debug table.
+    ///
+    /// They are real locals of the method that now contains them; the reference compiler names every
+    /// one. `shift` is where the splice landed for a body laid out at offset 0 — a branchless splice
+    /// is appended wherever the caller happens to be — and zero for one already laid out in place.
+    fn record_spliced_locals(
+        &mut self,
+        locals: &[(u16, u16, u16, String, String)],
+        inline_only: bool,
+        shift: usize,
+        code: &mut CodeBuilder,
+    ) {
+        // An `@InlineOnly` body contributes no debug locals either, for the same reason.
+        if !self.record_locals || inline_only {
+            return;
+        }
+        for (start, length, slot, name, descriptor) in locals {
+            let Ok(start) = u16::try_from(*start as usize + shift) else {
+                continue;
+            };
+            code.add_local_entry(start, Some(*length), *slot, name, descriptor);
+        }
+    }
+
     /// Full locals for a frame INSIDE a spliced lambda body: the caller's locals (`0..base`), then the
     /// HOST's live body locals at the invoke (`host_ctx`, slots `base..` — for a loop host the loop
     /// iterator/accumulator, not just params), then the lambda's own slots (`top_local..`) from its
@@ -13283,22 +13756,24 @@ impl<'a> Emitter<'a> {
     fn merge_lambda_frame_locals(
         &mut self,
         base: u16,
-        top_local: u16,
+        lambda_base: u16,
         host_ctx: &[crate::jvm::inline::VType],
         lam_locals: &[VerifType],
     ) -> Vec<VerifType> {
         let mut slots = self.verif_slots_upto(base); // 0..base caller locals (slot-indexed)
-                                                     // The host's live locals at `base..` (slot-indexed), then pad to `top_local` with `Top`.
+                                                     // The host's live locals at `base..`, then pad to where the lambda's own begin.
         let host_collapsed: Vec<VerifType> = host_ctx.iter().map(vtype_to_verif).collect();
         slots.extend(expand_collapsed_locals(&host_collapsed));
-        slots.truncate(top_local as usize);
-        while slots.len() < top_local as usize {
+        slots.truncate(lambda_base as usize);
+        while slots.len() < lambda_base as usize {
             slots.push(VerifType::Top);
         }
-        // The lambda's own slots (`top_local..`): expand the scratch frame, take from `top_local`.
+        // The lambda's own slots. They begin where the splice placed them — which is at the first
+        // slot the host no longer needs, NOT above the host's whole frame — so a frame that took
+        // them from the host's extent would leave the lambda's own parameters undescribed.
         for s in expand_collapsed_locals(lam_locals)
             .into_iter()
-            .skip(top_local as usize)
+            .skip(lambda_base as usize)
         {
             slots.push(s);
         }
@@ -13378,6 +13853,7 @@ impl<'a> Emitter<'a> {
             name,
             descriptor,
             splice_desc,
+            inline_only,
         } = target;
         crate::trace_compiler!(
             "splice",
@@ -13444,6 +13920,9 @@ impl<'a> Emitter<'a> {
             if body_invokes_lambda {
                 return self.try_inline_unified(
                     call_expression,
+                    owner,
+                    name,
+                    inline_only,
                     splice_desc,
                     args,
                     &body,
@@ -13495,6 +13974,7 @@ impl<'a> Emitter<'a> {
                 return false;
             }
             let ret_words = if probe.falls_through { ret_words } else { 0 };
+            let splice_start = code.bytes.len();
             code.splice_inline(
                 &probe.bytes,
                 &probe.external_branches,
@@ -13504,6 +13984,15 @@ impl<'a> Emitter<'a> {
                 ret_words,
                 probe.falls_through,
             );
+            self.record_spliced_lines(
+                &probe.lines,
+                owner,
+                body.source_file.as_deref(),
+                inline_only,
+                splice_start,
+                code,
+            );
+            self.record_spliced_locals(&probe.locals, inline_only, splice_start, code);
             return true;
         }
         // Branchy body: needs an empty operand-stack baseline (the relocated frames carry no stack
@@ -13528,6 +14017,7 @@ impl<'a> Emitter<'a> {
             self.cw,
             reified,
         ) else {
+            crate::trace_compiler!("splice", "probe declined ({descriptor})");
             return false;
         };
         let prefix = self.verif_locals_upto(base);
@@ -13551,6 +14041,15 @@ impl<'a> Emitter<'a> {
             ret_words,
             bs.falls_through,
         );
+        self.record_spliced_lines(
+            &bs.lines,
+            owner,
+            body.source_file.as_deref(),
+            inline_only,
+            0,
+            code,
+        );
+        self.record_spliced_locals(&bs.locals, inline_only, 0, code);
         // Join frame: the redirected returns land at the continuation right after the spliced body.
         let join = code.new_label();
         self.bind(join, code);
@@ -13922,7 +14421,9 @@ impl<'a> Emitter<'a> {
             );
             return;
         }
+        let suspension = self.machine_before(e, code);
         self.emit_value_node(e, node, code);
+        self.machine_after(suspension, code);
         // A successfully spliced bottom-typed expression has already transferred control (for
         // example, an inline lambda's non-local `return`). It leaves no value to discard. The
         // semantic type is retained on the IR expression even when the selected callable's physical
@@ -13935,8 +14436,49 @@ impl<'a> Emitter<'a> {
 
     fn emit_value(&mut self, e: u32, code: &mut CodeBuilder) {
         debug_lines::mark_expression_start(self.ir, e, code);
+        // A suspension whose machine emission owns: mark where it landed. The splice decides that
+        // position, so an offset recorded before it would be worthless, whereas an instruction
+        // travels with the code. Every marker is erased once its answers are read.
+        let suspension = self.machine_before(e, code);
         let node = self.ir.expr(e).clone();
         self.emit_value_node(e, &node, code);
+        self.machine_after(suspension, code);
+    }
+
+    /// Open a suspension this emission's machine owns, if `e` is one.
+    ///
+    /// Both the value and the discarding path go through this: a suspension whose result is thrown
+    /// away — `api.stop(id)` as a statement — is a state of the machine like any other, and one
+    /// that never spilled would resume into a frame the dispatch cannot produce.
+    fn machine_before(&mut self, e: u32, code: &mut CodeBuilder) -> Option<usize> {
+        if !self.machine_suspensions.contains(&e) {
+            return None;
+        }
+        let ordinal = self.machine_next_ordinal;
+        self.machine_next_ordinal += 1;
+        match self.machine.is_some() {
+            // Building the machine: spill first, then the call, then the check.
+            true => self.emit_machine_spills(ordinal, code),
+            // Discovering the frame: mark where the splice put this suspension. The discovery pass
+            // reads everything else — the locals held here and what is on the stack under the
+            // call — off the finished bytecode.
+            false => {
+                if let Ok(marker) = u16::try_from(ordinal) {
+                    code.coroutine_marker(
+                        crate::jvm::classfile::CoroutineMarker::Suspension,
+                        marker,
+                    );
+                }
+            }
+        }
+        Some(ordinal)
+    }
+
+    /// Close a suspension opened by [`Self::machine_before`].
+    fn machine_after(&mut self, suspension: Option<usize>, code: &mut CodeBuilder) {
+        if let (Some(ordinal), true) = (suspension, self.machine.is_some()) {
+            self.emit_machine_check(ordinal, code);
+        }
     }
 
     /// Emit `e` and then narrow it to the CONSUMPTION type `expected` — the `checkcast` kotlinc inserts
@@ -15361,14 +15903,23 @@ impl<'a> Emitter<'a> {
                 // failed to thread a continuation into — an unmodeled shape). Never emit the
                 // unverifiable call: the operand contract refuses, this arm bails the file (the gate
                 // SKIPS it) and pushes a typed zero so the dead code that follows still assembles.
+                let desc = method_descriptor(&param_tys, ret);
                 if let Err(mismatch) = self.emit_descriptor_virtual_operands(
-                    e, &owner, *receiver, &call_args, &param_tys, code,
+                    e,
+                    crate::jvm::ir_emit::call_operands::VirtualCallTarget {
+                        owner: &owner,
+                        name: &name,
+                        descriptor: &desc,
+                    },
+                    *receiver,
+                    &call_args,
+                    &param_tys,
+                    code,
                 ) {
                     self.bail_descriptor_arity(&mismatch, ret, code);
                     return;
                 }
                 let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
-                let desc = method_descriptor(&param_tys, ret);
                 crate::trace_compiler!(
                     "resolve",
                     "emit MethodCall {}.{} fid={fid} private={} iface={is_iface}",
@@ -15502,8 +16053,17 @@ impl<'a> Emitter<'a> {
                     let argument_words: i32 =
                         param_tys.iter().map(|ty| slot_words(*ty) as i32).sum();
                     let descriptor = method_descriptor(&param_tys, ret);
+                    let source_owner_is_interface = self.ir.classes.iter().any(|candidate| {
+                        candidate.is_interface && candidate.fq_name_id() == *owner
+                    });
                     let owner = owner.render();
-                    let method = if self.bodies.owner_is_interface(&owner) {
+                    // `owner_is_interface` answers from the CLASSPATH; a static declared on an
+                    // interface being compiled right now is not there. An `invokestatic` naming an
+                    // interface must use an InterfaceMethodref, so the file's own classes answer
+                    // too.
+                    let owner_is_interface =
+                        source_owner_is_interface || self.bodies.owner_is_interface(&owner);
+                    let method = if owner_is_interface {
                         self.cw.interface_methodref(&owner, &f.name, &descriptor)
                     } else {
                         self.cw.methodref(&owner, &f.name, &descriptor)
@@ -15887,6 +16447,7 @@ impl<'a> Emitter<'a> {
                                 name: &name,
                                 descriptor: &descriptor,
                                 splice_desc: &splice_desc,
+                                inline_only: inline.must_inline(),
                             };
                             self.try_inline_static_as(e, target, &all, code, true, &reified)
                         } else {
@@ -15900,6 +16461,7 @@ impl<'a> Emitter<'a> {
                                 name: &name,
                                 descriptor: &descriptor,
                                 splice_desc: &descriptor,
+                                inline_only: inline.must_inline(),
                             };
                             self.try_inline_static_as(
                                 e,
@@ -16168,9 +16730,14 @@ impl<'a> Emitter<'a> {
                         self.value_ty(recv),
                     );
                     let ret = ty_from_descriptor_ret(&descriptor);
+                    let jvm_name = mapped_builtin_virtual_name(&owner, &name, &descriptor);
                     if let Err(mismatch) = self.emit_descriptor_virtual_operands(
                         e,
-                        &owner,
+                        crate::jvm::ir_emit::call_operands::VirtualCallTarget {
+                            owner: &owner,
+                            name: jvm_name,
+                            descriptor: &descriptor,
+                        },
                         recv,
                         &args,
                         &physical_params,
@@ -16180,7 +16747,6 @@ impl<'a> Emitter<'a> {
                         return;
                     }
                     let aw: i32 = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
-                    let jvm_name = mapped_builtin_virtual_name(&owner, &name, &descriptor);
                     if interface {
                         let m = self.cw.interface_methodref(&owner, jvm_name, &descriptor);
                         debug_lines::mark_expression_start(self.ir, e, code);
@@ -16208,7 +16774,11 @@ impl<'a> Emitter<'a> {
                     let ret = ty_from_descriptor_ret(&descriptor);
                     if let Err(mismatch) = self.emit_descriptor_virtual_operands(
                         e,
-                        &owner,
+                        crate::jvm::ir_emit::call_operands::VirtualCallTarget {
+                            owner: &owner,
+                            name: &name,
+                            descriptor: &descriptor,
+                        },
                         recv,
                         &args,
                         &physical_params,
@@ -16429,15 +16999,14 @@ impl<'a> Emitter<'a> {
                             );
                         } else if at.is_jvm_scalar() && target.is_jvm_scalar() && at != target {
                             emit_num_conv(at, target, code);
-                        } else if at.is_reference()
-                            && target.is_reference()
-                            && type_descriptor(at) != type_descriptor(target)
-                        {
-                            let internal = crate::jvm::names::instanceof_internal_name(target);
-                            if internal != "java/lang/Object" {
-                                let class = self.cw.class_ref(&internal);
-                                code.checkcast(class);
-                            }
+                        } else {
+                            implicit_reference_coercion::emit(
+                                self.ir.expr(*arg),
+                                at,
+                                target,
+                                self.cw,
+                                code,
+                            );
                         }
                     }
                     IrTypeOp::SafeCast => {}
@@ -16953,10 +17522,15 @@ impl<'a> Emitter<'a> {
                 code.getstatic(f, 1);
             }
             IrExpr::CurrentContinuation => {
-                // The CPS pass (`jvm/suspend.rs`) rewrites every `CurrentContinuation` to a `GetValue` of
-                // the continuation slot before emit; reaching here means it was emitted outside a suspend
-                // function, which the front end forbids.
-                unreachable!("CurrentContinuation must be resolved by the CPS pass before emit")
+                // The CPS pass rewrites this to a `GetValue` of the continuation slot for every
+                // function whose machine it owns. It leaves the node in place for a function whose
+                // machine EMISSION owns — a suspension inside a body this emitter splices — because
+                // which slot holds the continuation is then an emission decision: the `$completion`
+                // parameter while discovering the frame, the machine's own local while building it.
+                let Some(slot) = self.continuation_slot else {
+                    unreachable!("CurrentContinuation outside a suspend function reaches emit")
+                };
+                code.aload(slot);
             }
             IrExpr::NotNullAssert { operand, message } => {
                 self.emit_value(*operand, code);
@@ -18982,6 +19556,8 @@ impl<'a> Emitter<'a> {
             !self.slots.values().any(|(held, _)| *held == slot),
             "backend temporary at slot {slot} aliases a semantic local"
         );
+        // A temporary released before the plan is read is invisible to it otherwise, and a spill
+        // set cannot skip a slot the frames still describe.
         self.temporaries.lease(slot, ty)
     }
 
@@ -19960,6 +20536,21 @@ mod fail_soft_tests {
         facade: &str,
         run: &EmitRun,
     ) -> Option<Vec<(String, Vec<u8>)>> {
+        emit_for_test_with_machines(
+            ir,
+            facade,
+            run,
+            &crate::jvm::suspend::EmitTimeMachines::default(),
+        )
+    }
+
+    /// [`emit_for_test`] with the emit-time coroutine machines a suspend pass would have recorded.
+    pub(super) fn emit_for_test_with_machines(
+        ir: &IrFile,
+        facade: &str,
+        run: &EmitRun,
+        emit_time_machines: &crate::jvm::suspend::EmitTimeMachines,
+    ) -> Option<Vec<(String, Vec<u8>)>> {
         let continuations = crate::jvm::suspend::ContinuationMetadataMap::default();
         let property_realizations =
             crate::jvm::property_realizations::PropertyRealizations::default();
@@ -19978,6 +20569,7 @@ mod fail_soft_tests {
                     facade: None,
                     continuations: &continuations,
                     bridge_returns: &bridge_returns,
+                    emit_time_machines,
                 },
                 signature_symbols: &NoClassifiers,
                 property_realizations: &property_realizations,
@@ -20052,11 +20644,13 @@ mod fail_soft_tests {
         let mut outer = crate::plugins::synthetic_class("demo/Outer");
         outer.is_source_declared = true;
         let outer_id = ir.add_class(outer);
+        ir.record_class_source_order(outer_id, 0);
 
         // A digit is valid in a source identifier; the former generated-name heuristic dropped it.
         let mut declared = crate::plugins::synthetic_class("demo/Outer$Node2");
         declared.is_source_declared = true;
-        ir.add_class(declared);
+        let declared_id = ir.add_class(declared);
+        ir.record_class_source_order(declared_id, 1);
 
         // Conversely, looking nested is not sufficient: backend-generated implementation classes
         // are not declarations in Kotlin metadata.
@@ -20153,5 +20747,47 @@ mod fail_soft_tests {
             param_checks: vec![],
         });
         assert!(emit_for_test(&ir, "TestKt", &EmitRun::default()).is_none());
+    }
+
+    // A machine recorded for a function with no `$completion` parameter cannot resolve the
+    // continuation it is re-entered on. Arming it anyway and letting the prologue decline emitted a
+    // body full of coroutine markers (`impdep1`, reserved by JVMS §6.2) over a continuation slot
+    // nothing assigned, and reached NO erasure pass: both are inside the branch that runs only when
+    // the prologue succeeded. The decision belongs before the machine is armed.
+    #[test]
+    fn a_machine_that_cannot_resolve_its_continuation_declines_before_it_is_armed() {
+        let mut ir = IrFile::default();
+        let suspension = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
+        let function = ir.add_fun(IrFunction {
+            name: "box".into(),
+            params: Vec::new(),
+            ret: Ty::Unit,
+            body: Some(suspension),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let mut machines = crate::jvm::suspend::EmitTimeMachines::default();
+        machines.record(
+            function,
+            vec![crate::jvm::suspend::cps::SplicedSuspension { call: suspension }],
+        );
+        // The EMITTING pass: a plan is already in hand, so the machine is what this emission builds.
+        let run = EmitRun::default();
+        run.record_machine_plan(
+            function,
+            coroutine_machine::MachinePlan {
+                suspensions: vec![coroutine_machine::SuspensionPlan::default()],
+                body_locals: 0,
+            },
+        );
+        assert!(
+            emit_for_test_with_machines(&ir, "TestKt", &run, &machines).is_none(),
+            "a machine that cannot be built declines the compile instead of emitting half of one",
+        );
+        assert_eq!(
+            run.inline_bail().as_deref(),
+            Some("a coroutine machine with no continuation parameter"),
+        );
     }
 }

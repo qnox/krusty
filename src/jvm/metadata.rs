@@ -2196,11 +2196,14 @@ fn metadata_class_kind(flags: u64) -> TypeKind {
     }
 }
 
+/// What [`decode_class_signature`] reads off a Class proto: the class's own type-parameter NAMES,
+/// each one's declared BOUNDS (one inner `Vec` per parameter, in the same order), and the direct
+/// applied SUPERTYPES.
+type ClassSignature = (Vec<String>, Vec<Vec<Ty>>, Vec<Ty>);
+
 /// Decode a Kotlin class's own type parameters and direct applied supertypes from the Class proto.
 /// Both inline `supertype` (field 6) and table-backed `supertype_id` (field 2) are valid encodings.
-fn decode_class_signature(
-    ctx: &MetaCtx<'_>,
-) -> MetadataResult<(Vec<String>, Vec<Vec<Ty>>, Vec<Ty>)> {
+fn decode_class_signature(ctx: &MetaCtx<'_>) -> MetadataResult<ClassSignature> {
     let parsed_params = type_param_bodies(ctx.msg, CLASS_TYPE_PARAMETER_FIELD)
         .into_iter()
         .map(parse_type_param)

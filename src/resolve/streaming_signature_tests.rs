@@ -5401,6 +5401,104 @@ fn stable_constructor_annotations_keep_their_lexically_bound_identity() {
 }
 
 #[test]
+fn stable_callable_and_property_annotations_keep_their_lexically_bound_identity() {
+    let source = r#"
+        package sample
+
+        annotation class Marker
+
+        @Marker fun topFunction() {}
+        @Marker val topProperty = 1
+        @Marker val String.topExtension: Int get() = length
+
+        class Host {
+            annotation class Marker
+
+            class Subject(@Marker val primary: Int) {
+                @Marker fun memberFunction() {}
+                @Marker val memberProperty = 1
+                @Marker val String.memberExtension: Int get() = length
+            }
+        }
+    "#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("DeclarationAnnotationIdentity")];
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("declaration annotations must finalize in Pass 1")
+        .module
+        .index();
+    let subject = (0..index.declaration_count())
+        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+        .find(|declaration| {
+            index
+                .classifier_header(*declaration)
+                .is_some_and(|classifier| {
+                    classifier.classifier == crate::types::type_name("sample/Host$Subject")
+                })
+        })
+        .expect("stable nested Subject classifier");
+    let top_level_marker = crate::types::type_name("sample/Marker");
+    let nested_marker = crate::types::type_name("sample/Host$Marker");
+    let assert_annotation = |name: &str,
+                             owner: Option<crate::fir::DeclarationId>,
+                             kind: crate::fir::DeclarationKind,
+                             expected: crate::types::TypeName| {
+        let declaration = (0..index.declaration_count())
+            .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+            .find(|declaration| {
+                index
+                    .declaration_header(*declaration)
+                    .is_some_and(|header| {
+                        header.owner == owner
+                            && header.kind == kind
+                            && index.declaration_name(*declaration) == Some(name)
+                    })
+            })
+            .unwrap_or_else(|| panic!("stable {kind:?} declaration {name}"));
+        assert_eq!(index.declaration_annotations(declaration), &[expected]);
+    };
+
+    assert_annotation(
+        "topFunction",
+        None,
+        crate::fir::DeclarationKind::Function,
+        top_level_marker,
+    );
+    for name in ["topProperty", "topExtension"] {
+        assert_annotation(
+            name,
+            None,
+            crate::fir::DeclarationKind::Property,
+            top_level_marker,
+        );
+    }
+    assert_annotation(
+        "memberFunction",
+        Some(subject),
+        crate::fir::DeclarationKind::Function,
+        nested_marker,
+    );
+    for name in ["primary", "memberProperty", "memberExtension"] {
+        assert_annotation(
+            name,
+            Some(subject),
+            crate::fir::DeclarationKind::Property,
+            nested_marker,
+        );
+    }
+}
+
+#[test]
 fn anonymous_subclass_in_if_condition_publishes_its_local_parent() {
     assert_streaming_frontend(
         r#"fun box(): String {

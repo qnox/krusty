@@ -239,8 +239,10 @@ fn synthesize_to_string(
         None if has_method(ir, class, "toString", 0) => return Ok(()),
         None => return Err(FirFileLoweringFailure::MissingCallable(declaration)),
     };
-    let internal = ir.classes[class as usize].fq_name();
-    let simple = internal.rsplit(['/', '$']).next().unwrap_or(&internal);
+    // The rendered internal name spells the package separator and the nesting separator
+    // differently, so the simple name is read through the identity tree rather than by splitting
+    // the rendering. The JVM pool seeding builds the twin recipe from the same operation.
+    let simple = ir.classes[class as usize].fq_name_id().nested_segment_ref();
     let singleton = ir.classes[class as usize].is_singleton();
     if singleton {
         let value = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(
@@ -324,7 +326,20 @@ fn synthesize_hash_code(
         .collect::<Vec<_>>();
     let mut statements = Vec::new();
     let value = match hashes.as_slice() {
-        [] => ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0))),
+        // A `data object` has no properties to fold, and kotlinc does not return 0 for it — every
+        // data object would then hash alike. It returns the hash of the object's SOURCE qualified
+        // name (`Origin.Owned`, dots for nesting) as a compile-time constant, which distinguishes
+        // two singletons without giving either identity-dependent behaviour.
+        [] => {
+            let source_name = ir.class_source_qualified_name(class).ok_or(
+                FirFileLoweringFailure::MissingClassSourceQualifiedName(declaration),
+            )?;
+            let source_name = source_name.as_str().ok_or(
+                FirFileLoweringFailure::MissingClassSourceQualifiedName(declaration),
+            )?;
+            let constant = java_string_hash(source_name);
+            ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(constant)))
+        }
         [hash] => *hash,
         [first, rest @ ..] => {
             const RESULT: u32 = 1;
@@ -360,6 +375,20 @@ fn synthesize_hash_code(
     }));
     ir.open_methods.insert(function);
     Ok(())
+}
+
+/// `java.lang.String.hashCode`, which is what a `data object`'s constant hash is computed with.
+/// Specified (JLS 3.10.5 via `String`), so reproducing it is stable rather than a guess at a
+/// particular JDK's behaviour.
+fn java_string_hash(text: &str) -> i32 {
+    text.chars()
+        .flat_map(|character| {
+            let mut units = [0u16; 2];
+            character.encode_utf16(&mut units).to_vec()
+        })
+        .fold(0i32, |hash, unit| {
+            hash.wrapping_mul(31).wrapping_add(i32::from(unit))
+        })
 }
 
 fn field_hash(class: ClassId, field: &DataField, ir: &mut IrFile) -> ExprId {
@@ -439,12 +468,19 @@ fn synthesize_equals(
         arg: other_value,
         type_operand: Ty::obj_name(classifier),
     });
-    statements.push(ir.add_expr(IrExpr::Variable {
-        index: OTHER,
-        ty: Ty::obj_name(classifier),
-        init: Some(cast),
-        named: false,
-    }));
+    if fields.is_empty() {
+        // A `data object` has no property to compare, so nothing reads the narrowed value. kotlinc
+        // still emits the `checkcast` -- it is the type test's own result -- and DISCARDS it rather
+        // than binding a local no one loads.
+        statements.push(cast);
+    } else {
+        statements.push(ir.add_expr(IrExpr::Variable {
+            index: OTHER,
+            ty: Ty::obj_name(classifier),
+            init: Some(cast),
+            named: false,
+        }));
+    }
 
     for field in fields {
         let this_value = ir.add_expr(IrExpr::GetValue(0));

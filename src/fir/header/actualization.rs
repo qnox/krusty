@@ -57,6 +57,28 @@ pub struct Actualization {
     /// header as unactualized as well names the same mismatch twice, from the side that did not
     /// get it wrong.
     pub incompatible: std::collections::HashSet<DeclarationId>,
+    /// For each matched classifier pair, the `expect` members that no `actual` member implements,
+    /// under the ACTUAL classifier the reference compiler reports them on.
+    ///
+    /// A member pairs by its own identity, so a matched owner says nothing about them. The
+    /// implementation is what got it wrong — it is the declaration that omitted them — and the
+    /// reference compiler names it once and lists what it owes, rather than reporting each
+    /// `expect` member as unfilled.
+    pub unactualized_members: Vec<UnactualizedMembers>,
+    /// `actual` members whose `expect` counterpart was found and rejected only because the two
+    /// spell their type parameters differently.
+    ///
+    /// The reference compiler requires an `expect`/`actual` pair to name its type parameters
+    /// identically and reports a rename as an incompatibility BETWEEN two declarations it
+    /// considers counterparts — not as an implementation that answered for nothing.
+    pub incompatible_members: std::collections::HashSet<DeclarationId>,
+}
+
+/// One `actual` classifier and the `expect` members it never implemented.
+#[derive(Clone, Debug)]
+pub struct UnactualizedMembers {
+    pub classifier: DeclarationId,
+    pub expected: Vec<DeclarationId>,
 }
 
 /// Classifier identities already bound by the ordinary resolver for compact actualization syntax.
@@ -130,6 +152,9 @@ pub fn actualization(
         bindings: &'a ActualizationTypeBindings,
         expect: SourceFileId,
         candidate: SourceFileId,
+        /// How a single-segment path naming a type parameter is resolved against the positional
+        /// map. See [`TypeParameterScope`].
+        type_parameters: TypeParameterScope,
     }
 
     impl MatchScope<'_> {
@@ -192,10 +217,16 @@ pub fn actualization(
                                 .iter()
                                 .any(|(parameter, _)| parameter == expect) =>
                         {
-                            type_parameters
-                                .iter()
-                                .find(|(parameter, _)| parameter == expect)
-                                .is_some_and(|(_, parameter)| parameter == candidate)
+                            let mut entries = type_parameters.iter();
+                            let found = match scope.type_parameters {
+                                TypeParameterScope::Declared => {
+                                    entries.find(|(parameter, _)| parameter == expect)
+                                }
+                                TypeParameterScope::Positional => {
+                                    entries.rfind(|(parameter, _)| parameter == expect)
+                                }
+                            };
+                            found.is_some_and(|(_, parameter)| parameter == candidate)
                         }
                         _ => {
                             // Resolution bound each syntax node once through the ordinary scope
@@ -323,6 +354,7 @@ pub fn actualization(
         candidate: DeclarationId,
         actualized_aliases: &[ActualizedAlias],
         bindings: &ActualizationTypeBindings,
+        type_parameters: TypeParameterScope,
     ) -> bool {
         let (Some(expect_source), Some(candidate_source)) = (
             headers
@@ -340,6 +372,7 @@ pub fn actualization(
             bindings,
             expect: expect_source,
             candidate: candidate_source,
+            type_parameters,
         };
         let (
             Some(HeaderDeclaration {
@@ -349,6 +382,7 @@ pub fn actualization(
                         parameters: expect_parameters,
                         type_parameters: expect_type_parameters,
                         context_count: expect_context_count,
+                        bounds: expect_bounds,
                         ..
                     },
                 ..
@@ -360,6 +394,7 @@ pub fn actualization(
                         parameters: candidate_parameters,
                         type_parameters: candidate_type_parameters,
                         context_count: candidate_context_count,
+                        bounds: candidate_bounds,
                         ..
                     },
                 ..
@@ -387,6 +422,17 @@ pub fn actualization(
         else {
             return false;
         };
+        if !type_parameter_bounds_match(
+            headers,
+            expect_bounds,
+            candidate_bounds,
+            &own,
+            &type_parameters,
+            actualized_aliases,
+            scope,
+        ) {
+            return false;
+        }
         let receiver_matches = match (expect_receiver, candidate_receiver) {
             (Some(expect), Some(candidate)) => type_shape_matches(
                 headers,
@@ -425,6 +471,7 @@ pub fn actualization(
         candidate: DeclarationId,
         actualized_aliases: &[ActualizedAlias],
         bindings: &ActualizationTypeBindings,
+        type_parameters: TypeParameterScope,
     ) -> bool {
         let (Some(expect_source), Some(candidate_source)) = (
             headers
@@ -442,6 +489,7 @@ pub fn actualization(
             bindings,
             expect: expect_source,
             candidate: candidate_source,
+            type_parameters,
         };
         let (
             Some(HeaderDeclaration {
@@ -451,6 +499,7 @@ pub fn actualization(
                         context_parameters: expect_context,
                         type_parameters: expect_type_parameters,
                         mutable: expect_mutable,
+                        bounds: expect_bounds,
                         ..
                     },
                 ..
@@ -462,6 +511,7 @@ pub fn actualization(
                         context_parameters: candidate_context,
                         type_parameters: candidate_type_parameters,
                         mutable: candidate_mutable,
+                        bounds: candidate_bounds,
                         ..
                     },
                 ..
@@ -490,6 +540,17 @@ pub fn actualization(
         else {
             return false;
         };
+        if !type_parameter_bounds_match(
+            headers,
+            expect_bounds,
+            candidate_bounds,
+            &own,
+            &type_parameters,
+            actualized_aliases,
+            scope,
+        ) {
+            return false;
+        }
         let receiver_matches = match (expect_receiver, candidate_receiver) {
             (Some(expect), Some(candidate)) => type_shape_matches(
                 headers,
@@ -569,6 +630,24 @@ pub fn actualization(
 
     /// The positional type-parameter map for one pair: the owners' parameters, then the
     /// declaration's own.
+    /// Which of two same-named type parameters a single-segment path resolves to.
+    ///
+    /// Lookup names are interned by spelling, so a declaration's own `<S>` and its owner's `S` are
+    /// one key and only the map's order tells them apart. Kotlin's own scoping resolves the inner
+    /// one, but an `expect`/`actual` pair is NOT matched that way: the reference compiler requires
+    /// the two declarations to spell their type parameters identically and reports a rename as an
+    /// incompatibility rather than as a different declaration. Reading the map from the front
+    /// therefore answers "are these the same declaration", and reading it from the back answers
+    /// "would they be, if the names did not have to agree" — which is what tells a rename from a
+    /// declaration that simply does not match.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum TypeParameterScope {
+        /// The names must agree, as the reference compiler requires of a pair.
+        Declared,
+        /// Positional only: an own parameter answers for an enclosing one of the same spelling.
+        Positional,
+    }
+
     fn positional_type_parameters(
         headers: &StreamedHeaderModule,
         expect: DeclarationId,
@@ -587,6 +666,57 @@ pub fn actualization(
                 .chain(own.iter().copied())
                 .collect(),
         )
+    }
+
+    /// Two positionally paired type parameters agree when their declared upper bounds do.
+    ///
+    /// A type parameter's spelling carries no meaning — the two declarations may name theirs
+    /// differently — so its bounds are the whole of what it says about the values it admits. A
+    /// receiver or parameter written as a type parameter is therefore only as compared as its
+    /// bounds are, and without this two members that differ solely in an upper bound pair with
+    /// each other while kotlinc rejects the implementation.
+    ///
+    /// Bounds are held per declaration and keyed by the parameter's own spelling, so an enclosing
+    /// parameter of the same name cannot be confused for one of these. Each bound is compared as
+    /// an ordinary type shape, which is what lets a bound naming another type parameter
+    /// (`<A, B : A>`) match positionally too.
+    fn type_parameter_bounds_match(
+        headers: &StreamedHeaderModule,
+        expect_bounds: HeaderTypeBoundRange,
+        candidate_bounds: HeaderTypeBoundRange,
+        own: &[(LookupNameId, LookupNameId)],
+        type_parameters: &[(LookupNameId, LookupNameId)],
+        actualized_aliases: &[ActualizedAlias],
+        scope: MatchScope<'_>,
+    ) -> bool {
+        let expect_bounds = headers.syntax.bounds(expect_bounds);
+        let candidate_bounds = headers.syntax.bounds(candidate_bounds);
+        own.iter().all(|(expect_parameter, candidate_parameter)| {
+            let expect: Vec<_> = expect_bounds
+                .iter()
+                .filter(|bound| bound.parameter == *expect_parameter)
+                .map(|bound| bound.ty)
+                .collect();
+            let candidate: Vec<_> = candidate_bounds
+                .iter()
+                .filter(|bound| bound.parameter == *candidate_parameter)
+                .map(|bound| bound.ty)
+                .collect();
+            expect.len() == candidate.len()
+                && expect
+                    .into_iter()
+                    .zip(candidate)
+                    .all(|(expect, candidate)| {
+                        type_shape_matches(
+                            headers,
+                            expect,
+                            candidate,
+                            type_parameters,
+                            actualized_aliases,
+                            scope,
+                        )
+                    })
+        })
     }
 
     /// A constructor pair, compared by the parameter types both declare.
@@ -640,6 +770,9 @@ pub fn actualization(
             bindings,
             expect: expect_source,
             candidate: candidate_source,
+            // A constructor declares no type parameters of its own — the classifier's are in
+            // scope — so an own parameter can never shadow an enclosing one here.
+            type_parameters: TypeParameterScope::Declared,
         };
         let Some(type_parameters) = positional_type_parameters(headers, expect, candidate, &[])
         else {
@@ -677,6 +810,7 @@ pub fn actualization(
         candidates: &[DeclarationId],
         actualized_aliases: &[ActualizedAlias],
         bindings: &ActualizationTypeBindings,
+        type_parameters: TypeParameterScope,
     ) -> Option<DeclarationId> {
         let matching = candidates
             .iter()
@@ -688,6 +822,7 @@ pub fn actualization(
                     *candidate,
                     actualized_aliases,
                     bindings,
+                    type_parameters,
                 ),
                 DeclarationKind::Constructor => constructor_parameter_shapes_match(
                     headers,
@@ -702,6 +837,7 @@ pub fn actualization(
                     *candidate,
                     actualized_aliases,
                     bindings,
+                    type_parameters,
                 ),
                 DeclarationKind::Classifier
                 | DeclarationKind::TypeAlias
@@ -777,9 +913,18 @@ pub fn actualization(
         }
     }
     let mut incompatible = std::collections::HashSet::new();
+    let mut unactualized_members: Vec<UnactualizedMembers> = Vec::new();
+    let mut incompatible_members = std::collections::HashSet::new();
     let mut select_top_level = |stub: &DeclarationStub, aliases: &[ActualizedAlias]| {
         let candidates = actuals.get(&key(headers, stub)?)?;
-        let actual = select_actual(headers, stub, candidates, aliases, bindings);
+        let actual = select_actual(
+            headers,
+            stub,
+            candidates,
+            aliases,
+            bindings,
+            TypeParameterScope::Declared,
+        );
         if actual.is_none() {
             incompatible.insert(stub.id);
         }
@@ -832,6 +977,20 @@ pub fn actualization(
         /// A receiver that names no classifier — a function type. The coarse key records only the
         /// semantic category; `select_actual` compares its complete type shape.
         Structural,
+        /// A receiver written as a classifier path that the scope binds to NO classifier.
+        ///
+        /// The predicate is exactly that and no more. A type PARAMETER is the case this exists
+        /// for — `actual val <S> S.p: S` declares its own `S`, shadowing its owner's, and no scope
+        /// has a classifier for it — but an unresolved or ambiguous spelling reaches the same
+        /// arm. Those are told apart by the comparison, not by the key: a shape match demands a
+        /// binding on BOTH sides, so two unresolved receivers never pair, while two type
+        /// parameters match positionally and by their declared bounds.
+        ///
+        /// Refusing to key such a member at all left `expect val <S> S.p: S` and the `actual`
+        /// written exactly like it pairing with nothing, and the implementation reported as
+        /// actualizing nothing. The coarse key records the category; `select_actual` compares the
+        /// complete type shape, which is what tells two of them apart.
+        Unbound,
     }
 
     fn child_key(
@@ -850,19 +1009,20 @@ pub fn actualization(
         // `expect class` actualized by a `typealias` is written as the alias's target on the
         // platform side — so the key is the identity, after following an actualized alias to the
         // classifier it now stands for.
-        // `None` means the file has not said which classifier the receiver is, so the member
-        // cannot be keyed at all and pairs with nothing.
+        // `None` means the receiver has no header type at all, so the member cannot be keyed and
+        // pairs with nothing. A receiver the scope binds to no classifier is NOT that case: it
+        // keys as `Unbound` and is told apart by its complete type shape.
         let receiver_identity = |receiver: Option<HeaderTypeId>| -> Option<ReceiverKey> {
             let Some(receiver) = receiver else {
                 return Some(ReceiverKey::Absent);
             };
-            let Some(ty) = headers.syntax.ty(receiver) else {
-                return None;
-            };
+            let ty = headers.syntax.ty(receiver)?;
             if !matches!(ty.kind, HeaderTypeKind::Classifier { .. }) {
                 return Some(ReceiverKey::Structural);
             };
-            let identity = bindings.type_classifier(stub.source, receiver)?;
+            let Some(identity) = bindings.type_classifier(stub.source, receiver) else {
+                return Some(ReceiverKey::Unbound);
+            };
             for (name, target, source) in actualized_aliases {
                 if *name != identity {
                     continue;
@@ -921,11 +1081,13 @@ pub fn actualization(
                 actual_children.entry(key).or_default().push(child.id);
             }
         }
+        let mut owed = Vec::new();
         for child in expect_children {
             let Some(key) = child_key(headers, child, bindings, &actualized_aliases) else {
                 continue;
             };
             let Some(candidates) = actual_children.get(&key) else {
+                owed.push(child.id);
                 continue;
             };
             // The child key is deliberately coarse — kind, name, receiver and arity — so members
@@ -934,9 +1096,32 @@ pub fn actualization(
             // `actual fun foo(a: String)` from `actual fun foo(a: Any)` beside it. Giving up on a
             // tie leaves BOTH members unpaired, which reads downstream as two members that
             // actualized nothing.
-            let Some(actual) =
-                select_actual(headers, child, candidates, &actualized_aliases, bindings)
-            else {
+            let Some(actual) = select_actual(
+                headers,
+                child,
+                candidates,
+                &actualized_aliases,
+                bindings,
+                TypeParameterScope::Declared,
+            ) else {
+                // A candidate carried the member's key and lost on its shape. Ask the same
+                // comparison again without requiring the two to SPELL their type parameters
+                // alike: if one answers now, the declarations are each other's counterparts and
+                // the rename is the whole of the disagreement, which is what the reference
+                // compiler reports on the implementation. Anything else is a member the owner
+                // still owes, reported on the owner below.
+                if let Some(renamed) = select_actual(
+                    headers,
+                    child,
+                    candidates,
+                    &actualized_aliases,
+                    bindings,
+                    TypeParameterScope::Positional,
+                ) {
+                    incompatible_members.insert(renamed);
+                } else {
+                    owed.push(child.id);
+                }
                 continue;
             };
             let pair = ActualizedDeclarationPair {
@@ -946,6 +1131,12 @@ pub fn actualization(
             if !pairs.contains(&pair) {
                 pairs.push(pair);
             }
+        }
+        if !owed.is_empty() {
+            unactualized_members.push(UnactualizedMembers {
+                classifier: pair.actual,
+                expected: owed,
+            });
         }
     }
     // Only a TOP-LEVEL implementation can be reported this way: the `actual` a member writes is
@@ -969,6 +1160,8 @@ pub fn actualization(
     Actualization {
         pairs,
         unmarked,
+        unactualized_members,
+        incompatible_members,
         incompatible,
     }
 }

@@ -28,6 +28,7 @@ pub enum FirFileLoweringFailure {
     MissingCallable(DeclarationId),
     MissingProperty(DeclarationId),
     MissingSourceOrder(DeclarationId),
+    MissingClassSourceQualifiedName(DeclarationId),
     MissingSourcePackage(crate::fir::SourceFileId),
     UnsupportedPropertyShape(DeclarationId),
     MissingClassifier(DeclarationId),
@@ -186,6 +187,7 @@ impl<'a> CommonIrBodySink<'a> {
         )?;
         self.predeclare_functions(index)?;
         finalize_constructors(index, self.ir)?;
+        super::constructors::finalize_local_superclass_captures(self.ir)?;
         finalize_enum_entries(self.ir)?;
         finalize_properties(index, self.ir)?;
         finalize_constructor_field_indices(index, self.ir)?;
@@ -701,7 +703,11 @@ impl<'a> CommonIrBodySink<'a> {
             } else {
                 None
             };
+            let source_order = index
+                .source_order(declaration)
+                .ok_or(FirFileLoweringFailure::MissingSourceOrder(declaration))?;
             let class = self.ir.add_class(class);
+            self.ir.record_class_source_order(class, source_order);
             if let Some(source_qualified_name) = source_qualified_name {
                 self.ir
                     .record_class_source_qualified_name(class, source_qualified_name);

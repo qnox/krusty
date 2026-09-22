@@ -20,21 +20,55 @@ use super::*;
 /// let the real call stand) or on the committed emission path.
 #[derive(Debug, Clone)]
 pub(super) struct DescriptorArityMismatch {
-    /// The owning class, when the site knows it. Absent for descriptor-only operand pushes.
-    pub(super) owner: Option<String>,
+    /// The exact realized JVM callable, when the site knows it. Absent for descriptor-only operand
+    /// pushes. The descriptor is part of the identity: owner and member alone do not distinguish
+    /// overloads.
+    pub(super) target: Option<JvmCallableIdentity>,
     /// Operands the checked call supplied.
     pub(super) supplied: usize,
     /// Parameters the physical descriptor declares.
     pub(super) physical: usize,
 }
 
+/// The already-realized JVM callable whose virtual operands are being pushed.
+///
+/// Callers pass this directly from the selected call representation. The operand contract never
+/// looks a declaration up again or derives identity from a source spelling.
+#[derive(Clone, Copy)]
+pub(super) struct VirtualCallTarget<'a> {
+    pub(super) owner: &'a str,
+    pub(super) name: &'a str,
+    pub(super) descriptor: &'a str,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct JvmCallableIdentity {
+    owner: String,
+    name: String,
+    descriptor: String,
+}
+
+impl std::fmt::Display for JvmCallableIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}{}", self.owner, self.name, self.descriptor)
+    }
+}
+
 impl DescriptorArityMismatch {
-    fn check(owner: Option<&str>, supplied: usize, physical: usize) -> Result<(), Self> {
+    fn check(
+        target: Option<VirtualCallTarget<'_>>,
+        supplied: usize,
+        physical: usize,
+    ) -> Result<(), Self> {
         if supplied == physical {
             return Ok(());
         }
         Err(Self {
-            owner: owner.map(str::to_string),
+            target: target.map(|target| JvmCallableIdentity {
+                owner: target.owner.to_string(),
+                name: target.name.to_string(),
+                descriptor: target.descriptor.to_string(),
+            }),
             supplied,
             physical,
         })
@@ -96,9 +130,9 @@ impl Emitter<'_> {
             "emit",
             "descriptor arity mismatch{} ({} operands vs {} params)",
             mismatch
-                .owner
-                .as_deref()
-                .map(|owner| format!(" for {owner}"))
+                .target
+                .as_ref()
+                .map(|target| format!(" for {target}"))
                 .unwrap_or_default(),
             mismatch.supplied,
             mismatch.physical,
@@ -217,13 +251,14 @@ impl Emitter<'_> {
     pub(super) fn emit_descriptor_virtual_operands(
         &mut self,
         call_expression: u32,
-        owner: &str,
+        target: VirtualCallTarget<'_>,
         receiver: u32,
         args: &[u32],
         physical_params: &[Ty],
         code: &mut CodeBuilder,
     ) -> Result<(), DescriptorArityMismatch> {
-        DescriptorArityMismatch::check(Some(owner), args.len(), physical_params.len())?;
+        let owner = target.owner;
+        DescriptorArityMismatch::check(Some(target), args.len(), physical_params.len())?;
         let mut ops = Vec::with_capacity(args.len() + 1);
         ops.push(receiver);
         ops.extend(args.iter().copied());
@@ -265,10 +300,30 @@ impl Emitter<'_> {
 /// emitted against operands that were never pushed.
 #[cfg(test)]
 mod tests {
+    use super::{DescriptorArityMismatch, VirtualCallTarget};
     use crate::ir::{Callee, IrConst, IrExpr, IrFile, IrFunction};
     use crate::jvm::ir_emit::fail_soft_tests::emit_for_test;
     use crate::jvm::ir_emit::EmitRun;
     use crate::types::Ty;
+
+    #[test]
+    fn arity_mismatch_keeps_the_exact_realized_callable() {
+        let mismatch = DescriptorArityMismatch::check(
+            Some(VirtualCallTarget {
+                owner: "sample/Backend",
+                name: "remove",
+                descriptor: "(Ljava/lang/String;I)Z",
+            }),
+            1,
+            2,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            mismatch.target.as_ref().map(ToString::to_string),
+            Some("sample/Backend.remove(Ljava/lang/String;I)Z".to_string())
+        );
+    }
 
     #[test]
     fn arity_failure_exposes_category_without_owner_or_callable_name() {

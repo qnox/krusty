@@ -3315,6 +3315,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   leaf body — only the forwarded tail stays verbatim (kotlinc's shape). Previously the forward path
   skipped return boxing entirely (`iconst_1; areturn` → VerifyError)
   (`tail_forward_with_early_returns_boxes_them` in `tests/feature_coverage_s_e2e.rs`).
+- **A non-local `return` out of a lambda spliced into a classpath `inline fun` boxes like any other
+  suspend return.** Inside a lambda's inline template every surviving `IrExpr::Return` already crosses
+  out of the lambda (a local `return@label` became a labelled exit at template preparation), so the
+  splice realizes it as a return from the ENCLOSING method — and in a CPS body that method returns
+  `Object`. `box_returns` used to stop at `Lambda`, leaving `bipush 100; areturn` (VerifyError: `Bad type
+  on operand stack`) and a void `return` where a value is expected; it now walks the lambda's
+  `inline_body` too. A plain function returning `Any` was never affected: its coercion is inserted by
+  the lowering. The invariant is scoped to returns that leave the template being spliced: a
+  `return@outer` inside a lambda nested in ANOTHER emit-time-spliced lambda is prepared only by the
+  inner template and survives as a raw `Return` the emitter realizes as the method's — a pre-existing
+  gap this rule does not close. Test: `tests/suspend_inline_splice_nonlocal_return_e2e.rs`.
 - **`return` inside a `try { … } finally { … }`** now runs each enclosing `finally` (innermost first)
   before transferring control, instead of bailing. The lowerer pushes the `finally` AST onto a
   `try_finally_stack` while lowering the body/catches, and a `Stmt::Return` inside inlines those finallys:
@@ -5571,7 +5582,55 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   anchors on its source range — never by name and arity, which cannot tell two overloads that tie
   on arity apart and left both of a tied pair unrendered. A member EXTENSION property is a separate
   declaration in a separate table (`ClassSig::member_ext_props`), consulted by the same identity,
-  and renders its receiver before the name while the diagnostic still points at the name. A nested
+  and renders its receiver before the name while the diagnostic still points at the name. It also
+  renders its OWN type parameters ahead of that receiver — `public final actual val <S> S.kept: S`
+  declares an `S` that shadows its owner's — with the names the source WROTE, since a rendering
+  shows what was written; resolution holds those formals under internal placeholder spellings and
+  the bounds are read from there. A receiver written as a classifier path that the file's scope
+  binds to NO classifier records that, and only that: the coarse child key says the scope bound
+  nothing, and `select_actual` compares the complete type shape. A type parameter is the case this
+  serves, and two of them are told apart positionally and by their DECLARED BOUNDS — a bound is
+  the whole of what such a receiver says about the values it admits, so two members differing only
+  there are different declarations. An unresolved or ambiguous spelling reaches the same key and is
+  excluded by the comparison instead, which demands a binding on both sides. Within one
+  declaration the positional map is read innermost first, so an own type parameter shadows an
+  enclosing one of the same spelling and the implementation may rename it. Refusing to key such a
+  A matched classifier still answers for the members it never implemented. A member actualizes by
+  its own identity, so a matched owner says nothing about them, and an owner implementing none of
+  them is otherwise accepted in silence; the implementation is the declaration that got it wrong,
+  so it is named once at its own name — `'actual class Owed<T> : Any' has no corresponding members
+  for expected class members:` — rather than each `expect` member being reported as unfilled from
+  the side that did not. The owed members are listed under that line as the common source DECLARED
+  them: `expect fun <S : Number> generic(s: S): S`, `expect val starred: List<*>`,
+  `expect fun defaulted(a: Int = ...): Int`. Every other rendering in this check is built from a
+  resolved signature and these cannot be — an `expect` subtree is excluded from the resolved model,
+  so neither the members nor their classifier is published — but the listing is source text in the
+  reference compiler too, so it is rendered from declaration syntax while that syntax is live. A
+  property parameter on an expected class's constructor is rejected outright, so methods and body
+  properties are the whole of what a classifier can owe. The listing follows a newline inside the
+  same diagnostic, so the differential harness — which compares one `: error:` line each — pins the
+  first line only; the listing is checked against the reference compiler directly. Test
+  `no_expect_for_actual_e2e::a_classifier_owing_expected_members_is_reported`.
+
+  An `expect`/`actual` pair must SPELL its type parameters alike, and a rename is an
+  incompatibility between two declarations already taken to be counterparts — `the 'expect' and
+  the 'actual' declarations are incompatible.` at the implementation — not an implementation that
+  answered for nothing, and not a member its owner is left owing. A differing upper BOUND is the
+  other answer: it means no counterpart was found at all, so the owner owes the member and the
+  implementation corresponds to nothing. The two are told apart by asking the input-shape
+  comparison twice, once requiring the names to agree and once positionally: only the second
+  answering is what a rename is. Tests
+  `no_expect_for_actual_e2e::a_renamed_type_parameter_is_an_incompatibility` and
+  `::a_member_whose_bound_differs_is_not_a_counterpart`.
+
+  member at all left an `expect` and an `actual` written identically pairing with nothing, and box
+  `multiplatform/k2/basic/expectActualFakeOverridesWithTypeParameters.kt` regressed; tests
+  `no_expect_for_actual_e2e::a_member_extension_on_its_own_type_parameter_matches`,
+  `::a_renamed_own_type_parameter_receiver_matches`,
+  `::a_member_extension_on_its_owners_type_parameter_matches`,
+  `::a_member_extension_function_on_a_type_parameter_matches`,
+  `::a_type_parameter_receiver_compares_its_bound` and
+  `::a_member_extension_property_renders_its_own_formals`. A nested
   classifier and a `companion object` are hoisted out of their owner by the parser, so neither
   rides a member list: each is recorded as an actualization target of its own where its modifier
   list is read, renders its OWN simple name, and a companion renders the word `companion` before
@@ -7156,6 +7215,62 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/loop_backedge_narrowing_e2e.rs` (all eight, each answer taken from kotlinc 2.4.10
   first).
 
+- **A value class delegating an interface uses its own UNDERLYING VALUE, not a field of the
+  delegation's.** A value class has exactly one field, and `value class IC(val i: I) : I by i` names
+  that very field as the delegate. Kotlin synthesizes no `$$delegate_0` there — the underlying value
+  IS the delegate, and every forwarder reads it — and it could not: a second field is not a shape a
+  value class has.
+
+  Common lowering synthesized one anyway. That gave the class two fields, which the JVM emitter
+  turned into a `putfield` of the wrong type in `constructor-impl` — the class was rejected at load
+  with `VerifyError: Bad type on operand stack in putfield` — and which the native code generator
+  refused by name.
+
+  WHICH field the delegate is cannot be decided where the delegation field used to be created: the
+  property's own field does not exist yet at that point, and the delegate field was being pushed
+  ahead of it. So nothing is pushed for this shape and the edge is recorded later, where the
+  constructor's field indices are known. The delegate must be the first CONSTRUCTOR PARAMETER, which
+  is what the underlying value is; a value class delegating to anything else is not this shape and
+  keeps the ordinary field, to be refused as before rather than silently pointed at the wrong
+  storage.
+  Tests: `tests/value_class_delegation_e2e.rs`, each cross-checked against the reference compiler:
+  the forwarder reached through both types, the underlying value still readable as its own property,
+  a generic underlying type, and an ORDINARY class still delegating through a field of its own.
+  Corpus: `codegen/box/inlineClasses/delegationByUnderlyingType/` (all six).
+
+- **A local class whose SUPERCLASS is a local class with captures passes them on.** A capturing
+  local class takes its captures as synthetic PREFIX parameters of its constructor, ahead of the
+  ones the source wrote. A subclass's `super(…)` spells only the written ones — the prefix is not in
+  the source and there is no expression there for a resolved-constructor lookup to find — so the
+  call was one value short per capture. kotlinc compiles these; krusty rejected them on both
+  backends, the JVM's with `VerifyError: Bad type on operand stack` putting `this` where the capture
+  belonged.
+
+  Two halves, neither sufficient alone:
+
+  - Selection records the superclass's captures as the subclass's own, read from the RESOLVED
+    SUPERTYPE (`resolved_body_local_supertypes`) rather than from a call. That is the one edge a
+    supertype constructor gives: `class Derived : Local(true)` records the base classifier and its
+    arguments and nothing in between.
+  - Common lowering prepends the matching prefix reads to `super_args`. Each transitive capture
+    retains the superclass field's stable semantic coordinate, so matching never depends on a
+    synthetic field spelling. Only a call short by exactly the parent's prefix is filled; any other
+    shape is left to the arity check downstream.
+
+  The same lexical value captured twice is ONE capture. A class that captures `x` for its own body
+  and is then found to need `x` for a declaration it reaches carries one field, not two — the second
+  is a duplicate field of the same name, which the class file format rejects outright
+  (`ClassFormatError: Duplicate field name`). The merge previously keyed a dependency-required
+  capture on the dependency alone, so an identical own capture did not match it.
+
+  Anonymous objects use the same resolved-superclass edge after their body-driven capture pass, so
+  they also carry a superclass capture that their own body never mentions.
+  Tests: `tests/local_superclass_capture_e2e.rs`, seven shapes, each cross-checked against the
+  reference compiler. Corpus: `codegen/box/localClass/localHierarchy.kt`,
+  `codegen/box/innerNested/superConstructorCall/{localExtendsLocalWithClosure,localWithClosureExtendsLocalWithClosure}.kt`,
+  `codegen/box/localClasses/innerOfLocalCaptureExtensionReceiver.kt` and
+  `codegen/box/secondaryConstructors/callFromLocalSubClass.kt`.
+
 ### Native target (`src/native/`)
 
 The native backend has no `kotlinc` to be differential against — Kotlin/Native's output is LLVM
@@ -8593,7 +8708,6 @@ and behavior is checked by RUNNING the emitted program.
   `delegatedProperty/{delegateWithPrivateSet,protectedVarWithPrivateSet,kt9712,observable}.kt`,
   `delegatedProperty/local/kt23117.kt` and
   `nameBasedDestructuring/{fullForm,shortForm}ExtraPropType.kt`.
-
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.
