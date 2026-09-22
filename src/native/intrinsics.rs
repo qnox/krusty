@@ -906,6 +906,74 @@ pub(super) fn is_map_entry_type(internal: crate::types::TypeName) -> bool {
     )
 }
 
+/// One SHAPE of the runtime's collections.
+///
+/// A shape groups the types whose objects are interchangeable at a call site: a class standing
+/// behind one type of a shape could stand behind any other type of the same shape, and behind no
+/// type of another. `Set` shares the `Iterable` shape because a set implementor answers a
+/// `Collection` and an `Iterable` receiver too; `Map` has its own because Kotlin's map is no
+/// `Collection`, and `Sequence` has its own for the same reason.
+///
+/// This is what makes a file's declaration of its own collection a question about the RECEIVER
+/// rather than about the file: a file that declares a `Sequence` of its own endangers a receiver
+/// typed by a sequence and no list receiver anywhere.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) enum CollectionShape {
+    /// Anything a `for` loop walks directly: a list, a set, a range, an array, text.
+    Iterable,
+    /// The iterator itself, which a walk asks `hasNext` and `next`.
+    Iterator,
+    /// A map, which is neither an `Iterable` nor an iterator.
+    Map,
+    /// ONE entry of a map, which `entries` hands out and a destructuring reads.
+    MapEntry,
+    /// A lazy sequence, which is no `Iterable` either.
+    Sequence,
+}
+
+/// The shape a type NAME belongs to. The narrow kinds are asked first: every one of them is an
+/// `Iterable` by [`iteration_role`], which walks a map as its entries and a sequence as its source,
+/// and that role is about walking rather than about which objects are interchangeable.
+pub(super) fn collection_shape(internal: crate::types::TypeName) -> Option<CollectionShape> {
+    if is_map_entry_type(internal) {
+        return Some(CollectionShape::MapEntry);
+    }
+    if is_map_type(internal) {
+        return Some(CollectionShape::Map);
+    }
+    if is_sequence_type(internal) {
+        return Some(CollectionShape::Sequence);
+    }
+    if is_list_type(internal) || is_set_type(internal) {
+        return Some(CollectionShape::Iterable);
+    }
+    // TEXT is walkable here and is no collection at all, so [`iteration_role`] does not name it —
+    // [`iteration_role_of`] reaches it from the TYPE instead. It belongs to the shape all the same:
+    // a `class Chars(…) : CharSequence` is a program's object behind a receiver whose `get` the
+    // runtime answers by reading a string's header.
+    if matches!(
+        kotlin_owner(&internal.render()),
+        "kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder"
+    ) {
+        return Some(CollectionShape::Iterable);
+    }
+    match iteration_role(internal)? {
+        IterationRole::Iterable => Some(CollectionShape::Iterable),
+        IterationRole::Iterator => Some(CollectionShape::Iterator),
+    }
+}
+
+/// The shape a TYPE belongs to. An ARRAY names no collection type and is walkable all the same,
+/// which is why this takes a type where [`collection_shape`] takes a name — the same split
+/// [`iteration_role_of`] makes over [`iteration_role`].
+pub(super) fn collection_shape_of(ty: Ty) -> Option<CollectionShape> {
+    let ty = ty.non_null();
+    if ty.is_array() {
+        return Some(CollectionShape::Iterable);
+    }
+    collection_shape(ty.obj_internal()?)
+}
+
 /// A qualified name with the FILE FACADE a nested class is qualified by removed, or `None` when it
 /// names no facade.
 ///

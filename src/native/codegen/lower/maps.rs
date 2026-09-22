@@ -171,11 +171,11 @@ impl BodyLowering<'_, '_, '_> {
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
         let ty = self.type_of(receiver)?;
-        // A file that declares its own map or set puts an object of ITS own behind these types,
-        // and the runtime would read a header that is not there. No static type can tell the two
-        // apart, which is why the guard is the FILE's rather than the receiver's — the same
-        // position `lists.rs` takes.
-        if self.file.declares_its_own_collection {
+        // A file that declares its own map, set or entry puts an object of ITS own behind that
+        // type, and the runtime would read a header that is not there. No static type tells the
+        // two apart within a shape, so a receiver of a shape the file implements declines — the
+        // same position `lists.rs` takes, and by the same test.
+        if self.file.implements_collection_of(ty) {
             return None;
         }
         let (symbol, carried, answer) = if is_map(ty) {
@@ -198,7 +198,7 @@ impl BodyLowering<'_, '_, '_> {
         receiver: u32,
     ) -> Option<String> {
         let ty = self.type_of(receiver)?;
-        if self.file.declares_its_own_collection || !(is_map(ty) || is_set(ty) || is_map_entry(ty))
+        if self.file.implements_collection_of(ty) || !(is_map(ty) || is_set(ty) || is_map_entry(ty))
         {
             return None;
         }

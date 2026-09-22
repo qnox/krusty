@@ -191,7 +191,7 @@ pub fn lower_file(
         reference_identities: HashMap::new(),
         holders: HashMap::new(),
         references: HashMap::new(),
-        declares_its_own_collection: declares_its_own_collection(ir),
+        implemented_collections: implemented_collections(ir),
         declares_its_own_comparable: declares_its_own_comparable(ir),
         implemented_dependencies: implemented_dependencies(ir),
     };
@@ -268,37 +268,44 @@ fn implemented_dependencies(ir: &IrFile) -> std::collections::HashSet<String> {
     owners
 }
 
-/// Whether the file puts a class of its own behind one of the runtime's collection types.
+/// The collection SHAPES the file puts a class of its own behind.
 ///
 /// Read from the OVERRIDE edges rather than from the supertype lists: what matters is that a
 /// member of this file answers for one of those types, which is exactly what an edge to a
 /// dependency declaration of it records — and it holds for a class reaching the type through
 /// another dependency type the supertype list does not name.
-fn declares_its_own_collection(ir: &IrFile) -> bool {
-    let owned = |owner: crate::types::TypeName| {
-        super::super::intrinsics::is_list_type(owner)
-            || super::super::intrinsics::is_map_type(owner)
-            || super::super::intrinsics::is_set_type(owner)
-            // A map ENTRY is one too. `class Entry : Map.Entry<K, V>` is a program's object behind
-            // a type whose `key` the runtime answers by reading a header that is not there, which
-            // is the same hazard for the same reason.
-            || super::super::intrinsics::is_map_entry_type(owner)
-            // A SEQUENCE too: `class Counting<T>(…) : Sequence<T>` is a program's object behind a
-            // type whose `iterator` the runtime answers out of a wrapper that is not there.
-            || super::super::intrinsics::is_sequence_type(owner)
-            || super::super::intrinsics::iteration_role_of(Ty::Obj(owner, &[])).is_some()
-    };
-    ir.function_overrides.values().flatten().any(|edge| {
-        matches!(
+///
+/// A SHAPE rather than a single flag, because the hazard is not the file's, it is the receiver's.
+/// An object of a class that answers for `Sequence` can stand behind a sequence and behind nothing
+/// else the runtime walks; a list receiver in the same file is as safe as it would be in a file
+/// that declared nothing. Each shape is recorded only from an edge that NAMES it, and no shape
+/// implies another: a class handing out an iterator of its own overrides `Iterator`'s members and
+/// is recorded there in its own right, and one returning a walk the runtime made is no hazard.
+fn implemented_collections(
+    ir: &IrFile,
+) -> std::collections::HashSet<super::super::intrinsics::CollectionShape> {
+    let mut shapes = std::collections::HashSet::new();
+    for edge in ir.function_overrides.values().flatten() {
+        if matches!(
             edge.overridden,
             crate::fir::ResolvedFunctionOverrideTarget::External(_)
-        ) && owned(edge.overridden_owner)
-    }) || ir.property_overrides.values().flatten().any(|edge| {
-        matches!(
+        ) {
+            shapes.extend(super::super::intrinsics::collection_shape(
+                edge.overridden_owner,
+            ));
+        }
+    }
+    for edge in ir.property_overrides.values().flatten() {
+        if matches!(
             edge.overridden,
             crate::fir::ResolvedPropertyOverrideTarget::External(_)
-        ) && owned(edge.overridden_owner)
-    })
+        ) {
+            shapes.extend(super::super::intrinsics::collection_shape(
+                edge.overridden_owner,
+            ));
+        }
+    }
+    shapes
 }
 
 /// Whether this file declares a class an object of which could stand behind a `Comparable<T>`.
@@ -390,13 +397,14 @@ struct FileLowering<'a> {
     /// A receiver typed by one of these may be an object of the program's rather than one the
     /// runtime made, and the tables that answer a dependency member answer only for the runtime's.
     implemented_dependencies: std::collections::HashSet<String>,
-    /// Whether this file declares a class of its own behind one of the runtime's COLLECTION types.
+    /// The collection SHAPES this file declares a class of its own behind.
     ///
     /// A receiver typed by one of those goes to the runtime's own dispatch, which knows only the
     /// collections this runtime MAKES — a range and a list. An object of the program's own behind
-    /// that type would have its vtable read for an entry it does not have, so where such a class
-    /// exists those members decline by name instead of being answered wrongly.
-    declares_its_own_collection: bool,
+    /// that type would have its vtable read for an entry it does not have, so a receiver of a
+    /// shape listed here declines by name instead of being answered wrongly. A receiver of any
+    /// OTHER shape is answered as usual; see [`implemented_collections`].
+    implemented_collections: std::collections::HashSet<super::super::intrinsics::CollectionShape>,
     /// Whether this file declares a class an object of which could stand behind a `Comparable<T>`;
     /// see [`declares_its_own_comparable`].
     declares_its_own_comparable: bool,
@@ -433,6 +441,14 @@ impl<'a> FileLowering<'a> {
     fn implements_dependency(&self, internal: crate::types::TypeName) -> bool {
         self.implemented_dependencies
             .contains(&super::super::intrinsics::kotlin_name_of(internal))
+    }
+
+    /// Whether a class of this file could stand behind a receiver of type `ty` — that is, whether
+    /// `ty`'s collection shape is one this file implements. Anything of another shape, or of no
+    /// shape at all, is the runtime's alone and is answered normally.
+    fn implements_collection_of(&self, ty: Ty) -> bool {
+        super::super::intrinsics::collection_shape_of(ty)
+            .is_some_and(|shape| self.implemented_collections.contains(&shape))
     }
 
     fn signature_of(&self, params: &[Ty], ret: Ty) -> Result<Signature, Unsupported> {

@@ -80,26 +80,46 @@ fn an_eager_walk_over_a_sequence_declines() {
     );
 }
 
-/// A file that declares its own `Sequence` still declines — but on `asSequence`, not on `iterator`.
+/// A file that declares its own `Sequence` walks it — and the list beside it too.
 ///
-/// `iterator` takes no arguments, so it is dispatched on the receiver now (see
-/// `tests/native_implemented_dependency_dispatch_e2e.rs`): the file knows the class of its own that
-/// could stand behind a `Sequence`, and tests for it. What still declines is the OTHER half — a
-/// collection member asked of a concrete runtime type, here `listOf(…).asSequence()`, which a
-/// blanket file-level guard blocks for any file that declares a collection of its own. That guard
-/// is what the dispatch's runtime arm waits on, and it is why the arm is not yet reachable.
+/// Two things had to give before this ran. `iterator` takes no arguments, so it is dispatched on
+/// the receiver (see `tests/native_implemented_dependency_dispatch_e2e.rs`): the file knows the
+/// class of its own that could stand behind a `Sequence`, tests for it, and falls through to the
+/// runtime otherwise — which is the arm `source.iterator()` takes here, `source` being a sequence
+/// the runtime made. And the guard that used to block the OTHER half is a question about the
+/// receiver now rather than about the file: declaring a `Sequence` endangers a sequence receiver
+/// and nothing else, so `listOf(…).asSequence()` in the same file is answered as it always was.
 #[test]
-fn a_file_that_declares_its_own_sequence_still_declines_on_the_runtimes_half() {
-    expect_native_decline(
-        "class Counting<out T>(private val source: Sequence<T>) : Sequence<T> {\n\
+fn a_file_that_declares_its_own_sequence_walks_it() {
+    let source = "class Counting<out T>(private val source: Sequence<T>) : Sequence<T> {\n\
          \x20   override fun iterator() = source.iterator()\n\
          }\n\
          fun box(): String {\n\
          \x20   var text = \"\"\n\
          \x20   for (x in Counting(listOf(\"O\", \"K\").asSequence())) text += x\n\
          \x20   return text\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "DeclaredSequence");
+    expect_native_box(source, "DeclaredSequence", "OK");
+}
+
+/// A file that declares its own `Sequence` still declines a SEQUENCE receiver's other members.
+///
+/// The shape the file implements is the sequence's, and `withIndex` is not a nullary member the
+/// receiver test can carry — so the decline stands exactly where the hazard is.
+#[test]
+fn a_declared_sequence_still_declines_the_members_it_endangers() {
+    expect_native_decline(
+        "class Counting<out T>(private val source: Sequence<T>) : Sequence<T> {\n\
+         \x20   override fun iterator() = source.iterator()\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val xs: Sequence<String> = Counting(listOf(\"O\", \"K\").asSequence())\n\
+         \x20   var text = \"\"\n\
+         \x20   for ((_, x) in xs.withIndex()) text += x\n\
+         \x20   return text\n\
          }\n",
-        "DeclaredSequence",
-        "asSequence",
+        "DeclaredSequenceIndexed",
+        "withIndex",
     );
 }

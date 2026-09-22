@@ -8055,14 +8055,43 @@ and behavior is checked by RUNNING the emitted program.
   - The runtime's own answers for a dependency member. A receiver typed by a runtime-known type
     this file implements may be an object of the PROGRAM's, and every such table answers only for
     the objects the runtime MAKES — no static type tells the two apart, which is the whole reason
-    those answers are the runtime's. So the guard is the FILE's: a receiver typed by a dependency
-    this file implements declines by name, with the type it was asked of still in sight, and the
-    collection dispatch in particular declines wholesale where such a class exists.
+    those answers are the runtime's. So a receiver typed by a dependency this file implements
+    declines by name, with the type it was asked of still in sight. For the collection dispatch,
+    which of those receivers a declaration endangers is narrowed by the SHAPE rule in the next
+    entry.
 
   What remains missing is fixed slot numbers for the members of runtime-known types, which is what
   would let a call THROUGH such a type dispatch; that phase is in `docs/IMPLEMENTATION_PLAN.md`.
   Tests: `tests/native_dependency_overrides_e2e.rs` and
   `tests/native_function_type_classes_e2e.rs`.
+
+- **Which receivers a file's own collection class endangers is a question about the RECEIVER's
+  shape, not about the file.** The collection guard above declined every collection member in any
+  file that declared a class behind any collection type — one boolean for the whole file. That is
+  wider than the hazard. A SHAPE groups the types whose objects are interchangeable at a call site:
+  a set implementor answers a `Collection` and an `Iterable` receiver, so a list, a set, a range,
+  an array and text are one shape; Kotlin's `Map` is no `Collection` and a `Sequence` is no
+  `Iterable`, so each of those is its own, as is the iterator and the map entry. A class can only
+  stand behind a receiver of a shape it implements something of, so the guard now asks whether the
+  RECEIVER's shape is one the file implements, and a receiver of any other shape is answered as it
+  would be in a file that declared nothing.
+
+  The shapes are read from the same OVERRIDE edges the file-wide flag was, and no shape implies
+  another — a class handing out an iterator of its own overrides `Iterator`'s members and is
+  recorded there in its own right, while one returning a walk the runtime made is no hazard and
+  records nothing. Inside a shape the guard stays wholesale, which is the point of a shape: no
+  static type tells a program's `CharSequence` from a string, so a file declaring one still
+  declines a list member.
+
+  Together with the receiver dispatch for a nullary member of an implemented type, this is what
+  makes a declared `Sequence` RUN: `class Counting<T>(source: Sequence<T>) : Sequence<T>` walks,
+  because `iterator` is dispatched on the receiver and `listOf(…).asSequence()` beside it is of
+  another shape entirely — the arm that falls through to the runtime, previously unreachable
+  because the blanket guard declined its operand first.
+  Tests: `tests/native_collection_shape_guard_e2e.rs` (an iterator, a map entry, and the
+  deliberate coarseness inside one shape) and `tests/native_sequences_e2e.rs`
+  (`::a_file_that_declares_its_own_sequence_walks_it`,
+  `::a_declared_sequence_still_declines_the_members_it_endangers`).
 
 ## 8. Success criteria for the PoC
 
