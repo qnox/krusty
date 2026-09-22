@@ -12,6 +12,7 @@ use crate::jvm::classfile::{
     ClassWriter, CodeBuilder, InnerClassResolver, Label, VerifType, MAJOR_JAVA8,
 };
 use crate::jvm::classreader::{MethodCode, C};
+use crate::jvm::constructor_debug::property_line;
 use crate::jvm::inline::MethodBodies;
 use crate::jvm::names::{
     mapped_builtin_virtual_name, method_descriptor, property_getter_name, property_setter_name,
@@ -6031,7 +6032,6 @@ fn emit_class(
                 let mut slot = 1u16;
                 for (i, t) in param_tys.iter().enumerate() {
                     if let Some(field_i) = ctor_param_fields.get(i).copied().flatten() {
-                        let name = &c.fields[field_i].name;
                         // Fields already stored before `super(…)` are not stored again here. The cutoff
                         // is semantic constructor metadata, independent of their physical ABI names.
                         if !c
@@ -6042,9 +6042,7 @@ fn emit_class(
                             // kotlinc maps this field store to the parameter's own source line —
                             // capture the pc where it starts.
                             let pc = ctor.bytes.len() as u16;
-                            if let Some(line) =
-                                crate::jvm::constructor_debug::property_line(ir, c, name)
-                            {
+                            if let Some(line) = property_line(ir, c, field_i as u32) {
                                 ctor_lines.push((pc, line));
                             }
                             ctor.aload(0);
@@ -9355,7 +9353,7 @@ fn emit_enum_class(
         for (argument, ty) in c.ctor_args.iter().zip(&all_param_tys) {
             if argument.is_field {
                 let name = &c.fields[field_i].name;
-                if let Some(line) = crate::jvm::constructor_debug::property_line(ir, c, name) {
+                if let Some(line) = property_line(ir, c, field_i as u32) {
                     store_lines.push((ctor.bytes.len() as u16, line));
                 }
                 ctor.aload(0);

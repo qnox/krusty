@@ -154,6 +154,18 @@ pub(super) fn attach(file: &mut File, src: &str) {
                 for p in &mut c.props {
                     if p.span.lo != 0 || p.span.hi != 0 {
                         p.decl_line = line_at(p.span.lo);
+                        // Where the parameter's declaration starts, annotations included — the line
+                        // kotlinc maps the constructor's store of this property to. Same shape as
+                        // the class's own `decl_start_line` above.
+                        let start = p
+                            .annotations
+                            .iter()
+                            .map(|annotation| annotation.span.lo)
+                            .filter(|lo| *lo != 0)
+                            .chain(std::iter::once(p.span.lo))
+                            .min()
+                            .unwrap_or(p.span.lo);
+                        p.decl_start_line = line_at(start);
                     }
                 }
                 for p in &mut c.body_props {
