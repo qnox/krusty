@@ -2767,6 +2767,117 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         self.dispatch(object, slot, &carried, ret, &arguments)
     }
 
+    /// The slot and ABI of the ZERO-ARGUMENT member `name` on `class`, for a dispatch whose
+    /// receiver is already a value.
+    ///
+    /// Zero arguments on purpose: an argument would have to cross at the DECLARATION's carriers,
+    /// and the caller that needs this has already coerced its operands to the runtime entry
+    /// point's. `iterator`, `hasNext` and `next` take none, which is what makes the choice between
+    /// the two dispatches a matter of the receiver alone.
+    pub(super) fn nullary_slot(&self, class: ClassId, name: &str) -> Option<(u32, Ty)> {
+        let ir = self.file.ir;
+        let fid = ir.classes[class as usize]
+            .methods
+            .iter()
+            .copied()
+            .find(|&fid| {
+                let function = &ir.functions[fid as usize];
+                function.name == name
+                    && function.params.is_empty()
+                    && function.dispatch_receiver.is_some()
+            })?;
+        let key = model::function_key(ir, class, fid);
+        let slot = self.file.model.slot(class, &key)?;
+        Some((slot, ir.functions[fid as usize].ret))
+    }
+
+    /// A zero-argument member asked of a type this file implements ITSELF, chosen by what the
+    /// receiver turns out to be.
+    ///
+    /// The runtime answers such a member for the objects IT makes, and a class of this file's is
+    /// not one of them — which is why this was a decline. But the file knows every class of its own
+    /// that could stand behind that static type, so the choice is made here: test the receiver
+    /// against each, and dispatch on that class's own slot when it matches. No program-wide slot
+    /// number is needed, because the implementor is in this file by the very condition that raised
+    /// the decline.
+    ///
+    /// The receiver is evaluated ONCE, before the tests, and both paths read that value — a
+    /// receiver with a side effect must not be evaluated per branch.
+    pub(super) fn dispatch_by_implementor(
+        &mut self,
+        implementors: &[(ClassId, u32, Ty)],
+        object: Value,
+        answer: Ty,
+        runtime: impl FnOnce(&mut Self, Value) -> Result<Option<Value>, Unsupported>,
+    ) -> Result<Option<Value>, Unsupported> {
+        let merge = self.builder.create_block();
+        let carried = carrier(answer);
+        if let Some(clif) = carried.clif() {
+            self.builder.append_block_param(merge, clif);
+        }
+        for (class, slot, declared) in implementors {
+            let descriptor = self.file.classes[*class as usize].descriptor;
+            let type_address = self.data_address(descriptor);
+            let matches = self
+                .runtime_call(
+                    "kt_is_instance",
+                    &[any(), any()],
+                    Ty::Boolean,
+                    &[object, type_address],
+                )?
+                .expect("`kt_is_instance` returns a Boolean");
+            let mine = self.builder.create_block();
+            let rest = self.builder.create_block();
+            self.builder.ins().brif(matches, mine, &[], rest, &[]);
+
+            self.continue_in(mine);
+            self.builder.seal_block(mine);
+            // The carried list is the member's PARAMETERS, which `dispatch` prepends the receiver
+            // to — empty here, these members taking none.
+            let produced = self.dispatch(object, *slot, &[], *declared, &[])?;
+            // The slot's answer is the DECLARATION's; the site wants what the runtime entry point
+            // would have handed back, so it is reconciled here as every other boundary is.
+            let produced = match produced {
+                Some(value) => self.convert(value, Some(*declared), answer)?,
+                None => None,
+            };
+            self.jump_to_merge(merge, carried, produced);
+            self.continue_in(rest);
+            self.builder.seal_block(rest);
+        }
+        let produced = runtime(self, object)?;
+        self.jump_to_merge(merge, carried, produced);
+
+        self.builder.switch_to_block(merge);
+        self.builder.seal_block(merge);
+        Ok(carried.clif().map(|_| self.builder.block_params(merge)[0]))
+    }
+
+    /// Leave the current block for `merge`, carrying the arm's value where there is one.
+    fn jump_to_merge(&mut self, merge: Block, carried: Carrier, produced: Option<Value>) {
+        if self.terminated {
+            return;
+        }
+        match (carried.clif(), produced) {
+            (Some(_), Some(value)) => {
+                self.builder.ins().jump(merge, &[BlockArg::Value(value)]);
+            }
+            // An arm that produced nothing where a value is wanted cannot reach the merge; the
+            // call it made diverged, and `terminated` above is the ordinary way that is seen.
+            (Some(clif), None) => {
+                let filler = match clif {
+                    types::F32 => self.builder.ins().f32const(0.0),
+                    types::F64 => self.builder.ins().f64const(0.0),
+                    integer => self.builder.ins().iconst(integer, 0),
+                };
+                self.builder.ins().jump(merge, &[BlockArg::Value(filler)]);
+            }
+            (None, _) => {
+                self.builder.ins().jump(merge, &[]);
+            }
+        }
+    }
+
     /// `super.p` and `super.p = v` — the named class's own realization of a PROPERTY.
     ///
     /// Returns `None` when the class declares no such property, so the caller keeps its decline.

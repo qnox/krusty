@@ -606,6 +606,73 @@ impl BodyLowering<'_, '_, '_> {
         Some(self.list_call(symbol, &carried, answer, receiver, args, ret))
     }
 
+    /// A ZERO-ARGUMENT collection member asked of a type this file implements ITSELF.
+    ///
+    /// The runtime answers such a member for the objects IT makes, and a class of this file's is
+    /// not one of them — which is why the caller declines. But the file knows every class of its
+    /// own that could stand behind that static type, so the choice can be made here: test the
+    /// receiver against each, dispatch on that implementor's own slot when it matches, and fall
+    /// through to the runtime entry point otherwise.
+    ///
+    /// Zero arguments on purpose. An argument would have to cross at the DECLARATION's carriers in
+    /// one arm and at the runtime entry point's in the other, and reconciling those is more than
+    /// the receiver test this is. `iterator`, `hasNext` and `next` take none, which is every member
+    /// in this group.
+    ///
+    /// `None` when the member takes arguments, when the runtime has no entry point for it, or when
+    /// any implementor does not supply it — a partial chain would fall through to the runtime for
+    /// an object the runtime cannot answer for.
+    pub(super) fn implemented_nullary_member(
+        &mut self,
+        internal: crate::types::TypeName,
+        name: &str,
+        receiver: u32,
+        args: &[u32],
+        ret: Ty,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        if !args.is_empty() {
+            return None;
+        }
+        let ty = self.type_of(receiver)?;
+        let role = super::super::super::intrinsics::iteration_role_of(ty)?;
+        let (symbol, _, answer) = interface_symbol(role, name, 0)?;
+        let declared = self.file.implementors_of(internal);
+        let implementors: Vec<(ClassId, u32, Ty)> = declared
+            .iter()
+            .filter_map(|&class| {
+                self.nullary_slot(class, name)
+                    .map(|(slot, supplied)| (class, slot, supplied))
+            })
+            .collect();
+        if implementors.is_empty() || implementors.len() != declared.len() {
+            return None;
+        }
+        Some(self.nullary_by_implementor(&implementors, symbol, answer, receiver, ret))
+    }
+
+    /// One of those, with the runtime entry point as the last arm.
+    fn nullary_by_implementor(
+        &mut self,
+        implementors: &[(ClassId, u32, Ty)],
+        symbol: &'static str,
+        answer: Ty,
+        receiver: u32,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let object = self.reference(receiver)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let produced =
+            self.dispatch_by_implementor(implementors, object, answer, move |body, object| {
+                body.runtime_call(symbol, &[any()], answer, &[object])
+            })?;
+        let Some(produced) = produced else {
+            return Ok(None);
+        };
+        self.convert(produced, Some(answer), ret)
+    }
+
     /// Whether every operand of a `joinToString` is the constant the stdlib declares it to default
     /// to, so that the call is the one a program wrote as `joinToString()`.
     ///

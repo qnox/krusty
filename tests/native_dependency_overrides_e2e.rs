@@ -66,20 +66,27 @@ fn a_class_overriding_a_dependency_property_reads_it_through_its_own_type() {
     expect_native_box(source, "DependencyPropertyOverride", "OK");
 }
 
-/// A call through the DEPENDENCY type still declines, where the type it named is in sight.
+/// A call through the DEPENDENCY type now WORKS, where it once declined.
+///
+/// This test read the other way when it was written, and the header above still describes why: the
+/// answer for such a member is the runtime's, and the runtime answers only for the objects it makes.
+/// What changed is that a ZERO-ARGUMENT member no longer needs the runtime to answer it — the file
+/// knows every class of its own that could stand behind the type, so the call site tests the
+/// receiver and dispatches on the implementor's own slot. See
+/// `tests/native_implemented_dependency_dispatch_e2e.rs` for the mechanism and its limits.
+///
+/// A member with ARGUMENTS still declines, which the last test in this file pins.
 #[test]
-fn a_call_through_the_dependency_type_still_declines() {
-    expect_native_decline(
-        "class Pointed : Iterator<String> {\n\
+fn a_call_through_the_dependency_type_dispatches_on_the_receiver() {
+    let source = "class Pointed : Iterator<String> {\n\
          \x20   var left = 1\n\
          \x20   override fun hasNext(): Boolean = left > 0\n\
          \x20   override fun next(): String { left--; return \"OK\" }\n\
          }\n\
          fun walk(it: Iterator<String>): String = if (it.hasNext()) it.next() else \"fail\"\n\
-         fun box(): String = walk(Pointed())\n",
-        "DependencyTypedCall",
-        "Iterator.hasNext",
-    );
+         fun box(): String = walk(Pointed())\n";
+    expect_box_ok_with_stdlib(source, "DependencyTypedCall");
+    expect_native_box(source, "DependencyTypedCall", "OK");
 }
 
 /// A member asked of a type this file implements ITSELF declines, whatever the member.

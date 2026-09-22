@@ -403,6 +403,32 @@ struct FileLowering<'a> {
 }
 
 impl<'a> FileLowering<'a> {
+    /// Every class of THIS FILE that could stand behind the dependency type `internal`.
+    ///
+    /// A member asked of such a type is the runtime's answer, and the runtime answers only for the
+    /// objects it makes — so where the file puts a class of its own behind that type, the choice
+    /// has to be made at the call site. This is what it chooses between: a subclass needs no entry
+    /// of its own, because `is` walks the super chain and a subclass's vtable has already replaced
+    /// the slot the dispatch reads.
+    fn implementors_of(&self, internal: crate::types::TypeName) -> Vec<ClassId> {
+        (0..self.ir.classes.len() as ClassId)
+            .filter(|&id| {
+                let class = &self.ir.classes[id as usize];
+                !class.is_interface
+                    && std::iter::once(class.superclass)
+                        .chain(class.interfaces.iter())
+                        .chain(
+                            class
+                                .supertypes
+                                .iter()
+                                .copied()
+                                .filter_map(crate::types::Ty::obj_internal),
+                        )
+                        .any(|named| named == internal)
+            })
+            .collect()
+    }
+
     /// Whether a class of this file answers for the dependency type `internal`.
     fn implements_dependency(&self, internal: crate::types::TypeName) -> bool {
         self.implemented_dependencies
@@ -2466,6 +2492,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             .and_then(|ty| ty.obj_internal())
                         {
                             if self.file.implements_dependency(internal) {
+                                // Where the member takes NO ARGUMENTS the choice can still be made
+                                // here: the file knows every class of its own that could stand
+                                // behind that type, so the receiver is tested against each and the
+                                // runtime entry point is the last arm. Anything else declines.
+                                if let Some(realized) = self.implemented_nullary_member(
+                                    internal, &name, receiver, args, *ret,
+                                ) {
+                                    return realized;
+                                }
                                 return Err(format!(
                                     "the member `{}.{name}` of a type this file implements itself",
                                     internal.render().replace('/', ".")

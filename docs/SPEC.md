@@ -2363,6 +2363,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `lateinit` read has the same shape: it yields its operand, and only the guard differs.
   Tests: `tests/native_not_null_assert_type_e2e.rs`.
 
+- **A zero-argument member of a type this file implements ITSELF is dispatched by what the receiver
+  turns out to be.** The runtime answers such a member for the objects IT makes, and a class of the
+  program's is not one of them — no static type tells the two apart, which is why the answer is the
+  runtime's at all and why this was a decline.
+  Where the member takes NO ARGUMENTS the choice can be made at the call site: the file knows every
+  class of its own that could stand behind that type, so the receiver is tested against each,
+  dispatched on that implementor's own slot when it matches, and handed to the runtime entry point
+  otherwise. No program-wide slot number is needed, which is what the implementation plan first
+  assumed — the decline is raised precisely when the implementor is in THIS file, so its slot is one
+  this file already assigned. A subclass needs no entry of its own either: `is` walks the super
+  chain, and a subclass's vtable has already replaced the slot the dispatch reads.
+  ZERO arguments on purpose. An argument would have to cross at the DECLARATION's carriers in one
+  arm and at the runtime entry point's in the other, and reconciling those is more than a receiver
+  test; `iterator`, `hasNext` and `next` take none, which is this whole group. A member with
+  arguments keeps declining.
+  The receiver is evaluated ONCE, before the tests, and both arms read that value — a receiver with
+  a side effect must not be evaluated per branch.
+  The runtime arm is emitted and is not yet REACHABLE: a file declaring a collection of its own
+  still declines every collection member asked of a concrete runtime type, through a blanket
+  file-level guard that predates this, so no runtime iterator can be obtained inside such a file.
+  The arm is still what to emit — it becomes live when that guard is made receiver-precise.
+  Tests: `tests/native_implemented_dependency_dispatch_e2e.rs`.
+
 - **`assertEquals` compares booleans structurally, like everything else it compares.** It is
   generic, so `assertEquals(true, true)` has `Boolean` as its first parameter after substitution.
   Reading the parameter to decide how the operands cross handed two raw machine values to an entry
