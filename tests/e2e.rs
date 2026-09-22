@@ -950,6 +950,8 @@ mod local_fun_overload_e2e;
 mod local_fun_ref_e2e;
 #[path = "local_shadows_receiver_member_e2e.rs"]
 mod local_shadows_receiver_member_e2e;
+#[path = "local_superclass_capture_e2e.rs"]
+mod local_superclass_capture_e2e;
 #[path = "loop_jump_shape_e2e.rs"]
 mod loop_jump_shape_e2e;
 #[path = "lower_bail_reason_e2e.rs"]
@@ -1167,6 +1169,8 @@ mod extension_receiver_specificity_e2e;
 mod int_when_switch_e2e;
 #[path = "loop_backedge_narrowing_e2e.rs"]
 mod loop_backedge_narrowing_e2e;
+#[path = "nested_data_class_tostring_recipe_e2e.rs"]
+mod nested_data_class_tostring_recipe_e2e;
 #[path = "operator_expected_result_seeding_e2e.rs"]
 mod operator_expected_result_seeding_e2e;
 #[path = "operator_inc_dec_e2e.rs"]
@@ -1265,6 +1269,8 @@ mod reference_range_expression_e2e;
 mod reified_anonymous_object_e2e;
 #[path = "reified_class_literal_member_inference_e2e.rs"]
 mod reified_class_literal_member_inference_e2e;
+#[path = "reified_collection_round_trip_e2e.rs"]
+mod reified_collection_round_trip_e2e;
 #[path = "reified_inline_check_e2e.rs"]
 mod reified_inline_check_e2e;
 #[path = "reified_inline_return_infer_e2e.rs"]
@@ -1466,6 +1472,8 @@ mod suspend_inline_stateless_finally_e2e;
 mod suspend_inline_statementless_block_e2e;
 #[path = "suspend_interface_delegation_e2e.rs"]
 mod suspend_interface_delegation_e2e;
+#[path = "suspend_interface_impl_e2e.rs"]
+mod suspend_interface_impl_e2e;
 #[path = "suspend_lambda_unit_tail_e2e.rs"]
 mod suspend_lambda_unit_tail_e2e;
 #[path = "suspend_loop_compound_assign_e2e.rs"]
@@ -1631,6 +1639,8 @@ mod value_class_branch_repr_e2e;
 mod value_class_classpath_ctor_e2e;
 #[path = "value_class_default_param_e2e.rs"]
 mod value_class_default_param_e2e;
+#[path = "value_class_delegation_e2e.rs"]
+mod value_class_delegation_e2e;
 #[path = "value_class_e2e.rs"]
 mod value_class_e2e;
 #[path = "value_class_init_validate_e2e.rs"]
