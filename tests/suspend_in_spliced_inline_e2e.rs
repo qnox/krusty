@@ -973,10 +973,16 @@ fn a_non_local_return_of_a_value_try_leaves_the_function() {
         }
         fun box(): String = runBlocking { "" + early() }
     "#;
-    let Some(output) = run("suspend_spliced_nonlocal_return_try", MAIN) else {
-        return;
-    };
-    assert_eq!(output, "2");
+    let output = run("suspend_spliced_nonlocal_return_try", MAIN)
+        .expect("krusty must compile and run the value-try return");
+    let reference_library =
+        common::kotlinc_library(LIB).expect("reference compiler must build the inline fixture");
+    let reference = common::kotlinc_box_result_with_classpath(
+        MAIN,
+        &[reference_library, common::coroutines_jar()],
+    );
+    assert_eq!(reference, "2", "kotlinc value-try return result");
+    assert_eq!(output, reference, "krusty differs from kotlinc");
 }
 
 /// A spliced body whose only store into a local is fed by ANOTHER local — `onEach` copies its

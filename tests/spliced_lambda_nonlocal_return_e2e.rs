@@ -1,6 +1,6 @@
 //! A non-local `return` out of a lambda that suspends and is spliced into its caller's frame.
 //!
-//! `repeat(n) { … api.get() … return v }` is one frame once the splice happens: the suspension
+//! `visit(n) { … api.get() … return v }` is one frame once the splice happens: the suspension
 //! belongs to the enclosing suspend function, and so does the `return`. The emit-time coroutine
 //! machine declined any spliced body holding a `return`, on the belief that such a return was not
 //! boxed to the CPS `Object` result — but `box_returns` walks a lambda's retained `inline_body`
@@ -9,26 +9,45 @@
 //!
 //! Each callee here really suspends (`yield()`), so the resume path — not just verification — runs.
 use super::common;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 
 const LIB: &str = "package lib\n\
-    interface Api { suspend fun get(id: String): String? }\n";
+    interface Api { suspend fun get(id: String): String? }\n\
+    inline fun <T> visit(count: Int, action: (Int) -> T) {\n\
+        var index = 0\n\
+        while (index < count) { action(index); index = index + 1 }\n\
+    }\n";
 
-fn run(tag: &str, main: &str) -> Option<String> {
+fn library() -> &'static PathBuf {
+    static LIBRARY: OnceLock<PathBuf> = OnceLock::new();
+    LIBRARY.get_or_init(|| {
+        common::kotlinc_library(LIB).expect("reference compiler must build the inline fixture")
+    })
+}
+
+fn classpath() -> (Vec<PathBuf>, PathBuf) {
     let jdk = common::jdk_modules();
     let sl = common::stdlib_jar();
     let coro = common::coroutines_jar();
-    let lo = common::compile_lib(tag, LIB)?;
-    common::compile_and_run_box(
+    (vec![library().clone(), sl, coro, jdk.clone()], jdk)
+}
+
+fn run(tag: &str, main: &str) -> String {
+    let (cp, jdk) = classpath();
+    let ours = common::expect_box_run(main, "Main", &cp, Some(jdk.as_path()));
+    let reference = common::kotlinc_box_result_with_classpath(
         main,
-        "Main",
-        &[lo, sl, coro, jdk.clone()],
-        Some(jdk.as_path()),
-    )
+        &[library().clone(), common::coroutines_jar()],
+    );
+    assert_eq!(reference, "OK", "{tag}: kotlinc fixture must succeed");
+    assert_eq!(ours, reference, "{tag}: krusty differs from kotlinc");
+    ours
 }
 
 #[test]
 fn a_reference_return_leaves_a_spliced_suspending_lambda() {
-    // The corpus shape: poll a suspending API inside `repeat` and leave the whole function as soon
+    // The corpus shape: poll a suspending API inside a generic inline loop and leave the whole function as soon
     // as it answers. Before the fix this file did not compile at all.
     const MAIN: &str = "import lib.*\n\
         import kotlinx.coroutines.runBlocking\n\
@@ -42,7 +61,7 @@ fn a_reference_return_leaves_a_spliced_suspending_lambda() {
             }\n\
         }\n\
         suspend fun poll(api: Api, id: String): String? {\n\
-            repeat(5) {\n\
+            visit(5) {\n\
                 val v = api.get(id)\n\
                 if (v != null) return v\n\
             }\n\
@@ -52,10 +71,7 @@ fn a_reference_return_leaves_a_spliced_suspending_lambda() {
             val v = runBlocking { poll(Late(3), \"OK\") }\n\
             return v ?: \"F: null\"\n\
         }\n";
-    assert_eq!(
-        run("nonlocal_ref", MAIN).expect("a reference non-local return out of a spliced lambda"),
-        "OK"
-    );
+    assert_eq!(run("nonlocal_ref", MAIN), "OK");
 }
 
 #[test]
@@ -74,7 +90,7 @@ fn a_return_never_taken_still_falls_through_the_whole_loop() {
             }\n\
         }\n\
         suspend fun poll(api: Api, id: String): String? {\n\
-            repeat(4) {\n\
+            visit(4) {\n\
                 val v = api.get(id)\n\
                 if (v != null) return v\n\
             }\n\
@@ -85,11 +101,7 @@ fn a_return_never_taken_still_falls_through_the_whole_loop() {
             val v = runBlocking { poll(api, \"x\") }\n\
             return if (v == null && api.calls == 4) \"OK\" else \"F: \" + v + \" \" + api.calls\n\
         }\n";
-    assert_eq!(
-        run("nonlocal_fallthrough", MAIN)
-            .expect("a spliced lambda whose non-local return never fires"),
-        "OK"
-    );
+    assert_eq!(run("nonlocal_fallthrough", MAIN), "OK");
 }
 
 #[test]
@@ -108,7 +120,7 @@ fn a_primitive_return_is_boxed_to_the_cps_result() {
             }\n\
         }\n\
         suspend fun attempts(api: Api, id: String): Int {\n\
-            repeat(5) { i ->\n\
+            visit(5) { i ->\n\
                 if (api.get(id) != null) return i + 1\n\
             }\n\
             return -1\n\
@@ -117,10 +129,7 @@ fn a_primitive_return_is_boxed_to_the_cps_result() {
             val n = runBlocking { attempts(Late(2), \"x\") }\n\
             return if (n == 2) \"OK\" else \"F: \" + n\n\
         }\n";
-    assert_eq!(
-        run("nonlocal_int", MAIN).expect("a primitive non-local return out of a spliced lambda"),
-        "OK"
-    );
+    assert_eq!(run("nonlocal_int", MAIN), "OK");
 }
 
 #[test]
@@ -140,7 +149,7 @@ fn a_bare_return_leaves_a_unit_returning_suspend_function() {
         }\n\
         var seen = 0\n\
         suspend fun drain(api: Api, id: String) {\n\
-            repeat(5) {\n\
+            visit(5) {\n\
                 seen = seen + 1\n\
                 if (api.get(id) != null) return\n\
             }\n\
@@ -149,8 +158,32 @@ fn a_bare_return_leaves_a_unit_returning_suspend_function() {
             runBlocking { drain(Late(3), \"x\") }\n\
             return if (seen == 3) \"OK\" else \"F: \" + seen\n\
         }\n";
+    assert_eq!(run("nonlocal_unit", MAIN), "OK");
+}
+
+#[test]
+fn a_non_local_return_crossing_finally_keeps_the_exact_fail_closed_diagnostic() {
+    const MAIN: &str = "import lib.*\n\
+        suspend fun one(): String? = null\n\
+        fun consume(value: Int) {}\n\
+        suspend fun guarded(): String? {\n\
+            visit(1) {\n\
+                try {\n\
+                    val value = one()\n\
+                    if (value != null) return value\n\
+                } finally {\n\
+                    consume(1)\n\
+                }\n\
+            }\n\
+            return null\n\
+        }\n";
+    let (cp, jdk) = classpath();
+    let outcome = common::backend_outcome_in_process(MAIN, "Main", &cp, Some(jdk.as_path()))
+        .expect("the unsupported shape is frontend-valid");
     assert_eq!(
-        run("nonlocal_unit", MAIN).expect("a bare non-local return out of a spliced lambda"),
-        "OK"
+        outcome,
+        common::BackendOutcome::Rejected(vec![
+            "krusty: JVM backend inline error: call arity mismatch".to_string()
+        ])
     );
 }

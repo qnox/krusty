@@ -393,12 +393,15 @@ pub(crate) fn lower_suspend(
         // inside an expression) still keeps the call's raw `Object` in a scalar arm; such a body is
         // declined after normalization, exactly as before the machine existed.
         //
-        // A non-local `return` out of such a body is NOT a reason to decline: `box_returns` walks a
-        // lambda's retained `inline_body`, so the return already yields the CPS `Object` result.
+        // A direct non-local `return` out of such a body is NOT a reason to decline: `box_returns`
+        // walks a lambda's retained `inline_body`, so the return already yields the CPS `Object`
+        // result. A return that crosses `finally` remains declined until that control transfer can
+        // be normalized inside a retained inline body.
         let spliced_suspensions = match (spliced_suspensions.is_empty(), body) {
             (false, Some(b)) => {
                 hoist_spliced_inline_bodies(ir, b, &suspend_set, &orig_rets, &ret_ty);
-                let declined = cps::suspends_in_a_value_try(ir, b, &suspend_set);
+                let declined = cps::suspends_in_a_value_try(ir, b, &suspend_set)
+                    || cps::spliced_return_crosses_finally(ir, b);
                 match declined {
                     true => Vec::new(),
                     false => cps::frame_suspensions(ir, b, &suspend_set),

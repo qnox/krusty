@@ -85,6 +85,66 @@ pub(crate) fn frame_suspensions(
     found
 }
 
+/// Whether a non-local return in a body that will be spliced crosses a `finally` boundary.
+///
+/// Return boxing is sufficient for a direct non-local return, but the emit-time machine cannot yet
+/// route a return through a `finally`: `linearize_finally_returns` stops at a lambda boundary, and
+/// the machine deliberately rejects an unnormalized returning `try/finally`.
+/// Keep that unsupported shape on the old fail-closed path while admitting the direct returns this
+/// pass can represent.
+pub(crate) fn spliced_return_crosses_finally(ir: &IrFile, body: ExprId) -> bool {
+    let mut stack = vec![(body, false, false, false)];
+    let mut seen = HashSet::new();
+    while let Some((at, inlined, spliceable, crosses_finally)) = stack.pop() {
+        if !seen.insert((at, inlined, spliceable, crosses_finally)) {
+            continue;
+        }
+        match &ir.exprs[at as usize] {
+            IrExpr::Return(_) if inlined && crosses_finally => return true,
+            IrExpr::Lambda {
+                captures,
+                inline_body,
+                ..
+            } => {
+                for &capture in captures {
+                    stack.push((capture, inlined, false, crosses_finally));
+                }
+                if let (true, Some(&inner)) = (spliceable, inline_body.as_ref()) {
+                    stack.push((inner, true, false, crosses_finally));
+                }
+                continue;
+            }
+            IrExpr::Try {
+                body,
+                catches,
+                finally,
+                ..
+            } => {
+                let protected_crosses = crosses_finally || finally.is_some();
+                stack.push((*body, inlined, spliceable, protected_crosses));
+                for catch in catches {
+                    stack.push((catch.body, inlined, spliceable, protected_crosses));
+                }
+                if let Some(finally) = finally {
+                    // A return FROM this finalizer does not cross the same finalizer, but it still
+                    // crosses any one surrounding this `try`.
+                    stack.push((*finally, inlined, spliceable, crosses_finally));
+                }
+                continue;
+            }
+            _ => {}
+        }
+        let operands_are_spliceable = match &ir.exprs[at as usize] {
+            IrExpr::Call { .. } => calls_an_inline_function(ir, at),
+            _ => spliceable,
+        };
+        for_each_child(&ir.exprs, at, &mut |child| {
+            stack.push((child, inlined, operands_are_spliceable, crosses_finally))
+        });
+    }
+    false
+}
+
 /// Whether a SPLICED body still suspends inside a `try` that produces a value, after normalization.
 ///
 /// Such an arm keeps the call's raw `Object` result and stores it straight into the arm's local,
@@ -441,5 +501,32 @@ mod tests {
             spliced_inline_suspensions(&ir, body, &HashSet::new()),
             [inner_point]
         );
+    }
+
+    #[test]
+    fn a_direct_return_from_a_spliced_body_crosses_no_finally() {
+        let mut ir = IrFile::default();
+        let value = ir.add_expr(IrExpr::UnitInstance);
+        let returned = ir.add_expr(IrExpr::Return(Some(value)));
+        let lam = lambda(&mut ir, Vec::new(), Some(returned));
+        let body = inline_call(&mut ir, lam);
+        assert!(!spliced_return_crosses_finally(&ir, body));
+    }
+
+    #[test]
+    fn a_return_from_a_spliced_try_body_crosses_its_finally() {
+        let mut ir = IrFile::default();
+        let value = ir.add_expr(IrExpr::UnitInstance);
+        let returned = ir.add_expr(IrExpr::Return(Some(value)));
+        let finalizer = ir.add_expr(IrExpr::UnitInstance);
+        let protected = ir.add_expr(IrExpr::Try {
+            body: returned,
+            catches: Vec::new(),
+            finally: Some(finalizer),
+            result: Ty::Unit,
+        });
+        let lam = lambda(&mut ir, Vec::new(), Some(protected));
+        let body = inline_call(&mut ir, lam);
+        assert!(spliced_return_crosses_finally(&ir, body));
     }
 }
