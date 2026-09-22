@@ -44,6 +44,10 @@ enum Access {
     TopLevel,
     /// A member of a class of this file, read and written through the receiver.
     Member { class: ClassId, index: usize },
+    /// A `const val` of an object or companion, whose value lives in a STATIC rather than in the
+    /// object's own storage — Kotlin folds such a property at every use site, and a reference's
+    /// `get` answers that same value. Never mutable, so there is no write to reach.
+    Static { index: u32 },
     /// A top-level property reached through its ACCESSOR pair rather than through a slot: an
     /// extension property, which has no object of its own to keep a field in, and a delegated or
     /// custom-accessor property, whose value is not in any slot this reference could name. The two
@@ -101,6 +105,57 @@ fn reference_site(expr: &IrExpr) -> Option<(&crate::fir::PropertyId, Option<u32>
 }
 
 impl<'a> FileLowering<'a> {
+    /// Why a property-reference site was not realized, named rather than numbered.
+    ///
+    /// The declare pass skips a site it cannot realize and leaves the decline to the lowering, so
+    /// that the diagnostic names the CONSTRUCT rather than the pass. What it used to name was the
+    /// IR node — `Checked(PropertyReference)` — which is the one thing every such site has in
+    /// common and says nothing about which of them this is. The conditions below are the same ones
+    /// [`reference_site`] and [`Self::reference_of`] decide by, read again to report them.
+    pub(super) fn property_reference_decline(&self, id: u32) -> String {
+        let IrExpr::Checked(crate::ir::IrCheckedOperation::PropertyReference {
+            target,
+            dispatch_receiver,
+            extension_receiver,
+            ..
+        }) = self.ir.expr(id)
+        else {
+            return "a property reference of a shape this generator does not read".to_string();
+        };
+        if dispatch_receiver.is_some() && extension_receiver.is_some() {
+            return "a reference to a MEMBER EXTENSION property, whose accessor wants two \
+                    receivers where this object has room for one"
+                .to_string();
+        }
+        let property = match target {
+            FirPropertyReferenceTarget::Module(property)
+            | FirPropertyReferenceTarget::SpecializedModule { property, .. } => property,
+            _ => {
+                return "a reference to a property this file does not declare".to_string();
+            }
+        };
+        let Some(checked) = self.ir.checked_properties.get(property) else {
+            return "a reference to a property this file does not declare".to_string();
+        };
+        match self.ir.local_property_layouts.get(property) {
+            Some(crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
+                context_parameters, ..
+            }) if !context_parameters.is_empty() => format!(
+                "a reference to the property `{}`, which has context parameters this object has \
+                 no room for",
+                checked.name
+            ),
+            Some(crate::ir::IrLocalPropertyLayout::MemberExtension { .. }) => format!(
+                "a reference to the member extension property `{}`",
+                checked.name
+            ),
+            _ => format!(
+                "a reference to the property `{}`, whose storage this generator did not find",
+                checked.name
+            ),
+        }
+    }
+
     /// Declare a type and its member bodies for every property reference in the file.
     ///
     /// One type per (property, bound-or-not), NOT one per site: Kotlin compares callable references
@@ -242,13 +297,20 @@ impl<'a> FileLowering<'a> {
             | Some(IrLocalPropertyLayout::MemberExtension { .. }) => return None,
             _ => match checked.class {
                 None => Access::TopLevel,
-                Some(class) => {
-                    let index = self.ir.classes[class as usize]
-                        .properties
-                        .iter()
-                        .position(|candidate| candidate.name == checked.name)?;
-                    Access::Member { class, index }
-                }
+                Some(class) => match self.ir.classes[class as usize]
+                    .properties
+                    .iter()
+                    .position(|candidate| candidate.name == checked.name)
+                {
+                    Some(index) => Access::Member { class, index },
+                    // Not in the object's own storage: a `const val` is a STATIC. Whose static is
+                    // not always this class's — a COMPANION's `const val` lives on the OUTER
+                    // class, which is where kotlinc puts it and what the layout here follows — so
+                    // both owners are admitted, and only under the property's own name.
+                    None => Access::Static {
+                        index: self.constant_static(class, &checked.name)?,
+                    },
+                },
             },
         };
         Some(Site {
@@ -258,6 +320,27 @@ impl<'a> FileLowering<'a> {
             mutable,
             bound,
         })
+    }
+
+    /// The static holding a `const val` declared by `class`, by name.
+    ///
+    /// Either the class's own or, when `class` is a COMPANION, its outer one: kotlin puts a
+    /// companion's `const val` on the outer class, and this layout follows it. Only a CONST is
+    /// admitted — an ordinary property reached this way would be a guess about where its value is.
+    fn constant_static(&self, class: ClassId, name: &str) -> Option<u32> {
+        let own = self.ir.classes[class as usize].fq_name_id();
+        let outer = self
+            .ir
+            .classes
+            .iter()
+            .find(|candidate| candidate.companion_class == Some(own))
+            .map(|candidate| candidate.fq_name_id());
+        let index = self.ir.statics.iter().position(|declaration| {
+            declaration.is_const
+                && declaration.name == name
+                && matches!(declaration.owner, Some(owner) if owner == own || Some(owner) == outer)
+        })?;
+        u32::try_from(index).ok()
     }
 
     fn define_reference(
@@ -447,6 +530,7 @@ impl<'a> FileLowering<'a> {
             &mut |body, params| {
                 let value = match access {
                     Access::TopLevel => body.top_level_read(&name)?,
+                    Access::Static { index } => body.static_read(index)?,
                     Access::Member { class, index } => {
                         let object = receiver(body, params, receiver_offset);
                         body.null_check(object)?;
@@ -494,6 +578,12 @@ impl<'a> FileLowering<'a> {
             &format!("{base}_set"),
             &mut |body, params| {
                 match access {
+                    // A `const val` is not mutable, so no site that reaches this storage asks for
+                    // a setter — and if one somehow did, writing a constant is not a thing to do
+                    // quietly.
+                    Access::Static { .. } => {
+                        return Err(format!("a write to the constant `{name}`"));
+                    }
                     Access::TopLevel => {
                         let ty = body.top_level_written_ty(&name)?;
                         let Some(value) = body.convert(params[2], Some(any()), ty)? else {
@@ -583,7 +673,7 @@ impl BodyLowering<'_, '_, '_> {
     /// `::foo`, `C::p`, `x::p` — the reference object itself.
     pub(super) fn property_reference(&mut self, id: u32) -> Result<Option<Value>, Unsupported> {
         let Some(items) = self.file.references.get(&id) else {
-            return Err("`Checked(PropertyReference)`".to_string());
+            return Err(self.file.property_reference_decline(id));
         };
         let (descriptor, size, receiver_offset, singleton) = (
             items.descriptor,
@@ -597,7 +687,7 @@ impl BodyLowering<'_, '_, '_> {
             return Ok(Some(self.data_address(instance)));
         }
         let Some((_, bound, _)) = reference_site(self.file.ir.expr(id)) else {
-            return Err("`Checked(PropertyReference)`".to_string());
+            return Err(self.file.property_reference_decline(id));
         };
         let bound = bound.expect("a site with no singleton binds a receiver");
         let object = self.reference(bound)?;

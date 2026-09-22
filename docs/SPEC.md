@@ -8121,6 +8121,30 @@ and behavior is checked by RUNNING the emitted program.
   that evaluating it twice would fail, and `::a_member_with_a_special_bridge_declines`), and
   `tests/native_comparable_e2e.rs::a_declared_comparable_is_ordered_by_its_own_compare_to`.
 
+- **A property reference to a `const val` of an object or companion reads the STATIC that holds
+  it.** A reference's `get` reaches the property's storage, and for a class member that is a field
+  of the receiver. A `const val` has no such field: Kotlin folds it at every use site and keeps the
+  value in a static, so the reference answers that same value and reads it from there. Never
+  mutable, so there is no write to reach; a site that somehow asked for one declines rather than
+  writing a constant quietly.
+
+  WHOSE static is not always the declaring object's. A COMPANION's `const val` lives on the OUTER
+  class, which is where kotlinc puts it and what this layout follows, so both owners are admitted —
+  under the property's own name, and only for a CONST: an ordinary property reached this way would
+  be a guess about where its value is.
+
+  Found by making the reference declines say WHICH construct they are. Every unrealized site
+  reported `Checked(PropertyReference)`, the one thing they all have in common, which says nothing
+  about which of them it is; they now name the shape — a dependency property, a member extension
+  one, one with context parameters, or storage the generator did not find. That last one is what
+  this entry closes, and the first three are what remains.
+  Tests: `tests/native_const_reference_e2e.rs`. The reference compiler supplies those expectations
+  directly rather than the two backends being cross-checked: reaching a `const val` through a
+  reference or a delegate is a separate, pre-existing gap in the JVM backend, which emits a call to
+  a getter the constant does not have. Corpus:
+  `callableReference/callableReferenceOfCompanionConst.kt` and
+  `delegatedProperty/delegateToConstVal.kt`.
+
 - **An enum may leave an interface member to its ENTRIES.** The class model refuses a CONCRETE
   class that reaches an interface's abstract trap for an interface it implements: Kotlin would not
   have compiled such a class, so the implementation exists and the model failed to find it, and

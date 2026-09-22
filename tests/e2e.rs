@@ -1072,6 +1072,8 @@ mod native_comparable_ranges_e2e;
 mod native_comparator_e2e;
 #[path = "native_concurrency_e2e.rs"]
 mod native_concurrency_e2e;
+#[path = "native_const_reference_e2e.rs"]
+mod native_const_reference_e2e;
 #[path = "native_delegated_properties_e2e.rs"]
 mod native_delegated_properties_e2e;
 #[path = "native_delegation_e2e.rs"]
