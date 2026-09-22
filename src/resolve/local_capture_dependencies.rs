@@ -344,6 +344,10 @@ impl Checker<'_> {
                     match binding.origin {
                         ReceiverFnValueOrigin::Local => AnonymousObjectCaptureSource::LexicalValue,
                         ReceiverFnValueOrigin::ClassStorage(field) => {
+                            if let Some(existing) = captures.get_mut(field as usize) {
+                                existing.shared_cell |= required.shared_cell;
+                                continue;
+                            }
                             AnonymousObjectCaptureSource::ClassStorage { field }
                         }
                         ReceiverFnValueOrigin::DispatchProperty { .. }
@@ -351,7 +355,16 @@ impl Checker<'_> {
                         | ReceiverFnValueOrigin::TopLevelProperty => continue,
                     }
                 }
-                AnonymousObjectCaptureSource::ClassStorage { .. } => required.source,
+                AnonymousObjectCaptureSource::ClassStorage { field } => {
+                    // The nested constructor already reads this exact field from the current local
+                    // classifier. Carrying it through the current classifier's own constructor
+                    // would duplicate the field and reinterpret its ordinal under another owner.
+                    if let Some(existing) = captures.get_mut(field as usize) {
+                        existing.shared_cell |= required.shared_cell;
+                        continue;
+                    }
+                    required.source
+                }
                 AnonymousObjectCaptureSource::EnclosingInstance { current, depth }
                 | AnonymousObjectCaptureSource::ImplicitReceiver { current, depth } => {
                     if !receivers.iter().any(|receiver| {

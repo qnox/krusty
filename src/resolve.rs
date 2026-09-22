@@ -19440,11 +19440,12 @@ impl<'a> Checker<'a> {
                     .map(|(candidate, ..)| candidate.clone())
                     .collect::<Vec<_>>();
                 provisional_candidates.extend(candidates.iter().cloned());
-                record_anonymous_construction_captures(
+                let _ = record_anonymous_construction_captures(
                     self.file,
                     call,
                     &self.anonymous_lexical_scope,
                     &provisional_candidates,
+                    true,
                     SelectedLocalCallableCaptures {
                         calls: &self.resolved_calls,
                         expressions: &self.expr_lowers,
@@ -19482,13 +19483,21 @@ impl<'a> Checker<'a> {
                 }
                 selected_receiver_candidates.extend(candidates);
                 candidates = selected_receiver_candidates;
-                // Remove every unused provisional receiver. This remains inside capture
-                // discovery; the authoritative body check consumes only this exact stable list.
-                record_anonymous_construction_captures(
+                // Finalize away receiver rungs the scratch body did not select. Pending inference
+                // remains provisional so an incomplete revisit cannot discard an established
+                // field.
+                let storage_field_remap = record_anonymous_construction_captures(
                     self.file,
                     call,
                     &self.anonymous_lexical_scope,
                     &candidates,
+                    self.postponed_argument_depth != 0
+                        || candidates.iter().any(|candidate| {
+                            candidate.ty.mentions_pending()
+                                || candidate
+                                    .delegate_storage
+                                    .is_some_and(|storage| storage.mentions_pending())
+                        }),
                     SelectedLocalCallableCaptures {
                         calls: &self.resolved_calls,
                         expressions: &self.expr_lowers,
@@ -19496,6 +19505,24 @@ impl<'a> Checker<'a> {
                     },
                     &mut self.discovered_anonymous_captures,
                 );
+                // Descendants were checked while every addressable receiver rung occupied a
+                // provisional field. Rewrite their exact `ClassStorage` coordinates through the
+                // finalized field permutation instead of replaying the class body. Rechecking the
+                // whole subtree here doubles the work at every nesting level (and is exponential
+                // for deeply nested anonymous objects); the structural owner edge identifies the
+                // only constructions whose storage owner is this declaration.
+                if !remap_direct_anonymous_class_storage_captures(
+                    declaration,
+                    &self.anonymous_lexical_scope,
+                    &storage_field_remap,
+                    &mut self.discovered_anonymous_captures,
+                ) {
+                    self.diags.error(
+                        span,
+                        "anonymous capture storage identity was removed during finalization",
+                    );
+                    return Ty::Error;
+                }
                 if let Some(mut captures) = self.discovered_anonymous_captures.remove(&declaration)
                 {
                     self.extend_anonymous_superclass_captures(scope, declaration, &mut captures);
@@ -38185,11 +38212,12 @@ fn record_anonymous_construction_captures(
     construction: ExprId,
     lexical_scope: &AnonymousLexicalClassScope,
     candidates: &[AnonymousCaptureCandidate],
+    preserve_missing: bool,
     selected_local_callables: SelectedLocalCallableCaptures<'_>,
     captures: &mut HashMap<DeclId, Vec<AnonymousObjectCapture>>,
-) {
+) -> Vec<Option<u32>> {
     let Some(&declaration) = file.anonymous_object_classes.get(&construction) else {
-        return;
+        return Vec::new();
     };
     let bound = anonymous_body_bound_value_names(file, declaration);
     crate::trace_compiler!(
@@ -38270,37 +38298,88 @@ fn record_anonymous_construction_captures(
         "anonymous capture selection declaration={declaration:?} captures={selected:?}",
     );
     // Postponed generic-lambda checking may revisit the same construction while one receiver type
-    // is temporarily `Pending`. Capture discovery is monotonic: a provisional revisit must never
-    // replace the exact symbolic type recorded by the earlier check, because this table crosses the
-    // retained-inline boundary and no pending semantic type may reach checked FIR.
+    // is temporarily `Pending`. A provisional revisit must neither replace the exact symbolic type
+    // recorded by the earlier check nor renumber an established capture field. Descendant
+    // constructions can already carry one of these ordinals as their resolved `ClassStorage`
+    // source, so retain the established order while discovery is provisional. The returned field
+    // permutation lets direct descendants update their exact storage coordinates after unused
+    // receiver rungs are removed. This table crosses the retained-inline boundary and no pending
+    // semantic type may reach checked FIR.
+    let mut field_remap = Vec::new();
     if let Some(previous) = captures.get(&declaration) {
-        for capture in &mut selected {
-            if !capture.ty.mentions_pending()
-                && capture
+        field_remap.resize(previous.len(), None);
+        let mut pending = selected;
+        selected = Vec::with_capacity(previous.len().max(pending.len()));
+        for (previous_field, exact) in previous.iter().enumerate() {
+            let Some(position) = pending
+                .iter()
+                .position(|capture| capture.name == exact.name && capture.source == exact.source)
+            else {
+                if preserve_missing {
+                    field_remap[previous_field] = u32::try_from(selected.len()).ok();
+                    selected.push(exact.clone());
+                }
+                continue;
+            };
+            let mut capture = pending.remove(position);
+            capture.shared_cell |= exact.shared_cell;
+            if (capture.ty.mentions_pending()
+                || capture
+                    .storage_ty
+                    .is_some_and(|storage| storage.mentions_pending()))
+                && !exact.ty.mentions_pending()
+                && exact
                     .storage_ty
                     .is_none_or(|storage| !storage.mentions_pending())
             {
-                continue;
+                capture.ty = exact.ty;
+                capture.storage_ty = exact.storage_ty;
             }
-            let Some(exact) = previous.iter().find(|exact| {
-                exact.name == capture.name
-                    && exact.source == capture.source
-                    && !exact.ty.mentions_pending()
-                    && exact
-                        .storage_ty
-                        .is_none_or(|storage| !storage.mentions_pending())
-            }) else {
-                continue;
-            };
-            capture.ty = exact.ty;
-            capture.storage_ty = exact.storage_ty;
+            field_remap[previous_field] = u32::try_from(selected.len()).ok();
+            selected.push(capture);
         }
+        selected.extend(pending);
     }
     crate::trace_compiler!(
         "resolve",
         "anonymous captures selected declaration={declaration:?} captures={selected:?}",
     );
     captures.insert(declaration, selected);
+    field_remap
+}
+
+/// Translate storage ordinals recorded by direct anonymous children while `owner` still exposed
+/// its provisional receiver prefix. The lexical-owner graph is the authoritative relationship:
+/// deeper descendants read storage from their immediate classifier, whose own finalization remaps
+/// them independently.
+fn remap_direct_anonymous_class_storage_captures(
+    owner: DeclId,
+    lexical_scope: &AnonymousLexicalClassScope,
+    storage_fields: &[Option<u32>],
+    captures: &mut HashMap<DeclId, Vec<AnonymousObjectCapture>>,
+) -> bool {
+    let direct_children = lexical_scope
+        .owners
+        .iter()
+        .filter_map(|(&declaration, &candidate_owner)| {
+            (candidate_owner == owner).then_some(declaration)
+        })
+        .collect::<Vec<_>>();
+    for declaration in direct_children {
+        let Some(child_captures) = captures.get_mut(&declaration) else {
+            continue;
+        };
+        for capture in child_captures {
+            let AnonymousObjectCaptureSource::ClassStorage { field } = &mut capture.source else {
+                continue;
+            };
+            let Some(Some(finalized_field)) = storage_fields.get(*field as usize) else {
+                return false;
+            };
+            *field = *finalized_field;
+        }
+    }
+    true
 }
 
 fn install_anonymous_object_captures(
@@ -41851,6 +41930,17 @@ impl<'a> Checker<'a> {
                 result.unsupported.get_or_insert(name);
                 continue;
             };
+            let source = match local.origin {
+                ReceiverFnValueOrigin::ClassStorage(field)
+                | ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } => {
+                    AnonymousObjectCaptureSource::ClassStorage { field }
+                }
+                ReceiverFnValueOrigin::Local
+                | ReceiverFnValueOrigin::DispatchProperty { .. }
+                | ReceiverFnValueOrigin::TopLevelProperty => {
+                    AnonymousObjectCaptureSource::LexicalValue
+                }
+            };
             result.values.push(AnonymousObjectCapture {
                 // Smart-cast state is a fact about this control-flow point, not the type of a
                 // mutable cell captured by a separately checked classifier body.
@@ -41869,7 +41959,7 @@ impl<'a> Checker<'a> {
                 .is_shared_cell(),
                 storage_ty: local.delegate_storage_ty,
                 name,
-                source: AnonymousObjectCaptureSource::LexicalValue,
+                source,
                 receiver_label: None,
                 lexical_shadow_depth: 0,
                 capture_dependency: None,
