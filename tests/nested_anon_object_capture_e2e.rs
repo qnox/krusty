@@ -18,29 +18,27 @@
 
 use super::common;
 
-fn run(src: &str) -> String {
-    common::expect_box_run_with_stdlib(src, "Main")
-}
-
 /// The value actually reaches the innermost object: a fix that merely stopped the panic while
 /// reading the wrong field would return the wrong string rather than crash.
 #[test]
 fn an_anon_object_in_a_lambda_in_an_anon_object_reads_the_right_capture() {
     const SRC: &str = "interface Inner { fun get(): String }\n\
         interface Outer { val inner: Inner }\n\
+        fun <Input, Output> carryAcross(value: Input, transform: (Input) -> Output): Output =\n\
+        \x20   transform(value)\n\
         fun box(): String {\n\
         \x20   val tag = \"K\"\n\
-        \x20   val xs = listOf(\"O\")\n\
         \x20   val outer = object : Outer {\n\
         \x20       override val inner: Inner = object : Inner {\n\
         \x20           override fun get(): String =\n\
-        \x20               xs.map { head -> object : Inner { override fun get(): String = head + tag } }\n\
-        \x20                   .joinToString(\"\") { it.get() }\n\
+        \x20               carryAcross(\"O\") { head ->\n\
+        \x20                   object : Inner { override fun get(): String = head + tag }\n\
+        \x20               }.get()\n\
         \x20       }\n\
         \x20   }\n\
         \x20   return outer.inner.get()\n\
         }\n";
-    assert_eq!(run(SRC), "OK");
+    common::expect_box_same_as_kotlinc(SRC, "NestedAnonObjectOuterAndLambdaCapture");
 }
 
 /// The innermost object capturing only the lambda's own parameter panicked identically, so it is
@@ -49,18 +47,20 @@ fn an_anon_object_in_a_lambda_in_an_anon_object_reads_the_right_capture() {
 fn an_anon_object_in_a_lambda_may_capture_only_the_lambda_parameter() {
     const SRC: &str = "interface Inner { fun get(): String }\n\
         interface Outer { val inner: Inner }\n\
+        fun <Input, Output> carryAcross(value: Input, transform: (Input) -> Output): Output =\n\
+        \x20   transform(value)\n\
         fun box(): String {\n\
-        \x20   val xs = listOf(\"O\", \"K\")\n\
         \x20   val outer = object : Outer {\n\
         \x20       override val inner: Inner = object : Inner {\n\
         \x20           override fun get(): String =\n\
-        \x20               xs.map { head -> object : Inner { override fun get(): String = head } }\n\
-        \x20                   .joinToString(\"\") { it.get() }\n\
+        \x20               carryAcross(\"OK\") { value ->\n\
+        \x20                   object : Inner { override fun get(): String = value }\n\
+        \x20               }.get()\n\
         \x20       }\n\
         \x20   }\n\
         \x20   return outer.inner.get()\n\
         }\n";
-    assert_eq!(run(SRC), "OK");
+    common::expect_box_same_as_kotlinc(SRC, "NestedAnonObjectLambdaOnlyCapture");
 }
 
 /// An ordinary source declaration supplies the lambda boundary, so the regression cannot pass by
