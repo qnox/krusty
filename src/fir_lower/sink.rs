@@ -28,6 +28,7 @@ pub enum FirFileLoweringFailure {
     MissingCallable(DeclarationId),
     MissingProperty(DeclarationId),
     MissingSourceOrder(DeclarationId),
+    MissingContinuationOrdinal(DeclarationId),
     MissingClassSourceQualifiedName(DeclarationId),
     MissingSourcePackage(crate::fir::SourceFileId),
     UnsupportedPropertyShape(DeclarationId),
@@ -1094,9 +1095,6 @@ impl<'a> CommonIrBodySink<'a> {
                     .source_order(declaration)
                     .ok_or(FirFileLoweringFailure::MissingSourceOrder(declaration))?,
             );
-            if let Some(ordinal) = index.continuation_ordinal(declaration) {
-                self.ir.fn_continuation_ordinal.insert(function, ordinal);
-            }
             if let Some(bound) = index.callable_equality_bound(callable.id) {
                 self.ir.fn_equality_bounds.insert(function, bound.get());
             }
@@ -1112,6 +1110,10 @@ impl<'a> CommonIrBodySink<'a> {
                 .flags
                 .has(crate::fir::DeclarationFlags::SUSPEND)
             {
+                let ordinal = index.continuation_ordinal(declaration).ok_or(
+                    FirFileLoweringFailure::MissingContinuationOrdinal(declaration),
+                )?;
+                self.ir.fn_continuation_ordinal.insert(function, ordinal);
                 self.ir.suspend_funs.push(function);
             }
             if declaration_header

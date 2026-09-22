@@ -2472,9 +2472,15 @@ fn same_name_ordinal(ir: &IrFile, fid: u32) -> usize {
 pub(crate) fn continuation_ordinal(ir: &IrFile, fid: u32) -> usize {
     match ir.fn_continuation_ordinal.get(&fid) {
         Some(&ordinal) => ordinal as usize,
-        // No source declaration: nothing reserved a position, and no anonymous object of a
-        // generated body can hold one either, so the overloads simply number themselves.
-        None => same_name_ordinal(ir, fid) + 1,
+        None => {
+            assert!(
+                !ir.fn_source_order.contains_key(&fid),
+                "source suspend function {fid} has no published continuation ordinal"
+            );
+            // A lowering-made function has no source declaration, so no anonymous source object
+            // can consume its generated sequence. Its target-private overloads number themselves.
+            same_name_ordinal(ir, fid) + 1
+        }
     }
 }
 
