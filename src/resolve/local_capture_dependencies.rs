@@ -38,6 +38,7 @@ impl Checker<'_> {
             captures,
             capture_bindings,
         );
+        self.extend_superclass_captures(scope, declaration, captures, capture_bindings);
         debug_assert_eq!(captures.len(), capture_bindings.len());
     }
 
@@ -94,13 +95,18 @@ impl Checker<'_> {
         binding: Option<u32>,
     ) {
         let existing = captures.iter().enumerate().find_map(|(index, capture)| {
+            // The same lexical VALUE is one capture, whether or not a dependency asked for it. A
+            // class that captures `x` for its own body and is then found to need `x` for a
+            // declaration it reaches carries one field, not two — the second would be a duplicate
+            // field of the same name, which the class file format rejects outright.
+            let same_lexical_value = capture.source == candidate.source
+                && capture_bindings[index] == binding
+                && capture.name == candidate.name;
             let same_semantic_source = match candidate.capture_dependency {
-                Some(dependency) => capture.capture_dependency == Some(dependency),
-                None => {
-                    capture.capture_dependency.is_none()
-                        && capture.source == candidate.source
-                        && capture_bindings[index] == binding
+                Some(dependency) => {
+                    capture.capture_dependency == Some(dependency) || same_lexical_value
                 }
+                None => capture.capture_dependency.is_none() && same_lexical_value,
             };
             same_semantic_source.then_some(index)
         });
@@ -206,6 +212,51 @@ impl Checker<'_> {
         }
     }
 
+    /// The captures a local class needs because its SUPERCLASS is a local class that has some.
+    ///
+    /// A supertype constructor call is not an expression: `class Derived : Local(true)` records the
+    /// base classifier and its ARGUMENTS, and nothing in between that a resolved-constructor lookup
+    /// could find. So the edge is read from the resolved supertype instead — the same declaration
+    /// identity, arrived at from the header rather than from a call — and the superclass's own
+    /// discovered captures become the subclass's, to be passed on ahead of the written arguments.
+    ///
+    /// Without this the subclass carries nothing and its constructor calls the base with the
+    /// written arguments alone, one value short per capture: kotlinc compiles these, and both of
+    /// krusty's backends were rejecting them — the JVM's with a `VerifyError` putting `this` where
+    /// the capture belongs.
+    fn extend_superclass_captures(
+        &self,
+        scope: &CheckerScope<'_>,
+        current_declaration: DeclId,
+        captures: &mut Vec<AnonymousObjectCapture>,
+        capture_bindings: &mut Vec<Option<u32>>,
+    ) {
+        let Decl::Class(class) = self.file.decl(current_declaration) else {
+            return;
+        };
+        let Some(owner) = self.active_classifier_internal(current_declaration, class) else {
+            return;
+        };
+        let Some(superclass) = self
+            .resolved_body_local_supertypes
+            .get(&owner)
+            .and_then(|supertypes| supertypes.first())
+            .and_then(|supertype| supertype.kotlin_class_internal())
+        else {
+            return;
+        };
+        let Some(selected) = self.local_classifier_captures_of(superclass) else {
+            return;
+        };
+        self.extend_required_captures(
+            scope,
+            current_declaration,
+            selected,
+            captures,
+            capture_bindings,
+        );
+    }
+
     fn extend_selected_constructor_captures(
         &self,
         scope: &CheckerScope<'_>,
@@ -238,6 +289,26 @@ impl Checker<'_> {
                     })
             })
             .collect::<Vec<_>>();
+        self.extend_required_captures(
+            scope,
+            current_declaration,
+            required,
+            captures,
+            capture_bindings,
+        );
+    }
+
+    /// Carry each REQUIRED capture of a selected local declaration into the current one, mapping it
+    /// onto a source this scope can supply. A capture with no such source here is skipped: the
+    /// declaration that needs it is reached from somewhere that has it, or not at all.
+    fn extend_required_captures(
+        &self,
+        scope: &CheckerScope<'_>,
+        current_declaration: DeclId,
+        required: Vec<(DeclId, TypeName, usize, AnonymousObjectCapture, Option<u32>)>,
+        captures: &mut Vec<AnonymousObjectCapture>,
+        capture_bindings: &mut Vec<Option<u32>>,
+    ) {
         let receivers = self.implicit_receivers(scope);
         for (declaration, owner, field, mut required, required_identity) in required {
             if declaration == current_declaration {
@@ -290,6 +361,38 @@ impl Checker<'_> {
                 required_identity,
             );
         }
+    }
+
+    /// The discovered captures of the local classifier named `owner`, in the shape
+    /// [`Self::extend_required_captures`] consumes.
+    fn local_classifier_captures_of(
+        &self,
+        owner: TypeName,
+    ) -> Option<Vec<(DeclId, TypeName, usize, AnonymousObjectCapture, Option<u32>)>> {
+        let declaration =
+            self.discovered_local_class_captures
+                .keys()
+                .copied()
+                .find(|declaration| {
+                    matches!(
+                        self.file.decl(*declaration),
+                        Decl::Class(class)
+                            if self.active_classifier_internal(*declaration, class) == Some(owner)
+                    )
+                })?;
+        let captures = self.discovered_local_class_captures.get(&declaration)?;
+        let bindings = self
+            .discovered_local_class_capture_bindings
+            .get(&declaration)?;
+        (captures.len() == bindings.len()).then(|| {
+            captures
+                .iter()
+                .cloned()
+                .zip(bindings.iter().copied())
+                .enumerate()
+                .map(|(field, (capture, binding))| (declaration, owner, field, capture, binding))
+                .collect()
+        })
     }
 
     fn selected_local_classifier_captures(
