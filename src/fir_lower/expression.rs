@@ -2007,9 +2007,9 @@ impl BodyLowering<'_> {
 /// An IR constant for a checked FIR one, carrying the value and the checked identity.
 ///
 /// The constant's TYPE is part of what the frontend checked, so common IR records it: `FirConstant`
-/// has no narrower integral case than `Int` and no unsigned one at all, so the checked type is the
-/// only thing carrying the width. What primitive ends up holding an unsigned value is not decided
-/// here — see [`IrConst::UByte`].
+/// has no signed integral case narrower than `Int` and no `UByte`/`UShort` case, so the checked type
+/// is the only thing carrying those widths. What primitive ends up holding an unsigned value is not
+/// decided here — see [`IrConst::UByte`].
 fn lower_constant(
     constant: &FirConstant,
     ty: Ty,
@@ -2024,8 +2024,8 @@ fn lower_constant(
             // is the only thing that carries the width.
             //
             // Recording a `Byte`-typed constant as an `Int` loses it, and a backend that boxes by
-            // the constant's SHAPE then boxes `Byte.MIN_VALUE` as an `Int`: the native one did,
-            // and `Byte.MIN_VALUE as Any is Byte` answered false.
+            // the constant's SHAPE then boxes that value as an `Int`: the JVM backend did, so an
+            // `is Byte` test answered false.
             match ty.non_null() {
                 Ty::Byte => IrConst::Byte(
                     i8::try_from(value)

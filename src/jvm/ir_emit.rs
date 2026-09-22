@@ -29,6 +29,7 @@ mod bridge_emission;
 mod call_operands;
 mod constructor_defaults;
 mod coroutine_machine;
+mod data_class_pool_seed;
 mod debug_lines;
 mod enum_entry_subclass;
 mod enum_metadata;
@@ -2730,86 +2731,18 @@ fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_, '_>, cw: &mut ClassWriter)
     // member methods (whose bodies intern their own constants in between) — so `emit_class` reserves
     // each name at its emission site instead.
     if synthesizes_data_class_members(c) {
-        let simple = fq_name.rsplit('/').next().unwrap_or(fq_name);
-        // The synthesized members cover the PRIMARY-CONSTRUCTOR properties only; a body property has a
-        // backing field in `c.fields` but no `componentN` and no `copy` parameter (see
-        // `build_class_metadata`, which takes the same prefix).
-        let component_fields = &c.fields[..(c.ctor_param_count as usize).min(c.fields.len())];
-        let data_fields: Vec<(String, String)> = component_fields
-            .iter()
-            .map(|f| (f.name.clone(), desc(f.ty)))
-            .collect();
-        // Derive the JVM-only dispatch owner from each property's semantic type. The physical field
-        // may already have been erased by a backend pass, so prefer the property declaration.
-        let hashcode_owners: Vec<Option<String>> = component_fields
-            .iter()
-            .enumerate()
-            .map(|(index, field)| {
-                let semantic_ty = c
-                    .properties
-                    .iter()
-                    .find(|property| property.backing_field == Some(index as u32))
-                    .map_or(field.ty, |property| property.ty);
-                data_class_hashcode_owner(ir, bodies, semantic_ty)
-            })
-            .collect();
-        let mut data_accessors = Vec::new();
-        for property in &c.properties {
-            if property.is_private {
-                continue;
-            }
-            let Some(field) = property
-                .backing_field
-                .and_then(|index| c.fields.get(index as usize))
-            else {
-                continue;
-            };
-            let accessor_ty = declared_property_accessor_jvm(ir, property, field);
-            let accessor_desc = desc(accessor_ty);
-            let field_sig = field_sig_of(field);
-            let getter = property
-                .getter_jvm_name
-                .clone()
-                .unwrap_or_else(|| crate::names::property_getter_name(&property.name));
-            data_accessors.push(crate::jvm::classfile::DataAccessorInfo {
-                name: getter,
-                desc: format!("(){accessor_desc}"),
-                setter_kind: 0,
-                signature: field_sig.as_ref().map(|signature| format!("(){signature}")),
-            });
-            if property.is_var {
-                let setter = property
-                    .setter_jvm_name
-                    .clone()
-                    .unwrap_or_else(|| crate::names::property_setter_name(&property.name));
-                let guarded = accessor_ty.is_reference()
-                    && !property.ty.is_nullable()
-                    && is_nonnull_reference_field(ir, fq_name, &field.name, field.ty);
-                data_accessors.push(crate::jvm::classfile::DataAccessorInfo {
-                    name: setter,
-                    desc: format!("({accessor_desc})V"),
-                    setter_kind: if guarded { 2 } else { 1 },
-                    signature: field_sig.map(|signature| format!("({signature})V")),
-                });
-            }
-        }
-        // `copy`'s generic Signature shares the ctor's parameter list, returning `self` instead of `void`.
-        let copy_sig = ctor_sig
-            .and_then(|s| s.strip_suffix('V'))
-            .map(|params| format!("{params}L{fq_name};"));
-        cw.seed_data_class_pool(
-            fq_name,
-            &ctor_desc,
-            simple,
-            &data_fields,
-            &crate::jvm::classfile::DataMemberInfo {
-                accessors: &data_accessors,
-                hashcode_owners: &hashcode_owners,
-                copy_sig: copy_sig.as_deref(),
-                copy_is_private: data_copy_fid(ir, c)
-                    .is_some_and(|fid| ir.private_methods.contains(&fid)),
+        data_class_pool_seed::seed_data_class_members(
+            data_class_pool_seed::DataClassPoolSeed {
+                ir,
+                class: c,
+                bodies,
+                fq_name,
+                ctor_signature: ctor_sig,
+                ctor_desc: &ctor_desc,
                 field_sigs: &field_sigs,
+                field_sig_of: &field_sig_of,
             },
+            cw,
         );
     }
 }
@@ -9021,28 +8954,60 @@ fn emit_interface_class(
         // to the abstract method via `invokeinterface`. kotlinc emits it ON THE INTERFACE (call sites use
         // it) AND, under a mode that keeps the compatibility holder, a copy on the
         // `<Iface>$DefaultImpls` class (`public final`).
-        if let Some(defaults) = ir.param_defaults(fid) {
-            // `disable` puts NOTHING executable on the interface, the `$default` stub included: call
-            // sites go to the holder's copy instead.
-            if bodies_on_interface {
-                emit_default_stub(ir, fid, &fq_name, facade, &mut cw, defaults, env, true);
-            }
-            // `-jvm-default=no-compatibility` emits NO `$DefaultImpls` at all. Emitting one anyway
-            // would publish a holder class the build says does not exist — a downstream compilation
-            // resolving against it links to a class kotlinc would never have produced.
-            if emits_default_impls {
-                let di = default_impls.get_or_insert_with(|| {
-                    let mut w =
-                        new_writer(&format!("{fq_name}$DefaultImpls"), "java/lang/Object", opts);
-                    w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
-                    w
-                });
-                if enable_compat {
-                    // The interface owns the real default application; the holder's copy is a
-                    // thin synthetic forward to it (kotlinc's `enable` shape).
-                    emit_default_stub_forward(ir, fid, &fq_name, di);
-                } else {
-                    emit_default_stub(ir, fid, &fq_name, facade, di, defaults, env, true);
+        let deferred_suspend_declaration = ir
+            .jvm_suspend_interface_bodies
+            .values()
+            .any(|(_, declaration)| *declaration == fid);
+        let default_fid = ir
+            .jvm_suspend_interface_bodies
+            .get(&fid)
+            .map(|(_, declaration)| *declaration)
+            .unwrap_or(fid);
+        if !deferred_suspend_declaration {
+            if let Some(defaults) = ir.param_defaults(default_fid) {
+                // `disable` puts NOTHING executable on the interface, the `$default` stub included: call
+                // sites go to the holder's copy instead.
+                if bodies_on_interface {
+                    emit_default_stub(
+                        ir,
+                        default_fid,
+                        &fq_name,
+                        facade,
+                        &mut cw,
+                        defaults,
+                        env,
+                        true,
+                    );
+                }
+                // `-jvm-default=no-compatibility` emits NO `$DefaultImpls` at all. Emitting one anyway
+                // would publish a holder class the build says does not exist — a downstream compilation
+                // resolving against it links to a class kotlinc would never have produced.
+                if emits_default_impls {
+                    let di = default_impls.get_or_insert_with(|| {
+                        let mut w = new_writer(
+                            &format!("{fq_name}$DefaultImpls"),
+                            "java/lang/Object",
+                            opts,
+                        );
+                        w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
+                        w
+                    });
+                    if enable_compat {
+                        // The interface owns the real default application; the holder's copy is a
+                        // thin synthetic forward to it (kotlinc's `enable` shape).
+                        emit_default_stub_forward(ir, default_fid, &fq_name, di);
+                    } else {
+                        emit_default_stub(
+                            ir,
+                            default_fid,
+                            &fq_name,
+                            facade,
+                            di,
+                            defaults,
+                            env,
+                            true,
+                        );
+                    }
                 }
             }
         }
@@ -10797,7 +10762,16 @@ fn emit_method_inner_with_holder(
             method_sig.as_deref(),
             &method_descriptor(&param_tys, ret),
         ),
-        None => method_sig,
+        None => match ir.jvm_suspend_interface_bodies.get(&fid).copied() {
+            Some((receiver, _)) => holder_method_signature(
+                &signature_formatter,
+                ir,
+                receiver,
+                method_sig.as_deref(),
+                &method_descriptor(f.params.get(1..).unwrap_or_default(), ret),
+            ),
+            None => method_sig,
+        },
     };
     let ann_of = |t: Ty| -> Option<&'static str> {
         let d = crate::jvm::names::type_descriptor(t);
@@ -11925,6 +11899,12 @@ fn method_signature_shape(
     }
     if let Some(generic) = ir.signatures.get(&fid) {
         return jvm_method_signature(formatter, generic, f);
+    }
+    if let (Some((params, ret)), Some(_)) = (
+        ir.member_semantic_sigs.get(&fid),
+        ir.suspend_declared_sigs.get(&fid),
+    ) {
+        return suspend_method_sig(formatter, params, ret);
     }
     if let Some((params, ret)) = ir.member_semantic_sigs.get(&fid) {
         // A member using ENCLOSING-CLASS type parameters signs with bare references (`(TT;)TT;`)
@@ -13216,9 +13196,13 @@ impl<'a> Emitter<'a> {
         // records frames (a loop HOF's loop frames). All of these are bound relative to an empty operand
         // baseline (no caller operand prefix is threaded into them), so a non-empty baseline must bail —
         // `records_frame` makes a parent operand sequence spill earlier operands so we reach here at 0.
+        // Per lambda, per BODY, the frames that body records: a lambda argument always has a body, so
+        // the question is whether any body actually produced a frame — not whether one exists.
         let needs_frames = probe.join_required
             || !probe.frames.is_empty()
-            || lam_frames.iter().any(|f| !f.is_empty())
+            || lam_frames
+                .iter()
+                .any(|bodies| bodies.iter().any(|frames| !frames.is_empty()))
             || !probe.external_branches.is_empty();
         if needs_frames && code.stack_height() != 0 {
             crate::trace_compiler!(
@@ -16069,8 +16053,17 @@ impl<'a> Emitter<'a> {
                     let argument_words: i32 =
                         param_tys.iter().map(|ty| slot_words(*ty) as i32).sum();
                     let descriptor = method_descriptor(&param_tys, ret);
+                    let source_owner_is_interface = self.ir.classes.iter().any(|candidate| {
+                        candidate.is_interface && candidate.fq_name_id() == *owner
+                    });
                     let owner = owner.render();
-                    let method = if self.bodies.owner_is_interface(&owner) {
+                    // `owner_is_interface` answers from the CLASSPATH; a static declared on an
+                    // interface being compiled right now is not there. An `invokestatic` naming an
+                    // interface must use an InterfaceMethodref, so the file's own classes answer
+                    // too.
+                    let owner_is_interface =
+                        source_owner_is_interface || self.bodies.owner_is_interface(&owner);
+                    let method = if owner_is_interface {
                         self.cw.interface_methodref(&owner, &f.name, &descriptor)
                     } else {
                         self.cw.methodref(&owner, &f.name, &descriptor)

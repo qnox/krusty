@@ -113,6 +113,83 @@ pub(super) fn classifier_type_parameter_ordinal(
     unreachable!("the packed type-parameter ordinal space is finite")
 }
 
+/// A local class whose SUPERCLASS is a local class with captures passes them on.
+///
+/// A capturing local class takes its captures as synthetic PREFIX parameters of its constructor,
+/// ahead of the ones the source wrote. A subclass's `super(…)` spells only the written ones — the
+/// prefix is not in the source and there is no expression there to resolve — so the call was one
+/// value short per capture and every backend refused it: the JVM's verifier saw `this` where the
+/// capture belonged, and the native generator declined the arity outright. kotlinc compiles these.
+///
+/// The subclass carries the same captures, because selection records the superclass's as its own
+/// (`resolve::local_capture_dependencies`). Each forwarded field retains the superclass capture's
+/// stable semantic coordinate, so lowering never joins two constructor prefixes by field spelling.
+///
+/// Only a call that is short by exactly the parent's prefix is filled. Anything else is a shape
+/// this does not understand and is left for the arity check downstream to report.
+pub(super) fn finalize_local_superclass_captures(
+    ir: &mut IrFile,
+) -> Result<(), FirFileLoweringFailure> {
+    for class in 0..ir.classes.len() {
+        let Some(parent) = ir.class_id_by_name(ir.classes[class].superclass) else {
+            continue;
+        };
+        if parent as usize == class {
+            continue;
+        }
+        let prefix = ir.classes[parent as usize].constructor_prefix_count as usize;
+        if prefix == 0 {
+            continue;
+        }
+        let parent_args = &ir.classes[parent as usize].ctor_args;
+        if parent_args.len() != ir.classes[class].super_args.len() + prefix {
+            continue;
+        }
+        let wanted = (0..prefix)
+            .map(|field| {
+                let field = u32::try_from(field).ok()?;
+                Some((
+                    *ir.class_capture_identities.get(&(parent, field))?,
+                    parent_args[field as usize].ty,
+                ))
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(wanted) = wanted else {
+            continue;
+        };
+        let own_prefix = ir.classes[class].constructor_prefix_count as usize;
+        let mut slots = Vec::with_capacity(wanted.len());
+        for (identity, _) in &wanted {
+            let Some(slot) = (0..own_prefix).position(|field| {
+                u32::try_from(field)
+                    .ok()
+                    .and_then(|field| ir.class_capture_identities.get(&(class as u32, field)))
+                    == Some(identity)
+            }) else {
+                break;
+            };
+            let Ok(slot) = u32::try_from(slot) else {
+                break;
+            };
+            slots.push(slot);
+        }
+        if slots.len() != wanted.len() {
+            continue;
+        }
+        // Slot 0 of a constructor body is `this`, so a prefix parameter is one past its index —
+        // the same address `constructor_capture_parameter` reads one by.
+        let arguments: Vec<crate::ir::ExprId> = slots
+            .into_iter()
+            .map(|slot| ir.add_expr(IrExpr::GetValue(slot + 1)))
+            .collect();
+        let parameters: Vec<crate::types::Ty> = wanted.into_iter().map(|(_, ty)| ty).collect();
+        let declaration = &mut ir.classes[class];
+        declaration.super_args.splice(0..0, arguments);
+        declaration.super_ctor_params.splice(0..0, parameters);
+    }
+    Ok(())
+}
+
 pub(super) fn finalize_constructors(
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,

@@ -239,8 +239,10 @@ fn synthesize_to_string(
         None if has_method(ir, class, "toString", 0) => return Ok(()),
         None => return Err(FirFileLoweringFailure::MissingCallable(declaration)),
     };
-    let internal = ir.classes[class as usize].fq_name();
-    let simple = internal.rsplit(['/', '$']).next().unwrap_or(&internal);
+    // The rendered internal name spells the package separator and the nesting separator
+    // differently, so the simple name is read through the identity tree rather than by splitting
+    // the rendering. The JVM pool seeding builds the twin recipe from the same operation.
+    let simple = ir.classes[class as usize].fq_name_id().nested_segment_ref();
     let singleton = ir.classes[class as usize].is_singleton();
     if singleton {
         let value = ir.add_expr(IrExpr::Const(crate::ir::IrConst::String(

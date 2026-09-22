@@ -187,6 +187,7 @@ impl<'a> CommonIrBodySink<'a> {
         )?;
         self.predeclare_functions(index)?;
         finalize_constructors(index, self.ir)?;
+        super::constructors::finalize_local_superclass_captures(self.ir)?;
         finalize_enum_entries(self.ir)?;
         finalize_properties(index, self.ir)?;
         finalize_constructor_field_indices(index, self.ir)?;

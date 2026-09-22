@@ -2549,6 +2549,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   anywhere an expression is; statement position keeps the `Stmt::IncDec` / member-index-assignment desugar.
   The value lowering uses no temp slot — the update is `i = i ± 1` and the value is the new `i` (prefix) or
   new `i` ∓ 1 = the old `i` (postfix), valid for every numeric type. `tests/incdec_expr_e2e.rs`.
+- **A narrow integral constant keeps its own WIDTH in common IR.** `FirConstant` has no signed case
+  narrower than `Int` and no `UByte`/`UShort` case, so a constant expression's checked TYPE is the
+  only thing carrying those widths — which is why `lower_constant` already reads it to tell `UByte`
+  from `UInt`. It did not read it for the signed narrow pair, so every `Byte`-typed constant was
+  recorded as an `Int`.
+
+  That is invisible to a consumer which reads the type a constant is ASSIGNED to, and wrong for one
+  which reads the constant's own SHAPE: a box made from a `Byte` constant came out an `Int`, so an
+  `is Byte` test answered false and two equal bytes compared unequal once boxed through a generic
+  parameter. `IrConst::Byte` and `IrConst::Short` are already produced elsewhere and already handled
+  across the JVM backend, the metadata builder and suspend hoisting, so emitting them here stays
+  inside the existing contract rather than widening it.
+
+  A value the named width cannot hold is a lowering FAILURE, not a truncation — the checker produces
+  none, and saying so keeps a later widening of this path from silently wrapping. ARITHMETIC is
+  unaffected: `Byte + Byte` is an `Int` in Kotlin, and that promotion belongs to the operation rather
+  than to the constant.
+  Tests: `fir_lower::tests::a_narrow_integral_constant_keeps_the_width_named_by_its_checked_type`,
+  `::an_integral_constant_too_wide_for_its_checked_type_fails`, and
+  `tests/narrow_integral_constant_e2e.rs`.
+
 - **Unsigned types `UByte`/`UShort`/`UInt`/`ULong`** — Kotlin inline classes over `Byte`/`Short`/`Int`/`Long`;
   unboxed they ARE that JVM primitive (descriptor `B`/`S`/`I`/`J`), with unsignedness driving
   operation/conversion choice (kotlinc hardcodes these intrinsic mappings, so krusty mirrors them). Literals
@@ -5979,6 +6000,62 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   backends (`codegen/box/casts/kt83324.kt`, `codegen/box/objectExpression/expr3.kt`).
   Tests: `tests/loop_backedge_narrowing_e2e.rs` (all eight, each answer taken from kotlinc 2.4.10
   first).
+
+- **A value class delegating an interface uses its own UNDERLYING VALUE, not a field of the
+  delegation's.** A value class has exactly one field, and `value class IC(val i: I) : I by i` names
+  that very field as the delegate. Kotlin synthesizes no `$$delegate_0` there — the underlying value
+  IS the delegate, and every forwarder reads it — and it could not: a second field is not a shape a
+  value class has.
+
+  Common lowering synthesized one anyway. That gave the class two fields, which the JVM emitter
+  turned into a `putfield` of the wrong type in `constructor-impl` — the class was rejected at load
+  with `VerifyError: Bad type on operand stack in putfield` — and which the native code generator
+  refused by name.
+
+  WHICH field the delegate is cannot be decided where the delegation field used to be created: the
+  property's own field does not exist yet at that point, and the delegate field was being pushed
+  ahead of it. So nothing is pushed for this shape and the edge is recorded later, where the
+  constructor's field indices are known. The delegate must be the first CONSTRUCTOR PARAMETER, which
+  is what the underlying value is; a value class delegating to anything else is not this shape and
+  keeps the ordinary field, to be refused as before rather than silently pointed at the wrong
+  storage.
+  Tests: `tests/value_class_delegation_e2e.rs`, each cross-checked against the reference compiler:
+  the forwarder reached through both types, the underlying value still readable as its own property,
+  a generic underlying type, and an ORDINARY class still delegating through a field of its own.
+  Corpus: `codegen/box/inlineClasses/delegationByUnderlyingType/` (all six).
+
+- **A local class whose SUPERCLASS is a local class with captures passes them on.** A capturing
+  local class takes its captures as synthetic PREFIX parameters of its constructor, ahead of the
+  ones the source wrote. A subclass's `super(…)` spells only the written ones — the prefix is not in
+  the source and there is no expression there for a resolved-constructor lookup to find — so the
+  call was one value short per capture. kotlinc compiles these; krusty rejected them on both
+  backends, the JVM's with `VerifyError: Bad type on operand stack` putting `this` where the capture
+  belonged.
+
+  Two halves, neither sufficient alone:
+
+  - Selection records the superclass's captures as the subclass's own, read from the RESOLVED
+    SUPERTYPE (`resolved_body_local_supertypes`) rather than from a call. That is the one edge a
+    supertype constructor gives: `class Derived : Local(true)` records the base classifier and its
+    arguments and nothing in between.
+  - Common lowering prepends the matching prefix reads to `super_args`. Each transitive capture
+    retains the superclass field's stable semantic coordinate, so matching never depends on a
+    synthetic field spelling. Only a call short by exactly the parent's prefix is filled; any other
+    shape is left to the arity check downstream.
+
+  The same lexical value captured twice is ONE capture. A class that captures `x` for its own body
+  and is then found to need `x` for a declaration it reaches carries one field, not two — the second
+  is a duplicate field of the same name, which the class file format rejects outright
+  (`ClassFormatError: Duplicate field name`). The merge previously keyed a dependency-required
+  capture on the dependency alone, so an identical own capture did not match it.
+
+  Anonymous objects use the same resolved-superclass edge after their body-driven capture pass, so
+  they also carry a superclass capture that their own body never mentions.
+  Tests: `tests/local_superclass_capture_e2e.rs`, seven shapes, each cross-checked against the
+  reference compiler. Corpus: `codegen/box/localClass/localHierarchy.kt`,
+  `codegen/box/innerNested/superConstructorCall/{localExtendsLocalWithClosure,localWithClosureExtendsLocalWithClosure}.kt`,
+  `codegen/box/localClasses/innerOfLocalCaptureExtensionReceiver.kt` and
+  `codegen/box/secondaryConstructors/callFromLocalSubClass.kt`.
 
 ## 8. Success criteria for the PoC
 
