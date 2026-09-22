@@ -236,7 +236,8 @@ fn a_missing_runtime_compiler_leaves_the_native_target_unavailable() {
     assert_eq!(
         String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
         format!(
-            "cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
+            "cargo:rerun-if-changed=src/native/runtime/krusty_rt.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
@@ -277,14 +278,15 @@ fn a_failing_runtime_compiler_fails_the_build() {
     assert_eq!(
         String::from_utf8(output.stderr).expect("build-script stderr is UTF-8"),
         format!(
-            "native runtime: `{}` failed compiling `krusty_fp.c` for \
+            "native runtime: `{}` failed compiling `krusty_rt.c` for \
              `x86_64-unknown-linux-gnu` (exit status: 1)\n",
             compiler.display()
         )
     );
     assert_eq!(
         String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
-        "cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
+        "cargo:rerun-if-changed=src/native/runtime/krusty_rt.c\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
