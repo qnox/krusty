@@ -30,6 +30,20 @@ struct ElementDecode<'a> {
     )>,
 }
 
+/// Narrow a serializer operand to the interface the element call declares.
+///
+/// Every serializer reaching one of these calls already implements it — a generated
+/// `Foo$$serializer`, a builtin singleton, a `Lazy` slot's value — so the JVM verifies the call
+/// without a cast and krusty emitted none. kotlinc narrows unconditionally, and the difference is
+/// three bytes plus its pool entries at EVERY element of every generated serializer.
+pub(super) fn narrowed(ir: &mut IrFile, serializer: ExprId, interface: &str) -> ExprId {
+    ir.add_expr(IrExpr::TypeOp {
+        op: IrTypeOp::Cast,
+        arg: serializer,
+        type_operand: class_ty(interface),
+    })
+}
+
 impl ElementDecode<'_> {
     /// `cache[k].value` when element `k` is cached — narrowed from the `Lazy`'s erased `Object` to
     /// the decode call's `DeserializationStrategy` parameter, exactly as kotlinc does.
@@ -66,6 +80,7 @@ impl ElementDecode<'_> {
             // begins. So the first decode of an element passes the same `null` the old code
             // spelled out, and every LATER one passes what the previous decode produced — which is
             // the whole difference, and the reason disassembly parity alone does not prove it.
+            let inst = narrowed(ir, inst, "kotlinx/serialization/DeserializationStrategy");
             let prev = ir.add_expr(IrExpr::GetValue(self.field_locals[k]));
             let method = if is_nullable(&ty) {
                 "decodeNullableSerializableElement"
@@ -104,6 +119,7 @@ impl ElementDecode<'_> {
             // begins. So the first decode of an element passes the same `null` the old code
             // spelled out, and every LATER one passes what the previous decode produced — which is
             // the whole difference, and the reason disassembly parity alone does not prove it.
+            let inst = narrowed(ir, inst, "kotlinx/serialization/DeserializationStrategy");
             let prev = ir.add_expr(IrExpr::GetValue(self.field_locals[k]));
             let method = if is_nullable(&ty) {
                 "decodeNullableSerializableElement"
@@ -143,6 +159,7 @@ impl ElementDecode<'_> {
             // begins. So the first decode of an element passes the same `null` the old code
             // spelled out, and every LATER one passes what the previous decode produced — which is
             // the whole difference, and the reason disassembly parity alone does not prove it.
+            let inst = narrowed(ir, inst, "kotlinx/serialization/DeserializationStrategy");
             let prev = ir.add_expr(IrExpr::GetValue(self.field_locals[k]));
             let method = if is_nullable(&ty) {
                 "decodeNullableSerializableElement"

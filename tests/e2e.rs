@@ -1365,6 +1365,8 @@ mod serialization_krusty_only_e2e;
 mod serialization_roundtrip_e2e;
 #[path = "common/serialization.rs"]
 mod serialization_test_support;
+#[path = "serializer_operand_cast_e2e.rs"]
+mod serializer_operand_cast_e2e;
 #[path = "session_subsystems_e2e.rs"]
 mod session_subsystems_e2e;
 #[path = "shadowed_method_tparam_e2e.rs"]
