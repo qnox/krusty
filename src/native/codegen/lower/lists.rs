@@ -603,7 +603,11 @@ impl BodyLowering<'_, '_, '_> {
         Some(self.pair_of(receiver, *second))
     }
 
-    fn pair_of(&mut self, first: u32, second: u32) -> Result<Option<Value>, Unsupported> {
+    pub(super) fn pair_of(
+        &mut self,
+        first: u32,
+        second: u32,
+    ) -> Result<Option<Value>, Unsupported> {
         let first = self.reference(first)?;
         if self.terminated {
             return Ok(None);

@@ -1423,6 +1423,11 @@ pub(super) fn property_reference_markers(mutable: bool, arity: usize) -> Vec<&'s
     markers
 }
 
+/// Whether a classifier is `kotlin.Pair`, which the runtime owns rather than any file declaring.
+pub(super) fn is_pair_name(owner: crate::types::TypeName) -> bool {
+    owner.matches("kotlin/Pair")
+}
+
 /// A member of the collections facade the runtime answers for an ARRAY receiver, as
 /// `(symbol, carried, answer)`.
 ///

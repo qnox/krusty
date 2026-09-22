@@ -2105,6 +2105,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   compare addresses would answer that no two values are ever identical. Test:
   `tests/native_float_identity_e2e.rs`.
 
+- **`Pair(a, b)` is the pair `a to b` already builds.** No file declares `kotlin.Pair`; krusty's
+  native runtime owns it, and one is built for every `a to b` and for each step of a `withIndex`
+  walk. The written constructor reaches that same object rather than a second shape of it, which is
+  what lets a pair built either way be equal to, read like and destructured like the other. Both
+  operands cross as references, which is what a pair's fields hold. Test:
+  `tests/native_pair_construction_e2e.rs`.
+
 - **A `Throwable` carries a CAUSE, and the two one-argument constructors are told apart by type.**
   Kotlin declares four: `()`, `(message)`, `(cause)` and `(message, cause)`. A single argument whose
   type is a `Throwable` is the cause and anything else is the message, and the two forms differ in

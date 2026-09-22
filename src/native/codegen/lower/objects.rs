@@ -2408,6 +2408,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if let Some(descriptor) = super::super::super::intrinsics::throwable_descriptor(internal) {
             return self.runtime_throwable(descriptor, &name, args, selected);
         }
+        // `Pair(a, b)`, the runtime's two-field carrier. Declared in no file either, and the
+        // runtime already builds one for every `a to b` and for each step of a `withIndex` walk —
+        // so the written constructor reaches the same object rather than a second shape of it.
+        // Both operands cross as references, which is what a `Pair`'s fields hold.
+        if super::super::super::intrinsics::is_pair_name(internal) {
+            return match args {
+                [first, second] => self.pair_of(*first, *second),
+                _ => Err(format!("this constructor of `{name}`")),
+            };
+        }
         // `ArrayList()`, the runtime's growable list. Declared in no file either, like `Any` and
         // the throwables above, so the runtime allocates it rather than the generator laying one
         // out. The capacity overload is a HINT with nothing observable depending on it; a copy
