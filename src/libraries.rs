@@ -1,6 +1,7 @@
 //! Library metadata shared by symbol sources.
 
 mod array_factories;
+pub(crate) mod builtin_realization;
 mod core_builtins;
 mod generic_signature;
 mod inline_body;
@@ -480,6 +481,45 @@ pub struct AliasExpansion {
     /// `typealias CargoBox = PBox<Cargo, Cargo>` abbreviates both expanded arguments as `Cargo`
     /// however it is spelled.
     pub expansion_spelling: crate::spelling::Spelled,
+}
+
+/// How a provider realizes one already-selected dependency callable.
+///
+/// The identity a consumer holds is opaque and provider-assigned; this is what the provider hands
+/// back for it. Neither half names a target: [`LibraryCallable`] is the semantic declaration, and
+/// the kind says which shape the declaration takes — a top-level function, a member, or a property
+/// realized over storage rather than an accessor. A backend reads it; it does not reconstruct it.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ExternalCallableKind {
+    TopLevel,
+    Extension,
+    Member,
+    Constructor,
+    /// JVM realization of a provider-normalized Kotlin property getter.
+    InstanceFieldRead,
+    /// JVM realization of a provider-normalized Kotlin property setter.
+    InstanceFieldWrite,
+    /// A selected dependency property whose target realization is a static field read.
+    StaticFieldRead,
+    /// A selected dependency property whose target realization is a static field write.
+    StaticFieldWrite,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExternalCallableRealization {
+    pub callable: LibraryCallable,
+    pub kind: ExternalCallableKind,
+}
+
+/// A provider's realization of one normalized Kotlin property. FIR carries only its opaque
+/// identity; callers read the semantic name and the independently interned physical accessors here.
+#[derive(Clone, Debug)]
+pub struct ExternalPropertyRealization {
+    pub name: String,
+    pub getter: crate::fir::ExternalCallableId,
+    pub setter: Option<crate::fir::ExternalCallableId>,
+    /// The provider-normalized declaration is its value class's underlying storage property.
+    pub declares_value_class_storage: bool,
 }
 
 pub trait SemanticPlatform: crate::symbol_source::SymbolSource {

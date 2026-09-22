@@ -2,7 +2,7 @@
 //!
 //! The `d1` protobuf is decoded against `d2` string-table identities before semantic facts publish.
 
-pub(super) mod klib_validation;
+pub(crate) mod klib_validation;
 mod property_identity;
 
 use property_identity::inline_underlying_property_name_id;
@@ -161,7 +161,7 @@ fn is_kotlin_function_classifier(internal: &str) -> bool {
 /// Metadata represents `suspend R.(P) -> T` as a function whose final parameter is
 /// `Continuation<T>` and whose physical return is `Any?`, plus the suspend-type flag. The
 /// continuation is not a source parameter: its argument is the source return type.
-fn source_suspend_function_type(ty: Ty) -> Ty {
+pub(super) fn source_suspend_function_type(ty: Ty) -> Ty {
     let Ty::Fun(signature) = ty else {
         return ty;
     };
@@ -2196,14 +2196,11 @@ fn metadata_class_kind(flags: u64) -> TypeKind {
     }
 }
 
-/// What [`decode_class_signature`] reads off a Class proto: the class's own type-parameter NAMES,
-/// each one's declared BOUNDS (one inner `Vec` per parameter, in the same order), and the direct
-/// applied SUPERTYPES.
-type ClassSignature = (Vec<String>, Vec<Vec<Ty>>, Vec<Ty>);
-
 /// Decode a Kotlin class's own type parameters and direct applied supertypes from the Class proto.
 /// Both inline `supertype` (field 6) and table-backed `supertype_id` (field 2) are valid encodings.
-fn decode_class_signature(ctx: &MetaCtx<'_>) -> MetadataResult<ClassSignature> {
+fn decode_class_signature(
+    ctx: &MetaCtx<'_>,
+) -> MetadataResult<(Vec<String>, Vec<Vec<Ty>>, Vec<Ty>)> {
     let parsed_params = type_param_bodies(ctx.msg, CLASS_TYPE_PARAMETER_FIELD)
         .into_iter()
         .map(parse_type_param)
@@ -3952,12 +3949,33 @@ fn resolve_qname(qnames: &[QName], strings: &[String], mut idx: i64) -> String {
 /// facets the fragment actually records — a class's type ARGUMENTS (`Set<Map.Entry<K, V>>`) and a
 /// reference to a declared type PARAMETER (`E` of `List<E>`) — so both are modelled here. Class names
 /// are Kotlin internal names (`kotlin/Int`, `kotlin/collections/Map.Entry`).
+/// The facts a Kotlin function TYPE carries beyond its classifier and arguments.
+///
+/// `(T) -> R`, `T.() -> R`, `context(C) (T) -> R` and `suspend (T) -> R` are all `Function`
+/// classifiers with the same argument list. Kotlin records the difference as annotations on the
+/// type — `kotlin.ExtensionFunctionType`, `kotlin.ContextFunctionTypeParams` — and a suspend flag,
+/// and a reader that drops them publishes a block with no `this`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FunctionTypeShape {
+    /// `T.() -> R`: the first argument is a RECEIVER, not a parameter.
+    pub receiver: bool,
+    /// Leading arguments that are context parameters.
+    pub context_count: usize,
+    /// `suspend (T) -> R`: the physical shape appends a `Continuation` and erases the return.
+    pub suspend: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BuiltinTy {
     Class {
         internal: String,
         args: Vec<BuiltinTy>,
         nullable: bool,
+        /// What a `kotlin/FunctionN` classifier MEANS beyond its arity, from the annotations the
+        /// declaration's type carries. Kept on the decoded type because it is the only place it
+        /// survives: `T.() -> R` and `(T) -> R` are the same classifier with the same arguments,
+        /// and only this tells them apart.
+        shape: FunctionTypeShape,
     },
     Param {
         name: String,
@@ -3973,6 +3991,7 @@ impl BuiltinTy {
             internal: internal.into(),
             args: Vec::new(),
             nullable: false,
+            shape: FunctionTypeShape::default(),
         }
     }
 
@@ -4000,6 +4019,7 @@ impl BuiltinTy {
                 internal,
                 args,
                 nullable,
+                ..
             } => (internal.clone(), args.as_slice(), *nullable),
             BuiltinTy::Param { name, nullable } => (name.clone(), &[][..], *nullable),
             BuiltinTy::InProjection(inner) => return format!("in {}", inner.render()),
@@ -4048,6 +4068,19 @@ pub struct BuiltinMember {
     /// Whether the declared return type is nullable (`V?`) — the JVM descriptor erases it, only the
     /// `.kotlin_builtins` `Type.nullable` flag carries it (`Map.get(K): V?`, `firstOrNull(): T?`).
     pub ret_nullable: bool,
+    /// The value a `const val` declares. Every use site folds it, so a member that has one is
+    /// never read at run time — which is what lets `Int.MAX_VALUE` resolve on a target whose
+    /// companion objects have no storage.
+    pub constant: Option<crate::libraries::LibConst>,
+    /// The value parameters' source names, parallel to [`Self::params`]. Without them a call site
+    /// can neither name an argument nor be told which one it omitted: the checker reported "no
+    /// value passed for parameter 'p1'" for `ContractBuilder.callsInPlace(b)`, naming a parameter
+    /// the declaration never had.
+    pub param_names: Vec<String>,
+    /// Which of them declare a default, parallel to [`Self::params`].
+    pub param_defaults: Vec<bool>,
+    /// The `vararg` parameter's position, if the member has one.
+    pub vararg: Option<usize>,
 }
 
 /// One top-level function declared by a `.kotlin_builtins` package fragment. Unlike a class member,
@@ -4077,6 +4110,27 @@ pub struct BuiltinFunction {
 pub struct BuiltinPackage {
     pub classes: std::collections::HashMap<String, BuiltinClass>,
     pub functions: Vec<BuiltinFunction>,
+    pub properties: Vec<BuiltinProperty>,
+}
+
+/// One TOP-LEVEL property a package fragment declares — `val Collection<*>.indices`, `val PI`.
+///
+/// Distinct from [`BuiltinMember`], which is the member shape and carries no receiver: an extension
+/// property's receiver is the fact that makes it findable at all, and a member has none to record.
+pub struct BuiltinProperty {
+    pub name: String,
+    /// The extension receiver, for `val Collection<*>.indices`; `None` for a plain top-level one.
+    pub receiver: Option<BuiltinTy>,
+    pub ty: BuiltinTy,
+    pub formals: Vec<BuiltinTypeParam>,
+    pub visibility: crate::types::Visibility,
+    /// A `var`, so the declaration has a setter as well as a getter.
+    pub is_var: bool,
+    /// Old unnamed context receivers followed by named context parameters, as on
+    /// [`BuiltinFunction::context_count`].
+    pub context_count: usize,
+    /// The value a `const val` declares, as on [`BuiltinMember::constant`].
+    pub constant: Option<crate::libraries::LibConst>,
 }
 
 /// One constructor declared by a builtin class. Unlike a function it has no return type or name;
@@ -4101,6 +4155,37 @@ pub struct BuiltinTypeParam {
 
 /// A builtin `Class` decoded from a `.kotlin_builtins` fragment: its direct supertypes and declared
 /// members — the two facets the front end needs (the read-only/mutable hierarchy AND each type's API).
+/// A declaration's Kotlin modality, as declared.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuiltinModality {
+    Final,
+    Open,
+    Abstract,
+    Sealed,
+}
+
+impl BuiltinModality {
+    /// Whether the declaration has members without implementations, so it cannot be instantiated.
+    pub fn is_abstract(self) -> bool {
+        matches!(self, Self::Abstract | Self::Sealed)
+    }
+
+    /// Whether a declaration OUTSIDE the declaring module may extend it.
+    pub fn is_extensible(self) -> bool {
+        matches!(self, Self::Open | Self::Abstract)
+    }
+}
+
+/// The modality the `Class.flags` word declares: bits 4-5, `0 FINAL, 1 OPEN, 2 ABSTRACT, 3 SEALED`.
+pub(crate) fn builtin_class_modality(flags: u64) -> BuiltinModality {
+    match (flags >> 4) & 0x3 {
+        1 => BuiltinModality::Open,
+        2 => BuiltinModality::Abstract,
+        3 => BuiltinModality::Sealed,
+        _ => BuiltinModality::Final,
+    }
+}
+
 pub struct BuiltinClass {
     pub supertypes: Vec<String>,
     /// The supertypes WITH their type arguments (`MutableList<E> : List<E>`), which the name-only
@@ -4117,12 +4202,38 @@ pub struct BuiltinClass {
     /// `Enum`) — from the `@Metadata` `CLASS_KIND` flag. Needed when reporting a classless builtin whose
     /// JVM class is absent (a no-JDK compile), so member calls emit the right invoke opcode.
     pub kind: TypeKind,
+    /// The declaration is a `fun interface`, so a lambda converts to it and its name is a SAM
+    /// constructor. A Java interface is structurally eligible and needs no bit; a KOTLIN one is
+    /// eligible only by declaring this, which is why a provider reading Kotlin metadata has to
+    /// carry it rather than infer eligibility from the member shape. `kotlin.Comparator` is the
+    /// declaration that says so on a klib-backed target, where it is a real `fun interface` and
+    /// not, as on the JVM, a type alias for `java.util.Comparator`.
+    pub is_fun_interface: bool,
     /// Source visibility from the metadata flag word. This is deliberately separate from `access`:
     /// Kotlin `internal` declarations are public in classfiles after name mangling.
     pub visibility: Visibility,
     /// Kotlin metadata's `IS_EXPECT_CLASS` declaration flag. KLIB consumers use this semantic bit
     /// to distinguish common declarations from platform-only classifiers in the same archive.
     pub is_expect: bool,
+    /// The entry names an `enum class` declares, in declaration order; empty for anything else.
+    /// `AnnotationTarget.FUNCTION` is an ordinary reference a program writes, and a classifier
+    /// publishing no entries answers none of them.
+    pub enum_entries: Vec<String>,
+    /// The direct subclasses a `sealed` declaration names; empty for anything else. This is what
+    /// lets an exhaustive `when` over a stdlib sealed type be proven exhaustive.
+    pub sealed_subclasses: Vec<String>,
+    /// The sole underlying property's name, for a `value class`; `None` for anything else. This
+    /// single field is what MAKES the declaration a value class to every consumer — a value class
+    /// is erased to its underlying at run time, so a reader that drops it publishes a type that
+    /// allocates where Kotlin says nothing is allocated.
+    pub inline_class_property: Option<String>,
+    /// Declared Kotlin MODALITY, as the two facts a consumer asks of it. Kept semantically rather
+    /// than left to be re-derived from [`Self::access`], which is a JVM word: a non-JVM provider
+    /// would have to read JVM flags to learn that `kotlin.Number` is `abstract`.
+    ///
+    /// `sealed` is abstract and NOT extensible here: a program outside the declaring module cannot
+    /// extend it, and every consumer of this decoder is outside the stdlib's.
+    pub modality: BuiltinModality,
     pub is_nested: bool,
     /// The JVM class access flags the same `Class.flags` word describes (`public static interface
     /// abstract` for `kotlin/collections/Map.Entry`) — what an `InnerClasses` entry naming this builtin
