@@ -1622,18 +1622,6 @@ pub(super) fn is_text_length(owner: crate::types::TypeName, name: &str) -> bool 
             ))
 }
 
-/// Whether an accessor is `Throwable.message`.
-///
-/// The property is declared on `kotlin.Throwable` itself, so a subclass reading it — the program's
-/// own or one of the runtime's — arrives here under the root's owner. Both spellings are taken for
-/// the reason [`is_text_length`] gives: which one a provider uses is its business.
-///
-/// `cause` is deliberately NOT here. This `Throwable` has no cause field, so answering it would be
-/// answering `null` to a program that passed one, and that declines instead.
-pub(super) fn is_throwable_message(owner: crate::types::TypeName, name: &str) -> bool {
-    throwable_field(owner, name) == Some("kt_throwable_message")
-}
-
 /// The runtime reader for one of `Throwable`'s two fields, or `None` for any other accessor.
 ///
 /// Both are read by the runtime rather than by an offset here, because the class is the runtime's
