@@ -511,9 +511,23 @@ impl BackendModuleFacts {
                     .declaration_annotations(declaration)
                     .iter()
                     .copied()
-                    .map(|annotation| crate::types::ResolvedAnnotation {
+                    .enumerate()
+                    .map(|(ordinal, annotation)| crate::types::ResolvedAnnotation {
                         annotation,
-                        arguments: Vec::new(),
+                        // The class-valued arguments the frontend resolved for this occurrence.
+                        // A dependency's annotations reach a backend with their arguments intact;
+                        // one declared in ANOTHER FILE OF THIS MODULE must too, or the two sides of
+                        // the same boundary answer the same question differently.
+                        arguments: index
+                            .declaration_annotation_class_arguments(declaration, ordinal as u32)
+                            .iter()
+                            .map(|&classifier| {
+                                (
+                                    String::new(),
+                                    crate::types::AnnotationValue::Class(classifier),
+                                )
+                            })
+                            .collect(),
                     })
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
@@ -643,6 +657,11 @@ impl crate::types::ClassifierAnnotationSource for CheckedBackendClassifiers<'_> 
         classifier: TypeName,
     ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
         BackendClassifierSource::classifier(self, classifier).map(|fact| fact.annotations.to_vec())
+    }
+
+    fn classifier_is_object(&self, classifier: TypeName) -> Option<bool> {
+        BackendClassifierSource::classifier(self, classifier)
+            .map(|fact| fact.kind == crate::libraries::TypeKind::Object)
     }
 }
 

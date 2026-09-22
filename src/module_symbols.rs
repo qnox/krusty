@@ -1515,6 +1515,7 @@ mod tests {
             source_decl: None,
             visibility: Visibility::Public,
             annotations: vec![],
+            annotation_class_arguments: vec![],
             props: vec![],
             declared_props: HashMap::new(),
             contextual_props: HashMap::new(),

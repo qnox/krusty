@@ -87,6 +87,69 @@ fn krusty_box(src: &str, stem: &str) -> String {
         .unwrap_or_else(|| panic!("box() did not run for {stem}"))
 }
 
+fn reference_box_files(sources: &[(&str, &str)], stem: &str) -> String {
+    let work = common::scratch_dir()
+        .unwrap_or_else(|| panic!("{stem}: cannot allocate a scratch directory"))
+        .join(format!("{stem}-serialization-reference-files"));
+    std::fs::create_dir_all(&work).expect("create serialization reference fixture directory");
+    let mut written = Vec::new();
+    for (name, src) in sources {
+        let source = work.join(name);
+        std::fs::write(&source, src).expect("write serialization reference fixture");
+        written.push(source);
+    }
+    let out = work.join("classes");
+    let plugin = common::kotlinc_lib_dir()
+        .unwrap_or_else(|| panic!("{stem}: no reference compiler lib directory"))
+        .join("kotlinx-serialization-compiler-plugin.jar");
+    assert!(
+        plugin.is_file(),
+        "{stem}: the reference serialization plugin is missing at {}",
+        plugin.display()
+    );
+    let jars = runtime_jars();
+    let classpath = std::env::join_paths(&jars).expect("join the serialization classpath");
+    let mut args = vec![
+        format!("-Xplugin={}", plugin.display()),
+        "-jvm-target".to_string(),
+        "25".to_string(),
+        "-cp".to_string(),
+        classpath.to_string_lossy().into_owned(),
+        "-d".to_string(),
+        out.display().to_string(),
+    ];
+    args.extend(written.iter().map(|path| path.display().to_string()));
+    let (code, diagnostics) = common::kotlinc_compile(&args)
+        .unwrap_or_else(|| panic!("{stem}: the reference compiler could not be invoked"));
+    assert_eq!(
+        code, 0,
+        "{stem}: kotlinc rejected the fixture: {diagnostics}"
+    );
+    let mut classpath = vec![out];
+    classpath.extend(jars);
+    common::run_box(&[], "MainKt", &classpath)
+        .unwrap_or_else(|| panic!("{stem}: the reference-built box() did not run"))
+}
+
+fn krusty_box_files(sources: &[(&str, &str)], stem: &str) -> String {
+    let jars = runtime_jars();
+    let classes = common::compile_in_process_files(sources, &jars, None)
+        .unwrap_or_else(|| panic!("krusty failed to compile the {stem} fixture"));
+    let box_class =
+        common::find_box_class(&classes).unwrap_or_else(|| panic!("no box class for {stem}"));
+    common::run_box(&classes, &box_class, &jars)
+        .unwrap_or_else(|| panic!("box() did not run for {stem}"))
+}
+
+/// The multi-file form of [`both_compilers_box`]: the file split is itself the discriminator for a
+/// serializer a sibling file declares.
+pub(super) fn both_compilers_box_files(sources: &[(&str, &str)], stem: &str) -> String {
+    let reference = reference_box_files(sources, stem);
+    let actual = krusty_box_files(sources, stem);
+    assert_eq!(actual, reference, "{stem}: krusty disagrees with kotlinc");
+    actual
+}
+
 /// Run the identical serialization fixture under both compilers and require the exact same result.
 pub(super) fn both_compilers_box(src: &str, stem: &str) -> String {
     let reference = reference_box(src, stem);

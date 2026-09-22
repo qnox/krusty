@@ -2103,6 +2103,10 @@ pub struct ClassSig {
     /// Resolved classifier declaration annotations, projected to the stable module index before
     /// Pass 2 so plugins and semantic checks never revisit source occurrences.
     pub annotations: Vec<TypeName>,
+    /// Resolved CLASS arguments of those annotations, by annotation ordinal — the identity behind
+    /// `@Serializable(with = X::class)`. Resolved here, with the annotation's own name and through
+    /// the same classifier rules, because no later phase may recover it from a spelling.
+    pub annotation_class_arguments: Vec<(u32, TypeName)>,
     pub props: Vec<(String, Ty, bool)>, // backing-field properties (name, type, is_var)
     pub declared_props: HashMap<String, DeclaredPropertySig>,
     /// Context-parameter properties are overloadable by their context shape and may share a name
@@ -2288,6 +2292,7 @@ impl ClassSig {
             source_decl: Some(source_decl),
             visibility,
             annotations: Vec::new(),
+            annotation_class_arguments: Vec::new(),
             props: Vec::new(),
             declared_props: HashMap::new(),
             contextual_props: HashMap::new(),
