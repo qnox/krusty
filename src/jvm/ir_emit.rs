@@ -14445,6 +14445,26 @@ impl<'a> Emitter<'a> {
         self.machine_after(suspension, code);
     }
 
+    /// Emit a type-operation operand and return its physical stack type plus semantic scalar
+    /// identity. Value and branch forms of `is`/`!is` share this boundary so unsigned/value-class
+    /// boxing cannot drift between the ordinary and fused emitters.
+    fn emit_type_op_operand(&mut self, operand: u32, code: &mut CodeBuilder) -> (Ty, Ty) {
+        let physical = self
+            .ir
+            .physical_types
+            .get(&operand)
+            .map(ir_ty_to_jvm)
+            .unwrap_or_else(|| self.value_ty(operand));
+        let semantic = self
+            .ir
+            .logical_types
+            .get(&operand)
+            .copied()
+            .unwrap_or(physical);
+        self.emit_value(operand, code);
+        (physical, semantic)
+    }
+
     /// Open a suspension this emission's machine owns, if `e` is one.
     ///
     /// Both the value and the discarding path go through this: a suspension whose result is thrown
@@ -16847,19 +16867,7 @@ impl<'a> Emitter<'a> {
                         value.map(|expression| (expression, self.ir.expr(expression))),
                     );
                 }
-                let physical_arg = self
-                    .ir
-                    .physical_types
-                    .get(arg)
-                    .map(ir_ty_to_jvm)
-                    .unwrap_or_else(|| self.value_ty(*arg));
-                let semantic_arg = self
-                    .ir
-                    .logical_types
-                    .get(arg)
-                    .copied()
-                    .unwrap_or(physical_arg);
-                self.emit_value(*arg, code);
+                let (physical_arg, semantic_arg) = self.emit_type_op_operand(*arg, code);
                 match op {
                     IrTypeOp::InstanceOf => {
                         if physical_arg.is_jvm_scalar() {
@@ -18976,19 +18984,7 @@ impl<'a> Emitter<'a> {
             None
         };
         if let Some((to, arg, internal)) = inst_fuse {
-            let physical_arg = self
-                .ir
-                .physical_types
-                .get(&arg)
-                .map(ir_ty_to_jvm)
-                .unwrap_or_else(|| self.value_ty(arg));
-            let semantic_arg = self
-                .ir
-                .logical_types
-                .get(&arg)
-                .copied()
-                .unwrap_or(physical_arg);
-            self.emit_value(arg, code);
+            let (physical_arg, semantic_arg) = self.emit_type_op_operand(arg, code);
             // `instanceof` takes a REFERENCE. A scalar operand is boxed first, exactly as the
             // unfused emit above does it — `if (n is Number)` where `n` is an `Int` reached here
             // and put an `int` where the verifier wants an object.

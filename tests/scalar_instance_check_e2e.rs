@@ -21,6 +21,7 @@ use super::common;
 /// Run `body` under krusty AND under the reference compiler, and require the SAME output.
 fn agrees_with_kotlinc(stem: &str, body: &str) {
     let krusty = common::expect_box_run_with_stdlib(body, stem);
+    assert_eq!(krusty, "OK", "{stem}: unexpected krusty result");
     let reference = common::kotlinc_box_result(body);
     assert_eq!(reference, "OK", "{stem}: unexpected kotlinc result");
     assert_eq!(krusty, reference, "{stem}: krusty and kotlinc disagree");
