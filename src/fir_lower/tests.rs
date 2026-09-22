@@ -3437,13 +3437,13 @@ pub(super) fn lower_source_from_set(sources: &[(&str, &str)], active_source: usi
 
 /// A constant's CHECKED TYPE is what says which integral type it is.
 ///
-/// `FirConstant` has no case narrower than `Int` and none unsigned at all, so the type is the only
-/// thing carrying the width. Recording a `Byte`-typed constant as an `Int` loses it, and a consumer
-/// that reads a constant's SHAPE rather than the type it is assigned to then gets the wrong width —
-/// a box made from `Byte.MIN_VALUE` came out an `Int`, so `Byte.MIN_VALUE as Any is Byte` answered
+/// `FirConstant` has no signed case narrower than `Int` and no `UByte`/`UShort` case, so the type is
+/// the only thing carrying those widths. Recording a `Byte`-typed constant as an `Int` loses it, and
+/// a consumer that reads a constant's SHAPE rather than the type it is assigned to then gets the
+/// wrong width — a box made from a `Byte` constant came out an `Int`, so an `is Byte` test answered
 /// false and two equal bytes compared unequal once boxed.
 #[test]
-fn a_narrow_integral_constant_keeps_the_width_its_checked_type_names() {
+fn a_narrow_integral_constant_keeps_the_width_named_by_its_checked_type() {
     for (ty, expected) in [
         (Ty::Byte, IrConst::Byte(-128)),
         (Ty::Short, IrConst::Short(-128)),
