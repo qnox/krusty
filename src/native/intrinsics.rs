@@ -1378,6 +1378,51 @@ pub(super) fn function_type_descriptor(owner: crate::types::TypeName) -> Option<
     ARITIES.get(suffix.parse::<usize>().ok()?).copied()
 }
 
+/// The runtime marker an `is` against one of Kotlin's REFLECTION types asks about.
+///
+/// A property reference is an object of a type of its own — the generator emits one per property —
+/// so the type written at the site is never the object's, exactly as for a function value. These
+/// markers are what the two have in common.
+pub(super) fn reflection_type_descriptor(owner: crate::types::TypeName) -> Option<&'static str> {
+    Some(match kotlin_owner(&owner.render()) {
+        "kotlin/reflect/KCallable" => "kt_type_kcallable",
+        "kotlin/reflect/KProperty" => "kt_type_kproperty",
+        "kotlin/reflect/KProperty0" => "kt_type_kproperty0",
+        "kotlin/reflect/KProperty1" => "kt_type_kproperty1",
+        "kotlin/reflect/KProperty2" => "kt_type_kproperty2",
+        "kotlin/reflect/KMutableProperty" => "kt_type_kmutable_property",
+        "kotlin/reflect/KMutableProperty0" => "kt_type_kmutable_property0",
+        "kotlin/reflect/KMutableProperty1" => "kt_type_kmutable_property1",
+        "kotlin/reflect/KMutableProperty2" => "kt_type_kmutable_property2",
+        _ => return None,
+    })
+}
+
+/// Every marker a PROPERTY REFERENCE of this shape wears, flattened as `KType.interfaces` requires.
+///
+/// Kotlin's hierarchy is `KCallable` → `KProperty` → `KPropertyN`, with `KMutableProperty` and
+/// `KMutablePropertyN` beside them for a `var`. An interface's own bases are not walked at an `is`,
+/// so every one of them is named rather than only the most derived.
+pub(super) fn property_reference_markers(mutable: bool, arity: usize) -> Vec<&'static str> {
+    let mut markers = vec!["kt_type_kcallable", "kt_type_kproperty"];
+    markers.extend(match arity {
+        0 => Some("kt_type_kproperty0"),
+        1 => Some("kt_type_kproperty1"),
+        2 => Some("kt_type_kproperty2"),
+        _ => None,
+    });
+    if mutable {
+        markers.push("kt_type_kmutable_property");
+        markers.extend(match arity {
+            0 => Some("kt_type_kmutable_property0"),
+            1 => Some("kt_type_kmutable_property1"),
+            2 => Some("kt_type_kmutable_property2"),
+            _ => None,
+        });
+    }
+    markers
+}
+
 /// A member of the collections facade the runtime answers for an ARRAY receiver, as
 /// `(symbol, carried, answer)`.
 ///

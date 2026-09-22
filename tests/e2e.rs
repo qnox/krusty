@@ -1817,6 +1817,8 @@ mod native_class_literals_e2e;
 
 #[path = "native_function_type_checks_e2e.rs"]
 mod native_function_type_checks_e2e;
+#[path = "native_reflection_type_checks_e2e.rs"]
+mod native_reflection_type_checks_e2e;
 #[path = "native_throwable_cause_e2e.rs"]
 mod native_throwable_cause_e2e;
 mod serializer_metadata_class_id_e2e;

@@ -529,6 +529,26 @@ impl<'a> FileLowering<'a> {
         } else {
             "kotlin.reflect.KProperty"
         };
+        // How many receivers `get` takes, which is the N in `KPropertyN`. A BOUND reference
+        // carries its receiver in the object and takes none; an unbound one takes the receiver its
+        // property reads through, and a top-level property has none to take.
+        let arity = if site.bound.is_some() {
+            0
+        } else {
+            match site.access {
+                Access::Member { .. } => 1,
+                Access::Accessor { receiver, .. } => usize::from(receiver),
+                Access::TopLevel | Access::Static { .. } => 0,
+            }
+        };
+        // What an `is` against a reflection type asks about: this object's own type is one of a
+        // kind, so the markers are what it shares with the type written at the check.
+        let markers =
+            super::super::super::intrinsics::property_reference_markers(site.mutable, arity);
+        let markers = markers
+            .into_iter()
+            .map(|symbol| self.import_data(symbol))
+            .collect::<Result<Vec<_>, _>>()?;
         self.define_type_descriptor(
             descriptor,
             &base,
@@ -537,7 +557,7 @@ impl<'a> FileLowering<'a> {
             &references,
             &vtable,
             any_type,
-            &[],
+            &markers,
             None,
             super::objects::WalkMembers::default(),
         )?;

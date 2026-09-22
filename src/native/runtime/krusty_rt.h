@@ -290,6 +290,20 @@ extern const KType kt_type_function20;
 extern const KType kt_type_function21;
 extern const KType kt_type_function22;
 
+/* Kotlin's reflection hierarchy, as far as a PROPERTY REFERENCE wears it. Each reference object
+   has a type of its own — one per property — so an `is` against `KProperty0` cannot ask about that
+   type and asks about these instead. The whole chain is named on each descriptor, because
+   `KType.interfaces` is flattened and an interface's own bases are not walked. */
+extern const KType kt_type_kcallable;
+extern const KType kt_type_kproperty;
+extern const KType kt_type_kproperty0;
+extern const KType kt_type_kproperty1;
+extern const KType kt_type_kproperty2;
+extern const KType kt_type_kmutable_property;
+extern const KType kt_type_kmutable_property0;
+extern const KType kt_type_kmutable_property1;
+extern const KType kt_type_kmutable_property2;
+
 extern const KType kt_type_list;
 extern const KType kt_type_list_iterator;
 

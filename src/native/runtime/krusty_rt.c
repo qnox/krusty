@@ -114,6 +114,26 @@ KT_FUNCTION_TYPE(20)
 KT_FUNCTION_TYPE(21)
 KT_FUNCTION_TYPE(22)
 
+/* Kotlin's reflection hierarchy, as far as a PROPERTY REFERENCE wears it. None has instances of
+   its own — a reference object's type is one the generator emits per property — so these are what
+   an `is` against `KProperty0` or `KMutableProperty` compares with. */
+#define KT_REFLECT_TYPE(identifier, kotlin_name)                                                   \
+    const KType identifier = {kotlin_name,       sizeof(kotlin_name) - 1,                          \
+                              sizeof(KObjectHeader), 0,                                            \
+                              0,                 NULL,                                             \
+                              &kt_type_any,      kt_any_vtable,                                    \
+                              3,                 0};
+
+KT_REFLECT_TYPE(kt_type_kcallable, "kotlin.reflect.KCallable")
+KT_REFLECT_TYPE(kt_type_kproperty, "kotlin.reflect.KProperty")
+KT_REFLECT_TYPE(kt_type_kproperty0, "kotlin.reflect.KProperty0")
+KT_REFLECT_TYPE(kt_type_kproperty1, "kotlin.reflect.KProperty1")
+KT_REFLECT_TYPE(kt_type_kproperty2, "kotlin.reflect.KProperty2")
+KT_REFLECT_TYPE(kt_type_kmutable_property, "kotlin.reflect.KMutableProperty")
+KT_REFLECT_TYPE(kt_type_kmutable_property0, "kotlin.reflect.KMutableProperty0")
+KT_REFLECT_TYPE(kt_type_kmutable_property1, "kotlin.reflect.KMutableProperty1")
+KT_REFLECT_TYPE(kt_type_kmutable_property2, "kotlin.reflect.KMutableProperty2")
+
 /* Flattened and transitive, as `KType.interfaces` requires: a `Number` is also `Comparable`, so a
    numeric box names both rather than relying on a walk that does not exist. */
 static const KType *const kt_number_interfaces[] = {&kt_type_number, &kt_type_comparable};

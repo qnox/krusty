@@ -2060,6 +2060,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Kotlin's largest function arity, so the set is complete. Test:
   `tests/native_function_type_checks_e2e.rs`.
 
+- **An `is` against a REFLECTION type asks about markers too, and arity counts the receivers.** A
+  property reference is an object of a type of its own — one descriptor per property — so
+  `p is KProperty0<*>` compares against runtime markers rather than against the object's own type,
+  exactly as a function type does. Kotlin's hierarchy is `KCallable` → `KProperty` → `KPropertyN`,
+  with `KMutableProperty` and `KMutablePropertyN` beside them for a `var`, and each reference's
+  descriptor names the whole flattened chain because an interface's own bases are not walked. The N
+  is how many receivers `get` takes: a BOUND reference carries its receiver in the object and takes
+  none, so `Holder(1)::value` is a `KProperty0` while `Holder::value` is a `KProperty1`, and a
+  top-level property has no receiver either way. A reference to a `val` wears no mutable marker.
+  Test: `tests/native_reflection_type_checks_e2e.rs`.
+
 - **A `Throwable` carries a CAUSE, and the two one-argument constructors are told apart by type.**
   Kotlin declares four: `()`, `(message)`, `(cause)` and `(message, cause)`. A single argument whose
   type is a `Throwable` is the cause and anything else is the message, and the two forms differ in

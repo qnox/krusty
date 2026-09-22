@@ -269,6 +269,19 @@ impl<'a> FileLowering<'a> {
                     .and_then(super::super::super::intrinsics::function_type_descriptor)
                     .expect("just matched")
             }
+            // One of Kotlin's REFLECTION types, asked about the same way a function type is: the
+            // reference object's own type is one of a kind, so the markers are what it shares with
+            // the type written at the site.
+            _ if target
+                .obj_internal()
+                .and_then(super::super::super::intrinsics::reflection_type_descriptor)
+                .is_some() =>
+            {
+                target
+                    .obj_internal()
+                    .and_then(super::super::super::intrinsics::reflection_type_descriptor)
+                    .expect("just matched")
+            }
             _ => return Ok(None),
         };
         self.import_data(symbol).map(Some)
