@@ -2294,6 +2294,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   without walking the hierarchy: the class that names it is itself declared there.
   Tests: `tests/native_comparable_e2e.rs`.
 
+- **`kotlin.math.abs`, the floating-point bit conversions, and a walkable `StringBuilder`.** Each is
+  exact, and each has one detail a naive realization gets wrong.
+  `abs` on an integral type WRAPS at the minimum — `abs(Int.MIN_VALUE)` is `Int.MIN_VALUE`, because
+  there is no positive value to answer with. On a floating one it clears the SIGN BIT rather than
+  negating: `-0.0 < 0.0` is false, so `if (x < 0) -x else x` hands back the negative zero it was
+  given, and `abs(NaN)` must stay a NaN.
+  `toBits` differs from `toRawBits` in one respect: every NaN answers the canonical one, the same
+  collapse `equals` and `hashCode` make. `fromBits` is answered in the KLIB lane only — it is an
+  extension of the companion object, and while a klib call reaches it with that object unread, a jar
+  call materializes the object first, which this target cannot do for a type declared in no file.
+  A BUILDER is walkable text. `for (c in StringBuilder("OK"))` is Kotlin's own, and the walk is the
+  string's: the chars iterator reads its element through `kt_string_get` and its bound through
+  `kt_string_length`, both of which answer for either shape — and it re-reads that bound every step,
+  which is what lets a loop that shortens the builder stop where Kotlin's stops. `setLength` counts
+  UTF-16 units: shorter truncates on a character boundary, longer pads with NUL.
+  `assertSame` is IDENTITY where `assertEquals` is equality — two strings with the same text are
+  equal and are not the same object. Its failure wording was read off the reference toolchain rather
+  than guessed.
+  Tests: `tests/native_math_bits_e2e.rs`.
+
 - **`assertEquals` compares booleans structurally, like everything else it compares.** It is
   generic, so `assertEquals(true, true)` has `Boolean` as its first parameter after substitution.
   Reading the parameter to decide how the operands cross handed two raw machine values to an entry

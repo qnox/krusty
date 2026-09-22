@@ -2676,6 +2676,50 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                                 return self.convert(produced, Some(Ty::Boolean), *ret);
                             }
                         }
+                        // `Float.fromBits(n)`: an extension of the COMPANION object, so the
+                        // receiver is that object and nothing reads it — there is no object to
+                        // make and none is made. The operand's width says which of the two.
+                        if let Some((symbol, operand, answer)) =
+                            super::super::intrinsics::bits_to_float(&owner, &name, params)
+                        {
+                            let Some(bits) = self.coerce(args[0], operand)? else {
+                                return Ok(None);
+                            };
+                            if self.terminated {
+                                return Ok(None);
+                            }
+                            let produced =
+                                self.runtime_call(symbol, &[operand], answer, &[bits])?;
+                            let Some(produced) = produced else {
+                                return Ok(None);
+                            };
+                            return self.convert(produced, Some(answer), *ret);
+                        }
+                        // `x.toBits()` / `x.toRawBits()`: an extension whose receiver is a machine
+                        // value, taken at its own width rather than through a box. The receiver's
+                        // type says which width, the declaration having no parameter to say it.
+                        if let Some(receiver_ty) = self.type_of(receiver) {
+                            if let Some((symbol, answer)) = super::super::intrinsics::float_to_bits(
+                                &owner,
+                                &name,
+                                params,
+                                receiver_ty,
+                            ) {
+                                let carried = receiver_ty.non_null();
+                                let Some(value) = self.coerce(receiver, carried)? else {
+                                    return Ok(None);
+                                };
+                                if self.terminated {
+                                    return Ok(None);
+                                }
+                                let produced =
+                                    self.runtime_call(symbol, &[carried], answer, &[value])?;
+                                let Some(produced) = produced else {
+                                    return Ok(None);
+                                };
+                                return self.convert(produced, Some(answer), *ret);
+                            }
+                        }
                         // `x.compareTo(y)` where the static type says only `Comparable`. The
                         // receiver's DESCRIPTOR says what to compare, exactly as `equals` and
                         // `toString` on such a receiver already read it — a boxed primitive at its

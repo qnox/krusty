@@ -348,13 +348,13 @@ kt_int kt_render_float(kt_float value, char *out) {
    the significands, because the answer is `(significand of a, shifted) mod (significand of b)` and
    a shift-and-subtract loop gets that with no rounding anywhere. Verified against the JVM's own
    `%` over a million operand pairs, bit for bit. */
-static kt_double kt_bits_to_double(uint64_t bits) {
+static kt_double fp_double_of_bits(uint64_t bits) {
     kt_double out;
     memcpy(&out, &bits, sizeof out);
     return out;
 }
 
-static uint64_t kt_double_to_bits(kt_double value) {
+static uint64_t fp_bits_of_double(kt_double value) {
     uint64_t bits;
     memcpy(&bits, &value, sizeof bits);
     return bits;
@@ -363,7 +363,7 @@ static uint64_t kt_double_to_bits(kt_double value) {
 /* `significand * 2^exponent` as a double, for a value the format can hold exactly. */
 static kt_double kt_double_from_parts(uint64_t significand, int exponent, int negative) {
     if (significand == 0) {
-        return kt_bits_to_double(negative ? (1ull << 63) : 0);
+        return fp_double_of_bits(negative ? (1ull << 63) : 0);
     }
     while (significand < (1ull << 52)) { significand <<= 1; exponent--; }
     while (significand >= (1ull << 53)) { significand >>= 1; exponent++; }
@@ -377,11 +377,11 @@ static kt_double kt_double_from_parts(uint64_t significand, int exponent, int ne
         bits = ((uint64_t)biased << 52) | (significand & 0xFFFFFFFFFFFFFull);
     }
     if (negative) bits |= 1ull << 63;
-    return kt_bits_to_double(bits);
+    return fp_double_of_bits(bits);
 }
 
 kt_double kt_rem_double(kt_double a, kt_double b) {
-    uint64_t left = kt_double_to_bits(a), right = kt_double_to_bits(b);
+    uint64_t left = fp_bits_of_double(a), right = fp_bits_of_double(b);
     int negative = (int)(left >> 63);
     int exp_a = (int)((left >> 52) & 0x7FF), exp_b = (int)((right >> 52) & 0x7FF);
     uint64_t man_a = left & 0xFFFFFFFFFFFFFull, man_b = right & 0xFFFFFFFFFFFFFull;
@@ -391,7 +391,7 @@ kt_double kt_rem_double(kt_double a, kt_double b) {
     if (exp_a == 0x7FF && man_a != 0) return a;
     if (exp_b == 0x7FF && man_b != 0) return b;
     if (exp_a == 0x7FF || (exp_b == 0 && man_b == 0)) {
-        return kt_bits_to_double(0xFFF8000000000000ull);
+        return fp_double_of_bits(0xFFF8000000000000ull);
     }
     /* A finite value by an infinity leaves itself, and a zero leaves itself. */
     if (exp_b == 0x7FF) return a;

@@ -222,6 +222,13 @@ pub(super) fn runtime_function(owner: &str, name: &str, params: &[Ty]) -> Option
         ("kotlin", "error", [_]) => Some("kt_illegal_state".to_string()),
         ("kotlin", "require", [Ty::Boolean]) => Some("kt_require".to_string()),
         ("kotlin", "check", [Ty::Boolean]) => Some("kt_check".to_string()),
+        // `kotlin.math.abs`, one per width it is declared over. The operand crosses at its OWN
+        // width and the answer comes back at it: `abs` of a `Long` is a `Long`, and computing it
+        // at any other width would change what the minimum answers.
+        ("kotlin/math", "abs", [Ty::Int]) => Some("kt_abs_int".to_string()),
+        ("kotlin/math", "abs", [Ty::Long]) => Some("kt_abs_long".to_string()),
+        ("kotlin/math", "abs", [Ty::Float]) => Some("kt_abs_float".to_string()),
+        ("kotlin/math", "abs", [Ty::Double]) => Some("kt_abs_double".to_string()),
         // The overflow guard `forEachIndexed` and its relatives carry. A jar provider presents
         // those as INLINE declarations, so their bodies are spliced into the caller and this call
         // comes with them; a klib provider answers the walk itself and never mentions it. Kotlin's
@@ -253,6 +260,10 @@ pub(super) fn assertion_call(
     }
     let (symbol, compared) = match name {
         "assertEquals" => ("kt_assert_equals", 2),
+        // IDENTITY rather than equality, which is the whole of the difference: two strings with
+        // the same text are equal and are not the same object.
+        "assertSame" => ("kt_assert_same", 2),
+        "assertNotSame" => ("kt_assert_not_same", 2),
         "assertTrue" => ("kt_assert_true", 1),
         "assertFalse" => ("kt_assert_false", 1),
         _ => return None,
@@ -732,16 +743,18 @@ pub(super) fn iteration_role_of(ty: Ty) -> Option<IterationRole> {
         return Some(IterationRole::Iterable);
     }
     let internal = ty.obj_internal()?;
-    let walkable_text = [
-        "kotlin/String",
-        "kotlin/CharSequence",
-        "java/lang/String",
-        "java/lang/CharSequence",
-    ];
-    if walkable_text
-        .iter()
-        .any(|candidate| internal.matches(candidate))
-    {
+    // The BUILDER is walkable text too. `for (c in StringBuilder("OK"))` is Kotlin's own, and the
+    // walk is the same one a string takes: the chars iterator's bound is `kt_string_length`, which
+    // answers for either shape — and re-reads it every step, which is what lets a loop that
+    // shortens the builder stop where Kotlin's stops.
+    //
+    // Read through [`kotlin_owner`] rather than by listing both providers' spellings, which is
+    // what that function is for: a jar hands over `java.lang.StringBuilder` for a type Kotlin
+    // calls `kotlin.text.StringBuilder`, and normalizing once beats a list that has to grow.
+    if matches!(
+        kotlin_owner(&internal.render()),
+        "kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder"
+    ) {
         return Some(IterationRole::Iterable);
     }
     iteration_role(internal)
@@ -779,6 +792,50 @@ pub(super) fn runtime_table(internal: crate::types::TypeName) -> Option<&'static
     match kotlin_owner(&internal.render()) {
         "kotlin/collections/HashMap" | "kotlin/collections/LinkedHashMap" => Some("map"),
         "kotlin/collections/HashSet" | "kotlin/collections/LinkedHashSet" => Some("set"),
+        _ => None,
+    }
+}
+
+/// `Float.fromBits(n)` / `Double.fromBits(n)`, as (runtime symbol, operand, answer).
+///
+/// An EXTENSION of the companion object, declared in `kotlin`, so the receiver is that object and
+/// nothing reads it — which is why this is not [`scalar_member`]: that table evaluates a receiver
+/// and crosses it as a reference, and there is no object here to make. The operand's width is what
+/// says which of the two this is.
+pub(super) fn bits_to_float(
+    owner: &str,
+    name: &str,
+    params: &[Ty],
+) -> Option<(&'static str, Ty, Ty)> {
+    if declaration_package(kotlin_owner(owner)) != "kotlin" || name != "fromBits" {
+        return None;
+    }
+    match params {
+        [Ty::Int] => Some(("kt_float_from_bits", Ty::Int, Ty::Float)),
+        [Ty::Long] => Some(("kt_double_from_bits", Ty::Long, Ty::Double)),
+        _ => None,
+    }
+}
+
+/// `x.toBits()` / `x.toRawBits()`, as (runtime symbol, answer), for a receiver of `receiver`.
+///
+/// Also an extension declared in `kotlin`, and its RECEIVER is a machine value — so, like
+/// [`floor_mod`], it takes that receiver at its own width rather than through a box. The receiver's
+/// type is what says which width, because the declaration takes no parameter to read it from.
+pub(super) fn float_to_bits(
+    owner: &str,
+    name: &str,
+    params: &[Ty],
+    receiver: Ty,
+) -> Option<(&'static str, Ty)> {
+    if declaration_package(kotlin_owner(owner)) != "kotlin" || !params.is_empty() {
+        return None;
+    }
+    match (name, receiver.non_null()) {
+        ("toRawBits", Ty::Float) => Some(("kt_float_to_raw_bits", Ty::Int)),
+        ("toRawBits", Ty::Double) => Some(("kt_double_to_raw_bits", Ty::Long)),
+        ("toBits", Ty::Float) => Some(("kt_float_to_bits", Ty::Int)),
+        ("toBits", Ty::Double) => Some(("kt_double_to_bits", Ty::Long)),
         _ => None,
     }
 }
@@ -950,6 +1007,14 @@ pub(super) fn scalar_member(
             "get" | "charAt",
             [Ty::Int],
         ) => Some(("kt_string_get", vec![reference, Ty::Int], Ty::Char)),
+        // `sb.setLength(n)` counts UTF-16 units, so the operand is an `Int` the generator must not
+        // box to hand over. It answers nothing, which is why it is not one of the builder's
+        // reference-carried members below.
+        ("kotlin/text/StringBuilder", "setLength", [Ty::Int]) => Some((
+            "kt_string_builder_set_length",
+            vec![reference, Ty::Int],
+            Ty::Unit,
+        )),
         // `s.subSequence(a, b)` is `s.substring(a, b)`; the return type only says less about the
         // result, which the call site already knows.
         ("kotlin/String" | "kotlin/CharSequence", "subSequence", [Ty::Int, Ty::Int]) => Some((

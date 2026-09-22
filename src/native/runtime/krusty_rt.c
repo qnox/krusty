@@ -945,6 +945,35 @@ static void kt_string_builder_reserve(KRef self, kt_int additional) {
     builder->storage = replacement;
 }
 
+/* `sb.setLength(n)`, by UTF-16 UNIT as Kotlin counts. Shorter truncates; longer pads with NUL,
+   which is what Java's own does and what a program reading the result back would see.
+
+   Truncating cuts on a character boundary, so `kt_string_offset` finds the byte — and asking for a
+   length inside a surrogate pair is the loud failure it already is, for the same reason: UTF-8 has
+   no encoding for half a character. A NUL is one byte, so padding costs one per unit. */
+void kt_string_builder_set_length(KRef self, kt_int length) {
+    if (length < 0) {
+        kt_index_out_of_bounds(length, kt_string_length(self));
+        return;
+    }
+    kt_int units = kt_string_length(self);
+    if (length <= units) {
+        KStringBuilder *builder = (KStringBuilder *)self;
+        /* The text is the builder's own bytes, which `kt_string_of` names without copying: the
+           offset wanted is a byte count into them. */
+        KRef view = kt_string_of(builder->storage, kt_bytes_of((KByteArray *)builder->storage),
+                                 builder->byte_length);
+        builder->byte_length = kt_string_offset(view, length);
+        return;
+    }
+    kt_int padding = length - units;
+    kt_string_builder_reserve(self, padding);
+    KStringBuilder *builder = (KStringBuilder *)self;
+    memset(kt_bytes_of((KByteArray *)builder->storage) + builder->byte_length, 0,
+           (size_t)padding);
+    builder->byte_length += padding;
+}
+
 KRef kt_string_builder_append(KRef self, KRef value) {
     /* The rendering goes through `kt_to_string` rather than `kt_render`, because a value whose type
        overrides `toString` must answer with ITS text and only the vtable knows that. It allocates,
@@ -2779,7 +2808,10 @@ KRef kt_iterable_iterator(KRef iterable) {
     if (iterable != NULL && kt_is_array(iterable->header.type)) {
         return kt_walk_of(&kt_type_array_iterator, iterable);
     }
-    if (iterable != NULL && iterable->header.type == &kt_type_string) {
+    /* Either text shape: the chars iterator reads its element through `kt_string_get` and its
+       bound through `kt_string_length`, and both answer for a string and for a builder. */
+    if (iterable != NULL
+        && (iterable->header.type == &kt_type_string || kt_is_string_builder(iterable))) {
         return kt_walk_of(&kt_type_chars_iterator, iterable);
     }
     /* A SET is iterated as the list of its elements: that list IS the set's order, which is the
@@ -2849,7 +2881,7 @@ static kt_int kt_iterable_size(KRef iterable) {
     if (kt_is_array(iterable->header.type)) {
         return kt_length_of(iterable);
     }
-    if (iterable->header.type == &kt_type_string) {
+    if (iterable->header.type == &kt_type_string || kt_is_string_builder(iterable)) {
         return kt_string_length(iterable);
     }
     if (iterable->header.type != &kt_type_int_range &&
@@ -4359,6 +4391,75 @@ kt_long kt_shr_long(kt_long a, kt_int bits) {
 
 kt_long kt_ushr_long(kt_long a, kt_int bits) { return (kt_long)((uint64_t)a >> (bits & 63)); }
 
+/* `kotlin.math.abs`. The integral ones WRAP at the minimum, as Kotlin's do: `abs(Int.MIN_VALUE)`
+   is `Int.MIN_VALUE`, because there is no positive value to answer with. The unsigned arithmetic is
+   what makes that defined rather than an overflow.
+
+   The floating ones clear the SIGN BIT rather than negating: `abs(-0.0)` is `0.0` and `abs(NaN)` is
+   a NaN, and a comparison-driven negation gets the first of those wrong — `-0.0 < 0.0` is false, so
+   `x < 0 ? -x : x` hands back the negative zero it was given. */
+kt_int kt_abs_int(kt_int value) {
+    return value < 0 ? (kt_int)(0u - (uint32_t)value) : value;
+}
+
+kt_long kt_abs_long(kt_long value) {
+    return value < 0 ? (kt_long)(0u - (uint64_t)value) : value;
+}
+
+kt_float kt_abs_float(kt_float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof bits);
+    bits &= 0x7FFFFFFFu;
+    kt_float result;
+    memcpy(&result, &bits, sizeof result);
+    return result;
+}
+
+kt_double kt_abs_double(kt_double value) {
+    uint64_t bits;
+    memcpy(&bits, &value, sizeof bits);
+    bits &= 0x7FFFFFFFFFFFFFFFULL;
+    kt_double result;
+    memcpy(&result, &bits, sizeof result);
+    return result;
+}
+
+/* `x.toRawBits()` / `Float.fromBits(n)`: the bits as they are, in both directions. A
+   reinterpretation and nothing else, which is why it is `memcpy` and not a cast — reading one type
+   through a pointer to another is not defined C, and the copy compiles to no instruction.
+
+   `toBits` differs from `toRawBits` in ONE respect: every NaN answers the canonical one, which is
+   the same collapse `equals` and `hashCode` make and the reason `kt_double_bits` exists. */
+kt_int kt_float_to_raw_bits(kt_float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof bits);
+    return (kt_int)bits;
+}
+
+kt_long kt_double_to_raw_bits(kt_double value) {
+    uint64_t bits;
+    memcpy(&bits, &value, sizeof bits);
+    return (kt_long)bits;
+}
+
+kt_int kt_float_to_bits(kt_float value) { return (kt_int)kt_float_bits(value); }
+
+kt_long kt_double_to_bits(kt_double value) { return (kt_long)kt_double_bits(value); }
+
+kt_float kt_float_from_bits(kt_int bits) {
+    uint32_t raw = (uint32_t)bits;
+    kt_float value;
+    memcpy(&value, &raw, sizeof value);
+    return value;
+}
+
+kt_double kt_double_from_bits(kt_long bits) {
+    uint64_t raw = (uint64_t)bits;
+    kt_double value;
+    memcpy(&value, &raw, sizeof value);
+    return value;
+}
+
 #define KT_COMPARE(suffix, type)                                                                   \
     kt_int kt_compare_##suffix(type a, type b) { return a < b ? -1 : (a > b ? 1 : 0); }
 
@@ -4566,6 +4667,32 @@ void kt_assert_equals(KRef expected, KRef actual, KRef message) {
     KRef text = kt_string_plus(kt_assert_prefix(message), kt_string_utf8("Expected <", 10));
     text = kt_string_plus(text, kt_to_string(expected));
     text = kt_string_plus(text, kt_string_utf8(">, actual <", 11));
+    text = kt_string_plus(text, kt_to_string(actual));
+    kt_assert_fail(kt_string_plus(text, kt_string_utf8(">.", 2)));
+}
+
+/* `assertSame`/`assertNotSame`: IDENTITY, which is the whole of what separates them from
+   `assertEquals` — two strings with the same text are equal and are not the same object. Kotlin's
+   own wording for each, verified against the reference toolchain.
+
+   Built in pieces for the reason `assertEquals` is: rendering either operand allocates, and the
+   text so far has to stay reachable across that. */
+void kt_assert_same(KRef expected, KRef actual, KRef message) {
+    if (expected == actual) {
+        return;
+    }
+    KRef text = kt_string_plus(kt_assert_prefix(message), kt_string_utf8("Expected <", 10));
+    text = kt_string_plus(text, kt_to_string(expected));
+    text = kt_string_plus(text, kt_string_utf8(">, actual <", 11));
+    text = kt_string_plus(text, kt_to_string(actual));
+    kt_assert_fail(kt_string_plus(text, kt_string_utf8("> is not same.", 14)));
+}
+
+void kt_assert_not_same(KRef illegal, KRef actual, KRef message) {
+    if (illegal != actual) {
+        return;
+    }
+    KRef text = kt_string_plus(kt_assert_prefix(message), kt_string_utf8("Illegal value: <", 16));
     text = kt_string_plus(text, kt_to_string(actual));
     kt_assert_fail(kt_string_plus(text, kt_string_utf8(">.", 2)));
 }

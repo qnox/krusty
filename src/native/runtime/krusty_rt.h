@@ -604,6 +604,9 @@ KRef kt_string_builder_append(KRef self, KRef value);
 KRef kt_string_builder_append_line(KRef self, KRef value);
 KRef kt_string_builder_append_new_line(KRef self);
 
+/* `sb.setLength(n)`, by UTF-16 unit as Kotlin counts: shorter truncates, longer pads with NUL. */
+void kt_string_builder_set_length(KRef self, kt_int length);
+
 /* Whether a value is one, for the entry points that serve both shapes. */
 kt_boolean kt_is_string_builder(KRef value);
 
@@ -743,6 +746,10 @@ void kt_check_uncaught(void);
    specifies, with Kotlin's wording, so a failing assertion reports what kotlinc would report.
    `message` may be NULL, which is the form without one. */
 void kt_assert_equals(KRef expected, KRef actual, KRef message);
+/* `assertSame`/`assertNotSame`: IDENTITY, which is what separates them from `assertEquals` — two
+   strings with the same text are equal and are not the same object. */
+void kt_assert_same(KRef expected, KRef actual, KRef message);
+void kt_assert_not_same(KRef illegal, KRef actual, KRef message);
 void kt_assert_true(kt_boolean actual, KRef message);
 void kt_assert_false(kt_boolean actual, KRef message);
 
@@ -851,6 +858,24 @@ kt_long kt_ushr_long(kt_long a, kt_int bits);
 /* `compareTo` on scalars. Separate functions rather than an emitted `a < b ? -1 : ...` so neither
    operand is evaluated twice, and so the floating-point cases can implement Kotlin's TOTAL order
    (NaN above everything, -0.0 below 0.0) rather than C's comparison operators. */
+/* `kotlin.math.abs`. The integral ones WRAP at the minimum, as Kotlin's do — there is no positive
+   value to answer with. The floating ones clear the SIGN BIT rather than negating, so `abs(-0.0)` is
+   `0.0`: `-0.0 < 0.0` is false, and a comparison-driven negation hands back what it was given. */
+kt_int kt_abs_int(kt_int value);
+kt_long kt_abs_long(kt_long value);
+kt_float kt_abs_float(kt_float value);
+kt_double kt_abs_double(kt_double value);
+
+/* The bits of a floating-point value and back, a reinterpretation and nothing else. `toBits`
+   differs from `toRawBits` in one respect: every NaN answers the canonical one, the same collapse
+   `equals` and `hashCode` make. */
+kt_int kt_float_to_raw_bits(kt_float value);
+kt_long kt_double_to_raw_bits(kt_double value);
+kt_int kt_float_to_bits(kt_float value);
+kt_long kt_double_to_bits(kt_double value);
+kt_float kt_float_from_bits(kt_int bits);
+kt_double kt_double_from_bits(kt_long bits);
+
 kt_int kt_compare_byte(kt_byte a, kt_byte b);
 kt_int kt_compare_short(kt_short a, kt_short b);
 kt_int kt_compare_int(kt_int a, kt_int b);
