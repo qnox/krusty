@@ -155,6 +155,7 @@ pub(super) fn predeclare_properties(
                     IrCheckedProperty {
                         declaration,
                         decl_line: 0,
+                        decl_start_line: 0,
                         initialization_order: header.initialization_order,
                         class,
                         name,
@@ -209,6 +210,7 @@ pub(super) fn finalize_properties(
     for (source_order, anchor, property_id, property) in properties {
         let declaration = property.declaration;
         let decl_line = property.decl_line;
+        let decl_start_line = property.decl_start_line;
         let shape = index
             .property(property_id)
             .ok_or(FirFileLoweringFailure::MissingProperty(
@@ -276,6 +278,22 @@ pub(super) fn finalize_properties(
                 .cloned()
                 .ok_or(FirFileLoweringFailure::MissingProperty(declaration))?;
             apply_property_decl_line(ir, &layout, decl_line);
+            // A constructor property additionally publishes where its declaration STARTS, which is
+            // the line the constructor's store of it maps to. Attach the role to the exact backing
+            // field selected above; emission must not rediscover it from the field's spelling.
+            if decl_start_line != 0 {
+                if let IrLocalPropertyLayout::Member {
+                    class,
+                    backing_field: Some(field),
+                    ..
+                } = &layout
+                {
+                    if let Some(field) = ir.classes[*class as usize].fields.get_mut(*field as usize)
+                    {
+                        field.constructor_store_line = decl_start_line;
+                    }
+                }
+            }
         }
     }
     merge_class_initialization(ir, initialization)?;
@@ -834,6 +852,7 @@ fn materialize_member_property(
             ir.classes[class_id as usize].fields.push(IrField {
                 name: property.name.clone(),
                 ty: storage_ty,
+                constructor_store_line: 0,
                 type_param: field_type_parameter,
                 default: None,
                 flags: IrfFlags::default()

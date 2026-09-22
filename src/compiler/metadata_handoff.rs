@@ -138,18 +138,21 @@ pub(super) fn accept_active_debug_metadata(
             }
         }
 
+        // A constructor parameter carries a second line: where its declaration STARTS, annotations
+        // included. Only it does — a body property's initializer store stays on its own `val` line,
+        // measured against kotlinc — so the start line is accepted from that arm alone.
+        let constructor_parameter = active.constructor_parameter(file, declaration);
         let property_line = active
             .property(file, declaration)
             .map(|property| property.decl_line)
-            .or_else(|| {
-                active
-                    .constructor_parameter(file, declaration)
-                    .map(|property| property.decl_line)
-            });
+            .or_else(|| constructor_parameter.map(|property| property.decl_line));
         if let Some(line) = property_line.filter(|line| *line != 0) {
             if let Some(property) = index.property_for_declaration(declaration) {
                 if let Some(property) = ir.checked_properties.get_mut(&property) {
                     property.decl_line = line;
+                    property.decl_start_line = constructor_parameter
+                        .map(|parameter| parameter.decl_start_line)
+                        .unwrap_or(0);
                 }
             }
         }

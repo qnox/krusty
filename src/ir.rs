@@ -365,6 +365,13 @@ pub struct IrCheckedProperty {
     /// output metadata, not a source locator: property realization copies it to the common-IR
     /// declarations it creates after the syntax unit has already been dropped.
     pub decl_line: u32,
+    /// For a PRIMARY-CONSTRUCTOR property, the line its declaration starts on with its annotations
+    /// included; 0 for every other property and whenever the syntax unit carried no line.
+    ///
+    /// Accepted on the same terms as [`Self::decl_line`], and kept beside it rather than folded
+    /// into it because the two describe different members: the constructor's store of the property
+    /// maps here, its accessors map to `decl_line`.
+    pub decl_start_line: u32,
     /// Exact semantic position among the owning class's property initializers and `init` blocks.
     /// This is copied from the stable FIR declaration header, never reconstructed from source.
     pub initialization_order: Option<u32>,
@@ -1309,6 +1316,11 @@ impl IrfFlags {
 pub struct IrField {
     pub name: String,
     pub ty: Ty,
+    /// Source line for the compiler-generated PRIMARY-CONSTRUCTOR store into this exact field.
+    /// Zero for non-constructor-property fields or when no source line was retained. This semantic
+    /// debug role is recorded on the resolved field coordinate so a backend never has to recover
+    /// the property from its emitted field name.
+    pub constructor_store_line: u32,
     /// The source type-parameter NAME the field was declared with (`val x: T` → `Some("T")`), else
     /// `None`. Platform-neutral; lets the value-class pass pick the CORRECT bound for a generic
     /// underlying (vs guessing), independent of erasure dropping the name.
@@ -1335,6 +1347,7 @@ impl IrField {
         IrField {
             name,
             ty,
+            constructor_store_line: 0,
             type_param: None,
             default: None,
             flags: IrfFlags::default().with_is_private(true),

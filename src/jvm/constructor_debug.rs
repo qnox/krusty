@@ -11,9 +11,21 @@ pub(super) struct PropertyStore {
     pub(super) line: Option<u32>,
 }
 
-pub(super) fn property_line(ir: &IrFile, class: &IrClass, field: &str) -> Option<u32> {
+/// The line a constructor's store of the exact `field` coordinate maps to.
+///
+/// A PRIMARY-CONSTRUCTOR property's store goes to the line its declaration starts on, annotations
+/// included: kotlinc puts `@SerialName("x")` over `val x: Int` on the annotation's line, while the
+/// property's own getter stays on the `val` line. A BODY property is not the same shape — its
+/// initializer store stays on its own line, annotation or not — which is why only constructor
+/// properties carry `constructor_store_line`. Body-property stores retain the older declaration-line
+/// map until that broader debug-metadata migration moves onto exact field coordinates too.
+pub(super) fn property_line(ir: &IrFile, class: &IrClass, field: u32) -> Option<u32> {
+    let field = class.fields.get(field as usize)?;
+    if field.constructor_store_line != 0 {
+        return Some(field.constructor_store_line);
+    }
     ir.prop_decl_lines
-        .get(&(class.fq_name_id(), field.to_string()))
+        .get(&(class.fq_name_id(), field.name.clone()))
         .copied()
         .filter(|&line| line != 0)
 }
@@ -43,10 +55,9 @@ pub(super) fn initializer_property_stores(
                 let IrExpr::SetField { index, .. } = ir.expr(expression) else {
                     unreachable!("initializer was checked as a SetField block")
                 };
-                let field = &class.fields[*index as usize].name;
                 PropertyStore {
                     expression,
-                    line: property_line(ir, class, field),
+                    line: property_line(ir, class, *index),
                 }
             })
             .collect(),
