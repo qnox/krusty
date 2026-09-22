@@ -299,6 +299,7 @@ fn compile_source(
     );
     let backend = krusty::jvm::JvmBackend::new(cp)
         .with_jvm_default(krusty::conformance::jvm_default_mode(src));
+    progress("emit");
     let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     T_EMIT.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
@@ -376,6 +377,7 @@ fn compile_multifile(
     main_stem: &str,
     cp_jars: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
+    progress: &dyn Fn(&str),
 ) -> Option<Vec<(String, Vec<u8>)>> {
     // Split on `// FILE: name.kt` markers (the preamble before the first marker is directives).
     // `.java` blocks are collected separately: javac compiles them first (in-process, via the
@@ -402,6 +404,7 @@ fn compile_multifile(
     // real javac (docs/JAVA_INTEROP.md slice 2).
     let mut java_classes: Vec<(String, Vec<u8>)> = Vec::new();
     if !java_blocks.is_empty() {
+        progress("module javac");
         match common::javac_compile(&java_blocks, cp_jars) {
             Some((javadir, classes)) => {
                 // The classes were read into memory (BoxRunner loads from bytes, and krusty sees
@@ -411,7 +414,16 @@ fn compile_multifile(
                 }
                 java_classes = classes;
             }
-            None => return compile_kotlin_first(src, &blocks, &java_blocks, cp_jars, jdk_modules),
+            None => {
+                return compile_kotlin_first(
+                    src,
+                    &blocks,
+                    &java_blocks,
+                    cp_jars,
+                    jdk_modules,
+                    progress,
+                )
+            }
         }
     }
 
@@ -424,7 +436,7 @@ fn compile_multifile(
         &[],
         jdk_modules,
         &features,
-        None,
+        Some(progress),
         &java_classes,
     );
     let mut out = compiled?;
@@ -442,6 +454,7 @@ fn compile_kotlin_first(
     java_blocks: &[(String, String)],
     cp_jars: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
+    progress: &dyn Fn(&str),
 ) -> Option<Vec<(String, Vec<u8>)>> {
     let features = krusty::features::LangFeatures::from_source(src);
     let kotlin_classes = compile_blocks_mixed(
@@ -451,7 +464,7 @@ fn compile_kotlin_first(
         &[],
         jdk_modules,
         &features,
-        None,
+        Some(progress),
         &[],
     )?;
 
@@ -468,6 +481,7 @@ fn compile_kotlin_first(
         write_classes_to_dir(&kotlin_classes, &kotlindir)?;
         let mut javac_cp = cp_jars.to_vec();
         javac_cp.push(kotlindir);
+        progress("module javac");
         let (javadir, java_classes) = common::javac_compile(java_blocks, &javac_cp)?;
         if let Some(jroot) = javadir.parent() {
             let _ = fs::remove_dir_all(jroot);
@@ -554,6 +568,7 @@ fn compile_blocks_mixed(
         .find(|mode| *mode != krusty::jvm::ir_emit::JvmDefaultMode::default())
         .unwrap_or_default();
     let backend = krusty::jvm::JvmBackend::new(cp).with_jvm_default(jvm_default);
+    report("module emit");
     let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     let classes = outputs
         .into_iter()
@@ -674,7 +689,7 @@ fn compile_module_test(
                             &friend_paths,
                             jdk_modules,
                             &features,
-                            None,
+                            Some(&report),
                             &java_classes,
                         )
                     };
@@ -683,7 +698,7 @@ fn compile_module_test(
                         k
                     })
                 }
-                None => compile_kotlin_first(src, files, java_files, &cp, jdk_modules),
+                None => compile_kotlin_first(src, files, java_files, &cp, jdk_modules, &report),
             }
         };
         let Some(classes) = classes else {
@@ -1308,7 +1323,10 @@ fn kotlin_codegen_box_conformance() {
                 // The Kotlin test runner expands the `OPTIONAL_JVM_INLINE_ANNOTATION` placeholder to
                 // `@JvmInline` (single-field value classes). Mirror that so value-class tests reach the
                 // compiler instead of failing to parse on the bare placeholder identifier.
-                let src = krusty::conformance::prepare_test_source(&src);
+                let src = krusty::conformance::prepare_test_source(
+                    &src,
+                    krusty::conformance::TestTarget::Jvm,
+                );
                 t_read.fetch_add(tr0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 let __ret = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let applicable = if no_run {
@@ -1340,7 +1358,13 @@ fn kotlin_codegen_box_conformance() {
                             mark_box_case_phase(&active, tid, file, phase)
                         })
                     } else if src.contains("// FILE:") || src.contains("// WITH_COROUTINES") {
-                        compile_multifile(&src, &stem, &compile_cp, jdk_modules.as_deref())
+                        compile_multifile(
+                            &src,
+                            &stem,
+                            &compile_cp,
+                            jdk_modules.as_deref(),
+                            &|phase| mark_box_case_phase(&active, tid, file, phase),
+                        )
                     } else {
                         compile_source(&src, &stem, &compile_cp, jdk_modules.as_deref(), &|phase| {
                             mark_box_case_phase(&active, tid, file, phase)

@@ -1,0 +1,235 @@
+//! `is`, `as` and `as?` against an ARRAY type, through krusty's own code generator and runtime.
+//!
+//! An array is not a class a program declares, so the generator has no class id to look a
+//! descriptor up by — and without a descriptor there is nothing to ask the runtime. But the
+//! descriptor exists: every array the generator allocates already wears one of the runtime's own
+//! (`kt_type_int_array`, `kt_type_array`, …), because the collector has to be told the element
+//! width and whether to look inside. Naming that same descriptor at a type check is the whole of
+//! what these programs need.
+//!
+//! What an array's descriptor distinguishes is the element WIDTH, not the element type a program
+//! wrote, which is exactly Kotlin's own erasure: `is Array<String>` is not something a program may
+//! write, `is Array<*>` is, and `IntArray` and `Array<Int>` are different types on both sides.
+//!
+//! The same is true of every other type the runtime names rather than the program: a cast is
+//! CHECKED whenever its target is held as a reference and there is a descriptor to check against.
+//! A scalar target is the one exclusion, and not an oversight — `x as Int` is an unboxing, whose
+//! realization is a representation change rather than a question about an object.
+
+use super::common::{expect_box_ok_with_stdlib, expect_native_box};
+
+#[test]
+fn a_primitive_array_is_only_its_own_kind() {
+    // Each primitive array is a type of its own — `IntArray` is not `LongArray` and neither is an
+    // `Array<*>`. Asking through an `Any` is what makes the question the object's rather than the
+    // site's: a statically typed receiver could be answered without the runtime at all.
+    let src = "fun box(): String {\n\
+               \x20   val value: Any = intArrayOf(1, 2, 3)\n\
+               \x20   if (value !is IntArray) return \"fail: not an IntArray\"\n\
+               \x20   if (value is LongArray) return \"fail: a LongArray\"\n\
+               \x20   if (value is CharArray) return \"fail: a CharArray\"\n\
+               \x20   if (value is Array<*>) return \"fail: a reference array\"\n\
+               \x20   if (value is String) return \"fail: a String\"\n\
+               \x20   return \"OK\"\n\
+               }\n";
+    expect_box_ok_with_stdlib(src, "PrimitiveArrayIsItsOwnKind");
+    expect_native_box(src, "PrimitiveArrayIsItsOwnKind", "OK");
+}
+
+#[test]
+fn a_reference_array_is_not_a_primitive_one() {
+    let src = "fun box(): String {\n\
+               \x20   val value: Any = arrayOf(\"a\", \"b\")\n\
+               \x20   if (value !is Array<*>) return \"fail: not an Array\"\n\
+               \x20   if (value is IntArray) return \"fail: an IntArray\"\n\
+               \x20   if (value is ByteArray) return \"fail: a ByteArray\"\n\
+               \x20   return \"OK\"\n\
+               }\n";
+    expect_box_ok_with_stdlib(src, "ReferenceArrayIsNotPrimitive");
+    expect_native_box(src, "ReferenceArrayIsNotPrimitive", "OK");
+}
+
+#[test]
+fn a_non_array_answers_no_to_every_array_kind() {
+    let src = "class Holder\n\
+               fun box(): String {\n\
+               \x20   val value: Any = Holder()\n\
+               \x20   if (value is IntArray) return \"fail: IntArray\"\n\
+               \x20   if (value is Array<*>) return \"fail: Array\"\n\
+               \x20   if (value is DoubleArray) return \"fail: DoubleArray\"\n\
+               \x20   if (value is BooleanArray) return \"fail: BooleanArray\"\n\
+               \x20   return \"OK\"\n\
+               }\n";
+    expect_box_ok_with_stdlib(src, "NonArrayIsNoArrayKind");
+    expect_native_box(src, "NonArrayIsNoArrayKind", "OK");
+}
+
+#[test]
+fn every_primitive_array_kind_recognizes_itself() {
+    // Eight widths share one object shape, and the descriptor is the only thing separating them.
+    // One program asks all eight, each through an `Any`, so a single wrong symbol cannot hide
+    // behind the seven that are right.
+    let src = "fun kind(value: Any): String = when {\n\
+               \x20   value is ByteArray -> \"byte\"\n\
+               \x20   value is ShortArray -> \"short\"\n\
+               \x20   value is IntArray -> \"int\"\n\
+               \x20   value is LongArray -> \"long\"\n\
+               \x20   value is CharArray -> \"char\"\n\
+               \x20   value is BooleanArray -> \"boolean\"\n\
+               \x20   value is FloatArray -> \"float\"\n\
+               \x20   value is DoubleArray -> \"double\"\n\
+               \x20   else -> \"none\"\n\
+               }\n\
+               fun box(): String {\n\
+               \x20   val seen = kind(byteArrayOf(1)) + \" \" + kind(shortArrayOf(1)) + \" \" +\n\
+               \x20       kind(intArrayOf(1)) + \" \" + kind(longArrayOf(1)) + \" \" +\n\
+               \x20       kind(charArrayOf('a')) + \" \" + kind(booleanArrayOf(true)) + \" \" +\n\
+               \x20       kind(floatArrayOf(1.0f)) + \" \" + kind(doubleArrayOf(1.0))\n\
+               \x20   val want = \"byte short int long char boolean float double\"\n\
+               \x20   return if (seen == want) \"OK\" else \"fail: $seen\"\n\
+               }\n";
+    expect_box_ok_with_stdlib(src, "EveryPrimitiveArrayKind");
+    expect_native_box(src, "EveryPrimitiveArrayKind", "OK");
+}
+
+#[test]
+fn a_nullable_array_check_admits_null() {
+    // `x is IntArray?` is true of `null`; `x is IntArray` is not. The runtime answers false for a
+    // null receiver, so the nullable form has to say so itself.
+    let src = "fun box(): String {\n\
+               \x20   val absent: Any? = null\n\
+               \x20   if (absent !is IntArray?) return \"fail: null is not IntArray?\"\n\
+               \x20   if (absent is IntArray) return \"fail: null is IntArray\"\n\
+               \x20   val present: Any? = intArrayOf(1)\n\
+               \x20   if (present !is IntArray?) return \"fail: an array is not IntArray?\"\n\
+               \x20   return \"OK\"\n\
+               }\n";
+    expect_box_ok_with_stdlib(src, "NullableArrayCheck");
+    expect_native_box(src, "NullableArrayCheck", "OK");
+}
+
+#[test]
+fn a_safe_cast_to_an_array_answers_null_rather_than_the_wrong_array() {
+    // `as?` is the check with a value attached, so it has to reach the same descriptor. Answering
+    // the receiver unchecked would hand back an `Array<String>` typed `IntArray`, and every read
+    // off it would then be four bytes out of an eight-byte slot.
+    let src = "fun box(): String {\n\
+               \x20   val value: Any = arrayOf(\"a\")\n\
+               \x20   if ((value as? IntArray) != null) return \"fail: became an IntArray\"\n\
+               \x20   val ints: Any = intArrayOf(7)\n\
+               \x20   val back = ints as? IntArray ?: return \"fail: lost its own type\"\n\
+               \x20   return if (back[0] == 7) \"OK\" else \"fail: ${back[0]}\"\n\
+               }\n";
+    expect_box_ok_with_stdlib(src, "SafeCastToArray");
+    expect_native_box(src, "SafeCastToArray", "OK");
+}
+
+#[test]
+fn a_string_is_asked_about_the_same_way_a_class_is() {
+    // `String` is the runtime's type, not the program's, so it had the array's gap too.
+    let src = "fun box(): String {\n\
+               \x20   val text: Any = \"a\"\n\
+               \x20   val number: Any = 1\n\
+               \x20   if (text !is String) return \"fail: not a String\"\n\
+               \x20   if (number is String) return \"fail: a number is a String\"\n\
+               \x20   if ((number as? String) != null) return \"fail: became a String\"\n\
+               \x20   val back = text as? String ?: return \"fail: lost its own type\"\n\
+               \x20   return if (back == \"a\") \"OK\" else \"fail: $back\"\n\
+               }\n";
+    expect_box_ok_with_stdlib(src, "StringIsAskedLikeAClass");
+    expect_native_box(src, "StringIsAskedLikeAClass", "OK");
+}
+
+#[test]
+fn an_unboxing_cast_stays_a_representation_change() {
+    // The exclusion, stated as a program: `as Int` reads the number out of the box, and routing it
+    // through the object check would hand the box back where the site wants the value.
+    let src = "fun box(): String {\n\
+               \x20   val boxed: Any = 7\n\
+               \x20   val n = boxed as Int\n\
+               \x20   val doubled = n * 2\n\
+               \x20   return if (doubled == 14) \"OK\" else \"fail: $doubled\"\n\
+               }\n";
+    expect_box_ok_with_stdlib(src, "UnboxingCastStaysACoercion");
+    expect_native_box(src, "UnboxingCastStaysACoercion", "OK");
+}
+
+#[test]
+fn nothing_is_a_type_no_value_is_an_instance_of() {
+    // `Nothing` has no instances at all, so the check is settled by the type. Its NULLABLE form is
+    // the one value it admits — `Nothing?` is the type of `null` and of nothing else.
+    //
+    // Asserted against this backend only, deliberately. krusty's JVM backend answers `true` here:
+    // `ref_internal` has no arm for `Ty::Nothing` and falls through to `java/lang/Object`, so it
+    // emits `instanceof java/lang/Object`, which every non-null value passes. That is a defect in
+    // shared code rather than a difference of opinion between targets, and it is being fixed on
+    // its own branch; cross-checking here would pin the wrong answer.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val present: Any? = \"a\"\n\
+         \x20   val absent: Any? = null\n\
+         \x20   if (present is Nothing) return \"fail: a value is Nothing\"\n\
+         \x20   if (present is Nothing?) return \"fail: a value is Nothing?\"\n\
+         \x20   if (absent is Nothing) return \"fail: null is Nothing\"\n\
+         \x20   if (absent !is Nothing?) return \"fail: null is not Nothing?\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "NothingHasNoInstances",
+        "OK",
+    );
+}
+
+#[test]
+fn any_is_the_question_of_whether_there_is_a_value_at_all() {
+    let src = "fun box(): String {\n\
+               \x20   val present: Any? = 1\n\
+               \x20   val absent: Any? = null\n\
+               \x20   if (present !is Any) return \"fail: a value is not Any\"\n\
+               \x20   if (absent is Any) return \"fail: null is Any\"\n\
+               \x20   if (present !is Any?) return \"fail: a value is not Any?\"\n\
+               \x20   if (absent !is Any?) return \"fail: null is not Any?\"\n\
+               \x20   return \"OK\"\n\
+               }\n";
+    expect_box_ok_with_stdlib(src, "AnyIsWhetherThereIsAValue");
+    expect_native_box(src, "AnyIsWhetherThereIsAValue", "OK");
+}
+
+#[test]
+fn a_settled_check_still_evaluates_its_receiver() {
+    // The constant is the ANSWER, not the expression. A receiver with effects runs exactly once,
+    // which is what separates folding the answer from dropping the question. Native-only for the
+    // `Nothing` half, for the reason given above.
+    expect_native_box(
+        "var calls = 0\n\
+         fun subject(): Any? { calls++; return \"a\" }\n\
+         fun box(): String {\n\
+         \x20   val never = subject() is Nothing\n\
+         \x20   val always = subject() is Any\n\
+         \x20   if (never) return \"fail: Nothing\"\n\
+         \x20   if (!always) return \"fail: Any\"\n\
+         \x20   return if (calls == 2) \"OK\" else \"fail: $calls\"\n\
+         }\n",
+        "SettledCheckEvaluatesReceiver",
+        "OK",
+    );
+}
+
+#[test]
+fn unit_is_asked_about_as_the_object_it_is() {
+    // `Unit` reaches a check spelled as the object rather than as the carrier the generator names,
+    // and it is one type either way.
+    //
+    // Native-only for the same reason as `Nothing`: `ref_internal` has no `Ty::Unit` arm either, so
+    // krusty's JVM backend answers `"a" is Unit` with `true`.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val value: Any = Unit\n\
+         \x20   val other: Any = \"a\"\n\
+         \x20   if (value !is Unit) return \"fail: Unit is not Unit\"\n\
+         \x20   if (other is Unit) return \"fail: a String is Unit\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "UnitIsAskedAsAnObject",
+        "OK",
+    );
+}

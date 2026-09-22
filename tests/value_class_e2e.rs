@@ -498,3 +498,27 @@ fn synthesized_metadata_uses_properties_not_erased_value_class_fields() {
         "SemanticPropertyMetadata",
     );
 }
+
+/// A value class wrapping a floating-point value, on the NATIVE backend.
+///
+/// The three synthesized members were declined there on the premise that the runtime could not
+/// render the value. It can: a floating-point value has a box and its own `toString`, which is the
+/// shortest decimal that reads back as itself. `equals` and `hashCode` read the BITS, so NaN
+/// equals itself and the two zeroes stay distinct — the rule Kotlin's own `equals` states, and the
+/// opposite of what `==` on the machine answers.
+#[test]
+fn a_value_class_wrapping_a_floating_point_value_answers_its_members() {
+    let source = "value class D(val v: Double)\n\
+         value class F(val v: Float)\n\
+         fun box(): String {\n\
+         \x20   if (D(1.5).toString() != \"D(v=1.5)\") return \"fail D: \" + D(1.5)\n\
+         \x20   if (F(2.25f).toString() != \"F(v=2.25)\") return \"fail F: \" + F(2.25f)\n\
+         \x20   if (D(1.5) != D(1.5)) return \"fail equals\"\n\
+         \x20   if (D(Double.NaN) != D(Double.NaN)) return \"fail NaN equals\"\n\
+         \x20   if (D(0.0) == D(-0.0)) return \"fail the two zeroes\"\n\
+         \x20   if (D(1.5).hashCode() != D(1.5).hashCode()) return \"fail hashCode\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(source, "FloatingValueClass");
+    common::expect_native_box(source, "FloatingValueClass", "OK");
+}

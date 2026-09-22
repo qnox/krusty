@@ -25,6 +25,17 @@ stacker = "0.1.24"
 # Heap profiler, OFF by default (optional dep, enabled only by the `dhat-heap` feature) so normal
 # builds pay zero cost. See the `dhat-heap` feature.
 dhat = { version = "0.3", optional = true }
+# Reading the prebuilt runtime's relocatable objects and writing the executable krusty links them
+# into. Only the linker uses it; the code generator brings its own dependency when it lands.
+object = "0.40.0"
+# Cranelift owns instruction selection and register allocation, and only those. It compiles in only
+# the host architecture by default; every target krusty links for needs its backend present, since
+# one host builds all of them.
+cranelift-codegen = { version = "0.134", features = ["x86", "arm64", "riscv64"] }
+cranelift-frontend = "0.134"
+cranelift-module = "0.134"
+cranelift-object = "0.134"
+target-lexicon = "0.13.5"
 
 [features]
 # Opt-in compiler tracing (`trace_compiler!`). OFF by default so release/gate/conformance builds pay

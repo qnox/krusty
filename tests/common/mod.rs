@@ -1,8 +1,14 @@
 //! Shared test helpers.
 
 mod kotlin_metadata;
+mod native_backend;
 mod source_set_compile;
 
+// Re-exported so a test writes `common::expect_native_box` like every other helper here. The
+// conformance binary compiles this module too and uses none of them, exactly as it uses none of
+// the JVM-only helpers below.
+#[allow(unused_imports)]
+pub use native_backend::{expect_native_box, expect_native_decline, expect_native_exit};
 pub use source_set_compile::compile_in_process_files;
 
 pub(crate) use kotlin_metadata::raw_kotlin_metadata;
@@ -21,6 +27,37 @@ use krusty::jvm::classpath::Classpath;
 /// Locate the batch CLI built from the separate `krusty-cli` workspace package.
 ///
 /// The canonical test runner builds it before starting the suite. A direct `cargo test -p krusty`
+/// Spawn a just-written executable, waiting out the window in which the kernel still sees an open
+/// write handle to it.
+///
+/// A test that writes a program and immediately runs it races every OTHER test in the binary: a
+/// `Command::spawn` on another thread forks, inheriting this file's still-open write descriptor,
+/// and the exec here fails with `ETXTBSY` until that child reaches its own exec and the
+/// close-on-exec flag takes effect. The window is microseconds and nothing about the compiler is
+/// being tested by it, so it is waited out rather than reported as a failure.
+#[allow(dead_code)]
+pub fn spawn_freshly_written(command: &mut Command) -> std::io::Result<Child> {
+    /// `ETXTBSY`. Spelled as its number because `ErrorKind::ExecutableFileBusy` is still unstable.
+    const TEXT_FILE_BUSY: i32 = 26;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match command.spawn() {
+            Err(error)
+                if error.raw_os_error() == Some(TEXT_FILE_BUSY) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Run a just-written executable to completion, with [`spawn_freshly_written`]'s retry.
+#[allow(dead_code)]
+pub fn run_freshly_written(command: &mut Command) -> std::io::Result<std::process::Output> {
+    spawn_freshly_written(command.stdout(Stdio::piped()).stderr(Stdio::piped()))?.wait_with_output()
+}
+
 /// may not, so build it once on demand in the test profile rather than coupling the compiler crate
 /// back to the executable package.
 #[allow(dead_code)]
@@ -251,7 +288,7 @@ fn parse_source_set_named(
     sources: &[(&str, &str)],
     diags: &mut krusty::diag::DiagSink,
 ) -> Option<Vec<krusty::ast::File>> {
-    let files = sources
+    let mut files = sources
         .iter()
         .map(|(stem, source)| {
             let features = krusty::features::LangFeatures::from_source(source);
@@ -261,6 +298,8 @@ fn parse_source_set_named(
             file
         })
         .collect::<Vec<_>>();
+    let sources = sources.iter().map(|(_, s)| *s).collect::<Vec<_>>();
+    let sources: &[&str] = &sources;
     if diags.has_errors() {
         return None;
     }
@@ -1533,7 +1572,10 @@ pub fn compile_and_run_box_files(
 pub fn compile_and_run_with_stdlib(src: &str, stem: &str) -> Option<String> {
     let stdlib = stdlib_jar();
     let jdk = jdk_modules();
-    compile_and_run_box(src, stem, &[stdlib], Some(jdk.as_path()))
+    // A `None` is the JVM path declining, which leaves no answer to cross-check against.
+    let answer = compile_and_run_box(src, stem, &[stdlib], Some(jdk.as_path()))?;
+    cross_check_backends(src, stem, &answer);
+    Some(answer)
 }
 
 /// Multi-file form of [`compile_and_run_with_stdlib`].
@@ -1590,7 +1632,30 @@ pub fn expect_box_run(
 pub fn expect_box_run_with_stdlib(src: &str, stem: &str) -> String {
     let stdlib = stdlib_jar();
     let jdk = jdk_modules();
-    expect_box_run(src, stem, &[stdlib], Some(jdk.as_path()))
+    let answer = expect_box_run(src, stem, &[stdlib], Some(jdk.as_path()));
+    cross_check_backends(src, stem, &answer);
+    answer
+}
+
+/// [`expect_box_run_with_stdlib`] for a program the two backends answer DIFFERENTLY on purpose.
+///
+/// The ordinary helper asserts the backends agree, which is the right default and the reason it is
+/// the default. A handful of programs sit on a defect one backend has and the other does not, and
+/// for those "the backends agree" is the wrong claim: it would be satisfied only by making the
+/// correct backend wrong.
+///
+/// So both answers are named. The JVM's is returned as usual for the caller to assert; the native
+/// one is asserted here. A test reaching for this has to write down what each backend says, which
+/// is what keeps a deliberate divergence from quietly becoming a regression in either direction —
+/// if the JVM defect is fixed and the answers converge, this call fails and the test comes back to
+/// the ordinary helper.
+#[allow(dead_code)]
+pub fn expect_box_run_with_stdlib_diverging(src: &str, stem: &str, native: &str) -> String {
+    let stdlib = stdlib_jar();
+    let jdk = jdk_modules();
+    let answer = expect_box_run(src, stem, &[stdlib], Some(jdk.as_path()));
+    cross_check_backends(src, stem, native);
+    answer
 }
 
 /// [`expect_box_run`] for a compile-only consumer: the emitted classes, or a panic naming why the
@@ -1628,6 +1693,79 @@ pub fn expect_box_ok_with_stdlib(src: &str, stem: &str) {
         "OK",
         "{stem}"
     );
+    cross_check_backends(src, stem, "OK");
+}
+
+/// A target the suite's `box()` programs run on.
+///
+/// The suite is written ONCE. Which targets a run exercises is the runner's choice, not a property
+/// of the helper a test happens to call — so a new target is registered here and picked up by every
+/// existing test, rather than needing a second suite or an edit per call site.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+pub enum TestBackend {
+    /// The reference target. Always runs: it is the one that decides the expected answer.
+    Jvm,
+    /// Cranelift + the prebuilt runtime for the host.
+    Native,
+}
+
+impl TestBackend {
+    fn spelling(self) -> &'static str {
+        match self {
+            Self::Jvm => "jvm",
+            Self::Native => "native",
+        }
+    }
+}
+
+/// Every target this run CROSS-CHECKS against the JVM answer, from `KRUSTY_TEST_BACKENDS`.
+///
+/// A comma-separated list of spellings; `jvm` is implicit and may be listed harmlessly. The default
+/// is every target this build can actually reach, so a contributor gets the wider check without
+/// asking for it, and `KRUSTY_TEST_BACKENDS=jvm` narrows a run to the reference target alone.
+#[allow(dead_code)]
+fn cross_checked_backends() -> Vec<TestBackend> {
+    let available = [TestBackend::Native];
+    let selected = std::env::var("KRUSTY_TEST_BACKENDS").ok();
+    let selected = match selected.as_deref() {
+        // Retained spelling of the first switch this replaced.
+        None => match std::env::var("KRUSTY_NATIVE_E2E").as_deref() {
+            Ok("0") => return Vec::new(),
+            _ => return available.to_vec(),
+        },
+        Some(list) => list,
+    };
+    available
+        .into_iter()
+        .filter(|backend| {
+            selected
+                .split(',')
+                .any(|name| name.trim() == backend.spelling())
+        })
+        .collect()
+}
+
+/// Run `src` on every cross-checked target and require the SAME answer the JVM gave.
+///
+/// The suite's own programs are a better corpus for a young backend than anything written for it:
+/// they were written to pin krusty's semantics, they are small, and their oracle is already the
+/// string `box()` returns. Reusing them costs one switch rather than a second suite.
+///
+/// Comparing against `expected` rather than against the literal `"OK"` is what lets EVERY box
+/// helper route through here, including the ones whose programs deliberately answer something else:
+/// the claim is that a backend agrees with the reference, which is the claim worth making.
+///
+/// A construct the generator DECLINES is a skip. A younger backend says "not lowered yet" that way,
+/// and failing a test for it would turn every JVM-side test into that backend's to-do list.
+#[allow(dead_code)]
+pub fn cross_check_backends(src: &str, stem: &str, expected: &str) {
+    for backend in cross_checked_backends() {
+        match backend {
+            TestBackend::Jvm => {}
+            TestBackend::Native => native_backend::also_run_natively(src, stem, expected),
+        }
+    }
 }
 
 /// Multi-file form of [`expect_box_ok_with_stdlib`].
@@ -2411,6 +2549,7 @@ pub fn corpus_ready() -> bool {
 pub fn run_box_corpus_case(rel: &str) -> Option<String> {
     let src = krusty::conformance::prepare_test_source(
         &std::fs::read_to_string(box_corpus_dir()?.join(rel)).ok()?,
+        krusty::conformance::TestTarget::Jvm,
     );
     // Multi-file / multi-module cases need the gate's `// FILE:`/`// MODULE:` splitting — skip here
     // rather than miscompile all blocks as one source (enforce the contract, don't rely on luck).
@@ -2428,6 +2567,7 @@ pub fn run_box_corpus_case(rel: &str) -> Option<String> {
 pub fn box_corpus_case_backend_outcome(rel: &str) -> Option<BackendOutcome> {
     let src = krusty::conformance::prepare_test_source(
         &std::fs::read_to_string(box_corpus_dir()?.join(rel)).ok()?,
+        krusty::conformance::TestTarget::Jvm,
     );
     if src.contains("// FILE:") || src.contains("// MODULE:") {
         return None;
@@ -3351,150 +3491,6 @@ pub fn byte_diff_against_kotlinc_cp_target(
         krusty_bytes.len(),
         ref_bytes.len()
     )))
-}
-
-/// Compare ONE method's instruction sequence against the reference compiler's, with a dependency
-/// the reference compiler built.
-///
-/// Whole-class identity also covers the constant pool, the debug tables and `SourceDebugExtension`,
-/// which diverge for reasons of their own; this instrument answers the narrower question a splice
-/// change is actually about — whether the emitted code is the same instructions in the same order,
-/// over the same local slots. Pool indices are normalized away because two pools interned in
-/// different orders describe the same references.
-#[allow(dead_code)]
-pub fn method_code_diff_against_kotlinc_lib(
-    name: &str,
-    lib: &str,
-    src: &str,
-    class: &str,
-    method: &str,
-) -> Option<Result<(), String>> {
-    let libout = kotlinc_lib_out(&[("Lib.kt", lib)])?;
-    let dir = scratch_dir()?;
-    let kref = dir.join("ref");
-    let kout = dir.join("krusty");
-    std::fs::create_dir_all(&kref).ok()?;
-    std::fs::create_dir_all(&kout).ok()?;
-    let src_path = dir.join(format!("{name}.kt"));
-    std::fs::write(&src_path, src).ok()?;
-    let (code, stderr) = kotlinc_compile(&[
-        "-d".to_string(),
-        kref.to_string_lossy().into_owned(),
-        "-cp".to_string(),
-        libout.to_string_lossy().into_owned(),
-        src_path.to_string_lossy().into_owned(),
-    ])?;
-    assert_eq!(code, 0, "{name}: kotlinc failed: {stderr}");
-
-    let classpath = [libout, stdlib_jar()];
-    let classes = compile_in_process_metadata_cp(src, name, &classpath)
-        .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
-    let (_, krusty_bytes) = classes
-        .iter()
-        .find(|(emitted, _)| emitted == class)
-        .unwrap_or_else(|| panic!("{name}: krusty did not emit {class}"));
-    let krusty_path = kout.join(format!("{class}.class"));
-    if let Some(parent) = krusty_path.parent() {
-        std::fs::create_dir_all(parent).ok()?;
-    }
-    std::fs::write(&krusty_path, krusty_bytes).ok()?;
-
-    let reference = disassembled_method(&kref, class, method)?;
-    let actual = disassembled_method(&kout, class, method)?;
-    let _ = std::fs::remove_dir_all(&dir);
-    if reference == actual {
-        return Some(Ok(()));
-    }
-    Some(Err(format!(
-        "{name}/{class}.{method}: instruction sequences differ\n--- kotlinc ---\n{reference}\n--- krusty ---\n{actual}"
-    )))
-}
-
-/// Whether `bytes` contains a CALL to `callee` — a method reference an instruction names, rather
-/// than the name appearing anywhere in the class.
-///
-/// A spliced inline function's name still occurs in the class: its inline-depth marker
-/// (`$i$f$<callee>`) is a debug-table entry, and the source map names the file it came from. Those
-/// are not calls, and the reference compiler emits them too, so a byte search for the name answers
-/// a different question from the one a splice test is asking.
-#[allow(dead_code)]
-pub fn class_calls_method(bytes: &[u8], class: &str, callee: &str) -> Option<bool> {
-    let dir = scratch_dir()?;
-    let path = dir.join(format!("{class}.class"));
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok()?;
-    }
-    std::fs::write(&path, bytes).ok()?;
-    let out = std::process::Command::new(format!("{}/bin/javap", java_home()))
-        .args(["-p", "-c", "-cp"])
-        .arg(&dir)
-        .arg(class.replace('/', "."))
-        .output()
-        .ok()?;
-    let text = String::from_utf8(out.stdout).ok()?;
-    let _ = std::fs::remove_dir_all(&dir);
-    Some(
-        text.lines()
-            .any(|line| line.contains("// Method ") && line.contains(&format!(".{callee}:"))),
-    )
-}
-
-/// One method's instructions and its `LocalVariableTable`, with constant-pool indices and trailing
-/// comments normalized away.
-///
-/// The `LineNumberTable` is deliberately excluded: a spliced body's line numbers are output lines
-/// that only a `SourceDebugExtension` gives meaning to, and krusty does not emit one yet
-/// (`docs/JVM_INLINE_BEFORE_CPS.md` a5/a6). Including it would fail for a reason this instrument is
-/// not measuring.
-#[allow(dead_code)]
-fn disassembled_method(dir: &Path, class: &str, method: &str) -> Option<String> {
-    let out = std::process::Command::new(format!("{}/bin/javap", java_home()))
-        .args(["-p", "-c", "-l", "-cp"])
-        .arg(dir)
-        .arg(class.replace('/', "."))
-        .output()
-        .ok()?;
-    let text = String::from_utf8(out.stdout).ok()?;
-    let mut body = String::new();
-    let mut inside = false;
-    let mut skipping_lines = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with(method) && trimmed.contains('(') {
-            inside = true;
-            continue;
-        }
-        if inside {
-            if trimmed.is_empty() {
-                break;
-            }
-            if trimmed == "Code:" {
-                continue;
-            }
-            if trimmed == "LineNumberTable:" {
-                skipping_lines = true;
-                continue;
-            }
-            if trimmed == "LocalVariableTable:" {
-                skipping_lines = false;
-                body.push_str("LocalVariableTable\n");
-                continue;
-            }
-            if skipping_lines {
-                continue;
-            }
-            // `12: invokestatic  #23    // Method one:(I)I` → `12: invokestatic #`
-            let code = trimmed.split("//").next().unwrap_or(trimmed).trim();
-            let normalized = code
-                .split_whitespace()
-                .map(|token| if token.starts_with('#') { "#" } else { token })
-                .collect::<Vec<_>>()
-                .join(" ");
-            body.push_str(normalized.trim_end_matches(','));
-            body.push('\n');
-        }
-    }
-    (!body.is_empty()).then_some(body)
 }
 
 #[cfg(test)]

@@ -40,6 +40,7 @@ pub mod metadata;
 pub mod module_symbols;
 pub mod name_tree;
 pub mod names;
+pub mod native;
 pub mod parser;
 pub mod plugins;
 mod resolve;

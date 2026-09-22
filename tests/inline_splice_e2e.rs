@@ -44,14 +44,12 @@ fn branchless_inline_fn_is_spliced_not_called() {
         .find(|(n, _)| n == "MainKt")
         .expect("no MainKt")
         .1;
-    for callee in ["triple", "atLeast", "applyIt"] {
-        // A CALL, not the name: a spliced body still carries `$i$f$<callee>` in its debug table.
-        if let Some(called) = common::class_calls_method(main_class, "MainKt", callee) {
-            assert!(
-                !called,
-                "MainKt still calls `{callee}` — the inline fn was called, not spliced"
-            );
-        }
+    for callee in [&b"triple"[..], &b"atLeast"[..], &b"applyIt"[..]] {
+        assert!(
+            !contains(main_class, callee),
+            "MainKt still references `{}` — the inline fn was called, not spliced",
+            String::from_utf8_lossy(callee)
+        );
     }
 
     // 4. The spliced bytecode verifies and computes the right result (persistent box JVM). The inline
@@ -105,13 +103,12 @@ fn typed_bodies_are_spliced() {
         .find(|(n, _)| n == "MainTypedKt")
         .expect("no MainTypedKt")
         .1;
-    for callee in ["dscale", "lsum", "fbump", "widen"] {
-        if let Some(called) = common::class_calls_method(main_class, "MainTypedKt", callee) {
-            assert!(
-                !called,
-                "MainTypedKt still calls `{callee}` — spliced, not called"
-            );
-        }
+    for callee in [&b"dscale"[..], &b"lsum"[..], &b"fbump"[..], &b"widen"[..]] {
+        assert!(
+            !contains(main_class, callee),
+            "MainTypedKt still references `{}` — spliced, not called",
+            String::from_utf8_lossy(callee)
+        );
     }
 
     let Some(out) = common::run_box(&classes, "MainTypedKt", &[stdlib_path]) else {
@@ -119,4 +116,8 @@ fn typed_bodies_are_spliced() {
         return;
     };
     assert_eq!(out.trim(), "OK", "typed box() returned {out:?}");
+}
+
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
 }

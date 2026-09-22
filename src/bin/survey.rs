@@ -656,7 +656,8 @@ fn survey_parse_file(file: &Path) -> ParseSurveyOutcome {
             }
         }
     };
-    let source = krusty::conformance::prepare_test_source(&raw);
+    let source =
+        krusty::conformance::prepare_test_source(&raw, krusty::conformance::TestTarget::Jvm);
     let fallback = file
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -764,7 +765,7 @@ fn survey_file(
             ))
         }
     };
-    let src = krusty::conformance::prepare_test_source(&src);
+    let src = krusty::conformance::prepare_test_source(&src, krusty::conformance::TestTarget::Jvm);
     // An `IGNORE_BACKEND` mute is a statement about EMISSION, so it cannot excuse a frontend
     // refusal: a frontend census scores those cases exactly as the parse-only gate does. A
     // `TARGET_BACKEND` and `METADATA_TARGET_PLATFORMS` delimit the platform source universe.
