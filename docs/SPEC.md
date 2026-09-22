@@ -2355,6 +2355,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_builtin_companions_e2e.rs`
   (`a_narrow_constant_boxes_as_its_own_type`, `a_narrow_constant_still_promotes_for_arithmetic`).
 
+- **`x!!` has the operand's type with the nullability taken off, and the type table says so.** The
+  lowering already knew it — it unboxes a nullable primitive there — but the TYPE table had no arm
+  for the assertion, so a CONSUMER of `x!!` was left holding a value it could not name. `c!!.toInt()`
+  on a `Char?` then reached the conversion with a reference where a machine value was required, and
+  declined as "a value of undetermined type (carried as `i64`) where a `i32` is required". A
+  `lateinit` read has the same shape: it yields its operand, and only the guard differs.
+  Tests: `tests/native_not_null_assert_type_e2e.rs`.
+
 - **`assertEquals` compares booleans structurally, like everything else it compares.** It is
   generic, so `assertEquals(true, true)` has `Boolean` as its first parameter after substitution.
   Reading the parameter to decide how the operands cross handed two raw machine values to an entry

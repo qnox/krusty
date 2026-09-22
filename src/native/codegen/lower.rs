@@ -2210,6 +2210,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         "kotlin/reflect/KProperty"
                     })
                 }),
+            // `x!!` yields `x` or fails, so its type is the OPERAND's with the nullability taken
+            // off — which is what the lowering already does, unboxing a nullable primitive there.
+            // Saying so here is what lets a CONSUMER of `x!!` know what it is holding: without it
+            // the value's type is undetermined, and `c!!.toInt()` on a `Char?` reached `convert`
+            // with a reference where a machine value was required and declined by that name.
+            IrExpr::NotNullAssert { operand, .. } => self.physical_type_of(*operand)?.non_null(),
+            // A `lateinit` read yields its operand too; only the guard differs.
+            IrExpr::LateinitCheck { operand, .. } => self.physical_type_of(*operand)?,
             IrExpr::Checked(IrCheckedOperation::PropertyRead { target, .. }) => {
                 self.file.ir.checked_properties.get(target)?.ty
             }

@@ -1096,6 +1096,8 @@ mod native_lists_e2e;
 mod native_maps_e2e;
 #[path = "native_math_bits_e2e.rs"]
 mod native_math_bits_e2e;
+#[path = "native_not_null_assert_type_e2e.rs"]
+mod native_not_null_assert_type_e2e;
 #[path = "native_preconditions_e2e.rs"]
 mod native_preconditions_e2e;
 #[path = "native_property_reference_e2e.rs"]
