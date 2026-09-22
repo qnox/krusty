@@ -1427,6 +1427,21 @@ fn callable_with_return(c: &LibraryCallable, ret: Ty, default_call: bool) -> Lib
 /// Materialize the default-argument bridge attached to the already-selected declaration. The bridge
 /// is realization data only: semantic parameters, generic signature, visibility, and overload identity
 /// remain those of `base`; no synthetic name is re-entered into resolution.
+/// The Kotlin type a default literal has. `null` has none — see [`SymbolResolver::default_literal_fits`].
+fn default_literal_ty(value: &crate::libraries::DefaultValue) -> Option<Ty> {
+    use crate::libraries::DefaultValue;
+    Some(match value {
+        DefaultValue::Int(_) => Ty::Int,
+        DefaultValue::Long(_) => Ty::Long,
+        DefaultValue::Double(_) => Ty::Double,
+        DefaultValue::Float(_) => Ty::Float,
+        DefaultValue::Bool(_) => Ty::Boolean,
+        DefaultValue::Char(_) => Ty::Char,
+        DefaultValue::Str(_) => Ty::String,
+        DefaultValue::Null | DefaultValue::Object(_) => return None,
+    })
+}
+
 pub(crate) fn selected_default_callable(base: &FunctionInfo) -> Option<LibraryCallable> {
     let Some(realization) = base.callable.default_realization.as_deref() else {
         crate::trace_compiler!(
@@ -4172,10 +4187,21 @@ impl<'a> SymbolResolver<'a> {
                 }
             }
         }
-        let directly_realizable = slots
-            .iter()
-            .enumerate()
-            .all(|(index, slot)| slot.is_some() || o.call_sig.vararg_index == Some(index));
+        let directly_realizable = slots.iter().enumerate().all(|(index, slot)| {
+            slot.is_some()
+                || o.call_sig.vararg_index == Some(index)
+                // A default the provider states as a CONSTANT is passed at the CALL SITE, so the
+                // call is the direct one: nothing needs a `$default` symbol to fill the slot.
+                // `Checker::library_default_literals` records the value and checked FIR
+                // materializes it; here it means only that the slot is not missing.
+                || o.default_values
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .zip(vparams.get(index))
+                    .is_some_and(|(value, parameter)| {
+                        self.default_literal_fits(value, *parameter)
+                    })
+        });
         if directly_realizable {
             let mut args = slots
                 .iter()
@@ -4256,6 +4282,31 @@ impl<'a> SymbolResolver<'a> {
 
     fn arg_fits_or_subtype(&self, param: &Ty, arg: &Ty) -> bool {
         arg_fits_source(self.lib, &self.src, param, arg)
+    }
+
+    /// Whether a provider-stated default LITERAL can fill the parameter it is declared on.
+    ///
+    /// Assignability rather than an exact representation match, because a default is written in
+    /// Kotlin and reaches a parameter the same way any other argument does:
+    /// `joinToString(separator: CharSequence = ", ")` defaults a `String` into a `CharSequence`,
+    /// and `transform: ((T) -> String)? = null` defaults a `null` into a function type. An exact
+    /// check rejected both and took the whole declaration back to being unrealizable.
+    pub(crate) fn default_literal_fits(
+        &self,
+        value: &crate::libraries::DefaultValue,
+        parameter: Ty,
+    ) -> bool {
+        match value {
+            // A `null` has no type of its own. What it needs of the parameter is that the
+            // parameter admits absence at all.
+            crate::libraries::DefaultValue::Null => {
+                matches!(parameter, Ty::Nullable(_) | Ty::PlatformNullable(_))
+            }
+            // Not a constant: it names a declaration, and there is no literal to pass.
+            crate::libraries::DefaultValue::Object(_) => false,
+            _ => default_literal_ty(value)
+                .is_some_and(|literal| self.arg_fits_or_subtype(&parameter, &literal)),
+        }
     }
 
     /// Map supplied source arguments to the base declaration's parameter slots without consulting

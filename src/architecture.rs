@@ -255,6 +255,13 @@ mod tests {
             "trace",
             "trace_compiler",
             "types",
+            // WHAT a value class is — which declarations have an underlying value, and what that
+            // value is — is a question about the LANGUAGE rather than about a target, and every
+            // backend that erases one has to answer it the same way or the two authorities drift
+            // apart. So it is read from one shared place; what stays under `src/jvm` is everything
+            // this target then does with the answer: the mangling, `box-impl`/`unbox-impl`,
+            // descriptors, bridges.
+            "value_classes",
             "wide_stack",
         ];
         for path in rust_files_under("src/jvm") {
