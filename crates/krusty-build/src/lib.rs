@@ -15,13 +15,13 @@
 //!   is written down.
 //! * [`abi`] — an ABI model carrying no method bodies, and its fingerprint. This is the artifact a
 //!   dependent compiles against and the hash every dependent's cache key folds in.
+//! * [`cache`] — the cache key. Every input that can change emitted bytes is in it by default.
 //!
 //! # What is NOT here YET
 //!
-//! The cache key, the artifact store, and the driver that ties them together. Each lands on top of
-//! this one, in that order, because that is the order they depend on each other: a cache key folds
-//! in ABI fingerprints, the store is keyed by cache key, and the driver walks the [`graph`]
-//! through all three.
+//! The artifact store and the driver that ties everything together. Each lands on top of this one,
+//! in that order: the store is keyed by [`cache`] key, and the driver walks the [`graph`] through
+//! all of the above.
 //!
 //! No build providers (Gradle/Maven/BSP/JPS) and no parallel scheduling either. The providers are
 //! ~10,000 lines living in `crates/krusty-lsp/src/project/` and lifting them is its own change;
@@ -40,11 +40,13 @@
 //! cache hit. `tests/emission_determinism_e2e.rs` gates that property.
 
 pub mod abi;
+pub mod cache;
 pub mod digest;
 pub mod graph;
 pub mod model;
 
 pub use abi::{AbiClass, AbiFingerprint, AbiMember, MemberKind};
+pub use cache::{CacheKey, CacheKeyInputs, FileDigest};
 pub use digest::{digest_bytes, Digest, Hasher};
 pub use graph::{GraphError, ModuleGraph};
 pub use model::{Module, ModuleId, ModuleOutput, SourceRoot, SourceRootKind};
