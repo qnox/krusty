@@ -899,6 +899,14 @@ fn materialize_member_property(
         ir.fn_source_order.insert(getter, source_order);
         ir.open_methods.insert(getter);
         ir.classes[class_id as usize].methods.push(getter);
+        // The accessor of a property typed by an enclosing-class type parameter signs `()TT;`, the
+        // same as a member function returning `T`. A declared function gets this from
+        // `attach_callable_generic_facts`, which runs over CALLABLES; an accessor is synthesized
+        // from the property and never reaches it, so the fact is recorded here. A type that
+        // mentions no type parameter formats to the descriptor and the attribute is dropped
+        // downstream, so this does not need to decide genericity itself.
+        ir.member_semantic_sigs
+            .insert(getter, (context_parameters.clone(), property.ty));
         if property.flags.has(DeclarationFlags::MUTABLE) {
             let setter = add_abstract_accessor_function(
                 ir,
@@ -914,6 +922,17 @@ fn materialize_member_property(
             ir.fn_source_order.insert(setter, source_order);
             ir.open_methods.insert(setter);
             ir.classes[class_id as usize].methods.push(setter);
+            ir.member_semantic_sigs.insert(
+                setter,
+                (
+                    context_parameters
+                        .iter()
+                        .copied()
+                        .chain(std::iter::once(property.ty))
+                        .collect(),
+                    Ty::Unit,
+                ),
+            );
         }
     }
     let setter = property.setter.map(|body| {
