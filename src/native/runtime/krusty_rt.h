@@ -462,6 +462,17 @@ kt_boolean kt_floating_range_is_empty(KRef range);
 kt_double kt_floating_range_start(KRef range);
 kt_double kt_floating_range_end(KRef range);
 
+/* ---- Delegates.notNull -------------------------------------------------------------------------
+
+   `var x: T by Delegates.notNull()`: one reference, and reading it before it is written is an
+   error. The NAME the error reports is handed over by the caller, read from the `KProperty`
+   operand the delegate convention passes. */
+extern const KType kt_type_not_null_var;
+
+KRef kt_not_null_var(void);
+KRef kt_not_null_var_get(KRef self, KRef name);
+void kt_not_null_var_set(KRef self, KRef value);
+
 /* ---- comparable ranges ------------------------------------------------------------------------
 
    `"a".."c"`, and every other `a..b` ordered by `Comparable` rather than by a machine comparison.

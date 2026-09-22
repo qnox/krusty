@@ -8119,6 +8119,30 @@ and behavior is checked by RUNNING the emitted program.
   Tests: `tests/native_comparable_ranges_e2e.rs`; corpus: `ranges/contains/inExtensionRange.kt`,
   `::inRangeLiteralComposition.kt`, `::inOptimizableIntRange.kt`, `::inOptimizableLongRange.kt`.
 
+- **`Delegates.notNull()` is one reference and the rule that reading it before writing is an
+  error.** Kotlin's `NotNullVar` has no more content than that: `null` is not a value it can hold,
+  its `T` being non-null by declaration, so the empty slot needs no flag beside it the way a lazy's
+  `computed` does. The construction is a member of the `Delegates` OBJECT, which carries nothing, so
+  it takes the path `Result.Companion.success` already takes — no receiver read, no operand passed.
+
+  `getValue(thisRef, property)` drops `thisRef` as a lazy's does — the delegation already evaluated
+  whatever it names, and this delegate reads none of it. The PROPERTY is read, but not as an object:
+  the error names the property, as Kotlin's does, and the runtime cannot ask a property reference
+  for its name (that is answered by a function of the emitted code's own, at no number the runtime
+  knows). So the name is a string LITERAL the call site takes from the reference's declaration, and
+  a `KProperty` this file did not build has no name to take — that call declines rather than
+  reporting a wrong one.
+
+  Two wrappers are looked through to find the declaration. An implicit COERCION, because the
+  convention's parameter is `KProperty<*>` and the reference is narrower; and a read of a STATIC,
+  because a top-level delegated property's `KProperty` is built once in the file's initializer and
+  the call site reads it from there — so the reference is that static's initializer. One level of
+  static only: a chain of them would be following assignments rather than reading a declaration.
+  Tests: `tests/native_not_null_delegate_e2e.rs` (a member property, a local one read through a
+  capture, a rewritten one, and the `IllegalStateException` a read-before-write raises with Kotlin's
+  own wording); corpus: `delegatedProperty/{delegateWithPrivateSet,protectedVarWithPrivateSet}.kt`
+  and `delegatedProperty/local/kt23117.kt`.
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

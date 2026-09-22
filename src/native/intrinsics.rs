@@ -1561,6 +1561,10 @@ pub(super) fn runtime_companion_member(
     match (kotlin_owner(owner), name, params) {
         ("kotlin/Result$Companion", "success", [_]) => Some("kt_result_success"),
         ("kotlin/Result$Companion", "failure", [_]) => Some("kt_result_failure"),
+        // `Delegates.notNull()`. `Delegates` is an OBJECT of the stdlib, carrying nothing, and the
+        // delegate it answers with starts empty — so this is the same shape: no receiver to read
+        // and no operand to pass.
+        ("kotlin/properties/Delegates", "notNull", []) => Some("kt_not_null_var"),
         _ => None,
     }
 }

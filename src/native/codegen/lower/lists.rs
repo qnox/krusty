@@ -59,6 +59,17 @@ fn lazy_symbol(name: &str, arity: usize) -> Option<(&'static str, Vec<Ty>, Ty)> 
     })
 }
 
+/// Whether a type is the delegate `Delegates.notNull()` answers with.
+///
+/// `ReadWriteProperty<Any?, T>` is what the declaration returns and what the delegate field is
+/// typed by. It is an INTERFACE a program may implement, so a file that does is declined before
+/// this is reached, by the guard every runtime-answered dependency member sits behind.
+fn is_not_null_var(ty: Ty) -> bool {
+    ty.non_null()
+        .obj_internal()
+        .is_some_and(|internal| internal.matches("kotlin/properties/ReadWriteProperty"))
+}
+
 /// Whether a type is the runtime's `Pair`.
 fn is_pair(ty: Ty) -> bool {
     ty.non_null()
@@ -414,6 +425,132 @@ impl BodyLowering<'_, '_, '_> {
         self.runtime_call("kt_lazy_of", &[any()], any(), &[function])
     }
 
+    /// `getValue(thisRef, property)` / `setValue(thisRef, property, value)` on that delegate.
+    ///
+    /// `thisRef` is nothing this delegate reads, and the delegation already evaluated whatever it
+    /// names, so it is dropped as a lazy's is. The PROPERTY is read, but not as an object: the
+    /// error a read-before-write raises names the property, and that name is a literal here, taken
+    /// from the reference operand's own declaration. A `KProperty` this file did not build has no
+    /// name to take, and the call declines rather than reporting a wrong one.
+    fn not_null_var_member(
+        &mut self,
+        name: &str,
+        receiver: u32,
+        args: &[u32],
+        ret: Ty,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        match (name, args) {
+            ("getValue", [_, property]) => {
+                let Some(text) = self.property_reference_name(*property) else {
+                    return Some(Err(
+                        "a `notNull` delegate read through a `KProperty` this file did not build"
+                            .to_string(),
+                    ));
+                };
+                Some(self.not_null_var_read(receiver, &text, ret))
+            }
+            ("setValue", [_, _, value]) => Some(self.not_null_var_write(receiver, *value)),
+            _ => None,
+        }
+    }
+
+    /// The name a `KProperty` operand of the delegate convention carries, or `None` when the
+    /// operand is not a property reference this file built.
+    ///
+    /// An IMPLICIT COERCION is looked through: the convention's parameter is `KProperty<*>` and the
+    /// reference is narrower, so common lowering wraps it — and the wrapper changes nothing about
+    /// which declaration the reference names. So is a read of a STATIC: a top-level delegated
+    /// property's `KProperty` is built once in the file's initializer and the call site reads it
+    /// from there, so the reference is the static's INITIALIZER rather than the operand itself.
+    fn property_reference_name(&self, property: u32) -> Option<String> {
+        let property = self.through_coercions(property);
+        if let IrExpr::GetStatic(index) = self.file.ir.expr(property) {
+            let init = self.file.ir.statics.get(*index as usize)?.init;
+            // One level only. A static's initializer is the reference itself where this applies,
+            // and following a chain of statics would be following assignments rather than reading
+            // a declaration.
+            return self.named_property_reference(self.through_coercions(init));
+        }
+        self.named_property_reference(property)
+    }
+
+    /// The name of a property-reference node, or `None` for anything else.
+    fn named_property_reference(&self, property: u32) -> Option<String> {
+        match self.file.ir.expr(property) {
+            IrExpr::LocalPropertyReference { name, .. } => Some(name.to_string()),
+            IrExpr::Checked(crate::ir::IrCheckedOperation::PropertyReference {
+                target, ..
+            }) => {
+                let target = match target {
+                    crate::fir::FirPropertyReferenceTarget::Module(property)
+                    | crate::fir::FirPropertyReferenceTarget::SpecializedModule {
+                        property, ..
+                    } => property,
+                    _ => return None,
+                };
+                Some(self.file.ir.checked_properties.get(target)?.name.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// An expression with every implicit coercion around it stripped.
+    fn through_coercions(&self, mut id: u32) -> u32 {
+        while let IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg,
+            ..
+        } = self.file.ir.expr(id)
+        {
+            id = *arg;
+        }
+        id
+    }
+
+    fn not_null_var_read(
+        &mut self,
+        receiver: u32,
+        property: &str,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let object = self.reference(receiver)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let name = self.string_literal(property.as_bytes())?;
+        let Some(produced) = self.runtime_call(
+            "kt_not_null_var_get",
+            &[any(), any()],
+            any(),
+            &[object, name],
+        )?
+        else {
+            return Ok(None);
+        };
+        self.convert(produced, Some(any()), ret)
+    }
+
+    fn not_null_var_write(
+        &mut self,
+        receiver: u32,
+        value: u32,
+    ) -> Result<Option<Value>, Unsupported> {
+        let object = self.reference(receiver)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        let written = self.reference(value)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        self.runtime_call(
+            "kt_not_null_var_set",
+            &[any(), any()],
+            Ty::Unit,
+            &[object, written],
+        )
+    }
+
     /// `l.value` — a checked read of a dependency property the runtime answers.
     pub(super) fn lazy_getter(
         &self,
@@ -556,6 +693,9 @@ impl BodyLowering<'_, '_, '_> {
             // runtime takes the receiver alone, so they are not evaluated here either — the
             // delegation already evaluated whatever they name.
             return Some(self.list_call(symbol, &carried, answer, receiver, &[], ret));
+        }
+        if is_not_null_var(ty) {
+            return self.not_null_var_member(name, receiver, args, ret);
         }
         if is_pair(ty) {
             let (symbol, carried, answer) = pair_symbol(name, args.len())?;

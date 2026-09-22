@@ -1415,6 +1415,58 @@ static KRef kt_lazy_to_string(KRef self) {
     return kt_to_string(lazy->value);
 }
 
+/* ---- Delegates.notNull ------------------------------------------------------------------------
+
+   `var x: T by Delegates.notNull()`. One reference and the rule that reading it before it is
+   written is an error — Kotlin's `NotNullVar`, whose whole content is that check. `null` is not a
+   value it can hold (its `T` is non-null by declaration), so the empty slot needs no flag beside
+   it the way a lazy's `computed` does.
+
+   The message names the PROPERTY, as Kotlin's does. The name is a string the generator hands over,
+   read at the call site from the `KProperty` operand the delegate convention passes: the runtime
+   cannot ask the object for it, since a property reference answers `name` from a table of the
+   emitted code's own. */
+static void kt_raise_uninitialized_property(KRef name);
+
+typedef struct KNotNullVar {
+    KObjectHeader header;
+    KRef value;
+} KNotNullVar;
+
+static const uint32_t kt_not_null_var_offsets[] = {offsetof(KNotNullVar, value)};
+
+/* Identity, as Kotlin leaves them: `NotNullVar` is no data class, and `toString` is `Any`'s. */
+static const kt_fn kt_not_null_var_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
+                                           (kt_fn)kt_any_to_string};
+
+const KType kt_type_not_null_var = {"kotlin.properties.NotNullVar",
+                                sizeof("kotlin.properties.NotNullVar") - 1,
+                                sizeof(KNotNullVar),
+                                1,
+                                0,
+                                kt_not_null_var_offsets,
+                                &kt_type_any,
+                                kt_not_null_var_vtable,
+                                3,
+                                0};
+
+KRef kt_not_null_var(void) {
+    KNotNullVar *var = (KNotNullVar *)kt_gc_allocate(&kt_type_not_null_var, sizeof(KNotNullVar));
+    var->value = NULL;
+    return (KRef)var;
+}
+
+KRef kt_not_null_var_get(KRef self, KRef name) {
+    KRef value = ((const KNotNullVar *)self)->value;
+    if (value == NULL) {
+        kt_raise_uninitialized_property(name);
+        return NULL;
+    }
+    return value;
+}
+
+void kt_not_null_var_set(KRef self, KRef value) { ((KNotNullVar *)self)->value = value; }
+
 /* ---- pairs --------------------------------------------------------------------------------- */
 
 /* `a to b`. Two references and nothing else — Kotlin's `Pair` is a data class over two values, and
@@ -4313,6 +4365,14 @@ void kt_require(kt_boolean value) {
    stdlib body. Kotlin's own wording. */
 void kt_throw_index_overflow(void) {
     KT_THROW(kt_type_arithmetic_exception, KT_MESSAGE("Index overflow has happened."));
+}
+
+/* `Property x should be initialized before get.` — Kotlin's own text for a `notNull` delegate read
+   before it was written. */
+static void kt_raise_uninitialized_property(KRef name) {
+    KRef message = kt_string_plus(KT_MESSAGE("Property "), kt_to_string(name));
+    message = kt_string_plus(message, KT_MESSAGE(" should be initialized before get."));
+    KT_THROW(kt_type_illegal_state_exception, message);
 }
 
 void kt_check(kt_boolean value) {
