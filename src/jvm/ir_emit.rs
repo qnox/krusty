@@ -975,24 +975,6 @@ fn data_copy_fn_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
     (COPY_FN_FLAGS & !crate::metadata::property_flags::VISIBILITY_MASK) | (visibility << 1)
 }
 
-/// Whether a type is an ARRAY whose element is star-projected, so its JVM descriptor cannot be
-/// derived from the metadata record.
-///
-/// An array's descriptor is built from its element's ERASURE, and a star projection records no
-/// bound to erase — `Array<List<*>>` is `[Ljava/util/List;` but nothing in the proto says so. A bare
-/// `List<*>` erases to its own classifier and stays derivable, so only the array form needs the
-/// explicit `JvmMethodSignature` (measured on kotlinc 2.4.10).
-pub(super) fn array_of_star_projection(ty: crate::types::Ty) -> bool {
-    ty.array_elem().is_some_and(|element| {
-        matches!(element.non_null(), crate::types::Ty::StarProjection(_))
-            || element
-                .non_null()
-                .type_args()
-                .iter()
-                .any(|argument| matches!(argument, crate::types::Ty::StarProjection(_)))
-    })
-}
-
 /// Compute a class's `@kotlin.Metadata` from its IR — WIRING [`crate::metadata::class_builder::build_class`]
 /// into emission. Covers a class with a primary constructor of `val`/`var` properties plus real declared
 /// members (emitted with derived [`function_flags`]), and the data/value-class synthesized sets. Returns
@@ -1792,11 +1774,14 @@ fn build_class_metadata(
                     // The physical descriptor rides along whenever a reader could not derive it from
                     // the proto types: a VC/suspend-rewritten member (`declared`), a signature
                     // mentioning a TYPE PARAMETER (`vararg parts: T` erases to `[Ljava/lang/Object;`
-                    // — nothing in the record names that), or a vararg (kotlinc records it there
-                    // too). Derivable signatures omit it, kotlinc's usual shape. A value-class
-                    // rewrite that only MANGLED the name still has a derivable descriptor when no
-                    // erasure happened (`f(): V?` stays `()LI$V;` — nullable value classes box), so
-                    // kotlinc records just the name there; an erased shape (`h(): V` → `()I`) is not
+                    // — nothing in the record names that), a vararg (kotlinc records it there too),
+                    // or a `kotlin/Array` anywhere in the signature, which a name-keyed table cannot
+                    // map because the descriptor depends on the type ARGUMENT. That last one is the
+                    // same rule the facade path applies, and the same predicate states it.
+                    // Derivable signatures omit it, kotlinc's usual shape. A value-class rewrite
+                    // that only MANGLED the name still has a derivable descriptor when no erasure
+                    // happened (`f(): V?` stays `()LI$V;` — nullable value classes box), so kotlinc
+                    // records just the name there; an erased shape (`h(): V` → `()I`) is not
                     // derivable and keeps the descriptor.
                     jvm_sig: ((declared.is_some()
                         && (is_suspend
@@ -1806,10 +1791,10 @@ fn build_class_metadata(
                             })))
                         || ir.fn_vararg_index.contains_key(&fid)
                         || matches!(metadata_ret, crate::types::Ty::TyParam(..))
-                        || array_of_star_projection(metadata_ret)
+                        || crate::metadata::descriptor_needs_recording(metadata_ret)
                         || metadata_params.iter().any(|parameter| {
                             matches!(parameter, crate::types::Ty::TyParam(..))
-                                || array_of_star_projection(*parameter)
+                                || crate::metadata::descriptor_needs_recording(*parameter)
                         }))
                     .then(|| crate::jvm::names::method_descriptor(&f.params, f.ret)),
                     jvm_sig_name: (name != f.name).then(|| f.name.clone()),
