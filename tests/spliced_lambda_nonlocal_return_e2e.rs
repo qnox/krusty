@@ -183,7 +183,8 @@ fn a_non_local_return_crossing_finally_keeps_the_exact_fail_closed_diagnostic() 
     assert_eq!(
         outcome,
         common::BackendOutcome::Rejected(vec![
-            "krusty: JVM backend inline error: call arity mismatch".to_string()
+            "krusty: this suspend-function shape is not yet supported by the IR backend"
+                .to_string()
         ])
     );
 }

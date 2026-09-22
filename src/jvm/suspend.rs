@@ -400,8 +400,13 @@ pub(crate) fn lower_suspend(
         let spliced_suspensions = match (spliced_suspensions.is_empty(), body) {
             (false, Some(b)) => {
                 hoist_spliced_inline_bodies(ir, b, &suspend_set, &orig_rets, &ret_ty);
-                let declined = cps::suspends_in_a_value_try(ir, b, &suspend_set)
-                    || cps::spliced_return_crosses_finally(ir, b);
+                // Do not let an explicitly unsupported control transfer fall through to emission
+                // and masquerade as an unrelated continuation-arity error. This backend pass owns
+                // the limitation and declines the file at the exact boundary that detects it.
+                if cps::spliced_return_crosses_finally(ir, b) {
+                    return false;
+                }
+                let declined = cps::suspends_in_a_value_try(ir, b, &suspend_set);
                 match declined {
                     true => Vec::new(),
                     false => cps::frame_suspensions(ir, b, &suspend_set),
