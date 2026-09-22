@@ -19,8 +19,10 @@
 //! prebuilt runtime that target's link draws on, and the LINKER that draws on it. The code
 //! generator whose objects it links follows.
 
+pub mod gc;
 mod linker;
 mod prebuilt;
+pub mod runtime;
 mod target;
 
 pub use linker::{can_link, link_program, ProgramLinkError};
