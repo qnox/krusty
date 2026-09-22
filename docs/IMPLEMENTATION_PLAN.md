@@ -2358,46 +2358,80 @@ broad `box()` constructs (when/try/lambdas/strings) to climb from 37 back toward
 
 ## Native: fixed slot numbers for members of runtime-known types  🚧
 
-Three groups of native-lane declines share ONE missing mechanism, and none of them can be closed
-without it. Measured on the klib lane at `fbc32b1c` (klib 4357 passed, failed 0):
+A member declared by a type this file does NOT declare has no slot number, so a call THROUGH that
+type cannot dispatch. Several decline groups share that one gap. Measured on the klib lane at
+`5718d61b` (klib 4650 passed, failed 0):
 
 | group | cases | decline |
 |---|---|---|
-| a class extending `kotlin.Number` | 7 | `a superclass declared outside this file` |
-| `x.compareTo(y)` where `x: Comparable<T>` | 6 | `the member kotlin.Comparable.compareTo` |
-| a functional interface declared outside this file (`kotlin/Comparator`) | 5 | as named |
+| `x.hasNext()` where `x: Iterator<T>` and the file declares one | 7 | `… of a type this file implements itself` |
+| `x.iterator()` where `x: Iterable<T>` and the file declares one | 6 | as above |
+| a functional interface declared outside this file (`kotlin/Comparator`) | 6 | as named |
+| a class extending `kotlin.Number` | 6 | `a superclass declared outside this file` |
+| `x.compareTo(y)` where the file declares its own `Comparable` | 4 | `… of a type this file implements itself` |
+| `m[k]` where the file declares its own `Map` | 4 + 3 | as above |
+| a `CharSequence` / `Set` / `Sequence` the file declares | ~5 | as above |
 
-**The mechanism.** A member declared by a type this file does NOT declare has no slot number. The
-interface numbering pass numbers only interfaces the file declares, and a class's vtable is its
-superclass's with overrides replaced — so when the superclass is the runtime's, there is nothing to
-replace and an override takes a fresh slot whose number no caller can know. A call through the
-declaring type therefore cannot dispatch, and today each of these is realized instead by an
-intrinsic that reads a shape it recognizes: `n.toDouble()` reads a boxed primitive's payload,
-`compareTo` compares by the receiver's known type.
+**The mechanism.** The interface numbering pass numbers only interfaces the FILE declares, and a
+class's vtable is its superclass's with overrides replaced — so when the declaring type is the
+runtime's, there is nothing to replace and an override takes a fresh slot whose number no caller can
+know. Each of these is realized today by an intrinsic that reads a shape it recognizes, and declines
+when the file declares a type of its own that could stand behind the same static type.
 
 **Why it is not a decline that can simply be lifted.** Relaxing the override check alone was tried
-and reverted: it took 5 of the 6 `primitiveTypes/numberToChar` cases and turned
-`primitiveTypes/virtualCallToCustomNumber.kt` from a decline into a runtime ABORT, because
-`numberToDouble(FortyTwo)` reaches the boxed-primitive intrinsic with an object that is not one.
-A decline becoming a wrong answer is the outcome the two-sided gate exists to catch, and it caught
-this one as `failed 1`.
+and reverted: it turned `primitiveTypes/virtualCallToCustomNumber.kt` from a decline into a runtime
+ABORT, because `numberToDouble(FortyTwo)` reaches the boxed-primitive intrinsic with an object that
+is not one. A decline becoming a wrong answer is what the two-sided gate exists to catch, and it
+caught that one as `failed 1`.
 
-**The design.** Give each runtime-known type's members fixed slot numbers immediately after
-`kotlin.Any`'s three, seeded as `Slot::Abstract` in a subclass's table and replaced by that
-subclass's overrides. The intrinsic then keeps its existing switch for the shapes it recognizes —
-a boxed primitive, a string — and dispatches through the receiver's vtable for anything else.
-`kotlin.Number` needs seven (`toByte`, `toShort`, `toInt`, `toLong`, `toFloat`, `toDouble`,
-`toChar`); `kotlin.Comparable` needs one.
+**A narrower design than the one first written here.** The original plan was a FIXED vtable prefix
+after `kotlin.Any`'s three, which costs a `KType` change so that a boxed primitive's descriptor
+carries those slots too. Reading `place_interface_slots` suggests that is more than is needed:
 
-What this costs is the part to weigh before starting: a boxed primitive's descriptor must carry
-those slots too, or dispatching on one reads past its table. `ExternalBase` in
-`src/native/classes.rs` is where the layout side goes, beside the `kotlin.Throwable` entry that
-already works this way, and `src/native/intrinsics.rs` owns which types are known.
+* The interface numbering ALREADY assigns program-wide numbers (`base + relative`), and already pads
+  every class's table to a common `base`. What it lacks is an entry for a type the file does not
+  declare.
+* So add a pseudo-interface entry per runtime-known type the file implements, numbered exactly as an
+  interface member is, and have each implementing class fill it — by NAME, since the key differs per
+  class (`compareTo(Box)` against `compareTo(Int)`), the way `accessor_key_by_name` already works.
+* The runtime cannot know a per-program number, so the generator EXPORTS it: a `uint32_t` data symbol
+  per runtime-known member (`kt_slot_iterable_iterator`, …), always defined, zero when no class in
+  the program implements that type. `kt_iterable_iterator` and its relatives then keep their switch
+  over the shapes the runtime makes and dispatch through the receiver's vtable otherwise.
+
+That avoids both the `KType` change and a wasted fixed prefix in every class's table. The cost to
+weigh before starting is that the generator must define every such symbol in every program, and that
+`vtable_length` must be checked before the call so a short table is never indexed past.
+
+**Simpler still, and probably the one to do first.** No program-wide number is needed at all for the
+"of a type this file implements itself" half, which is most of the table above. At such a call site
+the generator knows every class IN THIS FILE that implements the dependency type, so it can emit the
+dispatch itself:
+
+```
+if (kt_is_instance(x, C)) <virtual call on C's own slot for the member>
+else                      <the runtime entry point, as today>
+```
+
+`C`'s slot is C's own and known within the file, and a subclass `D : C` is handled by both halves
+already — `kt_is_instance` walks the super chain, and D's vtable replaces C's slot, so the virtual
+call reaches D's override. The chain is as long as the file has implementors, which is one in every
+corpus case here. This needs no slot numbering, no exported symbol and no `KType` change; it is
+entirely inside the generator, at the site where `implements_dependency` declines today.
+
+The exported-number design above is still what a call through a runtime-known type needs when the
+implementor is in ANOTHER file — but no corpus case in the table needs that, because the decline is
+raised precisely when the implementor is in this one.
+
+**Start narrow.** `Comparable.compareTo` is one slot and 4 cases, and its half that needs NO slots
+already landed (`8e9c8d88`): a file that declares no `Comparable` is answered from the descriptor.
+Doing the same split for `Iterable`/`Iterator` first would validate the mechanism on 13 cases before
+`Number`'s seven slots are attempted.
 
 **What already works this way.** `kotlin.Enum` and the `kotlin.Throwable` family: both are bases no
 file declares, whose layout, descriptor and `kotlin.Any` slots the runtime carries, and a source
-class extends either of them today. Neither needed slot numbers because neither declares a member
-a subclass overrides and a caller dispatches through — which is exactly the gap this phase closes.
+class extends either today. Neither needed slot numbers because neither declares a member a subclass
+overrides and a caller dispatches through — which is exactly the gap this phase closes.
 
 ## Bare-name stdlib hardcode audit (no-hardcode policy)  🚧
 
