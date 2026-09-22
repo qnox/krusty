@@ -830,8 +830,20 @@ extern const KType kt_type_uninitialized_property_access_exception;
 /* Allocate one. `message` may be NULL, which is Kotlin's `null` message. */
 KRef kt_throwable_new(const KType *type, KRef message);
 
+/* `Throwable(message, cause)` and `Throwable(cause)`. The second fills the message from the cause,
+   as Kotlin does, so the two one-argument constructors are not one function with a flag. */
+KRef kt_throwable_new_with_cause(const KType *type, KRef message, KRef cause);
+KRef kt_throwable_new_from_cause(const KType *type, KRef cause);
+
+/* `cause?.toString()`, for a subclass of `Throwable` the generator lays out itself: it writes the
+   two fields in place and needs the same rendering `kt_throwable_new_from_cause` performs. */
+KRef kt_throwable_message_of_cause(KRef cause);
+
 /* Its `message`, or NULL. */
 KRef kt_throwable_message(KRef self);
+
+/* `Throwable.cause`, or NULL where the constructor was given none. */
+KRef kt_throwable_cause(KRef self);
 
 /* ---- kotlin.Result ------------------------------------------------------------------------- */
 

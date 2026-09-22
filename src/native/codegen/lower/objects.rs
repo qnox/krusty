@@ -1048,6 +1048,9 @@ impl<'a> FileLowering<'a> {
         // delegation passes none: the parent's prefix is the parent's own outer instance, which
         // this constructor does not have.
         let mut prefix_operands = 0usize;
+        // Whether the `super(…)` this constructor writes reaches a `Throwable` the RUNTIME owns.
+        // There is no constructor to call then, so the two fields are written here instead.
+        let mut throwable_base = false;
         // Whether this constructor writes its own prefix into the fields those parameters back.
         let mut stores_its_prefix = false;
         let (target, target_params): (Option<FuncId>, Vec<Ty>) = match &secondary.delegate {
@@ -1153,6 +1156,15 @@ impl<'a> FileLowering<'a> {
                         && target_params.is_empty() =>
                     {
                         (None, Vec::new())
+                    }
+                    // A `Throwable` base. It has no constructor here to call — the class is the
+                    // runtime's — so its storage is written in place, exactly as the PRIMARY
+                    // constructor path writes it for a class whose only supertype is one of these.
+                    // The operands are read from the delegation's own arguments, so all four of
+                    // Kotlin's forms reach the same two fields.
+                    None if model::external_base(*owner).is_some() => {
+                        throwable_base = true;
+                        (None, target_params.clone())
                     }
                     None => {
                         return Err(format!(
@@ -1270,6 +1282,53 @@ impl<'a> FileLowering<'a> {
             if let Some(target) = target {
                 let func_ref = body.func_ref(target);
                 body.emit_call(func_ref, &operands)?;
+            } else if throwable_base {
+                // The base's storage, written in the place and order its constructor would have
+                // run. The operands are the delegation's own arguments, read the same way a direct
+                // `Exception(…)` reads them, so all four of Kotlin's forms land here.
+                let Some(written) =
+                    body.throwable_operands(&name, &arguments, Some(&target_params))?
+                else {
+                    return Ok(());
+                };
+                if body.terminated {
+                    return Ok(());
+                }
+                let (message, cause) = match written {
+                    ThrowableOperands::Message(message) => {
+                        (message, body.builder.ins().iconst(types::I64, 0))
+                    }
+                    ThrowableOperands::MessageAndCause { message, cause } => (message, cause),
+                    ThrowableOperands::Cause(cause) => {
+                        let rendered = body.runtime_call(
+                            "kt_throwable_message_of_cause",
+                            &[any()],
+                            any(),
+                            &[cause],
+                        )?;
+                        if body.terminated {
+                            return Ok(());
+                        }
+                        let Some(rendered) = rendered else {
+                            return Ok(());
+                        };
+                        (rendered, cause)
+                    }
+                };
+                // BOTH are written, the `null` cause included: an unwritten field is whatever the
+                // allocation left there, and the collector traces this one.
+                body.builder.ins().store(
+                    trusted(),
+                    message,
+                    this,
+                    model::EXTERNAL_BASE_FIELD_OFFSET as i32,
+                );
+                body.builder.ins().store(
+                    trusted(),
+                    cause,
+                    this,
+                    model::THROWABLE_CAUSE_OFFSET as i32,
+                );
             }
             // The prefix parameters that BACK a field, written after the base's constructor has
             // run — the same place the primary writes its own parameter-backed fields. A field
@@ -1923,11 +1982,11 @@ impl<'a> FileLowering<'a> {
                 body.emit_call(func_ref, &arguments)?;
             }
             // The runtime-owned base has no constructor to call; its storage is written here
-            // instead, in the same place and order the call would have run. The operand is
-            // computed exactly as a direct `Exception(…)` computes it, so `Exception()` leaves
-            // Kotlin's `null` message and a `cause` this storage cannot hold declines.
+            // instead, in the same place and order the call would have run. The operands are
+            // computed exactly as a direct `Exception(…)` computes them, so `Exception()` leaves
+            // Kotlin's `null` message and a `null` cause.
             if parent.is_none() && model::external_base(declaration.superclass).is_some() {
-                let Some(value) = body.throwable_message_operand(
+                let Some(operands) = body.throwable_operands(
                     &declaration.fq_name(),
                     &declaration.super_args,
                     Some(&declaration.super_ctor_params),
@@ -1938,11 +1997,44 @@ impl<'a> FileLowering<'a> {
                 if body.terminated {
                     return Ok(());
                 }
+                // `Throwable(cause)` renders its message from the cause, and that rendering is the
+                // runtime's. Asking the runtime for a throwable only to copy two fields out of it
+                // would allocate one to throw away, so the entry point answering the pair is asked
+                // for the MESSAGE and the cause is stored beside it.
+                let (message, cause) = match operands {
+                    ThrowableOperands::Message(message) => {
+                        (message, body.builder.ins().iconst(types::I64, 0))
+                    }
+                    ThrowableOperands::MessageAndCause { message, cause } => (message, cause),
+                    ThrowableOperands::Cause(cause) => {
+                        let rendered = body.runtime_call(
+                            "kt_throwable_message_of_cause",
+                            &[any()],
+                            any(),
+                            &[cause],
+                        )?;
+                        if body.terminated {
+                            return Ok(());
+                        }
+                        let Some(rendered) = rendered else {
+                            return Ok(());
+                        };
+                        (rendered, cause)
+                    }
+                };
+                // BOTH are written, the `null` cause included: an unwritten field is whatever the
+                // allocation left there, and the collector traces this one.
                 body.builder.ins().store(
                     trusted(),
-                    value,
+                    message,
                     this,
                     model::EXTERNAL_BASE_FIELD_OFFSET as i32,
+                );
+                body.builder.ins().store(
+                    trusted(),
+                    cause,
+                    this,
+                    model::THROWABLE_CAUSE_OFFSET as i32,
                 );
             }
             if !declaration.explicit_param_stores {
@@ -2466,12 +2558,70 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(Some(object))
     }
 
-    /// The message operand a `Throwable` constructor was given, as the runtime's single `message`
-    /// field takes it: a `null` reference where the constructor took none.
+    /// The operands a `Throwable` constructor was given, as its two fields take them.
     ///
-    /// Only the no-argument and one-message forms are realized. A `cause: Throwable?` is the other
-    /// one-argument form and this `Throwable` has no `cause` field, so accepting it would silently
-    /// drop what the program passed; it declines instead. `Ok(None)` means the lowering left.
+    /// Kotlin declares four: `()`, `(message)`, `(cause)` and `(message, cause)`. The two
+    /// one-argument forms are told apart by the parameter TYPE — a `Throwable` is a cause and
+    /// anything else is a message — and they differ in more than which field they fill, because
+    /// `Throwable(cause)` takes its MESSAGE from the cause as well. That rendering belongs to the
+    /// runtime, which is where `toString` lives, so this answers which form was written and lets
+    /// the caller pick the entry point. `Ok(None)` means the lowering left.
+    fn throwable_operands(
+        &mut self,
+        name: &str,
+        args: &[u32],
+        selected: Option<&[Ty]>,
+    ) -> Result<Option<ThrowableOperands>, Unsupported> {
+        let cause_operand = |ty: &Ty| {
+            ty.non_null()
+                .obj_internal()
+                .and_then(super::super::super::intrinsics::throwable_descriptor)
+                .is_some()
+        };
+        match (args, selected) {
+            // `Throwable(cause)`: the runtime fills the message from it.
+            ([argument], Some([only])) if cause_operand(only) => {
+                let Some(cause) =
+                    self.coerce(*argument, Ty::nullable(Ty::obj("kotlin/Throwable")))?
+                else {
+                    return Err(format!("a `Unit` cause for `{name}`"));
+                };
+                if self.terminated {
+                    return Ok(None);
+                }
+                Ok(Some(ThrowableOperands::Cause(cause)))
+            }
+            // `Throwable(message, cause)`.
+            ([message, cause], Some([first, second])) if cause_operand(second) => {
+                let Some(message) =
+                    self.throwable_message_operand(name, &[*message], Some(&[*first]))?
+                else {
+                    return Ok(None);
+                };
+                let Some(cause) = self.coerce(*cause, Ty::nullable(Ty::obj("kotlin/Throwable")))?
+                else {
+                    return Err(format!("a `Unit` cause for `{name}`"));
+                };
+                if self.terminated {
+                    return Ok(None);
+                }
+                Ok(Some(ThrowableOperands::MessageAndCause { message, cause }))
+            }
+            _ => {
+                let Some(message) = self.throwable_message_operand(name, args, selected)? else {
+                    return Ok(None);
+                };
+                Ok(Some(ThrowableOperands::Message(message)))
+            }
+        }
+    }
+
+    /// The message operand a `Throwable` constructor was given, as its `message` field takes it: a
+    /// `null` reference where the constructor took none.
+    ///
+    /// Only the no-argument and one-message forms reach here; the forms carrying a cause are told
+    /// apart by [`Self::throwable_operands`] before this is asked. `Ok(None)` means the lowering
+    /// left.
     fn throwable_message_operand(
         &mut self,
         name: &str,
@@ -2518,11 +2668,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
     }
 
-    /// `Throwable(message)` and its subclasses, as the runtime declares them.
-    ///
-    /// Only the no-argument and `message: String?` constructors are realized. A `cause` is the
-    /// other one-argument form and this `Throwable` has no `cause` field, so accepting it would
-    /// silently drop what the program passed; it declines instead.
+    /// `Throwable(…)` and its subclasses, as the runtime declares them — all four of Kotlin's
+    /// constructors, each reaching the runtime entry point that fills what it was given.
     fn runtime_throwable(
         &mut self,
         descriptor: &str,
@@ -2530,7 +2677,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         args: &[u32],
         selected: Option<&[Ty]>,
     ) -> Result<Option<Value>, Unsupported> {
-        let Some(message) = self.throwable_message_operand(name, args, selected)? else {
+        let Some(operands) = self.throwable_operands(name, args, selected)? else {
             return Ok(None);
         };
         if self.terminated {
@@ -2538,15 +2685,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
         let descriptor = self.file.import_data(descriptor)?;
         let descriptor = self.data_address(descriptor);
-        let thrown = self.runtime_call(
-            "kt_throwable_new",
-            &[any(), any()],
-            any(),
-            &[descriptor, message],
-        )?;
-        Ok(Some(
-            thrown.expect("`kt_throwable_new` returns the exception"),
-        ))
+        let (symbol, mut arguments) = match operands {
+            ThrowableOperands::Message(message) => ("kt_throwable_new", vec![message]),
+            ThrowableOperands::Cause(cause) => ("kt_throwable_new_from_cause", vec![cause]),
+            ThrowableOperands::MessageAndCause { message, cause } => {
+                ("kt_throwable_new_with_cause", vec![message, cause])
+            }
+        };
+        arguments.insert(0, descriptor);
+        let signature = vec![any(); arguments.len()];
+        let thrown = self.runtime_call(symbol, &signature, any(), &arguments)?;
+        Ok(Some(thrown.expect("a throwable constructor answers one")))
     }
 
     /// Is this accessor `Throwable.message`?
@@ -2560,27 +2709,28 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         super::super::super::intrinsics::result_predicate(getter.callable.owner, &property.name)
     }
 
-    pub(super) fn is_throwable_message(&self, target: crate::fir::ExternalPropertyId) -> bool {
-        let Some(property) = self.file.provider.external_property(target) else {
-            return false;
-        };
-        let Some(getter) = self.file.provider.external_callable(property.getter) else {
-            return false;
-        };
-        super::super::super::intrinsics::is_throwable_message(getter.callable.owner, &property.name)
+    /// The runtime reader for `e.message` or `e.cause`, and `None` for any other accessor.
+    pub(super) fn throwable_field(
+        &self,
+        target: crate::fir::ExternalPropertyId,
+    ) -> Option<&'static str> {
+        let property = self.file.provider.external_property(target)?;
+        let getter = self.file.provider.external_callable(property.getter)?;
+        super::super::super::intrinsics::throwable_field(getter.callable.owner, &property.name)
     }
 
-    /// `e.message` — the one field a `Throwable` carries, read by the runtime rather than by an
-    /// offset here, because the class is the runtime's and so is its layout.
-    pub(super) fn throwable_message(
+    /// `e.message` and `e.cause` — the two fields a `Throwable` carries, read by the runtime
+    /// rather than by an offset here, because the class is the runtime's and so is its layout.
+    pub(super) fn throwable_field_read(
         &mut self,
+        symbol: &str,
         receiver: u32,
     ) -> Result<Option<Value>, Unsupported> {
         let value = self.reference(receiver)?;
         if self.terminated {
             return Ok(None);
         }
-        self.runtime_call("kt_throwable_message", &[any()], any(), &[value])
+        self.runtime_call(symbol, &[any()], any(), &[value])
     }
 
     pub(super) fn method_call(
@@ -3453,6 +3603,20 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 pub(super) const TOP_LEVEL: &str = "\u{0}top-level";
 
 /// A type's spelling for a diagnostic: the class name when it has one, else the debug form.
+/// Which of Kotlin's four `Throwable` constructors a site wrote, with the operands it gave.
+///
+/// The two one-argument forms are told apart by the parameter TYPE — a `Throwable` is a cause and
+/// anything else is a message — and they are not one case with an empty field, because
+/// `Throwable(cause)` fills the MESSAGE from the cause as well.
+enum ThrowableOperands {
+    /// `Throwable()` and `Throwable(message)`; the no-argument form carries a `null`.
+    Message(Value),
+    /// `Throwable(cause)`, whose message the runtime renders from the cause.
+    Cause(Value),
+    /// `Throwable(message, cause)`.
+    MessageAndCause { message: Value, cause: Value },
+}
+
 pub(super) fn type_name_of(ty: Ty) -> String {
     match ty.non_null().obj_internal() {
         Some(internal) => internal.render().replace('/', "."),

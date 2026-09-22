@@ -2060,6 +2060,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Kotlin's largest function arity, so the set is complete. Test:
   `tests/native_function_type_checks_e2e.rs`.
 
+- **A `Throwable` carries a CAUSE, and the two one-argument constructors are told apart by type.**
+  Kotlin declares four: `()`, `(message)`, `(cause)` and `(message, cause)`. A single argument whose
+  type is a `Throwable` is the cause and anything else is the message, and the two forms differ in
+  more than which field they fill — `Throwable(cause)` takes its MESSAGE from the cause as well, as
+  `cause?.toString()` — so neither can be rewritten as the other. krusty's native runtime holds both
+  fields, and the collector traces each. A class of the PROGRAM extending `Throwable` is laid out on
+  top of that storage, so its constructors write the two fields in place where the base's
+  constructor would have run — the primary and the secondary paths alike, all four forms reaching
+  the same pair. A `null` cause is written rather than left alone: an unwritten field is whatever
+  the allocation left there, and this one is traced. `e.cause` reads it through the runtime, as
+  `e.message` already did, because the class is the runtime's and so is its layout. Both are
+  `open val`s, though, and reading one through the runtime answers the FIELD — which is right for
+  every throwable the runtime makes and wrong the moment a class of the program redeclares one,
+  since Kotlin dispatches to the override and the base reserves no slot to dispatch through. A file
+  that overrides either therefore declines the read rather than answering the wrong half of the
+  question. Test: `tests/native_throwable_cause_e2e.rs`.
+
 - **The runtime walks a collection the PROGRAM declared, through three thunks its descriptor
   carries.** Every walking entry point of krusty's native runtime — `withIndex`, `contains`,
   `count`, `map`, `joinToString`, the `for` loop itself — reaches its elements through `iterator()`,

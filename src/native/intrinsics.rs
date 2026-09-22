@@ -1551,7 +1551,23 @@ pub(super) fn is_text_length(owner: crate::types::TypeName, name: &str) -> bool 
 /// `cause` is deliberately NOT here. This `Throwable` has no cause field, so answering it would be
 /// answering `null` to a program that passed one, and that declines instead.
 pub(super) fn is_throwable_message(owner: crate::types::TypeName, name: &str) -> bool {
-    name == "message" && matches!(kotlin_owner(&owner.render()), "kotlin/Throwable")
+    throwable_field(owner, name) == Some("kt_throwable_message")
+}
+
+/// The runtime reader for one of `Throwable`'s two fields, or `None` for any other accessor.
+///
+/// Both are read by the runtime rather than by an offset here, because the class is the runtime's
+/// and so is its layout. A SUBCLASS of it declared in this file is read the same way: its storage
+/// begins with the base's, which is exactly what makes one reader answer for both.
+pub(super) fn throwable_field(owner: crate::types::TypeName, name: &str) -> Option<&'static str> {
+    if kotlin_owner(&owner.render()) != "kotlin/Throwable" {
+        return None;
+    }
+    match name {
+        "message" => Some("kt_throwable_message"),
+        "cause" => Some("kt_throwable_cause"),
+        _ => None,
+    }
 }
 
 /// The runtime function answering `Result.isSuccess` / `Result.isFailure`, or `None`.

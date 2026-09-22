@@ -5027,9 +5027,13 @@ kt_int kt_compare_double(kt_double a, kt_double b) {
 typedef struct KThrowable {
     KObjectHeader header;
     KRef message;
+    /* The throwable this one was given as its cause, or NULL. Kotlin's `Throwable.cause` is a
+       `val` set once by a constructor, so there is nothing to write after construction. */
+    KRef cause;
 } KThrowable;
 
-static const uint32_t kt_throwable_offsets[] = {offsetof(KThrowable, message)};
+static const uint32_t kt_throwable_offsets[] = {offsetof(KThrowable, message),
+                                                offsetof(KThrowable, cause)};
 
 KRef kt_throwable_to_string(KRef self) {
     const KType *type = self->header.type;
@@ -5047,11 +5051,19 @@ static const kt_fn kt_throwable_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_
 /* The hierarchy a `catch` clause names. Each link is the one Kotlin declares, so
    `catch (e: Exception)` takes an `IllegalStateException` and does not take a bare `Throwable`. */
 #define KT_THROWABLE_TYPE(identifier, kotlin_name, base)                                           \
-    const KType identifier = {kotlin_name,           sizeof(kotlin_name) - 1,                      \
-                              sizeof(KThrowable),    1,                                            \
-                              0,                     kt_throwable_offsets,                         \
-                              base,                  kt_throwable_vtable,                          \
-                              3,                     0};
+    const KType identifier = {                                                                     \
+        kotlin_name,                                                                               \
+        sizeof(kotlin_name) - 1,                                                                   \
+        sizeof(KThrowable),                                                                        \
+        /* `message` and `cause`, counted from the array rather than written out, so adding a      \
+           field to `KThrowable` cannot leave one of them untraced. */                             \
+        (uint32_t)(sizeof(kt_throwable_offsets) / sizeof(kt_throwable_offsets[0])),                \
+        0,                                                                                         \
+        kt_throwable_offsets,                                                                      \
+        base,                                                                                      \
+        kt_throwable_vtable,                                                                       \
+        3,                                                                                         \
+        0};
 
 KT_THROWABLE_TYPE(kt_type_throwable, "kotlin.Throwable", &kt_type_any)
 KT_THROWABLE_TYPE(kt_type_error, "kotlin.Error", &kt_type_throwable)
@@ -5087,10 +5099,38 @@ KRef kt_throwable_new(const KType *type, KRef message) {
     /* `message` stays in this parameter across the allocation: it is its root. */
     KThrowable *thrown = (KThrowable *)kt_gc_allocate(type, sizeof(KThrowable));
     thrown->message = message;
+    thrown->cause = NULL;
     return (KRef)thrown;
 }
 
+/* `Throwable(message, cause)`. Both operands stay in their parameters across the allocation, for
+   the reason `message` alone does above: each is its own root. */
+KRef kt_throwable_new_with_cause(const KType *type, KRef message, KRef cause) {
+    KThrowable *thrown = (KThrowable *)kt_gc_allocate(type, sizeof(KThrowable));
+    thrown->message = message;
+    thrown->cause = cause;
+    return (KRef)thrown;
+}
+
+/* `Throwable(cause)`, the one-argument form whose operand is the CAUSE rather than the message.
+   Kotlin fills the message from the cause — `cause?.toString()` — so the two one-argument
+   constructors differ in more than which field they fill, and a caller cannot rewrite one as the
+   other. The rendering happens BEFORE the allocation, so nothing half-built is live across it. */
+KRef kt_throwable_new_from_cause(const KType *type, KRef cause) {
+    KRef message = cause == NULL ? NULL : kt_to_string(cause);
+    return kt_throwable_new_with_cause(type, message, cause);
+}
+
+/* The message `Throwable(cause)` gives an object the GENERATOR builds rather than this runtime —
+   a class of the program extending `Throwable`, whose fields the constructor writes in place. The
+   rendering is Kotlin's `cause?.toString()`, and it lives here because `toString` does. */
+KRef kt_throwable_message_of_cause(KRef cause) {
+    return cause == NULL ? NULL : kt_to_string(cause);
+}
+
 KRef kt_throwable_message(KRef self) { return ((KThrowable *)self)->message; }
+
+KRef kt_throwable_cause(KRef self) { return ((KThrowable *)self)->cause; }
 
 /* `assertFailsWith<T> { … }` when the block did not throw what it had to.
 

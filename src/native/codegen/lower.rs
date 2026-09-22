@@ -210,6 +210,7 @@ pub fn lower_file(
         dependency_properties,
         dependency_property_skips: std::collections::HashMap::new(),
         implemented_collections: implemented_collections(ir),
+        overrides_a_throwable_accessor: overrides_a_throwable_accessor(ir),
         // Filled once the class model can be consulted: which classes are walkable is which ones
         // a thunk could be emitted for, and only the model knows that.
         unwalkable_collections: std::collections::HashSet::new(),
@@ -307,6 +308,23 @@ fn implemented_dependencies(ir: &IrFile) -> std::collections::HashSet<String> {
 /// that declared nothing. Each shape is recorded only from an edge that NAMES it, and no shape
 /// implies another: a class handing out an iterator of its own overrides `Iterator`'s members and
 /// is recorded there in its own right, and one returning a walk the runtime made is no hazard.
+/// Whether this file OVERRIDES `Throwable.message` or `Throwable.cause`.
+///
+/// Both are `open val`s of the runtime's own class, and this target reads them with a runtime
+/// function rather than through a slot — the class is the runtime's, and so is its layout. That is
+/// right for every throwable the runtime makes and wrong the moment a class of the program
+/// redeclares one: the read would answer the FIELD where Kotlin dispatches to the override. There
+/// is no slot to dispatch through, because the base declares none, so a file that overrides either
+/// declines the read rather than answering the wrong half of it.
+fn overrides_a_throwable_accessor(ir: &IrFile) -> bool {
+    ir.property_overrides.values().flatten().any(|edge| {
+        matches!(
+            edge.overridden,
+            crate::fir::ResolvedPropertyOverrideTarget::External(_)
+        ) && super::super::intrinsics::throwable_field(edge.overridden_owner, &edge.name).is_some()
+    })
+}
+
 fn implemented_collections(
     ir: &IrFile,
 ) -> std::collections::HashSet<super::super::intrinsics::CollectionShape> {
@@ -439,6 +457,9 @@ struct FileLowering<'a> {
     /// rather than the condition it has in common with every other.
     dependency_property_skips: std::collections::HashMap<u32, String>,
     implemented_collections: std::collections::HashSet<super::super::intrinsics::CollectionShape>,
+    /// Whether this file redeclares `Throwable.message` or `Throwable.cause`; see
+    /// [`overrides_a_throwable_accessor`].
+    overrides_a_throwable_accessor: bool,
     /// The classes of THIS FILE the runtime can walk, by the role their own members answer for.
     ///
     /// A class implementing `kotlin.collections.Iterable` or `Iterator` records where its own
@@ -1761,7 +1782,20 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 target,
                 receiver: Some(receiver),
                 ..
-            }) if self.is_throwable_message(target) => self.throwable_message(receiver),
+            }) if self.throwable_field(target).is_some() => {
+                let symbol = self.throwable_field(target).expect("just matched");
+                if self.file.overrides_a_throwable_accessor {
+                    return Err(format!(
+                        "a read of `Throwable.{}` in a file that overrides one",
+                        if symbol == "kt_throwable_cause" {
+                            "cause"
+                        } else {
+                            "message"
+                        }
+                    ));
+                }
+                self.throwable_field_read(symbol, receiver)
+            }
             // `cs.length` where the receiver is typed `CharSequence`: a string, on this target.
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
                 target,

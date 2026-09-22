@@ -114,10 +114,12 @@ pub(super) struct ExternalBase {
     pub any_slots: [&'static str; ANY_SLOTS as usize],
 }
 
-/// `kotlin.Throwable`'s own storage: the header, then `message`.
+/// `kotlin.Throwable`'s own storage: the header, then `message` and `cause`. It has to agree with
+/// `struct KThrowable` in the runtime, which is what a subclass's own fields are laid out after.
 const THROWABLE_MESSAGE_OFFSET: u32 = HEADER_SIZE;
-const THROWABLE_FIELDS_END: u32 = HEADER_SIZE + 8;
-const THROWABLE_REFERENCE_OFFSETS: &[u32] = &[THROWABLE_MESSAGE_OFFSET];
+pub(super) const THROWABLE_CAUSE_OFFSET: u32 = HEADER_SIZE + 8;
+const THROWABLE_FIELDS_END: u32 = HEADER_SIZE + 16;
+const THROWABLE_REFERENCE_OFFSETS: &[u32] = &[THROWABLE_MESSAGE_OFFSET, THROWABLE_CAUSE_OFFSET];
 
 /// The base `superclass` names, when it is one the runtime owns rather than one this file declares.
 ///
