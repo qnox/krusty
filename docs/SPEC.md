@@ -2549,6 +2549,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   anywhere an expression is; statement position keeps the `Stmt::IncDec` / member-index-assignment desugar.
   The value lowering uses no temp slot — the update is `i = i ± 1` and the value is the new `i` (prefix) or
   new `i` ∓ 1 = the old `i` (postfix), valid for every numeric type. `tests/incdec_expr_e2e.rs`.
+- **A narrow integral constant keeps its own WIDTH in common IR.** `FirConstant` has no case
+  narrower than `Int` and no unsigned one, so a constant expression's checked TYPE is the only thing
+  carrying the width — which is why `lower_constant` already reads it to tell `UByte` from `UInt`. It
+  did not read it for the signed narrow pair, so every `Byte`-typed constant was recorded as an
+  `Int`.
+
+  That is invisible to a consumer which reads the type a constant is ASSIGNED to, and wrong for one
+  which reads the constant's own SHAPE: a box made from `Byte.MIN_VALUE` came out an `Int`, so
+  `Byte.MIN_VALUE as Any is Byte` answered false and two equal bytes compared unequal once boxed
+  through a generic parameter. `IrConst::Byte` and `IrConst::Short` are already produced elsewhere
+  and already handled across the JVM backend, the metadata builder and suspend hoisting, so emitting
+  them here stays inside the existing contract rather than widening it.
+
+  A value the named width cannot hold is a lowering FAILURE, not a truncation — the checker produces
+  none, and saying so keeps a later widening of this path from silently wrapping. ARITHMETIC is
+  unaffected: `Byte + Byte` is an `Int` in Kotlin, and that promotion belongs to the operation rather
+  than to the constant.
+  Tests: `fir_lower::tests::a_narrow_integral_constant_keeps_the_width_its_checked_type_names` and
+  `::an_integral_constant_too_wide_for_its_checked_type_fails`.
+
 - **Unsigned types `UByte`/`UShort`/`UInt`/`ULong`** — Kotlin inline classes over `Byte`/`Short`/`Int`/`Long`;
   unboxed they ARE that JVM primitive (descriptor `B`/`S`/`I`/`J`), with unsignedness driving
   operation/conversion choice (kotlinc hardcodes these intrinsic mappings, so krusty mirrors them). Literals
