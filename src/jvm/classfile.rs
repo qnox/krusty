@@ -2721,6 +2721,22 @@ impl ClassWriter {
             Some(m) => (m.lnt.is_empty(), m.lvt.is_empty()),
             None => return,
         };
+        // A body that emitted marks of its own still needs the method's OPENING entry: kotlinc
+        // opens every method on its declaration line, and a body's first mark sits at the first
+        // statement, not at pc 0. Prepending is not the same as the "only when empty" fill below —
+        // that one REPLACES a table, this one completes one.
+        if !needs_lnt {
+            if let Some((0, line)) = lnt {
+                if let Some(m) = self.methods.iter_mut().find(|m| m.name == n && m.desc == d) {
+                    let line = line.min(u16::MAX as u32) as u16;
+                    match m.lnt.first() {
+                        Some(&(0, _)) => {}
+                        Some(&(_, first)) if first == line => {}
+                        _ => m.lnt.insert(0, (0, line)),
+                    }
+                }
+            }
+        }
         if !needs_lnt && !needs_lvt {
             return;
         }

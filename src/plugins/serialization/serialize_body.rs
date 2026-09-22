@@ -352,6 +352,21 @@ impl SerializeBody<'_> {
                         break;
                     };
                     let def = ir.add_expr(IrExpr::Const(dc.clone()));
+                    // The default value carries the property's own declaration line, as it does in
+                    // the deserialization constructor. The comparison that consumes it is marked
+                    // back to the statement's line by the emitter, which is where that rule lives.
+                    // A `null` default is excluded: it is tested with `ifnull`, which pushes
+                    // nothing, and kotlinc marks no line for it.
+                    if !matches!(dc, IrConst::Null) {
+                        if let Some(line) = ir
+                            .prop_decl_lines
+                            .get(&(serialized_name, pname.clone()))
+                            .copied()
+                            .filter(|line| *line != 0)
+                        {
+                            ir.expr_source_lines.insert(def, line);
+                        }
+                    }
                     let neq = ir.add_expr(IrExpr::PrimitiveBinOp {
                         op: crate::ir::IrBinOp::Ne,
                         lhs: cur,
@@ -366,9 +381,17 @@ impl SerializeBody<'_> {
                     let cond = ir.add_expr(IrExpr::When {
                         branches: vec![(Some(should), encode_anyway), (None, neq)],
                     });
-                    stmts.push(ir.add_expr(IrExpr::When {
+                    let guard = ir.add_expr(IrExpr::When {
                         branches: vec![(Some(cond), enc_stmt)],
-                    }));
+                    });
+                    // The guard is a statement of the class's own declaration, so it carries the
+                    // class's start line. That is also what puts the emitter's "current statement
+                    // line" in effect, which the comparison inside the condition returns to.
+                    let start_line = ir.classes[foo_id as usize].decl_start_line;
+                    if start_line != 0 {
+                        ir.expr_lines.insert(guard, start_line);
+                    }
+                    stmts.push(guard);
                 }
             }
         }

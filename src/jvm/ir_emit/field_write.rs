@@ -11,6 +11,7 @@ use crate::types::Ty;
 impl Emitter<'_> {
     pub(super) fn emit_set_field(
         &mut self,
+        statement: u32,
         receiver: u32,
         class: ClassId,
         index: u32,
@@ -60,6 +61,15 @@ impl Emitter<'_> {
             self.emit_value(value, code);
         }
         self.adapt_generated_initializer_reference(value, self.value_ty(value), field_ty, code);
+        // A value that carried its OWN source line leaves that line in effect; the store belongs to
+        // the statement, so kotlinc marks the statement's line again at the `putfield`. Without it
+        // the property's line stays in effect over everything that follows the store.
+        if let (Some(&statement_line), true) = (
+            self.ir.expr_lines.get(&statement),
+            self.ir.expr_source_lines.contains_key(&value),
+        ) {
+            code.mark_line(statement_line);
+        }
         let field_ref = self.cw.fieldref(&owner, &name, &type_descriptor(field_ty));
         code.putfield(field_ref, slot_words(field_ty) as i32);
     }
