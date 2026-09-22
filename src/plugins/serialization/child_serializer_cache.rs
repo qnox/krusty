@@ -431,9 +431,24 @@ impl ChildSerializersBody<'_> {
                     } else {
                         base
                     }
-                } else if let Some(e) =
-                    super::element_serializer_expr(ir, ctx, &serializer_field_types[i])
-                {
+                } else if let Some(e) = super::element_serializer_expr(
+                    ir,
+                    ctx,
+                    &serializer_field_types[i],
+                )
+                .map(|base| {
+                    // A NULLABLE property's element serializer is the base one wrapped
+                    // `.nullable`, narrowed to the `KSerializer` that wrapper takes. Only the
+                    // explicit-serializer arm above did this, so every nullable property whose
+                    // serializer is DERIVED from its type published the non-null serializer.
+                    if super::is_nullable(&serializer_field_types[i]) {
+                        let narrowed =
+                            super::deserialize_body::narrowed(ir, base, super::KSERIALIZER_FQ);
+                        super::wrap_nullable_serializer(ir, narrowed)
+                    } else {
+                        base
+                    }
+                }) {
                     // Nested @Serializable (generic `Foo<A>` → `Foo.serializer(A_ser)`,
                     // or non-generic `Foo$serializer.INSTANCE`) | builtin `…Serializer`.
                     e
