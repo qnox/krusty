@@ -122,9 +122,8 @@ pub(super) fn classifier_type_parameter_ordinal(
 /// capture belonged, and the native generator declined the arity outright. kotlinc compiles these.
 ///
 /// The subclass carries the same captures, because selection records the superclass's as its own
-/// (`resolve::local_capture_dependencies`). Which of its prefix parameters holds which is read by
-/// NAME, and a name is the right key here and only here: both prefixes name the same lexical value
-/// of the same enclosing body, which is what a capture IS.
+/// (`resolve::local_capture_dependencies`). Each forwarded field retains the superclass capture's
+/// stable semantic coordinate, so lowering never joins two constructor prefixes by field spelling.
 ///
 /// Only a call that is short by exactly the parent's prefix is filled. Anything else is a shape
 /// this does not understand and is left for the arity check downstream to report.
@@ -146,20 +145,27 @@ pub(super) fn finalize_local_superclass_captures(
         if parent_args.len() != ir.classes[class].super_args.len() + prefix {
             continue;
         }
-        let wanted: Vec<(Option<String>, crate::types::Ty)> = parent_args[..prefix]
-            .iter()
-            .map(|argument| (argument.name.clone(), argument.ty))
-            .collect();
+        let wanted = (0..prefix)
+            .map(|field| {
+                let field = u32::try_from(field).ok()?;
+                Some((
+                    *ir.class_capture_identities.get(&(parent, field))?,
+                    parent_args[field as usize].ty,
+                ))
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(wanted) = wanted else {
+            continue;
+        };
         let own_prefix = ir.classes[class].constructor_prefix_count as usize;
         let mut slots = Vec::with_capacity(wanted.len());
-        for (name, _) in &wanted {
-            let Some(name) = name.as_deref() else {
-                break;
-            };
-            let Some(slot) = ir.classes[class].ctor_args[..own_prefix]
-                .iter()
-                .position(|argument| argument.name.as_deref() == Some(name))
-            else {
+        for (identity, _) in &wanted {
+            let Some(slot) = (0..own_prefix).position(|field| {
+                u32::try_from(field)
+                    .ok()
+                    .and_then(|field| ir.class_capture_identities.get(&(class as u32, field)))
+                    == Some(identity)
+            }) else {
                 break;
             };
             let Ok(slot) = u32::try_from(slot) else {

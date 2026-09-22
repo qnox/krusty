@@ -12,11 +12,6 @@
 //! with `VerifyError: Bad type on operand stack` — `this` sat where the capture belonged. kotlinc
 //! compiles every program here, so every expectation is taken by running it under kotlinc.
 //!
-//! An ANONYMOUS OBJECT extending a capturing local class is the same shape one level over and is
-//! NOT covered: its captures are discovered on a different path, from the construction site's
-//! candidate list rather than from a declaration's resolved supertype, and that path has no
-//! superclass edge to read yet.
-
 use super::common;
 
 /// Run `body` under krusty AND under the reference compiler, and require the SAME output.
@@ -138,6 +133,22 @@ fn a_mutable_capture_stays_one_cell_across_the_hierarchy() {
          \x20   val derived = Derived()\n\
          \x20   state = \"OK\"\n\
          \x20   return derived.read()\n\
+         }\n",
+    );
+}
+
+/// Anonymous-object capture discovery uses the same resolved superclass edge. The object body does
+/// not mention `result`; it carries that value solely because its local superclass requires it.
+#[test]
+fn an_anonymous_object_passes_on_its_local_superclasss_capture() {
+    agrees_with_kotlinc(
+        "AnonymousObjectPassesCapture",
+        "fun box(): String {\n\
+         \x20   val result = \"OK\"\n\
+         \x20   open class Local {\n\
+         \x20       fun value() = result\n\
+         \x20   }\n\
+         \x20   return object : Local() {}.value()\n\
          }\n",
     );
 }

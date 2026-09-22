@@ -60,6 +60,16 @@ impl Checker<'_> {
             .collect()
     }
 
+    pub(super) fn extend_anonymous_superclass_captures(
+        &self,
+        scope: &CheckerScope<'_>,
+        declaration: DeclId,
+        captures: &mut Vec<AnonymousObjectCapture>,
+    ) {
+        let mut bindings = self.local_capture_binding_identities(scope, captures);
+        self.extend_superclass_captures(scope, declaration, captures, &mut bindings);
+    }
+
     fn lexical_binding_by_identity(
         &self,
         scope: &CheckerScope<'_>,
@@ -95,23 +105,30 @@ impl Checker<'_> {
         binding: Option<u32>,
     ) {
         let existing = captures.iter().enumerate().find_map(|(index, capture)| {
-            // The same lexical VALUE is one capture, whether or not a dependency asked for it. A
-            // class that captures `x` for its own body and is then found to need `x` for a
-            // declaration it reaches carries one field, not two — the second would be a duplicate
-            // field of the same name, which the class file format rejects outright.
-            let same_lexical_value = capture.source == candidate.source
-                && capture_bindings[index] == binding
-                && capture.name == candidate.name;
-            let same_semantic_source = match candidate.capture_dependency {
-                Some(dependency) => {
-                    capture.capture_dependency == Some(dependency) || same_lexical_value
+            // The same semantic source is one capture, whether or not a dependency asked for it.
+            // Lexical values require their resolved binding identity; receiver/storage captures
+            // carry their exact coordinate in `source`. Spelling is never part of this join.
+            let same_source = match (capture_bindings[index], binding) {
+                (Some(existing), Some(candidate)) => existing == candidate,
+                (None, None)
+                    if capture.source != AnonymousObjectCaptureSource::LexicalValue
+                        && candidate.source != AnonymousObjectCaptureSource::LexicalValue =>
+                {
+                    capture.source == candidate.source
                 }
-                None => capture.capture_dependency.is_none() && same_lexical_value,
+                _ => false,
+            };
+            let same_semantic_source = match candidate.capture_dependency {
+                Some(dependency) => capture.capture_dependency == Some(dependency) || same_source,
+                None => capture.capture_dependency.is_none() && same_source,
             };
             same_semantic_source.then_some(index)
         });
         if let Some(existing) = existing {
             captures[existing].shared_cell |= candidate.shared_cell;
+            captures[existing].capture_dependency = captures[existing]
+                .capture_dependency
+                .or(candidate.capture_dependency);
             return;
         }
         captures.push(candidate);

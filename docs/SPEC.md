@@ -6017,11 +6017,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     SUPERTYPE (`resolved_body_local_supertypes`) rather than from a call. That is the one edge a
     supertype constructor gives: `class Derived : Local(true)` records the base classifier and its
     arguments and nothing in between.
-  - Common lowering prepends the matching prefix reads to `super_args`. Which of the subclass's
-    prefix parameters holds which of the superclass's captures is read by NAME, and a name is the
-    right key here and only here: both prefixes name the same lexical value of the same enclosing
-    body, which is what a capture IS. Only a call short by exactly the parent's prefix is filled;
-    any other shape is left to the arity check downstream.
+  - Common lowering prepends the matching prefix reads to `super_args`. Each transitive capture
+    retains the superclass field's stable semantic coordinate, so matching never depends on a
+    synthetic field spelling. Only a call short by exactly the parent's prefix is filled; any other
+    shape is left to the arity check downstream.
 
   The same lexical value captured twice is ONE capture. A class that captures `x` for its own body
   and is then found to need `x` for a declaration it reaches carries one field, not two — the second
@@ -6029,10 +6028,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`ClassFormatError: Duplicate field name`). The merge previously keyed a dependency-required
   capture on the dependency alone, so an identical own capture did not match it.
 
-  Still NOT covered: an ANONYMOUS OBJECT extending a capturing local class. Its captures are
-  discovered on a different path — from the construction site's candidate list rather than from a
-  declaration's resolved supertype — and that path has no superclass edge to read yet.
-  Tests: `tests/local_superclass_capture_e2e.rs`, six shapes, each cross-checked against the
+  Anonymous objects use the same resolved-superclass edge after their body-driven capture pass, so
+  they also carry a superclass capture that their own body never mentions.
+  Tests: `tests/local_superclass_capture_e2e.rs`, seven shapes, each cross-checked against the
   reference compiler. Corpus: `codegen/box/localClass/localHierarchy.kt`,
   `codegen/box/innerNested/superConstructorCall/{localExtendsLocalWithClosure,localWithClosureExtendsLocalWithClosure}.kt`,
   `codegen/box/localClasses/innerOfLocalCaptureExtensionReceiver.kt` and
