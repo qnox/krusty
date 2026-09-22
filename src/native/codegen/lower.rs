@@ -2674,10 +2674,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         let Some(symbol) =
                             super::super::intrinsics::runtime_member(&owner, &name, params)
                         else {
-                            return Err(format!(
-                                "the member `{}.{name}` {params:?} -> {ret:?}",
-                                owner.replace('/', ".")
-                            ));
+                            return Err(format!("the member `{}.{name}`", owner.replace('/', ".")));
                         };
                         let mut arguments = vec![self.reference(receiver)?];
                         for argument in args {
