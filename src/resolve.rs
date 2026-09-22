@@ -37495,7 +37495,7 @@ pub(crate) fn member_extension_function_with(
         .unwrap_or_default();
     maximal.retain(|index| candidates[*index].score == best);
     match maximal.as_slice() {
-        [index] => MemberExtensionFunctionSelection::Selected(candidates[*index].clone()),
+        [index] => MemberExtensionFunctionSelection::Selected(Box::new(candidates[*index].clone())),
         _ => MemberExtensionFunctionSelection::Ambiguous(
             maximal
                 .into_iter()
