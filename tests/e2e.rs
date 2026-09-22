@@ -1339,6 +1339,8 @@ mod sam_conversion_e2e;
 mod sam_generic_lambda_param_e2e;
 #[path = "sam_lambda_expected_result_e2e.rs"]
 mod sam_lambda_expected_result_e2e;
+#[path = "sibling_generic_custom_serializer_e2e.rs"]
+mod sibling_generic_custom_serializer_e2e;
 #[path = "same_file_custom_serializer_e2e.rs"]
 mod same_file_custom_serializer_e2e;
 #[path = "same_package_classpath_e2e.rs"]
