@@ -1480,13 +1480,14 @@ pub(super) fn unsigned_conversion(owner: &str, name: &str) -> Option<Ty> {
     })
 }
 
-/// Whether an accessor is `CharSequence.length`.
+/// Whether an accessor is TEXT's `length` — `String`'s, `CharSequence`'s or a builder's.
 ///
-/// Every `CharSequence` this target can produce is a string — `subSequence` answers one, and
-/// nothing in the runtime makes another — which is the same position `scalar_member` already takes
-/// for `CharSequence.get`. A user class implementing `kotlin.CharSequence` is not one of these and
-/// keeps its own member, which the receiver's own type routes elsewhere long before this.
-pub(super) fn is_char_sequence_length(owner: crate::types::TypeName, name: &str) -> bool {
+/// One question about the same thing, and the runtime answers all three from one place (see
+/// `kt_text_of`) — including for text the PROGRAM declared, whose own `length` the descriptor
+/// records. `String.length` reaches here only through an ACCESSOR: written in source it is a
+/// compiler-supplied operation, because the frontend recognizes the form, and a synthesized
+/// accessor is a call.
+pub(super) fn is_text_length(owner: crate::types::TypeName, name: &str) -> bool {
     // The provider presents it under the Kotlin name of the property, not the JVM accessor's:
     // `length`, where `kotlin.Enum`'s two arrive as `getName`/`getOrdinal`. Both spellings are
     // taken because which one a provider uses is the provider's business, not this table's.
@@ -1494,16 +1495,17 @@ pub(super) fn is_char_sequence_length(owner: crate::types::TypeName, name: &str)
         && (["kotlin/CharSequence", "java/lang/CharSequence"]
             .iter()
             .any(|candidate| owner.matches(candidate))
-            // A builder's `length` is the same question about the same text, and the runtime
-            // answers both from one place; see `kt_text_of`.
-            || kotlin_owner(&owner.render()) == "kotlin/text/StringBuilder")
+            || matches!(
+                kotlin_owner(&owner.render()),
+                "kotlin/String" | "kotlin/text/StringBuilder"
+            ))
 }
 
 /// Whether an accessor is `Throwable.message`.
 ///
 /// The property is declared on `kotlin.Throwable` itself, so a subclass reading it — the program's
 /// own or one of the runtime's — arrives here under the root's owner. Both spellings are taken for
-/// the reason [`is_char_sequence_length`] gives: which one a provider uses is its business.
+/// the reason [`is_text_length`] gives: which one a provider uses is its business.
 ///
 /// `cause` is deliberately NOT here. This `Throwable` has no cause field, so answering it would be
 /// answering `null` to a program that passed one, and that declines instead.
@@ -1527,7 +1529,7 @@ pub(super) fn result_predicate(owner: crate::types::TypeName, name: &str) -> Opt
 
 /// The runtime function answering a `KClass` name accessor, or `None` for anything else.
 ///
-/// Both spellings of each are taken for the reason `is_char_sequence_length` takes both: which one
+/// Both spellings of each are taken for the reason `is_text_length` takes both: which one
 /// a provider presents a property's accessor under is the provider's business, not this table's.
 pub(super) fn class_name_accessor(
     owner: crate::types::TypeName,

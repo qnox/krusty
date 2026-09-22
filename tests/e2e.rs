@@ -1080,6 +1080,8 @@ mod native_delegated_properties_e2e;
 mod native_delegation_e2e;
 #[path = "native_dependency_overrides_e2e.rs"]
 mod native_dependency_overrides_e2e;
+#[path = "native_dependency_property_reference_e2e.rs"]
+mod native_dependency_property_reference_e2e;
 #[path = "native_dependency_reference_e2e.rs"]
 mod native_dependency_reference_e2e;
 #[path = "native_enum_defaults_e2e.rs"]

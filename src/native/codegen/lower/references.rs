@@ -37,6 +37,17 @@ pub(super) struct ReferenceItems {
     singleton: Option<DataId>,
 }
 
+/// What ONE SITE makes: the emitted pieces, which sites sharing a declaration share, and the
+/// expression THIS site binds as the receiver, which they do not.
+///
+/// Kept beside the items rather than read back out of the node, because the node says it in a
+/// different place for each kind of target and only [`reference_site`] knows the module one.
+#[derive(Clone, Copy)]
+pub(super) struct ReferenceSite {
+    items: ReferenceItems,
+    bound: Option<u32>,
+}
+
 /// What a site's `get` and `set` reach.
 #[derive(Clone, Copy)]
 enum Access {
@@ -166,8 +177,25 @@ impl<'a> FileLowering<'a> {
         let property = match target {
             FirPropertyReferenceTarget::Module(property)
             | FirPropertyReferenceTarget::SpecializedModule { property, .. } => property,
-            _ => {
-                return "a reference to a property this file does not declare".to_string();
+            // A DEPENDENCY property's reference is supplied accessors by a pass of its own, which
+            // says why it supplied none; see `native::dependency_references`.
+            FirPropertyReferenceTarget::External { .. } => {
+                return match self.dependency_property_skips.get(&id) {
+                    Some(reason) => reason.clone(),
+                    None => {
+                        super::super::super::dependency_references::property_decline(self.ir, id)
+                    }
+                }
+            }
+            // A CLASSIFIER's own implicit property — `Colour::entries` and its siblings — which is
+            // no declaration of this file and no dependency property either.
+            FirPropertyReferenceTarget::Classifier {
+                owner, property, ..
+            } => {
+                return format!(
+                    "a reference to `{}`'s implicit `{property:?}`",
+                    owner.render().replace('/', ".")
+                )
             }
         };
         let Some(checked) = self.ir.checked_properties.get(property) else {
@@ -199,6 +227,7 @@ impl<'a> FileLowering<'a> {
     /// with one type and, for an unbound reference, one instance, identity equality answers that
     /// without a word of reflection metadata.
     pub(super) fn declare_property_references(&mut self) -> Result<(), Unsupported> {
+        self.declare_dependency_property_references()?;
         let mut emitted: HashMap<(crate::fir::PropertyId, bool), ReferenceItems> = HashMap::new();
         for index in 0..self.ir.exprs.len() {
             let Some((property, bound, mutable)) = reference_site(&self.ir.exprs[index]) else {
@@ -219,7 +248,72 @@ impl<'a> FileLowering<'a> {
                     items
                 }
             };
-            self.references.insert(index as u32, items);
+            self.references
+                .insert(index as u32, ReferenceSite { items, bound });
+        }
+        Ok(())
+    }
+
+    /// Declare a type for every reference to a DEPENDENCY property the pass supplied accessors
+    /// for; see [`crate::native::dependency_references`].
+    ///
+    /// The object is the same one a reference to a property of this file becomes: one type per
+    /// property, `get`/`set`/`name` in its table, the bound receiver in its one field. All that
+    /// differs is where `get` and `set` lead — a pair of synthesized functions that reach the
+    /// dependency through the ordinary dependency-property path, rather than storage or an
+    /// accessor this file declares. One type per PROPERTY and boundness, for the reason the other
+    /// pass has one: two references to one declaration are equal, and the type is what they share.
+    fn declare_dependency_property_references(&mut self) -> Result<(), Unsupported> {
+        let mut emitted: HashMap<(crate::fir::ExternalPropertyId, bool), ReferenceItems> =
+            HashMap::new();
+        for index in 0..self.ir.exprs.len() {
+            let index = index as u32;
+            let Some(realized) = self.dependency_properties.get(&index) else {
+                continue;
+            };
+            // The property's Kotlin name, which `KCallable.name` answers. A property the provider
+            // cannot name gets no object rather than one answering a spelling it invented.
+            let Some(name) = self
+                .provider
+                .external_property(realized.property)
+                .map(|property| property.name.clone())
+            else {
+                self.dependency_property_skips.insert(
+                    index,
+                    "a reference to a dependency property the provider cannot name".to_string(),
+                );
+                continue;
+            };
+            let site = Site {
+                name,
+                access: Access::Accessor {
+                    getter: realized.getter,
+                    setter: realized.setter,
+                    receiver: realized.receiver,
+                },
+                ty: realized.ty,
+                mutable: realized.mutable,
+                bound: realized.bound,
+            };
+            let key = (realized.property, realized.bound.is_some());
+            let items = match emitted.get(&key) {
+                Some(items) => *items,
+                None => {
+                    // The ordinal only names the emitted symbols, and the two passes share the
+                    // namespace — so this one counts on from where a property of this file would.
+                    let ordinal = self.references.len() + emitted.len();
+                    let items = self.define_reference(ordinal, site)?;
+                    emitted.insert(key, items);
+                    items
+                }
+            };
+            self.references.insert(
+                index,
+                ReferenceSite {
+                    items,
+                    bound: realized.bound,
+                },
+            );
         }
         Ok(())
     }
@@ -249,7 +343,9 @@ impl<'a> FileLowering<'a> {
                     items
                 }
             };
-            self.references.insert(index as u32, items);
+            // A LOCAL delegated property's metadata binds no receiver: Kotlin gives it none.
+            self.references
+                .insert(index as u32, ReferenceSite { items, bound: None });
         }
         Ok(())
     }
@@ -699,10 +795,11 @@ impl BodyLowering<'_, '_, '_> {
         &mut self,
         id: u32,
     ) -> Result<Option<Value>, Unsupported> {
-        let Some(items) = self.file.references.get(&id) else {
+        let Some(site) = self.file.references.get(&id) else {
             return Err("`LocalPropertyReference`".to_string());
         };
-        let instance = items
+        let instance = site
+            .items
             .singleton
             .expect("a local property reference has one instance");
         Ok(Some(self.data_address(instance)))
@@ -710,23 +807,23 @@ impl BodyLowering<'_, '_, '_> {
 
     /// `::foo`, `C::p`, `x::p` — the reference object itself.
     pub(super) fn property_reference(&mut self, id: u32) -> Result<Option<Value>, Unsupported> {
-        let Some(items) = self.file.references.get(&id) else {
+        let Some(site) = self.file.references.get(&id) else {
             return Err(self.file.property_reference_decline(id));
         };
-        let (descriptor, size, receiver_offset, singleton) = (
-            items.descriptor,
-            items.instance_size,
-            items.receiver_offset,
-            items.singleton,
+        let (descriptor, size, receiver_offset, singleton, bound) = (
+            site.items.descriptor,
+            site.items.instance_size,
+            site.items.receiver_offset,
+            site.items.singleton,
+            site.bound,
         );
         if let Some(instance) = singleton {
             // No receiver to hold: one object for the program, which is also what makes
             // `::foo == ::foo` answer true through identity equality.
             return Ok(Some(self.data_address(instance)));
         }
-        let Some((_, bound, _)) = reference_site(self.file.ir.expr(id)) else {
-            return Err(self.file.property_reference_decline(id));
-        };
+        // The operand the DECLARE pass read out of this site — not re-read here, because the node
+        // says it in a different place for each kind of target.
         let bound = bound.expect("a site with no singleton binds a receiver");
         let object = self.reference(bound)?;
         if self.terminated {

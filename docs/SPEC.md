@@ -2011,6 +2011,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`a_reference_to_a_member_a_source_form_spells_calls_it`,
   `a_reference_to_an_arrays_indexed_access_reads_it`).
 
+- **A reference to a DEPENDENCY property is an object over synthesized accessors.** A reference to
+  a property this file does not declare — `String::length`, `"KOTLIN"::length` — is left CHECKED by
+  common lowering, because there is no declaration here whose storage or accessors the object could
+  point at. krusty's native target supplies the pair: a synthesized static getter that performs the
+  ordinary dependency-property read, and, for a `var`, a setter that performs the write. What is
+  built over them is the very object a reference to a property of this file becomes — `get`, `set`
+  and `name` in its table, the bound receiver in its one field, one type per property and
+  boundness — so two references to one declaration are equal and a bound one evaluates its receiver
+  once, where it is written. `KCallable.name` answers the property's Kotlin name as the provider
+  spells it, and a property the provider cannot name gets no object rather than one answering an
+  invented spelling. A MEMBER EXTENSION property declines: its accessor wants two receivers where
+  the object has room for one. Test: `tests/native_dependency_property_reference_e2e.rs`.
+
+- **Text's `length` is one question wherever it is asked.** Written in source, `s.length` is a
+  compiler-supplied operation the frontend names, so it never reaches a dependency-member path at
+  all. Two other spellings do: a receiver typed `CharSequence`, because the property belongs to the
+  interface, and the read krusty's native target synthesizes for `String::length`, which is an
+  accessor call like any other. All three ask the same thing, so one runtime function answers all
+  three — it reaches a string's own bytes, a builder's, and, through the descriptor, text the
+  PROGRAM declared. Test: `tests/native_dependency_property_reference_e2e.rs`
+  (`a_dependency_property_reference_answers_its_name`), `tests/native_walkable_text_e2e.rs`.
+
 - **The runtime walks a collection the PROGRAM declared, through three thunks its descriptor
   carries.** Every walking entry point of krusty's native runtime — `withIndex`, `contains`,
   `count`, `map`, `joinToString`, the `for` loop itself — reaches its elements through `iterator()`,

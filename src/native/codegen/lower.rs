@@ -152,13 +152,29 @@ fn isa_for(target: NativeTarget) -> Result<cranelift_codegen::isa::OwnedTargetIs
         .map_err(|error| format!("target {target} ({error})"))
 }
 
+/// What the generator is given beyond the file: the pieces a native IR pass prepared for it.
+///
+/// One struct rather than a growing parameter list, and BORROWED rather than owned, because the
+/// pass that made them owns them for the whole lowering.
+pub struct FileInput<'a> {
+    pub ir: &'a IrFile,
+    /// The accessors synthesized for each reference to a dependency property, by site; see
+    /// [`crate::native::dependency_references`].
+    pub dependency_properties:
+        &'a std::collections::HashMap<u32, super::super::dependency_references::DependencyProperty>,
+}
+
 pub fn lower_file(
-    ir: &IrFile,
+    input: FileInput<'_>,
     provider: &Rc<dyn SemanticPlatform>,
     target: NativeTarget,
     stem: &str,
     entry: Entry,
 ) -> Result<Lowered, Unsupported> {
+    let FileInput {
+        ir,
+        dependency_properties,
+    } = input;
     let class_model = model::build(ir)?;
 
     let isa = isa_for(target)?;
@@ -191,6 +207,8 @@ pub fn lower_file(
         reference_identities: HashMap::new(),
         holders: HashMap::new(),
         references: HashMap::new(),
+        dependency_properties,
+        dependency_property_skips: std::collections::HashMap::new(),
         implemented_collections: implemented_collections(ir),
         // Filled once the class model can be consulted: which classes are walkable is which ones
         // a thunk could be emitted for, and only the model knows that.
@@ -395,7 +413,7 @@ struct FileLowering<'a> {
     /// The holder type for a captured `var` of each carrier, by the carrier's spelling.
     holders: HashMap<String, DataId>,
     /// The emitted pieces of each property reference, by the expression that creates it.
-    references: HashMap<u32, references::ReferenceItems>,
+    references: HashMap<u32, references::ReferenceSite>,
     /// One marker per (referenced declaration, bound-ness) this file mentions — the identity two
     /// callable references compare. Deduplicated here because two sites naming the same
     /// declaration must reach the SAME marker; that is the whole point of it.
@@ -412,6 +430,14 @@ struct FileLowering<'a> {
     /// that type would have its vtable read for an entry it does not have, so a receiver of a
     /// shape listed here declines by name instead of being answered wrongly. A receiver of any
     /// OTHER shape is answered as usual; see [`implemented_collections`].
+    /// The accessors synthesized for each reference to a dependency property, by site; see
+    /// [`crate::native::dependency_references`].
+    dependency_properties:
+        &'a std::collections::HashMap<u32, super::super::dependency_references::DependencyProperty>,
+    /// Why a reference to a dependency property was left without an object, by site — filled by
+    /// the declare pass at the point it skips one, so the decline names the step that skipped it
+    /// rather than the condition it has in common with every other.
+    dependency_property_skips: std::collections::HashMap<u32, String>,
     implemented_collections: std::collections::HashSet<super::super::intrinsics::CollectionShape>,
     /// The classes of THIS FILE the runtime can walk, by the role their own members answer for.
     ///
@@ -1741,7 +1767,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 target,
                 receiver: Some(receiver),
                 ..
-            }) if self.is_char_sequence_length(target) => self.char_sequence_length(receiver),
+            }) if self.is_text_length(target) => self.text_length(receiver),
             // `x.indices` is `0..size - 1` of the receiver, so it needs the receiver's own size
             // rather than anything the property declaration says.
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
@@ -2270,7 +2296,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             }) => {
                 // `cs.length` is an `Int`, and `::foo.name` a `String`: both are the language's
                 // own types, stated here for the same reason `kotlin.Enum`'s two are.
-                if self.is_char_sequence_length(*target) {
+                if self.is_text_length(*target) {
                     return Some(Ty::Int);
                 }
                 if self.class_name_accessor(*target).is_some() {

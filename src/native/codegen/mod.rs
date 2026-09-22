@@ -87,17 +87,28 @@ impl Backend for CraneliftBackend {
         // the generator has no shape for, and this turns the realizable ones into the adapter form
         // it already lowers. See `native::dependency_references`.
         super::dependency_references::realize(&mut file.ir);
-        let lowered =
-            match lower::lower_file(&file.ir, &self.provider, self.target, &stem, self.entry) {
-                Ok(lowered) => lowered,
-                Err(unsupported) => {
-                    diags.error(
-                        crate::diag::Span::new(0, 0),
-                        format!("krusty: the native backend does not support {unsupported} yet"),
-                    );
-                    return Vec::new();
-                }
-            };
+        // The accessors a reference to a DEPENDENCY property is reached through, which the
+        // generator's own object is built from; see `native::dependency_references`.
+        let properties = super::dependency_references::realize_properties(&mut file.ir);
+        let lowered = match lower::lower_file(
+            lower::FileInput {
+                ir: &file.ir,
+                dependency_properties: &properties,
+            },
+            &self.provider,
+            self.target,
+            &stem,
+            self.entry,
+        ) {
+            Ok(lowered) => lowered,
+            Err(unsupported) => {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    format!("krusty: the native backend does not support {unsupported} yet"),
+                );
+                return Vec::new();
+            }
+        };
         if lowered.defines_entry {
             if let Some(first) = &state.entry_file {
                 diags.error(
