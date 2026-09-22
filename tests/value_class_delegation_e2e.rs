@@ -15,6 +15,21 @@
 
 use super::common;
 
+const UNDERLYING_DELEGATE_SOURCE: &str = "// LANGUAGE: +InlineClassImplementationByDelegation\n\
+     interface I {\n\
+     \x20   fun ok(): String\n\
+     }\n\
+     @JvmInline\n\
+     value class IC(val i: I) : I by i\n\
+     fun box(): String {\n\
+     \x20   val i = object : I {\n\
+     \x20       override fun ok(): String = \"OK\"\n\
+     \x20   }\n\
+     \x20   if (IC(i).ok() != \"OK\") return \"fail through the value class\"\n\
+     \x20   val boxed: I = IC(i)\n\
+     \x20   return boxed.ok()\n\
+     }\n";
+
 /// Run `body` under krusty AND under the reference compiler, and require the SAME output.
 fn agrees_with_kotlinc(stem: &str, body: &str) {
     let krusty = common::expect_box_run_with_stdlib(body, stem);
@@ -26,23 +41,28 @@ fn agrees_with_kotlinc(stem: &str, body: &str) {
 /// Reached through the value class's own type and through the interface it delegates.
 #[test]
 fn a_value_class_delegates_through_its_underlying_value() {
-    agrees_with_kotlinc(
-        "ValueClassDelegates",
-        "// LANGUAGE: +InlineClassImplementationByDelegation\n\
-         interface I {\n\
-         \x20   fun ok(): String\n\
-         }\n\
-         @JvmInline\n\
-         value class IC(val i: I) : I by i\n\
-         fun box(): String {\n\
-         \x20   val i = object : I {\n\
-         \x20       override fun ok(): String = \"OK\"\n\
-         \x20   }\n\
-         \x20   if (IC(i).ok() != \"OK\") return \"fail through the value class\"\n\
-         \x20   val boxed: I = IC(i)\n\
-         \x20   return boxed.ok()\n\
-         }\n",
-    );
+    agrees_with_kotlinc("ValueClassDelegates", UNDERLYING_DELEGATE_SOURCE);
+}
+
+/// Runtime verification catches the old invalid `putfield`, while this pins the underlying cause:
+/// the value class must have exactly kotlinc's one field, with no unused `$$delegate_0` surviving.
+#[test]
+fn a_value_class_reuses_the_exact_underlying_field_layout() {
+    let classes =
+        common::expect_classes_with_stdlib(UNDERLYING_DELEGATE_SOURCE, "ValueClassDelegateFields");
+    let (_, bytes) = classes
+        .iter()
+        .find(|(name, _)| name == "IC")
+        .expect("krusty emits IC");
+    let ours = krusty::jvm::classreader::parse_class(bytes).expect("krusty IC parses");
+
+    let reference = common::kotlinc_library(UNDERLYING_DELEGATE_SOURCE)
+        .expect("reference compiler emits value-class delegation fixture");
+    let reference = std::fs::read(reference.join("IC.class")).expect("read kotlinc IC");
+    let reference = krusty::jvm::classreader::parse_class(&reference).expect("kotlinc IC parses");
+
+    assert_eq!(reference.fields.len(), 1, "kotlinc fixture changed shape");
+    assert_eq!(ours.fields, reference.fields, "IC field layout differs");
 }
 
 /// The underlying value is still READABLE as the property it is: the delegation does not take the
