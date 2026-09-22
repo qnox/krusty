@@ -13196,9 +13196,13 @@ impl<'a> Emitter<'a> {
         // records frames (a loop HOF's loop frames). All of these are bound relative to an empty operand
         // baseline (no caller operand prefix is threaded into them), so a non-empty baseline must bail —
         // `records_frame` makes a parent operand sequence spill earlier operands so we reach here at 0.
+        // Per lambda, per BODY, the frames that body records: a lambda argument always has a body, so
+        // the question is whether any body actually produced a frame — not whether one exists.
         let needs_frames = probe.join_required
             || !probe.frames.is_empty()
-            || lam_frames.iter().any(|f| !f.is_empty())
+            || lam_frames
+                .iter()
+                .any(|bodies| bodies.iter().any(|frames| !frames.is_empty()))
             || !probe.external_branches.is_empty();
         if needs_frames && code.stack_height() != 0 {
             crate::trace_compiler!(
