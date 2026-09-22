@@ -2064,6 +2064,13 @@ pub struct ResolvedAnnotation {
 /// typed values without gaining name lookup, callable selection, or backend access.
 pub trait ClassifierAnnotationSource {
     fn classifier_annotations(&self, classifier: TypeName) -> Option<Vec<ResolvedAnnotation>>;
+
+    /// Whether this classifier's single instance is reachable as an object value. A plugin that
+    /// names a classifier it does not declare must not infer this from its name or type arity:
+    /// reading `INSTANCE` off an ordinary class is a link-time failure.
+    fn classifier_is_object(&self, _classifier: TypeName) -> Option<bool> {
+        None
+    }
 }
 
 /// A resolved annotation application, including its declaration-ordered element values and

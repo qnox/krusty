@@ -1594,6 +1594,12 @@ pub struct ResolvedModuleIndex {
     /// syntax. Keeping it beside the stable declaration lets target realization consume annotation
     /// policy without reopening a parser arena or a coordinate-keyed frontend table.
     declaration_annotation_string_arguments: HashMap<(DeclarationId, u32), Box<[Box<str>]>>,
+    /// Resolved CLASS arguments parallel to selected declaration annotations — the identity behind
+    /// `@Serializable(with = X::class)`, already resolved to a classifier rather than a written
+    /// path. A backend fact for one file of a module is read by the others, which never see this
+    /// declaration's syntax, and a class-valued argument is exactly as much a semantic fact as the
+    /// string arguments beside it.
+    declaration_annotation_class_arguments: HashMap<(DeclarationId, u32), Box<[TypeName]>>,
     /// Stable declarations whose resolved `@Suppress` policy permits otherwise-invisible source
     /// references while checking their bodies. Annotation occurrences remain Pass-1 syntax; only
     /// this declaration-owned semantic fact crosses into Pass 2.
@@ -2196,6 +2202,17 @@ impl ResolvedModuleIndex {
             .unwrap_or_default()
     }
 
+    pub fn declaration_annotation_class_arguments(
+        &self,
+        declaration: DeclarationId,
+        annotation_ordinal: u32,
+    ) -> &[TypeName] {
+        self.declaration_annotation_class_arguments
+            .get(&(declaration, annotation_ordinal))
+            .map(Box::as_ref)
+            .unwrap_or_default()
+    }
+
     pub(crate) fn declaration_suppresses_invisible_reference(
         &self,
         declaration: DeclarationId,
@@ -2705,6 +2722,24 @@ impl ResolvedModuleIndex {
         );
     }
 
+    pub fn publish_declaration_annotation_class_arguments(
+        &mut self,
+        declaration: DeclarationId,
+        annotation_ordinal: u32,
+        arguments: impl IntoIterator<Item = TypeName>,
+    ) {
+        let arguments = arguments.into_iter().collect::<Vec<_>>().into_boxed_slice();
+        if arguments.is_empty() {
+            return;
+        }
+        assert!(
+            self.declaration_annotation_class_arguments
+                .insert((declaration, annotation_ordinal), arguments)
+                .is_none(),
+            "a stable annotation occurrence may publish its class arguments only once"
+        );
+    }
+
     pub fn publish_classifier_header(
         &mut self,
         declaration: DeclarationId,
@@ -2971,6 +3006,7 @@ impl ResolvedModuleIndex {
             && self.declaration_headers.is_empty()
             && self.declaration_annotations.is_empty()
             && self.declaration_annotation_string_arguments.is_empty()
+            && self.declaration_annotation_class_arguments.is_empty()
             && self.classifiers.is_empty()
             && self.signatures.is_empty()
             && self.callables.is_empty()
@@ -3322,6 +3358,9 @@ impl ResolvedModuleIndex {
             + self.declaration_annotation_string_arguments.len()
                 * (std::mem::size_of::<(DeclarationId, u32)>()
                     + std::mem::size_of::<Box<[Box<str>]>>())
+            + self.declaration_annotation_class_arguments.len()
+                * (std::mem::size_of::<(DeclarationId, u32)>()
+                    + std::mem::size_of::<Box<[TypeName]>>())
             + self
                 .declaration_annotation_string_arguments
                 .values()
@@ -3332,6 +3371,11 @@ impl ResolvedModuleIndex {
                             .map(|argument| argument.len())
                             .sum::<usize>()
                 })
+                .sum::<usize>()
+            + self
+                .declaration_annotation_class_arguments
+                .values()
+                .map(|arguments| arguments.len() * std::mem::size_of::<TypeName>())
                 .sum::<usize>()
             + (self.invisible_reference_suppressions.len()
                 + self.invisible_member_suppressions.len()

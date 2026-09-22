@@ -118,6 +118,10 @@ pub struct PluginContext {
     /// kotlinx.serialization cores but not in supported older ones, and emitting a reference to a
     /// class that is not there fails at class-load rather than at compile time.
     runtime_serializers: std::collections::HashSet<TypeName>,
+    /// External serializers the provider confirms are object values. A class needs ordinary
+    /// constructor selection before generated code may instantiate it; the post-check plugin must
+    /// not infer that call from type-parameter arity.
+    external_serializer_singletons: std::collections::HashSet<TypeName>,
 }
 
 impl Default for PluginContext {
@@ -127,6 +131,7 @@ impl Default for PluginContext {
             target_type_descriptor: no_target_type_descriptor,
             external_serializers: std::collections::HashMap::new(),
             runtime_serializers: std::collections::HashSet::new(),
+            external_serializer_singletons: std::collections::HashSet::new(),
         }
     }
 }
@@ -138,6 +143,7 @@ impl Clone for PluginContext {
             target_type_descriptor: self.target_type_descriptor,
             external_serializers: self.external_serializers.clone(),
             runtime_serializers: self.runtime_serializers.clone(),
+            external_serializer_singletons: self.external_serializer_singletons.clone(),
         }
     }
 }
@@ -181,6 +187,19 @@ impl PluginContext {
     /// already exists outside this file.
     pub fn external_serializer(&self, classifier: TypeName) -> Option<TypeName> {
         self.external_serializers.get(&classifier).copied()
+    }
+
+    /// Record which external serializers have a provider-confirmed singleton value.
+    pub fn with_external_serializer_singletons(
+        mut self,
+        serializers: std::collections::HashSet<TypeName>,
+    ) -> Self {
+        self.external_serializer_singletons = serializers;
+        self
+    }
+
+    pub fn external_serializer_is_singleton(&self, serializer: TypeName) -> bool {
+        self.external_serializer_singletons.contains(&serializer)
     }
 
     /// `ClassId`s carrying the exact resolved annotation identity.
@@ -417,8 +436,20 @@ pub fn run_enabled(
     {
         return;
     }
+    let external = external_serializers(ir, classifiers);
+    // `Some(false)` is the only answer that rules a singleton out. A generated `Foo$$serializer`
+    // for a CLASSPATH `@Serializable` class is an object kotlinc synthesized, and the provider has
+    // no classifier view of a synthetic it never read a declaration for — it answers `None`. Taking
+    // `None` as "not a singleton" leaves that element underivable and bails the whole file, which is
+    // exactly the failure this plugin path exists to prevent.
+    let external_singletons = external
+        .values()
+        .copied()
+        .filter(|&serializer| classifiers.classifier_is_object(serializer) != Some(false))
+        .collect();
     let ctx = ctx
-        .with_external_serializers(external_serializers(ir, classifiers))
+        .with_external_serializers(external)
+        .with_external_serializer_singletons(external_singletons)
         .with_runtime_serializers(runtime_serializers(classifiers));
     enabled_plugins(module_name).run(ir, &ctx);
 }
@@ -446,15 +477,20 @@ fn external_serializers(
             let application = annotations
                 .iter()
                 .find(|annotation| annotation.annotation == serializable);
+            // `@Serializable`'s only element is `with`, so its class-valued argument IS the
+            // serializer whether or not the provider carried the element name: a dependency read
+            // from a class file names its elements, while a sibling file of this module publishes
+            // the resolved identity positionally. The same-file path reads the first value for the
+            // same reason.
             let custom = application.and_then(|annotation| {
-                annotation.arguments.iter().find_map(|(name, value)| {
-                    (name == "with")
-                        .then_some(value)
-                        .and_then(|value| match value {
-                            crate::types::AnnotationValue::Class(serializer) => Some(*serializer),
-                            _ => None,
-                        })
-                })
+                annotation
+                    .arguments
+                    .iter()
+                    .filter(|(name, _)| name.is_empty() || name == "with")
+                    .find_map(|(_, value)| match value {
+                        crate::types::AnnotationValue::Class(serializer) => Some(*serializer),
+                        _ => None,
+                    })
             });
             custom
                 .or_else(|| application.map(|_| classifier.nested_child("$serializer")))

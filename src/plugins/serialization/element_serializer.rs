@@ -384,11 +384,14 @@ pub(super) fn element_serializer_plan(
     // off the classpath, which is exactly what kotlinc emits
     // (`getstatic dep/Inner$$serializer.INSTANCE`). Deriving one here is impossible — the plugin only
     // generates serializers for what this file declares.
-    // Scope: the non-generic shape. A generic dependency serializer is built through
-    // `Foo.Companion.serializer(<argument serializers>)`, which needs the companion's ABI read back
-    // from the classpath; until then such a field stays underivable and the caller bails cleanly.
+    // A provider-confirmed non-generic object is reachable through `INSTANCE`. A generic custom
+    // serializer class needs an ordinary checked constructor call; this post-check plugin cannot
+    // reconstruct overload selection from classifier arity, so that shape remains underivable.
     if type_args.is_empty() {
-        if let Some(serializer) = ctx.external_serializer(fq_name) {
+        if let Some(serializer) = ctx
+            .external_serializer(fq_name)
+            .filter(|&serializer| ctx.external_serializer_is_singleton(serializer))
+        {
             return Some(ElementSerializerPlan::ExternalSingleton(serializer));
         }
     }
