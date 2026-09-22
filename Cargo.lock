@@ -617,6 +617,9 @@ dependencies = [
 [[package]]
 name = "krusty-build"
 version = "0.0.1"
+dependencies = [
+ "krusty",
+]
 
 [[package]]
 name = "krusty-cli"
