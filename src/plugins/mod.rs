@@ -477,6 +477,15 @@ fn external_classifier_candidates(ir: &IrFile) -> impl Iterator<Item = TypeName>
         .iter()
         .flat_map(|class| class.fields.iter().map(|field| field.ty))
         .collect();
+    // A reified type argument names a classifier the plugin may have to build a serializer for
+    // without it appearing as any field's type — `element<JsonElement>("v")` inside a hand-written
+    // `KSerializer` is exactly that, and its serializer is the `@Serializable(with = …)` one the
+    // dependency declares.
+    candidates.extend(
+        ir.reified_call_subst
+            .values()
+            .flat_map(|substitutions| substitutions.iter().map(|(_, ty)| *ty)),
+    );
     let mut seen = std::collections::HashSet::new();
     let mut external = Vec::new();
     for expression in &ir.exprs {
@@ -590,6 +599,19 @@ mod tests {
     use super::*;
     use crate::ir::IrFile;
 
+    struct FakeClassifierAnnotations(
+        std::collections::HashMap<crate::types::TypeName, Vec<crate::types::ResolvedAnnotation>>,
+    );
+
+    impl crate::types::ClassifierAnnotationSource for FakeClassifierAnnotations {
+        fn classifier_annotations(
+            &self,
+            classifier: crate::types::TypeName,
+        ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
+            self.0.get(&classifier).cloned()
+        }
+    }
+
     struct TouchPlugin;
     impl IrPlugin for TouchPlugin {
         fn name(&self) -> &str {
@@ -690,5 +712,84 @@ mod tests {
             crate::types::type_name("kotlinx/serialization/UseContextualSerialization"),
             crate::types::type_name("demo/External")
         ));
+    }
+    /// A classifier named ONLY by a reified type argument is still offered to the external-serializer
+    /// map.
+    ///
+    /// `element<JsonElement>("v")` inside a hand-written `KSerializer` names a dependency type that
+    /// is no field's type and appears in no plugin placeholder, so it reached neither candidate
+    /// source and the plugin could not build its serializer — which left the reified `element` call
+    /// on the splice path, and that refusal bails the whole file.
+    #[test]
+    fn a_reified_type_argument_is_an_external_classifier_candidate() {
+        let mut ir = IrFile::default();
+        ir.reified_call_subst.insert(
+            7,
+            vec![(
+                "T".to_owned(),
+                Ty::obj("kotlinx/serialization/json/JsonElement"),
+            )],
+        );
+        let candidates: Vec<crate::types::TypeName> = external_classifier_candidates(&ir).collect();
+        assert!(
+            candidates.contains(&crate::types::type_name(
+                "kotlinx/serialization/json/JsonElement"
+            )),
+            "a reified type argument must be a candidate: {candidates:?}"
+        );
+    }
+
+    /// The production provider boundary, not a classifier spelling, decides which serializer a
+    /// reified-only dependency type uses. Nest the payload in another user type so this also proves
+    /// candidate traversal reaches type arguments rather than consulting only the outer classifier.
+    #[test]
+    fn reified_only_classifier_uses_its_metadata_named_serializer() {
+        let payload = crate::types::type_name("fixtures/ExternalPayload");
+        let serializer = crate::types::type_name("fixtures/PayloadCodec");
+        let mut ir = IrFile::default();
+        ir.reified_call_subst.insert(
+            11,
+            vec![(
+                "Payload".to_owned(),
+                Ty::obj_args("fixtures/Envelope", &[Ty::obj_name(payload)]),
+            )],
+        );
+        let annotations = FakeClassifierAnnotations(std::collections::HashMap::from([(
+            payload,
+            vec![crate::types::ResolvedAnnotation {
+                annotation: crate::types::type_name(serialization::SERIALIZABLE_FQ),
+                arguments: vec![(
+                    "with".to_owned(),
+                    crate::types::AnnotationValue::Class(serializer),
+                )],
+            }],
+        )]));
+
+        let resolved = external_serializers(&ir, &annotations);
+
+        assert_eq!(
+            resolved,
+            std::collections::HashMap::from([(payload, serializer)])
+        );
+        let context = PluginContext::default().with_external_serializers(resolved);
+        assert_eq!(context.external_serializer(payload), Some(serializer));
+        assert_eq!(
+            context.external_serializer(crate::types::type_name("fixtures/Envelope")),
+            None
+        );
+    }
+
+    /// A type the module DECLARES is not external, however it is named.
+    #[test]
+    fn a_declared_classifier_is_not_an_external_candidate() {
+        let mut ir = IrFile::default();
+        ir.add_class(synthetic_class("demo/Own"));
+        ir.reified_call_subst
+            .insert(7, vec![("T".to_owned(), Ty::obj("demo/Own"))]);
+        let candidates: Vec<crate::types::TypeName> = external_classifier_candidates(&ir).collect();
+        assert!(
+            !candidates.contains(&crate::types::type_name("demo/Own")),
+            "a declared classifier must not be external: {candidates:?}"
+        );
     }
 }
