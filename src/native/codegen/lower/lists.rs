@@ -466,6 +466,76 @@ impl BodyLowering<'_, '_, '_> {
         }
     }
 
+    /// `ReadOnlyProperty.getValue` on a delegate this FILE declares.
+    ///
+    /// Unlike `ReadWriteProperty`, whose `notNull()` and `observable(…)` the runtime builds itself,
+    /// this runtime makes no `ReadOnlyProperty` at all — so every object that can stand behind the
+    /// type is a class of this file, and the dispatch among them is exhaustive. The last arm is
+    /// still emitted and still fails loudly: an object of neither class cannot arrive, and saying
+    /// so where it would is cheaper than reasoning about it later.
+    ///
+    /// A call through the interface cannot go through a slot: an override of a DEPENDENCY member
+    /// takes a slot of its own, so the interface names no number to dispatch on. Testing the
+    /// receiver against each implementor is what that leaves, and it is the same dispatch a
+    /// collection member of a type this file implements already uses.
+    pub(super) fn read_only_property_member(
+        &mut self,
+        internal: crate::types::TypeName,
+        name: &str,
+        receiver: u32,
+        args: &[u32],
+        ret: Ty,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        if name != "getValue" || args.len() != 2 {
+            return None;
+        }
+        let declared = self.file.implementors_of(internal);
+        let implementors: Vec<(ClassId, u32, Vec<Ty>, Ty)> = declared
+            .iter()
+            .filter_map(|&class| {
+                self.member_slot(class, name, args.len())
+                    .map(|(slot, params, supplied)| (class, slot, params, supplied))
+            })
+            .collect();
+        // A class whose `getValue` this generator cannot place leaves the set short, and a
+        // dispatch missing an arm would answer the wrong body for it.
+        if implementors.is_empty() || implementors.len() != declared.len() {
+            return None;
+        }
+        Some(self.read_only_property_dispatch(&implementors, receiver, args, ret))
+    }
+
+    fn read_only_property_dispatch(
+        &mut self,
+        implementors: &[(ClassId, u32, Vec<Ty>, Ty)],
+        receiver: u32,
+        args: &[u32],
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let object = self.reference(receiver)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        // Each operand once, at whatever type it already has; every arm converts from there.
+        let mut operands = Vec::with_capacity(args.len());
+        for argument in args {
+            let Some(value) = self.expression(*argument)? else {
+                return Ok(None);
+            };
+            if self.terminated {
+                return Ok(None);
+            }
+            operands.push((value, self.type_of(*argument)));
+        }
+        let produced =
+            self.dispatch_by_implementor_with(implementors, object, &operands, ret, |body, _| {
+                // Unreachable: the arms above cover every class that can stand behind the type.
+                body.runtime_call("kt_abstract_method_called", &[], Ty::Unit, &[])?;
+                Ok(Some(body.builder.ins().iconst(types::I64, 0)))
+            })?;
+        Ok(produced)
+    }
+
     /// The name a `KProperty` operand of the delegate convention carries, or `None` when the
     /// operand is not a property reference this file built.
     ///

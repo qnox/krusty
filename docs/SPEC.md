@@ -2161,6 +2161,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   krusty's native target keeps the two apart. Test:
   `tests/native_data_class_array_rendering_e2e.rs`.
 
+- **A `ReadOnlyProperty` delegate is dispatched among the file's own classes.** `val x by
+  Delegate()` reads through `kotlin.properties.ReadOnlyProperty.getValue`, a dependency member, and
+  a call through a dependency interface cannot go through a slot: an override of one takes a slot
+  of its own, so the interface names no number to dispatch on. What makes the choice possible here
+  is that krusty's native runtime builds no `ReadOnlyProperty` at all — unlike `ReadWriteProperty`,
+  whose `notNull()` and `observable(…)` it does build — so every object that can stand behind the
+  type is a class of the file, and testing the receiver against each is exhaustive. The last arm is
+  still emitted and fails loudly, for an object that cannot arrive. Test:
+  `tests/native_read_only_property_delegate_e2e.rs`.
+
 - **A `Throwable` carries a CAUSE, and the two one-argument constructors are told apart by type.**
   Kotlin declares four: `()`, `(message)`, `(cause)` and `(message, cause)`. A single argument whose
   type is a `Throwable` is the cause and anything else is the message, and the two forms differ in

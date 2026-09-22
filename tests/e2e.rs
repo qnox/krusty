@@ -1829,6 +1829,8 @@ mod native_list_type_checks_e2e;
 mod native_pair_construction_e2e;
 #[path = "native_range_bound_control_e2e.rs"]
 mod native_range_bound_control_e2e;
+#[path = "native_read_only_property_delegate_e2e.rs"]
+mod native_read_only_property_delegate_e2e;
 #[path = "native_reflection_type_checks_e2e.rs"]
 mod native_reflection_type_checks_e2e;
 #[path = "native_reified_declarations_e2e.rs"]

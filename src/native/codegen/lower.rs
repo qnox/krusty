@@ -2752,6 +2752,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                                 {
                                     return realized;
                                 }
+                                // A `ReadOnlyProperty` delegate. The runtime builds none, so the
+                                // file's own classes are every object that can stand behind the
+                                // type and the dispatch among them needs no runtime arm — which
+                                // is what `implemented_member` above requires and cannot find.
+                                if super::super::intrinsics::is_read_only_property_name(internal) {
+                                    if let Some(realized) = self.read_only_property_member(
+                                        internal, &name, receiver, args, *ret,
+                                    ) {
+                                        return realized;
+                                    }
+                                }
                                 return Err(format!(
                                     "the member `{}.{name}` of a type this file implements itself",
                                     internal.render().replace('/', ".")
