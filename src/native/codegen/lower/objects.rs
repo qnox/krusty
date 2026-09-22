@@ -256,6 +256,19 @@ impl<'a> FileLowering<'a> {
                     .and_then(super::super::super::intrinsics::throwable_descriptor)
                     .expect("just matched")
             }
+            // A FUNCTION TYPE. The object is of a type of its own — one per lambda and per
+            // callable reference — so what a check asks about is the marker every such descriptor
+            // names, and the arity is what separates one from another.
+            _ if target
+                .obj_internal()
+                .and_then(super::super::super::intrinsics::function_type_descriptor)
+                .is_some() =>
+            {
+                target
+                    .obj_internal()
+                    .and_then(super::super::super::intrinsics::function_type_descriptor)
+                    .expect("just matched")
+            }
             _ => return Ok(None),
         };
         self.import_data(symbol).map(Some)

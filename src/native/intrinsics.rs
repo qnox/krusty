@@ -1337,6 +1337,47 @@ pub(super) fn is_function_type_name(owner: crate::types::TypeName) -> bool {
     suffix.is_empty() || suffix.chars().all(|digit| digit.is_ascii_digit())
 }
 
+/// The runtime marker an `is` against a FUNCTION TYPE asks about, for a type that names one.
+///
+/// A function value is an object of a type of its own — one per lambda and per callable reference —
+/// so the type written at the site is never the object's. The markers stand in for it: each
+/// function value's descriptor names its arity's and the bare `kotlin.Function` beside it. A
+/// `suspend` function type spells the same names and is left to the paths that read it, which
+/// decline before reaching here.
+pub(super) fn function_type_descriptor(owner: crate::types::TypeName) -> Option<&'static str> {
+    const ARITIES: [&str; 23] = [
+        "kt_type_function0",
+        "kt_type_function1",
+        "kt_type_function2",
+        "kt_type_function3",
+        "kt_type_function4",
+        "kt_type_function5",
+        "kt_type_function6",
+        "kt_type_function7",
+        "kt_type_function8",
+        "kt_type_function9",
+        "kt_type_function10",
+        "kt_type_function11",
+        "kt_type_function12",
+        "kt_type_function13",
+        "kt_type_function14",
+        "kt_type_function15",
+        "kt_type_function16",
+        "kt_type_function17",
+        "kt_type_function18",
+        "kt_type_function19",
+        "kt_type_function20",
+        "kt_type_function21",
+        "kt_type_function22",
+    ];
+    let rendered = kotlin_owner(&owner.render()).to_string();
+    let suffix = rendered.strip_prefix("kotlin/Function")?;
+    if suffix.is_empty() {
+        return Some("kt_type_function");
+    }
+    ARITIES.get(suffix.parse::<usize>().ok()?).copied()
+}
+
 /// A member of the collections facade the runtime answers for an ARRAY receiver, as
 /// `(symbol, carried, answer)`.
 ///

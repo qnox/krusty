@@ -402,6 +402,18 @@ impl<'a> FileLowering<'a> {
                     // `toString` on a function value prints this name, as `Function1` would on the
                     // JVM.
                     let kotlin_name = format!("kotlin.Function{arity}");
+                    // What an `is` against a function type asks about. This object's own type is
+                    // one of a kind — there is a descriptor per lambda — so the type written at a
+                    // check site is never this one, and the markers are what the two have in
+                    // common. Both the arity's and the bare `Function` are named, because
+                    // `KType.interfaces` is flattened and an interface's own bases are not walked.
+                    // 22 is Kotlin's largest function arity, and the runtime declares exactly
+                    // those; a wider one names nothing rather than a symbol that does not exist.
+                    let mut markers = Vec::new();
+                    if arity <= 22 {
+                        markers.push(self.import_data(&format!("kt_type_function{arity}"))?);
+                        markers.push(self.import_data("kt_type_function")?);
+                    }
                     self.define_type_descriptor(
                         descriptor,
                         &base,
@@ -410,7 +422,7 @@ impl<'a> FileLowering<'a> {
                         &references,
                         &vtable,
                         any_type,
-                        &[],
+                        &markers,
                         marker,
                         super::objects::WalkMembers::default(),
                     )?;

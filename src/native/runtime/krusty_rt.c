@@ -68,6 +68,52 @@ const KType kt_type_comparable = {"kotlin.Comparable", 17, sizeof(KObjectHeader)
 const KType kt_type_char_sequence = {"kotlin.CharSequence", 19, sizeof(KObjectHeader), 0, 0, NULL,
                                      &kt_type_any,         kt_any_vtable, 3, 0};
 
+/* `kotlin.Function` and each arity of it. A function value is an object of a type of its own —
+   the generator emits one per lambda and per callable reference — so an `is` against a function
+   type has no single descriptor to compare against. These are that descriptor: each function
+   value's own type names its arity's marker and the bare `Function` beside it.
+
+   None of them has instances, exactly like `Number` and `Comparable` above. 22 is Kotlin's largest
+   function arity, so the set is complete rather than open-ended. */
+const KType kt_type_function = {"kotlin.Function", 15,            sizeof(KObjectHeader), 0, 0, NULL,
+                                &kt_type_any,      kt_any_vtable, 3,                     0};
+
+#define KT_FUNCTION_TYPE(arity)                                                                    \
+    const KType kt_type_function##arity = {"kotlin.Function" #arity,                               \
+                                           sizeof("kotlin.Function" #arity) - 1,                   \
+                                           sizeof(KObjectHeader),                                  \
+                                           0,                                                      \
+                                           0,                                                      \
+                                           NULL,                                                   \
+                                           &kt_type_any,                                           \
+                                           kt_any_vtable,                                          \
+                                           3,                                                      \
+                                           0};
+
+KT_FUNCTION_TYPE(0)
+KT_FUNCTION_TYPE(1)
+KT_FUNCTION_TYPE(2)
+KT_FUNCTION_TYPE(3)
+KT_FUNCTION_TYPE(4)
+KT_FUNCTION_TYPE(5)
+KT_FUNCTION_TYPE(6)
+KT_FUNCTION_TYPE(7)
+KT_FUNCTION_TYPE(8)
+KT_FUNCTION_TYPE(9)
+KT_FUNCTION_TYPE(10)
+KT_FUNCTION_TYPE(11)
+KT_FUNCTION_TYPE(12)
+KT_FUNCTION_TYPE(13)
+KT_FUNCTION_TYPE(14)
+KT_FUNCTION_TYPE(15)
+KT_FUNCTION_TYPE(16)
+KT_FUNCTION_TYPE(17)
+KT_FUNCTION_TYPE(18)
+KT_FUNCTION_TYPE(19)
+KT_FUNCTION_TYPE(20)
+KT_FUNCTION_TYPE(21)
+KT_FUNCTION_TYPE(22)
+
 /* Flattened and transitive, as `KType.interfaces` requires: a `Number` is also `Comparable`, so a
    numeric box names both rather than relying on a walk that does not exist. */
 static const KType *const kt_number_interfaces[] = {&kt_type_number, &kt_type_comparable};

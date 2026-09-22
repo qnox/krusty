@@ -2048,6 +2048,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   both references, and the target declines rather than choose. Test:
   `tests/native_interface_implementations_e2e.rs`.
 
+- **An `is` against a FUNCTION TYPE asks about a marker, not about the object's own type.** krusty's
+  native target emits one descriptor per lambda and per callable reference, so the type written at
+  `f is Function0<*>` is never the type the object wears and cannot be compared against it. What the
+  two share is a runtime marker: `kotlin.Function` and one per arity, none of which has instances of
+  its own, exactly as `Number` and `Comparable` already do for the value types. Every function
+  value's descriptor names its arity's marker and the bare `Function` beside it — both, because
+  `KType.interfaces` is flattened and an interface's own bases are not walked. Arity is what
+  separates them, so `{ x: Int -> x } is Function0<*>` is false while `is Function1<*, *>` and
+  `is Function<*>` are true, and a callable reference answers the same way a lambda does. 22 is
+  Kotlin's largest function arity, so the set is complete. Test:
+  `tests/native_function_type_checks_e2e.rs`.
+
 - **The runtime walks a collection the PROGRAM declared, through three thunks its descriptor
   carries.** Every walking entry point of krusty's native runtime — `withIndex`, `contains`,
   `count`, `map`, `joinToString`, the `for` loop itself — reaches its elements through `iterator()`,

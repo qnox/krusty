@@ -258,6 +258,38 @@ extern const KType kt_type_ulong_array;
    which is what Kotlin's own `listOf(vararg)` wraps too. Being immutable is what makes sharing
    that array sound — nothing a program can write through reaches it. `MutableList` is a different
    type and is not one of these. */
+/* `kotlin.Function` and its arities. A function value is an object of a type of its own — one per
+   lambda or callable reference — so an `is` against a function type cannot ask about that type. It
+   asks about these markers, which every function value's descriptor names.
+
+   Arity is what separates them: `f is Function0<*>` must be false of a `Function1`. Both the arity
+   and the bare `Function` are named on each descriptor, because `KType.interfaces` is flattened
+   and an interface's own bases are not walked. */
+extern const KType kt_type_function;
+extern const KType kt_type_function0;
+extern const KType kt_type_function1;
+extern const KType kt_type_function2;
+extern const KType kt_type_function3;
+extern const KType kt_type_function4;
+extern const KType kt_type_function5;
+extern const KType kt_type_function6;
+extern const KType kt_type_function7;
+extern const KType kt_type_function8;
+extern const KType kt_type_function9;
+extern const KType kt_type_function10;
+extern const KType kt_type_function11;
+extern const KType kt_type_function12;
+extern const KType kt_type_function13;
+extern const KType kt_type_function14;
+extern const KType kt_type_function15;
+extern const KType kt_type_function16;
+extern const KType kt_type_function17;
+extern const KType kt_type_function18;
+extern const KType kt_type_function19;
+extern const KType kt_type_function20;
+extern const KType kt_type_function21;
+extern const KType kt_type_function22;
+
 extern const KType kt_type_list;
 extern const KType kt_type_list_iterator;
 
