@@ -80,10 +80,16 @@ fn an_eager_walk_over_a_sequence_declines() {
     );
 }
 
-/// A file that declares its own `Sequence` declines: the runtime would answer `iterator` out of a
-/// wrapper that is not there.
+/// A file that declares its own `Sequence` still declines — but on `asSequence`, not on `iterator`.
+///
+/// `iterator` takes no arguments, so it is dispatched on the receiver now (see
+/// `tests/native_implemented_dependency_dispatch_e2e.rs`): the file knows the class of its own that
+/// could stand behind a `Sequence`, and tests for it. What still declines is the OTHER half — a
+/// collection member asked of a concrete runtime type, here `listOf(…).asSequence()`, which a
+/// blanket file-level guard blocks for any file that declares a collection of its own. That guard
+/// is what the dispatch's runtime arm waits on, and it is why the arm is not yet reachable.
 #[test]
-fn a_file_that_declares_its_own_sequence_declines() {
+fn a_file_that_declares_its_own_sequence_still_declines_on_the_runtimes_half() {
     expect_native_decline(
         "class Counting<out T>(private val source: Sequence<T>) : Sequence<T> {\n\
          \x20   override fun iterator() = source.iterator()\n\
@@ -94,6 +100,6 @@ fn a_file_that_declares_its_own_sequence_declines() {
          \x20   return text\n\
          }\n",
         "DeclaredSequence",
-        "this file implements itself",
+        "asSequence",
     );
 }
