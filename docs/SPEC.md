@@ -2071,6 +2071,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   top-level property has no receiver either way. A reference to a `val` wears no mutable marker.
   Test: `tests/native_reflection_type_checks_e2e.rs`.
 
+- **A declaration with a REIFIED type parameter has no body to emit.** Kotlin permits a reified
+  type parameter only on an `inline` function, and such a function is spliced at every call site
+  precisely so that `is T` and `T::class` have a type to name. Its own body is therefore never
+  called, and compiling it would have to answer what `T` is where nothing has said — which is what
+  made `inline fun <reified T> Any?.isTOrNull() = this is T?` decline on a type parameter that had
+  reached the generator unsubstituted. krusty's native target emits no body for one, the same
+  treatment a lambda that returns non-locally already gets: a call site that somehow named it finds
+  no symbol and declines rather than reaching a body that cannot be right. Test:
+  `tests/native_reified_declarations_e2e.rs`.
+
+- **A nested class's `simpleName` is the segment after what encloses it.** A package is spelled
+  with dots and NESTING with `$` — `A$Companion` is the companion of `A` — so a simple name read by
+  splitting on dots alone answered the whole nested spelling. Both separators count, which is what
+  makes `A.Companion::class.simpleName` answer `Companion`, a named companion answer its own name,
+  and a plain nested class answer its own. Test: `tests/native_reified_declarations_e2e.rs`.
+
 - **A `Throwable` carries a CAUSE, and the two one-argument constructors are told apart by type.**
   Kotlin declares four: `()`, `(message)`, `(cause)` and `(message, cause)`. A single argument whose
   type is a `Throwable` is the cause and anything else is the message, and the two forms differ in

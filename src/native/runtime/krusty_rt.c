@@ -1339,13 +1339,17 @@ KRef kt_class_qualified_name(KRef self) {
     return kt_string_utf8(described->name, (kt_int)described->name_length);
 }
 
-/* The last dot-separated segment of the qualified name. A name with no dot is its own simple name,
-   which is what a class in the root package has. */
+/* The last segment of the qualified name. A name with no separator is its own simple name, which
+   is what a class in the root package has.
+
+   Both separators count. A package is spelled with dots and NESTING with `$` — `A$Companion` is
+   the companion of `A` — so splitting on dots alone answered the whole nested name where Kotlin
+   answers `Companion`. */
 KRef kt_class_simple_name(KRef self) {
     const KType *described = ((const KClass *)self)->described;
     kt_int start = 0;
     for (kt_int at = 0; at < (kt_int)described->name_length; at++) {
-        if (described->name[at] == '.') {
+        if (described->name[at] == '.' || described->name[at] == '$') {
             start = at + 1;
         }
     }

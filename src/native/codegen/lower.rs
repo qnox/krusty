@@ -635,10 +635,27 @@ impl<'a> FileLowering<'a> {
             // the return and fell through, which is a wrong answer rather than a decline. Common
             // lowering marks these; leaving one undeclared is how a call site that names it comes
             // to decline, which is the same mechanism the branch below relies on.
-            if self
+            // A function with a REIFIED type parameter is inline-only by Kotlin's own rule: a
+            // type parameter may be reified only on an `inline` function, and such a function is
+            // spliced at every call site precisely so that `is T` and `T::class` have a type to
+            // name. Its own body therefore is never called, and compiling it would ask what `T` is
+            // where nothing has said — which is exactly the decline `is T` used to raise. A call
+            // site that somehow named it finds no id and declines, as for the shapes below.
+            let reified = self
                 .ir
-                .inline_only_fns
-                .contains(&(index as crate::ir::FunId))
+                .signatures
+                .get(&(index as crate::ir::FunId))
+                .is_some_and(|signature| {
+                    signature
+                        .type_params
+                        .iter()
+                        .any(|parameter| parameter.reified)
+                });
+            if reified
+                || self
+                    .ir
+                    .inline_only_fns
+                    .contains(&(index as crate::ir::FunId))
                 || function.body.is_none()
             {
                 // Nothing to emit, and therefore nothing to DECLARE: an exported symbol that is
