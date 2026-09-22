@@ -2181,6 +2181,9 @@ mod tests {
         IrField {
             name: name.to_string(),
             ty,
+            // A debug coordinate for a primary-constructor store, which a synthesized fixture has
+            // no source line for; zero is what "none retained" is spelled as.
+            constructor_store_line: 0,
             type_param: None,
             default: None,
             flags: IrfFlags::default(),
