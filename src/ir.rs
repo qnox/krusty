@@ -2162,6 +2162,11 @@ pub struct IrFile {
     /// Guards the active-unit metadata handoff when a source is checked in several body groups.
     pub(crate) file_annotations_attached: bool,
     pub functions: Vec<IrFunction>,
+    /// JVM suspend-interface body carriers, keyed by carrier function id, with the exact interface
+    /// owner and source-declaration function id. The JVM signature/default-stub boundaries consume
+    /// these identities; they must not recover either one from the generated `$suspendImpl`
+    /// spelling.
+    pub(crate) jvm_suspend_interface_bodies: std::collections::HashMap<FunId, (TypeName, FunId)>,
     /// Exact generated function metadata/debug contracts, keyed by semantic owning classifier.
     /// Producers publish once; backends consume function identities without name/descriptor scans.
     generated_member_publications:
