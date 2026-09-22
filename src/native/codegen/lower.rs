@@ -276,6 +276,12 @@ fn implemented_dependencies(ir: &IrFile) -> std::collections::HashSet<String> {
 fn declares_its_own_collection(ir: &IrFile) -> bool {
     let owned = |owner: crate::types::TypeName| {
         super::super::intrinsics::is_list_type(owner)
+            || super::super::intrinsics::is_map_type(owner)
+            || super::super::intrinsics::is_set_type(owner)
+            // A map ENTRY is one too. `class Entry : Map.Entry<K, V>` is a program's object behind
+            // a type whose `key` the runtime answers by reading a header that is not there, which
+            // is the same hazard for the same reason.
+            || super::super::intrinsics::is_map_entry_type(owner)
             || super::super::intrinsics::iteration_role_of(Ty::Obj(owner, &[])).is_some()
     };
     ir.function_overrides.values().flatten().any(|edge| {

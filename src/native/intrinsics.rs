@@ -49,6 +49,16 @@ fn kotlin_owner(owner: &str) -> &str {
         "java/util/Collection" => "kotlin/collections/Collection",
         "java/util/Iterator" => "kotlin/collections/Iterator",
         "java/lang/Iterable" => "kotlin/collections/Iterable",
+        // The tables, on the same footing. `kotlin.collections.HashMap` is a TYPEALIAS to the Java
+        // class rather than a mapped builtin, so a jar provider hands over the Java name for it
+        // and there is nothing else to normalize it to.
+        "java/util/Map" => "kotlin/collections/Map",
+        "java/util/HashMap" => "kotlin/collections/HashMap",
+        "java/util/LinkedHashMap" => "kotlin/collections/LinkedHashMap",
+        "java/util/Map$Entry" => "kotlin/collections/Map$Entry",
+        "java/util/Set" => "kotlin/collections/Set",
+        "java/util/HashSet" => "kotlin/collections/HashSet",
+        "java/util/LinkedHashSet" => "kotlin/collections/LinkedHashSet",
         // The text types, on the same footing. Kotlin has no `java.lang.StringBuilder` and no
         // `java.lang.CharSequence`: `kotlin.text.StringBuilder` and `kotlin.CharSequence` are the
         // types, and these spellings are only how a JVM jar presents them. `AbstractStringBuilder`
@@ -766,21 +776,46 @@ pub(super) fn is_array_list(internal: crate::types::TypeName) -> bool {
 /// one object here — the map this runtime builds is insertion-ordered, and an unordered one leaves
 /// its order unspecified, of which insertion order is one.
 pub(super) fn runtime_table(internal: crate::types::TypeName) -> Option<&'static str> {
-    // Both spellings, because a jar provider names these `java.util.HashMap` and the mapping
-    // `kotlin_owner` makes does not cover them: Kotlin's `kotlin.collections.HashMap` is a
-    // TYPEALIAS to the Java class rather than a mapped builtin, so the provider hands over the
-    // Java name and there is nothing to normalize it to.
     match kotlin_owner(&internal.render()) {
-        "kotlin/collections/HashMap"
-        | "kotlin/collections/LinkedHashMap"
-        | "java/util/HashMap"
-        | "java/util/LinkedHashMap" => Some("map"),
-        "kotlin/collections/HashSet"
-        | "kotlin/collections/LinkedHashSet"
-        | "java/util/HashSet"
-        | "java/util/LinkedHashSet" => Some("set"),
+        "kotlin/collections/HashMap" | "kotlin/collections/LinkedHashMap" => Some("map"),
+        "kotlin/collections/HashSet" | "kotlin/collections/LinkedHashSet" => Some("set"),
         _ => None,
     }
+}
+
+/// Whether a type name is the MAP the native runtime builds.
+///
+/// `MutableMap`, `HashMap` and `LinkedHashMap` are one object there: the map that runtime builds is
+/// growable and insertion-ordered, which satisfies all three — the unordered spellings leave their
+/// order unspecified, and insertion order is one of the orders left unspecified.
+pub(super) fn is_map_type(internal: crate::types::TypeName) -> bool {
+    matches!(
+        kotlin_owner(&internal.render()),
+        "kotlin/collections/Map"
+            | "kotlin/collections/MutableMap"
+            | "kotlin/collections/HashMap"
+            | "kotlin/collections/LinkedHashMap"
+    )
+}
+
+/// Whether a type name is the SET the native runtime builds — the same four spellings, one level
+/// down.
+pub(super) fn is_set_type(internal: crate::types::TypeName) -> bool {
+    matches!(
+        kotlin_owner(&internal.render()),
+        "kotlin/collections/Set"
+            | "kotlin/collections/MutableSet"
+            | "kotlin/collections/HashSet"
+            | "kotlin/collections/LinkedHashSet"
+    )
+}
+
+/// Whether a type name is a map ENTRY, which `entries` hands out and a destructuring reads.
+pub(super) fn is_map_entry_type(internal: crate::types::TypeName) -> bool {
+    matches!(
+        kotlin_owner(&internal.render()),
+        "kotlin/collections/Map$Entry" | "kotlin/collections/MutableMap$MutableEntry"
+    )
 }
 
 /// A qualified name with the FILE FACADE a nested class is qualified by removed, or `None` when it

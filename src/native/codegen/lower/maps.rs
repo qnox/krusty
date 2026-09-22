@@ -13,52 +13,25 @@
 
 use super::*;
 
-/// Whether a type is one of the runtime's maps.
-///
-/// `MutableMap`, `HashMap` and `LinkedHashMap` are one object here: the map this runtime builds is
-/// growable and insertion-ordered, which satisfies all three — the unordered spellings leave their
-/// order unspecified, and insertion order is one of the orders left unspecified.
+/// Whether a type is one of the runtime's maps, sets, or map entries. Which spellings each covers
+/// — and the normalization a jar provider's `java.util` names need — is
+/// [`intrinsics::is_map_type`]'s to know; this only asks.
 fn is_map(ty: Ty) -> bool {
-    ty.non_null().obj_internal().is_some_and(|internal| {
-        [
-            "kotlin/collections/Map",
-            "kotlin/collections/MutableMap",
-            "kotlin/collections/HashMap",
-            "kotlin/collections/LinkedHashMap",
-            "java/util/Map",
-            "java/util/HashMap",
-            "java/util/LinkedHashMap",
-        ]
-        .iter()
-        .any(|candidate| internal.matches(candidate))
-    })
+    ty.non_null()
+        .obj_internal()
+        .is_some_and(super::super::super::intrinsics::is_map_type)
 }
 
-/// Whether a type is one of the runtime's sets. The same five spellings as a map's, one level
-/// down.
 fn is_set(ty: Ty) -> bool {
-    ty.non_null().obj_internal().is_some_and(|internal| {
-        [
-            "kotlin/collections/Set",
-            "kotlin/collections/MutableSet",
-            "kotlin/collections/HashSet",
-            "kotlin/collections/LinkedHashSet",
-            "java/util/Set",
-            "java/util/HashSet",
-            "java/util/LinkedHashSet",
-        ]
-        .iter()
-        .any(|candidate| internal.matches(candidate))
-    })
+    ty.non_null()
+        .obj_internal()
+        .is_some_and(super::super::super::intrinsics::is_set_type)
 }
 
-/// Whether a type is a map ENTRY, which `entries` hands out and a destructuring reads.
 fn is_map_entry(ty: Ty) -> bool {
-    ty.non_null().obj_internal().is_some_and(|internal| {
-        ["kotlin/collections/Map$Entry", "java/util/Map$Entry"]
-            .iter()
-            .any(|candidate| internal.matches(candidate))
-    })
+    ty.non_null()
+        .obj_internal()
+        .is_some_and(super::super::super::intrinsics::is_map_entry_type)
 }
 
 /// The runtime function answering one member of a map, with the types it is carried at.
