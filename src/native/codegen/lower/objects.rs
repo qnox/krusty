@@ -2767,18 +2767,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         self.dispatch(object, slot, &carried, ret, &arguments)
     }
 
-    /// The slot and ABI of the ZERO-ARGUMENT member `name` on `class`, for a dispatch whose
-    /// receiver is already a value.
-    ///
-    /// Zero arguments on purpose: an argument would have to cross at the DECLARATION's carriers,
-    /// and the caller that needs this has already coerced its operands to the runtime entry
-    /// point's. `iterator`, `hasNext` and `next` take none, which is what makes the choice between
-    /// the two dispatches a matter of the receiver alone.
-    pub(super) fn nullary_slot(&self, class: ClassId, name: &str) -> Option<(u32, Ty)> {
-        let (slot, _, answer) = self.member_slot(class, name, 0)?;
-        Some((slot, answer))
-    }
-
     /// The slot a class's own `name` of this ARITY takes, with the parameter types it declares and
     /// the type it answers.
     ///
@@ -2812,8 +2800,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Some((slot, function.params.clone(), function.ret))
     }
 
-    /// A zero-argument member asked of a type this file implements ITSELF, chosen by what the
-    /// receiver turns out to be.
+    /// A member asked of a type this file implements ITSELF, chosen by what the receiver turns
+    /// out to be.
     ///
     /// The runtime answers such a member for the objects IT makes, and a class of this file's is
     /// not one of them — which is why this was a decline. But the file knows every class of its own
@@ -2822,29 +2810,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// number is needed, because the implementor is in this file by the very condition that raised
     /// the decline.
     ///
-    /// The receiver is evaluated ONCE, before the tests, and both paths read that value — a
-    /// receiver with a side effect must not be evaluated per branch.
-    pub(super) fn dispatch_by_implementor(
-        &mut self,
-        implementors: &[(ClassId, u32, Ty)],
-        object: Value,
-        answer: Ty,
-        runtime: impl FnOnce(&mut Self, Value) -> Result<Option<Value>, Unsupported>,
-    ) -> Result<Option<Value>, Unsupported> {
-        let carried: Vec<(ClassId, u32, Vec<Ty>, Ty)> = implementors
-            .iter()
-            .map(|(class, slot, declared)| (*class, *slot, Vec::new(), *declared))
-            .collect();
-        self.dispatch_by_implementor_with(&carried, object, &[], answer, runtime)
-    }
-
-    /// The same, for a member that takes ARGUMENTS.
-    ///
-    /// Each operand is evaluated ONCE, before the tests, and converted per arm: an implementor's
-    /// own parameter type in its arm, the runtime entry point's carrier in the last one. That is
-    /// the whole of what an argument adds — the two sides state the operand differently and the
-    /// value is the same, so the conversion is the ordinary boundary one and nothing is evaluated
-    /// twice.
+    /// Each operand, the receiver included, is evaluated ONCE, before the tests, and converted per
+    /// arm: an implementor's own parameter type in its arm, the runtime entry point's carrier in
+    /// the last one. The two sides state the operand differently and the value is the same, so the
+    /// conversion is the ordinary boundary one and nothing is evaluated twice.
     pub(super) fn dispatch_by_implementor_with(
         &mut self,
         implementors: &[(ClassId, u32, Vec<Ty>, Ty)],

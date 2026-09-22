@@ -3448,6 +3448,23 @@ fn callee_kind(callee: &Callee) -> &'static str {
 
 /// A short phrase naming the construct, for the declining diagnostic.
 fn describe(node: &IrExpr) -> String {
+    // A CHECKED callable reference is one whose invocation common lowering did not turn into an
+    // adapter, so the target is what says which piece of work it is. Reporting the node alone put
+    // every one of them under one line of the backlog, which cannot be worked from.
+    if let IrExpr::Checked(IrCheckedOperation::CallableReference { target, .. }) = node {
+        use crate::fir::FirCallableReferenceTarget as Target;
+        return match target {
+            Target::Module(_) => {
+                "a reference to a declaration of this file, kept as a reflection value".to_string()
+            }
+            Target::ArrayFactory { .. } => "a reference to an array factory".to_string(),
+            Target::Constructor { .. } => "a reference to a CONSTRUCTOR".to_string(),
+            Target::External { .. } => "a reference to a DEPENDENCY declaration".to_string(),
+            Target::Classifier { .. } => {
+                "a reference to a classifier's implicit member".to_string()
+            }
+        };
+    }
     // The first two identifiers, not one: `Checked(Call { … })` and `Checked(PropertyRead { … })`
     // are different pieces of work, and a backlog that lumps them together cannot be worked from.
     let debug = format!("{node:?}");
