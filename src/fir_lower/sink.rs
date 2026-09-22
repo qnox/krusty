@@ -1094,6 +1094,9 @@ impl<'a> CommonIrBodySink<'a> {
                     .source_order(declaration)
                     .ok_or(FirFileLoweringFailure::MissingSourceOrder(declaration))?,
             );
+            if let Some(ordinal) = index.continuation_ordinal(declaration) {
+                self.ir.fn_continuation_ordinal.insert(function, ordinal);
+            }
             if let Some(bound) = index.callable_equality_bound(callable.id) {
                 self.ir.fn_equality_bounds.insert(function, bound.get());
             }

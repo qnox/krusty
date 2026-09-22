@@ -2444,9 +2444,9 @@ fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> boo
 /// and they do not share a spill layout, so whichever class loses the name resumes against fields it
 /// does not have (`NoSuchFieldError`). Both machines number the later one.
 ///
-/// Only a `suspend` overload counts. An ordinary overload of the same name declares no continuation,
-/// so it consumes none of the free ordinals this sequence hands out — it only contributes whatever
-/// anonymous objects its body declares, which are already named and therefore already excluded.
+/// This answers for a suspend function that has NO source declaration behind it — a lowering-made
+/// one, which no frontend pass could have reserved a position for. A declared function reads its
+/// position from [`continuation_ordinal`] instead of counting anything here.
 fn same_name_ordinal(ir: &IrFile, fid: u32) -> usize {
     let function = &ir.functions[fid as usize];
     let bare = |name: &str| name.split('-').next().unwrap_or(name).to_string();
@@ -2465,29 +2465,21 @@ fn same_name_ordinal(ir: &IrFile, fid: u32) -> usize {
 
 /// The 1-based `$N` the continuation class of `fid` takes in its `<owner>$<function>` sequence.
 ///
-/// That sequence also names the anonymous objects declared in those function bodies, which are
-/// named before any coroutine transform runs. The frontend leaves one ordinal free per suspend
-/// function, in declaration order, so the continuations are exactly the ordinals no object holds:
-/// the first suspend function of the sequence takes the first free one, the next overload the one
-/// after that.
-pub(crate) fn continuation_ordinal(ir: &IrFile, fid: u32, owner: &str, function: &str) -> usize {
-    let held_by_an_object = |ordinal: usize| {
-        let name = format!("{owner}${function}${ordinal}");
-        ir.classes
-            .iter()
-            .any(|class| class.fq_name == name && !class.superclass_matches(CONTINUATION_IMPL))
-    };
-    let mut ordinal = 0;
-    for _ in 0..=same_name_ordinal(ir, fid) {
-        ordinal += 1;
-        while held_by_an_object(ordinal) {
-            ordinal += 1;
-        }
+/// The sequence is shared with the anonymous objects those bodies declare, and the pass that names
+/// those objects is the one that leaves a position free for each suspend function, in declaration
+/// order. It publishes which position it left — `IrFile::fn_continuation_ordinal` — so there is one
+/// numbering, computed once. Nothing here re-derives it from a class name.
+pub(crate) fn continuation_ordinal(ir: &IrFile, fid: u32) -> usize {
+    match ir.fn_continuation_ordinal.get(&fid) {
+        Some(&ordinal) => ordinal as usize,
+        // No source declaration: nothing reserved a position, and no anonymous object of a
+        // generated body can hold one either, so the overloads simply number themselves.
+        None => same_name_ordinal(ir, fid) + 1,
     }
-    ordinal
 }
 
-/// The continuation class for an ordinal from [`continuation_ordinal`].
+/// The continuation class for an ordinal from [`continuation_ordinal`]. The one place a generated
+/// continuation class is spelled.
 pub(crate) fn continuation_class_name(owner: &str, function: &str, ordinal: usize) -> String {
     format!("{owner}${function}${ordinal}")
 }
@@ -2816,11 +2808,8 @@ fn build_state_machine(
     // kotlinc names `create-SCm-oBs`'s continuation `<Owner>$create$1`. `-` can't occur in a Kotlin
     // identifier, so it only ever separates the mangle hash — strip from the first `-`.
     let cont_fname = fname.split('-').next().unwrap_or(&fname);
-    let cont_internal = continuation_class_name(
-        &cont_owner,
-        cont_fname,
-        continuation_ordinal(ir, fid, &cont_owner, cont_fname),
-    );
+    let cont_internal =
+        continuation_class_name(&cont_owner, cont_fname, continuation_ordinal(ir, fid));
     let cont_ty = Ty::obj(&cont_internal);
 
     let base = max_value_index(ir) + 1;

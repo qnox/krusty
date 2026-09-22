@@ -350,7 +350,7 @@ pub(super) fn continuation_internal(
     owner: &str,
     function: &str,
 ) -> String {
-    let ordinal = crate::jvm::suspend::continuation_ordinal(ir, fid, owner, function);
+    let ordinal = crate::jvm::suspend::continuation_ordinal(ir, fid);
     crate::jvm::suspend::continuation_class_name(owner, function, ordinal)
 }
 

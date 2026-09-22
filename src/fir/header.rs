@@ -316,18 +316,38 @@ fn local_executable_owner(
         return Some(owner);
     }
 
-    match file
-        .anonymous_object_enclosing_functions
-        .get(&declaration)?
-    {
+    enclosing_function_identity(
+        file,
+        source,
+        ids,
+        classifier_ids,
+        *file
+            .anonymous_object_enclosing_functions
+            .get(&declaration)?,
+    )
+}
+
+/// The stable identity of a source function the parser recorded as an exact lexical enclosure.
+///
+/// The only way from [`crate::ast::AnonymousEnclosingFunction`] to a declaration id: it interns the
+/// same anchor `function_stub` does, so both sides name one declaration. Every consumer of that
+/// edge goes through here rather than matching on the variants again.
+pub(super) fn enclosing_function_identity(
+    file: &File,
+    source: SourceFileId,
+    ids: &mut DeclarationIds,
+    classifier_ids: &std::collections::HashMap<DeclId, DeclarationId>,
+    enclosing: crate::ast::AnonymousEnclosingFunction,
+) -> Option<DeclarationId> {
+    match enclosing {
         crate::ast::AnonymousEnclosingFunction::TopLevel(function) => {
-            let Decl::Fun(function_decl) = file.decl(*function) else {
+            let Decl::Fun(function_decl) = file.decl(function) else {
                 return None;
             };
             let sibling = u32::try_from(
                 file.decls
                     .iter()
-                    .position(|candidate| candidate == function)?,
+                    .position(|candidate| *candidate == function)?,
             )
             .ok()?;
             Some(ids.intern(DeclarationAnchor {
@@ -340,19 +360,19 @@ fn local_executable_owner(
         }
         crate::ast::AnonymousEnclosingFunction::Member { class, method } => {
             let owner = classifier_ids
-                .get(class)
+                .get(&class)
                 .copied()
-                .or_else(|| classifier_identity(file, source, ids, *class))?;
-            let Decl::Class(class_decl) = file.decl(*class) else {
+                .or_else(|| classifier_identity(file, source, ids, class))?;
+            let Decl::Class(class_decl) = file.decl(class) else {
                 return None;
             };
-            let function = class_decl.methods.get(*method as usize)?;
+            let function = class_decl.methods.get(method as usize)?;
             Some(ids.intern(DeclarationAnchor {
                 source,
                 range: function.span,
                 owner: Some(owner),
                 kind: DeclarationKind::Function,
-                sibling: *method,
+                sibling: method,
             }))
         }
     }
@@ -1134,6 +1154,10 @@ struct ExtractedFileStubs {
     /// The `expect` keyword each header declaration of this file was introduced by, recorded while
     /// the parser unit is live because nothing afterwards can answer it.
     expect_keywords: Vec<(DeclarationId, TextRange)>,
+    /// The generated-class position each `suspend` function's continuation holds, bound to that
+    /// function's stable identity. The parser pass that numbers the sequence is the only one that
+    /// can say which positions are free; this carries its answer past the AST.
+    continuation_ordinals: Vec<(DeclarationId, u32)>,
 }
 
 /// Extract syntax-independent declaration/body locations from one transient file AST. The returned
@@ -2000,6 +2024,46 @@ fn extract_file_stub_inventory(
             break;
         }
     }
+    // The reservation the anonymous-object naming pass made for each suspend function, bound to the
+    // identity its own stub already interned. Look the anchor up, never intern one: a second anchor
+    // for a declaration that has one is a second identity for it.
+    let position = |wanted: DeclId| file.decls.iter().position(|decl| *decl == wanted);
+    let mut continuation_ordinals = file
+        .suspend_continuation_ordinals
+        .iter()
+        .filter_map(|(&function, &ordinal)| {
+            let declaration = match function {
+                crate::ast::AnonymousEnclosingFunction::TopLevel(declaration) => {
+                    let Decl::Fun(function) = file.decl(declaration) else {
+                        return None;
+                    };
+                    ids.get(DeclarationAnchor {
+                        source,
+                        range: function.span,
+                        owner: None,
+                        kind: DeclarationKind::Function,
+                        sibling: u32::try_from(position(declaration)?).ok()?,
+                    })?
+                }
+                crate::ast::AnonymousEnclosingFunction::Member { class, method } => {
+                    let owner = source_declarations[position(class)?]?;
+                    let Decl::Class(class) = file.decl(class) else {
+                        return None;
+                    };
+                    ids.get(DeclarationAnchor {
+                        source,
+                        range: class.methods.get(method as usize)?.span,
+                        owner: Some(owner),
+                        kind: DeclarationKind::Function,
+                        sibling: method,
+                    })?
+                }
+            };
+            Some((declaration, ordinal))
+        })
+        .collect::<Vec<_>>();
+    // A map iterates in no order; the stubs this travels beside are a sequence.
+    continuation_ordinals.sort_unstable();
     ExtractedFileStubs {
         stubs,
         source_declarations: source_declarations
@@ -2009,6 +2073,7 @@ fn extract_file_stub_inventory(
             })
             .collect(),
         expect_keywords,
+        continuation_ordinals,
     }
 }
 
@@ -2829,6 +2894,10 @@ pub struct StreamedHeaderModule {
     /// declaration — a search with no answer for a synthesized declaration and a wrong one whenever
     /// two headers share a line. One entry per `expect` declaration.
     pub expect_keywords: std::collections::HashMap<DeclarationId, TextRange>,
+    /// The generated-class position each `suspend` function's continuation holds in its scope's
+    /// sequence, 1-based in declaration order. Only the parser pass that numbers that sequence can
+    /// answer it, so it is carried rather than recomputed. A backend builds the spelling.
+    pub continuation_ordinals: std::collections::HashMap<DeclarationId, u32>,
     /// Complete parser declaration-stream order before semantic exclusions. These are stable
     /// header identities, not source offsets or parser arena ids.
     pub(super) inventory: Vec<DeclarationId>,
@@ -3534,6 +3603,7 @@ pub struct HeaderInventoryBuilder {
     stubs: Vec<DeclarationStub>,
     inventory: Vec<DeclarationId>,
     expect_keywords: std::collections::HashMap<DeclarationId, TextRange>,
+    continuation_ordinals: std::collections::HashMap<DeclarationId, u32>,
     source_declarations: Vec<Vec<DeclarationId>>,
     local_classifier_lexical_roots: std::collections::HashMap<DeclarationId, DeclarationId>,
     inventoried: Vec<bool>,
@@ -3602,6 +3672,8 @@ impl HeaderInventoryBuilder {
         order_file_stubs(&mut stubs, &self.declarations);
         self.source_declarations[source.raw() as usize] = extracted.source_declarations;
         self.expect_keywords.extend(extracted.expect_keywords);
+        self.continuation_ordinals
+            .extend(extracted.continuation_ordinals);
         self.visibility_suppressions.add_file(source, file, &stubs);
         let primary_stub = |declaration: DeclId| {
             let (kind, range) = match file.decl(declaration) {
@@ -3716,6 +3788,7 @@ impl HeaderInventoryBuilder {
             visibility_suppressions: self.visibility_suppressions,
             stubs: self.stubs,
             expect_keywords: self.expect_keywords,
+            continuation_ordinals: self.continuation_ordinals,
             inventory: self.inventory,
             source_declarations: self.source_declarations,
             local_classifier_lexical_roots: self.local_classifier_lexical_roots,
