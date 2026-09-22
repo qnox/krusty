@@ -223,6 +223,22 @@ fn walk_symbol(
         // ordinary function value of two arguments here, which is what a `Comparator` this runtime
         // makes IS — see `intrinsics::runtime_functional_interface`.
         ("sortedWith", 1) => ("kt_iterable_sorted_with", vec![any(), any()], any()),
+        // The same sort ordered by the elements themselves, or by what a selector answers for
+        // them. `sortedBy` asks the selector once per COMPARISON, which is what Kotlin's own does.
+        ("sorted", 0) => ("kt_iterable_sorted", vec![any()], any()),
+        ("sortedBy", 1) => ("kt_iterable_sorted_by", vec![any(), any()], any()),
+        ("minOrNull", 0) => ("kt_iterable_min_or_null", vec![any()], any()),
+        ("maxOrNull", 0) => ("kt_iterable_max_or_null", vec![any()], any()),
+        ("minByOrNull", 1) => ("kt_iterable_min_by_or_null", vec![any(), any()], any()),
+        ("maxByOrNull", 1) => ("kt_iterable_max_by_or_null", vec![any(), any()], any()),
+        // `sum` is `sumOf` over the elements themselves, and is dispatched the same way: the
+        // ANSWER's width says which entry point, and a width with no entry point keeps declining
+        // rather than summing at another's and narrowing afterwards.
+        ("sum", 0) => match ret.non_null() {
+            Ty::Int => ("kt_iterable_sum_int", vec![any()], Ty::Int),
+            Ty::Long => ("kt_iterable_sum_long", vec![any()], Ty::Long),
+            _ => return None,
+        },
         ("any", 1) => ("kt_iterable_any", vec![any(), any()], Ty::Boolean),
         ("any", 0) => ("kt_iterable_is_not_empty", vec![any()], Ty::Boolean),
         ("all", 1) => ("kt_iterable_all", vec![any(), any()], Ty::Boolean),
@@ -356,6 +372,9 @@ fn list_symbol(name: &str, arity: usize, physical: &[Ty]) -> Option<(&'static st
         ("last", 0) => ("kt_list_last", vec![any()], any()),
         // `list.sortWith(comparator)`, which writes through the receiver and answers nothing.
         ("sortWith", 1) => ("kt_list_sort_with", vec![any(), any()], Ty::Unit),
+        // `list.sort()`: the same sort ordered by the elements themselves. A LIST member rather
+        // than a walk, because it writes through the receiver instead of answering a new list.
+        ("sort", 0) => ("kt_list_sort", vec![any()], Ty::Unit),
         ("indexOf", 1) => ("kt_list_index_of", vec![any(), any()], Ty::Int),
         ("lastIndexOf", 1) => ("kt_list_last_index_of", vec![any(), any()], Ty::Int),
         ("contains", 1) => ("kt_list_contains", vec![any(), any()], Ty::Boolean),

@@ -7311,6 +7311,26 @@ and behavior is checked by RUNNING the emitted program.
   Tests: `tests/native_iterable_walk_members_e2e.rs`
   (`a_walk_finds_the_first_element_matching_a_predicate`).
 
+- **A sort is STABLE, and `sortedBy` asks its selector once per COMPARISON.** The runtime sorts by
+  insertion, so equal elements keep the order the walk gave them, which is what Kotlin promises.
+  Kotlin's own `sortedBy` is `sortedWith(compareBy(selector))`, which calls the selector inside the
+  comparator rather than once per element — a difference a selector with a side effect can see, so
+  the runtime does the same.
+  Tests: `tests/native_iterable_walk_members_e2e.rs`
+  (`a_walk_sorts_by_its_elements_or_by_a_selector`).
+
+- **`minOrNull`/`maxOrNull` answer the FIRST of several equal winners.** The comparison a candidate
+  must win is strict, so a later element that merely ties does not displace the incumbent — which
+  is how Kotlin's are written and is observable whenever the elements are distinguishable beyond
+  what the ordering compares (`minByOrNull` on equal keys).
+  Tests: `tests/native_iterable_walk_members_e2e.rs`
+  (`a_walk_answers_its_smallest_and_largest_element`).
+
+- **`sort()` is the LIST's, `sorted()` is the walk's.** `sort` reorders the receiver and answers
+  nothing; `sorted` leaves it alone and answers a new read-only list. They are different members,
+  not two spellings.
+  Tests: `tests/native_iterable_walk_members_e2e.rs` (`a_mutable_list_sorts_itself_in_place`).
+
 - **`isEmpty`/`isNotEmpty` are asked of a `Collection`, not of an `Iterable`.** Kotlin declares
   neither over `Iterable` — `isEmpty` is a member of `Collection` and `isNotEmpty` an extension of
   it — so a receiver typed `Iterable` does not have them to be asked at all.

@@ -437,10 +437,26 @@ KRef kt_iterable_to_list(KRef iterable);
    a `Function2`, nothing but its one member ever being asked of it — so the comparison goes through
    the same invoke slot every function value declares. STABLE, as Kotlin's are. */
 void kt_list_sort_with(KRef list, KRef comparator);
+/* `list.sort()`: the same stable sort ordered by the elements themselves, in place. */
+void kt_list_sort(KRef list);
 /* `comparator.compare(a, b)` written out by a program: the same invoke the sort makes, with the
    boxed answer unwrapped to the `Int` the call site asked for. */
 kt_int kt_comparator_compare(KRef comparator, KRef left, KRef right);
 KRef kt_iterable_sorted_with(KRef iterable, KRef comparator);
+/* `xs.sorted()` and `xs.sortedBy { … }`: the same new list, ordered by the elements themselves or
+   by what the selector answers for them. */
+KRef kt_iterable_sorted(KRef iterable);
+KRef kt_iterable_sorted_by(KRef iterable, KRef selector);
+/* The extremes of a walk, or null for an empty one. The FIRST of several equal winners comes back,
+   as Kotlin's do; the `…By` forms order by the selector and still answer the element. */
+KRef kt_iterable_min_or_null(KRef iterable);
+KRef kt_iterable_max_or_null(KRef iterable);
+KRef kt_iterable_min_by_or_null(KRef iterable, KRef selector);
+KRef kt_iterable_max_by_or_null(KRef iterable, KRef selector);
+/* `xs.sum()`, one per width the ELEMENTS are; see `kt_iterable_sum_of_int` for why a width with no
+   entry point declines rather than borrowing another's. */
+kt_int kt_iterable_sum_int(KRef iterable);
+kt_long kt_iterable_sum_long(KRef iterable);
 KRef kt_iterable_reversed(KRef iterable);
 kt_int kt_iterable_index_of(KRef iterable, KRef value);
 kt_boolean kt_iterable_contains(KRef iterable, KRef value);

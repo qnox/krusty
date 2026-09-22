@@ -249,3 +249,77 @@ fun box(): String {
 "#;
     every_backend_agrees_with_kotlinc("native_list_last_index_of", source);
 }
+
+/// `sorted`/`sortedBy` order by the elements or by what a selector answers; neither touches the
+/// receiver, and both are STABLE — equal elements keep the order the walk gave them.
+#[test]
+fn a_walk_sorts_by_its_elements_or_by_a_selector() {
+    let source = r#"
+fun box(): String {
+    val xs = listOf(3, 1, 2)
+    if (xs.sorted() != listOf(1, 2, 3)) return "fail sorted"
+    if (xs != listOf(3, 1, 2)) return "fail receiver changed"
+    if (listOf("bb", "a", "ccc").sortedBy { it.length } != listOf("a", "bb", "ccc")) return "fail by"
+    if (listOf<Int>().sorted().isNotEmpty()) return "fail empty"
+    val pairs = listOf("bx", "ay", "az", "bw")
+    if (pairs.sortedBy { it.first() } != listOf("ay", "az", "bx", "bw")) return "fail stable"
+    return "OK"
+}
+"#;
+    every_backend_agrees_with_kotlinc("native_walk_sorted", source);
+}
+
+/// `sort()` is the LIST's own: it reorders the receiver and answers nothing.
+#[test]
+fn a_mutable_list_sorts_itself_in_place() {
+    let source = r#"
+fun box(): String {
+    val xs = mutableListOf(3, 1, 2)
+    xs.sort()
+    if (xs != listOf(1, 2, 3)) return "fail " + xs
+    val empty = mutableListOf<Int>()
+    empty.sort()
+    if (empty.isNotEmpty()) return "fail empty"
+    return "OK"
+}
+"#;
+    every_backend_agrees_with_kotlinc("native_list_sort", source);
+}
+
+/// The extremes of a walk, by the elements and by a selector. An empty walk answers null, and the
+/// FIRST of several equal winners is the one that comes back.
+#[test]
+fn a_walk_answers_its_smallest_and_largest_element() {
+    let source = r#"
+fun box(): String {
+    val xs = listOf(3, 1, 2)
+    if (xs.minOrNull() != 1) return "fail min"
+    if (xs.maxOrNull() != 3) return "fail max"
+    if (listOf<Int>().minOrNull() != null) return "fail empty min"
+    if (listOf<Int>().maxOrNull() != null) return "fail empty max"
+    val words = listOf("bb", "a", "ccc")
+    if (words.minByOrNull { it.length } != "a") return "fail min by"
+    if (words.maxByOrNull { it.length } != "ccc") return "fail max by"
+    val ties = listOf("ax", "ay", "az")
+    if (ties.minByOrNull { it.length } != "ax") return "fail first of equal minima"
+    if (ties.maxByOrNull { it.length } != "ax") return "fail first of equal maxima"
+    return "OK"
+}
+"#;
+    every_backend_agrees_with_kotlinc("native_walk_min_max", source);
+}
+
+/// `sum` is `sumOf` over the elements themselves, at the width the elements are.
+#[test]
+fn a_walk_sums_its_elements() {
+    let source = r#"
+fun box(): String {
+    if (listOf(1, 2, 3).sum() != 6) return "fail int"
+    if (listOf<Int>().sum() != 0) return "fail empty"
+    if (listOf(1L, 2L).sum() != 3L) return "fail long"
+    if ((1..4).sum() != 10) return "fail range"
+    return "OK"
+}
+"#;
+    every_backend_agrees_with_kotlinc("native_walk_sum", source);
+}

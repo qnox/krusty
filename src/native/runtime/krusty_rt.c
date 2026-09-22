@@ -3431,14 +3431,31 @@ kt_int kt_comparator_compare(KRef comparator, KRef left, KRef right) {
     return kt_unbox_int(answer);
 }
 
-void kt_list_sort_with(KRef list, KRef comparator) {
+/* One stable insertion sort, three orderings. `comparator` orders a pair itself; `selector` orders
+   by what it answers for each element; with neither, the elements are compared by their own natural
+   order. Insertion sort is what `sortWith` already used and is what keeps Kotlin's promise about
+   equal elements — a sort here is STABLE.
+
+   A `selector` is asked once per COMPARISON rather than once per element, which is what Kotlin's
+   own `sortedBy` does (`sortedWith(compareBy(selector))` calls it inside the comparator), and the
+   difference is observable through a selector with a side effect. */
+static void kt_list_sorted_in_place(KRef list, KRef comparator, KRef selector) {
     kt_int size = kt_list_size(list);
     for (kt_int at = 1; at < size; at++) {
         kt_int hole = at;
         while (hole > 0) {
             KRef previous = kt_list_get(list, hole - 1);
             KRef current = kt_list_get(list, hole);
-            if (kt_comparator_compare(comparator, previous, current) <= 0) {
+            kt_int order;
+            if (comparator != NULL) {
+                order = kt_comparator_compare(comparator, previous, current);
+            } else if (selector != NULL) {
+                order = kt_compare_any(kt_invoke_one(selector, previous),
+                                       kt_invoke_one(selector, current));
+            } else {
+                order = kt_compare_any(previous, current);
+            }
+            if (order <= 0) {
                 break;
             }
             (void)kt_mutable_list_set(list, hole - 1, current);
@@ -3447,6 +3464,13 @@ void kt_list_sort_with(KRef list, KRef comparator) {
         }
     }
 }
+
+void kt_list_sort_with(KRef list, KRef comparator) {
+    kt_list_sorted_in_place(list, comparator, NULL);
+}
+
+/* `list.sort()`: the receiver reordered by its elements' own order, answering nothing. */
+void kt_list_sort(KRef list) { kt_list_sorted_in_place(list, NULL, NULL); }
 
 static KRef kt_invoke_three(KRef function, KRef first, KRef second, KRef third) {
     if (function == NULL || function->header.type->vtable == NULL ||
@@ -3663,6 +3687,85 @@ KRef kt_iterable_sorted_with(KRef iterable, KRef comparator) {
     }
     kt_list_sort_with(growing, comparator);
     return kt_frozen(growing, 0);
+}
+
+/* `xs.sorted()` and `xs.sortedBy { … }`: the same snapshot-sort-freeze as `sortedWith`, ordered by
+   the elements themselves or by what the selector answers for them. */
+static KRef kt_iterable_sorted_by_order(KRef iterable, KRef selector) {
+    KRef growing = kt_mutable_list_new();
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        (void)kt_mutable_list_add(growing, kt_iterator_next(iterator));
+    }
+    kt_list_sorted_in_place(growing, NULL, selector);
+    return kt_frozen(growing, 0);
+}
+
+KRef kt_iterable_sorted(KRef iterable) { return kt_iterable_sorted_by_order(iterable, NULL); }
+
+KRef kt_iterable_sorted_by(KRef iterable, KRef selector) {
+    return kt_iterable_sorted_by_order(iterable, selector);
+}
+
+/* `xs.minOrNull()`, `xs.maxOrNull()` and their `…ByOrNull` forms: one walk, keeping the element
+   that wins. Null for an empty walk — that is what the `OrNull` in the name is — and the FIRST of
+   several equal winners, which is what Kotlin keeps too, because the comparison has to be strict
+   for a later equal element to lose.
+
+   `wanted` is the sign the comparison must have for a candidate to displace the incumbent, so one
+   walk serves both directions. A `selector` orders by what it answers rather than by the element,
+   but the element is still what comes back. */
+static KRef kt_iterable_extreme(KRef iterable, KRef selector, kt_int wanted) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    if (!kt_iterator_has_next(iterator)) {
+        return NULL;
+    }
+    KRef best = kt_iterator_next(iterator);
+    KRef best_key = selector == NULL ? best : kt_invoke_one(selector, best);
+    while (kt_iterator_has_next(iterator)) {
+        KRef element = kt_iterator_next(iterator);
+        KRef key = selector == NULL ? element : kt_invoke_one(selector, element);
+        kt_int order = kt_compare_any(key, best_key);
+        if ((wanted < 0 && order < 0) || (wanted > 0 && order > 0)) {
+            best = element;
+            best_key = key;
+        }
+    }
+    return best;
+}
+
+KRef kt_iterable_min_or_null(KRef iterable) { return kt_iterable_extreme(iterable, NULL, -1); }
+
+KRef kt_iterable_max_or_null(KRef iterable) { return kt_iterable_extreme(iterable, NULL, 1); }
+
+KRef kt_iterable_min_by_or_null(KRef iterable, KRef selector) {
+    return kt_iterable_extreme(iterable, selector, -1);
+}
+
+KRef kt_iterable_max_by_or_null(KRef iterable, KRef selector) {
+    return kt_iterable_extreme(iterable, selector, 1);
+}
+
+/* `xs.sum()`, one per width the ELEMENTS are. `sumOf` sums what a selector answers; this sums the
+   elements themselves, and is otherwise the same promise — a width with no entry point declines
+   rather than borrowing another's, because summing at one width and narrowing afterwards is a
+   different answer on overflow. */
+kt_int kt_iterable_sum_int(KRef iterable) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    kt_int total = 0;
+    while (kt_iterator_has_next(iterator)) {
+        total = (kt_int)((uint32_t)total + (uint32_t)kt_unbox_int(kt_iterator_next(iterator)));
+    }
+    return total;
+}
+
+kt_long kt_iterable_sum_long(KRef iterable) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    kt_long total = 0;
+    while (kt_iterator_has_next(iterator)) {
+        total = (kt_long)((uint64_t)total + (uint64_t)kt_unbox_long(kt_iterator_next(iterator)));
+    }
+    return total;
 }
 
 /* `value in xs` and `xs.indexOf(value)` over an ITERABLE. Elements are compared with `equals`, as
