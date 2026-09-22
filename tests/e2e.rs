@@ -1070,6 +1070,7 @@ mod native_collection_indices_e2e;
 mod native_collection_shape_guard_e2e;
 #[path = "native_collection_walks_e2e.rs"]
 mod native_collection_walks_e2e;
+
 #[path = "native_comparable_e2e.rs"]
 mod native_comparable_e2e;
 #[path = "native_comparable_ranges_e2e.rs"]
@@ -1116,6 +1117,8 @@ mod native_implemented_dependency_dispatch_e2e;
 mod native_interface_bridges_e2e;
 #[path = "native_interface_implementations_e2e.rs"]
 mod native_interface_implementations_e2e;
+#[path = "native_iterable_walk_members_e2e.rs"]
+mod native_iterable_walk_members_e2e;
 #[path = "native_lists_e2e.rs"]
 mod native_lists_e2e;
 #[path = "native_maps_e2e.rs"]

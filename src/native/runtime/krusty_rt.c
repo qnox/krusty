@@ -3684,6 +3684,124 @@ kt_boolean kt_iterable_contains(KRef iterable, KRef value) {
     return kt_iterable_index_of(iterable, value) >= 0;
 }
 
+/* `xs.first()` and `xs.last()` over an ITERABLE, with no predicate: the ends of the walk.
+
+   A LIST receiver is kept out of these by the call site, which leaves the two names to
+   `kt_list_first`/`kt_list_last` so they can read its array directly. That is why the wording here
+   is the one Kotlin uses for a walk it cannot index — "Collection is empty." — rather than the
+   list form's "List is empty."; the two really do differ, which is what the gate is for. */
+KRef kt_iterable_first(KRef iterable) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    if (kt_iterator_has_next(iterator)) {
+        return kt_iterator_next(iterator);
+    }
+    kt_throw(kt_throwable_new(&kt_type_no_such_element_exception,
+                              kt_string_utf8("Collection is empty.", 20)));
+    return NULL;
+}
+
+KRef kt_iterable_last(KRef iterable) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    if (!kt_iterator_has_next(iterator)) {
+        kt_throw(kt_throwable_new(&kt_type_no_such_element_exception,
+                                  kt_string_utf8("Collection is empty.", 20)));
+        return NULL;
+    }
+    KRef last = kt_iterator_next(iterator);
+    while (kt_iterator_has_next(iterator)) {
+        last = kt_iterator_next(iterator);
+    }
+    return last;
+}
+
+/* `xs.singleOrNull()`: the one element, or null for a walk of any other length. Null for a walk of
+   TWO as much as for an empty one — that is what separates it from `single()`, which raises. The
+   walk stops at the second element, because knowing there is one is the whole answer. */
+KRef kt_iterable_single_or_null(KRef iterable) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    if (!kt_iterator_has_next(iterator)) {
+        return NULL;
+    }
+    KRef only = kt_iterator_next(iterator);
+    if (kt_iterator_has_next(iterator)) {
+        return NULL;
+    }
+    return only;
+}
+
+/* `xs.mapNotNull { … }`: the transform's answers, with the nulls dropped.
+
+   The ELEMENT may be null and still be asked — the transform is what decides, not the element —
+   so this filters the answer rather than the input. The result grows, because how many answers
+   survive is not known before the walk. */
+KRef kt_iterable_map_not_null(KRef iterable, KRef transform) {
+    KRef growing = kt_mutable_list_new();
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        KRef mapped = kt_invoke_one(transform, kt_iterator_next(iterator));
+        if (mapped != NULL) {
+            kt_mutable_list_add(growing, mapped);
+        }
+    }
+    return kt_frozen(growing, 0);
+}
+
+/* `xs.drop(n)`: everything after the first `n` elements, as a new read-only list. A count past the
+   end is not an error — the answer is empty — but a NEGATIVE one is, and Kotlin says so with
+   `IllegalArgumentException` rather than quietly treating it as zero. */
+KRef kt_iterable_drop(KRef iterable, kt_int count) {
+    if (count < 0) {
+        kt_throw(kt_throwable_new(
+            &kt_type_illegal_argument_exception,
+            kt_string_utf8("Requested element count is less than zero.", 42)));
+        return NULL;
+    }
+    KRef growing = kt_mutable_list_new();
+    KRef iterator = kt_iterable_iterator(iterable);
+    kt_int left = count;
+    while (kt_iterator_has_next(iterator)) {
+        KRef element = kt_iterator_next(iterator);
+        if (left > 0) {
+            left--;
+            continue;
+        }
+        kt_mutable_list_add(growing, element);
+    }
+    return kt_frozen(growing, 0);
+}
+
+/* `xs.reduce { acc, e -> … }`: `fold` with the FIRST element as the initial accumulator, so an
+   empty walk has no answer to give at all. Kotlin raises `UnsupportedOperationException` for that,
+   not the `NoSuchElementException` the element accessors raise. */
+KRef kt_iterable_reduce(KRef iterable, KRef operation) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    if (!kt_iterator_has_next(iterator)) {
+        kt_throw(kt_throwable_new(&kt_type_unsupported_operation_exception,
+                                  kt_string_utf8("Empty collection can't be reduced.", 34)));
+        return NULL;
+    }
+    KRef accumulator = kt_iterator_next(iterator);
+    while (kt_iterator_has_next(iterator)) {
+        accumulator = kt_invoke_two(operation, accumulator, kt_iterator_next(iterator));
+    }
+    return accumulator;
+}
+
+/* `xs.lastIndexOf(value)` over an ITERABLE. The whole walk runs — unlike `indexOf`, which stops at
+   the first match — because a later match is what the answer is. */
+kt_int kt_iterable_last_index_of(KRef iterable, KRef value) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    kt_int at = 0;
+    kt_int found = -1;
+    while (kt_iterator_has_next(iterator)) {
+        if (kt_equals(kt_iterator_next(iterator), value)) {
+            found = at;
+        }
+        at++;
+    }
+    return found;
+}
+
 /* `xs + x` and `xs + ys`: a NEW read-only list, never a change to the receiver — that is what
    separates `plus` from `plusAssign`, and Kotlin's contract is that a `List` cannot be changed at
    all. Which of the two a call means is the CALLER's answer, read from the physical parameter the

@@ -444,6 +444,22 @@ KRef kt_iterable_sorted_with(KRef iterable, KRef comparator);
 KRef kt_iterable_reversed(KRef iterable);
 kt_int kt_iterable_index_of(KRef iterable, KRef value);
 kt_boolean kt_iterable_contains(KRef iterable, KRef value);
+kt_int kt_iterable_last_index_of(KRef iterable, KRef value);
+
+/* The ends of a walk, and the walk of length one. A LIST receiver reaches `kt_list_first`/
+   `kt_list_last` instead, which read its array; these are for everything else that walks. */
+KRef kt_iterable_first(KRef iterable);
+KRef kt_iterable_last(KRef iterable);
+KRef kt_iterable_single_or_null(KRef iterable);
+/* `xs.mapNotNull { … }`: the transform's answers with the nulls dropped — the ELEMENT may be null
+   and still be asked. */
+KRef kt_iterable_map_not_null(KRef iterable, KRef transform);
+/* `xs.drop(n)`: everything after the first `n`. A count past the end is empty, a negative one is
+   `IllegalArgumentException`. */
+KRef kt_iterable_drop(KRef iterable, kt_int count);
+/* `xs.reduce { … }`: `fold` starting from the first element, so an empty walk has no answer and
+   raises `UnsupportedOperationException`. */
+KRef kt_iterable_reduce(KRef iterable, KRef operation);
 
 /* `xs + x` and `xs + ys`: a NEW read-only list. Which one a call means is decided by the CALLER
    from the declaration's physical parameter, as it is for `plusAssign`. */

@@ -200,8 +200,22 @@ fn walk_symbol(
     name: &str,
     arity: usize,
     ret: Ty,
+    over_list: bool,
 ) -> Option<(&'static str, Vec<Ty>, Ty)> {
     if role != IterationRole::Iterable {
+        return None;
+    }
+    // A LIST answers these four from its ARRAY, and this table is consulted first — so without
+    // this the walk would shadow `list_symbol` and `listOf<Int>().first()` would raise Kotlin's
+    // "Collection is empty." where it says "List is empty.". Only these four: the names below
+    // that a list also answers — `indexOf`, `contains` — ask the elements the same question and
+    // give the same answer whichever path runs.
+    if over_list
+        && matches!(
+            (name, arity),
+            ("first", 0) | ("last", 0) | ("isEmpty", 0) | ("lastIndexOf", 1)
+        )
+    {
         return None;
     }
     Some(match (name, arity) {
@@ -220,7 +234,25 @@ fn walk_symbol(
         ("filterNot", 1) => ("kt_iterable_filter_not", vec![any(), any()], any()),
         ("first", 1) => ("kt_iterable_first_matching", vec![any(), any()], any()),
         ("firstOrNull", 1) => ("kt_iterable_first_or_null", vec![any(), any()], any()),
+        // `find` IS `firstOrNull` with a predicate — Kotlin declares it as an alias and gives it
+        // the same body — so the two names reach one runtime function rather than two alike.
+        ("find", 1) => ("kt_iterable_first_or_null", vec![any(), any()], any()),
         ("last", 1) => ("kt_iterable_last_matching", vec![any(), any()], any()),
+        // The ends of the walk, with no predicate. A LIST receiver never arrives here: its own
+        // table answers `first`/`last` by indexing the array, which is the same answer cheaper.
+        ("first", 0) => ("kt_iterable_first", vec![any()], any()),
+        ("last", 0) => ("kt_iterable_last", vec![any()], any()),
+        ("singleOrNull", 0) => ("kt_iterable_single_or_null", vec![any()], any()),
+        // Asked of an iterable rather than of a collection: `any()`/`none()` are the same two
+        // questions, and a program that writes these names deserves them under their own.
+        ("isNotEmpty", 0) => ("kt_iterable_is_not_empty", vec![any()], Ty::Boolean),
+        ("isEmpty", 0) => ("kt_iterable_is_empty", vec![any()], Ty::Boolean),
+        ("mapNotNull", 1) => ("kt_iterable_map_not_null", vec![any(), any()], any()),
+        ("reduce", 1) => ("kt_iterable_reduce", vec![any(), any()], any()),
+        ("lastIndexOf", 1) => ("kt_iterable_last_index_of", vec![any(), any()], Ty::Int),
+        // The count is an `Int` the generator must not box to pass, which is why the signature is
+        // spelled out rather than taken as a reference like the operands above.
+        ("drop", 1) => ("kt_iterable_drop", vec![any(), Ty::Int], any()),
         ("fold", 2) => ("kt_iterable_fold", vec![any(), any(), any()], any()),
         ("forEachIndexed", 1) => ("kt_iterable_for_each_indexed", vec![any(), any()], Ty::Unit),
         ("toList", 0) => ("kt_iterable_to_list", vec![any()], any()),
@@ -890,9 +922,14 @@ impl BodyLowering<'_, '_, '_> {
         let written = self.written_arity(name, args);
         let args = &args[args.len() - written..];
         let over_text = is_text(ty);
+        // A list whose elements the runtime owns: `list_symbol` answers for it further down, and
+        // the few names both tables carry are left to that one; see [`walk_symbol`]. Where the
+        // FILE puts a class of its own behind the list type, the list path declines outright and
+        // the walk is the only answer there is.
+        let over_list = is_list(ty) && !self.file.implements_collection_of(ty);
         let (symbol, carried, answer) = interface_symbol(role, name, written).or_else(|| {
             (!over_text)
-                .then(|| walk_symbol(role, name, written, ret))
+                .then(|| walk_symbol(role, name, written, ret, over_list))
                 .flatten()
         })?;
         Some(self.list_call(symbol, &carried, answer, receiver, args, ret))

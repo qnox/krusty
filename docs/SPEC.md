@@ -7294,6 +7294,28 @@ The native backend has no `kotlinc` to be differential against — Kotlin/Native
 bitcode, not comparable bytes — so each decision below is recorded here with the test that pins it,
 and behavior is checked by RUNNING the emitted program.
 
+- **A walk answers `first`/`last`/`isEmpty`/`lastIndexOf` only for a receiver the runtime cannot
+  index.** The walk table is consulted before the list table, so an entry added to it shadows the
+  list's. For most shared names that is harmless — `indexOf` and `contains` ask the elements the
+  same question either way — but `first`/`last` are not: Kotlin's list form raises
+  `NoSuchElementException("List is empty.")` where the walk form says `"Collection is empty."`. The
+  call site therefore holds those four names back for a list whose elements the runtime owns, and
+  hands them to the walk only where the file puts a class of its own behind the collection type, in
+  which case the list path declines outright and the walk is the only answer there is.
+  Tests: `tests/native_iterable_walk_members_e2e.rs`
+  (`an_empty_walk_raises_with_the_collection_wording`,
+  `an_empty_list_still_raises_with_the_list_wording`).
+
+- **`find` is `firstOrNull` with a predicate.** Kotlin declares it as an alias with the same body,
+  so both names reach one runtime function rather than two alike.
+  Tests: `tests/native_iterable_walk_members_e2e.rs`
+  (`a_walk_finds_the_first_element_matching_a_predicate`).
+
+- **`isEmpty`/`isNotEmpty` are asked of a `Collection`, not of an `Iterable`.** Kotlin declares
+  neither over `Iterable` — `isEmpty` is a member of `Collection` and `isNotEmpty` an extension of
+  it — so a receiver typed `Iterable` does not have them to be asked at all.
+  Tests: `tests/native_iterable_walk_members_e2e.rs` (`a_collection_answers_whether_it_is_empty`).
+
 - **`Int?` is a reference, `Int` is a machine scalar.** A nullable primitive has to represent
   `null`, so it boxes, exactly as it does on the JVM. Anything else would need a sentinel value,
   and Kotlin has no integer that is not a legal `Int`.
