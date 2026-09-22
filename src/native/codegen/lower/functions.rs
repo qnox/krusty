@@ -319,6 +319,15 @@ impl<'a> FileLowering<'a> {
             let base = format!("kt_fn_{index}");
             let descriptor = self.declare_local_data(&format!("kt_type_{base}"), false)?;
             let any_type = self.import_data("kt_type_any")?;
+            // A conversion to a functional interface the RUNTIME knows changes nothing about the
+            // object: nothing but its single member is ever asked of it, and both the runtime and a
+            // call site that can see the type reach that member through the one invoke slot every
+            // function value declares. So it is built as the plain function value it already is,
+            // with no interface table and no program-wide member number.
+            let sam = sam.filter(|target| {
+                super::super::super::intrinsics::runtime_functional_interface(target.classifier)
+                    .is_none()
+            });
             match &sam {
                 // Converted to a `fun interface`: the object wears that interface's type, so its
                 // table has to be one a caller can dispatch through — full length, with the

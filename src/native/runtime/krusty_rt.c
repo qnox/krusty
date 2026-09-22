@@ -3230,6 +3230,41 @@ static KRef kt_invoke_two(KRef function, KRef first, KRef second) {
                                                                                       second);
 }
 
+/* `list.sortWith(comparator)` / `xs.sortedWith(comparator)`. The comparator is an ordinary
+   function value of two arguments — a `Comparator` this runtime makes is a `Function2`, because
+   nothing but its one member is ever asked of it — so the comparison goes through the same invoke
+   slot every function value declares, and its answer arrives BOXED.
+
+   An INSERTION sort, which is stable, and stability is observable: Kotlin's `sortWith` promises it,
+   so two elements the comparator calls equal keep the order they were in. It is quadratic, and the
+   corpus's lists are small; a merge sort would need a scratch buffer this has no reason to allocate
+   yet. The comparison can collect — it is emitted code — and nothing here holds a raw element
+   pointer across one: each step re-reads through the list. */
+kt_int kt_comparator_compare(KRef comparator, KRef left, KRef right) {
+    KRef answer = kt_invoke_two(comparator, left, right);
+    if (answer == NULL) {
+        KT_FAIL("krusty: a comparator answered nothing\n");
+    }
+    return kt_unbox_int(answer);
+}
+
+void kt_list_sort_with(KRef list, KRef comparator) {
+    kt_int size = kt_list_size(list);
+    for (kt_int at = 1; at < size; at++) {
+        kt_int hole = at;
+        while (hole > 0) {
+            KRef previous = kt_list_get(list, hole - 1);
+            KRef current = kt_list_get(list, hole);
+            if (kt_comparator_compare(comparator, previous, current) <= 0) {
+                break;
+            }
+            (void)kt_mutable_list_set(list, hole - 1, current);
+            (void)kt_mutable_list_set(list, hole, previous);
+            hole--;
+        }
+    }
+}
+
 static KRef kt_invoke_three(KRef function, KRef first, KRef second, KRef third) {
     if (function == NULL || function->header.type->vtable == NULL ||
         function->header.type->vtable_length <= KT_SLOT_INVOKE) {
@@ -3433,6 +3468,19 @@ static KRef kt_iterable_snapshot(KRef iterable, kt_boolean reversed) {
 KRef kt_iterable_to_list(KRef iterable) { return kt_iterable_snapshot(iterable, 0); }
 
 KRef kt_iterable_reversed(KRef iterable) { return kt_iterable_snapshot(iterable, 1); }
+
+/* `xs.sortedWith(comparator)`: a new list, the receiver untouched. Sorted while the list is still
+   the GROWING shape `kt_mutable_list_set` writes through, and frozen afterwards — a frozen list has
+   no `size` beside its elements and is not the same object to write into. */
+KRef kt_iterable_sorted_with(KRef iterable, KRef comparator) {
+    KRef growing = kt_mutable_list_new();
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        (void)kt_mutable_list_add(growing, kt_iterator_next(iterator));
+    }
+    kt_list_sort_with(growing, comparator);
+    return kt_frozen(growing, 0);
+}
 
 /* `value in xs` and `xs.indexOf(value)` over an ITERABLE. Elements are compared with `equals`, as
    Kotlin's own are — the list form already does, and a range's is the same question asked of the

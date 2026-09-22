@@ -42,6 +42,8 @@ fn kotlin_owner(owner: &str) -> &str {
         "java/util/NoSuchElementException" => "kotlin/NoSuchElementException",
         "java/util/ConcurrentModificationException" => "kotlin/ConcurrentModificationException",
         "java/lang/Enum" => "kotlin/Enum",
+        // A jar presents Kotlin's `Comparator` as the Java interface it is an alias for.
+        "java/util/Comparator" => "kotlin/Comparator",
         // The collections. Kotlin has no `java.util.ArrayList`: `kotlin.collections.ArrayList` is
         // the type, and this spelling is only how a JVM jar presents it.
         "java/util/ArrayList" => "kotlin/collections/ArrayList",
@@ -112,6 +114,27 @@ pub(super) fn throwable_descriptor(owner: crate::types::TypeName) -> Option<&'st
         }
         _ => return None,
     })
+}
+
+/// The one member of a functional interface the RUNTIME knows, or `None` for any other.
+///
+/// A `fun interface` declared in this file becomes an object wearing that interface's table, so a
+/// caller reaches its member through a program-wide number. One the runtime knows needs no number
+/// at all: nothing but its single member is ever asked of it, and every caller here is the runtime
+/// or a call site that can see the type — so the object is the ordinary FUNCTION VALUE the lambda
+/// already is, answering through the one invoke slot every function value declares.
+///
+/// `kotlin.Comparator` is the only one. Its `compare` is what `sortWith` calls, and a program
+/// calling it directly is the same invoke.
+pub(super) fn runtime_functional_interface(
+    classifier: crate::types::TypeName,
+) -> Option<&'static str> {
+    (kotlin_owner(&classifier.render()) == "kotlin/Comparator").then_some("compare")
+}
+
+/// Whether a type is the `Comparator` the runtime makes — a function value of two arguments.
+pub(super) fn is_comparator(internal: crate::types::TypeName) -> bool {
+    runtime_functional_interface(internal).is_some()
 }
 
 /// Whether a superclass is `kotlin.Number`, the other base the runtime owns that a source class

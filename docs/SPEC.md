@@ -8093,6 +8093,31 @@ and behavior is checked by RUNNING the emitted program.
   (`::a_file_that_declares_its_own_sequence_walks_it`,
   `::a_declared_sequence_still_declines_the_members_it_endangers`).
 
+- **`kotlin.Comparator` is a functional interface the RUNTIME knows, so its conversion makes no
+  object of its own.** A `fun interface` declared in this file becomes an object wearing that
+  interface's table, because a caller reaches its member through a program-wide member number.
+  `Comparator` needs none: nothing but its single `compare` is ever asked of it, and every caller is
+  either the runtime or a call site that can see the type. So the conversion changes nothing — the
+  object stays the ordinary FUNCTION VALUE the lambda already is, answering through the one invoke
+  slot every function value declares, and `Comparator { a, b -> … }`, `Comparator(fn)` and a lambda
+  passed where a `Comparator` is expected are all the same object.
+
+  That is what lets the sort work with no calling convention of its own: `sortWith` invokes the
+  comparator exactly as `map` invokes a transform. The sort is an INSERTION sort, which is stable,
+  and stability is observable — Kotlin's `sortWith` promises it, so two elements the comparator
+  calls equal keep the order they were in. It is quadratic, and a merge sort would need a scratch
+  buffer nothing yet has a reason to allocate. `sortedWith` answers a NEW list and leaves its
+  receiver alone, sorting while the list is still the growable shape a write goes through and
+  freezing it afterwards.
+
+  A program calling `compare` itself takes the same invoke, with the boxed answer unwrapped at the
+  entry point rather than at the call site — the `Int` it asks about would only be unboxed again.
+  Tests: `tests/native_comparator_e2e.rs` (a literal, a SAM constructor over a function value,
+  `compare` through the type, and `sortedWith`'s stability); corpus:
+  `sam/constructors/{comparator,nonLiteralComparator}.kt`,
+  `callableReference/function/sortListOfStrings.kt`, `funInterface/kt49384.kt` and
+  `funInterface/nonTrivialProjectionInSuperType.kt`.
+
 - **A source class may extend `kotlin.Number`.** It is the second base the runtime owns, beside
   the `kotlin.Throwable` family and `kotlin.Enum`, and the simplest: it carries NO state — every
   member it declares is an abstract conversion — so a subclass of it is laid out exactly as a

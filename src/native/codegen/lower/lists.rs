@@ -205,6 +205,10 @@ fn walk_symbol(
         return None;
     }
     Some(match (name, arity) {
+        // `xs.sortedWith(comparator)`: a new list, the receiver untouched. The comparator is an
+        // ordinary function value of two arguments here, which is what a `Comparator` this runtime
+        // makes IS — see `intrinsics::runtime_functional_interface`.
+        ("sortedWith", 1) => ("kt_iterable_sorted_with", vec![any(), any()], any()),
         ("any", 1) => ("kt_iterable_any", vec![any(), any()], Ty::Boolean),
         ("any", 0) => ("kt_iterable_is_not_empty", vec![any()], Ty::Boolean),
         ("all", 1) => ("kt_iterable_all", vec![any(), any()], Ty::Boolean),
@@ -315,6 +319,8 @@ fn list_symbol(name: &str, arity: usize, physical: &[Ty]) -> Option<(&'static st
         // are not these and fall through.
         ("first", 0) => ("kt_list_first", vec![any()], any()),
         ("last", 0) => ("kt_list_last", vec![any()], any()),
+        // `list.sortWith(comparator)`, which writes through the receiver and answers nothing.
+        ("sortWith", 1) => ("kt_list_sort_with", vec![any(), any()], Ty::Unit),
         ("indexOf", 1) => ("kt_list_index_of", vec![any(), any()], Ty::Int),
         ("lastIndexOf", 1) => ("kt_list_last_index_of", vec![any(), any()], Ty::Int),
         ("contains", 1) => ("kt_list_contains", vec![any(), any()], Ty::Boolean),
@@ -707,6 +713,26 @@ impl BodyLowering<'_, '_, '_> {
             // runtime takes the receiver alone, so they are not evaluated here either — the
             // delegation already evaluated whatever they name.
             return Some(self.list_call(symbol, &carried, answer, receiver, &[], ret));
+        }
+        // `comparator.compare(a, b)`. A `Comparator` this runtime makes is a function value of two
+        // arguments, so its one member is the invoke every function value answers; the runtime
+        // entry point is that invoke with the boxed answer unwrapped, which keeps the `Int` the
+        // site asked for out of a box it would only be unwrapped from again.
+        if name == "compare"
+            && args.len() == 2
+            && ty
+                .non_null()
+                .obj_internal()
+                .is_some_and(super::super::super::intrinsics::is_comparator)
+        {
+            return Some(self.list_call(
+                "kt_comparator_compare",
+                &[any(), any(), any()],
+                Ty::Int,
+                receiver,
+                args,
+                ret,
+            ));
         }
         if is_read_write_property(ty) {
             return self.read_write_property_member(name, receiver, args, ret);

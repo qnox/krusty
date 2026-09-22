@@ -347,6 +347,15 @@ KRef kt_iterable_last_matching(KRef iterable, KRef predicate);
 KRef kt_iterable_fold(KRef iterable, KRef initial, KRef operation);
 void kt_iterable_for_each_indexed(KRef iterable, KRef action);
 KRef kt_iterable_to_list(KRef iterable);
+/* `list.sortWith(comparator)` in place, and `xs.sortedWith(comparator)` answering a new list. The
+   comparator is an ordinary function value of two arguments — a `Comparator` this runtime makes is
+   a `Function2`, nothing but its one member ever being asked of it — so the comparison goes through
+   the same invoke slot every function value declares. STABLE, as Kotlin's are. */
+void kt_list_sort_with(KRef list, KRef comparator);
+/* `comparator.compare(a, b)` written out by a program: the same invoke the sort makes, with the
+   boxed answer unwrapped to the `Int` the call site asked for. */
+kt_int kt_comparator_compare(KRef comparator, KRef left, KRef right);
+KRef kt_iterable_sorted_with(KRef iterable, KRef comparator);
 KRef kt_iterable_reversed(KRef iterable);
 kt_int kt_iterable_index_of(KRef iterable, KRef value);
 kt_boolean kt_iterable_contains(KRef iterable, KRef value);
