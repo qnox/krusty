@@ -6069,6 +6069,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   keeps none.
   Tests: `fir::body_check::collection_literal_tests::custom_collection_literal_keeps_the_selected_companion_operator`
   and `inherited_collection_literal_operator_keeps_the_companion_receiver`.
+- **An `is` check asks a scalar operand through its box.** Kotlin has no subtyping among the
+  primitive types, so `n is Long` where `n` is an `Int` does not even compile and an `is` on a
+  scalar reads as settled — but `5 is Number` and `1u is Comparable<UInt>` are true, and answering
+  those needs the hierarchy. Each primitive's box carries the descriptor that has it, an unsigned
+  one its own (which is what makes `(1u as Any) is Int` false), so boxing the operand and asking is
+  both correct and the only rule needed.
+
+  The emitter has TWO shapes for the same check, and only one of them boxed. In value position it
+  emits the operand, boxes it and leaves a `Boolean` behind; in CONDITION position it fuses
+  `instanceof` with the branch it feeds, and that shape emitted the operand raw — so
+  `if (n is Number)` put an `int` where the verifier wants an object and the class was rejected with
+  `VerifyError: Bad type on operand stack`. The question is the same either way, so both box, and
+  the boxing reads the operand's SEMANTIC type so an unsigned value boxes as itself.
+  Tests: `tests/scalar_instance_check_e2e.rs`, each case cross-checked against the reference
+  compiler; the corpus cases are `codegen/box/boxingOptimization/kt5844.kt`,
+  `codegen/box/dataClasses/unitComponent.kt`,
+  `codegen/box/inlineClasses/boxResultInlineClassOfConstructorCallGeneric.kt` and
+  `codegen/box/primitiveTypes/kt36952_identityEqualsWithBooleanInLocalFunction.kt`.
 
 ## 8. Success criteria for the PoC
 

@@ -1349,6 +1349,8 @@ mod same_file_custom_serializer_e2e;
 mod same_package_classpath_e2e;
 #[path = "samefile_nested_object_value_e2e.rs"]
 mod samefile_nested_object_value_e2e;
+#[path = "scalar_instance_check_e2e.rs"]
+mod scalar_instance_check_e2e;
 #[path = "scope_chain_e2e.rs"]
 mod scope_chain_e2e;
 #[path = "scope_function_value_arg_e2e.rs"]
