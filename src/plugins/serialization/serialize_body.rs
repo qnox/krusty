@@ -17,15 +17,23 @@ fn record_serialize_lines(
     function: u32,
     opening_expression: ExprId,
 ) {
-    let (start_line, header_line) = {
+    // The body maps to where the DECLARATION starts — its annotation, not its header — and the
+    // trailing `return` to where the declaration CLOSES: the `)` of the constructor, or the `}` of
+    // a class body. Those coincide only on a one-line declaration, which is why the header line
+    // read correct for as long as it did. A declaration with no recorded end keeps its header.
+    let (start_line, close_line) = {
         let class = &ir.classes[serialized_class as usize];
-        (class.decl_start_line, class.decl_line)
+        let close = match class.decl_end_line {
+            0 => class.decl_line,
+            end => end,
+        };
+        (class.decl_start_line, close)
     };
     if start_line != 0 {
         ir.expr_lines.insert(opening_expression, start_line);
     }
-    if header_line != 0 {
-        ir.fn_close_lines.insert(function, header_line);
+    if close_line != 0 {
+        ir.fn_close_lines.insert(function, close_line);
     }
 }
 
