@@ -2086,8 +2086,11 @@ pub struct IrStatic {
     pub init: ExprId,
     /// `var` (mutable) ⇒ a setter is emitted and the backing field is non-`final`.
     pub is_var: bool,
-    /// `const val` ⇒ kotlinc keeps the field `public static final` (inlined at use) with no accessor;
-    /// a plain top-level `val`/`var` is `private static [final]` + a `public static` getter/setter.
+    /// `const val` ⇒ kotlinc keeps the field `static final` (inlined at use) with no accessor, at the
+    /// DECLARATION's own visibility: `private const val` is a private field, while `internal` and
+    /// `public` are both public (`internal` is a Kotlin boundary with no JVM spelling). A plain
+    /// top-level `val`/`var` is `private static [final]` + a `public static` getter/setter whatever
+    /// the source said, because every reader goes through the accessor.
     pub is_const: bool,
     /// The class this static field belongs to. `None` = the file facade (a top-level property). `Some`
     /// = a specific class — a `companion object`'s `const val` lives on the OUTER class (kotlinc emits
