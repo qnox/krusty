@@ -222,6 +222,40 @@ pub fn kotlin_version() -> String {
         .unwrap_or_else(|| max_reference_version().to_string())
 }
 
+/// The provisioned Kotlin/Native distribution root — the one whose klibs are the stdlib this
+/// target compiles against. `KRUSTY_KOTLIN_NATIVE` overrides the version-selected cache path.
+///
+/// The distribution is named for the host it was built for, in Kotlin's own spelling of the
+/// platform rather than Rust's, so the two are mapped here. An unmapped host simply has no
+/// provisioned distribution, which every caller already treats as "nothing to read".
+pub fn kotlin_native_root() -> Option<PathBuf> {
+    let path = match nonempty_path(std::env::var_os("KRUSTY_KOTLIN_NATIVE")) {
+        Some(path) => path,
+        None => {
+            let version = reference_version();
+            provisioned_path(
+                &workspace_root()?,
+                "kotlin-native",
+                &version,
+                &format!("kotlin-native-prebuilt-{}-{version}", kotlin_native_host()?),
+            )
+        }
+    };
+    path.is_dir().then_some(path)
+}
+
+/// Kotlin's name for the host this is running on, as its prebuilt distributions spell it.
+fn kotlin_native_host() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Some("linux-x86_64"),
+        ("linux", "aarch64") => Some("linux-aarch64"),
+        ("macos", "x86_64") => Some("macos-x86_64"),
+        ("macos", "aarch64") => Some("macos-aarch64"),
+        ("windows", "x86_64") => Some("windows-x86_64"),
+        _ => None,
+    }
+}
+
 /// The provisioned Kotlin codegen/box corpus root. `KRUSTY_KOTLIN_BOX_DIR` overrides the
 /// version-selected cache path.
 pub fn box_corpus_dir() -> Option<PathBuf> {
