@@ -411,6 +411,24 @@ kt_long kt_range_first(KRef range);
 kt_long kt_range_last(KRef range);
 kt_boolean kt_range_is_empty(KRef range);
 
+/* ---- floating-point ranges -------------------------------------------------------------------
+
+   `0.0..2.0`. Not a progression: it has no step and no walk, because there is no next
+   floating-point number for Kotlin to name — it is a pair of bounds and the question `value in it`.
+   A `Float` range is stored at `double`, which is exact and order-preserving, so both widths share
+   one shape and the descriptor remembers which. NaN needs no case of its own: `contains` is
+   `value >= start && value <= end` and `isEmpty` is `!(start <= end)`, which is Kotlin's own
+   `lessThanOrEquals` on these types. */
+extern const KType kt_type_double_range;
+extern const KType kt_type_float_range;
+
+KRef kt_double_range(kt_double start, kt_double end);
+KRef kt_float_range(kt_float start, kt_float end);
+kt_boolean kt_floating_range_contains(KRef range, kt_double value);
+kt_boolean kt_floating_range_is_empty(KRef range);
+kt_double kt_floating_range_start(KRef range);
+kt_double kt_floating_range_end(KRef range);
+
 /* `for (x in range)` over a range the program materialized. The iterator is its own object because
    the loop reads it twice per step; a range iterated straight from a literal never becomes one,
    because common lowering turns that into a counted loop before this backend sees it. */

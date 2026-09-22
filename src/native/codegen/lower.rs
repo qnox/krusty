@@ -1559,8 +1559,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 target,
                 receiver: Some(receiver),
                 ..
-            }) if self.range_getter(target).is_some() => {
-                let (owner, name, ret) = self.range_getter(target).expect("checked by the guard");
+            }) if self.range_getter(target, receiver).is_some() => {
+                let (owner, name, ret) = self
+                    .range_getter(target, receiver)
+                    .expect("checked by the guard");
                 self.range_member(&owner, &name, receiver, &[], ret)
                     .expect("a range member, by the guard")
             }
@@ -1783,13 +1785,18 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         symbol: &str,
         compared: usize,
         args: &[u32],
-        params: &[Ty],
     ) -> Result<Option<Value>, Unsupported> {
-        // `assertTrue`/`assertFalse` ask about a `Boolean` and take it as one; only the equality
-        // operands are compared structurally and therefore cross boxed.
-        let value = match params.first() {
-            Some(&Ty::Boolean) => Ty::Boolean,
-            _ => Ty::nullable(Ty::obj("kotlin/Any")),
+        // `assertTrue`/`assertFalse` ask about a `Boolean` and take it as one; every other
+        // assertion compares its operands STRUCTURALLY and takes them boxed.
+        //
+        // The SYMBOL is what decides, not the parameter type. `assertEquals` is generic, so
+        // `assertEquals(true, true)` has `Boolean` as its first parameter after substitution —
+        // and reading that handed two raw machine values to an entry point that reads them as
+        // references, which dereferenced 1 as a pointer.
+        let value = if matches!(symbol, "kt_assert_true" | "kt_assert_false") {
+            Ty::Boolean
+        } else {
+            Ty::nullable(Ty::obj("kotlin/Any"))
         };
         // Whether a message was WRITTEN, which the declaration cannot say: `message` is defaulted,
         // so a call that leaves it out still names the declaration that has it.
@@ -2094,7 +2101,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             lists::indexed_value_getter_ty(&name)
                         }
                         Some(receiver) if self.list_getter(*target, *receiver).is_some() => Ty::Int,
-                        _ => self.range_getter(*target)?.2,
+                        Some(receiver) => self.range_getter(*target, *receiver)?.2,
+                        None => return None,
                     },
                 }
             }
@@ -2666,7 +2674,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         let Some(symbol) =
                             super::super::intrinsics::runtime_member(&owner, &name, params)
                         else {
-                            return Err(format!("the member `{}.{name}`", owner.replace('/', ".")));
+                            return Err(format!(
+                                "the member `{}.{name}` {params:?} -> {ret:?}",
+                                owner.replace('/', ".")
+                            ));
                         };
                         let mut arguments = vec![self.reference(receiver)?];
                         for argument in args {
@@ -2702,7 +2713,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         if let Some((symbol, compared)) =
                             super::super::intrinsics::assertion_call(&owner, &name, params)
                         {
-                            return self.assertion(symbol, compared, args, params);
+                            return self.assertion(symbol, compared, args);
                         }
                         // `assertFailsWith<T> { … }`. Not one of the comparisons above: it runs a
                         // block and answers what that block threw, so it is the `try` machinery

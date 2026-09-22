@@ -2230,6 +2230,33 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_collection_walks_e2e.rs`
   (`an_array_reverses_into_an_array_and_answers_the_content_questions`).
 
+- **A floating-point range is a pair of bounds, not a progression.** `0.0..2.0` answers a
+  `ClosedFloatingPointRange<Double>`, and there is no next floating-point number for Kotlin to name
+  — so there is no walk and no step, only the question `value in it`. It therefore gets a shape of
+  its own in the runtime rather than joining the integral ranges, whose bounds are 64-bit integers
+  read at the element's signedness.
+  A `Float` range is stored at `Double`: widening a float is exact and order-preserving, so every
+  comparison answers what float comparison would. A bound is answered at `Double` and narrowed back
+  through the ELEMENT before it reaches the site, because `ClosedRange`'s own declaration types
+  `start` as the erased `T` and the value is boxed there — a `Float` left in a `Double` box reads
+  back as another number.
+  NaN needs no case of its own. `contains` is `value >= start && value <= end` and `isEmpty` is
+  `!(start <= end)`, which is Kotlin's own `lessThanOrEquals` on these types, so a NaN bound makes
+  the range empty and a NaN value belongs to nothing. Equality follows: every empty range equals
+  every other, which is what makes `NaN..NaN` equal itself though NaN equals no number.
+  Both `ClosedFloatingPointRange` and `ClosedRange` are INTERFACES a user class may implement, which
+  is why the integral table is keyed on the owner and this one on the RECEIVER; a file that declares
+  such an implementation is declined at every member asked of a type it implements itself, before
+  this is reached.
+  Tests: `tests/native_floating_ranges_e2e.rs`.
+
+- **`assertEquals` compares booleans structurally, like everything else it compares.** It is
+  generic, so `assertEquals(true, true)` has `Boolean` as its first parameter after substitution.
+  Reading the parameter to decide how the operands cross handed two raw machine values to an entry
+  point that reads them as references, and dereferenced 1 as a pointer. Only `assertTrue` and
+  `assertFalse` take a `Boolean` as one, and the SYMBOL says which, where the parameter cannot.
+  Tests: `tests/native_throws_e2e.rs` (`the_equality_assertion_compares_booleans_as_values`).
+
 - **Slicing and ordering a string on the native target are by UTF-16 unit.** A krusty string holds
   UTF-8 and Kotlin indexes by UTF-16 code unit, so `substring`, `subSequence` and `compareTo` all
   walk the text rather than its bytes: `é` is two bytes and one unit, `𝄞` four bytes and two.

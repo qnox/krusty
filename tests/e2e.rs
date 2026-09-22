@@ -1074,6 +1074,8 @@ mod native_exceptions_e2e;
 mod native_experimental_bitwise_e2e;
 #[path = "native_float_predicates_e2e.rs"]
 mod native_float_predicates_e2e;
+#[path = "native_floating_ranges_e2e.rs"]
+mod native_floating_ranges_e2e;
 #[path = "native_floor_mod_e2e.rs"]
 mod native_floor_mod_e2e;
 #[path = "native_function_type_classes_e2e.rs"]

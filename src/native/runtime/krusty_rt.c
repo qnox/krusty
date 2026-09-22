@@ -1840,6 +1840,126 @@ kt_long kt_range_iterator_next(KRef iterator) {
     return value;
 }
 
+
+/* ---- floating-point ranges ------------------------------------------------------------------ */
+
+/* `0.0..2.0`. A floating-point range is NOT a progression: it has no step and no walk, because
+   there is no next floating-point number for Kotlin to name. It is a pair of bounds and the
+   question `value in it`, which is why it gets a shape of its own rather than joining `KRange` —
+   whose bounds are 64-bit integers read at the element's signedness, and a `Double`'s bits are not
+   an integer's.
+
+   A `Float` range is stored at `double`. Widening a float is exact and order-preserving, and the
+   value tested widens the same way, so every comparison answers what float comparison would; the
+   descriptor is what remembers which it is, for rendering and for equality.
+
+   NaN is worth spelling out and is not a special case anywhere below. `contains` is
+   `value >= start && value <= end`, so a NaN on either side answers false; `isEmpty` is
+   `!(start <= end)`, so a range with a NaN bound is empty. Both fall out of IEEE comparison, which
+   is what Kotlin's own `lessThanOrEquals` on these types is. */
+/* Defined with the rest of the value hashing further down: the bits `equals` and `hashCode` read
+   from a floating-point value, with every NaN collapsed to one. */
+static uint64_t kt_double_bits(kt_double value);
+static uint32_t kt_float_bits(kt_float value);
+
+typedef struct KFloatingRange {
+    KObjectHeader header;
+    kt_double start;
+    kt_double end;
+} KFloatingRange;
+
+static kt_boolean kt_floating_range_equals(KRef self, KRef other);
+static kt_int kt_floating_range_hash_code(KRef self);
+static KRef kt_floating_range_to_string(KRef self);
+
+static const kt_fn kt_floating_range_vtable[] = {(kt_fn)kt_floating_range_equals,
+                                                 (kt_fn)kt_floating_range_hash_code,
+                                                 (kt_fn)kt_floating_range_to_string};
+
+/* Kotlin's own names for these: the class a `rangeTo` on a floating-point receiver answers with is
+   private to the stdlib, and `ClosedFloatingPointRange` is the interface it is seen through. The
+   name here is the CLASS's, because it is what `toString` on the object would report. */
+KT_RANGE_TYPE(kt_type_double_range, "kotlin.ranges.ClosedDoubleRange", KFloatingRange,
+              kt_floating_range_vtable)
+KT_RANGE_TYPE(kt_type_float_range, "kotlin.ranges.ClosedFloatRange", KFloatingRange,
+              kt_floating_range_vtable)
+
+static KRef kt_floating_range_new(const KType *type, kt_double start, kt_double end) {
+    KFloatingRange *range =
+        (KFloatingRange *)kt_gc_allocate(type, sizeof(KFloatingRange));
+    range->start = start;
+    range->end = end;
+    return (KRef)range;
+}
+
+KRef kt_double_range(kt_double start, kt_double end) {
+    return kt_floating_range_new(&kt_type_double_range, start, end);
+}
+
+KRef kt_float_range(kt_float start, kt_float end) {
+    return kt_floating_range_new(&kt_type_float_range, (kt_double)start, (kt_double)end);
+}
+
+kt_boolean kt_floating_range_is_empty(KRef range) {
+    const KFloatingRange *self = (const KFloatingRange *)range;
+    return !(self->start <= self->end);
+}
+
+kt_boolean kt_floating_range_contains(KRef range, kt_double value) {
+    const KFloatingRange *self = (const KFloatingRange *)range;
+    return value >= self->start && value <= self->end;
+}
+
+kt_double kt_floating_range_start(KRef range) {
+    return ((const KFloatingRange *)range)->start;
+}
+
+kt_double kt_floating_range_end(KRef range) { return ((const KFloatingRange *)range)->end; }
+
+/* Two are equal when both are EMPTY, or when both bounds are equal by IEEE comparison — Kotlin's
+   own, and the empty case is what makes `NaN..NaN` equal itself despite `NaN != NaN`. Only within
+   one range type: a `Float` range never equals a `Double` one. */
+static kt_boolean kt_floating_range_equals(KRef self, KRef other) {
+    if (other == NULL || other->header.type != self->header.type) {
+        return false;
+    }
+    const KFloatingRange *a = (const KFloatingRange *)self;
+    const KFloatingRange *b = (const KFloatingRange *)other;
+    if (kt_floating_range_is_empty(self) && kt_floating_range_is_empty(other)) {
+        return true;
+    }
+    return a->start == b->start && a->end == b->end;
+}
+
+/* Kotlin's own: `-1` for an empty range, else `31 * start.hashCode() + end.hashCode()`, each bound
+   folded through the hash of its OWN type — so a `Float` range hashes its bounds at 32 bits. */
+static kt_int kt_floating_range_hash_code(KRef self) {
+    const KFloatingRange *range = (const KFloatingRange *)self;
+    if (kt_floating_range_is_empty(self)) {
+        return -1;
+    }
+    if (self->header.type == &kt_type_float_range) {
+        uint32_t start = kt_float_bits((kt_float)range->start);
+        uint32_t end = kt_float_bits((kt_float)range->end);
+        return (kt_int)(31u * start + end);
+    }
+    uint64_t start = kt_double_bits(range->start);
+    uint64_t end = kt_double_bits(range->end);
+    kt_int first = (kt_int)(uint32_t)(start ^ (start >> 32));
+    kt_int last = (kt_int)(uint32_t)(end ^ (end >> 32));
+    return (kt_int)(31u * (uint32_t)first + (uint32_t)last);
+}
+
+/* `"$start..$end"`, each bound rendered as its own type would render it. */
+static KRef kt_floating_range_to_string(KRef self) {
+    const KFloatingRange *range = (const KFloatingRange *)self;
+    kt_boolean single = self->header.type == &kt_type_float_range;
+    KRef start = single ? kt_box_float((kt_float)range->start) : kt_box_double(range->start);
+    KRef end = single ? kt_box_float((kt_float)range->end) : kt_box_double(range->end);
+    KRef text = kt_string_plus(kt_to_string(start), kt_string_utf8("..", 2));
+    return kt_string_plus(text, kt_to_string(end));
+}
+
 #undef KT_RANGE_TYPE
 
 /* `"$first..$last"`, with a `CharRange`'s bounds rendered as the characters they are. */
@@ -3276,6 +3396,7 @@ static uint32_t kt_float_bits(kt_float value) {
     }
     return bits;
 }
+
 
 /* Built-in values compare by value, as Kotlin's `==` on boxed values does: two `Int?` holding 3
    are equal, and two strings with the same text are equal. */

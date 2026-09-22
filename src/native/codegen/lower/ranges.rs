@@ -88,6 +88,54 @@ fn range_type(ty: Ty) -> Option<(&'static str, Ty)> {
     .find_map(|(candidate, kind, element)| internal.matches(candidate).then_some((kind, element)))
 }
 
+/// A FLOATING-POINT range, as (runtime suffix, element).
+///
+/// `0.0..2.0` answers a `ClosedFloatingPointRange<Double>`, and a variable may hold one under the
+/// plainer `ClosedRange<Double>` too — so both names are read, and the TYPE ARGUMENT says which
+/// width. Neither is a progression: there is no next floating-point number for Kotlin to name, so
+/// there is no walk and no step, only a pair of bounds and the question `value in it`.
+///
+/// Both names are INTERFACES, which [`range_element`] deliberately leaves out because a user class
+/// may implement one. It is safe here for the reason the member chain already relies on: a file
+/// that declares such an implementation is declined at every member asked of a type it implements
+/// itself, before this is reached.
+fn floating_range(ty: Ty) -> Option<(&'static str, Ty)> {
+    let Ty::Obj(internal, arguments) = ty.non_null() else {
+        return None;
+    };
+    let named = [
+        "kotlin/ranges/ClosedFloatingPointRange",
+        "kotlin/ranges/ClosedRange",
+    ]
+    .iter()
+    .any(|candidate| internal.matches(candidate));
+    if !named {
+        return None;
+    }
+    match arguments.first().map(|argument| argument.non_null()) {
+        Some(Ty::Double) => Some(("double", Ty::Double)),
+        Some(Ty::Float) => Some(("float", Ty::Float)),
+        _ => None,
+    }
+}
+
+/// The runtime function answering one member of a floating-point range, and what it answers with.
+///
+/// Both bounds are kept at `Double` whatever the range's width: widening a `Float` is exact and
+/// order-preserving, so the comparison answers what float comparison would, and a `Float` range's
+/// `start` narrows back to the very float it was built from.
+fn floating_range_symbol(name: &str, arity: usize) -> Option<(&'static str, Ty)> {
+    Some(match (name, arity) {
+        ("contains", 1) => ("kt_floating_range_contains", Ty::Boolean),
+        ("isEmpty", 0) => ("kt_floating_range_is_empty", Ty::Boolean),
+        // The PROPERTY names, as in `range_symbol`: a property's own name is what its declaration
+        // publishes, where the accessor's is a physical call target.
+        ("start", 0) => ("kt_floating_range_start", Ty::Double),
+        ("endInclusive", 0) => ("kt_floating_range_end", Ty::Double),
+        _ => return None,
+    })
+}
+
 /// Whether this names text the runtime walks by UTF-16 unit.
 ///
 /// Every `CharSequence` this target can produce IS a string — `subSequence` answers one and
@@ -207,6 +255,23 @@ impl BodyLowering<'_, '_, '_> {
         args: &[u32],
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
+        // `0.0..2.0` as a VALUE. A floating-point `rangeTo` reaches this backend as an ordinary
+        // member call rather than as a range CONSTRUCTION, because there is no walk for common
+        // lowering to turn into a counted loop — so the object is built here, and the type the
+        // call RETURNS is what says which of the two widths it is.
+        if name == "rangeTo" && args.len() == 1 {
+            if let Some((kind, element)) = floating_range(ret) {
+                return Some(self.floating_range_of(kind, element, receiver, args[0], ret));
+            }
+        }
+        // A member of one. The RECEIVER is what says so, never the owner: `contains` is declared
+        // on the facade as well as on the interface, and `start` on the interface a user class may
+        // implement.
+        if self.type_of(receiver).and_then(floating_range).is_some() {
+            let (_, element) = self.type_of(receiver).and_then(floating_range)?;
+            let (symbol, answer) = floating_range_symbol(name, args.len())?;
+            return Some(self.floating_range_call(symbol, answer, element, receiver, args, ret));
+        }
         // `a until b` is an extension function of the ranges facade, not a member of the range it
         // answers, so the type it RETURNS is what says which range to build.
         if super::super::super::intrinsics::is_range_until(owner, name, args.len()) {
@@ -277,6 +342,74 @@ impl BodyLowering<'_, '_, '_> {
         let element = range_element(crate::types::type_name(owner))?;
         let (symbol, carried) = range_symbol(name, args.len())?;
         Some(self.range_call(symbol, carried, element, receiver, args, ret))
+    }
+
+    /// `a..b` on a floating-point receiver: the range object, built at the width the result names.
+    fn floating_range_of(
+        &mut self,
+        kind: &str,
+        element: Ty,
+        start: u32,
+        end: u32,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let Some(first) = self.coerce(start, element)? else {
+            return Ok(None);
+        };
+        let Some(last) = self.coerce(end, element)? else {
+            return Ok(None);
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        self.runtime_call(
+            &format!("kt_{kind}_range"),
+            &[element, element],
+            ret,
+            &[first, last],
+        )
+    }
+
+    /// One member of a floating-point range. Every operand crosses at `Double`, which is exact for
+    /// a `Float` and is the width the bounds are stored at.
+    fn floating_range_call(
+        &mut self,
+        symbol: &str,
+        answer: Ty,
+        element: Ty,
+        receiver: u32,
+        args: &[u32],
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        let object = self.reference(receiver)?;
+        let mut params = vec![any()];
+        let mut operands = vec![object];
+        for argument in args {
+            let Some(value) = self.coerce(*argument, Ty::Double)? else {
+                return Ok(None);
+            };
+            params.push(Ty::Double);
+            operands.push(value);
+        }
+        if self.terminated {
+            return Ok(None);
+        }
+        let Some(produced) = self.runtime_call(symbol, &params, answer, &operands)? else {
+            return Ok(None);
+        };
+        // A bound is answered at `Double` whatever the range's width, and the ELEMENT is what the
+        // site expects. Going through it rather than straight to `ret` is what makes a `Float`
+        // range's `start` right: `ClosedRange`'s own declaration types it as the erased `T`, so the
+        // value is BOXED there, and a `Float` left in a `Double` box reads back as another number.
+        let answered = if answer == Ty::Double {
+            element
+        } else {
+            answer
+        };
+        let Some(narrowed) = self.convert(produced, Some(answer), answered)? else {
+            return Ok(None);
+        };
+        self.convert(narrowed, Some(answered), ret)
     }
 
     /// `x in range` reached through the ranges facade, where `x` is not the range's element type.
@@ -597,11 +730,19 @@ impl BodyLowering<'_, '_, '_> {
     pub(super) fn range_getter(
         &self,
         target: crate::fir::ExternalPropertyId,
+        receiver: u32,
     ) -> Option<(String, String, Ty)> {
         let property = self.file.provider.external_property(target)?;
         let getter = self.file.provider.external_callable(property.getter)?;
-        range_element(getter.callable.owner)?;
-        range_symbol(&property.name, 0)?;
+        // An integral range is keyed on the OWNER, which names a concrete range type. A
+        // floating-point one cannot be: its `start` is declared on `ClosedRange`, an interface a
+        // user class may implement, so the RECEIVER is what says this is one of the runtime's.
+        if range_element(getter.callable.owner).is_some() {
+            range_symbol(&property.name, 0)?;
+        } else {
+            floating_range(self.type_of(receiver)?)?;
+            floating_range_symbol(&property.name, 0)?;
+        }
         Some((
             getter.callable.owner.render(),
             property.name.clone(),

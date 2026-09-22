@@ -165,6 +165,27 @@ fn the_test_assertions_pass_quietly_and_report_kotlins_wording() {
     );
 }
 
+/// `assertEquals` compares BOOLEANS structurally, like everything else it compares.
+///
+/// It is generic, so `assertEquals(true, true)` has `Boolean` as its first parameter after
+/// substitution — and reading the parameter to decide how the operands cross handed two raw
+/// machine values to an entry point that reads them as references. Only `assertTrue` and
+/// `assertFalse` take a `Boolean` as one; the SYMBOL says which, where the parameter cannot.
+#[test]
+fn the_equality_assertion_compares_booleans_as_values() {
+    expect_native_box(
+        "import kotlin.test.assertEquals\n\
+         fun box(): String {\n\
+         \x20   assertEquals(true, 1 < 2)\n\
+         \x20   assertEquals(false, 1 > 2)\n\
+         \x20   assertEquals(true, true, \"with a message\")\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "AssertEqualsBooleans",
+        "OK",
+    );
+}
+
 #[test]
 fn a_failed_assert_equals_reports_both_values() {
     // Kotlin's wording, which is what a failing assertion has to say for the report to mean the
