@@ -46,8 +46,8 @@ enum MemberKind {
         /// The property's OWN type-parameter names, in declaration order. A member EXTENSION
         /// property may declare them — `val <S> S.kept: S` declares an `S` that shadows its
         /// owner's — and the reference compiler renders them before the receiver. The names are
-        /// what the source WROTE; resolution publishes only their bounds, under internal
-        /// placeholder spellings.
+        /// what the source WROTE, which is what a rendering shows; resolution holds them under
+        /// internal placeholder spellings, and the bounds are read from there.
         type_parameters: Vec<String>,
     },
     /// A SECONDARY constructor. It has no name of its own, no modality slot, and the classifier
@@ -411,8 +411,8 @@ struct ResolvedMemberProperty<'symbols> {
     /// The declared extension receiver, for a member extension property.
     receiver: Option<Ty>,
     /// The DECLARED upper bounds of the property's own type parameters, parallel to the names the
-    /// source wrote. Resolution publishes the bounds under internal placeholder spellings, so only
-    /// the bounds are taken from here.
+    /// source wrote. Only the bounds are taken from here; the names come from the declaration,
+    /// as every other syntactic half of this rendering already does.
     formal_bounds: &'symbols [Ty],
 }
 

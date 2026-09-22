@@ -4537,15 +4537,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   declaration in a separate table (`ClassSig::member_ext_props`), consulted by the same identity,
   and renders its receiver before the name while the diagnostic still points at the name. It also
   renders its OWN type parameters ahead of that receiver — `public final actual val <S> S.kept: S`
-  declares an `S` that shadows its owner's — with the names the source WROTE, because resolution
-  publishes those formals under internal placeholder spellings and only their bounds are readable
-  from it. A receiver written as a classifier path that the file's scope binds to NO classifier is
-  one such type parameter, not an ambiguity: the coarse child key records the category and
-  `select_actual` compares the complete type shape, which is what tells two of them apart
-  positionally. Refusing to key such a member at all left an `expect` and an `actual` written
-  identically pairing with nothing, and box
-  `multiplatform/k2/basic/expectActualFakeOverridesWithTypeParameters.kt` regressed; test
-  `no_expect_for_actual_e2e::a_member_extension_on_its_own_type_parameter_matches`. A nested
+  declares an `S` that shadows its owner's — with the names the source WROTE, since a rendering
+  shows what was written; resolution holds those formals under internal placeholder spellings and
+  the bounds are read from there. A receiver written as a classifier path that the file's scope
+  binds to NO classifier records that, and only that: the coarse child key says the scope bound
+  nothing, and `select_actual` compares the complete type shape. A type parameter is the case this
+  serves, and two of them are told apart positionally and by their DECLARED BOUNDS — a bound is
+  the whole of what such a receiver says about the values it admits, so two members differing only
+  there are different declarations. An unresolved or ambiguous spelling reaches the same key and is
+  excluded by the comparison instead, which demands a binding on both sides. Within one
+  declaration the positional map is read innermost first, so an own type parameter shadows an
+  enclosing one of the same spelling and the implementation may rename it. Refusing to key such a
+  member at all left an `expect` and an `actual` written identically pairing with nothing, and box
+  `multiplatform/k2/basic/expectActualFakeOverridesWithTypeParameters.kt` regressed; tests
+  `no_expect_for_actual_e2e::a_member_extension_on_its_own_type_parameter_matches`,
+  `::a_renamed_own_type_parameter_receiver_matches`,
+  `::a_member_extension_on_its_owners_type_parameter_matches`,
+  `::a_member_extension_function_on_a_type_parameter_matches`,
+  `::a_type_parameter_receiver_compares_its_bound` and
+  `::a_member_extension_property_renders_its_own_formals`. A nested
   classifier and a `companion object` are hoisted out of their owner by the parser, so neither
   rides a member list: each is recorded as an actualization target of its own where its modifier
   list is read, renders its OWN simple name, and a companion renders the word `companion` before

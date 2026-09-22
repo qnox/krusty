@@ -1235,7 +1235,7 @@ fn a_member_extension_on_its_own_type_parameter_matches() {
             "OwnTypeParameterReceiverCommon.kt",
             "package plib\n\
              \n\
-             expect class Holder<O> {\n\
+             expect class Holder<S> {\n\
              \x20   val <S> S.kept: S\n\
              }\n",
         )],
@@ -1243,9 +1243,140 @@ fn a_member_extension_on_its_own_type_parameter_matches() {
             "OwnTypeParameterReceiverPlatform.kt",
             "package plib\n\
              \n\
-             actual class Holder<O> {\n\
+             actual class Holder<S> {\n\
              \x20   actual val <S> S.kept: S get() = this\n\
              \x20   actual val <S> S.stray: S get() = this\n\
+             }\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert!(
+        !reference.is_empty(),
+        "the fixture must make the reference compiler report something"
+    );
+}
+
+/// A member extension on the OWNER's type parameter is the same category as one on its own.
+///
+/// `val O.kept: Int` names a type parameter the classifier declares. No scope binds it to a
+/// classifier either, so it keys the same way — but through the enclosing half of the positional
+/// map rather than the declaration's own.
+#[test]
+fn a_member_extension_on_its_owners_type_parameter_matches() {
+    let (reference, krusty) = both_split(
+        "OwnerTypeParameterReceiver",
+        &[(
+            "OwnerTypeParameterReceiverCommon.kt",
+            "package plib\n\
+             \n\
+             expect class Owned<O> {\n\
+             \x20   val O.kept: Int\n\
+             }\n",
+        )],
+        &[(
+            "OwnerTypeParameterReceiverPlatform.kt",
+            "package plib\n\
+             \n\
+             actual class Owned<O> {\n\
+             \x20   actual val O.kept: Int get() = 1\n\
+             \x20   actual val O.stray: Int get() = 2\n\
+             }\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert!(
+        !reference.is_empty(),
+        "the fixture must make the reference compiler report something"
+    );
+}
+
+/// A member extension FUNCTION on a type-parameter receiver keys like the property does.
+///
+/// It reaches the other input-shape comparison — the one that also counts value parameters — so it
+/// is a distinct source form and is asserted separately.
+#[test]
+fn a_member_extension_function_on_a_type_parameter_matches() {
+    let (reference, krusty) = both_split(
+        "TypeParameterReceiverFunction",
+        &[(
+            "TypeParameterReceiverFunctionCommon.kt",
+            "package plib\n\
+             \n\
+             expect class Calls<O> {\n\
+             \x20   fun <S> S.kept(): S\n\
+             }\n",
+        )],
+        &[(
+            "TypeParameterReceiverFunctionPlatform.kt",
+            "package plib\n\
+             \n\
+             actual class Calls<O> {\n\
+             \x20   actual fun <S> S.kept(): S = this\n\
+             \x20   actual fun <S> S.stray(): S = this\n\
+             }\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert!(
+        !reference.is_empty(),
+        "the fixture must make the reference compiler report something"
+    );
+}
+
+/// Two type-parameter receivers that differ only by their UPPER BOUND are different declarations.
+///
+/// A receiver written as a type parameter binds to no classifier, so the key says only that. The
+/// bound is the whole of what such a receiver says about the values it admits, and without
+/// comparing it an implementation with an unrelated bound paired with the `expect` and the check
+/// went silent where the reference compiler does not. Asserted on a TOP-LEVEL pair, which reaches
+/// the same input-shape comparison without also asking what a classifier reports for a member it
+/// never had actualized.
+#[test]
+fn a_type_parameter_receiver_compares_its_bound() {
+    let (reference, krusty) = both_split(
+        "TypeParameterReceiverBound",
+        &[(
+            "TypeParameterReceiverBoundCommon.kt",
+            "package plib\n\
+             \n\
+             expect fun <S : Number> S.kept(): Int\n",
+        )],
+        &[(
+            "TypeParameterReceiverBoundPlatform.kt",
+            "package plib\n\
+             \n\
+             actual fun <S : CharSequence> S.kept(): Int = 1\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert!(
+        !reference.is_empty(),
+        "an unrelated upper bound is not an implementation of the expectation"
+    );
+}
+
+/// A member extension property renders EVERY own formal, with its bound.
+///
+/// The `<S>` case is reached through a receiver no scope binds. This one is on a bound receiver
+/// and declares two formals, one of them bounded, so the rendering is exercised where the keying
+/// is not in question — and a renderer that dropped a formal or mis-indexed a bound would differ
+/// from the reference compiler here.
+#[test]
+fn a_member_extension_property_renders_its_own_formals() {
+    let (reference, krusty) = both_split(
+        "MemberExtensionFormals",
+        &[(
+            "MemberExtensionFormalsCommon.kt",
+            "package plib\n\
+             \n\
+             expect class Rendered\n",
+        )],
+        &[(
+            "MemberExtensionFormalsPlatform.kt",
+            "package plib\n\
+             \n\
+             actual class Rendered {\n\
+             \x20   actual val <S : Comparable<S>, T> Map<S, T>.stray: Int get() = 1\n\
              }\n",
         )],
     );
@@ -1337,15 +1468,14 @@ fn a_default_imported_classifier_matches_its_qualified_spelling() {
             "package plib\n\
              \n\
              actual fun takes(value: kotlin.String): Int = 1\n\
-             actual fun gives(value: String): Int = 2\n",
+             actual fun gives(value: String): Int = 2\n\
+             actual fun stray(value: String): Int = 3\n",
         )],
     );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
     assert!(
-        reference.is_empty(),
-        "the reference compiler accepts both pairs: {reference:?}"
-    );
-    assert!(
-        krusty.is_empty(),
-        "and so must krusty, rather than reporting either `actual`: {krusty:?}"
+        !reference.is_empty(),
+        "`stray` actualizes nothing, so `takes` and `gives` are silent in a report that names \
+         something else rather than in an empty one"
     );
 }

@@ -349,6 +349,7 @@ pub fn actualization(
                         parameters: expect_parameters,
                         type_parameters: expect_type_parameters,
                         context_count: expect_context_count,
+                        bounds: expect_bounds,
                         ..
                     },
                 ..
@@ -360,6 +361,7 @@ pub fn actualization(
                         parameters: candidate_parameters,
                         type_parameters: candidate_type_parameters,
                         context_count: candidate_context_count,
+                        bounds: candidate_bounds,
                         ..
                     },
                 ..
@@ -387,6 +389,17 @@ pub fn actualization(
         else {
             return false;
         };
+        if !type_parameter_bounds_match(
+            headers,
+            expect_bounds,
+            candidate_bounds,
+            &own,
+            &type_parameters,
+            actualized_aliases,
+            scope,
+        ) {
+            return false;
+        }
         let receiver_matches = match (expect_receiver, candidate_receiver) {
             (Some(expect), Some(candidate)) => type_shape_matches(
                 headers,
@@ -451,6 +464,7 @@ pub fn actualization(
                         context_parameters: expect_context,
                         type_parameters: expect_type_parameters,
                         mutable: expect_mutable,
+                        bounds: expect_bounds,
                         ..
                     },
                 ..
@@ -462,6 +476,7 @@ pub fn actualization(
                         context_parameters: candidate_context,
                         type_parameters: candidate_type_parameters,
                         mutable: candidate_mutable,
+                        bounds: candidate_bounds,
                         ..
                     },
                 ..
@@ -490,6 +505,17 @@ pub fn actualization(
         else {
             return false;
         };
+        if !type_parameter_bounds_match(
+            headers,
+            expect_bounds,
+            candidate_bounds,
+            &own,
+            &type_parameters,
+            actualized_aliases,
+            scope,
+        ) {
+            return false;
+        }
         let receiver_matches = match (expect_receiver, candidate_receiver) {
             (Some(expect), Some(candidate)) => type_shape_matches(
                 headers,
@@ -587,6 +613,57 @@ pub fn actualization(
                 .chain(own.iter().copied())
                 .collect(),
         )
+    }
+
+    /// Two positionally paired type parameters agree when their declared upper bounds do.
+    ///
+    /// A type parameter's spelling carries no meaning — the two declarations may name theirs
+    /// differently — so its bounds are the whole of what it says about the values it admits. A
+    /// receiver or parameter written as a type parameter is therefore only as compared as its
+    /// bounds are, and without this two members that differ solely in an upper bound pair with
+    /// each other while kotlinc rejects the implementation.
+    ///
+    /// Bounds are held per declaration and keyed by the parameter's own spelling, so an enclosing
+    /// parameter of the same name cannot be confused for one of these. Each bound is compared as
+    /// an ordinary type shape, which is what lets a bound naming another type parameter
+    /// (`<A, B : A>`) match positionally too.
+    fn type_parameter_bounds_match(
+        headers: &StreamedHeaderModule,
+        expect_bounds: HeaderTypeBoundRange,
+        candidate_bounds: HeaderTypeBoundRange,
+        own: &[(LookupNameId, LookupNameId)],
+        type_parameters: &[(LookupNameId, LookupNameId)],
+        actualized_aliases: &[ActualizedAlias],
+        scope: MatchScope<'_>,
+    ) -> bool {
+        let expect_bounds = headers.syntax.bounds(expect_bounds);
+        let candidate_bounds = headers.syntax.bounds(candidate_bounds);
+        own.iter().all(|(expect_parameter, candidate_parameter)| {
+            let expect: Vec<_> = expect_bounds
+                .iter()
+                .filter(|bound| bound.parameter == *expect_parameter)
+                .map(|bound| bound.ty)
+                .collect();
+            let candidate: Vec<_> = candidate_bounds
+                .iter()
+                .filter(|bound| bound.parameter == *candidate_parameter)
+                .map(|bound| bound.ty)
+                .collect();
+            expect.len() == candidate.len()
+                && expect
+                    .into_iter()
+                    .zip(candidate)
+                    .all(|(expect, candidate)| {
+                        type_shape_matches(
+                            headers,
+                            expect,
+                            candidate,
+                            type_parameters,
+                            actualized_aliases,
+                            scope,
+                        )
+                    })
+        })
     }
 
     /// A constructor pair, compared by the parameter types both declare.
@@ -832,14 +909,19 @@ pub fn actualization(
         /// A receiver that names no classifier — a function type. The coarse key records only the
         /// semantic category; `select_actual` compares its complete type shape.
         Structural,
-        /// A receiver written as a classifier path that the scope binds to no classifier: a type
-        /// PARAMETER, whose identity is positional within the declaration rather than a classifier
-        /// at all — `actual val <S> S.p: S` declares its own `S`, shadowing its owner's.
+        /// A receiver written as a classifier path that the scope binds to NO classifier.
+        ///
+        /// The predicate is exactly that and no more. A type PARAMETER is the case this exists
+        /// for — `actual val <S> S.p: S` declares its own `S`, shadowing its owner's, and no scope
+        /// has a classifier for it — but an unresolved or ambiguous spelling reaches the same
+        /// arm. Those are told apart by the comparison, not by the key: a shape match demands a
+        /// binding on BOTH sides, so two unresolved receivers never pair, while two type
+        /// parameters match positionally and by their declared bounds.
         ///
         /// Refusing to key such a member at all left `expect val <S> S.p: S` and the `actual`
         /// written exactly like it pairing with nothing, and the implementation reported as
-        /// actualizing nothing. The coarse key records the category, and `select_actual` compares
-        /// the complete type shape — which is what tells two of them apart, positionally.
+        /// actualizing nothing. The coarse key records the category; `select_actual` compares the
+        /// complete type shape, which is what tells two of them apart.
         Unbound,
     }
 
@@ -859,8 +941,9 @@ pub fn actualization(
         // `expect class` actualized by a `typealias` is written as the alias's target on the
         // platform side — so the key is the identity, after following an actualized alias to the
         // classifier it now stands for.
-        // `None` means the file has not said which classifier the receiver is, so the member
-        // cannot be keyed at all and pairs with nothing.
+        // `None` means the receiver has no header type at all, so the member cannot be keyed and
+        // pairs with nothing. A receiver the scope binds to no classifier is NOT that case: it
+        // keys as `Unbound` and is told apart by its complete type shape.
         let receiver_identity = |receiver: Option<HeaderTypeId>| -> Option<ReceiverKey> {
             let Some(receiver) = receiver else {
                 return Some(ReceiverKey::Absent);
