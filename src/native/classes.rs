@@ -670,10 +670,23 @@ fn place_interface_slots(
             // time; emitting the trap would say it at run time, as a program that aborts where it
             // should print an answer. A slot of an interface the class does not implement is
             // padding, and unreachable: nothing can name it through a type this class has.
+            // An ENUM whose every entry has a BODY is not instantiable as itself: each instance
+            // is an entry subclass, and the slot is filled there — the check below runs for each
+            // of those too, so a genuinely missing implementation is still caught. Kotlin marks
+            // such a class abstract for the same reason; common IR does not, so the shape is read
+            // here. An entry WITHOUT a body is an instance of the enum class, and then the trap is
+            // reachable and this does not apply.
+            let entries_carry_it = is_enum(&ir.classes[id as usize])
+                && !ir.classes[id as usize].enum_entries.is_empty()
+                && ir.classes[id as usize]
+                    .enum_entries
+                    .iter()
+                    .all(|entry| entry.subclass.is_some());
             if implemented
                 && matches!(entry, Slot::Abstract)
                 && !ir.classes[id as usize].is_abstract
                 && !ir.classes[id as usize].is_interface
+                && !entries_carry_it
             {
                 return Err(format!(
                     "an interface member with no implementation found (`{}` in `{}`)",

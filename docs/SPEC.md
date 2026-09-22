@@ -8121,6 +8121,23 @@ and behavior is checked by RUNNING the emitted program.
   that evaluating it twice would fail, and `::a_member_with_a_special_bridge_declines`), and
   `tests/native_comparable_e2e.rs::a_declared_comparable_is_ordered_by_its_own_compare_to`.
 
+- **An enum may leave an interface member to its ENTRIES.** The class model refuses a CONCRETE
+  class that reaches an interface's abstract trap for an interface it implements: Kotlin would not
+  have compiled such a class, so the implementation exists and the model failed to find it, and
+  saying so at compile time beats a program that aborts where it should print an answer.
+
+  An enum whose every entry has a BODY is the exception, and not by fiat: such a class is not
+  instantiable as itself. Every instance is an entry subclass, the slot is filled there, and the
+  same check runs for each of those — so a genuinely missing implementation is still caught, one
+  level down. Kotlin marks such a class abstract for exactly this reason; common IR does not, so the
+  shape is read from the entries. An entry WITHOUT a body is an instance of the enum class, and
+  there the trap is reachable and the refusal stands.
+  Tests: `tests/native_enum_entry_interface_e2e.rs` (the member reached through the interface, an
+  enum splitting two interfaces between itself and its entries, and an enum with no entry bodies
+  implementing its own); corpus:
+  `enum/enumEntryReferenceFromInnerClassConstructor{1,2,3}.kt` and
+  `callableReference/function/local/enumExtendsTrait.kt`.
+
 - **`assert` is an intrinsic because its MODE decides before anything is evaluated.**
   `always-disable` evaluates NEITHER child, so a condition with a side effect does not have it, and
   a program can see that. Enabled, the condition is evaluated and branched on, and the failure side
