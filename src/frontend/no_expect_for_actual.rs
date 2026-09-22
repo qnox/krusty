@@ -492,7 +492,6 @@ fn type_parameters(names: &[String], bound: &dyn Fn(usize) -> Option<Ty>) -> Str
     format!("<{rendered}> ")
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_function(
     signature: &Signature,
     name: &str,

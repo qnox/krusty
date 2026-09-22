@@ -45,6 +45,13 @@ what and why — with no tooling provenance. Keep this rule when amending or rew
   `eprintln!`/`println!`/`dbg!` in the compiler: the differential harness parses stdout/stderr, so stray
   prints can corrupt it, and they tend to get left behind. The custom facility is intentional — do
   **not** add a logging crate (`tracing`/`log`); the project is deliberately dependency-lean.
+- **Retire lint suppressions in code you touch.** Any `#[allow(...)]` on a function, type, or
+  module your change touches must be deleted and re-linted; keep it only if the lint still fires,
+  and prefer fixing the finding to suppressing it. Never add one to land a change.
+  `clippy-baseline.tsv` is enforced by the pre-commit hook only — CI never runs `just lint` — so it
+  drifts both ways; removing findings is always safe, an extraction must leave its new files clean
+  because the baseline is keyed by file, and a refreeze must say what it knowingly accepts rather
+  than absorb unrelated findings silently. See the "Lint suppressions" section of `AGENTS.md`.
 - The AST/IR stays **index-based** (`u32` ids into parallel `Vec`s — no `Box`/`Rc` graphs).
 - Correctness is defined by the **differential harness** vs the real `kotlinc`: don't claim a
   feature works without an ABI-signature diff and/or a round-trip test.

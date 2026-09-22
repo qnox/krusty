@@ -128,8 +128,8 @@ Review these before reading a diff linearly:
 6. Name-derived arity/function/SAM shape, string annotation comparison, and non-FQN annotation
    checks after resolution.
 7. Duplicate constructor/call/property candidate structures or copied overload-selection loops.
-8. New `#[allow(dead_code)]`, silent `Ty::Error` recovery, skipped diagnostics, or tests weakened to
-   fit the implementation.
+8. Any `#[allow(...)]` surviving in touched code, new `#[allow(dead_code)]`, silent
+   `Ty::Error` recovery, skipped diagnostics, or tests weakened to fit the implementation.
 9. Diagnostic tests that use substring/prefix checks, search with `any`, sort output before
    comparison, or assert only rejection. Assert the complete emitted diagnostics and their count.
    Differential tests also assert exact file, line, column, message, and order.
@@ -139,7 +139,8 @@ Useful audit commands:
 ```text
 rg -n '\.render\(\)' src
 rg -n 'resolve_|get_class|classpath|fallback|or_else' src/ir_lower.rs
-rg -n '#\[allow\(dead_code\)\]' src
+rg -n '#\[allow\(' src
+git diff --name-only origin/master... | rg '\.rs$' | xargs -r rg -n '#\[allow\('
 rg -n '\$iv|_u24' src/fir_lower
 rg --pcre2 -n -U '(front_end_diagnostics|compiler_diagnostics|krusty_(stderr|stdout|errors)|\bdiags?\b|\bdiagnostics\b)[\s\S]{0,240}(contains|starts_with|ends_with|\.(any|all|sort|sort_by|sort_by_key)\()' tests
 ```
@@ -166,6 +167,41 @@ Follow data ownership rather than starting at the changed test:
 
 When a review finds the same architectural mistake twice, add the invariant and a targeted audit
 command here. Do not bury recurring rules only in a review comment or session transcript.
+
+## Lint suppressions
+
+- A change that touches a function, type, or module carrying a `#[allow(...)]` must try to retire
+  that suppression. Delete it, re-lint, and keep it only if the lint still fires — most of them are
+  stale, and one left in place is the reason the next one gets added beside it.
+- If the lint still fires, fix the finding rather than the suppression where the fix is ordinary:
+  a `clone()` on a `Copy` type, an unneeded `return`, a redundant closure, a `map_or` that is an
+  `is_some_and`. An argument count over the threshold is fixed by giving the arguments that travel
+  together a named type, not by suppressing it.
+- Never add a suppression to land a change. `#[allow(dead_code)]` on new code is already a review
+  smell (scan item 8); the same applies to `clippy::too_many_arguments` on a new signature.
+- Prefer deleting a suppression to converting it. `#[expect(...)]` reports an *unfulfilled
+  expectation* when the lint does NOT fire, so under the unpinned toolchains this repository builds
+  with it becomes a new baseline row on the next contributor's machine rather than a self-expiring
+  suppression.
+
+### `clippy-baseline.tsv`
+
+The baseline is keyed by **file + message + count**, and `clippy-baseline-check` fails only on a
+NEW file+message row or a HIGHER count. Removing findings is therefore always safe. A moved file is
+not: relocating code creates rows under the new path, so an extraction must leave the new files
+with no findings at all.
+
+It is enforced by the lefthook **pre-commit hook only** — CI installs the clippy component but
+never runs `just lint`, so a green CI run says nothing about the baseline. It therefore drifts in
+both directions as toolchains move and as findings are fixed without unfreezing: a stale-low entry
+blocks every commit, and a stale-high one silently licenses a real regression in that file.
+
+Refreezing with `just clippy-baseline` after intentionally fixing or knowingly accepting findings
+is the prescribed action, not a last resort. What it must not be is silent: a refreeze absorbs
+every unrelated finding present at that moment. Fix what is mechanical, state in the commit message
+what is knowingly accepted and why, and never refreeze merely to get a commit through — a hook
+failure naming files your change never touched means the baseline has drifted and wants its own
+change, not a quiet reset inside yours.
 
 ## Validation
 
