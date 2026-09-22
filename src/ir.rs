@@ -2673,6 +2673,14 @@ pub struct IrFile {
     /// synthetic, an appended lambda impl, an access bridge) keeps its position after the declared
     /// members. Resolution-facing indexes never see the sorted order.
     pub fn_source_order: std::collections::HashMap<u32, u32>,
+    /// FunId → the position this `suspend` function's continuation class takes in the
+    /// generated-class sequence its enclosing scope numbers, 1-based in declaration order.
+    ///
+    /// That sequence is shared with the anonymous objects those bodies declare, and the pass that
+    /// names them is the only one that can say which positions it left free. This is that answer,
+    /// carried as provenance; the JVM backend is where it becomes a class name. A suspend function
+    /// with no entry has no source declaration behind it.
+    pub fn_continuation_ordinal: std::collections::HashMap<u32, u32>,
     /// Class fq-internal-name → its generic-signature SHAPE (type parameters + bounds), for a generic
     /// class. The JVM backend formats it into the class `Signature` attribute.
     class_signatures: std::collections::HashMap<TypeName, IrGenericSig>,

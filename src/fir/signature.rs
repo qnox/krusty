@@ -1578,6 +1578,10 @@ pub struct ResolvedModuleIndex {
     /// deterministic declaration/metadata ordering and Pass-2 rebinding, never for executable
     /// class initialization (which has its own semantic ordinal in the declaration header).
     source_orders: HashMap<DeclarationId, u32>,
+    /// The generated-class position each `suspend` function's continuation holds in its scope's
+    /// `$N` sequence, 1-based in declaration order. Computed once, by the pass that numbers the
+    /// sequence; every consumer reads it rather than deriving a second answer.
+    continuation_ordinals: HashMap<DeclarationId, u32>,
     declaration_headers: HashMap<DeclarationId, ResolvedDeclarationHeader>,
     /// Declarations whose header carries `LOCAL_CLASS`, in declaration-id order. Local-signature
     /// publication selects from these once per checked body group; asking the whole inventory
@@ -2175,6 +2179,21 @@ impl ResolvedModuleIndex {
             );
         }
         order
+    }
+
+    /// The position `declaration`'s continuation class takes in its scope's generated-class
+    /// sequence, or `None` when the declaration is not a source `suspend` function.
+    pub fn continuation_ordinal(&self, declaration: DeclarationId) -> Option<u32> {
+        self.continuation_ordinals.get(&declaration).copied()
+    }
+
+    pub fn publish_continuation_ordinal(&mut self, declaration: DeclarationId, ordinal: u32) {
+        assert!(
+            self.continuation_ordinals
+                .insert(declaration, ordinal)
+                .is_none_or(|existing| existing == ordinal),
+            "a suspend declaration holds exactly one continuation ordinal"
+        );
     }
 
     pub fn declaration_header(
@@ -3007,6 +3026,7 @@ impl ResolvedModuleIndex {
             && self.declaration_annotations.is_empty()
             && self.declaration_annotation_string_arguments.is_empty()
             && self.declaration_annotation_class_arguments.is_empty()
+            && self.continuation_ordinals.is_empty()
             && self.classifiers.is_empty()
             && self.signatures.is_empty()
             && self.callables.is_empty()

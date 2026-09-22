@@ -10712,9 +10712,7 @@ fn emit_method_inner_with_holder(
         e.lease_temporary(
             continuation,
             Ty::obj(&coroutine_machine::continuation_internal(
-                owner,
-                &f.name,
-                crate::jvm::suspend::same_name_ordinal(ir, fid),
+                ir, fid, owner, &f.name,
             )),
         );
         e.lease_temporary(suspended, object);
@@ -10960,11 +10958,8 @@ fn emit_method_inner_with_holder(
             let completion = param_tys.len().saturating_sub(1) as u32 + u32::from(instance);
             match e.slots.get(&completion).map(|&(slot, _)| slot) {
                 Some(completion) => {
-                    let internal = coroutine_machine::continuation_internal(
-                        owner,
-                        &f.name,
-                        crate::jvm::suspend::same_name_ordinal(ir, fid),
-                    );
+                    let internal =
+                        coroutine_machine::continuation_internal(ir, fid, owner, &f.name);
                     e.machine = Some(coroutine_machine::Machine {
                         plan,
                         slots,
