@@ -648,6 +648,12 @@ pub enum IrCallableReferenceTarget {
         owner: Option<TypeName>,
         name: Box<str>,
     },
+    /// A DEPENDENCY declaration, by the provider-owned identity that names it. Kept opaque, as
+    /// every other dependency edge is: the owner spelling, the published name and whatever the
+    /// declaration is realized as are the target's to read from its provider.
+    External {
+        declaration: crate::fir::ExternalCallableId,
+    },
 }
 
 /// A checked callable-reference value after common invocation lowering. `adapter` is an exact

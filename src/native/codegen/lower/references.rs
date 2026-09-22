@@ -792,6 +792,18 @@ impl BodyLowering<'_, '_, '_> {
                 .referenced_module_callables
                 .get(id)
                 .map(|callable| callable.name.to_string()),
+            // A dependency declaration publishes its Kotlin name through the provider; the
+            // spelling it is realized under is an emit handle and not what `name` answers.
+            crate::ir::IrCallableReferenceTarget::External { declaration } => {
+                let realization = self.file.provider.external_callable(*declaration)?;
+                Some(
+                    realization
+                        .callable
+                        .reflection_name
+                        .clone()
+                        .unwrap_or_else(|| realization.callable.name.clone()),
+                )
+            }
         }
     }
 

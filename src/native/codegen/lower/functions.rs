@@ -118,6 +118,9 @@ fn reference_identity(reference: &crate::ir::IrCallableReference) -> String {
             model::c_identifier(&owner.map(|o| o.render()).unwrap_or_default()),
             model::c_identifier(name)
         ),
+        // The provider's own identity for the declaration, which is what two `Boolean::not`
+        // written in two files share — and the only thing about it this side is entitled to read.
+        Target::External { declaration } => format!("e{}", declaration.raw()),
     };
     let bound = if reference.bound_receiver.is_some() {
         "b"

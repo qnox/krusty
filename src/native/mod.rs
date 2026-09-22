@@ -20,6 +20,7 @@
 mod captures;
 mod classes;
 mod codegen;
+mod dependency_references;
 pub mod gc;
 mod intrinsics;
 pub mod libraries;

@@ -1986,6 +1986,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property boxes on the way out and is unboxed back at the call site.
   Tests: `tests/native_property_reference_e2e.rs`.
 
+- **A reflective reference to a DEPENDENCY declaration is the adapter it already is.** Common
+  lowering builds `"KOTLIN"::get` or `String::plus` into an ordinary function value — a synthesized
+  static method calling the dependency, plus whatever receiver the site bound — whenever the site's
+  type is a plain `FunctionN`, and leaves it CHECKED when the type is a reflective `KFunctionN`, so
+  each target may choose its own reflection representation. krusty's native target chooses the same
+  adapter, with the declaration's provider-owned identity kept beside it, so `Boolean::not ==
+  Boolean::not` is true and `"O"::plus` is equal to neither. The adapter reaches the dependency
+  through the ordinary dependency-call path, which is what gives the reference every intrinsic,
+  value class and runtime entry point that path knows; a bound site evaluates its receiver once,
+  where it is written. An ADAPTED reference — one that reorders, defaults or vararg-packs its
+  operands — is not built this way and declines, since the packing is argument normalization the
+  target does not own. Test: `tests/native_dependency_reference_e2e.rs`.
+
 - **A delegated property's `KProperty` metadata is a property reference, and a LOCAL one answers
   only its name.** `val x: Int by D()` hands the delegate an object so `getValue(thisRef, property)`
   can ask the property about itself; for a member property that object is exactly the reference
