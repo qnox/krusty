@@ -28,6 +28,8 @@ pub mod gc;
 #[allow(dead_code)]
 mod classes;
 #[allow(dead_code)]
+mod dependency_references;
+#[allow(dead_code)]
 #[allow(dead_code)]
 mod intrinsics;
 pub mod libraries;
