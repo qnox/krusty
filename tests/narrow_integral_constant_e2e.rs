@@ -27,5 +27,11 @@ fn repository_constants_keep_byte_and_short_identity_when_boxed() {
         }
     "#;
 
-    common::expect_box_same_as_kotlinc(SOURCE, "NarrowIntegralConstantIdentity");
+    let actual = common::expect_box_run_with_stdlib(SOURCE, "NarrowIntegralConstantIdentity");
+    assert_eq!(actual, "OK", "the repository-owned fixture must succeed");
+    assert_eq!(
+        common::kotlinc_box_result(SOURCE),
+        actual,
+        "Krusty and kotlinc must preserve the same narrow identities",
+    );
 }
