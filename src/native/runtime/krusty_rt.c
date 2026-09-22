@@ -2369,6 +2369,18 @@ typedef struct KList {
 
 static const uint32_t kt_list_offsets[] = {offsetof(KList, elements)};
 
+/* What `x is List<*>` compares against. Both list types below name it, because a check writes the
+   INTERFACE and neither concrete type is that. No instances of its own, exactly like `Number` and
+   the function markers. */
+const KType kt_type_list_interface = {"kotlin.collections.List", 23,
+                                      sizeof(KObjectHeader),    0,
+                                      0,                        NULL,
+                                      &kt_type_any,             kt_any_vtable,
+                                      3,                        0};
+
+/* Flattened, as `KType.interfaces` requires. */
+static const KType *const kt_list_interfaces[] = {&kt_type_list_interface};
+
 static kt_boolean kt_list_equals(KRef self, KRef other);
 static kt_int kt_list_hash_code(KRef self);
 static KRef kt_list_to_string(KRef self);
@@ -2385,7 +2397,9 @@ const KType kt_type_list = {"kotlin.collections.List",
                             &kt_type_any,
                             kt_list_vtable,
                             3,
-                            0};
+                            0,
+                            kt_list_interfaces,
+                            1};
 
 /* ---- a growable list ------------------------------------------------------------------------
 
@@ -2428,7 +2442,9 @@ const KType kt_type_mutable_list = {"kotlin.collections.ArrayList",
                                     &kt_type_any,
                                     kt_mutable_list_vtable,
                                     3,
-                                    0};
+                                    0,
+                                    kt_list_interfaces,
+                                    1};
 
 kt_boolean kt_is_mutable_list(KRef value) {
     return value != NULL && value->header.type == &kt_type_mutable_list;

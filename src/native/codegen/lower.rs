@@ -588,6 +588,19 @@ impl<'a> FileLowering<'a> {
             .is_some_and(|shape| self.unwalkable_collections.contains(&shape))
     }
 
+    /// Whether this file declares a class of the given collection SHAPE.
+    ///
+    /// Asked by a type CHECK rather than by a call: a marker on the runtime's own types answers
+    /// `x is List<*>` for every list the runtime built, and says nothing about a list the program
+    /// declared. Where the file declares one, the check keeps declining rather than answering
+    /// `false` for an object that is one.
+    pub(super) fn implements_collection_shape(
+        &self,
+        shape: super::super::intrinsics::CollectionShape,
+    ) -> bool {
+        self.implemented_collections.contains(&shape)
+    }
+
     /// Whether a class of this file could stand behind a receiver of type `ty` — that is, whether
     /// `ty`'s collection shape is one this file implements. Anything of another shape, or of no
     /// shape at all, is the runtime's alone and is answered normally.

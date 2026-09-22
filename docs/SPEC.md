@@ -2112,6 +2112,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   operands cross as references, which is what a pair's fields hold. Test:
   `tests/native_pair_construction_e2e.rs`.
 
+- **`x is List<*>` asks about a marker, and declines where the file declares a list of its own.**
+  krusty's native runtime builds two kinds of list — the immutable one `listOf` answers and the
+  growable one `ArrayList()` answers — and a check writes the INTERFACE, which is neither of those
+  types. Both name a marker with no instances of its own, and the check compares against that, as a
+  function type and a reflection type already do. The predicate is NARROWER than the one a call
+  uses: a call may treat `Collection` as a list because every question a list answers a collection
+  answers the same way, while a check may not, since a set is a `Collection` and wears no list
+  marker. And a file that declares a collection of its own keeps declining rather than answering
+  `false` for an object that is one, since the program's class wears no marker either. Test:
+  `tests/native_list_type_checks_e2e.rs`.
+
 - **A `Throwable` carries a CAUSE, and the two one-argument constructors are told apart by type.**
   Kotlin declares four: `()`, `(message)`, `(cause)` and `(message, cause)`. A single argument whose
   type is a `Throwable` is the cause and anything else is the message, and the two forms differ in

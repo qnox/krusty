@@ -846,6 +846,21 @@ pub(super) fn is_list_type(internal: crate::types::TypeName) -> bool {
     )
 }
 
+/// Whether a type name is one an `is` answers with the runtime's LIST marker.
+///
+/// Narrower than [`is_list_type`], which also admits `Collection` because every question a list
+/// answers a collection answers the same way. A CHECK cannot take that: a set is a `Collection` and
+/// wears no list marker, so answering `x is Collection<*>` from it would say `false` of an object
+/// that is one. Only the spellings every object wearing the marker really is.
+pub(super) fn is_list_check_type(internal: crate::types::TypeName) -> bool {
+    matches!(
+        kotlin_owner(&internal.render()),
+        "kotlin/collections/List"
+            | "kotlin/collections/MutableList"
+            | "kotlin/collections/ArrayList"
+    )
+}
+
 /// The growable list the runtime provides, if this names one.
 ///
 /// `kotlin.collections.ArrayList` is declared in no file krusty compiles, so constructing one takes

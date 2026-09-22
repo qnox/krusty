@@ -304,6 +304,11 @@ extern const KType kt_type_kmutable_property0;
 extern const KType kt_type_kmutable_property1;
 extern const KType kt_type_kmutable_property2;
 
+/* `kotlin.collections.List` as an `is` asks about it. The runtime builds two kinds of list — the
+   immutable one `listOf` answers and the growable one `ArrayList()` answers — and a check names
+   neither of those types, so both name this marker instead. It has no instances of its own. */
+extern const KType kt_type_list_interface;
+
 extern const KType kt_type_list;
 extern const KType kt_type_list_iterator;
 

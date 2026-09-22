@@ -269,6 +269,20 @@ impl<'a> FileLowering<'a> {
                     .and_then(super::super::super::intrinsics::function_type_descriptor)
                     .expect("just matched")
             }
+            // `kotlin.collections.List`. The runtime builds two kinds and a check names neither,
+            // so both name a marker and that is what this compares against. Only where THIS FILE
+            // implements no list of its own: a class of the program standing behind the type would
+            // wear no marker, and answering `false` for one is a wrong answer rather than a
+            // decline. That file keeps declining, exactly as it did before.
+            _ if target
+                .obj_internal()
+                .is_some_and(super::super::super::intrinsics::is_list_check_type)
+                && !self.implements_collection_shape(
+                    super::super::super::intrinsics::CollectionShape::Iterable,
+                ) =>
+            {
+                "kt_type_list_interface"
+            }
             // One of Kotlin's REFLECTION types, asked about the same way a function type is: the
             // reference object's own type is one of a kind, so the markers are what it shares with
             // the type written at the site.
