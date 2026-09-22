@@ -2087,6 +2087,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   makes `A.Companion::class.simpleName` answer `Companion`, a named companion answer its own name,
   and a plain nested class answer its own. Test: `tests/native_reified_declarations_e2e.rs`.
 
+- **A range operand may TRANSFER CONTROL instead of answering.** `break`, `continue`, `return` and
+  `throw` are expressions of type `Nothing`, and Kotlin admits one wherever a value is expected —
+  `for (j in break downTo 1u)` is a loop whose bound leaves the enclosing loop before the inner one
+  is ever built. Evaluating such an operand ends the lowering: what follows is unreachable, so
+  there is nothing left to emit and nothing to decline. krusty's native target reads the answer as
+  "the lowering left" rather than as "no value", which is what it used to report — a bound that
+  yields no value while control STAYS is the only shape it cannot lower. The rule holds for both
+  bounds of a counted loop and for all three operands of a membership test. Test:
+  `tests/native_range_bound_control_e2e.rs`.
+
 - **A `Throwable` carries a CAUSE, and the two one-argument constructors are told apart by type.**
   Kotlin declares four: `()`, `(message)`, `(cause)` and `(message, cause)`. A single argument whose
   type is a `Throwable` is the cause and anything else is the message, and the two forms differ in

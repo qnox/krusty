@@ -1817,6 +1817,8 @@ mod native_class_literals_e2e;
 
 #[path = "native_function_type_checks_e2e.rs"]
 mod native_function_type_checks_e2e;
+#[path = "native_range_bound_control_e2e.rs"]
+mod native_range_bound_control_e2e;
 #[path = "native_reflection_type_checks_e2e.rs"]
 mod native_reflection_type_checks_e2e;
 #[path = "native_reified_declarations_e2e.rs"]

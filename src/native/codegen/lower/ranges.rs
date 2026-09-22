@@ -646,14 +646,26 @@ impl BodyLowering<'_, '_, '_> {
         // Both ends are evaluated ONCE, in source order, before the loop runs: `a..b` builds a
         // range before anything walks it, so a body that assigns to what named an end cannot move
         // it, and an end with an effect has that effect exactly once even on an empty range.
+        // A bound may TRANSFER CONTROL rather than answer — `for (j in break downTo 1u)`, and
+        // the same with `continue`, `return` and `throw`, whose type is `Nothing`. The loop is
+        // then unreachable and there is nothing left to emit; only a bound that yielded no value
+        // while control stayed here is a shape this cannot lower.
         let Some(start) = self.coerce(start, counter)? else {
-            return Err("a `Unit` range bound".to_string());
+            return if self.terminated {
+                Ok(())
+            } else {
+                Err("a `Unit` range bound".to_string())
+            };
         };
         if self.terminated {
             return Ok(());
         }
         let Some(end) = self.coerce(end, counter)? else {
-            return Err("a `Unit` range bound".to_string());
+            return if self.terminated {
+                Ok(())
+            } else {
+                Err("a `Unit` range bound".to_string())
+            };
         };
         if self.terminated {
             return Ok(());
@@ -748,20 +760,36 @@ impl BodyLowering<'_, '_, '_> {
         if carrier(counter).clif().is_none() {
             return Err(format!("a range membership test over `{counter:?}`"));
         }
+        // Any of the three may TRANSFER CONTROL rather than answer — `x in 1u..break`, and the
+        // same with `continue`, `return` and `throw`. The test is then unreachable and there is
+        // nothing left to emit; only an operand that yielded no value while control stayed here is
+        // a shape this cannot lower.
         let Some(value) = self.coerce(value, counter)? else {
-            return Err("a `Unit` value in a range test".to_string());
+            return if self.terminated {
+                Ok(None)
+            } else {
+                Err("a `Unit` value in a range test".to_string())
+            };
         };
         if self.terminated {
             return Ok(None);
         }
         let Some(start) = self.coerce(start, counter)? else {
-            return Err("a `Unit` range bound".to_string());
+            return if self.terminated {
+                Ok(None)
+            } else {
+                Err("a `Unit` range bound".to_string())
+            };
         };
         if self.terminated {
             return Ok(None);
         }
         let Some(end) = self.coerce(end, counter)? else {
-            return Err("a `Unit` range bound".to_string());
+            return if self.terminated {
+                Ok(None)
+            } else {
+                Err("a `Unit` range bound".to_string())
+            };
         };
         if self.terminated {
             return Ok(None);
