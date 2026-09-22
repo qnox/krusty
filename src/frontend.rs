@@ -1464,6 +1464,7 @@ fn name_anonymous_classes_with_counters(
     counters: &mut std::collections::HashMap<String, u32>,
 ) {
     use crate::ast::{Decl, Expr};
+    let mut reserved = suspend_continuation_reservations(file, facade_simple);
     let mut anons: Vec<(crate::ast::ExprId, crate::ast::DeclId)> = file
         .anonymous_object_classes
         .iter()
@@ -1543,6 +1544,7 @@ fn name_anonymous_classes_with_counters(
             file.anonymous_object_enclosing_functions
                 .insert(decl, enclosing);
         }
+        take_continuation_reservations(&mut reserved, counters, &scope, span.lo);
         let ordinal = counters.entry(scope.clone()).or_insert(0);
         *ordinal += 1;
         let fresh = format!("{scope}${ordinal}");
@@ -1598,6 +1600,67 @@ fn name_anonymous_classes_with_counters(
             *name = fresh;
         }
     }
+    // A suspend function declared after the last anonymous object of its scope still holds its
+    // ordinal: a later declaration unit carrying a same-named overload must not reuse it.
+    for (scope, spans) in reserved {
+        *counters.entry(scope).or_insert(0) += spans.len() as u32;
+    }
+}
+
+/// The source offsets at which each `<owner>$<function>` scope's suspend functions are declared.
+///
+/// The reference compiler gives a suspend function's continuation class the next ordinal in its
+/// scope's `$N` sequence, ahead of every anonymous object the body declares. The reservation is
+/// made for the `suspend` modifier alone: a function that never reaches a suspension point emits
+/// no continuation class and still holds the ordinal.
+fn suspend_continuation_reservations(
+    file: &crate::ast::File,
+    facade_simple: &str,
+) -> std::collections::HashMap<String, Vec<u32>> {
+    use crate::ast::Decl;
+    let mut reservations: std::collections::HashMap<String, Vec<u32>> =
+        std::collections::HashMap::new();
+    for &candidate in &file.decls {
+        match file.decl(candidate) {
+            Decl::Fun(function) if function.is_suspend() => reservations
+                .entry(format!("{facade_simple}${}", function.name))
+                .or_default()
+                .push(function.span.lo),
+            Decl::Class(class) => {
+                let chain = class.name.replace('.', "$");
+                for method in class.methods.iter().filter(|method| method.is_suspend()) {
+                    reservations
+                        .entry(format!("{chain}${}", method.name))
+                        .or_default()
+                        .push(method.span.lo);
+                }
+            }
+            Decl::Fun(_) | Decl::Property(_) => {}
+        }
+    }
+    for spans in reservations.values_mut() {
+        spans.sort_unstable();
+    }
+    reservations
+}
+
+/// Spend the ordinals held by the suspend functions of `scope` that open at or before `offset` —
+/// every one whose continuation the reference compiler names before an object declared there.
+fn take_continuation_reservations(
+    reserved: &mut std::collections::HashMap<String, Vec<u32>>,
+    counters: &mut std::collections::HashMap<String, u32>,
+    scope: &str,
+    offset: u32,
+) {
+    let Some(spans) = reserved.get_mut(scope) else {
+        return;
+    };
+    let spent = spans.partition_point(|&start| start <= offset);
+    if spent == 0 {
+        return;
+    }
+    spans.drain(..spent);
+    *counters.entry(scope.to_string()).or_insert(0) += spent as u32;
 }
 
 #[cfg(test)]

@@ -2443,7 +2443,7 @@ fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> boo
 /// A continuation class is named after the method it re-enters, so two overloads would share one —
 /// and they do not share a spill layout, so whichever class loses the name resumes against fields it
 /// does not have (`NoSuchFieldError`). Both machines number the later one.
-pub(crate) fn same_name_ordinal(ir: &IrFile, fid: u32) -> usize {
+fn same_name_ordinal(ir: &IrFile, fid: u32) -> usize {
     let function = &ir.functions[fid as usize];
     let bare = |name: &str| name.split('-').next().unwrap_or(name).to_string();
     let name = bare(&function.name);
@@ -2456,13 +2456,33 @@ pub(crate) fn same_name_ordinal(ir: &IrFile, fid: u32) -> usize {
         .count()
 }
 
-/// The continuation class for `fid`: `<owner>$<function>$1`, and `$2`, `$3`, … for the overloads
-/// that follow it.
-pub(crate) fn continuation_class_name(owner: &str, function: &str, ordinal: usize) -> String {
-    match ordinal {
-        0 => format!("{owner}${function}$1"),
-        n => format!("{owner}${function}${}", n + 1),
+/// The 1-based `$N` the continuation class of `fid` takes in its `<owner>$<function>` sequence.
+///
+/// That sequence also names the anonymous objects declared in those function bodies, which are
+/// named before any coroutine transform runs. The frontend leaves one ordinal free per suspend
+/// function, in declaration order, so the continuations are exactly the ordinals no object holds:
+/// the first suspend function of the sequence takes the first free one, the next overload the one
+/// after that.
+pub(crate) fn continuation_ordinal(ir: &IrFile, fid: u32, owner: &str, function: &str) -> usize {
+    let held_by_an_object = |ordinal: usize| {
+        let name = format!("{owner}${function}${ordinal}");
+        ir.classes
+            .iter()
+            .any(|class| class.fq_name == name && !class.superclass_matches(CONTINUATION_IMPL))
+    };
+    let mut ordinal = 0;
+    for _ in 0..=same_name_ordinal(ir, fid) {
+        ordinal += 1;
+        while held_by_an_object(ordinal) {
+            ordinal += 1;
+        }
     }
+    ordinal
+}
+
+/// The continuation class for an ordinal from [`continuation_ordinal`].
+pub(crate) fn continuation_class_name(owner: &str, function: &str, ordinal: usize) -> String {
+    format!("{owner}${function}${ordinal}")
 }
 
 /// Build the coroutine state machine for `fid` (whose body `b` is a top-level block). The body is
@@ -2789,8 +2809,11 @@ fn build_state_machine(
     // kotlinc names `create-SCm-oBs`'s continuation `<Owner>$create$1`. `-` can't occur in a Kotlin
     // identifier, so it only ever separates the mangle hash — strip from the first `-`.
     let cont_fname = fname.split('-').next().unwrap_or(&fname);
-    let cont_internal =
-        continuation_class_name(&cont_owner, cont_fname, same_name_ordinal(ir, fid));
+    let cont_internal = continuation_class_name(
+        &cont_owner,
+        cont_fname,
+        continuation_ordinal(ir, fid, &cont_owner, cont_fname),
+    );
     let cont_ty = Ty::obj(&cont_internal);
 
     let base = max_value_index(ir) + 1;
