@@ -2353,3 +2353,1495 @@ kt_int kt_array_copy_into(KRef destination, kt_int at, KRef source) {
     return at + length;
 }
 
+/* ---- lists --------------------------------------------------------------------------------- */
+
+/* `listOf(...)` as a VALUE. The elements are an ordinary `Array<T>` the list holds, which is what
+   Kotlin's own `listOf(vararg)` does with the array a vararg call already built -- so the elements
+   are traced by the collector through the array it already knows how to trace, and the list itself
+   has exactly one reference field.
+
+   The list is IMMUTABLE, which is what makes sharing the vararg array sound: nothing a program can
+   write through reaches it. `MutableList` is not this type and is not realized here. */
+typedef struct KList {
+    KObjectHeader header;
+    KRef elements;
+} KList;
+
+static const uint32_t kt_list_offsets[] = {offsetof(KList, elements)};
+
+/* What `x is List<*>` compares against. Both list types below name it, because a check writes the
+   INTERFACE and neither concrete type is that. No instances of its own, exactly like `Number` and
+   the function markers. */
+const KType kt_type_list_interface = {"kotlin.collections.List", 23,
+                                      sizeof(KObjectHeader),    0,
+                                      0,                        NULL,
+                                      &kt_type_any,             kt_any_vtable,
+                                      3,                        0};
+
+/* Flattened, as `KType.interfaces` requires. */
+static const KType *const kt_list_interfaces[] = {&kt_type_list_interface};
+
+static kt_boolean kt_list_equals(KRef self, KRef other);
+static kt_int kt_list_hash_code(KRef self);
+static KRef kt_list_to_string(KRef self);
+
+static const kt_fn kt_list_vtable[] = {(kt_fn)kt_list_equals, (kt_fn)kt_list_hash_code,
+                                       (kt_fn)kt_list_to_string};
+
+const KType kt_type_list = {"kotlin.collections.List",
+                            sizeof("kotlin.collections.List") - 1,
+                            sizeof(KList),
+                            1,
+                            0,
+                            kt_list_offsets,
+                            &kt_type_any,
+                            kt_list_vtable,
+                            3,
+                            0,
+                            kt_list_interfaces,
+                            1};
+
+/* ---- a growable list ------------------------------------------------------------------------
+
+   `ArrayList`/`MutableList`. The same shape as `KList` with a SIZE beside the storage, because the
+   two differ only in whether every slot of the backing array is an element: an immutable list's
+   array IS its elements, a growable one's array is capacity and `size` says how much of it counts.
+
+   Sharing the shape is what lets `kt_list_size`, `kt_list_get` and everything built on them —
+   `indexOf`, `contains`, the iterator, a `for` loop — serve both. Each asks the DESCRIPTOR which
+   it is holding rather than being written twice, and the iterator keeps working unchanged because
+   the cursor it holds is an index and the bound it compares against is `kt_list_size`. */
+typedef struct KMutableList {
+    KObjectHeader header;
+    KRef elements;
+    kt_int size;
+    /* Structural changes so far. An iterator records this when it is made and compares on every
+       `next`, which is how a list notices being written through while it is being walked — Kotlin
+       raises `ConcurrentModificationException` there, and the count is the only evidence: after
+       `remove` the cursor and the size can agree again and nothing else would look wrong. */
+    kt_int modifications;
+} KMutableList;
+
+static const uint32_t kt_mutable_list_offsets[] = {offsetof(KMutableList, elements)};
+
+static kt_boolean kt_list_equals(KRef self, KRef other);
+static kt_int kt_list_hash_code(KRef self);
+static KRef kt_list_to_string(KRef self);
+
+/* Its `equals`/`hashCode`/`toString` are the list ones: Kotlin compares any two lists by their
+   elements in order, and a `List` is equal to a `MutableList` holding the same things. */
+static const kt_fn kt_mutable_list_vtable[] = {(kt_fn)kt_list_equals, (kt_fn)kt_list_hash_code,
+                                               (kt_fn)kt_list_to_string};
+
+const KType kt_type_mutable_list = {"kotlin.collections.ArrayList",
+                                    sizeof("kotlin.collections.ArrayList") - 1,
+                                    sizeof(KMutableList),
+                                    1,
+                                    0,
+                                    kt_mutable_list_offsets,
+                                    &kt_type_any,
+                                    kt_mutable_list_vtable,
+                                    3,
+                                    0,
+                                    kt_list_interfaces,
+                                    1};
+
+kt_boolean kt_is_mutable_list(KRef value) {
+    return value != NULL && value->header.type == &kt_type_mutable_list;
+}
+
+/* The cursor an iterator holds is an INDEX, not a pointer: the collector may not move an object,
+   but an index needs no such promise and reads the same whatever the list is. */
+typedef struct KListIterator {
+    KObjectHeader header;
+    KRef list;
+    kt_int at;
+    /* The list's modification count when this iterator was made; see `KMutableList`. An immutable
+       list never changes, so this stays zero and the comparison always holds. */
+    kt_int modifications;
+} KListIterator;
+
+static const uint32_t kt_list_iterator_offsets[] = {offsetof(KListIterator, list)};
+
+/* An iterator answers `kotlin.Any`'s three members by identity, as Kotlin's own iterators do. */
+const KType kt_type_list_iterator = {"kotlin.collections.Iterator",
+                                     sizeof("kotlin.collections.Iterator") - 1,
+                                     sizeof(KListIterator),
+                                     1,
+                                     0,
+                                     kt_list_iterator_offsets,
+                                     &kt_type_any,
+                                     kt_any_vtable,
+                                     3,
+                                     0};
+
+static KRef *kt_elements_of(KRef array) { return (KRef *)((KArray *)array + 1); }
+
+KRef kt_list_of(KRef elements) {
+    /* The allocation can collect, so the array has to be reachable across it; it is, in this
+       local, which the conservative root scan reads. */
+    KList *list = (KList *)kt_gc_allocate(&kt_type_list, sizeof(KList));
+    list->elements = elements;
+    return (KRef)list;
+}
+
+KRef kt_list_empty(void) { return kt_list_of(kt_array_new(&kt_type_array, 0)); }
+
+
+/* `listOf(x)` — Kotlin's own single-element overload, which is a DIFFERENT declaration from the
+   vararg one and not a vararg call of length one: `listOf(anArray)` selects it and answers a list
+   holding that array. There is no array yet, so this makes the one the list needs. `value` is a
+   root across the allocation the way every other local here is. */
+KRef kt_list_single(KRef value) {
+    KRef elements = kt_array_new(&kt_type_array, 1);
+    kt_elements_of(elements)[0] = value;
+    return kt_list_of(elements);
+}
+
+/* Both list shapes answer here; see the note on `KMutableList` for why they share the entry point
+   rather than each having its own. A growable list's array is capacity, so its SIZE is the field. */
+kt_int kt_list_size(KRef list) {
+    if (kt_is_mutable_list(list)) {
+        return ((const KMutableList *)list)->size;
+    }
+    return kt_length_of(((const KList *)list)->elements);
+}
+
+kt_boolean kt_list_is_empty(KRef list) { return kt_list_size(list) == 0; }
+
+KRef kt_list_get(KRef list, kt_int index) {
+    KRef elements = ((const KList *)list)->elements;
+    kt_int size = kt_list_size(list);
+    if (index < 0 || index >= size) {
+        kt_index_out_of_bounds(index, size);
+    }
+    return kt_elements_of(elements)[index];
+}
+
+/* `first()` and `last()`. Kotlin raises `NoSuchElementException` on an empty list, with its own
+   wording, rather than answering NULL — a list of a nullable element type has a perfectly good
+   NULL first element and the two must stay distinguishable. */
+KRef kt_list_first(KRef list) {
+    if (kt_list_size(list) == 0) {
+        kt_throw(kt_throwable_new(&kt_type_no_such_element_exception,
+                                  kt_string_utf8("List is empty.", 14)));
+    }
+    return kt_elements_of(((const KList *)list)->elements)[0];
+}
+
+KRef kt_list_last(KRef list) {
+    kt_int size = kt_list_size(list);
+    if (size == 0) {
+        kt_throw(kt_throwable_new(&kt_type_no_such_element_exception,
+                                  kt_string_utf8("List is empty.", 14)));
+    }
+    return kt_elements_of(((const KList *)list)->elements)[size - 1];
+}
+
+kt_int kt_list_index_of(KRef list, KRef value) {
+    KRef elements = ((const KList *)list)->elements;
+    kt_int length = kt_list_size(list);
+    for (kt_int i = 0; i < length; i++) {
+        if (kt_equals(kt_elements_of(elements)[i], value)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+kt_int kt_list_last_index_of(KRef list, KRef value) {
+    KRef elements = ((const KList *)list)->elements;
+    for (kt_int i = kt_list_size(list) - 1; i >= 0; i--) {
+        if (kt_equals(kt_elements_of(elements)[i], value)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+kt_boolean kt_list_contains(KRef list, KRef value) { return kt_list_index_of(list, value) >= 0; }
+
+KRef kt_mutable_list_new(void) {
+    KMutableList *list = (KMutableList *)kt_gc_allocate(&kt_type_mutable_list, sizeof(KMutableList));
+    list->elements = kt_array_new(&kt_type_array, 0);
+    list->size = 0;
+    list->modifications = 0;
+    return (KRef)list;
+}
+
+/* `ArrayList(initialCapacity)`. The capacity is a hint and nothing observable depends on it, so an
+   invalid one is not a failure here — Kotlin's own throws, which this target will do once a
+   `catch` exists to see the difference. */
+KRef kt_mutable_list_with_capacity(kt_int capacity) {
+    KRef list = kt_mutable_list_new();
+    if (capacity > 0) {
+        ((KMutableList *)list)->elements = kt_array_new(&kt_type_array, capacity);
+    }
+    return list;
+}
+
+/* Grow to hold at least one more, doubling so that repeated `add` stays linear overall. */
+static void kt_mutable_list_reserve(KRef self) {
+    KMutableList *list = (KMutableList *)self;
+    kt_int capacity = kt_length_of(list->elements);
+    if (list->size < capacity) {
+        return;
+    }
+    kt_int grown = capacity == 0 ? 4 : capacity * 2;
+    /* The allocation can collect, and `self` is a root in the caller's frame, so the OLD array
+       stays reachable through it until the new one is stored. */
+    KRef replacement = kt_array_new(&kt_type_array, grown);
+    kt_array_copy_into(replacement, 0, list->elements);
+    list->elements = replacement;
+}
+
+/* `mutableListOf(a, b, c)` — a COPY of what the vararg call packed, not a share of it. The array
+   belongs to the caller, and this list can be written through. */
+KRef kt_mutable_list_of(KRef elements) {
+    kt_int length = kt_length_of(elements);
+    /* `elements` stays live in this parameter across both allocations. */
+    KRef list = kt_mutable_list_with_capacity(length);
+    kt_array_copy_into(((KMutableList *)list)->elements, 0, elements);
+    ((KMutableList *)list)->size = length;
+    return list;
+}
+
+kt_boolean kt_mutable_list_add(KRef self, KRef value) {
+    kt_mutable_list_reserve(self);
+    KMutableList *list = (KMutableList *)self;
+    kt_elements_of(list->elements)[list->size++] = value;
+    list->modifications++;
+    /* Kotlin's `MutableList.add` answers whether the list changed, which for a list is always. */
+    return true;
+}
+
+/* `list += element`. Kotlin's `plusAssign` on a mutable collection IS `add`, and it answers
+   `Unit` rather than the `Boolean` `add` answers — so it is its own entry point rather than a
+   result the caller has to remember to drop. */
+void kt_mutable_list_plus_assign(KRef self, KRef value) { kt_mutable_list_add(self, value); }
+
+/* `list += elements`, where the right-hand side is something to walk. Kotlin has one `plusAssign`
+   per shape of that — an `Iterable`, an `Array`, a `Sequence` — and each appends every element in
+   order, which is the one walk this runtime already knows how to do. */
+void kt_mutable_list_add_all(KRef self, KRef elements) {
+    KRef iterator = kt_iterable_iterator(elements);
+    while (kt_iterator_has_next(iterator)) {
+        kt_mutable_list_add(self, kt_iterator_next(iterator));
+    }
+}
+
+KRef kt_mutable_list_set(KRef self, kt_int index, KRef value) {
+    KMutableList *list = (KMutableList *)self;
+    if (index < 0 || index >= list->size) {
+        kt_index_out_of_bounds(index, list->size);
+    }
+    KRef *slot = &kt_elements_of(list->elements)[index];
+    KRef previous = *slot;
+    *slot = value;
+    return previous;
+}
+
+void kt_mutable_list_add_at(KRef self, kt_int index, KRef value) {
+    KMutableList *list = (KMutableList *)self;
+    if (index < 0 || index > list->size) {
+        kt_index_out_of_bounds(index, list->size);
+    }
+    kt_mutable_list_reserve(self);
+    KRef *elements = kt_elements_of(list->elements);
+    for (kt_int at = list->size; at > index; at--) {
+        elements[at] = elements[at - 1];
+    }
+    elements[index] = value;
+    list->size++;
+    list->modifications++;
+}
+
+KRef kt_mutable_list_remove_at(KRef self, kt_int index) {
+    KMutableList *list = (KMutableList *)self;
+    if (index < 0 || index >= list->size) {
+        kt_index_out_of_bounds(index, list->size);
+    }
+    KRef *elements = kt_elements_of(list->elements);
+    KRef removed = elements[index];
+    for (kt_int at = index; at + 1 < list->size; at++) {
+        elements[at] = elements[at + 1];
+    }
+    /* Clear the vacated slot so the collector stops tracing what the list no longer holds. */
+    elements[--list->size] = NULL;
+    list->modifications++;
+    return removed;
+}
+
+kt_boolean kt_mutable_list_remove(KRef self, KRef value) {
+    kt_int at = kt_list_index_of(self, value);
+    if (at < 0) {
+        return false;
+    }
+    kt_mutable_list_remove_at(self, at);
+    return true;
+}
+
+void kt_mutable_list_clear(KRef self) {
+    KMutableList *list = (KMutableList *)self;
+    KRef *elements = kt_elements_of(list->elements);
+    for (kt_int at = 0; at < list->size; at++) {
+        elements[at] = NULL;
+    }
+    list->size = 0;
+    list->modifications++;
+}
+
+KRef kt_list_iterator(KRef list) {
+    KListIterator *iterator =
+        (KListIterator *)kt_gc_allocate(&kt_type_list_iterator, sizeof(KListIterator));
+    iterator->list = list;
+    iterator->at = 0;
+    iterator->modifications = kt_is_mutable_list(list) ? ((const KMutableList *)list)->modifications
+                                                       : 0;
+    return (KRef)iterator;
+}
+
+kt_boolean kt_list_iterator_has_next(KRef iterator) {
+    const KListIterator *self = (const KListIterator *)iterator;
+    return self->at < kt_list_size(self->list);
+}
+
+KRef kt_list_iterator_next(KRef iterator) {
+    KListIterator *self = (KListIterator *)iterator;
+    /* Checked BEFORE the bound, because that is the order the difference shows in: a `remove`
+       during the walk can leave the cursor inside the shortened list, where the bound says nothing
+       is wrong and Kotlin still raises. */
+    if (kt_is_mutable_list(self->list) &&
+        ((const KMutableList *)self->list)->modifications != self->modifications) {
+        kt_throw(kt_throwable_new(&kt_type_concurrent_modification_exception, NULL));
+        return NULL;
+    }
+    if (self->at >= kt_list_size(self->list)) {
+        kt_throw(kt_throwable_new(&kt_type_no_such_element_exception, NULL));
+        return NULL;
+    }
+    return kt_list_get(self->list, self->at++);
+}
+
+/* An `Iterable` or an `Iterator` that the generator could only type by the INTERFACE — a generic
+   body, an inlined stdlib extension — may be holding either of the two things this runtime can
+   iterate. The static type cannot say which, so the descriptor does.
+
+   `next` answers a reference for the same reason the question arises: a receiver typed by the
+   interface has its element type erased, so what a caller there expects is the boxed element. */
+/* ---- iterating an array or a string ---------------------------------------------------------- */
+
+/* Neither an array nor a `String` is a `kotlin.collections.Iterable`, and Kotlin still lets a
+   program reach every `Iterable` member on one — through an extension, or through a `for` loop the
+   frontend turns into a counted walk before this runtime sees it. What arrives here is the other
+   case: the receiver kept as a value and asked for an iterator. One iterator each, because the
+   element of an array is read at its own width and boxed by its own descriptor, and the "element"
+   of a string is a UTF-16 unit the text does not store as one. */
+typedef struct KWalk {
+    KObjectHeader header;
+    KRef over;
+    kt_int at;
+} KWalk;
+
+static const uint32_t kt_walk_offsets[] = {offsetof(KWalk, over)};
+
+const KType kt_type_array_iterator = {"kotlin.collections.Iterator",
+                                      sizeof("kotlin.collections.Iterator") - 1,
+                                      sizeof(KWalk),
+                                      1,
+                                      0,
+                                      kt_walk_offsets,
+                                      &kt_type_any,
+                                      kt_any_vtable,
+                                      3,
+                                      0};
+
+const KType kt_type_chars_iterator = {"kotlin.collections.CharIterator",
+                                      sizeof("kotlin.collections.CharIterator") - 1,
+                                      sizeof(KWalk),
+                                      1,
+                                      0,
+                                      kt_walk_offsets,
+                                      &kt_type_any,
+                                      kt_any_vtable,
+                                      3,
+                                      0};
+
+static kt_boolean kt_walk_is(KRef iterator) {
+    return iterator != NULL
+           && (iterator->header.type == &kt_type_array_iterator
+               || iterator->header.type == &kt_type_chars_iterator);
+}
+
+/* Whether a descriptor is one of the thirteen array shapes. */
+static kt_boolean kt_is_array(const KType *type) {
+    return type == &kt_type_array || type == &kt_type_byte_array || type == &kt_type_short_array
+           || type == &kt_type_int_array || type == &kt_type_long_array
+           || type == &kt_type_char_array || type == &kt_type_boolean_array
+           || type == &kt_type_float_array || type == &kt_type_double_array
+           || type == &kt_type_ubyte_array || type == &kt_type_ushort_array
+           || type == &kt_type_uint_array || type == &kt_type_ulong_array;
+}
+
+static KRef kt_walk_of(const KType *type, KRef over) {
+    KWalk *walk = (KWalk *)kt_gc_allocate(type, sizeof(KWalk));
+    walk->over = over;
+    walk->at = 0;
+    return (KRef)walk;
+}
+
+/* One element of an array, boxed by the descriptor the ARRAY carries — the only thing that knows
+   how wide the element is and how to read its bits.
+   Every descriptor `kt_is_array` accepts is answered here by name and the chain ends in a failure
+   rather than in a widest-element read: a descriptor this does not recognise is a routing mistake,
+   and reading its element as a `Double` would take eight bytes from an array that may hold one. */
+static KRef kt_array_element(KRef array, kt_int at) {
+    const KType *type = array->header.type;
+    const void *elements = (const void *)((const KArray *)array + 1);
+    if (type == &kt_type_array) {
+        return ((KRef *)elements)[at];
+    }
+    if (type == &kt_type_byte_array) {
+        return kt_box_byte(((const kt_byte *)elements)[at]);
+    }
+    if (type == &kt_type_short_array) {
+        return kt_box_short(((const kt_short *)elements)[at]);
+    }
+    if (type == &kt_type_int_array) {
+        return kt_box_int(((const kt_int *)elements)[at]);
+    }
+    if (type == &kt_type_long_array) {
+        return kt_box_long(((const kt_long *)elements)[at]);
+    }
+    if (type == &kt_type_char_array) {
+        return kt_box_char(((const kt_char *)elements)[at]);
+    }
+    if (type == &kt_type_boolean_array) {
+        return kt_box_boolean(((const kt_boolean *)elements)[at]);
+    }
+    if (type == &kt_type_float_array) {
+        return kt_box_float(((const kt_float *)elements)[at]);
+    }
+    if (type == &kt_type_double_array) {
+        return kt_box_double(((const kt_double *)elements)[at]);
+    }
+    /* An unsigned array holds the signed array's bits; only the BOX differs, because it is the box
+       that decides whether `toString` reads them as the maximum or as `-1`. */
+    if (type == &kt_type_ubyte_array) {
+        return kt_box_ubyte(((const kt_byte *)elements)[at]);
+    }
+    if (type == &kt_type_ushort_array) {
+        return kt_box_ushort(((const kt_short *)elements)[at]);
+    }
+    if (type == &kt_type_uint_array) {
+        return kt_box_uint(((const kt_int *)elements)[at]);
+    }
+    if (type == &kt_type_ulong_array) {
+        return kt_box_ulong(((const kt_long *)elements)[at]);
+    }
+    KT_FAIL("krusty: this is not an array whose elements can be read\n");
+    return NULL;
+}
+
+/* `xs.toList()` and `xs.reversed()` — a SNAPSHOT of an array's elements as a list. The snapshot is
+   the point: Kotlin's own answer is a new list, so writing through the array afterwards leaves it
+   as it was, and the corpus checks exactly that.
+
+   The elements are filled one at a time rather than copied, because a List holds references and a
+   primitive array does not: each element is boxed on the way in, which is what `IntArray.toList()`
+   answering a `List<Int>` means. The destination array is a root across those allocations, in a
+   local the conservative scan reads. */
+static KRef kt_array_snapshot(KRef array, int reversed) {
+    if (array == NULL) {
+        KT_FAIL("krusty: a list of a null array\n");
+    }
+    kt_int length = ((const KArray *)array)->length;
+    KRef elements = kt_array_new(&kt_type_array, length);
+    for (kt_int index = 0; index < length; index++) {
+        KRef value = kt_array_element(array, reversed ? length - 1 - index : index);
+        kt_elements_of(elements)[index] = value;
+    }
+    return kt_list_of(elements);
+}
+
+KRef kt_array_to_list(KRef array) { return kt_array_snapshot(array, 0); }
+
+/* `xs.isEmpty()` / `xs.isNotEmpty()` on an ARRAY. The length is the whole of the question, and it
+   is the same question for a reference array and a primitive one. */
+kt_boolean kt_array_is_empty(KRef array) {
+    if (array == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    return ((const KArray *)array)->length == 0;
+}
+
+kt_boolean kt_array_is_not_empty(KRef array) { return !kt_array_is_empty(array); }
+
+/* `xs.toTypedArray()`: a reference `Array<T>` holding what the receiver walks.
+   A collection's elements are already references — a primitive one is boxed the moment it enters a
+   list — so this is a copy into a fresh array rather than a conversion of each. The SIZE is asked
+   first and the array allocated before anything is read, so the walk fills a home that already
+   exists. */
+KRef kt_iterable_to_typed_array(KRef iterable) {
+    KRef list = kt_iterable_to_list(iterable);
+    kt_int length = kt_list_size(list);
+    KRef array = kt_array_new(&kt_type_array, length);
+    for (kt_int index = 0; index < length; index++) {
+        kt_elements_of(array)[index] = kt_list_get(list, index);
+    }
+    return array;
+}
+
+KRef kt_array_reversed(KRef array) { return kt_array_snapshot(array, 1); }
+
+/* `xs.reversedArray()`: a new ARRAY of the same element type, backwards.
+
+   Unlike `reversed()`, which answers a LIST of boxes, this keeps the elements where they were — in
+   an array wearing the receiver's own descriptor, so a primitive array stays primitive. The
+   elements are copied as BYTES: the descriptor's stride is what says how wide one is, and copying
+   by width is the one answer that serves a reference array and a `DoubleArray` alike. */
+KRef kt_array_reversed_array(KRef array) {
+    if (array == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    const KType *type = array->header.type;
+    kt_int length = ((const KArray *)array)->length;
+    KRef copy = kt_array_new(type, length);
+    size_t stride = (size_t)type->element_size;
+    const char *from = (const char *)array + type->instance_size;
+    char *to = (char *)copy + type->instance_size;
+    for (kt_int index = 0; index < length; index++) {
+        memcpy(to + (size_t)(length - 1 - index) * stride, from + (size_t)index * stride, stride);
+    }
+    return copy;
+}
+
+/* An annotation member's array, compared by CONTENT — `Arrays.equals`, which is what Kotlin gives
+   an annotation instance's `equals` for an array member and what separates it from a data class's
+   (that one compares arrays by identity).
+
+   Each element is compared the way its BOX compares, so a `Float` or `Double` element uses the
+   total order: NaN equals itself and the two zeroes are distinct. */
+kt_boolean kt_array_content_equals(KRef left, KRef right) {
+    if (left == right) {
+        return true;
+    }
+    if (left == NULL || right == NULL) {
+        return false;
+    }
+    kt_int length = ((const KArray *)left)->length;
+    if (length != ((const KArray *)right)->length) {
+        return false;
+    }
+    for (kt_int index = 0; index < length; index++) {
+        if (!kt_equals(kt_array_element(left, index), kt_array_element(right, index))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* `Arrays.hashCode`: 1, then `31 * result + element.hashCode()` per element, a null element
+   contributing 0 and a null array answering 0. The arithmetic is on the unsigned ring, because
+   Kotlin's `Int` wraps where C's signed overflow is undefined. */
+kt_int kt_array_content_hash_code(KRef array) {
+    if (array == NULL) {
+        return 0;
+    }
+    kt_int length = ((const KArray *)array)->length;
+    uint32_t result = 1;
+    for (kt_int index = 0; index < length; index++) {
+        KRef element = kt_array_element(array, index);
+        uint32_t hash = element == NULL ? 0u : (uint32_t)kt_hash_code(element);
+        result = result * 31u + hash;
+    }
+    return (kt_int)result;
+}
+
+/* `Arrays.toString`: `[a, b]`, and the text `null` for a null array. */
+KRef kt_array_content_to_string(KRef array) {
+    if (array == NULL) {
+        return kt_string_utf8("null", 4);
+    }
+    KRef builder = kt_string_builder_new();
+    kt_string_builder_append(builder, kt_string_utf8("[", 1));
+    kt_int length = ((const KArray *)array)->length;
+    for (kt_int index = 0; index < length; index++) {
+        if (index != 0) {
+            kt_string_builder_append(builder, kt_string_utf8(", ", 2));
+        }
+        kt_string_builder_append(builder, kt_array_element(array, index));
+    }
+    kt_string_builder_append(builder, kt_string_utf8("]", 1));
+    return kt_to_string(builder);
+}
+
+static kt_boolean kt_walk_has_next(KRef iterator) {
+    const KWalk *walk = (const KWalk *)iterator;
+    if (iterator->header.type == &kt_type_chars_iterator) {
+        return walk->at < kt_string_length(walk->over);
+    }
+    return walk->at < kt_length_of(walk->over);
+}
+
+/* The element as the 64 bits the narrow iterator protocol carries. A REFERENCE array's element is
+   not a number and must never arrive here: an `Array<T>`'s iterator has the static type
+   `Iterator<T>`, which routes to the general dispatch instead, so reaching this with one means the
+   routing above went wrong rather than that a pointer should be returned as an integer. */
+static kt_long kt_walk_next_long(KRef iterator) {
+    KWalk *walk = (KWalk *)iterator;
+    if (!kt_walk_has_next(iterator)) {
+        KT_FAIL("krusty: no more elements in this iterator\n");
+    }
+    kt_int at = walk->at;
+    walk->at = at + 1;
+    if (iterator->header.type == &kt_type_chars_iterator) {
+        return kt_string_get(walk->over, at);
+    }
+    const KType *type = walk->over->header.type;
+    const void *elements = (const void *)((const KArray *)walk->over + 1);
+    if (type == &kt_type_byte_array) {
+        return ((const kt_byte *)elements)[at];
+    }
+    if (type == &kt_type_short_array) {
+        return ((const kt_short *)elements)[at];
+    }
+    if (type == &kt_type_int_array) {
+        return ((const kt_int *)elements)[at];
+    }
+    if (type == &kt_type_long_array) {
+        return ((const kt_long *)elements)[at];
+    }
+    if (type == &kt_type_char_array) {
+        return ((const kt_char *)elements)[at];
+    }
+    if (type == &kt_type_boolean_array) {
+        return ((const kt_boolean *)elements)[at];
+    }
+    /* The unsigned widths, read through their own C types so the 64 bits this protocol carries hold
+       the VALUE and not its sign extension: a `UByteArray`'s `255u` arrives as 255, where a signed
+       read of the same byte would arrive as -1 and render that way anywhere the consumer widens
+       before it narrows again. */
+    if (type == &kt_type_ubyte_array) {
+        return ((const uint8_t *)elements)[at];
+    }
+    if (type == &kt_type_ushort_array) {
+        return ((const uint16_t *)elements)[at];
+    }
+    if (type == &kt_type_uint_array) {
+        return ((const uint32_t *)elements)[at];
+    }
+    if (type == &kt_type_ulong_array) {
+        return (kt_long)((const uint64_t *)elements)[at];
+    }
+    KT_FAIL("krusty: this iterator does not answer a number\n");
+    return 0;
+}
+
+/* ---- withIndex ------------------------------------------------------------------------------ */
+
+/* `IndexedValue(index, value)`, Kotlin's own data class. Only `value` is a reference; the index is
+   an `Int` and the collector is told so. */
+typedef struct KIndexedValue {
+    KObjectHeader header;
+    KRef value;
+    kt_int index;
+} KIndexedValue;
+
+static const uint32_t kt_indexed_value_offsets[] = {offsetof(KIndexedValue, value)};
+
+static kt_boolean kt_indexed_value_equals(KRef self, KRef other);
+static kt_int kt_indexed_value_hash_code(KRef self);
+static KRef kt_indexed_value_to_string(KRef self);
+
+static const kt_fn kt_indexed_value_vtable[] = {(kt_fn)kt_indexed_value_equals,
+                                                (kt_fn)kt_indexed_value_hash_code,
+                                                (kt_fn)kt_indexed_value_to_string};
+
+const KType kt_type_indexed_value = {"kotlin.collections.IndexedValue",
+                                     sizeof("kotlin.collections.IndexedValue") - 1,
+                                     sizeof(KIndexedValue),
+                                     1,
+                                     0,
+                                     kt_indexed_value_offsets,
+                                     &kt_type_any,
+                                     kt_indexed_value_vtable,
+                                     3,
+                                     0};
+
+KRef kt_indexed_value(kt_int index, KRef value) {
+    /* `value` stays in the parameter across the allocation: it is its root. */
+    KIndexedValue *indexed =
+        (KIndexedValue *)kt_gc_allocate(&kt_type_indexed_value, sizeof(KIndexedValue));
+    indexed->index = index;
+    indexed->value = value;
+    return (KRef)indexed;
+}
+
+kt_int kt_indexed_value_index(KRef self) {
+    if (self == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    return ((const KIndexedValue *)self)->index;
+}
+
+KRef kt_indexed_value_value(KRef self) {
+    if (self == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    return ((const KIndexedValue *)self)->value;
+}
+
+/* A data class: equal by its components, which is what a program comparing two of them means. */
+static kt_boolean kt_indexed_value_equals(KRef self, KRef other) {
+    if (other == NULL || other->header.type != &kt_type_indexed_value) {
+        return 0;
+    }
+    const KIndexedValue *mine = (const KIndexedValue *)self;
+    const KIndexedValue *theirs = (const KIndexedValue *)other;
+    return mine->index == theirs->index && kt_equals(mine->value, theirs->value);
+}
+
+static kt_int kt_indexed_value_hash_code(KRef self) {
+    const KIndexedValue *indexed = (const KIndexedValue *)self;
+    return indexed->index * 31 + kt_hash_code(indexed->value);
+}
+
+static KRef kt_indexed_value_to_string(KRef self) {
+    const KIndexedValue *indexed = (const KIndexedValue *)self;
+    KRef text = kt_string_utf8("IndexedValue(index=", 19);
+    text = kt_string_plus(text, kt_to_string(kt_box_int(indexed->index)));
+    text = kt_string_plus(text, kt_string_utf8(", value=", 8));
+    text = kt_string_plus(text, kt_to_string(indexed->value));
+    return kt_string_plus(text, kt_string_utf8(")", 1));
+}
+
+/* What `withIndex()` answers: the source iterable, kept until somebody asks it for an iterator.
+   Lazy, because Kotlin's is and because the loop that consumes it may stop early. */
+typedef struct KWithIndex {
+    KObjectHeader header;
+    KRef source;
+} KWithIndex;
+
+static const uint32_t kt_with_index_offsets[] = {offsetof(KWithIndex, source)};
+
+const KType kt_type_with_index = {"kotlin.collections.IndexingIterable",
+                                  sizeof("kotlin.collections.IndexingIterable") - 1,
+                                  sizeof(KWithIndex),
+                                  1,
+                                  0,
+                                  kt_with_index_offsets,
+                                  &kt_type_any,
+                                  kt_any_vtable,
+                                  3,
+                                  0};
+
+/* What `asSequence()` answers: the source iterable, kept until somebody asks it for an iterator.
+
+   The same shape as `withIndex()` above and lazy for the same reason, but its own type — because
+   what separates a `Sequence` from an `Iterable` here is which members may be asked of it. Every
+   walk this runtime has is EAGER, and an eager `map` on a sequence is not Kotlin's: the transform
+   would run for every element where Kotlin runs it per element consumed, which a side effect sees
+   and an endless sequence never survives. So a sequence is offered only the members whose answer is
+   the same either way — its iterator, and the lazy `withIndex` — and the rest decline at the call
+   site, where the type the program named is still in sight.
+
+   `equals` and `hashCode` are IDENTITY, which is what Kotlin answers: `Sequence` declares neither,
+   so two sequences over the same elements are different objects and stay that way. */
+typedef struct KSequence {
+    KObjectHeader header;
+    KRef source;
+} KSequence;
+
+static const uint32_t kt_sequence_offsets[] = {offsetof(KSequence, source)};
+
+const KType kt_type_sequence = {"kotlin.sequences.Sequence",
+                                sizeof("kotlin.sequences.Sequence") - 1,
+                                sizeof(KSequence),
+                                1,
+                                0,
+                                kt_sequence_offsets,
+                                &kt_type_any,
+                                kt_any_vtable,
+                                3,
+                                0};
+
+KRef kt_sequence_of(KRef source) {
+    KSequence *wrapper = (KSequence *)kt_gc_allocate(&kt_type_sequence, sizeof(KSequence));
+    wrapper->source = source;
+    return (KRef)wrapper;
+}
+
+kt_boolean kt_is_sequence(KRef value) {
+    return value != NULL && value->header.type == &kt_type_sequence;
+}
+
+/* The iterator it hands out: the source's own, plus the count. */
+typedef struct KIndexingIterator {
+    KObjectHeader header;
+    KRef source;
+    kt_int at;
+} KIndexingIterator;
+
+static const uint32_t kt_indexing_iterator_offsets[] = {offsetof(KIndexingIterator, source)};
+
+const KType kt_type_indexing_iterator = {"kotlin.collections.IndexingIterator",
+                                         sizeof("kotlin.collections.IndexingIterator") - 1,
+                                         sizeof(KIndexingIterator),
+                                         1,
+                                         0,
+                                         kt_indexing_iterator_offsets,
+                                         &kt_type_any,
+                                         kt_any_vtable,
+                                         3,
+                                         0};
+
+KRef kt_iterable_with_index(KRef iterable) {
+    KWithIndex *wrapper = (KWithIndex *)kt_gc_allocate(&kt_type_with_index, sizeof(KWithIndex));
+    wrapper->source = iterable;
+    return (KRef)wrapper;
+}
+
+KRef kt_iterable_iterator(KRef iterable) {
+    /* Either list shape: the one list iterator serves both, because its cursor is an index and the
+       bound it compares against is `kt_list_size`, which both answer. */
+    if (iterable != NULL
+        && (iterable->header.type == &kt_type_list || kt_is_mutable_list(iterable))) {
+        return kt_list_iterator(iterable);
+    }
+    if (iterable != NULL && kt_is_array(iterable->header.type)) {
+        return kt_walk_of(&kt_type_array_iterator, iterable);
+    }
+    /* Either text shape: the chars iterator reads its element through `kt_string_get` and its
+       bound through `kt_string_length`, and both answer for a string and for a builder. */
+    if (iterable != NULL
+        && (iterable->header.type == &kt_type_string || kt_is_string_builder(iterable))) {
+        return kt_walk_of(&kt_type_chars_iterator, iterable);
+    }
+    /* A SET is iterated as the list of its elements: that list IS the set's order, which is the
+       insertion order a `LinkedHashSet` promises. */
+    if (kt_is_set(iterable)) {
+        return kt_list_iterator(kt_map_keys_list(iterable));
+    }
+    /* A MAP is walked as its entries, which is what Kotlin's `Map.iterator()` extension answers
+       and what a `for ((k, v) in m)` destructures. */
+    if (kt_is_map(iterable)) {
+        return kt_iterable_iterator(kt_map_entries(iterable));
+    }
+    /* A SEQUENCE is walked as its source: that is the whole of what the wrapper holds, and asking
+       it for an iterator is the one member Kotlin's `Sequence` declares. */
+    if (kt_is_sequence(iterable)) {
+        return kt_iterable_iterator(((const KSequence *)iterable)->source);
+    }
+    if (iterable != NULL && iterable->header.type == &kt_type_with_index) {
+        KRef source = kt_iterable_iterator(((const KWithIndex *)iterable)->source);
+        KIndexingIterator *counting = (KIndexingIterator *)kt_gc_allocate(
+            &kt_type_indexing_iterator, sizeof(KIndexingIterator));
+        counting->source = source;
+        counting->at = 0;
+        return (KRef)counting;
+    }
+    /* A class of the PROGRAM that implements `kotlin.collections.Iterable`: its own `iterator()`,
+       at the slot its descriptor records. Last, so that nothing this runtime makes is reached
+       through a dispatch when its own shape already answered. */
+    if (iterable != NULL && iterable->header.type->walk_iterator != NULL) {
+        return iterable->header.type->walk_iterator(iterable);
+    }
+    /* Text the PROGRAM wrote is walked the way this runtime's own text is: by index, against the
+       length. `kt_string_length` and `kt_string_get` reach its own members, so the chars iterator
+       needs no case of its own. */
+    if (iterable != NULL && iterable->header.type->walk_length != NULL) {
+        return kt_walk_of(&kt_type_chars_iterator, iterable);
+    }
+    return kt_range_iterator(iterable);
+}
+
+kt_boolean kt_iterator_has_next(KRef iterator) {
+    if (iterator != NULL && iterator->header.type == &kt_type_list_iterator) {
+        return kt_list_iterator_has_next(iterator);
+    }
+    if (iterator != NULL && iterator->header.type == &kt_type_array_iterator) {
+        const KWalk *walk = (const KWalk *)iterator;
+        return walk->at < kt_length_of(walk->over);
+    }
+    if (iterator != NULL && iterator->header.type == &kt_type_chars_iterator) {
+        const KWalk *walk = (const KWalk *)iterator;
+        return walk->at < kt_string_length(walk->over);
+    }
+    if (iterator != NULL && iterator->header.type == &kt_type_indexing_iterator) {
+        return kt_iterator_has_next(((const KIndexingIterator *)iterator)->source);
+    }
+    if (iterator != NULL && iterator->header.type->walk_has_next != NULL) {
+        return iterator->header.type->walk_has_next(iterator);
+    }
+    return kt_range_iterator_has_next(iterator);
+}
+
+/* Call a one-argument function value. The second place the runtime calls back into emitted code,
+   through the same slot `kt_lazy_value` uses; see `KT_SLOT_INVOKE`. */
+static KRef kt_invoke_one(KRef function, KRef argument) {
+    if (function == NULL || function->header.type->vtable == NULL ||
+        function->header.type->vtable_length <= KT_SLOT_INVOKE) {
+        KT_FAIL("krusty: a function value was expected here\n");
+    }
+    return ((KRef(*)(KRef, KRef))function->header.type->vtable[KT_SLOT_INVOKE])(function, argument);
+}
+
+/* How many elements an iterable will yield. Only the two this runtime has are askable, and the
+   descriptor says which — a range's count is its bounds, a list's is its array's length.
+
+   `map` needs this because it answers a LIST, and a list is an array with a header: there is one
+   allocation, sized once, rather than a buffer that grows. */
+static kt_int kt_iterable_size(KRef iterable) {
+    if (iterable == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    if (iterable->header.type == &kt_type_list || kt_is_mutable_list(iterable)) {
+        return kt_list_size(iterable);
+    }
+    if (kt_is_set(iterable) || kt_is_map(iterable)) {
+        return kt_map_size(iterable);
+    }
+    if (kt_is_array(iterable->header.type)) {
+        return kt_length_of(iterable);
+    }
+    if (iterable->header.type == &kt_type_string || kt_is_string_builder(iterable)) {
+        return kt_string_length(iterable);
+    }
+    if (iterable->header.type != &kt_type_int_range &&
+        iterable->header.type != &kt_type_uint_range &&
+        iterable->header.type != &kt_type_ulong_range &&
+        iterable->header.type != &kt_type_long_range &&
+        iterable->header.type != &kt_type_char_range) {
+        /* A collection of the PROGRAM's, which this side reaches only through its iterator: its
+           count is not a question the descriptor answers, and walking it to find out would walk
+           it twice. -1 says so, and the one caller sizes its result as it goes instead. */
+        return -1;
+    }
+    /* How many elements the WALK yields, which is not `last - first + 1` unless the step is 1 and
+       the walk ascends. A progression wears a range's descriptor here -- one struct serves both --
+       so a descending `3 downTo 1` reached the ascending test with `first` above `last` and was
+       counted as empty, and `1..9 step 3` would have been counted 7 where the walk yields 3.
+
+       `kt_range_empty` already answers emptiness for either direction and at the bounds' own
+       signedness, so the count below never divides for a walk that yields nothing.
+
+       The span is taken on the RING, as two's-complement subtraction, for the reason
+       `kt_progression_last` states about forming a distance: `Long.MIN_VALUE..Long.MAX_VALUE`
+       spans more than a `kt_long` holds, and the signed subtraction wraps. At 64 bits unsigned it
+       is exact -- and exact for an unsigned range's bounds above 2^63 by the same token. A span
+       that large cannot be collected anyway, which the cap below still says. `last` is already the
+       last element REACHED, so the span divides by the step exactly. */
+    const KRange *bounds = (const KRange *)iterable;
+    if (kt_range_empty(bounds)) {
+        return 0;
+    }
+    kt_long step = bounds->step;
+    uint64_t span = step > 0 ? (uint64_t)bounds->last - (uint64_t)bounds->first
+                             : (uint64_t)bounds->first - (uint64_t)bounds->last;
+    uint64_t magnitude = (uint64_t)(step > 0 ? step : -step);
+    uint64_t count = span / magnitude + 1u;
+    if (count > (uint64_t)INT32_MAX) {
+        KT_FAIL("krusty: a range too long to collect\n");
+    }
+    return (kt_int)count;
+}
+
+/* `xs.map { … }`: one new list, the transform applied to each element in order.
+
+   The result list is built BEFORE the loop so that it, and through it the array, is a root across
+   every call the loop makes — each of which may collect, and each of which may allocate whatever
+   the transform returns. Elements already written are traced through the array like any other
+   reference, so there is nothing to defer and no barrier to write. */
+static KRef kt_frozen(KRef growing, kt_boolean reversed);
+
+KRef kt_iterable_map(KRef iterable, KRef transform) {
+    kt_int size = kt_iterable_size(iterable);
+    if (size < 0) {
+        /* A receiver whose count is not known without walking it; see `kt_iterable_size`. The
+           result grows rather than being sized once, which costs a copy or two and keeps the walk
+           single — and a walk's side effects are what a program can see. */
+        KRef growing = kt_mutable_list_new();
+        KRef walk = kt_iterable_iterator(iterable);
+        while (kt_iterator_has_next(walk)) {
+            kt_mutable_list_add(growing, kt_invoke_one(transform, kt_iterator_next(walk)));
+        }
+        return kt_frozen(growing, 0);
+    }
+    KRef elements = kt_array_new(&kt_type_array, size);
+    KRef result = kt_list_of(elements);
+    KRef iterator = kt_iterable_iterator(iterable);
+    for (kt_int i = 0; i < size; i++) {
+        kt_elements_of(elements)[i] = kt_invoke_one(transform, kt_iterator_next(iterator));
+    }
+    return result;
+}
+
+KRef kt_iterable_join_to_string(KRef iterable) {
+    KRef separator = kt_string_utf8(", ", 2);
+    KRef joined = kt_string_utf8("", 0);
+    KRef iterator = kt_iterable_iterator(iterable);
+    kt_boolean first = 1;
+    while (kt_iterator_has_next(iterator)) {
+        if (!first) {
+            joined = kt_string_plus(joined, separator);
+        }
+        first = 0;
+        /* `kt_to_string` and not the element itself: `joinToString` renders each element the way
+           `"$element"` would, through whatever `toString` the element's own type answers with. */
+        joined = kt_string_plus(joined, kt_to_string(kt_iterator_next(iterator)));
+    }
+    return joined;
+}
+
+/* `xs.forEach { … }`: the same walk with nothing kept, and so nothing to size. */
+void kt_iterable_for_each(KRef iterable, KRef action) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        kt_invoke_one(action, kt_iterator_next(iterator));
+    }
+}
+
+/* A function value of TWO parameters, called the way `kt_invoke_one` calls one of one. */
+static KRef kt_invoke_two(KRef function, KRef first, KRef second) {
+    if (function == NULL || function->header.type->vtable == NULL ||
+        function->header.type->vtable_length <= KT_SLOT_INVOKE) {
+        KT_FAIL("krusty: a function value was expected here\n");
+    }
+    return ((KRef(*)(KRef, KRef, KRef))function->header.type->vtable[KT_SLOT_INVOKE])(function,
+                                                                                      first,
+                                                                                      second);
+}
+
+/* `list.sortWith(comparator)` / `xs.sortedWith(comparator)`. The comparator is an ordinary
+   function value of two arguments — a `Comparator` this runtime makes is a `Function2`, because
+   nothing but its one member is ever asked of it — so the comparison goes through the same invoke
+   slot every function value declares, and its answer arrives BOXED.
+
+   An INSERTION sort, which is stable, and stability is observable: Kotlin's `sortWith` promises it,
+   so two elements the comparator calls equal keep the order they were in. It is quadratic, and the
+   corpus's lists are small; a merge sort would need a scratch buffer this has no reason to allocate
+   yet. The comparison can collect — it is emitted code — and nothing here holds a raw element
+   pointer across one: each step re-reads through the list. */
+kt_int kt_comparator_compare(KRef comparator, KRef left, KRef right) {
+    KRef answer = kt_invoke_two(comparator, left, right);
+    if (answer == NULL) {
+        KT_FAIL("krusty: a comparator answered nothing\n");
+    }
+    return kt_unbox_int(answer);
+}
+
+void kt_list_sort_with(KRef list, KRef comparator) {
+    kt_int size = kt_list_size(list);
+    for (kt_int at = 1; at < size; at++) {
+        kt_int hole = at;
+        while (hole > 0) {
+            KRef previous = kt_list_get(list, hole - 1);
+            KRef current = kt_list_get(list, hole);
+            if (kt_comparator_compare(comparator, previous, current) <= 0) {
+                break;
+            }
+            (void)kt_mutable_list_set(list, hole - 1, current);
+            (void)kt_mutable_list_set(list, hole, previous);
+            hole--;
+        }
+    }
+}
+
+static KRef kt_invoke_three(KRef function, KRef first, KRef second, KRef third) {
+    if (function == NULL || function->header.type->vtable == NULL ||
+        function->header.type->vtable_length <= KT_SLOT_INVOKE) {
+        KT_FAIL("krusty: a function value was expected here\n");
+    }
+    return ((KRef(*)(KRef, KRef, KRef, KRef))function->header.type->vtable[KT_SLOT_INVOKE])(
+        function, first, second, third);
+}
+
+/* Whether a predicate answered true for an element. The answer arrives BOXED, because a function
+   value's `invoke` hands back a reference whatever its declared return type is. */
+static kt_boolean kt_holds(KRef predicate, KRef element) {
+    return kt_unbox_boolean(kt_invoke_one(predicate, element));
+}
+
+/* `xs.any { … }`, `xs.all { … }` and `xs.none { … }` — one walk, three readings of it. Each stops
+   at the first element that settles the question, which is Kotlin's own promise and is observable
+   through a predicate with a side effect. */
+kt_boolean kt_iterable_any(KRef iterable, KRef predicate) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        if (kt_holds(predicate, kt_iterator_next(iterator))) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+kt_boolean kt_iterable_all(KRef iterable, KRef predicate) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        if (!kt_holds(predicate, kt_iterator_next(iterator))) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+kt_boolean kt_iterable_none(KRef iterable, KRef predicate) {
+    return !kt_iterable_any(iterable, predicate);
+}
+
+/* `xs.any()` and `xs.none()` with no predicate: whether the walk yields anything at all. */
+kt_boolean kt_iterable_is_not_empty(KRef iterable) {
+    return kt_iterator_has_next(kt_iterable_iterator(iterable));
+}
+
+kt_boolean kt_iterable_is_empty(KRef iterable) { return !kt_iterable_is_not_empty(iterable); }
+
+/* `xs.count()` walks rather than reading a size: `count` is declared over `Iterable`, and the
+   walk is the only thing every iterable has. */
+kt_int kt_iterable_count(KRef iterable) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    kt_int counted = 0;
+    while (kt_iterator_has_next(iterator)) {
+        (void)kt_iterator_next(iterator);
+        counted++;
+    }
+    return counted;
+}
+
+kt_int kt_iterable_count_matching(KRef iterable, KRef predicate) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    kt_int counted = 0;
+    while (kt_iterator_has_next(iterator)) {
+        if (kt_holds(predicate, kt_iterator_next(iterator))) {
+            counted++;
+        }
+    }
+    return counted;
+}
+
+/* Every element a walk yields, collected without asking the iterable for a SIZE.
+
+   Not every iterable has one to give: `withIndex()` answers a lazy object that only knows how to
+   walk, and a filter's answer is shorter than its source by definition. The buffer is the growable
+   list the runtime already has, which doubles; the answer is a READ-ONLY list over an array of
+   exactly the right length, because a read-only list IS its array and nothing may see a spare
+   slot. */
+static KRef kt_frozen(KRef growing, kt_boolean reversed) {
+    kt_int size = kt_list_size(growing);
+    KRef elements = kt_array_new(&kt_type_array, size);
+    /* Built before the copy so the array is a root through it; `growing` is one in this frame. */
+    KRef result = kt_list_of(elements);
+    for (kt_int at = 0; at < size; at++) {
+        kt_elements_of(elements)[reversed ? size - 1 - at : at] = kt_list_get(growing, at);
+    }
+    return result;
+}
+
+/* `xs.filter { … }` and `xs.filterNot { … }`.
+
+   The predicate is asked once per element, which counting first and filling second would not
+   manage — a predicate may have a side effect, and Kotlin asks it once.
+
+   `keep` is what the predicate must answer for an element to survive, so one walk serves both
+   names. */
+static KRef kt_iterable_filtered(KRef iterable, KRef predicate, kt_boolean keep) {
+    KRef growing = kt_mutable_list_new();
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        KRef element = kt_iterator_next(iterator);
+        if (kt_holds(predicate, element) == keep) {
+            kt_mutable_list_add(growing, element);
+        }
+    }
+    return kt_frozen(growing, 0);
+}
+
+KRef kt_iterable_filter(KRef iterable, KRef predicate) {
+    return kt_iterable_filtered(iterable, predicate, 1);
+}
+
+KRef kt_iterable_filter_not(KRef iterable, KRef predicate) {
+    return kt_iterable_filtered(iterable, predicate, 0);
+}
+
+/* `xs.first { … }` and `xs.firstOrNull { … }`. Kotlin raises `NoSuchElementException` when nothing
+   matches, with its own wording; the raise is followed by a RETURN, because `kt_throw` records the
+   exception for the call site and comes back. */
+KRef kt_iterable_first_or_null(KRef iterable, KRef predicate) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        KRef element = kt_iterator_next(iterator);
+        if (kt_holds(predicate, element)) {
+            return element;
+        }
+    }
+    return NULL;
+}
+
+KRef kt_iterable_first_matching(KRef iterable, KRef predicate) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        KRef element = kt_iterator_next(iterator);
+        if (kt_holds(predicate, element)) {
+            return element;
+        }
+    }
+    kt_throw(kt_throwable_new(
+        &kt_type_no_such_element_exception,
+        kt_string_utf8("Collection contains no element matching the predicate.", 54)));
+    return NULL;
+}
+
+/* `xs.last { … }`: the LAST match, so the whole walk runs. */
+KRef kt_iterable_last_matching(KRef iterable, KRef predicate) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    KRef found = NULL;
+    kt_boolean any = 0;
+    while (kt_iterator_has_next(iterator)) {
+        KRef element = kt_iterator_next(iterator);
+        if (kt_holds(predicate, element)) {
+            found = element;
+            any = 1;
+        }
+    }
+    if (!any) {
+        kt_throw(kt_throwable_new(
+            &kt_type_no_such_element_exception,
+            kt_string_utf8("Collection contains no element matching the predicate.", 54)));
+        return NULL;
+    }
+    return found;
+}
+
+/* `xs.fold(initial) { acc, e -> … }`: the accumulator threaded through the walk. */
+KRef kt_iterable_fold(KRef iterable, KRef initial, KRef operation) {
+    KRef accumulator = initial;
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        accumulator = kt_invoke_two(operation, accumulator, kt_iterator_next(iterator));
+    }
+    return accumulator;
+}
+
+/* `xs.forEachIndexed { i, e -> … }`. The index is BOXED on the way in, because a function value
+   takes references; the lambda's own prologue unboxes it. */
+void kt_iterable_for_each_indexed(KRef iterable, KRef action) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    kt_int index = 0;
+    while (kt_iterator_has_next(iterator)) {
+        KRef element = kt_iterator_next(iterator);
+        (void)kt_invoke_two(action, kt_box_int(index), element);
+        index++;
+    }
+}
+
+/* `xs.toList()` and `xs.reversed()` over an ITERABLE: a snapshot of its elements, in order or
+   backwards. The array version of both is `kt_array_to_list`/`kt_array_reversed`; this one walks,
+   which is what a range and a lazy `withIndex()` need. */
+static KRef kt_iterable_snapshot(KRef iterable, kt_boolean reversed) {
+    KRef growing = kt_mutable_list_new();
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        kt_mutable_list_add(growing, kt_iterator_next(iterator));
+    }
+    return kt_frozen(growing, reversed);
+}
+
+KRef kt_iterable_to_list(KRef iterable) { return kt_iterable_snapshot(iterable, 0); }
+
+KRef kt_iterable_reversed(KRef iterable) { return kt_iterable_snapshot(iterable, 1); }
+
+/* `xs.sortedWith(comparator)`: a new list, the receiver untouched. Sorted while the list is still
+   the GROWING shape `kt_mutable_list_set` writes through, and frozen afterwards — a frozen list has
+   no `size` beside its elements and is not the same object to write into. */
+KRef kt_iterable_sorted_with(KRef iterable, KRef comparator) {
+    KRef growing = kt_mutable_list_new();
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        (void)kt_mutable_list_add(growing, kt_iterator_next(iterator));
+    }
+    kt_list_sort_with(growing, comparator);
+    return kt_frozen(growing, 0);
+}
+
+/* `value in xs` and `xs.indexOf(value)` over an ITERABLE. Elements are compared with `equals`, as
+   Kotlin's own are — the list form already does, and a range's is the same question asked of the
+   numbers it yields. */
+kt_int kt_iterable_index_of(KRef iterable, KRef value) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    kt_int at = 0;
+    while (kt_iterator_has_next(iterator)) {
+        if (kt_equals(kt_iterator_next(iterator), value)) {
+            return at;
+        }
+        at++;
+    }
+    return -1;
+}
+
+kt_boolean kt_iterable_contains(KRef iterable, KRef value) {
+    return kt_iterable_index_of(iterable, value) >= 0;
+}
+
+/* `xs + x` and `xs + ys`: a NEW read-only list, never a change to the receiver — that is what
+   separates `plus` from `plusAssign`, and Kotlin's contract is that a `List` cannot be changed at
+   all. Which of the two a call means is the CALLER's answer, read from the physical parameter the
+   same way `plusAssign` reads it: after substitution an element of type `List<T>` and a collection
+   of them look alike, and only the declaration tells them apart. */
+static KRef kt_iterable_walked_into(KRef iterable, KRef growing) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    while (kt_iterator_has_next(iterator)) {
+        kt_mutable_list_add(growing, kt_iterator_next(iterator));
+    }
+    return growing;
+}
+
+KRef kt_iterable_plus_element(KRef iterable, KRef element) {
+    KRef growing = kt_iterable_walked_into(iterable, kt_mutable_list_new());
+    kt_mutable_list_add(growing, element);
+    return kt_frozen(growing, 0);
+}
+
+KRef kt_iterable_plus_all(KRef iterable, KRef tail) {
+    KRef growing = kt_iterable_walked_into(iterable, kt_mutable_list_new());
+    return kt_frozen(kt_iterable_walked_into(tail, growing), 0);
+}
+
+/* `xs.sumOf { … }`. Kotlin declares one per width the selector may answer, and the answer's TYPE
+   is the selector's — so which of these a call reaches is decided where the declaration is in
+   sight, and each unboxes what `invoke` hands back at the width its own name says. Summing at one
+   width and narrowing afterwards would not do: `Int` addition wraps and `Long` addition does not,
+   and a program that sums to an overflow is entitled to Kotlin's answer. */
+kt_int kt_iterable_sum_of_int(KRef iterable, KRef selector) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    kt_int total = 0;
+    while (kt_iterator_has_next(iterator)) {
+        total = (kt_int)((uint32_t)total
+                         + (uint32_t)kt_unbox_int(kt_invoke_one(selector,
+                                                                kt_iterator_next(iterator))));
+    }
+    return total;
+}
+
+kt_long kt_iterable_sum_of_long(KRef iterable, KRef selector) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    kt_long total = 0;
+    while (kt_iterator_has_next(iterator)) {
+        total = (kt_long)((uint64_t)total
+                          + (uint64_t)kt_unbox_long(kt_invoke_one(selector,
+                                                                  kt_iterator_next(iterator))));
+    }
+    return total;
+}
+
+kt_double kt_iterable_sum_of_double(KRef iterable, KRef selector) {
+    KRef iterator = kt_iterable_iterator(iterable);
+    kt_double total = 0.0;
+    while (kt_iterator_has_next(iterator)) {
+        total += kt_unbox_double(kt_invoke_one(selector, kt_iterator_next(iterator)));
+    }
+    return total;
+}
+
+KRef kt_iterator_next(KRef iterator) {
+    if (iterator == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    if (iterator->header.type == &kt_type_list_iterator) {
+        return kt_list_iterator_next(iterator);
+    }
+    if (iterator->header.type == &kt_type_array_iterator) {
+        KWalk *walk = (KWalk *)iterator;
+        kt_int at = walk->at;
+        walk->at = at + 1;
+        return kt_array_element(walk->over, at);
+    }
+    if (iterator->header.type == &kt_type_chars_iterator) {
+        KWalk *walk = (KWalk *)iterator;
+        kt_int at = walk->at;
+        walk->at = at + 1;
+        return kt_box_char(kt_string_get(walk->over, at));
+    }
+    if (iterator->header.type == &kt_type_indexing_iterator) {
+        KIndexingIterator *counting = (KIndexingIterator *)iterator;
+        /* The element is fetched BEFORE the index is bumped, and it stays in a local across the
+           allocation below so the collector sees it as a root. */
+        KRef element = kt_iterator_next(counting->source);
+        kt_int at = counting->at;
+        counting->at = at + 1;
+        return kt_indexed_value(at, element);
+    }
+    if (iterator->header.type->walk_next != NULL) {
+        return iterator->header.type->walk_next(iterator);
+    }
+    kt_long value = kt_range_iterator_next(iterator);
+    if (iterator->header.type == &kt_type_long_iterator) {
+        return kt_box_long(value);
+    }
+    if (iterator->header.type == &kt_type_char_iterator) {
+        return kt_box_char((kt_char)value);
+    }
+    if (iterator->header.type == &kt_type_uint_iterator) {
+        return kt_box_uint((kt_int)value);
+    }
+    if (iterator->header.type == &kt_type_ulong_iterator) {
+        return kt_box_ulong(value);
+    }
+    return kt_box_int((kt_int)value);
+}
+
+/* Kotlin's `List.equals`: same size and elementwise equal, and only against another list. A list
+   never equals a set with the same members, which the type comparison is. */
+static kt_boolean kt_list_equals(KRef self, KRef other) {
+    if (self == other) {
+        return true;
+    }
+    /* Either shape counts as a list: Kotlin compares two lists by their elements in order, so a
+       `List` and a `MutableList` holding the same things are equal. */
+    if (other == NULL
+        || (other->header.type != &kt_type_list && !kt_is_mutable_list(other))) {
+        return false;
+    }
+    kt_int size = kt_list_size(self);
+    if (size != kt_list_size(other)) {
+        return false;
+    }
+    KRef left = ((const KList *)self)->elements;
+    KRef right = ((const KList *)other)->elements;
+    for (kt_int i = 0; i < size; i++) {
+        if (!kt_equals(kt_elements_of(left)[i], kt_elements_of(right)[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Kotlin's own: 1 folded with `31 * h + e.hashCode()`, a null element contributing 0. */
+static kt_int kt_list_hash_code(KRef self) {
+    KRef elements = ((const KList *)self)->elements;
+    kt_int length = kt_list_size(self);
+    uint32_t hash = 1;
+    for (kt_int i = 0; i < length; i++) {
+        hash = 31u * hash + (uint32_t)kt_hash_code(kt_elements_of(elements)[i]);
+    }
+    return (kt_int)hash;
+}
+
+/* `[a, b, c]`, each element through its own `toString` — which is what makes this a loop over
+   `kt_string_plus` rather than a render into one buffer: an element's rendering may itself
+   allocate, and the joined text has to stay reachable across that. */
+static KRef kt_list_to_string(KRef self) {
+    KRef elements = ((const KList *)self)->elements;
+    kt_int length = kt_list_size(self);
+    KRef text = kt_string_utf8("[", 1);
+    for (kt_int i = 0; i < length; i++) {
+        if (i > 0) {
+            text = kt_string_plus(text, kt_string_utf8(", ", 2));
+        }
+        text = kt_string_plus(text, kt_to_string(kt_elements_of(elements)[i]));
+    }
+    return kt_string_plus(text, kt_string_utf8("]", 1));
+}
+
+
