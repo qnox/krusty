@@ -38,6 +38,29 @@ fn is_map_entry(ty: Ty) -> bool {
 ///
 /// `size` is an `Int` the generator must not box to ask about, which is why each signature is
 /// spelled out rather than taken as all-references.
+/// The runtime entry point for a map, set or entry member, chosen by the OWNER rather than by the
+/// receiver.
+///
+/// Every other reader here keys on the receiver, because that is what says which object it is. This
+/// one is for the dispatch that exists precisely because the receiver cannot be trusted — a file's
+/// own class may be behind it — so the static type is all there is, and the owner is it.
+pub(super) fn runtime_symbol(
+    owner: &str,
+    name: &str,
+    arity: usize,
+) -> Option<(&'static str, Vec<Ty>, Ty)> {
+    let internal = crate::types::type_name(owner);
+    if super::super::super::intrinsics::is_map_entry_type(internal) {
+        map_entry_symbol(name, arity)
+    } else if super::super::super::intrinsics::is_map_type(internal) {
+        map_symbol(name, arity)
+    } else if super::super::super::intrinsics::is_set_type(internal) {
+        set_symbol(name, arity)
+    } else {
+        None
+    }
+}
+
 fn map_symbol(name: &str, arity: usize) -> Option<(&'static str, Vec<Ty>, Ty)> {
     Some(match (name, arity) {
         // `Map.size` is a Kotlin property over a Java method, so the provider may present the

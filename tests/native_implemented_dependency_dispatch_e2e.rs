@@ -81,21 +81,69 @@ fn an_anonymous_implementor_and_a_subclass_both_dispatch() {
     expect_native_box(source, "SubclassImplementor", "OK");
 }
 
-/// A member that takes ARGUMENTS keeps declining: the two arms would carry it differently.
+/// A member that takes ARGUMENTS dispatches the same way, on the same receiver test.
+///
+/// An argument adds one thing and only one: the two sides state the operand differently — the
+/// implementor's own parameter type in its arm, the runtime entry point's carrier in the last —
+/// so each is converted per arm from a value evaluated ONCE, before the tests. Evaluating per arm
+/// would run a side effect twice, which is what the operand below is there to catch.
 #[test]
-fn a_member_with_arguments_still_declines() {
-    expect_native_decline(
-        "class Chars(val text: String) : CharSequence {\n\
+fn a_member_with_arguments_dispatches_on_the_receiver_too() {
+    let source = "class Chars(val text: String) : CharSequence {\n\
          \x20   override val length: Int get() = text.length\n\
          \x20   override fun get(index: Int): Char = text[index]\n\
          \x20   override fun subSequence(startIndex: Int, endIndex: Int): CharSequence =\n\
          \x20       Chars(text.substring(startIndex, endIndex))\n\
          }\n\
+         var reads = 0\n\
+         fun counted(): Int {\n\
+         \x20   reads++\n\
+         \x20   return 0\n\
+         }\n\
+         fun first(value: CharSequence): Char = value[counted()]\n\
          fun box(): String {\n\
-         \x20   val value: CharSequence = Chars(\"OK\")\n\
-         \x20   return \"\" + value[0] + value[1]\n\
+         \x20   // A class of this file's behind the type, and a string the runtime made, at one\n\
+         \x20   // call site.\n\
+         \x20   if (first(Chars(\"OK\")) != 'O') return \"fail mine\"\n\
+         \x20   if (first(\"OK\") != 'O') return \"fail the runtime's\"\n\
+         \x20   return if (reads == 2) \"OK\" else \"fail the index ran \" + reads + \" times\"\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "ArgumentedImplementedMember");
+    expect_native_box(source, "ArgumentedImplementedMember", "OK");
+}
+
+/// A member Kotlin gives a SPECIAL BRIDGE declines, argument or no argument.
+///
+/// `Map<Any, Any>.get(key: Any)` is declared with a NON-NULL parameter, and a caller holding the
+/// same object as a `Map<Any?, Any?>` may pass `null`. Kotlin does not call the override there — it
+/// answers the member's default, `null` for `get`, because the argument cannot be what the
+/// declaration accepts. The receiver dispatch has no bridge to put in front of an implementor's
+/// arm, so it declines rather than calling an override Kotlin would have skipped.
+///
+/// The two-sided conformance gate is what found this: dispatching these turned four corpus cases
+/// from declines into wrong answers, one of them a SIGILL.
+#[test]
+fn a_member_with_a_special_bridge_declines() {
+    expect_native_decline(
+        "object NotEmptyMap : MutableMap<Any, Any> {\n\
+         \x20   override fun containsKey(key: Any): Boolean = true\n\
+         \x20   override fun containsValue(value: Any): Boolean = true\n\
+         \x20   override fun get(key: Any): Any? = Any()\n\
+         \x20   override fun remove(key: Any): Any? = Any()\n\
+         \x20   override val size: Int get() = 0\n\
+         \x20   override fun isEmpty(): Boolean = true\n\
+         \x20   override fun put(key: Any, value: Any): Any? = null\n\
+         \x20   override fun putAll(from: Map<out Any, Any>) {}\n\
+         \x20   override fun clear() {}\n\
+         \x20   override val entries: MutableSet<MutableMap.MutableEntry<Any, Any>> get() = null!!\n\
+         \x20   override val keys: MutableSet<Any> get() = null!!\n\
+         \x20   override val values: MutableCollection<Any> get() = null!!\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val n = NotEmptyMap as MutableMap<Any?, Any?>\n\
+         \x20   return if (n.get(null) == null) \"OK\" else \"fail\"\n\
          }\n",
-        "ArgumentedImplementedMember",
-        "this file implements itself",
+        "SpecialBridgeMember",
+        "get",
     );
 }

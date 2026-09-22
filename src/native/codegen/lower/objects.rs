@@ -2775,20 +2775,41 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// point's. `iterator`, `hasNext` and `next` take none, which is what makes the choice between
     /// the two dispatches a matter of the receiver alone.
     pub(super) fn nullary_slot(&self, class: ClassId, name: &str) -> Option<(u32, Ty)> {
+        let (slot, _, answer) = self.member_slot(class, name, 0)?;
+        Some((slot, answer))
+    }
+
+    /// The slot a class's own `name` of this ARITY takes, with the parameter types it declares and
+    /// the type it answers.
+    ///
+    /// The arity is the only thing matched on beyond the name. Kotlin admits overloads that differ
+    /// in parameter TYPES at one arity, and this would pick whichever came first — so a class with
+    /// two of them is refused by the caller, which counts the candidates rather than trusting this.
+    pub(super) fn member_slot(
+        &self,
+        class: ClassId,
+        name: &str,
+        arity: usize,
+    ) -> Option<(u32, Vec<Ty>, Ty)> {
         let ir = self.file.ir;
-        let fid = ir.classes[class as usize]
+        let mut matching = ir.classes[class as usize]
             .methods
             .iter()
             .copied()
-            .find(|&fid| {
+            .filter(|&fid| {
                 let function = &ir.functions[fid as usize];
                 function.name == name
-                    && function.params.is_empty()
+                    && function.params.len() == arity
                     && function.dispatch_receiver.is_some()
-            })?;
+            });
+        let fid = matching.next()?;
+        if matching.next().is_some() {
+            return None;
+        }
         let key = model::function_key(ir, class, fid);
         let slot = self.file.model.slot(class, &key)?;
-        Some((slot, ir.functions[fid as usize].ret))
+        let function = &ir.functions[fid as usize];
+        Some((slot, function.params.clone(), function.ret))
     }
 
     /// A zero-argument member asked of a type this file implements ITSELF, chosen by what the
@@ -2810,12 +2831,34 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         answer: Ty,
         runtime: impl FnOnce(&mut Self, Value) -> Result<Option<Value>, Unsupported>,
     ) -> Result<Option<Value>, Unsupported> {
+        let carried: Vec<(ClassId, u32, Vec<Ty>, Ty)> = implementors
+            .iter()
+            .map(|(class, slot, declared)| (*class, *slot, Vec::new(), *declared))
+            .collect();
+        self.dispatch_by_implementor_with(&carried, object, &[], answer, runtime)
+    }
+
+    /// The same, for a member that takes ARGUMENTS.
+    ///
+    /// Each operand is evaluated ONCE, before the tests, and converted per arm: an implementor's
+    /// own parameter type in its arm, the runtime entry point's carrier in the last one. That is
+    /// the whole of what an argument adds — the two sides state the operand differently and the
+    /// value is the same, so the conversion is the ordinary boundary one and nothing is evaluated
+    /// twice.
+    pub(super) fn dispatch_by_implementor_with(
+        &mut self,
+        implementors: &[(ClassId, u32, Vec<Ty>, Ty)],
+        object: Value,
+        arguments: &[(Value, Option<Ty>)],
+        answer: Ty,
+        runtime: impl FnOnce(&mut Self, Value) -> Result<Option<Value>, Unsupported>,
+    ) -> Result<Option<Value>, Unsupported> {
         let merge = self.builder.create_block();
         let carried = carrier(answer);
         if let Some(clif) = carried.clif() {
             self.builder.append_block_param(merge, clif);
         }
-        for (class, slot, declared) in implementors {
+        for (class, slot, params, declared) in implementors {
             let descriptor = self.file.classes[*class as usize].descriptor;
             let type_address = self.data_address(descriptor);
             let matches = self
@@ -2833,8 +2876,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             self.continue_in(mine);
             self.builder.seal_block(mine);
             // The carried list is the member's PARAMETERS, which `dispatch` prepends the receiver
-            // to — empty here, these members taking none.
-            let produced = self.dispatch(object, *slot, &[], *declared, &[])?;
+            // to. Each operand crosses at the type this implementor declares for it.
+            let mut operands = Vec::with_capacity(arguments.len());
+            for ((value, source), target) in arguments.iter().zip(params.iter()) {
+                let Some(converted) = self.convert(*value, *source, *target)? else {
+                    return Ok(None);
+                };
+                operands.push(converted);
+            }
+            let produced = self.dispatch(object, *slot, params, *declared, &operands)?;
             // The slot's answer is the DECLARATION's; the site wants what the runtime entry point
             // would have handed back, so it is reconciled here as every other boundary is.
             let produced = match produced {

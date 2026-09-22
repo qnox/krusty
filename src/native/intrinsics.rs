@@ -116,6 +116,30 @@ pub(super) fn throwable_descriptor(owner: crate::types::TypeName) -> Option<&'st
     })
 }
 
+/// Whether Kotlin gives this member a SPECIAL BRIDGE, so that a call through the wide type does
+/// not always reach an override at all.
+///
+/// `Map<Any, Any>.get(key: Any)` is declared with a NON-NULL parameter, and a caller holding the
+/// same object as a `Map<Any?, Any?>` may pass `null`. Kotlin does not call the override there: it
+/// answers the member's default — `null` for `get` and `remove`, `false` for a `contains`, `-1` for
+/// an `indexOf` — because the argument cannot be what the declaration accepts. The corpus asks
+/// exactly that (`specialBuiltins/notEmptyMap.kt`, `bridges/special.kt`).
+///
+/// The receiver dispatch has no bridge to put in front of an implementor's arm, so it declines
+/// these rather than calling an override Kotlin would have skipped. Every one of them takes an
+/// ARGUMENT, which is why the nullary members are unaffected.
+pub(super) fn has_special_bridge(owner: crate::types::TypeName, name: &str) -> bool {
+    let over_a_map = is_map_type(owner) || is_map_entry_type(owner);
+    let over_a_collection = is_list_type(owner)
+        || is_set_type(owner)
+        || matches!(iteration_role(owner), Some(IterationRole::Iterable));
+    match name {
+        "get" | "remove" | "containsKey" | "containsValue" | "getOrDefault" => over_a_map,
+        "contains" | "indexOf" | "lastIndexOf" => over_a_collection,
+        _ => false,
+    }
+}
+
 /// The one member of a functional interface the RUNTIME knows, or `None` for any other.
 ///
 /// A `fun interface` declared in this file becomes an object wearing that interface's table, so a

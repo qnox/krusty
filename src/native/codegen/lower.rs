@@ -2508,12 +2508,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             .and_then(|ty| ty.obj_internal())
                         {
                             if self.file.implements_dependency(internal) {
-                                // Where the member takes NO ARGUMENTS the choice can still be made
-                                // here: the file knows every class of its own that could stand
-                                // behind that type, so the receiver is tested against each and the
-                                // runtime entry point is the last arm. Anything else declines.
-                                if let Some(realized) = self.implemented_nullary_member(
-                                    internal, &name, receiver, args, *ret,
+                                // The choice can still be made HERE: the file knows every class of
+                                // its own that could stand behind that type, so the receiver is
+                                // tested against each and the runtime entry point is the last arm.
+                                if let Some(realized) = self.implemented_member(
+                                    internal, &name, params, receiver, args, *ret,
                                 ) {
                                     return realized;
                                 }

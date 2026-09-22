@@ -803,60 +803,109 @@ impl BodyLowering<'_, '_, '_> {
     /// `None` when the member takes arguments, when the runtime has no entry point for it, or when
     /// any implementor does not supply it — a partial chain would fall through to the runtime for
     /// an object the runtime cannot answer for.
-    pub(super) fn implemented_nullary_member(
+    pub(super) fn implemented_member(
         &mut self,
         internal: crate::types::TypeName,
         name: &str,
+        params: &[Ty],
         receiver: u32,
         args: &[u32],
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
-        if !args.is_empty() {
+        // A member Kotlin gives a SPECIAL BRIDGE is not this dispatch's to make: a call through the
+        // wide type answers the member's default rather than reaching the override when the
+        // argument cannot be what the declaration accepts, and there is no bridge here to put in
+        // front of an implementor's arm. Every one of them takes an argument, so the nullary
+        // members are untouched.
+        if super::super::super::intrinsics::has_special_bridge(internal, name) {
             return None;
         }
         let ty = self.type_of(receiver)?;
-        // Which runtime entry point would have answered this. Two tables reach a nullary member of
-        // a runtime-known type: the ITERATION one, keyed on the role a receiver plays, and the
-        // SCALAR one, keyed on the owner — `kotlin.Number`'s six conversions are there, each of
-        // them nullary and each answering at its own width.
-        let (symbol, answer) = super::super::super::intrinsics::iteration_role_of(ty)
-            .and_then(|role| interface_symbol(role, name, 0))
-            .map(|(symbol, _, answer)| (symbol, answer))
-            .or_else(|| {
-                super::super::super::intrinsics::scalar_member(&internal.render(), name, &[])
-                    .map(|(symbol, _, answer)| (symbol, answer))
-            })?;
+        // Which runtime entry point would have answered this. Three tables reach a member of a
+        // runtime-known type: the ITERATION one, keyed on the role a receiver plays; the SCALAR
+        // one, keyed on the owner AND the parameter types the declaration states, because that is
+        // what tells `s[i]` from a member of the same name over something else; and the map one.
+        let owner = internal.render();
+        let (symbol, carried, answer) = super::super::super::intrinsics::iteration_role_of(ty)
+            .and_then(|role| interface_symbol(role, name, args.len()))
+            .or_else(|| super::super::super::intrinsics::scalar_member(&owner, name, params))
+            .or_else(|| super::maps::runtime_symbol(&owner, name, args.len()))?;
+        // An operand list the two sides state differently in LENGTH is not something a conversion
+        // reconciles; the runtime entry point leads with the receiver, so one more than the
+        // arguments is what it takes.
+        if carried.len() != args.len() + 1 {
+            return None;
+        }
         let declared = self.file.implementors_of(internal);
-        let implementors: Vec<(ClassId, u32, Ty)> = declared
+        let implementors: Vec<(ClassId, u32, Vec<Ty>, Ty)> = declared
             .iter()
             .filter_map(|&class| {
-                self.nullary_slot(class, name)
-                    .map(|(slot, supplied)| (class, slot, supplied))
+                self.member_slot(class, name, args.len())
+                    .map(|(slot, params, supplied)| (class, slot, params, supplied))
             })
             .collect();
         if implementors.is_empty() || implementors.len() != declared.len() {
             return None;
         }
-        Some(self.nullary_by_implementor(&implementors, symbol, answer, receiver, ret))
+        Some(self.member_by_implementor(
+            &implementors,
+            symbol,
+            &carried,
+            answer,
+            receiver,
+            args,
+            ret,
+        ))
     }
 
     /// One of those, with the runtime entry point as the last arm.
-    fn nullary_by_implementor(
+    fn member_by_implementor(
         &mut self,
-        implementors: &[(ClassId, u32, Ty)],
+        implementors: &[(ClassId, u32, Vec<Ty>, Ty)],
         symbol: &'static str,
+        carried: &[Ty],
         answer: Ty,
         receiver: u32,
+        args: &[u32],
         ret: Ty,
     ) -> Result<Option<Value>, Unsupported> {
         let object = self.reference(receiver)?;
         if self.terminated {
             return Ok(None);
         }
-        let produced =
-            self.dispatch_by_implementor(implementors, object, answer, move |body, object| {
-                body.runtime_call(symbol, &[any()], answer, &[object])
-            })?;
+        // Each operand is evaluated ONCE here, at whatever type it already has; every arm converts
+        // from that to the one it wants. Evaluating per arm would run a side effect twice.
+        let mut operands = Vec::with_capacity(args.len());
+        for argument in args {
+            let Some(value) = self.expression(*argument)? else {
+                return Ok(None);
+            };
+            if self.terminated {
+                return Ok(None);
+            }
+            operands.push((value, self.type_of(*argument)));
+        }
+        let runtime_params: Vec<Ty> = carried.to_vec();
+        let runtime_operands = operands.clone();
+        let produced = self.dispatch_by_implementor_with(
+            implementors,
+            object,
+            &operands,
+            answer,
+            move |body, object| {
+                let mut values = Vec::with_capacity(runtime_operands.len() + 1);
+                values.push(object);
+                for ((value, source), target) in
+                    runtime_operands.iter().zip(runtime_params.iter().skip(1))
+                {
+                    let Some(converted) = body.convert(*value, *source, *target)? else {
+                        return Ok(None);
+                    };
+                    values.push(converted);
+                }
+                body.runtime_call(symbol, &runtime_params, answer, &values)
+            },
+        )?;
         let Some(produced) = produced else {
             return Ok(None);
         };

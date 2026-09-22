@@ -8093,6 +8093,26 @@ and behavior is checked by RUNNING the emitted program.
   (`::a_file_that_declares_its_own_sequence_walks_it`,
   `::a_declared_sequence_still_declines_the_members_it_endangers`).
 
+- **The receiver dispatch for a member of a type this file implements now carries ARGUMENTS — and
+  declines where Kotlin puts a SPECIAL BRIDGE in front of the override.** An argument adds one thing
+  and only one: the two sides state the operand differently, so each is converted per arm — the
+  implementor's own parameter type in its arm, the runtime entry point's carrier in the last — from
+  a value evaluated ONCE, before the tests. Evaluating per arm would run a side effect twice. The
+  entry point is chosen from the declaration's PARAMETER TYPES as well as the owner, which is what
+  tells `s[i]` from a member of the same name over something else.
+
+  What that alone got wrong is Kotlin's special-bridge rule, and the two-sided gate is what said so:
+  `failed 4`, one of them a `SIGILL`. `Map<Any, Any>.get(key: Any)` is declared with a NON-NULL
+  parameter, and a caller holding the same object as a `Map<Any?, Any?>` may pass `null`. Kotlin
+  does not call the override there — it answers the member's default (`null` for `get` and `remove`,
+  `false` for a `contains`, `-1` for an `indexOf`) because the argument cannot be what the
+  declaration accepts. This dispatch has no bridge to put in front of an implementor's arm, so those
+  members decline rather than reaching an override Kotlin would have skipped. Every one of them
+  takes an argument, which is why the nullary members are untouched.
+  Tests: `tests/native_implemented_dependency_dispatch_e2e.rs`
+  (`::a_member_with_arguments_dispatches_on_the_receiver_too`, whose index operand is counted so
+  that evaluating it twice would fail, and `::a_member_with_a_special_bridge_declines`).
+
 - **`kotlin.Comparator` is a functional interface the RUNTIME knows, so its conversion makes no
   object of its own.** A `fun interface` declared in this file becomes an object wearing that
   interface's table, because a caller reaches its member through a program-wide member number.
