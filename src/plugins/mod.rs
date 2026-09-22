@@ -437,10 +437,15 @@ pub fn run_enabled(
         return;
     }
     let external = external_serializers(ir, classifiers);
+    // `Some(false)` is the only answer that rules a singleton out. A generated `Foo$$serializer`
+    // for a CLASSPATH `@Serializable` class is an object kotlinc synthesized, and the provider has
+    // no classifier view of a synthetic it never read a declaration for — it answers `None`. Taking
+    // `None` as "not a singleton" leaves that element underivable and bails the whole file, which is
+    // exactly the failure this plugin path exists to prevent.
     let external_singletons = external
         .values()
         .copied()
-        .filter(|&serializer| classifiers.classifier_is_object(serializer) == Some(true))
+        .filter(|&serializer| classifiers.classifier_is_object(serializer) != Some(false))
         .collect();
     let ctx = ctx
         .with_external_serializers(external)
