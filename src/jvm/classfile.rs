@@ -8,8 +8,11 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod control_flow;
+mod coroutine_markers;
 mod line_numbers;
 mod method_parameters;
+
+pub use coroutine_markers::{markers_in, CoroutineMarker, MARKER_LEN};
 
 pub const ACC_PUBLIC: u16 = 0x0001;
 pub const ACC_PRIVATE: u16 = 0x0002;
@@ -82,6 +85,55 @@ fn verif_eq(a: &VerifType, b: &VerifType, cp: &ConstPool) -> bool {
         _ => a == b,
     }
 }
+/// Merge the frames several labels registered at ONE bytecode offset into the single frame the
+/// class file carries there.
+///
+/// Several labels can be bound at the same offset — a loop's `end` and the following statement's
+/// `start`, or `next`/`end` in an all-diverging `when`. One frame is emitted for that offset, and
+/// it must hold on EVERY edge reaching it, so the frames are MERGED: the locals are their common
+/// prefix, everything past the first divergence reverting to `top`.
+///
+/// Keeping the first (a plain dedup) silently claimed a local that a later edge does not have.
+/// `for (v in …) …` immediately followed by `while (…) …` binds the loop's end and the while's head
+/// at one offset; the `for` frame still named its synthetic index, the `while`'s back edge chopped
+/// it, and the back edge became narrower than its own target — a class that fails verification
+/// ("Inconsistent stackmap frames").
+///
+/// `entries` must already be sorted by offset with a STABLE sort, so equal offsets are adjacent and
+/// keep their registration order.
+///
+/// This is the ONLY place the merge is defined. Everything that reasons about what the verifier
+/// holds at an offset — the `StackMapTable` writer and the coroutine machine's frame analysis —
+/// goes through it, so the emitted frame and the analysed one cannot drift apart: an analysis
+/// holding a MORE precise type than the frame the class file carries spills a local the verifier
+/// has as `top` there ("Bad local variable type").
+fn merge_frames_at_one_offset<K: Copy + PartialEq>(
+    entries: &[(K, &Vec<VerifType>, &Vec<VerifType>)],
+    cp: &ConstPool,
+) -> Vec<(K, Vec<VerifType>, Vec<VerifType>)> {
+    let mut out: Vec<(K, Vec<VerifType>, Vec<VerifType>)> = Vec::new();
+    for (off, locals, stack) in entries {
+        match out.last_mut() {
+            Some((previous_off, previous_locals, previous_stack)) if *previous_off == *off => {
+                let common = previous_locals
+                    .iter()
+                    .zip(locals.iter())
+                    .take_while(|(a, b)| verif_eq(a, b, cp))
+                    .count();
+                previous_locals.truncate(common);
+                // An operand stack that differs between edges into one offset is a lowering bug,
+                // not something a frame can reconcile; keep the shorter so the entry stays
+                // describable rather than asserting one edge's view over the other.
+                if stack.len() < previous_stack.len() {
+                    previous_stack.clone_from(stack);
+                }
+            }
+            _ => out.push((*off, (*locals).clone(), (*stack).clone())),
+        }
+    }
+    out
+}
+
 /// One pool entry a `super(…)` argument's evaluation interns before the super `<init>` Methodref,
 /// in code order: a construction's Class ref, a string constant's CONSTANT_String, or a
 /// constructor Methodref (`class Basic : Engine(Cfg(false), "basic")`).
@@ -261,6 +313,71 @@ impl ConstPool {
             _ => None,
         }
     }
+    /// The `Utf8` at `idx`, if it is one.
+    fn utf8_at(&self, idx: u16) -> Option<&str> {
+        match self.entry_at(idx)? {
+            Const::Utf8(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The `(owner, name, descriptor)` a Methodref/InterfaceMethodref at `idx` names.
+    fn methodref_parts(&self, idx: u16) -> Option<(&str, &str, &str)> {
+        let (class_idx, name_and_type) = match self.entry_at(idx)? {
+            Const::Methodref(c, nt) | Const::InterfaceMethodref(c, nt) => (*c, *nt),
+            _ => return None,
+        };
+        let Const::NameAndType(name_idx, descriptor_idx) = self.entry_at(name_and_type)? else {
+            return None;
+        };
+        Some((
+            self.class_name(class_idx)?,
+            self.utf8_at(*name_idx)?,
+            self.utf8_at(*descriptor_idx)?,
+        ))
+    }
+
+    /// The descriptor a Fieldref at `idx` names.
+    fn fieldref_descriptor(&self, idx: u16) -> Option<&str> {
+        let Const::Fieldref(_, name_and_type) = self.entry_at(idx)? else {
+            return None;
+        };
+        let Const::NameAndType(_, descriptor_idx) = self.entry_at(*name_and_type)? else {
+            return None;
+        };
+        self.utf8_at(*descriptor_idx)
+    }
+
+    /// The descriptor of the call site an `invokedynamic` at `idx` links.
+    fn invokedynamic_descriptor(&self, idx: u16) -> Option<&str> {
+        let Const::InvokeDynamic(_, name_and_type) = self.entry_at(idx)? else {
+            return None;
+        };
+        let Const::NameAndType(_, descriptor_idx) = self.entry_at(*name_and_type)? else {
+            return None;
+        };
+        self.utf8_at(*descriptor_idx)
+    }
+
+    /// The verification type `ldc`/`ldc_w`/`ldc2_w` of the constant at `idx` pushes.
+    fn loadable_constant_type(&self, idx: u16) -> Option<VerifType> {
+        Some(match self.entry_at(idx)? {
+            Const::Integer(_) => VerifType::Integer,
+            Const::Float(_) => VerifType::Float,
+            Const::Long(_) => VerifType::Long,
+            Const::Double(_) => VerifType::Double,
+            Const::String(_) => VerifType::ObjectName("java/lang/String".to_string()),
+            Const::Class(_) => VerifType::ObjectName("java/lang/Class".to_string()),
+            Const::MethodType(_) => {
+                VerifType::ObjectName("java/lang/invoke/MethodType".to_string())
+            }
+            Const::MethodHandle(..) => {
+                VerifType::ObjectName("java/lang/invoke/MethodHandle".to_string())
+            }
+            _ => return None,
+        })
+    }
+
     fn class(&mut self, internal_name: &str) -> u16 {
         // Ty→bytecode boundary: a built-in type may reach here under its Kotlin name (`kotlin/Any`);
         // a `CONSTANT_Class` must carry the JVM name (`java/lang/Object`). Every bare class reference
@@ -723,6 +840,10 @@ pub struct ClassWriter {
     major: u16,
     /// Source-file simple name for the `SourceFile` attribute (set via [`ClassWriter::set_source_file`]).
     source_file: Option<String>,
+    /// The JSR-045 source map for a class that contains inlined code, accumulated as each inline
+    /// body is spliced and rendered into `SourceDebugExtension` at the end. A class with nothing
+    /// inlined carries no attribute. See [`crate::jvm::source_map`].
+    source_map: crate::jvm::source_map::SourceMap,
     /// Owner, method name, and descriptor for the `EnclosingMethod` attribute.
     enclosing_method: Option<(String, String, String)>,
     pub internal_name: String,
@@ -834,6 +955,7 @@ impl ClassWriter {
             permitted_subclasses: Vec::new(),
             major: MAJOR_JAVA8,
             source_file: None,
+            source_map: crate::jvm::source_map::SourceMap::default(),
             enclosing_method: None,
             internal_name: internal_name.to_string(),
         }
@@ -851,6 +973,29 @@ impl ClassWriter {
 
     /// Set the source-file simple name for the `SourceFile` attribute (e.g. `Foo.kt`). `None` (the
     /// default) emits no attribute.
+    /// The class's source map, started from the class's own source file the first time an inline
+    /// body is spliced into it. Splicing a dependency's `inline fun` puts that dependency's source
+    /// into this class, and the map is what tells a debugger which file an inlined line belongs to.
+    ///
+    /// `lines` is the highest line the class's own code can claim. `None` when the class has no
+    /// `SourceFile` to map against, in which case its inlined lines cannot be described at all.
+    pub fn source_map_for_inlining(
+        &mut self,
+        lines: u16,
+    ) -> Option<&mut crate::jvm::source_map::SourceMap> {
+        if self.source_map.is_unstarted() {
+            let source_file = self.source_file.clone()?;
+            let path = self.internal_name.clone();
+            self.source_map = crate::jvm::source_map::SourceMap::new(&source_file, &path, lines);
+        }
+        Some(&mut self.source_map)
+    }
+
+    /// The class's own source file, for a synthesized class that belongs to it.
+    pub fn source_file_name(&self) -> Option<String> {
+        self.source_file.clone()
+    }
+
     pub fn set_source_file(&mut self, name: Option<String>) {
         self.source_file = name;
     }
@@ -1632,6 +1777,57 @@ impl ClassWriter {
     }
 
     /// Intern helpers exposed for the emitter (Phase 4) to reference pool entries while building code.
+    /// Read back the `(owner, name, descriptor)` of a method reference already in the pool.
+    ///
+    /// A transform that runs over instructions ALREADY relocated into this class has no source pool
+    /// left to consult, and interning every method it might want to recognize would add entries the
+    /// class does not otherwise carry. `None` when the index is not a method reference.
+    pub fn methodref_parts(&self, index: u16) -> Option<(&str, &str, &str)> {
+        self.cp.methodref_parts(index)
+    }
+
+    /// The internal name of the `CONSTANT_Class` at `index`, for the same reason.
+    pub fn class_name_at(&self, index: u16) -> Option<&str> {
+        self.cp.class_name(index)
+    }
+
+    /// The frames `code` will carry, by byte offset: one per offset, merged the way
+    /// `build_stackmap` writes them (see `merge_frames_at_one_offset`).
+    ///
+    /// The merge needs this class's constant pool to compare an eagerly interned `Object(index)`
+    /// against a lazily named `ObjectName`, which is why it lives here and not on `CodeBuilder`.
+    pub(crate) fn merged_frames(
+        &self,
+        code: &CodeBuilder,
+    ) -> Vec<(usize, Vec<VerifType>, Vec<VerifType>)> {
+        let mut entries: Vec<(usize, &Vec<VerifType>, &Vec<VerifType>)> = code
+            .frames
+            .iter()
+            .filter(|(lid, _, _)| !code.is_dead_bound(*lid))
+            .filter_map(|(lid, locals, stack)| {
+                let off = code.labels.get(*lid as usize).copied()?;
+                (off != usize::MAX).then_some((off, locals, stack))
+            })
+            .collect();
+        entries.sort_by_key(|&(off, _, _)| off);
+        merge_frames_at_one_offset(&entries, &self.cp)
+    }
+
+    /// The descriptor of the field reference at `index`, for the same reason.
+    pub fn fieldref_descriptor_at(&self, index: u16) -> Option<&str> {
+        self.cp.fieldref_descriptor(index)
+    }
+
+    /// The descriptor of the `invokedynamic` call site at `index`, for the same reason.
+    pub fn invokedynamic_descriptor_at(&self, index: u16) -> Option<&str> {
+        self.cp.invokedynamic_descriptor(index)
+    }
+
+    /// The verification type an `ldc` of the constant at `index` pushes, for the same reason.
+    pub fn loadable_constant_type_at(&self, index: u16) -> Option<VerifType> {
+        self.cp.loadable_constant_type(index)
+    }
+
     pub fn methodref(&mut self, class: &str, name: &str, desc: &str) -> u16 {
         self.cp.methodref(class, name, desc)
     }
@@ -2290,6 +2486,14 @@ impl ClassWriter {
         code: &CodeBuilder,
         signature: Option<&str>,
     ) {
+        // The last gate before a body becomes a class file's `Code`. A coroutine marker is
+        // `impdep1`, reserved by JVMS §6.2 for an implementation's own use and rejected by nothing —
+        // it would simply run, over a continuation slot the declining path never assigned. The walk
+        // is instruction-by-instruction because `0xfe` also occurs inside operands.
+        debug_assert!(
+            markers_in(&code.bytes).is_none_or(|found| found.is_empty()),
+            "a coroutine marker reached the class file in {name}{desc}",
+        );
         let n = self.cp.utf8(name);
         let d = self.cp.utf8(desc);
         let sig = signature.map(|s| self.cp.utf8(s));
@@ -2907,6 +3111,13 @@ impl ClassWriter {
             u2(&mut body, file_idx);
             (name, body)
         });
+        // The source map follows `SourceFile`: it names the same thing, one file deeper.
+        let smap_attr = self.source_map.render().map(|smap| {
+            let name = self.cp.utf8("SourceDebugExtension");
+            // JVMS 4.7.11: the attribute body is the modified-UTF-8 bytes themselves, with no
+            // length prefix and no constant-pool entry of their own.
+            (name, smap.into_bytes())
+        });
         // Intern `Deprecated` only if the class or a method carries it; a method's own use already
         // interned it in the per-method sequence above. A CLASS-level one interns here — after
         // `InnerClasses` and `SourceFile`, before `RuntimeVisibleAnnotations` — which is kotlinc's
@@ -2928,6 +3139,22 @@ impl ClassWriter {
         } else {
             None
         };
+        // The source map is also published as a BINARY-retained annotation, which is how a Kotlin
+        // consumer reads it back without parsing the class file's own attribute.
+        if let Some(smap) = self.source_map.render() {
+            let mut body = Vec::new();
+            let annotation = self.cp.utf8("Lkotlin/jvm/internal/SourceDebugExtension;");
+            u2(&mut body, annotation);
+            u2(&mut body, 1); // one element pair
+            let name = self.cp.utf8("value");
+            u2(&mut body, name);
+            body.push(b'['); // an array of one string, which is how kotlinc spells it
+            u2(&mut body, 1);
+            body.push(b's');
+            let value = self.cp.utf8(&smap);
+            u2(&mut body, value);
+            self.invisible_annotations.push(body);
+        }
         // ONE `RuntimeInvisibleAnnotations` for the BINARY-retained class annotations, written directly
         // after the visible ones — the order kotlinc emits them in.
         let ria_attr = if !self.invisible_annotations.is_empty() {
@@ -3197,6 +3424,7 @@ impl ClassWriter {
             [
                 enclosing_method_attr,
                 sourcefile_attr,
+                smap_attr,
                 deprecated_attr,
                 rva_attr,
                 ria_attr,
@@ -3404,8 +3632,13 @@ impl CodeBuilder {
     }
 
     /// The recorded frames resolved to byte offsets: `(offset, locals, stack)` for each bound label.
-    /// Used to relocate a spliced lambda body's own frames into the host method. Unbound labels (offset
-    /// `usize::MAX`) and labels bound inside a dropped dead region are dropped.
+    /// Used to relocate a spliced lambda body's own frames into the host method, where they are
+    /// re-registered per label. Unbound labels (offset `usize::MAX`) and labels bound inside a
+    /// dropped dead region are dropped.
+    ///
+    /// PER LABEL, so several entries can share one offset — this is NOT what the class file carries
+    /// there. Anything reasoning about what the VERIFIER holds at an offset wants
+    /// [`ClassWriter::merged_frames`] instead.
     pub fn resolved_frames(&self) -> Vec<(usize, Vec<VerifType>, Vec<VerifType>)> {
         self.frames
             .iter()
@@ -3478,42 +3711,8 @@ impl CodeBuilder {
             .filter(|(off, _, _)| (*off as usize) < code_len)
             .collect();
         entries.sort_by_key(|&(off, _, _)| off);
-        // Several labels can be bound at the SAME offset — a loop's `end` and the following
-        // statement's `start`, or `next`/`end` in an all-diverging `when`. One frame is emitted for
-        // that offset, and it must hold on EVERY edge reaching it, so the frames are MERGED: the
-        // locals are their common prefix, everything past the first divergence reverting to `top`.
-        //
-        // Keeping the first (a plain dedup) silently claimed a local that a later edge does not have.
-        // `for (v in …) …` immediately followed by `while (…) …` binds the loop's end and the while's
-        // head at one offset; the `for` frame still named its synthetic index, the `while`'s back edge
-        // chopped it, and the back edge became narrower than its own target — a class that fails
-        // verification ("Inconsistent stackmap frames").
-        let merged: Vec<(u32, Vec<VerifType>, Vec<VerifType>)> = {
-            let mut out: Vec<(u32, Vec<VerifType>, Vec<VerifType>)> = Vec::new();
-            for (off, locals, stack) in entries {
-                match out.last_mut() {
-                    Some((previous_off, previous_locals, previous_stack))
-                        if *previous_off == off =>
-                    {
-                        let common = previous_locals
-                            .iter()
-                            .zip(locals.iter())
-                            .take_while(|(a, b)| verif_eq(a, b, cp))
-                            .count();
-                        previous_locals.truncate(common);
-                        // An operand stack that differs between edges into one offset is a lowering
-                        // bug, not something a frame can reconcile; keep the shorter so the entry
-                        // stays describable rather than asserting one edge's view over the other.
-                        if stack.len() < previous_stack.len() {
-                            previous_stack.clone_from(stack);
-                        }
-                    }
-                    _ => out.push((off, locals.clone(), stack.clone())),
-                }
-            }
-            out
-        };
-        let entries = merged;
+        // Labels bound at one offset share one emitted frame; see `merge_frames_at_one_offset`.
+        let entries = merge_frames_at_one_offset(&entries, cp);
 
         let mut body = Vec::new();
         u2(&mut body, entries.len() as u16);
@@ -3637,6 +3836,16 @@ impl CodeBuilder {
     /// The current (linearly tracked) operand-stack height.
     pub fn stack_height(&self) -> i32 {
         self.cur_stack
+    }
+
+    /// Declare the operand-stack height at a block this builder cannot infer linearly.
+    ///
+    /// The tracker follows the instruction stream, so a block entered only by a branch inherits the
+    /// height left by whatever was emitted before it — which is not what reaches it. A coroutine
+    /// machine's dispatch is built of such blocks: each ends in a `goto` with the resumed value on
+    /// the stack, and the one that follows starts empty.
+    pub fn set_stack_height(&mut self, height: i32) {
+        self.cur_stack = height;
     }
 
     pub(crate) fn can_fall_through(&self) -> bool {
@@ -4534,6 +4743,74 @@ mod tests {
             assert!(matches!(locals[1], VerifType::Top));
             assert!(matches!(locals[2], VerifType::Integer));
         }
+    }
+
+    /// The `StackMapTable` writer and the coroutine machine's frame analysis must read the SAME
+    /// frame at an offset several labels are bound at.
+    ///
+    /// The class file carries ONE frame per offset — the merge of the frames bound there. Reading
+    /// them PER LABEL instead (`resolved_frames`) hands the analysis whichever label was registered
+    /// last, which can be more precise than anything the verifier holds there. The spill it then
+    /// plans loads a slot the verifier has as `top` ("Bad local variable type"), and the join frame
+    /// claims a type the fall-through edge does not carry ("Inconsistent stackmap frames").
+    #[test]
+    fn the_machine_reads_the_frame_the_stackmap_writes_where_two_labels_share_an_offset() {
+        use crate::jvm::inline::{decode_stackmap, VType};
+
+        let mut cw = ClassWriter::new("Scratch", "java/lang/Object");
+        let mut code = CodeBuilder::new(3);
+        let first = code.new_label();
+        let second = code.new_label();
+        // Two labels at ONE offset agreeing on slot 0 and disagreeing on slot 1: the merge is their
+        // common prefix, so slot 1 is `top` there however either label described it.
+        code.add_frame_if_new(
+            first,
+            vec![VerifType::Integer, VerifType::Integer],
+            Vec::new(),
+        );
+        code.add_frame_if_new(
+            second,
+            vec![VerifType::Integer, VerifType::Float],
+            Vec::new(),
+        );
+        code.bind(first);
+        code.bind(second);
+        code.ret_void();
+
+        // Per label, both frames survive, and the LAST one types slot 1 — the state the analysis
+        // used to be seeded with.
+        let per_label = code.resolved_frames();
+        assert_eq!(per_label.len(), 2);
+        assert_eq!(per_label[1].1.len(), 2);
+
+        let merged = cw.merged_frames(&code);
+        let written = decode_stackmap(
+            &code
+                .build_stackmap(Some(&[]), &mut cw.cp)
+                .expect("a table is needed"),
+            Vec::new(),
+        )
+        .expect("the written table decodes");
+
+        assert_eq!(merged.len(), written.len());
+        for (merged, written) in merged.iter().zip(written.iter()) {
+            assert_eq!(merged.0, written.offset);
+            assert_eq!(
+                merged
+                    .1
+                    .iter()
+                    .map(|v| match v {
+                        VerifType::Integer => VType::Int,
+                        VerifType::Float => VType::Float,
+                        VerifType::Top => VType::Top,
+                        _ => unreachable!("the fixture uses primitives only"),
+                    })
+                    .collect::<Vec<_>>(),
+                written.locals
+            );
+        }
+        // …and that agreed frame is narrower than the per-label one the analysis would have taken.
+        assert_eq!(merged[0].1.len(), 1);
     }
 
     #[test]

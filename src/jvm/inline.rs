@@ -95,6 +95,12 @@ pub fn instruction_len(code: &[u8], pc: usize) -> Option<usize> {
         | 0xc7 => 3,
         // multianewarray: 2-byte index + 1 dim byte.
         0xc5 => 4,
+        // krusty's coroutine-site marker (JVMS reserves `impdep1` for an implementation's own use):
+        // a 1-byte kind and a 2-byte ordinal. It marks a position that must survive relocation into
+        // a spliced inline body, where no offset recorded before the splice would still be valid.
+        // The emitter overwrites every one of them with `nop`s once it has bound its labels, so none
+        // can reach a class file. See `docs/JVM_INLINE_BEFORE_CPS.md`.
+        0xfe => 4,
         // invokeinterface / invokedynamic: 2-byte index + 2 trailing bytes.
         0xb9 | 0xba => 5,
         // goto_w / jsr_w.
@@ -462,20 +468,29 @@ fn local_load_store(base_op: u8, idx: u16) -> Insn {
 /// their `wide` variants), re-selecting the compact encoding. Relocating an inline body's locals into
 /// the caller's frame is a prerequisite for splicing — the body then occupies `base..base+max_locals`.
 pub fn shift_locals(insns: &mut [Insn], base: u16) -> Option<()> {
+    remap_locals(insns, |slot| slot + base)
+}
+
+/// Relocate every local-variable index in the body through `map`, re-selecting the compact encoding.
+///
+/// A splice needs more than a shift when it substitutes a lambda body for a `FunctionN.invoke`: the
+/// parameter that held the lambda object no longer exists, and leaving its slot reserved pushes
+/// every later local one slot up. `map` therefore both rebases and closes those gaps.
+pub fn remap_locals(insns: &mut [Insn], map: impl Fn(u16) -> u16) -> Option<()> {
     for insn in insns.iter_mut() {
         let Insn::Plain { op, operands } = insn else {
             continue;
         };
         let op = *op;
         if let Some((base_op, idx)) = decode_n_form(op) {
-            *insn = local_load_store(base_op, idx + base);
+            *insn = local_load_store(base_op, map(idx));
         } else if matches!(op, 0x15..=0x19 | 0x36..=0x3a) {
             // One-byte-indexed load/store.
-            let idx = *operands.first()? as u16 + base;
+            let idx = map(*operands.first()? as u16);
             *insn = local_load_store(op, idx);
         } else if op == 0xa9 {
             // ret <index>.
-            let idx = *operands.first()? as u16 + base;
+            let idx = map(*operands.first()? as u16);
             *insn = if idx <= 0xff {
                 Insn::Plain {
                     op: 0xa9,
@@ -489,7 +504,7 @@ pub fn shift_locals(insns: &mut [Insn], base: u16) -> Option<()> {
             };
         } else if op == 0x84 {
             // iinc <index> <const>.
-            let idx = *operands.first()? as u16 + base;
+            let idx = map(*operands.first()? as u16);
             let c = operands[1];
             *insn = if idx <= 0xff {
                 Insn::Plain {
@@ -507,7 +522,7 @@ pub fn shift_locals(insns: &mut [Insn], base: u16) -> Option<()> {
         } else if op == 0xc4 {
             // wide <sub-op> <index:2> [<const:2> for iinc].
             let sub = *operands.first()?;
-            let idx = ((operands[1] as u16) << 8 | operands[2] as u16) + base;
+            let idx = map((operands[1] as u16) << 8 | operands[2] as u16);
             if sub == 0x84 {
                 *insn = Insn::Plain {
                     op: 0xc4,
@@ -982,19 +997,60 @@ pub struct BranchySplice {
     /// Branch operands (absolute positions in the enclosing builder) whose destinations live outside
     /// this splice. The enclosing builder retains them until their owning loop label is bound.
     pub external_branches: Vec<(usize, super::classfile::Label)>,
+    /// The dependency's own debug locals, relocated into the caller: `(start, length, slot, name,
+    /// descriptor)` with ABSOLUTE offsets in the spliced output and the caller's slot numbering.
+    ///
+    /// A spliced body's locals are real locals of the method that now contains them, and the
+    /// reference compiler describes every one of them. Their names come from the dependency, which
+    /// is the only place they exist; the `$iv` suffix marking a value as inlined is added here,
+    /// because it is a property of being inlined rather than of the declaration.
+    pub locals: Vec<(u16, u16, u16, String, String)>,
+    /// Line marks for the spliced code: `(absolute offset, line, from the dependency)`, ascending.
+    ///
+    /// A host instruction's line belongs to the DEPENDENCY's file and means nothing until the
+    /// caller's source map gives it an output line, which is what the flag distinguishes. A spliced
+    /// lambda's body is the caller's own source and keeps its own lines.
+    pub lines: Vec<(u16, u16, bool)>,
 }
 
 pub struct RelocatedLambdaSite {
     pub lambda_index: usize,
+    /// Which of that lambda's `bodies` this site received.
+    pub body_index: usize,
     pub byte_start: usize,
     pub host_locals: Vec<VType>,
     pub stack_prefix: Option<Vec<VType>>,
 }
 
-/// One lambda argument to splice into a host body at its `FunctionN.invoke` site.
+/// One lambda argument to splice into a host body at its `FunctionN.invoke` sites.
 pub struct LambdaSplice {
     /// The host parameter index of this lambda (its position in the descriptor).
     pub param_index: usize,
+    /// What replaces each `invoke` of this lambda. ONE body serves every site — the ordinary case: a
+    /// body the host may run any number of times is the same code at each of them. One body PER
+    /// SITE, in the host's instruction order, when the sites cannot share: a suspension inside the
+    /// body is a state of the enclosing machine, and a state is one position with its own spill
+    /// set, so each site carries a copy marked with its own ordinal. Any other count is a mistake
+    /// the splice declines.
+    pub bodies: Vec<LambdaBody>,
+}
+
+/// One built body of a lambda argument, as the splice puts it in place of a `FunctionN.invoke`.
+pub struct LambdaBody {
+    /// The body's own debug locals as `(start, slot, name, descriptor)`, with `start` an offset into
+    /// `body` as built. Each runs to the end of the body, which is the only thing its scope can mean
+    /// once the body is code inside another method. The splice relocates them, because only it knows
+    /// where the body landed and which of its instructions it cancelled away.
+    pub locals: Vec<(u16, u16, String, String)>,
+    /// The body's own line marks as `(offset into `body`, line)`. These are the CALLER's lines — an
+    /// inlined lambda is the caller's source wherever it ends up running.
+    pub lines: Vec<(u16, u16)>,
+    /// The body's own exception table as `(start, end, handler, catch_type)`, offsets into `body`
+    /// as built and `catch_type` already in the target pool (the body was built against it). A
+    /// `try` inside the lambda is code inside another method once spliced, and its handler must
+    /// guard the same bytes there: the splice relocates the ranges, because only it knows where
+    /// the body landed and which of its instructions it cancelled away.
+    pub handlers: Vec<(u16, u16, u16, u16)>,
     /// Pre-built lambda body (relocated into the target pool, locals absolute), leaving the lambda's
     /// result boxed to `Object` on the stack — exactly what the replaced `invoke` produced. Branchless
     /// (no frames) in v1.
@@ -1630,6 +1686,377 @@ fn param_offsets(descriptor: &str) -> Option<Vec<u16>> {
 /// (the former `branchless_lambda_segments`). The caller emits the non-lambda arguments first (empty
 /// baseline otherwise) and binds the returned frames + the join frame. `None` on an unsupported shape
 /// (exception handlers, reified, an unparseable body) ⇒ the caller falls back / skips, never miscompiles.
+/// The primitive descriptor a `Wrapper.valueOf(p)LWrapper;` boxing call consumes, if `insn` is one.
+/// Read from the HOST's own pool, where the instruction still lives.
+fn boxing_call_primitive(src_cp: &[C], insn: &Insn) -> Option<char> {
+    let Insn::Plain { op: 0xb8, operands } = insn else {
+        return None;
+    };
+    let index = (*operands.first()? as u16) << 8 | *operands.get(1)? as u16;
+    let (class, name) = methodref_target(src_cp, index)?;
+    if name != "valueOf" {
+        return None;
+    }
+    wrapper_primitive(class)
+}
+
+/// The primitive a boxed wrapper carries: `java/lang/Integer` → `I`.
+fn wrapper_primitive(class: &str) -> Option<char> {
+    Some(match class {
+        "java/lang/Integer" => 'I',
+        "java/lang/Long" => 'J',
+        "java/lang/Short" => 'S',
+        "java/lang/Byte" => 'B',
+        "java/lang/Character" => 'C',
+        "java/lang/Boolean" => 'Z',
+        "java/lang/Float" => 'F',
+        "java/lang/Double" => 'D',
+        _ => return None,
+    })
+}
+
+/// How many leading instructions of `insns` form an unboxing of `primitive` — an optional
+/// `checkcast` onto the wrapper followed by its `xxxValue()` call — in the TARGET pool.
+///
+/// `0` when the head is not an unboxing.
+fn leading_unboxing(cw: &ClassWriter, insns: &[Insn], primitive: char) -> usize {
+    let mut at = 0;
+    if let Some(Insn::Plain { op: 0xc0, operands }) = insns.first() {
+        if let Some((high, low)) = operands.first().zip(operands.get(1)) {
+            let index = (u16::from(*high) << 8) | u16::from(*low);
+            if cw
+                .class_name_at(index)
+                .and_then(wrapper_primitive)
+                .is_some_and(|carried| carried == primitive)
+            {
+                at = 1;
+            }
+        }
+    }
+    let Some(Insn::Plain { op: 0xb6, operands }) = insns.get(at) else {
+        return 0;
+    };
+    let Some((high, low)) = operands.first().zip(operands.get(1)) else {
+        return 0;
+    };
+    let index = (u16::from(*high) << 8) | u16::from(*low);
+    let Some((class, _, descriptor)) = cw.methodref_parts(index) else {
+        return 0;
+    };
+    let unboxes = wrapper_primitive(class).is_some_and(|carried| carried == primitive)
+        && descriptor.starts_with("()")
+        && descriptor[2..].starts_with(primitive);
+    if unboxes {
+        at + 1
+    } else {
+        0
+    }
+}
+
+/// Whether `insn` boxes `primitive`, read from the TARGET pool (the lambda body's own).
+fn is_target_boxing(cw: &ClassWriter, insn: &Insn, primitive: char) -> bool {
+    let Insn::Plain { op: 0xb8, operands } = insn else {
+        return false;
+    };
+    let Some((high, low)) = operands.first().zip(operands.get(1)) else {
+        return false;
+    };
+    let index = (u16::from(*high) << 8) | u16::from(*low);
+    cw.methodref_parts(index).is_some_and(|(class, name, _)| {
+        name == "valueOf" && wrapper_primitive(class).is_some_and(|carried| carried == primitive)
+    })
+}
+
+/// The unboxing at the head of `insns` in the HOST's pool: an optional `checkcast` onto a wrapper
+/// or `java/lang/Number`, then an `xxxValue()` call. Returns the primitive it yields and how many
+/// instructions it spans.
+fn host_unboxing(src_cp: &[C], insns: &[Insn]) -> Option<(char, usize)> {
+    let mut at = 0;
+    if let Some(Insn::Plain { op: 0xc0, operands }) = insns.first() {
+        if let Some((high, low)) = operands.first().zip(operands.get(1)) {
+            let index = (u16::from(*high) << 8) | u16::from(*low);
+            if class_name(src_cp, index)
+                .is_some_and(|name| name == "java/lang/Number" || wrapper_primitive(name).is_some())
+            {
+                at = 1;
+            }
+        }
+    }
+    let Insn::Plain { op: 0xb6, operands } = insns.get(at)? else {
+        return None;
+    };
+    let index = (u16::from(*operands.first()?) << 8) | u16::from(*operands.get(1)?);
+    let (class, _, descriptor) = methodref_signature(src_cp, index)?;
+    if class != "java/lang/Number" && wrapper_primitive(class).is_none() {
+        return None;
+    }
+    let primitive = descriptor.strip_prefix("()")?.chars().next()?;
+    (descriptor.len() == 3 && "IJSBCZFD".contains(primitive)).then_some((primitive, at + 1))
+}
+
+/// `(class, name, descriptor)` of a method reference in a SOURCE pool.
+fn methodref_signature(src_cp: &[C], idx: u16) -> Option<(&str, &str, &str)> {
+    let (c, nt) = match src_cp.get(idx as usize)? {
+        C::Methodref(c, nt) | C::InterfaceMethodref(c, nt) => (*c, *nt),
+        _ => return None,
+    };
+    let (name, descriptor) = name_and_type(src_cp, nt)?;
+    Some((class_name(src_cp, c)?, name, descriptor))
+}
+
+/// Drop the entries describing `removed` slots from a collapsed verification-type list.
+///
+/// Found by SLOT, not by position: a `long`/`double` local occupies one verification-type entry and
+/// two slots, so past one of them the two stop agreeing, and dropping the wrong entry leaves a frame
+/// describing different locals from the code it guards.
+fn drop_slot_entries(collapsed: &[VType], removed: &[u16]) -> Vec<VType> {
+    let mut kept = Vec::with_capacity(collapsed.len());
+    let mut slot = 0u16;
+    for v in collapsed {
+        let width = if matches!(v, VType::Long | VType::Double) {
+            2
+        } else {
+            1
+        };
+        if !removed.contains(&slot) {
+            kept.push(*v);
+        }
+        slot += width;
+    }
+    kept
+}
+
+/// Instruction indices consumed by an entry null-check triplet (`aload`/`ldc`/`invokestatic
+/// Intrinsics.checkNotNull*`), which the splice deletes. A lambda's `aload` inside one is not a use.
+pub fn null_check_deletions(insns: &[Insn], src_cp: &[C]) -> std::collections::HashSet<usize> {
+    let mut deleted = std::collections::HashSet::new();
+    for (index, insn) in insns.iter().enumerate() {
+        let Insn::Plain { op: 0xb8, operands } = insn else {
+            continue;
+        };
+        if operands.len() != 2 || index < 2 {
+            continue;
+        }
+        let pool = (operands[0] as u16) << 8 | operands[1] as u16;
+        if let Some(("kotlin/jvm/internal/Intrinsics", name)) = methodref_target(src_cp, pool) {
+            if name == "checkNotNullParameter" || name == "checkNotNullExpressionValue" {
+                deleted.extend(index - 2..=index);
+            }
+        }
+    }
+    deleted
+}
+
+/// Pair each substituted lambda with the `FunctionN.invoke` its object load owns:
+/// `(lambda index, receiver-load index, invoke index)`, in body order.
+///
+/// The receiver load owns the first `invoke` before another substituted lambda's load; arguments may
+/// sit between the two (`action.invoke(element)`), so adjacency is not required. One definition,
+/// because the splice and the slot-base calculation must agree on which site belongs to which lambda
+/// or the body and its frame would be built against different numbering.
+pub fn lambda_invoke_sites(
+    insns: &[Insn],
+    src_cp: &[C],
+    lambda_slots: &[(usize, u16)],
+    deleted: &std::collections::HashSet<usize>,
+) -> Option<Vec<(usize, usize, usize)>> {
+    let mut found = Vec::new();
+    for (load_idx, instruction) in insns.iter().enumerate() {
+        if deleted.contains(&load_idx) {
+            continue;
+        }
+        let Some(&(lambda, _)) = lambda_slots
+            .iter()
+            .find(|(_, slot)| is_aload_of(instruction, *slot))
+        else {
+            continue;
+        };
+        let site = insns
+            .iter()
+            .enumerate()
+            .skip(load_idx + 1)
+            .take_while(|(index, candidate)| {
+                deleted.contains(index)
+                    || !lambda_slots
+                        .iter()
+                        .any(|(_, slot)| is_aload_of(candidate, *slot))
+            })
+            .find_map(|(index, candidate)| {
+                let Insn::Plain { op: 0xb9, operands } = candidate else {
+                    return None;
+                };
+                let pool = (*operands.first()? as u16) << 8 | *operands.get(1)? as u16;
+                let (class, name) = methodref_target(src_cp, pool)?;
+                (name == "invoke" && class.starts_with("kotlin/jvm/functions/Function"))
+                    .then_some(index)
+            })?;
+        found.push((lambda, load_idx, site));
+    }
+    Some(found)
+}
+
+/// The first local slot an inlined lambda's own locals may occupy.
+///
+/// One past the highest slot any of the host's own stack-map frames DESCRIBES, and at least its
+/// parameter area. Using `max_locals` instead would put the lambda above locals the host has
+/// finished with, and the reference compiler reuses those, so a body inlined where a later local is
+/// only ever live in straight-line code lands a slot lower.
+///
+/// Frames, not liveness: a splice keeps the host's frames verbatim rather than recomputing them, so
+/// a slot some frame still describes must keep its type even where nothing reads it. Writing a
+/// lambda local into one is how a frame comes to disagree with the code it guards.
+fn free_local_slot_at(
+    insns: &[Insn],
+    site: usize,
+    frames: &[(usize, Frame)],
+    minimum: u16,
+    ceiling: u16,
+) -> u16 {
+    // A slot the host has already written may be read again after the invoke, and a slot some frame
+    // describes must keep its type there. Neither signal implies the other, so both bound the
+    // answer.
+    let mut written = 0u16;
+    for insn in insns.iter().take(site) {
+        if let Some(slot) = stored_local(insn) {
+            written = written.max(slot + store_slot_width(insn));
+        }
+        if let Some(slot) = incremented_local_slot(insn) {
+            written = written.max(slot + 1);
+        }
+    }
+    let described = frames
+        .iter()
+        .map(|(_, frame)| {
+            frame
+                .locals
+                .iter()
+                .map(|v| {
+                    if matches!(v, VType::Long | VType::Double) {
+                        2
+                    } else {
+                        1
+                    }
+                })
+                .sum::<u16>()
+        })
+        .max()
+        .unwrap_or(0);
+    minimum
+        .max(described)
+        .max(written)
+        .min(ceiling.max(minimum))
+}
+
+/// Slots a store instruction writes (`lstore`/`dstore` take two)./// Slots a store instruction writes (`lstore`/`dstore` take two).
+fn store_slot_width(insn: &Insn) -> u16 {
+    let Insn::Plain { op, operands } = insn else {
+        return 1;
+    };
+    let effective = if *op == 0xc4 {
+        operands.first().copied().unwrap_or(*op)
+    } else {
+        *op
+    };
+    match effective {
+        0x37 | 0x39 | 0x3f..=0x42 | 0x47..=0x4a => 2,
+        _ => 1,
+    }
+}
+
+/// The slot an `iinc` writes, which `stored_local` does not report.
+fn incremented_local_slot(insn: &Insn) -> Option<u16> {
+    match insn {
+        Insn::Plain { op: 0x84, operands } => operands.first().copied().map(u16::from),
+        Insn::Plain { op: 0xc4, operands } if operands.first() == Some(&0x84) => operands
+            .get(1)
+            .zip(operands.get(2))
+            .map(|(&high, &low)| (u16::from(high) << 8) | u16::from(low)),
+        _ => None,
+    }
+}
+
+/// How a splice will lay out the caller's frame: where each substituted lambda's own locals begin,
+/// and how far the relocated host body reaches.
+///
+/// Both answers come from ONE compaction rule. They were derived separately once — here, in the
+/// splice itself, and in the emitter's `top_local` — and three copies of a rule that must agree is
+/// three chances for them not to; the disagreement shows up as locals overlapping, which the
+/// verifier reports as a frame mismatch far from its cause.
+pub struct SplicedFrame {
+    /// One entry per `lambda_params` position, in that order.
+    pub lambda_bases: Vec<u16>,
+    /// How many `FunctionN.invoke` sites the host has for each `lambda_params` position.
+    pub site_counts: Vec<usize>,
+    /// One past the highest caller slot the relocated host body occupies.
+    pub top_local: u16,
+}
+
+/// Plan the caller frame for splicing `body`. `None` when the body cannot be decoded or a lambda
+/// parameter has no `FunctionN.invoke` this splice would replace — the caller then has no splice to
+/// perform either.
+pub fn spliced_frame(
+    body: &MethodCode,
+    descriptor: &str,
+    lambda_params: &[usize],
+    base: u16,
+) -> Option<SplicedFrame> {
+    let offsets_of_param = param_offsets(descriptor)?;
+    let insns = disassemble(&body.code)?;
+    let deleted = null_check_deletions(&insns, &body.source_cp);
+    let lambda_slots = lambda_params
+        .iter()
+        .enumerate()
+        .map(|(lambda, &parameter)| {
+            offsets_of_param
+                .get(parameter)
+                .copied()
+                .map(|s| (lambda, s))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let removed: Vec<u16> = lambda_slots.iter().map(|&(_, slot)| slot).collect();
+    let compact = |slot: u16| -> u16 {
+        base + slot - removed.iter().filter(|&&gone| gone < slot).count() as u16
+    };
+    // The parameter area is live throughout even where the debug table does not say so.
+    let parameter_end = offsets_of_param
+        .last()
+        .map(|&last| last + 1)
+        .unwrap_or_default();
+    // The host's own frames, decoded the same way the splice decodes them.
+    let frames: Vec<(usize, Frame)> = match body.stackmap.as_ref() {
+        Some(stackmap) => {
+            let frame0 = param_vtypes_full(descriptor, &body.source_cp)?;
+            let offsets = old_offsets(&body.code)?;
+            decode_stackmap(stackmap, frame0)?
+                .into_iter()
+                .map(|frame| {
+                    offsets
+                        .iter()
+                        .position(|&at| at == frame.offset)
+                        .map(|index| (index, frame))
+                })
+                .collect::<Option<Vec<_>>>()?
+        }
+        None => Vec::new(),
+    };
+    let sites = lambda_invoke_sites(&insns, &body.source_cp, &lambda_slots, &deleted)?;
+    let mut bases = vec![None; lambda_params.len()];
+    let mut site_counts = vec![0usize; lambda_params.len()];
+    for (lambda, _, site) in sites {
+        let free = free_local_slot_at(&insns, site, &frames, parameter_end, body.max_locals);
+        // A lambda invoked from several sites takes the highest, so one body suits them all.
+        let at = compact(free);
+        bases[lambda] = Some(bases[lambda].map_or(at, |had: u16| had.max(at)));
+        site_counts[lambda] += 1;
+    }
+    Some(SplicedFrame {
+        lambda_bases: bases.into_iter().collect::<Option<Vec<_>>>()?,
+        site_counts,
+        // The slot one past the body's own locals, through the same compaction its locals take.
+        top_local: compact(body.max_locals),
+    })
+}
+
 pub fn splice_unified(
     body: &MethodCode,
     descriptor: &str,
@@ -1768,50 +2195,110 @@ pub fn splice_unified(
     let mut lambda_sites = Vec::new(); // original invoke index per occurrence
     let mut lambda_loads = Vec::new(); // original receiver-load index per occurrence
     let mut site_lambdas = Vec::new(); // input lambda index per occurrence
-    for (load_idx, instruction) in insns.iter().enumerate() {
-        if deleted.contains(&load_idx) {
-            continue;
-        }
-        let Some(&(lambda, _)) = lambda_slots
+    let mut site_bodies: Vec<&LambdaBody> = Vec::new(); // the body spliced at each occurrence
+    let mut site_body_indices = Vec::new(); // its index in the lambda's `bodies`
+                                            // Bytes of the lambda body dropped from its FRONT by argument cancellation. The body's own
+                                            // frames are offsets into the body as it was built, so the base they are bound against has to
+                                            // move back by exactly what no longer precedes them.
+    let mut dropped_prefix = Vec::new();
+    // The same drop counted in INSTRUCTIONS, which is what maps a frame exactly.
+    let mut dropped_prefix_insns = Vec::new();
+    // Bytes dropped from its END by result cancellation, which shortens where its locals leave scope.
+    let mut dropped_suffix = Vec::new();
+    let found_sites = lambda_invoke_sites(&insns, &body.source_cp, &lambda_slots, &deleted)?;
+    for (lambda, load_idx, site) in found_sites.iter().copied() {
+        // The k-th site of a lambda takes its k-th body, or the one body every site shares. A lambda
+        // built per site has exactly as many bodies as the host has sites for it: fewer would leave
+        // a site without code, more would leave a state without a position.
+        let occurrence = site_lambdas
             .iter()
-            .find(|(_, slot)| is_aload_of(instruction, *slot))
-        else {
-            continue;
+            .filter(|&&earlier| earlier == lambda)
+            .count();
+        let of_lambda = found_sites
+            .iter()
+            .filter(|(candidate, _, _)| *candidate == lambda)
+            .count();
+        let body_index = match lambdas[lambda].bodies.len() {
+            1 => 0,
+            count if count == of_lambda => occurrence,
+            _ => return None,
         };
-        // The receiver load owns the first FunctionN.invoke before another substituted-lambda load.
-        // Arguments may sit between the two (`action.invoke(element)`), so adjacency is not required.
-        let site = insns
-            .iter()
-            .enumerate()
-            .skip(load_idx + 1)
-            .take_while(|(index, candidate)| {
-                deleted.contains(index)
-                    || !lambda_slots
-                        .iter()
-                        .any(|(_, slot)| is_aload_of(candidate, *slot))
-            })
-            .find_map(|(index, candidate)| {
-                let Insn::Plain { op: 0xb9, operands } = candidate else {
-                    return None;
-                };
-                let pool = (*operands.first()? as u16) << 8 | *operands.get(1)? as u16;
-                let (class, name) = methodref_target(&body.source_cp, pool)?;
-                (name == "invoke" && class.starts_with("kotlin/jvm/functions/Function"))
-                    .then_some(index)
-            })?;
+        let site_body = &lambdas[lambda].bodies[body_index];
         edits.push(Edit {
             at: load_idx,
             len: 1,
             repl: Vec::new(),
         }); // delete the dead lambda-object load
+            // `FunctionN.invoke` is erased to `(Object)Object`, so the host boxes each argument and
+            // unboxes the result, and the lambda body undoes both. Once the body is spliced there is no
+            // `invoke` left and no reason for any of it: cancel each adjacent box/unbox pair, exactly as
+            // the reference compiler's inliner does. Only an ADJACENT pair is cancelled here, which is
+            // every argument of a zero- or one-parameter lambda and the result of any lambda; an earlier
+            // argument of a multi-parameter lambda is separated from its unboxing by the next argument's
+            // evaluation and needs a stack walk this does not attempt.
+        let mut replacement = site_body.body.clone();
+        let mut at = site;
+        let mut len = 1;
+        let mut dropped = 0usize;
+        let mut dropped_insns = 0usize;
+        let mut suffix = 0usize;
+        // The frames inside a cancelled region would describe a stack that no longer exists.
+        let frame_inside = |from: usize, to: usize| {
+            host_frames
+                .iter()
+                .any(|(index, _)| *index > from && *index <= to)
+        };
+        // Only a body with no frames of its own: cancelling instructions off its front moves every
+        // later offset in it, and its frames are recorded against the layout it was built with. A
+        // branchy body would need those rebased, and the mapping is not a constant shift.
+        let body_has_frames = site_body
+            .body
+            .iter()
+            .any(|insn| !matches!(insn, Insn::Plain { .. }));
+        if !body_has_frames
+            && site > load_idx + 1
+            && !deleted.contains(&(site - 1))
+            && !frame_inside(site - 1, site)
+        {
+            if let Some(primitive) = boxing_call_primitive(&body.source_cp, &insns[site - 1]) {
+                let unboxing = leading_unboxing(cw, &replacement, primitive);
+                if unboxing > 0 {
+                    let removed: Vec<Insn> = replacement.drain(..unboxing).collect();
+                    dropped = assemble(&removed).len();
+                    dropped_insns = removed.len();
+                    at = site - 1;
+                    len += 1;
+                }
+            }
+        }
+        if let Some((primitive, spans)) = host_unboxing(&body.source_cp, &insns[site + 1..]) {
+            let boxes_result = replacement
+                .last()
+                .is_some_and(|last| is_target_boxing(cw, last, primitive));
+            if boxes_result
+                && !(site + 1..=site + spans).any(|index| deleted.contains(&index))
+                && !frame_inside(site, site + spans)
+            {
+                let removed = replacement
+                    .pop()
+                    .expect("a trailing boxing was just observed");
+                suffix = assemble(std::slice::from_ref(&removed)).len();
+                len += spans;
+            }
+        }
         edits.push(Edit {
-            at: site,
-            len: 1,
-            repl: lambdas[lambda].body.clone(),
-        }); // replace the invoke with the lambda body
+            at,
+            len,
+            repl: replacement,
+        }); // replace the invoke (and any cancelled adapter) with the lambda body
         lambda_sites.push(site);
         lambda_loads.push(load_idx);
         site_lambdas.push(lambda);
+        site_bodies.push(site_body);
+        site_body_indices.push(body_index);
+        dropped_prefix.push(dropped);
+        dropped_prefix_insns.push(dropped_insns);
+        dropped_suffix.push(suffix);
     }
     if !lambdas.is_empty()
         && (invoke_count != lambda_sites.len()
@@ -1830,8 +2317,8 @@ pub fn splice_unified(
     // A BRANCHY lambda body has its own frames, compiled against an empty operand base; they must be
     // rebased onto the host state. If that state couldn't be modeled, bail (a BRANCHLESS body has no
     // frames, so its unmodeled state is irrelevant). The caller then falls back to a real call.
-    for (site, &lambda) in site_lambdas.iter().enumerate() {
-        let branchy = lambdas[lambda]
+    for (site, site_body) in site_bodies.iter().enumerate() {
+        let branchy = site_body
             .body
             .iter()
             .any(|i| !matches!(i, Insn::Plain { .. }));
@@ -1850,7 +2337,19 @@ pub fn splice_unified(
             return None;
         }
     }
-    shift_locals(&mut insns, base)?;
+    // The parameter that held a substituted lambda no longer exists: its `aload` is deleted and its
+    // body is spliced in place of the `invoke`. Leaving its slot reserved would push every later host
+    // local one slot up, which the reference compiler does not do — it closes the gap. Relocate the
+    // body's locals through a map that both rebases and compacts.
+    let removed_slots: Vec<u16> = lambdas
+        .iter()
+        .filter_map(|lambda| offsets_of_param.get(lambda.param_index).copied())
+        .collect();
+    let compact = |slot: u16| -> u16 {
+        let closed = removed_slots.iter().filter(|&&gone| gone < slot).count() as u16;
+        base + slot - closed
+    };
+    remap_locals(&mut insns, compact)?;
     // Return handling: DROP a trailing return (fall through with the result on the stack), and redirect
     // any earlier return to the join (`goto` past the body). A pure BRANCHLESS body — no branches, a
     // single trailing return dropped — then needs NO frames/join, so the caller may splice it at ANY
@@ -1981,16 +2480,13 @@ pub fn splice_unified(
     }
 
     // Prologue: store each NON-lambda argument (already on the stack, top = last) into its slot.
-    let stores = param_store_ops(descriptor, base)?;
-    let lambda_slots: std::collections::HashSet<u16> = lambdas
-        .iter()
-        .filter_map(|l| offsets_of_param.get(l.param_index).map(|o| base + o))
-        .collect();
+    let stores = param_store_ops(descriptor, 0)?;
+    let lambda_slots: std::collections::HashSet<u16> = removed_slots.iter().copied().collect();
     let prologue: Vec<Insn> = stores
         .iter()
         .rev()
         .filter(|(slot, _)| !lambda_slots.contains(slot))
-        .map(|&(slot, op)| local_load_store(op, slot))
+        .map(|&(slot, op)| local_load_store(op, compact(slot)))
         .collect();
     crate::trace_compiler!(
         "splice",
@@ -2006,23 +2502,29 @@ pub fn splice_unified(
 
     // Relocate the host frames: remap old index → new (+prologue), drop each spliced-away lambda slot
     // (its local is now dead → `Top`), and relocate the verification types into `cw`.
-    let lambda_entry: std::collections::HashSet<usize> =
-        lambdas.iter().map(|l| l.param_index).collect();
     let mut frames = Vec::with_capacity(host_frames.len() + 1);
     for (old_idx, f) in &host_frames {
         let new_idx = old2new[*old_idx] + p;
-        let locals = f
-            .locals
-            .iter()
-            .enumerate()
-            .map(|(k, v)| {
-                if lambda_entry.contains(&k) {
-                    Some(VType::Top) // the lambda param is spliced away — its slot is dead
-                } else {
-                    relocate_vtype(v, &body.source_cp, cw)
-                }
-            })
-            .collect::<Option<Vec<_>>>()?;
+        // The lambda parameter is spliced away and its slot closed, so the frame must not describe
+        // it at all — a `Top` in its place would still reserve the slot.
+        //
+        // The entry to drop is found by SLOT, not by position: a `long`/`double` local occupies one
+        // verification-type entry and two slots, so past one of them the two stop agreeing. Removing
+        // the wrong entry leaves a frame describing different locals from the code it guards, which
+        // the verifier reports as an inconsistent stack map, not as anything resembling its cause.
+        let mut locals = Vec::with_capacity(f.locals.len());
+        let mut slot = 0u16;
+        for v in &f.locals {
+            let width = if matches!(v, VType::Long | VType::Double) {
+                2
+            } else {
+                1
+            };
+            if !removed_slots.contains(&slot) {
+                locals.push(relocate_vtype(v, &body.source_cp, cw)?);
+            }
+            slot += width;
+        }
         // A substituted lambda's `aload` is deleted, so remove that exact value while it would have
         // been live between the load and `FunctionN.invoke`. Do not discard FunctionN values by type:
         // an inline host can legitimately carry an unsubstituted function parameter across a branch
@@ -2055,7 +2557,9 @@ pub fn splice_unified(
         frames.push((offs[new_idx], locals, stack));
     }
     if synthesize_empty_branch_frames {
-        let locals = param_vtypes_target(descriptor, cw)?;
+        // Through the same compaction the body's own locals and every other frame take: a
+        // substituted lambda's parameter slot is closed, so a frame must not describe it.
+        let locals = drop_slot_entries(&param_vtypes_target(descriptor, cw)?, &removed_slots);
         let mut targets = std::collections::BTreeSet::new();
         for insn in &final_insns {
             match insn {
@@ -2093,8 +2597,7 @@ pub fn splice_unified(
     // the verifier can't fall through the return, so it needs a stack-map frame there. Synthesize one from
     // the host state at the invoke plus the (dropped) `FunctionN.invoke` result, so the dead continuation
     // still verifies. (Without this the splice would emit a frameless target → `VerifyError`.)
-    for (k, &lambda) in site_lambdas.iter().enumerate() {
-        let lam = &lambdas[lambda];
+    for (k, lam) in site_bodies.iter().enumerate() {
         let diverges = matches!(
             lam.body.last(),
             Some(Insn::Plain { op, .. }) if matches!(op, 0xac..=0xb1 | 0xbf)
@@ -2119,8 +2622,11 @@ pub fn splice_unified(
         if frames.iter().any(|(o, _, _)| *o == cont_off) {
             continue; // already framed (a branch target)
         }
-        let mut rl = Vec::with_capacity(locals.len());
-        for v in &locals {
+        // Through the same compaction every other frame takes; this one is built from the host's
+        // simulated state rather than from its table, which is why it needs saying again here.
+        let collapsed = drop_slot_entries(&collapse_slots(&locals), &removed_slots);
+        let mut rl = Vec::with_capacity(collapsed.len());
+        for v in &collapsed {
             rl.push(relocate_vtype(v, &body.source_cp, cw)?);
         }
         let mut rs = Vec::with_capacity(stack.len() + 1);
@@ -2139,7 +2645,7 @@ pub fn splice_unified(
         let old_idx = old_off.iter().position(|&o| o == bp as usize)?;
         offs.get(old2new[old_idx] + p).copied()
     };
-    let mut handlers = Vec::with_capacity(body.handlers.len());
+    let mut host_handlers = Vec::with_capacity(body.handlers.len());
     for h in &body.handlers {
         let start = byte_to_abs(h.start_pc)?;
         let end = byte_to_abs(h.end_pc)?;
@@ -2149,45 +2655,82 @@ pub fn splice_unified(
         } else {
             relocate_const(&body.source_cp, h.catch_type, cw)?
         };
-        handlers.push((start, end, handler, catch_type));
+        host_handlers.push((start, end, handler, catch_type));
     }
+    // A lambda's ranges are nested INSIDE the host's at the invoke site, and the JVM takes the
+    // first table entry that covers the pc and matches the thrown type (JVMS 2.10). So the lambda's
+    // entries go first; listed after the host's, a `catch` the host wraps around the call would
+    // shadow the lambda's own, silently — `guard { try { throw … } catch … }` ran the host's arm.
+    let mut handlers = Vec::new();
+    // The lambda bodies' own handlers, relocated the same way their locals are below: a body is
+    // spliced verbatim except for the adapter instructions cancelled off its ends, so a range is its
+    // built offset less the cancelled prefix, and one that ran to the body's end now ends where the
+    // spliced bytes do. A handler that landed inside the cancelled prefix guards nothing that exists.
+    for (occurrence, &site) in lambda_sites.iter().enumerate() {
+        let lambda = site_bodies[occurrence];
+        if lambda.handlers.is_empty() {
+            continue;
+        }
+        // A handler is entered with only the exception on the stack: whatever the host held under
+        // the lambda's value (`acc + f(x)`) is gone, and the code after the region would find it
+        // missing. The reference compiler spills that prefix into locals around such a body; this
+        // splice does not yet, so it declines and the lambda stays a closure.
+        if host_states[occurrence]
+            .as_ref()
+            .is_some_and(|(_, stack)| !stack.is_empty())
+        {
+            return None;
+        }
+        let body_start = offs[p + old2new[site]];
+        let prefix = dropped_prefix[occurrence];
+        let suffix = dropped_suffix[occurrence];
+        let built = assemble(&lambda.body).len();
+        let Some(spliced_len) = built.checked_sub(prefix + suffix) else {
+            continue;
+        };
+        for &(start, end, handler, catch_type) in &lambda.handlers {
+            let (Some(start), Some(end), Some(handler)) = (
+                (start as usize).checked_sub(prefix),
+                (end as usize).checked_sub(prefix),
+                (handler as usize).checked_sub(prefix),
+            ) else {
+                return None;
+            };
+            let end = end.min(spliced_len);
+            if start >= end || handler > spliced_len {
+                return None;
+            }
+            handlers.push((
+                body_start + start,
+                body_start + end,
+                body_start + handler,
+                catch_type,
+            ));
+        }
+    }
+    handlers.extend(host_handlers);
     let falls_through = caller_continuation_reachable(&final_insns, &offs, &handlers)?;
     // The host's live body locals at each lambda's invoke point — the host frame (decoded, before
     // relocation) with the largest old index ≤ the invoke. For a loop host that's the loop-body frame
     // (iterator/accumulator live), the context a branchy lambda body's frames need. Empty if no frame
     // precedes the invoke (the caller then uses the parameters).
     // Fallback context when no host frame precedes the invoke (`takeIf` — the invoke is before the first
-    // branch): the method's parameters (`base..`, a lambda param dead → `Top`).
-    let param_ctx: Vec<VType> = param_vtypes_full(descriptor, &body.source_cp)
-        .unwrap_or_default()
-        .into_iter()
-        .enumerate()
-        .map(|(k, v)| {
-            if lambda_entry.contains(&k) {
-                VType::Top
-            } else {
-                v
-            }
-        })
-        .collect();
+    // branch): the method's parameters (`base..`, a spliced-away lambda param dropped).
+    let param_ctx: Vec<VType> = drop_slot_entries(
+        &param_vtypes_full(descriptor, &body.source_cp).unwrap_or_default(),
+        &removed_slots,
+    );
     // The host's live locals + operand-stack prefix at each lambda's invoke, from the forward simulation
     // (`host_states`): the loop-body context a branchy lambda body's frames need. The locals are collapsed
-    // to frame form, the spliced-away lambda slot blanked to `Top`, and both relocated into `cw`. A `None`
+    // to frame form, the spliced-away lambda slot dropped, and both relocated into `cw`. A `None`
     // state only occurs for a BRANCHLESS lambda (its frames/prefix are unused) → the `param_ctx` filler.
     let mut relocated_lambda_sites = Vec::with_capacity(host_states.len());
     for (occurrence, state) in host_states.iter().enumerate() {
         let (host_locals, stack_prefix) = match state {
             Some((slots, stack)) => (
-                collapse_slots(slots)
+                drop_slot_entries(&collapse_slots(slots), &removed_slots)
                     .iter()
-                    .enumerate()
-                    .map(|(k, v)| {
-                        if lambda_entry.contains(&k) {
-                            Some(VType::Top)
-                        } else {
-                            relocate_vtype(v, &body.source_cp, cw)
-                        }
-                    })
+                    .map(|v| relocate_vtype(v, &body.source_cp, cw))
                     .collect::<Option<Vec<_>>>()?,
                 stack
                     .iter()
@@ -2198,11 +2741,144 @@ pub fn splice_unified(
         };
         relocated_lambda_sites.push(RelocatedLambdaSite {
             lambda_index: site_lambdas[occurrence],
+            body_index: site_body_indices[occurrence],
             byte_start: offs[p + old2new[lambda_sites[occurrence]]],
             host_locals,
             stack_prefix,
         });
     }
+    // Relocate the dependency's debug locals: its byte offsets become instruction indices, travel
+    // through the same `old2new` every branch target does, and come back as absolute offsets; its
+    // slots go through the same compaction the instructions did. A local whose declaration lands
+    // inside a region this splice deleted — the entry null-check, a substituted lambda's object —
+    // has no place left to be described, and a zero-length range is not one either.
+    let byte_to_index =
+        |offset: u16| -> Option<usize> { old_off.iter().position(|&at| at == offset as usize) };
+    let mut relocated_locals = Vec::new();
+    for local in &body.locals {
+        if removed_slots.contains(&local.slot) {
+            continue; // the substituted lambda's own object: no longer a value
+        }
+        let (Some(from), Some(to)) = (
+            byte_to_index(local.start_pc),
+            byte_to_index(local.start_pc.saturating_add(local.length)),
+        ) else {
+            continue;
+        };
+        let start = offs[p + old2new[from]];
+        let end = offs[p + old2new[to]];
+        let (Ok(start), Ok(length)) = (
+            u16::try_from(start),
+            u16::try_from(end.saturating_sub(start)),
+        ) else {
+            continue;
+        };
+        if length == 0 {
+            continue;
+        }
+        relocated_locals.push((
+            start,
+            length,
+            compact(local.slot),
+            super::debug_local_names::spliced_local_name(&local.name),
+            local.descriptor.clone(),
+        ));
+    }
+    // The lambda bodies' own locals, relocated the same way. They come FIRST in the table: the
+    // reference compiler describes the innermost inlining before the one that contains it. Each runs
+    // from where its store completed to the end of the body it belongs to, which is where the
+    // enclosing code resumes.
+    let mut lambda_locals = Vec::new();
+    for (occurrence, &site) in lambda_sites.iter().enumerate() {
+        let lambda = site_bodies[occurrence];
+        if lambda.locals.is_empty() {
+            continue;
+        }
+        let body_start = offs[p + old2new[site]];
+        let prefix = dropped_prefix[occurrence];
+        let suffix = dropped_suffix[occurrence];
+        let built = assemble(&lambda.body).len();
+        let Some(spliced_len) = built.checked_sub(prefix + suffix) else {
+            continue;
+        };
+        let end = body_start + spliced_len;
+        // Reversed: the reference compiler lists the body's own marker before the parameters it
+        // opened, and a multi-parameter lambda's parameters in descending slot — which is the
+        // reverse of the order they are stored in, top of stack being the last parameter.
+        for (at, slot, name, descriptor) in lambda.locals.iter().rev() {
+            let Some(offset) = (*at as usize).checked_sub(prefix) else {
+                continue; // declared inside the cancelled adapter — there is nothing left to scope
+            };
+            let start = body_start + offset;
+            let (Ok(start), Ok(length)) = (
+                u16::try_from(start),
+                u16::try_from(end.saturating_sub(start)),
+            ) else {
+                continue;
+            };
+            if length == 0 {
+                continue;
+            }
+            lambda_locals.push((start, length, *slot, name.clone(), descriptor.clone()));
+        }
+    }
+    // The host's own line marks, relocated the same way. They name lines of the DEPENDENCY's file.
+    let mut relocated_lines: Vec<(u16, u16, bool)> = Vec::new();
+    for &(start_pc, line) in &body.lines {
+        let Some(index) = byte_to_index(start_pc) else {
+            continue;
+        };
+        let Ok(at) = u16::try_from(offs[p + old2new[index]]) else {
+            continue;
+        };
+        relocated_lines.push((at, line, true));
+    }
+    for (occurrence, &site) in lambda_sites.iter().enumerate() {
+        let lambda = site_bodies[occurrence];
+        let body_start = offs[p + old2new[site]];
+        let prefix = dropped_prefix[occurrence];
+        for &(at, line) in &lambda.lines {
+            let Some(offset) = (at as usize).checked_sub(prefix) else {
+                continue;
+            };
+            let Ok(at) = u16::try_from(body_start + offset) else {
+                continue;
+            };
+            relocated_lines.push((at, line, false));
+        }
+    }
+    // Where an inlined lambda returns, the host's own line resumes. The dependency's table has no
+    // entry there — it never had a lambda body in the middle of its line — so the line in effect
+    // when the region opened is restored at its end, which is what the reference compiler emits.
+    let mut resumed = Vec::new();
+    for (occurrence, &site) in lambda_sites.iter().enumerate() {
+        let lambda = site_bodies[occurrence];
+        if lambda.lines.is_empty() {
+            continue;
+        }
+        let body_start = offs[p + old2new[site]];
+        let built = assemble(&lambda.body).len();
+        let Some(spliced_len) =
+            built.checked_sub(dropped_prefix[occurrence] + dropped_suffix[occurrence])
+        else {
+            continue;
+        };
+        let Ok(end) = u16::try_from(body_start + spliced_len) else {
+            continue;
+        };
+        let host_line = relocated_lines
+            .iter()
+            .filter(|&&(at, _, inlined)| inlined && (at as usize) <= body_start)
+            .max_by_key(|&&(at, _, _)| at)
+            .map(|&(_, line, _)| line);
+        if let Some(line) = host_line {
+            resumed.push((end, line, true));
+        }
+    }
+    relocated_lines.extend(resumed);
+    relocated_lines.sort_by_key(|&(at, _, _)| at);
+    lambda_locals.extend(relocated_locals);
+    let relocated_locals = lambda_locals;
     let external_branches = final_insns
         .iter()
         .enumerate()
@@ -2223,6 +2899,8 @@ pub fn splice_unified(
         lambda_sites: relocated_lambda_sites,
         handlers,
         external_branches,
+        locals: relocated_locals,
+        lines: relocated_lines,
     })
 }
 
@@ -2536,6 +3214,8 @@ mod tests {
             stackmap: None,
             handlers: vec![],
             locals: vec![],
+            lines: Vec::new(),
+            source_file: None,
             bootstrap_methods: Vec::new(),
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
@@ -2592,6 +3272,106 @@ mod tests {
         let mut t = disassemble(&[0x1a, 0xb1]).unwrap(); // iload_0; return
         shift_locals(&mut t, 10).unwrap();
         assert_eq!(assemble(&t), [0x15, 0x0a, 0xb1]); // iload 10; return
+    }
+
+    /// An inlined lambda's locals go above every slot the host has WRITTEN by the invoke and above
+    /// every slot its own frames still DESCRIBE — a slot stored before the invoke may be read after
+    /// it, and a slot a frame mentions must keep its type whether or not anything reads it.
+    #[test]
+    fn the_free_slot_clears_both_the_writes_so_far_and_the_frames() {
+        // istore_1; lstore_2 (slots 2 and 3); iload_1; <invoke here>; istore 9
+        let insns = vec![
+            Insn::Plain {
+                op: 0x3c,
+                operands: Vec::new(),
+            },
+            Insn::Plain {
+                op: 0x41,
+                operands: Vec::new(),
+            },
+            Insn::Plain {
+                op: 0x1b,
+                operands: Vec::new(),
+            },
+            Insn::Plain {
+                op: 0x00,
+                operands: Vec::new(),
+            },
+            Insn::Plain {
+                op: 0x36,
+                operands: vec![9],
+            },
+        ];
+        let ceiling = 10;
+        // At index 3 the host has written slots 1 and 2-3, so the first free one is 4.
+        assert_eq!(free_local_slot_at(&insns, 3, &[], 1, ceiling), 4);
+        // A store that has not happened yet reserves nothing.
+        assert_eq!(free_local_slot_at(&insns, 1, &[], 1, ceiling), 2);
+        // The parameter area is reserved whether or not anything has been stored into it.
+        assert_eq!(free_local_slot_at(&insns, 0, &[], 6, ceiling), 6);
+
+        // A frame describing six slots reserves them even where nothing has been written.
+        let frame = Frame {
+            offset: 0,
+            locals: vec![VType::Int; 6],
+            stack: Vec::new(),
+        };
+        assert_eq!(free_local_slot_at(&insns, 1, &[(0, frame)], 1, ceiling), 6);
+
+        // A `long` in a frame occupies two slots, so the next free one is two above it.
+        let wide = Frame {
+            offset: 0,
+            locals: vec![VType::Int, VType::Long],
+            stack: Vec::new(),
+        };
+        assert_eq!(free_local_slot_at(&insns, 0, &[(0, wide)], 0, ceiling), 3);
+    }
+
+    /// `iinc` writes its slot without being a store instruction, so a lambda placed above the
+    /// highest store alone would land on a loop counter.
+    #[test]
+    fn an_incremented_counter_reserves_its_slot() {
+        let insns = vec![Insn::Plain {
+            op: 0x84,
+            operands: vec![7, 1],
+        }];
+        assert_eq!(free_local_slot_at(&insns, 1, &[], 1, 10), 8);
+    }
+
+    /// A substituted lambda's parameter slot is closed, not merely left reserved    /// A substituted lambda's parameter slot is closed, not merely left reserved    /// A substituted lambda's parameter slot is closed, not merely left reserved: every host local
+    /// above it moves down, which is what the reference compiler emits and what the flat shift got
+    /// wrong.
+    #[test]
+    fn remapping_closes_the_slot_a_spliced_lambda_parameter_left_behind() {
+        // A host `f(int x, Function1 g)` whose body uses x(0), g(1) and two locals 2, 3.
+        // g is spliced away, so with base = 1 the surviving locals are 1, 2, 3 — not 1, 3, 4.
+        let base = 1u16;
+        let removed = [1u16];
+        let compact = |slot: u16| -> u16 {
+            base + slot - removed.iter().filter(|&&gone| gone < slot).count() as u16
+        };
+        assert_eq!(compact(0), 1, "the value parameter rebases");
+        assert_eq!(compact(2), 2, "the first body local closes the gap");
+        assert_eq!(compact(3), 3);
+
+        // iload_0; iload_2; iadd; istore_3; return
+        let code = [0x1a, 0x1c, 0x60, 0x3e, 0xb1];
+        let mut insns = disassemble(&code).unwrap();
+        remap_locals(&mut insns, compact).unwrap();
+        // iload_1; iload_2; iadd; istore_3; return — every form stays compact.
+        assert_eq!(assemble(&insns), [0x1b, 0x1c, 0x60, 0x3e, 0xb1]);
+    }
+
+    /// Without a removed slot the remap is exactly the old shift, so the generalization cannot have
+    /// changed what every other splice emits.
+    #[test]
+    fn remapping_with_nothing_removed_is_the_flat_shift() {
+        let code = [0x1b, 0x3d, 0x84, 0x01, 0x01, 0xb1];
+        let mut shifted = disassemble(&code).unwrap();
+        shift_locals(&mut shifted, 4).unwrap();
+        let mut remapped = disassemble(&code).unwrap();
+        remap_locals(&mut remapped, |slot| slot + 4).unwrap();
+        assert_eq!(assemble(&shifted), assemble(&remapped));
     }
 
     /// A bootstrap entry's dependency graph is every member the host would have to reference.
@@ -2742,6 +3522,8 @@ mod tests {
             stackmap: None,
             handlers: vec![],
             locals: vec![],
+            lines: Vec::new(),
+            source_file: None,
             bootstrap_methods: Vec::new(),
         };
         assert!(!is_reified_inline(&body));
@@ -2758,6 +3540,8 @@ mod tests {
             stackmap: None,
             handlers: vec![],
             locals: vec![],
+            lines: Vec::new(),
+            source_file: None,
             bootstrap_methods: Vec::new(),
         };
         let mut cw = ClassWriter::new("T", "java/lang/Object");
