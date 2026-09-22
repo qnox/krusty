@@ -19032,6 +19032,12 @@ impl<'a> Checker<'a> {
             })
             .collect::<Vec<_>>();
 
+        // Keep the value facet selected for the expected classifier. The declaration owner is not
+        // necessarily this singleton: a companion may inherit `of` from an ordinary base class.
+        // The receiver therefore has to travel independently from the selected callable identity.
+        let companion_dispatch =
+            classifier.and_then(|classifier| self.classifier_singleton_value(classifier));
+
         // The expected classifier's companion operator is the first language strategy. Its raw
         // declarations enter the same applicability and overload-selection engine as an ordinary
         // call; only declarations explicitly marked `operator` are eligible for this syntax.
@@ -19142,19 +19148,18 @@ impl<'a> Checker<'a> {
                 self.record_selected_sam_arguments(args, &selected.applied_params());
                 let result = selected.callable.ret;
                 let mut member = selected.member_with_return(result);
-                // An `operator fun of` is an ordinary member of the companion object, and this
-                // syntax writes no receiver expression to carry that instance. A qualified
-                // `Owner.of(...)` gets it from the spelled receiver; here the selected owner IS the
-                // singleton, so record it on the member. Without this the call is emitted one
-                // argument short of the declaration it selected.
+                // An `operator fun of` is an ordinary member of the classifier's value facet, and
+                // this syntax writes no receiver expression to carry that instance. Keep the
+                // already-resolved singleton independently of the declaration owner: an inherited
+                // operator's owner is its base class, not the companion object that dispatches it.
                 if member.singleton_dispatch.is_none()
                     && member.implicit_classifier_callable.is_none()
-                    && self.classifier_is_object(selected.callable.owner)
                 {
-                    member.singleton_dispatch =
-                        Some(Box::new(crate::libraries::SingletonDispatch {
-                            classifier: selected.callable.owner,
-                        }));
+                    member.singleton_dispatch = companion_dispatch.map(|singleton| {
+                        Box::new(crate::libraries::SingletonDispatch {
+                            classifier: singleton.classifier,
+                        })
+                    });
                 }
                 self.resolved_calls
                     .insert(call, ResolvedCall::Companion(member));
