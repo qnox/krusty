@@ -26,6 +26,7 @@ fn kotlin_owner(owner: &str) -> &str {
         "java/lang/Object" => "kotlin/Any",
         "java/lang/Comparable" => "kotlin/Comparable",
         "java/lang/Number" => "kotlin/Number",
+        "java/lang/Boolean" => "kotlin/Boolean",
         "java/lang/Throwable" => "kotlin/Throwable",
         "java/lang/Error" => "kotlin/Error",
         "java/lang/Exception" => "kotlin/Exception",
@@ -169,6 +170,15 @@ pub(super) fn is_comparator(internal: crate::types::TypeName) -> bool {
 /// primitives point at it so that `is Number` has something to compare.
 pub(super) fn is_number_base(owner: crate::types::TypeName) -> bool {
     kotlin_owner(&owner.render()) == "kotlin/Number"
+}
+
+/// Is this owner `kotlin.Boolean` itself, whatever the realization spells it?
+///
+/// `Boolean::not` names the declaration `!b` names, and a realization of it goes out under
+/// `java.lang.Boolean`; the receiver's type already says the operand is a `Boolean`, and this is
+/// what says the DECLARATION is the builtin's rather than some library extension sharing the name.
+pub(super) fn is_boolean_base(owner: &str) -> bool {
+    kotlin_owner(owner) == "kotlin/Boolean"
 }
 
 /// How a `Throwable` constructor's single parameter supplies the message.

@@ -84,6 +84,47 @@ fn a_module_reference_answers_its_name_through_a_variable() {
     every_backend_agrees_with_kotlinc("ModuleReferenceName", source);
 }
 
+/// A reference to a member a SOURCE FORM is spelled as — `!b`, which the frontend supplies as a
+/// compiler operation for the form and as an ordinary dependency call for the reference. The
+/// declaration is the same, so the answer has to be.
+#[test]
+fn a_reference_to_a_member_a_source_form_spells_calls_it() {
+    let source = "fun box(): String {\n\
+         \x20   if ((Boolean::not).let { it(true) } != false) return \"fail not true\"\n\
+         \x20   if ((Boolean::not).let { it(false) } != true) return \"fail not false\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("PrimitiveMemberReference", source);
+}
+
+/// The same for an ARRAY's indexed access, which reaches the generator by the receiver rather than
+/// by the owner — eight primitive arrays and `Array<T>` name one operation between them.
+///
+/// Native only. An unbound reference to an array member is a separate gap in krusty's JVM backend:
+/// it emits the owner as the Kotlin spelling (`NoClassDefFoundError: kotlin/IntArray`), which is
+/// no JVM class — the array types have none. That failure predates this module and is unrelated to
+/// it, so the reference compiler supplies the expectation directly here.
+#[test]
+fn a_reference_to_an_arrays_indexed_access_reads_it() {
+    let source = "fun box(): String {\n\
+         \x20   val letters = arrayOf(\"O\", \"K\")\n\
+         \x20   val read = Array<String>::get\n\
+         \x20   if (read(letters, 0) + read(letters, 1) != \"OK\") return \"fail array get\"\n\
+         \x20   val numbers = intArrayOf(1, 2)\n\
+         \x20   val readInt = IntArray::get\n\
+         \x20   if (readInt(numbers, 1) != 2) return \"fail int array get\"\n\
+         \x20   val bound = numbers::get\n\
+         \x20   if (bound(0) != 1) return \"fail bound array get\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    assert_eq!(
+        kotlinc_box_result(source),
+        "OK",
+        "ArrayMemberReference: unexpected kotlinc result"
+    );
+    expect_native_box(source, "ArrayMemberReference", "OK");
+}
+
 /// A reference that BINDS its receiver evaluates that receiver once, where it is written — not
 /// again at each call.
 #[test]

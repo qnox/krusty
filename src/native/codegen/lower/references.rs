@@ -812,9 +812,6 @@ impl BodyLowering<'_, '_, '_> {
         target: crate::fir::ExternalPropertyId,
         receiver: u32,
     ) -> Option<String> {
-        let IrExpr::CallableReference(reference) = self.file.ir.expr(receiver) else {
-            return None;
-        };
         let property = self.file.provider.external_property(target)?;
         let getter = self.file.provider.external_callable(property.getter)?;
         if !super::super::super::intrinsics::is_callable_name(getter.callable.owner, &property.name)

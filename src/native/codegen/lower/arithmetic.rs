@@ -646,3 +646,56 @@ pub(super) fn arithmetic_result(op: IrBinOp, lhs: Ty, rhs: Option<Ty>) -> Ty {
         (other, _) => other,
     }
 }
+
+impl BodyLowering<'_, '_, '_> {
+    /// A member of a PRIMITIVE asked by name, realized as the operation the declaration is.
+    ///
+    /// `a[i]` and `!b` reach the generator as compiler-supplied operations, because the frontend
+    /// recognizes the source FORM and names one. `(IntArray::get)(a, i)` and `(Boolean::not)(b)`
+    /// name the very same declarations through an ordinary dependency call, which the member path
+    /// would otherwise look for a runtime entry point for and find none — a primitive has no
+    /// methods to reach. The declaration is what says what the call means, not the spelling, so
+    /// the answer here is the operation.
+    ///
+    /// Returns `None` when this is somebody else's member, so the caller falls through.
+    pub(super) fn primitive_member(
+        &mut self,
+        owner: &str,
+        name: &str,
+        receiver: u32,
+        args: &[u32],
+        ret: Ty,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        let ty = self.type_of(receiver)?.non_null();
+        // The RECEIVER decides, not the owner: the eight primitive arrays and `Array<T>` are eight
+        // owners naming one operation, and the receiver already distinguishes them for every other
+        // array answer this generator gives.
+        if ty.is_array() {
+            return match (name, args) {
+                ("get", [index]) => Some(self.array_get(receiver, *index, ret)),
+                ("set", [index, value]) => Some(self.array_set(receiver, *index, *value)),
+                _ => None,
+            };
+        }
+        if ty == Ty::Boolean
+            && name == "not"
+            && args.is_empty()
+            && super::super::super::intrinsics::is_boolean_base(owner)
+        {
+            return Some(self.boolean_not(receiver, ret));
+        }
+        None
+    }
+
+    /// `!b`, with the operand read at its own width rather than through a box.
+    fn boolean_not(&mut self, receiver: u32, ret: Ty) -> Result<Option<Value>, Unsupported> {
+        let Some(value) = self.coerce(receiver, Ty::Boolean)? else {
+            return Err("a `Unit` operand of `Boolean.not`".to_string());
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let negated = self.builder.ins().bxor_imm_u(value, 1);
+        self.convert(negated, Some(Ty::Boolean), ret)
+    }
+}

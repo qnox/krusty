@@ -2543,6 +2543,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         {
                             return self.float_predicate(predicate, receiver);
                         }
+                        // The member a SOURCE FORM is spelled as, asked by name instead:
+                        // `(IntArray::get)(a, i)` names the declaration `a[i]` names, and
+                        // `Boolean::not` the one `!b` does. The frontend supplies an operation for
+                        // the form it recognizes and an ordinary dependency call for the call, and
+                        // the declaration is the same either way — so the operation is too, rather
+                        // than a member of a type the runtime has no methods for.
+                        if let Some(realized) =
+                            self.primitive_member(&owner, &name, receiver, args, *ret)
+                        {
+                            return realized;
+                        }
                         // A range object's members are the runtime's, and `contains` is why they
                         // are not table entries below: that path crosses every argument as a
                         // reference, which would box the very `Int` the question is about.

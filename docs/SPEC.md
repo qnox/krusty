@@ -1999,6 +1999,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   operands — is not built this way and declines, since the packing is argument normalization the
   target does not own. Test: `tests/native_dependency_reference_e2e.rs`.
 
+- **A member a source FORM is spelled as means the same thing asked by name.** `a[i]` and `!b`
+  reach krusty's native generator as compiler-supplied operations, because the frontend recognizes
+  the form and names one; `(IntArray::get)(a, i)` and `(Boolean::not)(b)` name the very same
+  declarations through an ordinary dependency call. A primitive has no methods to reach, so the
+  member path would find no entry point and decline — the declaration is what says what the call
+  means, not the spelling, so the native target answers both with the operation. An array's
+  indexed access is chosen by the RECEIVER rather than by the owner, since the eight primitive
+  arrays and `Array<T>` are nine owners naming one operation. Test:
+  `tests/native_dependency_reference_e2e.rs`
+  (`a_reference_to_a_member_a_source_form_spells_calls_it`,
+  `a_reference_to_an_arrays_indexed_access_reads_it`).
+
 - **A delegated property's `KProperty` metadata is a property reference, and a LOCAL one answers
   only its name.** `val x: Int by D()` hands the delegate an object so `getValue(thisRef, property)`
   can ask the property about itself; for a member property that object is exactly the reference
