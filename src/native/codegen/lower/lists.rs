@@ -313,6 +313,9 @@ fn list_symbol(name: &str, arity: usize, physical: &[Ty]) -> Option<(&'static st
         // getter under either spelling; both name the same question.
         ("getSize" | "size", 0) => ("kt_list_size", vec![any()], Ty::Int),
         ("isEmpty", 0) => ("kt_list_is_empty", vec![any()], Ty::Boolean),
+        // `xs.toTypedArray()`: an `Array<T>` holding what the receiver walks. A collection's
+        // elements are already references, so this copies rather than converts each.
+        ("toTypedArray", 0) => ("kt_iterable_to_typed_array", vec![any()], any()),
         ("get", 1) => ("kt_list_get", vec![any(), Ty::Int], any()),
         // `first()` and `last()` with no predicate. The one-argument forms take a LAMBDA and are
         // a different question — an inline declaration whose body decides which element — so they

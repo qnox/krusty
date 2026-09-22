@@ -2171,6 +2171,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   still emitted and fails loudly, for an object that cannot arrive. Test:
   `tests/native_read_only_property_delegate_e2e.rs`.
 
+- **An array's emptiness is its length, and `toTypedArray` copies what the receiver walks.**
+  `xs.isEmpty()` and `xs.isNotEmpty()` on an array ask one question of the length, and it is the
+  same question whichever element width the array has — a `DoubleArray` answers it as an
+  `Array<String>` does. `xs.toTypedArray()` answers a reference `Array<T>` holding what the
+  receiver walks: a COPY, so writing through the array does not reach the collection it came from,
+  and a copy rather than a conversion of each element, since a collection's elements are already
+  references. Test: `tests/native_array_emptiness_e2e.rs`.
+
 - **A `Throwable` carries a CAUSE, and the two one-argument constructors are told apart by type.**
   Kotlin declares four: `()`, `(message)`, `(cause)` and `(message, cause)`. A single argument whose
   type is a `Throwable` is the cause and anything else is the message, and the two forms differ in

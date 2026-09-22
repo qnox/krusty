@@ -2866,6 +2866,32 @@ static KRef kt_array_snapshot(KRef array, int reversed) {
 
 KRef kt_array_to_list(KRef array) { return kt_array_snapshot(array, 0); }
 
+/* `xs.isEmpty()` / `xs.isNotEmpty()` on an ARRAY. The length is the whole of the question, and it
+   is the same question for a reference array and a primitive one. */
+kt_boolean kt_array_is_empty(KRef array) {
+    if (array == NULL) {
+        KT_FAIL("krusty: member access on a null receiver\n");
+    }
+    return ((const KArray *)array)->length == 0;
+}
+
+kt_boolean kt_array_is_not_empty(KRef array) { return !kt_array_is_empty(array); }
+
+/* `xs.toTypedArray()`: a reference `Array<T>` holding what the receiver walks.
+   A collection's elements are already references — a primitive one is boxed the moment it enters a
+   list — so this is a copy into a fresh array rather than a conversion of each. The SIZE is asked
+   first and the array allocated before anything is read, so the walk fills a home that already
+   exists. */
+KRef kt_iterable_to_typed_array(KRef iterable) {
+    KRef list = kt_iterable_to_list(iterable);
+    kt_int length = kt_list_size(list);
+    KRef array = kt_array_new(&kt_type_array, length);
+    for (kt_int index = 0; index < length; index++) {
+        kt_elements_of(array)[index] = kt_list_get(list, index);
+    }
+    return array;
+}
+
 KRef kt_array_reversed(KRef array) { return kt_array_snapshot(array, 1); }
 
 /* `xs.reversedArray()`: a new ARRAY of the same element type, backwards.

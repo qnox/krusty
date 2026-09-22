@@ -1489,6 +1489,10 @@ pub(super) fn array_member(
             Ty::Boolean,
         ),
         ("contentHashCode", []) => ("kt_array_content_hash_code", vec![reference], Ty::Int),
+        // The LENGTH is the whole of these two, and it is the same question whichever element
+        // width the array has.
+        ("isEmpty", []) => ("kt_array_is_empty", vec![reference], Ty::Boolean),
+        ("isNotEmpty", []) => ("kt_array_is_not_empty", vec![reference], Ty::Boolean),
         ("contentToString", []) => (
             "kt_array_content_to_string",
             vec![reference],

@@ -391,6 +391,11 @@ KRef kt_iterable_join_to_string(KRef iterable);
    and not identity's. */
 KRef kt_iterable_with_index(KRef iterable);
 
+/* `xs.isEmpty()` / `xs.isNotEmpty()` on an ARRAY, and `xs.toTypedArray()` on anything walkable. */
+kt_boolean kt_array_is_empty(KRef array);
+kt_boolean kt_array_is_not_empty(KRef array);
+KRef kt_iterable_to_typed_array(KRef iterable);
+
 /* `xs.asSequence()`: the source, kept until somebody asks for an iterator. Lazy like `withIndex`,
    and its own type — what separates a `Sequence` from an `Iterable` here is which members may be
    asked of it. Every walk this runtime has is EAGER, and an eager `map` on a sequence is not
