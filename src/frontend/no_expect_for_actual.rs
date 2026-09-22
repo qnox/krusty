@@ -310,9 +310,60 @@ pub(super) fn collect(
 /// follows an `actual typealias`, so it pairs `expect val S.tag: S` with
 /// `actual val String.tag: String` where a name/arity key differing on the receiver spelling
 /// cannot; consulting such a key as a second answer reported pairs that had matched.
+/// Report each matched classifier that left `expect` members unimplemented.
+///
+/// A member actualizes by its own identity, so a matched owner says nothing about them and an
+/// owner that implements none of them is otherwise accepted in silence. The implementation is the
+/// declaration that got it wrong, and the reference compiler names it once — at its own name —
+/// rather than reporting every `expect` member as unfilled from the side that did not.
+pub(super) fn report_unactualized_members(
+    owed: &[crate::fir::UnactualizedMembers],
+    unmatched: &[UnmatchedActual],
+    symbols: &SymbolTable,
+    headers: &crate::fir::StreamedHeaderModule,
+    diags: &mut DiagSink,
+) {
+    if owed.is_empty() {
+        return;
+    }
+    let declarations = ResolvedDeclarations::publish(symbols, headers);
+    for owed in owed {
+        // The classifier's coordinate comes from the same collection every other diagnostic in
+        // this pass is positioned by, keyed by the one identity a declaration has.
+        let Some(actual) = unmatched
+            .iter()
+            .find(|actual| actual.declaration == Some(owed.classifier))
+        else {
+            continue;
+        };
+        diags.set_file(actual.file);
+        let Target::Classifier { name, shape, .. } = &actual.target else {
+            // Only a classifier owns members, and only a classifier is recorded as owing any.
+            continue;
+        };
+        let subject = match declarations.get(owed.classifier) {
+            Some(Resolved::Classifier(signature)) => {
+                render_classifier_subject(signature, name, shape)
+            }
+            _ => Err("has no resolved classifier signature"),
+        };
+        match subject {
+            Ok(rendered) => diags.error(
+                actual.name,
+                format!("'{rendered}' has no corresponding members for expected class members:"),
+            ),
+            Err(unreachable) => diags.error(
+                actual.name,
+                format!("internal error: this actual declaration {unreachable}"),
+            ),
+        }
+    }
+}
+
 pub(super) fn report(
     unmatched: &[UnmatchedActual],
     actualized: &std::collections::HashSet<crate::fir::DeclarationId>,
+    incompatible_members: &std::collections::HashSet<crate::fir::DeclarationId>,
     symbols: &SymbolTable,
     headers: &crate::fir::StreamedHeaderModule,
     diags: &mut DiagSink,
@@ -364,7 +415,14 @@ pub(super) fn report(
         // owner's diagnostic — an unmatched member under a MATCHED owner is reported here just
         // the same, and so is every member of an owner whose own rendering could not be produced.
         if let Target::Classifier { members, .. } = &actual.target {
-            report_members(members, actualized, &declarations, stable, diags);
+            report_members(
+                members,
+                actualized,
+                incompatible_members,
+                &declarations,
+                stable,
+                diags,
+            );
         }
     }
 }
@@ -759,6 +817,21 @@ fn render_classifier(
     name: &str,
     shape: &ClassifierShape,
 ) -> Result<String, &'static str> {
+    Ok(format!(
+        "{} {} {}",
+        visibility(signature.visibility),
+        shape.modality(),
+        render_classifier_subject(signature, name, shape)?
+    ))
+}
+
+/// The classifier alone, without the visibility and modality a full signature leads with. The
+/// members report names the declaration that owes the members, not its whole signature.
+fn render_classifier_subject(
+    signature: &crate::resolve::ClassSig,
+    name: &str,
+    shape: &ClassifierShape,
+) -> Result<String, &'static str> {
     // A classifier's type parameters are stored as SEMANTIC identities; their source spelling is
     // what the declaration wrote and what the reference compiler renders.
     let names = signature
@@ -812,9 +885,7 @@ fn render_classifier(
         }
     };
     Ok(format!(
-        "{} {} actual {} {name}{formals} : {supertypes}",
-        visibility(signature.visibility),
-        shape.modality(),
+        "actual {} {name}{formals} : {supertypes}",
         shape.keyword()
     ))
 }

@@ -1387,6 +1387,108 @@ fn a_member_extension_property_renders_its_own_formals() {
     );
 }
 
+/// A classifier that implements NONE of its expectation's members is reported on the classifier.
+///
+/// A member actualizes by its own identity, so a matched owner says nothing about them, and an
+/// owner that implements none of them was otherwise accepted in silence — the module compiled. The
+/// reference compiler names the implementation once, at its own name, rather than reporting each
+/// `expect` member as unfilled from the side that did not get it wrong.
+#[test]
+fn a_classifier_owing_expected_members_is_reported() {
+    let (reference, krusty) = both_split(
+        "OwedMembers",
+        &[(
+            "OwedMembersCommon.kt",
+            "package plib\n\
+             \n\
+             expect class Owed<T> {\n\
+             \x20   val simple: Int\n\
+             \x20   fun takes(a: Int, b: String): Int\n\
+             }\n",
+        )],
+        &[(
+            "OwedMembersPlatform.kt",
+            "package plib\n\
+             \n\
+             actual class Owed<T> {\n\
+             }\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert!(
+        !reference.is_empty(),
+        "a classifier that implements none of its expectation's members is an error"
+    );
+}
+
+/// A RENAMED type parameter is an incompatibility between counterparts, not a refusal to pair.
+///
+/// The reference compiler requires an `expect`/`actual` pair to spell its type parameters alike,
+/// and reports a rename between two declarations it already considers each other's — saying the
+/// implementation answered for nothing names the wrong fault, and says nothing about the owner
+/// owing the member either.
+#[test]
+fn a_renamed_type_parameter_is_an_incompatibility() {
+    let (reference, krusty) = both_split(
+        "RenamedTypeParameter",
+        &[(
+            "RenamedTypeParameterCommon.kt",
+            "package plib\n\
+             \n\
+             expect class Renamed<S> {\n\
+             \x20   val <S> S.kept: S\n\
+             }\n",
+        )],
+        &[(
+            "RenamedTypeParameterPlatform.kt",
+            "package plib\n\
+             \n\
+             actual class Renamed<S> {\n\
+             \x20   actual val <T> T.kept: T get() = this\n\
+             }\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert!(
+        !reference.is_empty(),
+        "a renamed type parameter is an error, not an accepted pair"
+    );
+}
+
+/// A MEMBER whose upper bound differs is not its expectation's counterpart at all.
+///
+/// The distinction is the reference compiler's: a rename is an incompatibility BETWEEN
+/// counterparts, while an unrelated upper bound means no counterpart was found — so the owner is
+/// left owing the member and the implementation answers for nothing. Both are asserted, because a
+/// rule that reported one of them as the other is right on one case and wrong on the other.
+#[test]
+fn a_member_whose_bound_differs_is_not_a_counterpart() {
+    let (reference, krusty) = both_split(
+        "MemberBoundDiffers",
+        &[(
+            "MemberBoundDiffersCommon.kt",
+            "package plib\n\
+             \n\
+             expect class Bounded {\n\
+             \x20   val <S : Number> S.kept: Int\n\
+             }\n",
+        )],
+        &[(
+            "MemberBoundDiffersPlatform.kt",
+            "package plib\n\
+             \n\
+             actual class Bounded {\n\
+             \x20   actual val <S : CharSequence> S.kept: Int get() = 1\n\
+             }\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert!(
+        !reference.is_empty(),
+        "an unrelated upper bound is not an implementation of the expectation"
+    );
+}
+
 /// A `typealias` that actualizes an `expect class` also answers for the members keyed on it.
 ///
 /// A member EXTENSION on the expect classifier is keyed by its receiver, and the platform fragment

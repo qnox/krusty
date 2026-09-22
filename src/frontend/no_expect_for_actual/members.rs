@@ -230,6 +230,7 @@ fn member_modality(
 pub(super) fn report_members(
     members: &[Member],
     actualized: &std::collections::HashSet<crate::fir::DeclarationId>,
+    incompatible: &std::collections::HashSet<crate::fir::DeclarationId>,
     declarations: &ResolvedDeclarations<'_>,
     owner: Option<crate::fir::DeclarationId>,
     diags: &mut DiagSink,
@@ -247,8 +248,19 @@ pub(super) fn report_members(
         return;
     };
     for member in members {
-        match render_member(member, member.declaration, actualized, class, declarations) {
+        match render_member(
+            member,
+            member.declaration,
+            actualized,
+            incompatible,
+            class,
+            declarations,
+        ) {
             Ok(Rendered::Actualized) => {}
+            Ok(Rendered::Incompatible) => diags.error(
+                member.name,
+                "the 'expect' and the 'actual' declarations are incompatible.".to_string(),
+            ),
             Ok(Rendered::Unmatched(rendered)) => diags.error(
                 member.name,
                 format!("'{rendered}' has no corresponding expected declaration"),
@@ -266,6 +278,11 @@ enum Rendered {
     /// The member actualized an `expect` member, so it has nothing to answer for.
     Actualized,
     Unmatched(String),
+    /// Its `expect` counterpart was found and the two disagree — on the names they gave their
+    /// type parameters. The reference compiler reports that BETWEEN two declarations it already
+    /// considers a pair, so the member is not rendered: saying it answered for nothing would name
+    /// the wrong fault.
+    Incompatible,
 }
 
 /// Render `member`, or say what about it could not be reached.
@@ -276,12 +293,16 @@ fn render_member(
     member: &Member,
     stable: Option<crate::fir::DeclarationId>,
     actualized: &std::collections::HashSet<crate::fir::DeclarationId>,
+    incompatible: &std::collections::HashSet<crate::fir::DeclarationId>,
     class: &crate::resolve::ClassSig,
     declarations: &ResolvedDeclarations<'_>,
 ) -> Result<Rendered, &'static str> {
     let stable = stable.ok_or("has no stable declaration identity")?;
     if actualized.contains(&stable) {
         return Ok(Rendered::Actualized);
+    }
+    if incompatible.contains(&stable) {
+        return Ok(Rendered::Incompatible);
     }
     match &member.kind {
         MemberKind::Function {

@@ -232,6 +232,10 @@ struct ActualizedHeaders {
     unmarked: Vec<crate::fir::DeclarationId>,
     /// `expect` declarations an implementation was written for and none matched.
     incompatible: std::collections::HashSet<crate::fir::DeclarationId>,
+    /// Matched classifiers and the `expect` members they never implemented.
+    unactualized_members: Vec<crate::fir::UnactualizedMembers>,
+    /// `actual` members rejected only for spelling their type parameters differently.
+    incompatible_members: std::collections::HashSet<crate::fir::DeclarationId>,
 }
 
 fn actualize_headers_and_collect_inherited_defaults(
@@ -242,6 +246,8 @@ fn actualize_headers_and_collect_inherited_defaults(
         pairs,
         unmarked,
         incompatible,
+        unactualized_members,
+        incompatible_members,
     } = actualization;
     let matched = pairs
         .iter()
@@ -303,6 +309,8 @@ fn actualize_headers_and_collect_inherited_defaults(
         defaults: work,
         unmarked,
         incompatible,
+        unactualized_members,
+        incompatible_members,
     }
 }
 
@@ -1012,6 +1020,8 @@ where
         matched_expect_declarations,
         actualized_targets,
         incompatible_expects,
+        unactualized_members,
+        incompatible_members,
     ) = if multiplatform {
         let bindings =
             crate::resolve::actualization_type_bindings(&pass1_headers, platform.as_ref());
@@ -1022,6 +1032,8 @@ where
             defaults,
             unmarked,
             incompatible,
+            unactualized_members,
+            incompatible_members,
         } = actualize_headers_and_collect_inherited_defaults(&mut pass1_headers, actualization);
         // Reported here, while every file's syntax is still live: the diagnostic points at the
         // declaration's NAME, and the compact inventory anchors only its whole range.
@@ -1057,12 +1069,16 @@ where
             matched,
             actualized_targets,
             incompatible,
+            unactualized_members,
+            incompatible_members,
         )
     } else {
         (
             signature_default_work(&pass1_headers, &[]),
             std::collections::HashSet::new(),
             std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
+            Vec::new(),
             std::collections::HashSet::new(),
         )
     };
@@ -1175,6 +1191,14 @@ where
             no_expect_for_actual::report(
                 &unmatched_actuals,
                 &actualized_targets,
+                &incompatible_members,
+                &symbols,
+                &pass1_headers,
+                diags,
+            );
+            no_expect_for_actual::report_unactualized_members(
+                &unactualized_members,
+                &unmatched_actuals,
                 &symbols,
                 &pass1_headers,
                 diags,

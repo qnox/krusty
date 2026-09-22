@@ -4548,6 +4548,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   excluded by the comparison instead, which demands a binding on both sides. Within one
   declaration the positional map is read innermost first, so an own type parameter shadows an
   enclosing one of the same spelling and the implementation may rename it. Refusing to key such a
+  A matched classifier still answers for the members it never implemented. A member actualizes by
+  its own identity, so a matched owner says nothing about them, and an owner implementing none of
+  them is otherwise accepted in silence; the implementation is the declaration that got it wrong,
+  so it is named once at its own name — `'actual class Owed<T> : Any' has no corresponding members
+  for expected class members:` — rather than each `expect` member being reported as unfilled from
+  the side that did not. The reference compiler lists the owed members after that line; krusty
+  reports the line alone, since an `expect` member has no collected coordinate of its own. Test
+  `no_expect_for_actual_e2e::a_classifier_owing_expected_members_is_reported`.
+
+  An `expect`/`actual` pair must SPELL its type parameters alike, and a rename is an
+  incompatibility between two declarations already taken to be counterparts — `the 'expect' and
+  the 'actual' declarations are incompatible.` at the implementation — not an implementation that
+  answered for nothing, and not a member its owner is left owing. A differing upper BOUND is the
+  other answer: it means no counterpart was found at all, so the owner owes the member and the
+  implementation corresponds to nothing. The two are told apart by asking the input-shape
+  comparison twice, once requiring the names to agree and once positionally: only the second
+  answering is what a rename is. Tests
+  `no_expect_for_actual_e2e::a_renamed_type_parameter_is_an_incompatibility` and
+  `::a_member_whose_bound_differs_is_not_a_counterpart`.
+
   member at all left an `expect` and an `actual` written identically pairing with nothing, and box
   `multiplatform/k2/basic/expectActualFakeOverridesWithTypeParameters.kt` regressed; tests
   `no_expect_for_actual_e2e::a_member_extension_on_its_own_type_parameter_matches`,
