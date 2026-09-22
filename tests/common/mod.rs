@@ -251,7 +251,7 @@ fn parse_source_set_named(
     sources: &[(&str, &str)],
     diags: &mut krusty::diag::DiagSink,
 ) -> Option<Vec<krusty::ast::File>> {
-    let mut files = sources
+    let files = sources
         .iter()
         .map(|(stem, source)| {
             let features = krusty::features::LangFeatures::from_source(source);
@@ -261,8 +261,6 @@ fn parse_source_set_named(
             file
         })
         .collect::<Vec<_>>();
-    let sources = sources.iter().map(|(_, s)| *s).collect::<Vec<_>>();
-    let sources: &[&str] = &sources;
     if diags.has_errors() {
         return None;
     }

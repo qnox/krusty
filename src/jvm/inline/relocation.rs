@@ -52,7 +52,7 @@ fn field_descriptor_class(descriptor: &str) -> Option<Option<&str>> {
     valid_internal_name(class).then_some(Some(class))
 }
 
-fn descriptor_classes<'a>(descriptor: &'a str, method: bool) -> Option<Vec<&'a str>> {
+fn descriptor_classes(descriptor: &str, method: bool) -> Option<Vec<&str>> {
     let fields = if method {
         let (parameters, result) = crate::jvm::names::parse_method_descriptor(descriptor)?;
         parameters

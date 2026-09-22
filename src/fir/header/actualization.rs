@@ -1016,9 +1016,7 @@ pub fn actualization(
             let Some(receiver) = receiver else {
                 return Some(ReceiverKey::Absent);
             };
-            let Some(ty) = headers.syntax.ty(receiver) else {
-                return None;
-            };
+            let ty = headers.syntax.ty(receiver)?;
             if !matches!(ty.kind, HeaderTypeKind::Classifier { .. }) {
                 return Some(ReceiverKey::Structural);
             };

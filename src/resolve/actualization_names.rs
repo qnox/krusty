@@ -156,7 +156,7 @@ fn resolver_inputs<'a>(
                 .collect();
             let platform_defaults = platform
                 .platform_default_import_packages()
-                .into_iter()
+                .iter()
                 .map(|package| crate::types::type_name(&package.replace('.', "/")))
                 .collect();
             Some(
