@@ -269,6 +269,41 @@ fn a_concatenation_stops_at_the_first_throwing_to_string() {
     run_driver("string_plus_throwing_to_string");
 }
 
+#[test]
+fn unboxing_null_raises_and_comes_back() {
+    run_driver("unbox_null_raises");
+}
+
+#[test]
+fn a_number_conversion_of_null_raises_and_comes_back() {
+    run_driver("number_conversion_null_raises");
+}
+
+#[test]
+fn a_builder_joins_a_surrogate_pair_appended_unit_by_unit() {
+    run_driver("builder_joins_surrogate_pair");
+}
+
+#[test]
+fn a_lazy_whose_initializer_throws_stays_uninitialized() {
+    run_driver("lazy_initializer_throws");
+}
+
+#[test]
+fn an_append_whose_to_string_throws_leaves_the_builder_alone() {
+    run_driver("builder_append_throwing_to_string");
+}
+
+#[test]
+fn a_builder_made_from_a_program_char_sequence_holds_its_text() {
+    run_driver("builder_from_program_char_sequence");
+}
+
+#[test]
+fn a_builder_grown_past_the_largest_length_is_out_of_memory() {
+    run_driver_expecting_failure("builder_length_overflow", "krusty: out of memory\n");
+}
+
 fn compiled_build_script() -> PathBuf {
     static BUILD_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
     BUILD_SCRIPT
