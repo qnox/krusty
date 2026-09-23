@@ -1,13 +1,13 @@
-/* krusty native runtime — generated; do not edit. */
+/* krusty native runtime: the garbage collector. Hand-written freestanding C; build.rs compiles it
+   into the runtime for every target. */
 #include "krusty_rt.h"
 #include "krusty_sys.h"
 
 /* ---- heap geometry --------------------------------------------------------------------------- */
 
 #define KT_PAGE_BYTES 4096u
-/* A chunk of small objects; objects above KT_LARGE_THRESHOLD get a chunk of their own. */
+/* A chunk of small objects; an object above the largest size class gets a chunk of its own. */
 #define KT_CHUNK_BYTES (64u * 1024u)
-#define KT_LARGE_THRESHOLD 2048u
 /* The least allocation volume between collections; see kt_gc_collect for how it grows. */
 #define KT_MIN_COLLECT_BYTES (4u * 1024u * 1024u)
 
@@ -220,6 +220,23 @@ static void kt_trace(void) {
     }
 }
 
+/* A word found by scanning the stack or the registers, rather than read from a slot the program
+   declared, may be a pointer one past the end of an object: a C compiler walking an array may keep
+   only the loop's end pointer once the base is dead. When the object fills its slot exactly, that
+   address is the next slot's start, or lies past the chunk altogether, so it also counts for the
+   object that ends there. The price is that a pointer to an object's start keeps the object before
+   it alive as well, for as long as the pointer is found: a bounded false retention per root word.
+   Padding every object instead would never retain a neighbour, but would move every object whose
+   size is exactly a class size, the commonest being a header and one field, up into the next
+   class. A field of a heap object is traced precisely and always holds an object's start, so only
+   the scanned roots pay this. */
+static void kt_mark_scanned(uintptr_t address) {
+    kt_mark_candidate(address);
+    if (address != 0) {
+        kt_mark_candidate(address - 1);
+    }
+}
+
 /* ---- roots ----------------------------------------------------------------------------------- */
 
 /* Where the program's stack began, recorded by kt_runtime_init. */
@@ -227,14 +244,25 @@ static uintptr_t kt_stack_bottom;
 
 /* Global reference slots the emitted program declares (top-level properties). Registered rather
    than discovered, because a freestanding program has no portable way to find its own data
-   section, and guessing at one would either miss roots or scan unrelated memory. */
-#define KT_MAX_GLOBALS 4096
-static void **kt_globals[KT_MAX_GLOBALS];
-static uint32_t kt_global_count;
+   section, and guessing at one would either miss roots or scan unrelated memory. The program
+   registers one per string literal, enum entry, top-level property and `object`, so the count is
+   the program's size, and the registry grows in raw mapped memory like the chunk registry does. */
+static void ***kt_globals;
+static size_t kt_global_count;
+static size_t kt_global_capacity;
 
 void kt_gc_add_global_root(void **slot) {
-    if (kt_global_count == KT_MAX_GLOBALS) {
-        KT_SYS_FAIL("krusty: too many global roots\n");
+    if (kt_global_count == kt_global_capacity) {
+        size_t capacity = kt_global_capacity == 0 ? 256 : kt_global_capacity * 2;
+        void ***grown = (void ***)kt_map(capacity * sizeof(void **));
+        for (size_t i = 0; i < kt_global_count; i++) {
+            grown[i] = kt_globals[i];
+        }
+        if (kt_globals != NULL) {
+            kt_unmap(kt_globals, kt_global_capacity * sizeof(void **));
+        }
+        kt_globals = grown;
+        kt_global_capacity = capacity;
     }
     kt_globals[kt_global_count++] = slot;
 }
@@ -246,7 +274,7 @@ void kt_runtime_init(void *stack_bottom) { kt_stack_bottom = (uintptr_t)stack_bo
 static void kt_scan_range(uintptr_t low, uintptr_t high) {
     low = (low + sizeof(void *) - 1) & ~(uintptr_t)(sizeof(void *) - 1);
     for (uintptr_t at = low; at + sizeof(void *) <= high; at += sizeof(void *)) {
-        kt_mark_candidate(*(uintptr_t *)at);
+        kt_mark_scanned(*(uintptr_t *)at);
     }
 }
 
@@ -287,7 +315,7 @@ __attribute__((noinline)) static void kt_scan_registers_and_stack(void) {
 #error "krusty native: unsupported architecture"
 #endif
     for (unsigned i = 0; i < 16; i++) {
-        kt_mark_candidate(saved[i]);
+        kt_mark_scanned(saved[i]);
     }
 
     /* Every frame between this one and the program's entry lies above `saved`. */
@@ -341,11 +369,16 @@ void kt_gc_collect(void) {
     if (kt_stack_bottom == 0) {
         KT_SYS_FAIL("krusty: collection before kt_runtime_init recorded the stack\n");
     }
+    /* Nothing a collection calls allocates from the collected heap, so a collection never starts
+       during one. If one ever did, from a signal handler or through a later change to marking,
+       returning at once would let the allocation that asked for it go ahead on a heap that was
+       never swept, beside a collection whose marks are half set. That is a bug in the caller, and
+       it must fail where it happens rather than surface later as a corrupted heap. */
     if (kt_collecting) {
-        return;
+        KT_SYS_FAIL("krusty: a collection started during a collection\n");
     }
     kt_collecting = true;
-    for (uint32_t i = 0; i < kt_global_count; i++) {
+    for (size_t i = 0; i < kt_global_count; i++) {
         void *value = *kt_globals[i];
         if (value != NULL) {
             kt_mark_candidate((uintptr_t)value);
@@ -411,7 +444,14 @@ void *kt_gc_allocate(const KType *type, uint32_t size) {
             object = (uint8_t *)kt_take_from(chunk);
         }
     } else {
-        /* One chunk per large object, unmapped when it dies. */
+        /* One chunk per large object, unmapped when it dies. A size within 15 bytes of the 32-bit
+           limit would round up past it and wrap to zero, and a chunk whose object area ends where
+           it starts is one no root can ever resolve to: the next collection would unmap it while
+           it is held. No object that large can exist, so asking for one is running out of
+           memory. */
+        if (size > UINT32_MAX - 15u) {
+            kt_fail_oom();
+        }
         object_size = (size + 15u) & ~15u;
         KChunk *chunk = kt_new_chunk(object_size, 1, true);
         object = (uint8_t *)kt_take_from(chunk);
