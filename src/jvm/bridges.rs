@@ -31,7 +31,7 @@ pub fn derive_bridges(
             continue;
         }
         superclass_method_bridges(ir, cid, classpath)?;
-        property_bridges(ir, cid, classpath);
+        property_bridges(ir, cid, classpath)?;
     }
     Ok(())
 }
@@ -39,20 +39,17 @@ pub fn derive_bridges(
 fn external_method_name(
     classpath: &crate::jvm::classpath::Classpath,
     target: crate::fir::ExternalCallableId,
-    fallback: &str,
-) -> String {
-    classpath.external_callable(target).map_or_else(
-        || fallback.to_owned(),
-        |realization| {
-            let callable = realization.callable;
-            crate::jvm::names::mapped_builtin_virtual_name(
-                &callable.owner.render(),
-                &callable.name,
-                &callable.descriptor,
-            )
-            .to_owned()
-        },
+) -> Result<String, SkipReason> {
+    let realization = classpath
+        .external_callable(target)
+        .ok_or(SkipReason::Bridges)?;
+    let callable = realization.callable;
+    Ok(crate::jvm::names::mapped_builtin_virtual_name(
+        &callable.owner.render(),
+        &callable.name,
+        &callable.descriptor,
     )
+    .to_owned())
 }
 
 /// A method overriding a superclass method with a different erased signature (a generic or covariant
@@ -144,7 +141,7 @@ fn superclass_method_bridges(
         let bridge_name = match edge.overridden {
             crate::fir::ResolvedFunctionOverrideTarget::Module(_) => edge.name.clone(),
             crate::fir::ResolvedFunctionOverrideTarget::External(target) => {
-                external_method_name(classpath, target, &edge.name)
+                external_method_name(classpath, target)?
             }
         };
         let target_name = if edge.implementation_function.is_some() {
@@ -153,10 +150,13 @@ fn superclass_method_bridges(
             match edge.implementation {
                 crate::fir::ResolvedFunctionOverrideTarget::Module(_) => edge.name.clone(),
                 crate::fir::ResolvedFunctionOverrideTarget::External(target) => {
-                    external_method_name(classpath, target, &edge.name)
+                    external_method_name(classpath, target)?
                 }
             }
         };
+        if bridge_name != edge.name && edge.has_kotlin_superclass_override {
+            continue;
+        }
         crate::trace_compiler!(
             "bridges",
             "stable override class={internal_name} implementation={:?} owner={} overridden={:?} owner={} source={} bridge={} target={} declared={base_params:?}->{base_ret:?} concrete={own_params:?}->{own_ret:?}",
@@ -237,7 +237,11 @@ fn superclass_method_bridges(
 /// type) needs a synthetic `getX()` returning the supertype's erased type that delegates to the concrete
 /// getter — else a call through a supertype reference resolves to a getter that does not exist. A `var`
 /// override needs the matching `setX(erased)`, else a write through the supertype silently no-ops.
-fn property_bridges(ir: &mut IrFile, cid: usize, classpath: &crate::jvm::classpath::Classpath) {
+fn property_bridges(
+    ir: &mut IrFile,
+    cid: usize,
+    classpath: &crate::jvm::classpath::Classpath,
+) -> Result<(), SkipReason> {
     let internal_name = ir.classes[cid].fq_name;
     let edges = ir
         .property_overrides
@@ -260,18 +264,31 @@ fn property_bridges(ir: &mut IrFile, cid: usize, classpath: &crate::jvm::classpa
         let bridge_getter = match edge.overridden {
             crate::fir::ResolvedPropertyOverrideTarget::Module(_) => source_getter.clone(),
             crate::fir::ResolvedPropertyOverrideTarget::External(target) => {
-                external_method_name(classpath, target, &source_getter)
+                external_method_name(classpath, target)?
             }
         };
         let target_getter = match edge.implementation {
             crate::fir::ResolvedPropertyOverrideTarget::Module(_) => source_getter.clone(),
             crate::fir::ResolvedPropertyOverrideTarget::External(target) => {
-                external_method_name(classpath, target, &source_getter)
+                external_method_name(classpath, target)?
             }
         };
+        crate::trace_compiler!(
+            "bridges",
+            "stable property override class={internal_name} implementation={:?} owner={} overridden={:?} owner={} source={} bridge={bridge_getter} target={target_getter} covering={:?}",
+            edge.implementation,
+            edge.implementation_owner,
+            edge.overridden,
+            edge.overridden_owner,
+            edge.name,
+            edge.has_kotlin_superclass_override,
+        );
         if type_descriptor(edge.declared_type) == type_descriptor(edge.implementation_type)
             && bridge_getter == target_getter
         {
+            continue;
+        }
+        if bridge_getter != source_getter && edge.has_kotlin_superclass_override {
             continue;
         }
         let name = edge.name.clone();
@@ -287,6 +304,7 @@ fn property_bridges(ir: &mut IrFile, cid: usize, classpath: &crate::jvm::classpa
             target_getter,
         );
     }
+    Ok(())
 }
 
 /// The `get<X>()` bridge (and, for a `var` override, the `set<X>()` one). A bridge already recorded under
