@@ -30,6 +30,7 @@ mod call_operands;
 mod constructor_defaults;
 mod coroutine_machine;
 mod data_class_pool_seed;
+mod data_class_value_classes;
 mod debug_lines;
 mod enum_entry_subclass;
 mod enum_metadata;
@@ -146,6 +147,11 @@ fn has_ctor_marker_accessor(ir: &IrFile, class: &IrClass) -> bool {
         && (class.is_sealed
             || (class.is_companion && !companion_of_interface(ir, class))
             || ir.has_value_param_ctor(&class.fq_name()))
+}
+
+/// Whether the primary's marker accessor follows every other member rather than the primary itself.
+fn marker_accessor_emitted_last(ir: &IrFile, class: &IrClass) -> bool {
+    class.is_companion || (!class.is_sealed && ir.has_value_param_ctor(&class.fq_name()))
 }
 
 /// Mutable per-emit-run accumulators, owned by the caller and shared (by `&`, via interior mutability)
@@ -2615,13 +2621,7 @@ fn seed_plain_class_pool(seed: PlainClassPoolSeed<'_, '_>, cw: &mut ClassWriter)
     // A data class's accessor signatures join its accessor window below, while its backing-field
     // signatures land late after the synthesized data methods. Ordinary classes intern both naturally
     // at the exact accessor/field visits.
-    let (mut super_param_tys, _) = super_ctor_jvm_tys(ir, c, superclass, |a| {
-        ir.logical_types
-            .get(&a)
-            .cloned()
-            .map(|ty| ir_ty_to_jvm(&ty))
-            .unwrap_or(Ty::obj("kotlin/Any"))
-    });
+    let (mut super_param_tys, _) = super_ctor_jvm_tys(ir, c, superclass);
     if let Some(defaults) = ir
         .super_constructor_default_arguments
         .get(&c.fq_name_id())
@@ -3188,7 +3188,9 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
         .map(|f| ann(&f.name, f.ty))
         .collect();
     let ctor_desc = format!("({})V", ctor_field_descs(c));
-    if ctor_params.iter().any(|p| p.is_some()) {
+    // A primary hidden behind its marker accessor is private, and kotlinc annotates neither it nor the
+    // synthetic accessor.
+    if ctor_params.iter().any(|p| p.is_some()) && !ir.has_value_param_ctor(&c.fq_name()) {
         cw.set_method_nullability("<init>", &ctor_desc, None, &ctor_params);
     }
     // HOISTED companion properties: the delegating accessors annotate like ordinary accessors
@@ -5948,11 +5950,10 @@ fn emit_class(
                 }
             }
             // A base whose primary ctor takes a value-class param — or a SEALED base — has a PRIVATE
-            // primary; a subclass `super(…)` must reach it through the PUBLIC|SYNTHETIC
-            // `(…args, DefaultConstructorMarker)` accessor (a trailing `null` marker), never the
-            // inaccessible private primary.
-            let (mut super_param_tys, super_accessor) =
-                super_ctor_jvm_tys(e.ir, c, &superclass, |arg| e.value_ty(arg));
+            // primary. The checker records whether this exact selection is that primary; only then
+            // must a subclass `super(…)` reach it through the PUBLIC|SYNTHETIC
+            // `(…args, DefaultConstructorMarker)` accessor rather than the inaccessible declaration.
+            let (mut super_param_tys, super_accessor) = super_ctor_jvm_tys(e.ir, c, &superclass);
             let super_defaults =
                 e.ir.super_constructor_default_arguments
                     .get(&c.fq_name_id())
@@ -6136,16 +6137,25 @@ fn emit_class(
                 source_params,
                 source_defaults,
                 None,
+                value_param_ctor,
                 c.primary_ctor_annotations.deprecated(),
                 0x1001,
                 &mut cw,
                 env,
             );
         }
-        // A COMPANION's synthetic marker ctor is emitted LAST, after the instance accessors
-        // (kotlinc's member order — see below); every other shape keeps it beside the primary.
-        if has_ctor_marker_accessor(ir, c) && !c.is_companion {
-            constructor_defaults::emit_ctor_marker_accessor(&fq_name, &param_tys, &mut cw);
+        // A COMPANION's synthetic marker ctor, and a value-class-parameter primary's, is emitted
+        // LAST, after the members (kotlinc's member order — see below); a sealed class keeps it
+        // beside the primary.
+        if has_ctor_marker_accessor(ir, c) && !marker_accessor_emitted_last(ir, c) {
+            let parameter_identities =
+                crate::jvm::method_parameters::primary_constructor_identities(c, &param_tys);
+            constructor_defaults::emit_ctor_marker_accessor(
+                &fq_name,
+                &param_tys,
+                &parameter_identities,
+                &mut cw,
+            );
         }
     } // end `if c.has_primary_ctor`
 
@@ -6361,9 +6371,19 @@ fn emit_class(
         }
     }
     // A companion's synthetic `(…, DefaultConstructorMarker)` ctor goes AFTER the accessors —
-    // kotlinc's companion member order (private <init>, accessors, marker <init>).
-    if c.has_primary_ctor && c.is_companion && has_ctor_marker_accessor(ir, c) {
-        constructor_defaults::emit_ctor_marker_accessor(&fq_name, &class_ctor_jvm_tys(c), &mut cw);
+    // kotlinc's companion member order (private <init>, accessors, marker <init>). A class hiding a
+    // value-class-parameter primary puts its accessor after `equals` the same way.
+    if c.has_primary_ctor && marker_accessor_emitted_last(ir, c) && has_ctor_marker_accessor(ir, c)
+    {
+        let physical_parameters = class_ctor_jvm_tys(c);
+        let parameter_identities =
+            crate::jvm::method_parameters::primary_constructor_identities(c, &physical_parameters);
+        constructor_defaults::emit_ctor_marker_accessor(
+            &fq_name,
+            &physical_parameters,
+            &parameter_identities,
+            &mut cw,
+        );
     }
     bridge_emission::emit_bridges(ir, c, &mut cw, env.bridge_return_adaptations, env.run);
     // HOISTED companion properties: the private static field lives on THIS class, so the companion's
@@ -9441,6 +9461,7 @@ fn emit_enum_class(
             &all_param_tys,
             defaults,
             None,
+            false,
             false,
             base_ctor_acc | ACC_SYNTHETIC,
             &mut cw,
@@ -15651,30 +15672,16 @@ impl<'a> Emitter<'a> {
                                 .unwrap_or_default(),
                         };
                         // A class whose primary ctor takes a value-class param has a PRIVATE primary + a
-                        // PUBLIC|SYNTHETIC accessor `(…args, DefaultConstructorMarker)`. Construction from
-                        // ANOTHER class routes through the accessor (a trailing `null`) — JVM `private` is
-                        // a per-CLASS boundary (independent of file/package), so the test is `self.owner !=
-                        // owner`. Same-class construction (a secondary ctor, `box-impl`) keeps the primary.
-                        // A SECONDARY ctor with value-class params has the same private+marker ABI —
-                        // the checker-selected `ctor_params` identify it by erased shape.
-                        let vc_secondary = ctor_params.as_ref().is_some_and(|ps| {
-                            let want = jvm_tys(ps);
-                            self.ir
-                                .class_id_by_name(*internal)
-                                .map(|cid| &self.ir.classes[cid as usize])
-                                .is_some_and(|target| {
-                                    target.secondary_ctors.iter().any(|sc| {
-                                        sc.vc_params
-                                            && jvm_tys(&sc.prefix_params)
-                                                .into_iter()
-                                                .chain(jvm_tys(&sc.params))
-                                                .eq(want.iter().copied())
-                                    })
-                                })
-                        });
-                        let use_accessor = self.owner != owner
+                        // PUBLIC|SYNTHETIC accessor `(…args, DefaultConstructorMarker)`. Every construction
+                        // routes through the accessor (a trailing `null`) — from the class itself too
+                        // (`copy`, a member building a sibling instance): kotlinc leaves only the
+                        // accessor calling the private primary. A selected secondary constructor uses
+                        // the declaration fact recorded on this exact expression before erasure.
+                        // A call supplying defaults targets the public `$default` overload instead,
+                        // which reaches the accessor itself.
+                        let use_accessor = default_parameters.is_empty()
                             && ((ctor_params.is_none() && self.ir.has_value_param_ctor(&owner))
-                                || vc_secondary);
+                                || self.ir.has_value_class_parameter_construction(e));
                         let base_parameter_count = field_tys.len();
                         let source_parameter_count = base_parameter_count
                             .checked_sub(*default_prefix_count as usize)
@@ -16294,21 +16301,7 @@ impl<'a> Emitter<'a> {
                     crate::ir::IrIntrinsic::DataClassFieldEquals { ty } => {
                         let left = args[0];
                         let right = args[1];
-                        if let Some((owner, underlying)) =
-                            ty.non_null().obj_internal().and_then(|owner| {
-                                self.ir
-                                    .value_class_underlying_name(owner)
-                                    .map(|underlying| (owner, underlying))
-                            })
-                        {
-                            self.emit_value(left, code);
-                            self.emit_value(right, code);
-                            let physical = jvm_declared_ty(&underlying);
-                            let descriptor = method_descriptor(&[physical, physical], Ty::Boolean);
-                            let method =
-                                self.cw
-                                    .methodref(&owner.render(), "equals-impl0", &descriptor);
-                            code.invokestatic(method, slot_words(physical) as i32 * 2, 1);
+                        if self.emit_data_class_value_equals(*ty, left, right, code) {
                             return;
                         }
                         self.emit_value(left, code);
@@ -16324,28 +16317,10 @@ impl<'a> Emitter<'a> {
                     }
                     crate::ir::IrIntrinsic::DataClassFieldHash { ty } => {
                         let value = args[0];
-                        if let Some((owner, carrier)) = native_unsigned_impl_target(*ty) {
-                            self.emit_value(value, code);
-                            let descriptor = method_descriptor(&[carrier], Ty::Int);
-                            let method =
-                                self.cw
-                                    .methodref(&owner.render(), "hashCode-impl", &descriptor);
-                            code.invokestatic(method, slot_words(carrier) as i32, 1);
-                        } else if let Some((owner, underlying)) =
-                            ty.non_null().obj_internal().and_then(|owner| {
-                                self.ir
-                                    .value_class_underlying_name(owner)
-                                    .map(|underlying| (owner, underlying))
-                            })
-                        {
-                            self.emit_value(value, code);
-                            let physical = jvm_declared_ty(&underlying);
-                            let descriptor = method_descriptor(&[physical], Ty::Int);
-                            let method =
-                                self.cw
-                                    .methodref(&owner.render(), "hashCode-impl", &descriptor);
-                            code.invokestatic(method, slot_words(physical) as i32, 1);
-                        } else if ty.is_array() {
+                        if self.emit_data_class_value_hash(*ty, value, code) {
+                            return;
+                        }
+                        if ty.is_array() {
                             self.emit_value(value, code);
                             let descriptor = format!("({})I", type_descriptor(*ty));
                             let method =
@@ -20309,7 +20284,7 @@ fn ctor_arg_jvm_tys(args: &[IrCtorArg]) -> Vec<Ty> {
     args.iter().map(|a| jvm_declared_ty(&a.ty)).collect()
 }
 
-fn class_ctor_jvm_tys(c: &IrClass) -> Vec<Ty> {
+pub(super) fn class_ctor_jvm_tys(c: &IrClass) -> Vec<Ty> {
     if c.ctor_args.is_empty() {
         field_jvm_tys(&c.fields[..c.ctor_param_count as usize])
     } else {
@@ -20317,32 +20292,14 @@ fn class_ctor_jvm_tys(c: &IrClass) -> Vec<Ty> {
     }
 }
 
-fn super_ctor_jvm_tys(
-    ir: &IrFile,
-    c: &IrClass,
-    superclass: &str,
-    mut value_ty: impl FnMut(u32) -> Ty,
-) -> (Vec<Ty>, bool) {
-    let mut params = if crate::jvm::jvm_class_map::to_jvm_internal(superclass) == "java/lang/Object"
-    {
-        Vec::new()
-    } else if let Some(sc) = ir
+fn super_ctor_jvm_tys(ir: &IrFile, c: &IrClass, superclass: &str) -> (Vec<Ty>, bool) {
+    let mut params = jvm_tys(&c.super_ctor_params);
+    let target_is_sealed = ir
         .classes
         .iter()
-        .find(|candidate| candidate.fq_name_matches(superclass))
-    {
-        class_ctor_jvm_tys(sc)
-    } else {
-        c.super_args.iter().map(|&arg| value_ty(arg)).collect()
-    };
-    if params.is_empty() && !c.super_args.is_empty() {
-        params = c.super_args.iter().map(|&arg| value_ty(arg)).collect();
-    }
-    let uses_accessor = ir.has_value_param_ctor(superclass)
-        || ir
-            .classes
-            .iter()
-            .any(|candidate| candidate.fq_name_matches(superclass) && candidate.is_sealed);
+        .any(|candidate| candidate.fq_name_matches(superclass) && candidate.is_sealed);
+    let uses_accessor =
+        c.super_ctor_is_primary && (ir.has_value_param_ctor(superclass) || target_is_sealed);
     if uses_accessor {
         params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
     }

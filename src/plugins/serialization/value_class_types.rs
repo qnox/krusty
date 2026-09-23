@@ -2,31 +2,10 @@
 
 use super::element_serializer;
 use crate::ir::IrFile;
-use crate::types::{type_name, Ty, TypeName};
+use crate::types::{type_name, Ty};
 
 pub(super) fn value_class_underlying(ir: &IrFile, ty: &Ty) -> Option<Ty> {
-    fn rec(
-        ir: &IrFile,
-        ty: Ty,
-        seen: &mut std::collections::HashSet<TypeName>,
-    ) -> Result<Option<Ty>, ()> {
-        let Some(classifier) = ty.kotlin_class_internal() else {
-            return Ok(None);
-        };
-        if !seen.insert(classifier) {
-            return Err(());
-        }
-        let Some(underlying) = ir.value_class_underlying_name(classifier) else {
-            return Ok(None);
-        };
-        Ok(Some(rec(ir, underlying, seen)?.unwrap_or(underlying)))
-    }
-
-    // A cycle is malformed semantic input. Do not turn an arbitrary edge of it into a physical
-    // representation merely because recursion happened to stop there.
-    rec(ir, *ty, &mut std::collections::HashSet::new())
-        .ok()
-        .flatten()
+    ir.terminal_value_class_underlying(*ty)
 }
 
 /// Plain `Encoder.encode*` / `Decoder.decode*` for a value class's underlying type (`encodeInt` /

@@ -2141,7 +2141,22 @@ pub(crate) fn lower_value_classes(
                 })
         })
         .collect::<HashSet<_>>();
+    let serialization_constructor_accessor_calls = serialization_constructor_calls
+        .iter()
+        .copied()
+        .filter(|&expression| {
+            let Some((class, _, constructor)) = ir.generated_secondary_constructor_call(expression)
+            else {
+                return false;
+            };
+            ir.classes[class as usize].secondary_ctors[constructor as usize].vc_params
+        })
+        .collect::<Vec<_>>();
     let mut erased_variable_defaults = Vec::new();
+    // Generated serialization calls retain their boxed semantic parameter types, but the exact
+    // selected constructor may still be private behind its marker accessor. Its recorded generated
+    // declaration identity decides that ABI; no owner-wide parameter scan is involved.
+    let mut value_class_parameter_constructions = serialization_constructor_accessor_calls;
     for (i, e) in ir.exprs.iter_mut().enumerate() {
         let keep_box = vc_body_exprs.contains(&(i as u32));
         match e {
@@ -2173,9 +2188,18 @@ pub(crate) fn lower_value_classes(
                 let _ = keep_box;
             }
             IrExpr::New {
+                internal,
                 ctor_params: Some(ps),
                 ..
             } if !serialization_constructor_calls.contains(&(i as u32)) => {
+                // Preserve the exact selected declaration fact before erasure. It applies uniformly
+                // to local secondary and sibling-file constructors; owner origin is irrelevant.
+                // A value class's own construction is `constructor-impl`, not the hidden-marker ABI
+                // used by an ordinary class whose selected constructor declares a value-class
+                // parameter.
+                if !is_value_class_internal(*internal, &under) && ps.iter().any(is_vc_ty) {
+                    value_class_parameter_constructions.push(i as ExprId);
+                }
                 ps.iter_mut().for_each(|p| *p = erase(p, &under));
             }
             // A function value's `invoke` returns its declared type through the `FunctionN` generic slot — a
@@ -2220,6 +2244,9 @@ pub(crate) fn lower_value_classes(
             IrExpr::Try { result, .. } => *result = erase(result, &under),
             _ => {}
         }
+    }
+    for call in value_class_parameter_constructions {
+        ir.mark_value_class_parameter_construction(call);
     }
     for (init, erased) in erased_variable_defaults {
         if matches!(
@@ -4177,6 +4204,17 @@ pub(crate) fn lower_value_classes(
                 fresh += 1;
             }
             BoxOp::Narrow(x) => narrow_wrap(ir, id, x),
+        }
+    }
+
+    // `super_ctor_params` preserves the checker-selected declaration shape long enough to drive
+    // the argument boundary operations above. Emission consumes the same selected parameter list
+    // as a physical JVM descriptor, so realize value-class carriers only after those semantic
+    // boundary decisions are complete. Shared mutable-capture positions are rewritten to their
+    // holder types by the following JVM pass from their separate exact coordinate map.
+    for class in &mut ir.classes {
+        for parameter in &mut class.super_ctor_params {
+            *parameter = erase(parameter, &under);
         }
     }
 

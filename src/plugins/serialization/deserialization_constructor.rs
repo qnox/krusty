@@ -400,6 +400,7 @@ pub(super) fn add_deserialization_constructor(
             delegate: CtorDelegateTarget::Super {
                 owner: super_owner,
                 target_params: vec![],
+                to_primary: true,
                 default_masks: vec![],
             },
             synthetic: true,

@@ -91,6 +91,33 @@ pub(crate) fn nullable_value_requires_distinct_null(
         .is_some_and(|underlying| underlying_chain_accepts_null(underlying, declarations))
 }
 
+/// Follow exact declared value-class identities to the terminal semantic underlying type.
+///
+/// `None` means the input is not a value class, a declaration fact is missing, or the declaration
+/// graph is cyclic. Callers must not choose an arbitrary edge as a representation in any of those
+/// cases.
+pub(crate) fn terminal_underlying(
+    ty: Ty,
+    declaration: &dyn Fn(TypeName) -> Option<Ty>,
+) -> Option<Ty> {
+    let mut classifier = ty.non_null().obj_internal()?;
+    let mut seen = HashSet::new();
+    let mut underlying = declaration(classifier)?;
+    loop {
+        if !seen.insert(classifier) {
+            return None;
+        }
+        let Some(next) = underlying.non_null().obj_internal() else {
+            return Some(underlying);
+        };
+        let Some(next_underlying) = declaration(next) else {
+            return Some(underlying);
+        };
+        classifier = next;
+        underlying = next_underlying;
+    }
+}
+
 /// Whether every declared underlying chain terminates outside the value-class declaration graph.
 /// Providers/backends must reject a cyclic graph before asking a target policy to project it; an
 /// arbitrary cycle edge is not a valid carrier choice on any target.
@@ -199,5 +226,32 @@ mod tests {
             .collect();
 
         assert!(!declarations_are_acyclic(&declarations));
+        assert_eq!(
+            terminal_underlying(Ty::obj_name(first), &|name| {
+                declarations.get(&name).copied()
+            }),
+            None,
+        );
+    }
+
+    #[test]
+    fn terminal_underlying_follows_exact_qualified_identities() {
+        let outer = crate::types::type_name("fixture/OuterTicket");
+        let inner = crate::types::type_name("fixture/InnerTicket");
+        let unrelated = crate::types::type_name("other/InnerTicket");
+        let declarations = [
+            (outer, Ty::obj_name(inner)),
+            (inner, Ty::nullable(Ty::String)),
+            (unrelated, Ty::Int),
+        ]
+        .into_iter()
+        .collect::<UnderlyingTypes>();
+
+        assert_eq!(
+            terminal_underlying(Ty::obj_name(outer), &|name| {
+                declarations.get(&name).copied()
+            }),
+            Some(Ty::nullable(Ty::String)),
+        );
     }
 }

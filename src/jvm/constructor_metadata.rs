@@ -148,6 +148,7 @@ mod tests {
             delegate: CtorDelegateTarget::Super {
                 owner: type_name("kotlin/Any"),
                 target_params: Vec::new(),
+                to_primary: true,
                 default_masks: Vec::new(),
             },
             synthetic: true,
