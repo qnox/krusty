@@ -529,7 +529,10 @@ impl ChildSerializersBody<'_> {
                     // or non-generic `Foo$serializer.INSTANCE`) | builtin `…Serializer`.
                     e
                 } else {
-                    ir.add_expr(IrExpr::Const(IrConst::Null))
+                    super::element_serializer::unsupported_element_serializer(
+                        ir,
+                        serializer_field_types[i],
+                    )
                 }
             })
             .collect();
