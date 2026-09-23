@@ -6099,6 +6099,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `codegen/box/inlineClasses/boxResultInlineClassOfConstructorCallGeneric.kt` and
   `codegen/box/primitiveTypes/kt36952_identityEqualsWithBooleanInLocalFunction.kt`.
 
+- **A function type is a `Function<out R>` of its own result, not of every `R`.** `(P) -> R`
+  extends `FunctionN<P, R>`, which extends `kotlin.Function<out R>`, so `() -> String` is a
+  `Function<String>`, a `Function<CharSequence>` and a `Function<Any>` — and kotlinc rejects it for
+  a `Function<Int>`. The hierarchy walk reaches `Function<R>` from a function type (that is what
+  lets a lambda reach `callsInPlace(lambda: Function<R>, …)`), but the `Fun`-versus-`Obj` pair fell
+  to the reachability-only comparison, so the type argument it reached was never checked and every
+  function type was accepted for every `Function<X>`. The pair now takes the same class-type
+  comparison as two classes: reach the target, then check each argument under its declared
+  variance. That only rejects what the reachability test accepted, never the reverse.
+  Tests: `assignable::tests::a_function_type_is_a_function_of_its_own_result` and
+  `tests/function_type_supertype_e2e.rs` (`a_function_type_is_a_function_of_a_supertype_of_its_result`,
+  `a_function_type_is_not_a_function_of_an_unrelated_result`).
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

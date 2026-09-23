@@ -2,6 +2,10 @@
 //! JVM functional interface `kotlin/jvm/functions/FunctionN`. The class provides `override fun invoke`,
 //! and an instance is assignable to the matching `(…) -> R` and callable as a function value. Covers
 //! nullary, parameterised, `object`, and extension-receiver (`Recv.() -> R`) forms. Runs on the JVM.
+//!
+//! The other direction: a function type is a `kotlin.Function<out R>` of its OWN result `R` —
+//! `() -> String` is a `Function<CharSequence>`, never a `Function<Int>`. The hierarchy walk reaches
+//! `Function` from a function type; the type-argument check must then run on what it reached.
 use super::common;
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")
@@ -80,4 +84,39 @@ fn contextual_extension_function_supertype_called_directly() {
         }\n\
         fun box(): String = Join()(Part(\"O\"), Part(\"K\"), Part(\"\"))\n";
     assert_eq!(common::expect_box_run_with_stdlib(SRC, "Main"), "OK");
+}
+
+#[test]
+fn a_function_type_is_a_function_of_a_supertype_of_its_result() {
+    const SRC: &str = "fun takesStrings(f: Function<String>): String = \"s\"\n\
+fun takesCharSequences(f: Function<CharSequence>): String = \"c\"\n\
+fun box(): String {\n\
+    val l: () -> String = { \"x\" }\n\
+    val any: Function<Any> = l\n\
+    val strings: Function<String> = l\n\
+    return if (takesStrings(l) + takesCharSequences(l) == \"sc\" && any === strings) \"OK\" else \"fail\"\n\
+}\n";
+    common::expect_box_ok_with_stdlib(SRC, "FunctionOfSupertype");
+}
+
+#[test]
+fn a_function_type_is_not_a_function_of_an_unrelated_result() {
+    let assignment = common::front_end_diagnostics_files_with_stdlib(&["fun f() {\n\
+    val l: () -> String = { \"x\" }\n\
+    val ints: Function<Int> = l\n\
+}\n"]);
+    assert!(
+        !assignment.is_empty(),
+        "`() -> String` must not be assignable to `Function<Int>`"
+    );
+    let argument =
+        common::front_end_diagnostics_files_with_stdlib(&["fun takesInts(f: Function<Int>) {}\n\
+fun f() {\n\
+    val l: () -> String = { \"x\" }\n\
+    takesInts(l)\n\
+}\n"]);
+    assert!(
+        !argument.is_empty(),
+        "`() -> String` must not be passed for a `Function<Int>` parameter"
+    );
 }
