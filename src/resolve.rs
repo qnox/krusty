@@ -66,6 +66,7 @@ mod operator_calls;
 mod overload_diagnostics;
 mod override_plans;
 mod plugin_expression_annotations;
+mod postponed_applicability;
 mod postponed_diagnostics;
 mod qualified_call_shaping;
 mod receiver_flow;
@@ -46359,7 +46360,7 @@ impl<'a> Checker<'a> {
                         if whole_array {
                             return Some(element);
                         }
-                        if actual.map_or(false, |actual| {
+                        if actual.is_some_and(|actual| {
                             !crate::assignable::is_assignable(
                                 &crate::assignable::TyCtx::new(),
                                 self,
@@ -46508,21 +46509,14 @@ impl<'a> Checker<'a> {
                         // shaped. Real overload inference owns type-variable constraint merging;
                         // rejecting a generic shape here would duplicate that selector and cannot
                         // model variance/LUB constraints (`Sink<Int>`, `Sink<String>`, `Sink<Long>`).
-                        if declared
-                            .is_some_and(|declared| ty_mentions_param(declared, &semantic.formals))
+                        if let Some(declared) = declared
+                            .filter(|declared| ty_mentions_param(*declared, &semantic.formals))
                         {
-                            // Postpone constraints on type variables, not the fixed type constructor
-                            // surrounding them. `() -> T?` can infer `T` later, but it can never accept
-                            // a known `Int`. Keeping that overload alive here lets its lambda expectation
-                            // win before real overload selection (`generateSequence(1) { ... }` then
-                            // shapes `1` as the seed function overload).
-                            if declared.is_some_and(|declared| {
-                                matches!(declared.non_null(), Ty::Fun(_))
-                                    && actual.non_null().fun_arity().is_none()
-                            }) {
-                                return false;
-                            }
-                            return true;
+                            return self.postponed_argument_fits(
+                                declared,
+                                actual,
+                                &semantic.formals,
+                            );
                         }
                         expected.is_some_and(|expected| {
                             crate::assignable::is_assignable(

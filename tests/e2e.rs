@@ -1241,6 +1241,8 @@ mod platform_map_index_assign_e2e;
 mod plugins_e2e;
 #[path = "postponed_bound_inference_e2e.rs"]
 mod postponed_bound_inference_e2e;
+#[path = "postponed_constructor_applicability_e2e.rs"]
+mod postponed_constructor_applicability_e2e;
 #[path = "postponed_lambda_probe_e2e.rs"]
 mod postponed_lambda_probe_e2e;
 #[path = "primitive_array_members_e2e.rs"]
