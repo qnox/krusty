@@ -45,6 +45,7 @@ mod shared_captures;
 pub mod source_map;
 pub mod suspend;
 pub(crate) mod suspend_interface_impls;
+pub(crate) mod temporaries;
 mod top_level_properties;
 mod value_class_declarations;
 pub mod value_classes;

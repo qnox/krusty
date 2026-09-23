@@ -11,6 +11,7 @@ mod control_flow;
 mod coroutine_markers;
 mod line_numbers;
 mod method_parameters;
+mod method_rewrite;
 
 pub use coroutine_markers::{markers_in, CoroutineMarker, MARKER_LEN};
 
@@ -632,6 +633,8 @@ struct MethodInfo {
     /// is producer provenance, not a guess from the final byte stream; explicit returns and throws
     /// leave it absent.
     implicit_void_return_pc: Option<u16>,
+    /// What kotlinc's bytecode rewrites need to reshape this method when the class is written.
+    rewrite_source: Option<Box<method_rewrite::RewriteSource>>,
     /// `Code` exception table: `(start_pc, end_pc, handler_pc, catch_type)` — `catch_type` is a
     /// constant-pool class index, or 0 for a catch-all.
     exceptions: Vec<(u16, u16, u16, u16)>,
@@ -1239,6 +1242,7 @@ impl ClassWriter {
             max_locals: 0,
             code: None,
             implicit_void_return_pc: None,
+            rewrite_source: None,
             exceptions: Vec::new(),
             stackmap: None,
             signature: sig,
@@ -2555,6 +2559,7 @@ impl ClassWriter {
         // `<init>` is UninitializedThis until super() runs) followed by each parameter's type. Only
         // computed when the method actually has frames — `append_param_verif_types` interns the
         // parameters' class types, which would otherwise perturb the pool of a branch-free method.
+        let mut stackmap_baseline = None;
         let stackmap = if code.has_frames() {
             const ACC_STATIC: u16 = 0x0008;
             let mut initial_locals: Vec<VerifType> = Vec::new();
@@ -2567,7 +2572,9 @@ impl ClassWriter {
             }
             let baseline =
                 Self::append_param_verif_types(desc, &mut initial_locals).then_some(initial_locals);
-            code.build_stackmap(baseline.as_deref(), &mut self.cp)
+            let stackmap = code.build_stackmap(baseline.as_deref(), &mut self.cp);
+            stackmap_baseline = baseline;
+            stackmap
         } else {
             None
         };
@@ -2579,6 +2586,17 @@ impl ClassWriter {
             max_locals: code.max_locals,
             code: Some(code.bytes.clone()),
             implicit_void_return_pc: code.implicit_void_return_pc,
+            // kotlinc's bytecode rewrites run when the class is written: several of this method's
+            // tables are attached after it is added, and the rewrite depends on them.
+            rewrite_source: (!code.bytes.is_empty()).then(|| {
+                Box::new(method_rewrite::RewriteSource {
+                    access,
+                    name: name.to_string(),
+                    desc: desc.to_string(),
+                    builder: code.clone(),
+                    baseline: stackmap_baseline,
+                })
+            }),
             exceptions: code.resolved_exceptions(),
             stackmap,
             signature: sig,
@@ -2802,6 +2820,8 @@ impl ClassWriter {
     }
 
     pub fn finish(mut self) -> Vec<u8> {
+        // Every method's tables are final now; kotlinc's bytecode rewrites run over them.
+        self.rewrite_methods();
         // A class that never attached `@Metadata` still realizes its deferred fields first —
         // kotlinc's field visit precedes every class-attribute window.
         self.intern_late_fields();
@@ -3487,6 +3507,7 @@ pub struct Label {
 
 static NEXT_CODE_BUILDER_ID: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone)]
 pub struct CodeBuilder {
     id: u64,
     pub bytes: Vec<u8>,
