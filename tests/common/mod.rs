@@ -2547,6 +2547,7 @@ pub fn corpus_ready() -> bool {
 pub fn run_box_corpus_case(rel: &str) -> Option<String> {
     let src = krusty::conformance::prepare_test_source(
         &std::fs::read_to_string(box_corpus_dir()?.join(rel)).ok()?,
+        krusty::conformance::TestTarget::Jvm,
     );
     // Multi-file / multi-module cases need the gate's `// FILE:`/`// MODULE:` splitting — skip here
     // rather than miscompile all blocks as one source (enforce the contract, don't rely on luck).
@@ -2564,6 +2565,7 @@ pub fn run_box_corpus_case(rel: &str) -> Option<String> {
 pub fn box_corpus_case_backend_outcome(rel: &str) -> Option<BackendOutcome> {
     let src = krusty::conformance::prepare_test_source(
         &std::fs::read_to_string(box_corpus_dir()?.join(rel)).ok()?,
+        krusty::conformance::TestTarget::Jvm,
     );
     if src.contains("// FILE:") || src.contains("// MODULE:") {
         return None;

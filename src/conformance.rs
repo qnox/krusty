@@ -111,13 +111,37 @@ private fun <T> checkTypeEquality(
 ) {}
 "#;
 
+/// The target a corpus case is being prepared for.
+///
+/// Two of the placeholders Kotlin's runner expands mean different things per target, so a source
+/// prepared for one backend is a DIFFERENT PROGRAM from the same source prepared for another.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TestTarget {
+    Jvm,
+    Native,
+}
+
 /// Apply source declarations that Kotlin's codegen-test runner supplies for directives. These are
 /// ordinary Kotlin declarations, not compiler intrinsics; keeping the expansion here makes the gate,
 /// focused corpus helpers, and survey compile the same source program.
-pub fn prepare_test_source(src: &str) -> String {
+///
+/// `OPTIONAL_JVM_INLINE_ANNOTATION` is the placeholder the corpus writes where a `value class`
+/// needs `@JvmInline`. It needs it ON THE JVM and nowhere else — a Kotlin/Native `value class` is
+/// a value class without any annotation — which is why Kotlin's own runner expands it to nothing
+/// for a non-JVM target. Expanding it to `@JvmInline` regardless put a JVM-only annotation into
+/// every such program, and since `kotlin.jvm.*` is not among a native target's default imports
+/// (`kotlin.native.*` is, where the JVM has `java.lang` and `kotlin.jvm`), the result was an
+/// unresolved reference in 641 cases of the native lane. The annotation itself is not the problem:
+/// the Kotlin/Native stdlib klib declares `kotlin.jvm.JvmInline` as the optional expectation it is,
+/// and an import of it resolves.
+pub fn prepare_test_source(src: &str, target: TestTarget) -> String {
+    let (value_class_annotation, backend) = match target {
+        TestTarget::Jvm => ("@JvmInline", "\"JVM_IR\""),
+        TestTarget::Native => ("", "\"NATIVE\""),
+    };
     let mut prepared = src
-        .replace("OPTIONAL_JVM_INLINE_ANNOTATION", "@JvmInline")
-        .replace("BACKEND_UNDER_TEST", "\"JVM_IR\"");
+        .replace("OPTIONAL_JVM_INLINE_ANNOTATION", value_class_annotation)
+        .replace("BACKEND_UNDER_TEST", backend);
     if directive(src, "CHECK_TYPE_WITH_EXACT") {
         prepared.push_str(EXACT_TYPE_HELPER);
     }
@@ -257,17 +281,33 @@ fn k2_language_configuration_applicable(src: &str) -> bool {
 }
 
 pub fn backend_applicable(src: &str, names: &[&str]) -> bool {
-    // `ANY` names every backend (kotlinc's test runner uses it for red-code tests kept only for
-    // their diagnostic half), so it always mentions ours.
-    let mentions = |line: &str| {
-        line.split(',')
-            .any(|t| t.trim() == "ANY" || names.contains(&t.trim()))
-    };
-    if let Some(l) = src.lines().find(|l| l.starts_with("// TARGET_BACKEND:")) {
-        if !mentions(l.trim_start_matches("// TARGET_BACKEND:").trim()) {
-            return false;
-        }
+    backend_targeted(src, names) && !backend_muted(src, names)
+}
+
+/// `ANY` names every backend (kotlinc's test runner uses it for red-code tests kept only for their
+/// diagnostic half), so it always mentions ours.
+fn mentions(line: &str, names: &[&str]) -> bool {
+    line.split(',')
+        .any(|token| token.trim() == "ANY" || names.contains(&token.trim()))
+}
+
+/// Whether `// TARGET_BACKEND:` admits one of `names` — a case that names backends and none of
+/// ours is a case written for a platform this one is not.
+///
+/// Split from the mute half because the two ask different questions and a lane may answer them
+/// with different backend sets. A native lane targets `NATIVE` alone: a case marked JVM-only is
+/// JVM-only, and compiling it means compiling `java.lang.Runnable` against a target that has no
+/// JDK. But it must still honour a JVM mute, because the FRONTEND is shared — see
+/// [`backend_muted`].
+pub fn backend_targeted(src: &str, names: &[&str]) -> bool {
+    match src.lines().find(|l| l.starts_with("// TARGET_BACKEND:")) {
+        Some(line) => mentions(line.trim_start_matches("// TARGET_BACKEND:").trim(), names),
+        None => true,
     }
+}
+
+/// Whether any mute directive names one of `names`.
+pub fn backend_muted(src: &str, names: &[&str]) -> bool {
     src.lines()
         .filter(|l| {
             l.starts_with("// IGNORE_BACKEND:")
@@ -275,7 +315,7 @@ pub fn backend_applicable(src: &str, names: &[&str]) -> bool {
                 || l.starts_with("// IGNORE_BACKEND_K2_MULTI_MODULE:")
                 || l.starts_with("// DONT_TARGET_EXACT_BACKEND:")
         })
-        .all(|l| !mentions(l.split_once(':').map(|x| x.1).unwrap_or("").trim()))
+        .any(|l| mentions(l.split_once(':').map(|x| x.1).unwrap_or("").trim(), names))
 }
 
 /// Whether the test applies to krusty's backend (the common case of [`backend_applicable`]).
@@ -801,6 +841,7 @@ mod tests {
     fn exact_type_directive_injects_the_kotlin_test_declaration() {
         let prepared = prepare_test_source(
             "// CHECK_TYPE_WITH_EXACT\nfun box(): String { checkExactType<String>(\"OK\"); return \"OK\" }",
+            TestTarget::Jvm,
         );
         assert!(prepared.contains("private fun <T> checkExactType"));
         assert!(prepared.contains("value: @kotlin.internal.Exact T"));
@@ -810,10 +851,31 @@ mod tests {
     fn backend_under_test_is_preprocessed_like_the_kotlin_runner() {
         let prepared = prepare_test_source(
             "val jvm = BACKEND_UNDER_TEST == \"JVM_IR\"\nval android = BACKEND_UNDER_TEST == \"ANDROID\"",
+            TestTarget::Jvm,
         );
         assert_eq!(
             prepared,
             "val jvm = \"JVM_IR\" == \"JVM_IR\"\nval android = \"JVM_IR\" == \"ANDROID\""
+        );
+    }
+
+    /// The same source is a DIFFERENT PROGRAM per target, and these two placeholders are why.
+    ///
+    /// A `value class` needs `@JvmInline` on the JVM and nowhere else, so Kotlin's own runner
+    /// expands the placeholder to nothing for a non-JVM target. Expanding it regardless put a
+    /// JVM-only annotation into every such program — and `kotlin.jvm.*` is not among a native
+    /// target's default imports, so it did not resolve.
+    #[test]
+    fn a_native_target_gets_the_program_its_own_runner_would_compile() {
+        let source = "OPTIONAL_JVM_INLINE_ANNOTATION\nvalue class V(val x: Int)\n\
+                      val here = BACKEND_UNDER_TEST";
+        assert_eq!(
+            prepare_test_source(source, TestTarget::Native),
+            "\nvalue class V(val x: Int)\nval here = \"NATIVE\""
+        );
+        assert_eq!(
+            prepare_test_source(source, TestTarget::Jvm),
+            "@JvmInline\nvalue class V(val x: Int)\nval here = \"JVM_IR\""
         );
     }
 
