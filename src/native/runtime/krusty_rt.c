@@ -797,6 +797,49 @@ KRef kt_string_to_char_array(KRef self) {
     return array;
 }
 
+/* `s.replace(old, new)`: every occurrence, scanning left to right and resuming AFTER what was
+   put in rather than after what was taken out — so a replacement containing the old text is not
+   rewritten again. An empty `old` is Kotlin's own odd case: it matches at every boundary, so the
+   new text lands before each unit and once more at the end.
+
+   Bytes throughout: a UTF-8 match is a byte match, and resuming on a boundary keeps it one. */
+KRef kt_string_replace(KRef self, KRef old_value, KRef new_value) {
+    kt_int length = 0;
+    const char *bytes = kt_text_of(self, &length);
+    kt_int wanted = 0;
+    const char *needle = kt_text_of(old_value, &wanted);
+    KRef built = kt_string_utf8("", 0);
+    kt_int at = 0;
+    while (at < length) {
+        if (wanted > 0 && at + wanted <= length && kt_bytes_match(bytes, at, needle, wanted)) {
+            built = kt_string_plus(built, new_value);
+            at += wanted;
+        } else if (wanted == 0) {
+            built = kt_string_plus(built, new_value);
+            /* One UTF-8 character, so the walk stays on a boundary. */
+            kt_int width = 1;
+            while (at + width < length && ((bytes[at + width] & 0xC0) == 0x80)) {
+                width++;
+            }
+            built = kt_string_plus(built, kt_string_utf8(bytes + at, width));
+            at += width;
+        } else {
+            kt_int width = 1;
+            while (at + width < length && ((bytes[at + width] & 0xC0) == 0x80)) {
+                width++;
+            }
+            built = kt_string_plus(built, kt_string_utf8(bytes + at, width));
+            at += width;
+        }
+        /* `kt_string_plus` can collect, and `bytes` points into the receiver's storage, which the
+           collector does not move — the pointer stays good and the local keeps it alive. */
+    }
+    if (wanted == 0) {
+        built = kt_string_plus(built, new_value);
+    }
+    return built;
+}
+
 /* `s.indexOfAny(chars)`: the first position holding any of them, or -1.
 
    The FIRST position, so the outer walk is over the TEXT and the inner over the wanted units. The
@@ -3725,7 +3768,12 @@ KRef kt_iterable_map(KRef iterable, KRef transform) {
 }
 
 KRef kt_iterable_join_to_string(KRef iterable) {
-    KRef separator = kt_string_utf8(", ", 2);
+    return kt_iterable_join_to_string_with(iterable, kt_string_utf8(", ", 2));
+}
+
+/* The same walk with the separator the program named. `joinToString()` is this with Kotlin's own
+   `", "`, which is why the two share a body rather than each having one. */
+KRef kt_iterable_join_to_string_with(KRef iterable, KRef separator) {
     KRef joined = kt_string_utf8("", 0);
     KRef iterator = kt_iterable_iterator(iterable);
     kt_boolean first = 1;

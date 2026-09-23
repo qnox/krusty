@@ -390,6 +390,8 @@ KRef kt_iterable_map(KRef iterable, KRef transform);
    is realized; a call that passes anything declines at the call site, where the argument it passed
    is still visible. */
 KRef kt_iterable_join_to_string(KRef iterable);
+/* The same walk with the separator the program named; `joinToString()` is this with `", "`. */
+KRef kt_iterable_join_to_string_with(KRef iterable, KRef separator);
 
 /* `xs.withIndex()` and the pair it yields.
    The result is an ITERABLE, not a list: `withIndex` is lazy in Kotlin, and the walk it wraps may
@@ -803,6 +805,8 @@ kt_char kt_string_single(KRef self);
 KRef kt_string_to_char_array(KRef self);
 /* `s.indexOfAny(chars)`: the first position holding any of them, or -1. */
 kt_int kt_string_index_of_any_char(KRef self, KRef chars);
+/* `s.replace(old, new)`: every occurrence, resuming after what was put in. */
+KRef kt_string_replace(KRef self, KRef old_value, KRef new_value);
 /* `c in s`: a single unit rather than one text inside another, which `kt_string_contains` asks. */
 kt_boolean kt_string_contains_char(KRef self, kt_char value);
 /* `s.toInt()` / `s.toLong()` and their `OrNull` forms. The parse is Kotlin's: an optional sign,

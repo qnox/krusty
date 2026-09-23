@@ -7378,6 +7378,18 @@ and behavior is checked by RUNNING the emitted program.
   Kotlin's documented one.
   Tests: `tests/native_array_members_e2e.rs` (`an_array_renders_its_contents_deeply`).
 
+- **A call's WRITTEN operands are a prefix of what arrives, not a suffix.** A positional default
+  fills from the end, so an omitted parameter is never in front of a written one. Reading them as a
+  suffix happened to be right while only the all-defaults form was answered — zero operands and all
+  of them are the same slice either way — and took `joinToString`'s `transform` for its separator
+  the moment one written operand had to be found among six.
+  Tests: `tests/native_text_members_e2e.rs` (`a_walk_joins_with_the_separator_it_was_given`).
+
+- **`replace` resumes after what was PUT IN, not after what was taken out.** So a replacement
+  containing the old text is not rewritten: `"aa".replace("aa", "aaa")` is `"aaa"` and not an
+  endless rescan.
+  Tests: `tests/native_text_members_e2e.rs` (`text_replaces_every_occurrence`).
+
 - **A defaulted stdlib argument arrives two ways, and neither is a value the program chose.** A
   jar call leaves it OUT, because kotlinc has a `$default` synthetic to carry it; a klib call
   materializes it as a CONSTANT argument, because a klib has no such synthetic. Both mean "the

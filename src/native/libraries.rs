@@ -1740,19 +1740,30 @@ mod compiles_against_the_klib {
             "an extension omitting every defaulted argument compiles: {joined:?}"
         );
 
-        // And a call that passes an argument of its own still declines, which is what makes the
-        // line above a statement about the DEFAULTS rather than about the name. The runtime
-        // answers one `joinToString` — the whole-declaration one — so a separator nobody declared
-        // must not be silently dropped on the way to it.
+        // A SEPARATOR of its own is answered too: the runtime takes one, and the five parameters
+        // behind it are what the call still has to leave alone.
         let separated = diagnostics(
             &root,
             "fun box(): String = listOf(1, 2).joinToString(\"-\")\n",
         );
         assert!(
-            separated
+            separated.is_empty(),
+            "an extension given only its separator compiles: {separated:?}"
+        );
+
+        // And a call that passes an argument the runtime does NOT take still declines, which is
+        // what makes the two lines above statements about the DEFAULTS rather than about the name:
+        // a prefix nobody declared must not be silently dropped on the way to an entry point that
+        // has nowhere to put it.
+        let prefixed = diagnostics(
+            &root,
+            "fun box(): String = listOf(1, 2).joinToString(\", \", \"[\")\n",
+        );
+        assert!(
+            prefixed
                 .iter()
                 .any(|d| d.contains("the member `kotlin.collections.joinToString`")),
-            "a joiner given a separator of its own is refused, not defaulted: {separated:?}"
+            "a joiner given a prefix of its own is refused, not defaulted: {prefixed:?}"
         );
 
         // A block that returns NON-LOCALLY is valid only spliced into the function it returns

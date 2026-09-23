@@ -1369,6 +1369,28 @@ pub(super) fn is_index_of_any_chars(owner: &str, name: &str, params: &[Ty]) -> b
     matches!(params.first(), Some(ty) if ty.non_null().array_elem() == Some(Ty::Char))
 }
 
+/// `s.replace(old, new)`, whose third parameter — `ignoreCase` — the runtime does not answer and
+/// the CALLER therefore checks is at its declared default.
+///
+/// The `Char` overload is a different member with the same name, and this is not it: both operands
+/// here are text, and replacing one UNIT is a question about units.
+pub(super) fn is_text_replace(owner: &str, name: &str, params: &[Ty]) -> bool {
+    if name != "replace" {
+        return false;
+    }
+    let owner = kotlin_owner(owner);
+    if declaration_package(owner) != "kotlin/text"
+        && !matches!(owner, "kotlin/String" | "kotlin/CharSequence")
+    {
+        return false;
+    }
+    let text = |ty: &Ty| {
+        matches!(ty.non_null(), Ty::Obj(named, _)
+            if is_char_sequence(named) || named.matches("kotlin/String"))
+    };
+    matches!(params, [old, new] | [old, new, Ty::Boolean] if text(old) && text(new))
+}
+
 /// A `kotlin.text` member whose LAST parameter is Kotlin's `ignoreCase`, with the runtime entry
 /// point that answers the case-SENSITIVE form.
 ///

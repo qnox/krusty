@@ -3076,6 +3076,31 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                                 return self.convert(produced, Some(answer), *ret);
                             }
                         }
+                        // `s.replace(old, new)`. Its third parameter is `ignoreCase`, which the
+                        // runtime does not answer, so a call reaches this only with it left at
+                        // what the declaration says.
+                        if super::super::intrinsics::is_text_replace(&owner, &name, params)
+                            && self.passes_only_its_defaults(args, 2, &[IrConst::Boolean(false)])
+                        {
+                            let operands = vec![
+                                self.reference(receiver)?,
+                                self.reference(args[0])?,
+                                self.reference(args[1])?,
+                            ];
+                            if self.terminated {
+                                return Ok(None);
+                            }
+                            let produced = self.runtime_call(
+                                "kt_string_replace",
+                                &[any(), any(), any()],
+                                Ty::obj("kotlin/String"),
+                                &operands,
+                            )?;
+                            let Some(produced) = produced else {
+                                return Ok(None);
+                            };
+                            return self.convert(produced, Some(Ty::obj("kotlin/String")), *ret);
+                        }
                         // `s.indexOfAny(chars)`: the first position holding any of the units.
                         // Its other two parameters — a start index and `ignoreCase` — are not
                         // values the runtime is given, so a call reaches this only with both left

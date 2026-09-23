@@ -144,6 +144,14 @@ fn interface_symbol(
             vec![any()],
             Ty::obj("kotlin/String"),
         ),
+        // The same walk with the separator the program named. Its five other parameters are still
+        // only answered at their defaults, which is what `written_arity` has established by the
+        // time this is reached.
+        (IterationRole::Iterable, "joinToString", 1) => (
+            "kt_iterable_join_to_string_with",
+            vec![any(), any()],
+            Ty::obj("kotlin/String"),
+        ),
         _ => return None,
     })
 }
@@ -197,6 +205,24 @@ fn walks_its_operand(physical: &[Ty]) -> bool {
                     || super::super::super::intrinsics::iteration_role(internal).is_some()
             })
     })
+}
+
+/// What `joinToString`'s six parameters default to, in declaration order.
+///
+/// Named here because the provider does not carry a declaration's defaults to a backend, and
+/// spelled out value by value because what they decide is whether operands may be DROPPED: a call
+/// that passes a `prefix` of its own must keep declining with that argument still in sight, and
+/// only the exact default run is droppable.
+fn join_defaults() -> [IrConst; 6] {
+    let text = |value: &str| IrConst::String(crate::kt_string::KtString::from(value));
+    [
+        text(", "),
+        text(""),
+        text(""),
+        IrConst::Int(-1),
+        text("..."),
+        IrConst::Null,
+    ]
 }
 
 /// Whether a member may be asked of a SEQUENCE receiver; see [`is_sequence`].
@@ -976,7 +1002,7 @@ impl BodyLowering<'_, '_, '_> {
             return None;
         }
         let written = self.written_arity(name, args);
-        let args = &args[args.len() - written..];
+        let args = &args[..written];
         let (symbol, carried, answer) = list_symbol(name, written, physical)?;
         Some(self.list_call(symbol, &carried, answer, receiver, args, ret))
     }
@@ -1032,7 +1058,9 @@ impl BodyLowering<'_, '_, '_> {
             return None;
         }
         let written = self.written_arity(name, args);
-        let args = &args[args.len() - written..];
+        // The written operands are a PREFIX of what arrives: a positional default fills from the
+        // END, so an omitted one is never in front of a written one.
+        let args = &args[..written];
         let over_text = is_text(ty);
         // A list whose elements the runtime owns: `list_symbol` answers for it further down, and
         // the few names both tables carry are left to that one; see [`walk_symbol`]. Where the
@@ -1054,11 +1082,20 @@ impl BodyLowering<'_, '_, '_> {
     /// has no `$default` synthetic to call, so an omitted argument is materialized as the
     /// declaration's own default instead. The two are the same call.
     fn written_arity(&self, name: &str, args: &[u32]) -> usize {
-        if name == "joinToString" && self.is_defaulted_join(args) {
-            0
-        } else {
-            args.len()
+        if name != "joinToString" {
+            return args.len();
         }
+        // Kotlin declares `joinToString` with six defaulted parameters, and a klib call
+        // materializes every one it was not given — so the same source reaches this backend with
+        // six operands or with the one it wrote. Which is which is read from the ARGUMENTS, as
+        // every other defaulted call here is; see `passes_only_its_defaults`.
+        let defaults = join_defaults();
+        for written in [0usize, 1] {
+            if self.passes_only_its_defaults(args, written, &defaults[written..]) {
+                return written;
+            }
+        }
+        args.len()
     }
 
     /// A collection member asked of a type this file implements ITSELF.
@@ -1238,30 +1275,6 @@ impl BodyLowering<'_, '_, '_> {
             return Ok(None);
         };
         self.convert(produced, Some(answer), ret)
-    }
-
-    /// Whether every operand of a `joinToString` is the constant the stdlib declares it to default
-    /// to, so that the call is the one a program wrote as `joinToString()`.
-    ///
-    /// Spelled out value by value rather than counted, because what this decides is whether six
-    /// operands may be DROPPED: a call that passes a separator of its own must keep declining,
-    /// with the argument it passed still in sight, and only the exact default run is droppable.
-    fn is_defaulted_join(&self, args: &[u32]) -> bool {
-        let [separator, prefix, postfix, limit, truncated, transform] = args else {
-            return false;
-        };
-        let string = |id: &u32, expected: &str| {
-            matches!(
-                self.file.ir.expr(*id),
-                IrExpr::Const(IrConst::String(value)) if value.as_str() == Some(expected)
-            )
-        };
-        string(separator, ", ")
-            && string(prefix, "")
-            && string(postfix, "")
-            && matches!(self.file.ir.expr(*limit), IrExpr::Const(IrConst::Int(-1)))
-            && string(truncated, "...")
-            && matches!(self.file.ir.expr(*transform), IrExpr::Const(IrConst::Null))
     }
 
     fn list_call(

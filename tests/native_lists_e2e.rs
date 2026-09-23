@@ -341,13 +341,26 @@ fn a_range_joins_the_same_way_a_list_does() {
 }
 
 #[test]
-fn joining_with_an_argument_still_declines() {
-    // Every parameter of `joinToString` is defaulted and this backend has no `$default` synthetic
-    // of a dependency to call, so a call that passes one has nothing to route to. Declining keeps
-    // the argument in sight rather than dropping it.
-    super::common::expect_native_decline(
-        "fun box(): String = listOf(1, 2, 3).joinToString(\"-\")\n",
+fn joining_with_a_separator_of_its_own() {
+    // The runtime takes a separator, so the one parameter a program usually writes is answered.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val joined = listOf(1, 2, 3).joinToString(\"-\")\n\
+         \x20   return if (joined == \"1-2-3\") \"OK\" else \"fail: $joined\"\n\
+         }\n",
         "JoinToStringWithSeparator",
+        "OK",
+    );
+}
+
+#[test]
+fn joining_with_an_argument_the_runtime_cannot_take_declines() {
+    // The five parameters behind the separator have nowhere to go: this backend has no `$default`
+    // synthetic of a dependency to call, and the entry point takes no prefix. Declining keeps the
+    // argument in sight rather than dropping it.
+    super::common::expect_native_decline(
+        "fun box(): String = listOf(1, 2, 3).joinToString(\", \", \"[\")\n",
+        "JoinToStringWithPrefix",
         "joinToString",
     );
 }

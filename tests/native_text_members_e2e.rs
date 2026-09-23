@@ -266,3 +266,61 @@ fun box(): String = if ("aba".indexOfAny(charArrayOf('a'), 1) == 2) "OK" else "f
     );
     expect_native_decline(source, "native_text_index_of_any_start", "indexOfAny");
 }
+
+/// `joinToString` with the separator the program named.
+///
+/// Kotlin declares it with six defaulted parameters, and a klib call materializes every one it was
+/// not given — so the same source reaches this backend with six operands or with the one it wrote.
+/// The written operands are a PREFIX of what arrives, because a positional default fills from the
+/// end; reading them as a suffix took the `transform` for the separator.
+#[test]
+fn a_walk_joins_with_the_separator_it_was_given() {
+    let source = r#"
+fun box(): String {
+    if (listOf(1, 2, 3).joinToString() != "1, 2, 3") return "fail default"
+    if (listOf('a', 'b', 'c').joinToString("") != "abc") return "fail empty separator"
+    if (listOf(1, 2).joinToString(" - ") != "1 - 2") return "fail named"
+    if (listOf<Int>().joinToString("-") != "") return "fail empty walk"
+    if (listOf(7).joinToString("-") != "7") return "fail single"
+    if (intArrayOf(1, 2).joinToString("|") != "1|2") return "fail array"
+    if ((1..3).joinToString("") != "123") return "fail range"
+    return "OK"
+}
+"#;
+    every_backend_agrees_with_kotlinc("native_walk_join_separator", source);
+}
+
+/// A `prefix` the program DID choose is not a default, so the call declines with it in sight
+/// rather than having five operands dropped around it.
+#[test]
+fn a_chosen_join_prefix_declines_rather_than_being_dropped() {
+    let source = r#"
+fun box(): String = if (listOf(1, 2).joinToString(", ", "[") == "[1, 2") "OK" else "fail"
+"#;
+    assert_eq!(
+        kotlinc_box_result(source),
+        "OK",
+        "unexpected kotlinc result"
+    );
+    expect_native_decline(source, "native_join_prefix", "joinToString");
+}
+
+/// `s.replace(old, new)`: every occurrence, resuming AFTER what was put in.
+#[test]
+fn text_replaces_every_occurrence() {
+    let source = r#"
+fun box(): String {
+    if ("interface A".replace("interface", "class") != "class A") return "fail plain"
+    if ("aaa".replace("a", "bb") != "bbbbbb") return "fail repeated"
+    if ("xax".replace("a", "") != "xx") return "fail removal"
+    if ("abc".replace("z", "!") != "abc") return "fail absent"
+    // Resuming after what was PUT IN, so a replacement holding the old text is not rewritten.
+    if ("aa".replace("aa", "aaa") != "aaa") return "fail rescan"
+    if ("a".replace("a", "aa") != "aa") return "fail growth"
+    if ("".replace("a", "b") != "") return "fail empty text"
+    if ("héllo".replace("é", "e") != "hello") return "fail multibyte"
+    return "OK"
+}
+"#;
+    every_backend_agrees_with_kotlinc("native_text_replace", source);
+}
