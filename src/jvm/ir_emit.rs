@@ -1633,7 +1633,7 @@ fn build_class_metadata(
                 let f = ir.functions.get(fid as usize)?;
                 // Real parameter NAMES — metadata is reflection-visible, so a placeholder would be an
                 // observable lie. Positional fallback only when the IR has no recorded names.
-                let names = ir.param_names(fid);
+                let names = crate::jvm::parameter_names::function(ir, fid);
                 // A function is described as SOURCE declared it: its own name, parameters and return
                 // type. Two lowerings hide that — CPS gives a `suspend fun` a trailing `Continuation`
                 // and an `Object` return, and the value-class pass mangles the name and erases the
@@ -1744,6 +1744,7 @@ fn build_class_metadata(
                         // `fn_params` records the extension receiver (`$this$<fn>`) at that same
                         // physical index, exactly like `param_defaults`; both are read positionally.
                         let n = names
+                            .as_ref()
                             .and_then(|ns| ns.get(physical_index).cloned())
                             .unwrap_or_else(|| format!("p{physical_index}"));
                         (
@@ -9010,7 +9011,20 @@ fn emit_interface_class(
                     None => (jd_declared_param_tys(ir, fid), f.ret),
                 };
                 let guards = if opts.param_assertions {
-                    f.param_checks.clone()
+                    f.param_checks
+                        .iter()
+                        .enumerate()
+                        .map(|(index, check)| {
+                            check.as_ref().map(|_| {
+                                let identity = ir
+                                    .function_parameter_identities(fid)
+                                    .and_then(|identities| identities.get(index))
+                                    .expect("a checked compatibility parameter has an identity");
+                                crate::jvm::parameter_names::assertion(identity, &f.name)
+                                    .expect("a checked compatibility parameter has a JVM label")
+                            })
+                        })
+                        .collect()
                 } else {
                     Vec::new()
                 };
@@ -9020,7 +9034,7 @@ fn emit_interface_class(
                     &f.name,
                     &jvm_function_params(ir, fid),
                     &semantic_params,
-                    ir.param_names(fid).unwrap_or(&[]),
+                    &crate::jvm::parameter_names::function(ir, fid).unwrap_or_default(),
                     &guards,
                     jvm_declared_ty(&f.ret),
                     semantic_ret,
@@ -9181,7 +9195,7 @@ fn emit_interface_class(
             c.decl_line,
             &f.name,
             &jvm_function_params(ir, fid),
-            ir.param_names(fid).unwrap_or(&[]),
+            &crate::jvm::parameter_names::function(ir, fid).unwrap_or_default(),
             jvm_declared_ty(&f.ret),
         );
     }
@@ -11069,12 +11083,18 @@ fn emit_method_inner_with_holder(
     // kotlinc guards each non-null reference parameter of a visible function with
     // `Intrinsics.checkNotNullParameter(param, "name")` at method entry — emit the same.
     let param_checks = f.param_checks.clone();
+    let parameter_identities = ir.function_parameter_identities(fid);
     for (i, check) in param_checks.iter().enumerate() {
-        if let Some(name) = check {
+        if check.is_some() {
+            let identity = parameter_identities
+                .and_then(|identities| identities.get(i))
+                .expect("a checked parameter carries an exact identity");
+            let name = crate::jvm::parameter_names::assertion(identity, &f.name)
+                .expect("a checked parameter carries an assertion spelling");
             let vi = i as u32 + if instance { 1 } else { 0 };
             if let Some(&(slot, _)) = e.slots.get(&vi) {
                 code.aload(slot);
-                code.push_string(name, e.cw);
+                code.push_string(&name, e.cw);
                 let m = e.cw.methodref(
                     "kotlin/jvm/internal/Intrinsics",
                     "checkNotNullParameter",
@@ -11336,8 +11356,8 @@ fn emit_method_inner_with_holder(
         let mut slot = u16::from(instance);
         for (i, t) in param_tys.iter().enumerate() {
             let pname = parameter_identities
-                .and_then(|identities| identities.get(i).cloned())
-                .or_else(|| f.param_checks.get(i).and_then(|n| n.clone()))
+                .and_then(|identities| identities.get(i))
+                .map(|identity| crate::jvm::parameter_names::legacy(identity, &f.name))
                 .unwrap_or_else(|| format!("p{i}"));
             let pdesc = local_variable_desc(*t);
             e.cw.seed_utf8(&pname);
@@ -13264,7 +13284,8 @@ impl<'a> Emitter<'a> {
                                 .ir
                                 .fn_params
                                 .get(&impl_fn)
-                                .and_then(|info| info.names.get(n_cap + j))
+                                .and_then(|info| info.identities.get(n_cap + j))
+                                .and_then(|identity| identity.source_name.as_ref())
                             {
                                 lam_locals_declared.push((
                                     u16::try_from(scratch.bytes.len()).unwrap_or(u16::MAX),

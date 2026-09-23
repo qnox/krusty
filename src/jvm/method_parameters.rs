@@ -1,6 +1,9 @@
 //! JVM `MethodParameters` planning from checked declarations and backend-generated provenance.
 
-use crate::ir::{IrClass, IrFile, IrSecondaryCtor};
+use crate::ir::{
+    IrClass, IrFile, IrGeneratedParameterRole, IrParameterIdentity, IrParameterProvenance,
+    IrSecondaryCtor,
+};
 use crate::types::{same, Ty, TypeName};
 
 pub(super) type MethodParameter = (String, u16);
@@ -37,10 +40,13 @@ pub(super) fn prepend_value_class_receiver(ir: &mut IrFile, function: u32, name:
     let info = ir
         .fn_params
         .entry(function)
-        .or_insert_with(|| crate::ir::FnParamInfo::names(Vec::new()));
-    info.prepend_compiler_generated(name.to_string());
+        .or_insert_with(|| crate::ir::FnParamInfo::identities(Vec::new()));
+    info.prepend_generated(IrParameterIdentity::generated(
+        IrGeneratedParameterRole::ValueClassCarrier,
+        Some(name.to_string()),
+    ));
     assert_eq!(
-        info.names.len(),
+        info.identities.len(),
         expected,
         "value-class carrier provenance must match the transformed function"
     );
@@ -65,9 +71,17 @@ pub(super) fn record_function(
     let info = ir
         .fn_params
         .entry(function)
-        .or_insert_with(|| crate::ir::FnParamInfo::names(names.clone()));
+        .or_insert_with(|| crate::ir::FnParamInfo::source_names(names.clone()));
     assert_eq!(
-        info.names, names,
+        info.identities
+            .iter()
+            .map(|identity| identity.source_name.as_deref())
+            .collect::<Vec<_>>(),
+        names
+            .iter()
+            .map(String::as_str)
+            .map(Some)
+            .collect::<Vec<_>>(),
         "one function has one parameter identity list"
     );
     for &parameter in compiler_generated {
@@ -88,37 +102,36 @@ pub(super) fn function(
     if ir.synthetic_methods.contains(&function) && generated.is_none() {
         return Vec::new();
     }
-    let source_info = ir.fn_params.get(&function);
-    let Some(mut names) = ir
+    let Some(mut identities) = ir
         .function_parameter_identities(function)
-        .map(<[String]>::to_vec)
+        .map(<[IrParameterIdentity]>::to_vec)
     else {
         return Vec::new();
     };
-    if names.len() + 1 == physical_parameters.len()
+    if identities.len() + 1 == physical_parameters.len()
         && physical_parameters.last().is_some_and(|ty| {
             ty.obj_internal()
                 .is_some_and(|name| same(name, crate::types::wk::continuation()))
         })
     {
-        names.push("$completion".to_string());
+        identities.push(IrParameterIdentity::generated(
+            IrGeneratedParameterRole::Continuation,
+            None,
+        ));
     }
     assert_eq!(
-        names.len(),
+        identities.len(),
         physical_parameters.len(),
         "recorded function parameter identities must match the physical JVM parameters"
     );
-    assert!(
-        names.iter().all(|name| !name.is_empty()),
-        "a MethodParameters entry must have a non-empty name"
-    );
-    let mut parameters = names
+    let function_name = &ir.functions[function as usize].name;
+    let mut parameters = identities
         .into_iter()
         .enumerate()
-        .map(|(index, name)| {
+        .map(|(_index, identity)| {
             parameter(
-                name,
-                u16::from(source_info.is_some_and(|info| info.is_compiler_generated(index)))
+                crate::jvm::parameter_names::legacy(&identity, function_name),
+                u16::from(identity.provenance == IrParameterProvenance::CompilerGenerated)
                     * SYNTHETIC,
             )
         })

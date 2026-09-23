@@ -31,12 +31,12 @@ pub(super) fn attach_declared_function_debug(
         return;
     }
     let param_tys = jvm_function_params(ir, fid);
-    let parameter_names = ir.function_parameter_identities(fid);
+    let parameter_identities = ir.function_parameter_identities(fid);
     if !param_tys.is_empty() {
-        let parameter_names =
-            parameter_names.expect("a debug-published function carries exact parameter identities");
+        let parameter_identities = parameter_identities
+            .expect("a debug-published function carries exact parameter identities");
         assert_eq!(
-            parameter_names.len(),
+            parameter_identities.len(),
             param_tys.len(),
             "debug parameter identities exactly match physical arity for function {fid} ({})",
             function.name,
@@ -51,12 +51,18 @@ pub(super) fn attach_declared_function_debug(
     }
     let mut body_pc = 0u16;
     for (index, ty) in param_tys.iter().enumerate() {
-        let name = parameter_names
-            .and_then(|names| names.get(index))
-            .cloned()
+        let identity = parameter_identities
+            .and_then(|identities| identities.get(index))
             .expect("a debug-published parameter needs its canonical source identity");
-        if let Some(Some(guarded)) = function.param_checks.get(index) {
-            body_pc += aload_len(slot) + cw.string_ldc_len(guarded).unwrap_or(2) + 3;
+        let name = crate::jvm::parameter_names::legacy(identity, &function.name);
+        if function
+            .param_checks
+            .get(index)
+            .is_some_and(Option::is_some)
+        {
+            let guarded = crate::jvm::parameter_names::assertion(identity, &function.name)
+                .expect("a checked parameter carries an assertion identity");
+            body_pc += aload_len(slot) + cw.string_ldc_len(&guarded).unwrap_or(2) + 3;
         }
         locals.push((name, crate::jvm::names::type_descriptor(*ty), slot));
         slot += slot_words(*ty);

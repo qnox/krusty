@@ -1255,7 +1255,7 @@ pub struct IrFunction {
     /// Per-parameter `Some(name)` when the backend should guard it with a non-null assertion at method
     /// entry (`Intrinsics.checkNotNullParameter` on the JVM) — non-null reference parameters of a
     /// visible (non-private) function. Empty for synthesized methods (no guards). Parallel to `params`.
-    pub param_checks: Vec<Option<String>>,
+    pub param_checks: Vec<Option<IrParameterCheck>>,
 }
 
 /// One entry of an `enum class` in [`IrClass`]. Groups what were parallel `Vec`s keyed by entry index
@@ -3521,9 +3521,6 @@ impl IrFile {
     pub fn param_defaults_stub_only(&self, fid: u32) -> bool {
         self.fn_params.get(&fid).is_some_and(|info| info.stub_only)
     }
-    pub fn param_names(&self, fid: u32) -> Option<&[String]> {
-        Some(&self.fn_params.get(&fid)?.names)
-    }
     pub(crate) fn set_debug_local_provenance(
         &mut self,
         declaration: ExprId,
@@ -3622,7 +3619,10 @@ pub use generated_members::{
     IrGeneratedFunctionPublication, IrGeneratedMemberPublication,
 };
 mod function_parameters;
-pub use function_parameters::FnParamInfo;
+pub use function_parameters::{
+    FnParamInfo, IrGeneratedParameterRole, IrParameterCheck, IrParameterIdentity,
+    IrParameterProvenance, IrParameterRole,
+};
 mod traversal;
 pub use traversal::*;
 mod clone;

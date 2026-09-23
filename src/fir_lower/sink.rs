@@ -478,21 +478,24 @@ impl<'a> CommonIrBodySink<'a> {
             .iter()
             .map(|parameter| parameter.get())
             .collect::<Vec<_>>();
-        let mut names = (0..index.callable_parameter_name_count(callable.id))
+        let mut identities = (0..index.callable_parameter_name_count(callable.id))
             .filter_map(|ordinal| {
                 index
                     .callable_parameter_name(callable.id, ordinal as u32)
-                    .map(str::to_owned)
+                    .map(crate::ir::IrParameterIdentity::source)
             })
             .collect::<Vec<_>>();
         if !companion_associated {
             if let Some(receiver) = callable.shape.extension_receiver {
                 let position = callable.shape.context_parameter_count as usize;
-                if position > params.len() || position > names.len() {
+                if position > params.len() || position > identities.len() {
                     return Err(FirFileLoweringFailure::MissingCallable(declaration));
                 }
                 params.insert(position, receiver.get());
-                names.insert(position, "$this$inline".to_string());
+                identities.insert(
+                    position,
+                    crate::ir::IrParameterIdentity::extension_receiver(),
+                );
             }
         }
         let dispatch_receiver = index
@@ -526,7 +529,7 @@ impl<'a> CommonIrBodySink<'a> {
         }
         self.ir
             .fn_params
-            .insert(function, FnParamInfo::names(names));
+            .insert(function, FnParamInfo::identities(identities));
         attach_callable_generic_facts(index, declaration, function, self.ir);
         self.ir
             .checked_callable_functions
@@ -1034,27 +1037,24 @@ impl<'a> CommonIrBodySink<'a> {
                     }
                 })
                 .collect::<Vec<_>>();
-            let mut names = (0..index.callable_parameter_name_count(callable.id))
+            let mut identities = (0..index.callable_parameter_name_count(callable.id))
                 .map(|ordinal| {
                     index
                         .callable_parameter_name(callable.id, ordinal as u32)
+                        .map(crate::ir::IrParameterIdentity::source)
                         .expect("published parameter-name count must address every name")
-                        .to_owned()
                 })
                 .collect::<Vec<_>>();
             if !companion_associated {
                 if let Some(receiver) = callable.shape.extension_receiver {
                     let position = callable.shape.context_parameter_count as usize;
-                    if position > params.len() || position > names.len() {
+                    if position > params.len() || position > identities.len() {
                         return Err(FirFileLoweringFailure::MissingCallable(declaration));
                     }
                     params.insert(position, receiver.get());
-                    names.insert(
+                    identities.insert(
                         position,
-                        format!(
-                            "$this${}",
-                            index.callable_name(callable.id).unwrap_or("extension")
-                        ),
+                        crate::ir::IrParameterIdentity::extension_receiver(),
                     );
                 }
             }
@@ -1163,7 +1163,7 @@ impl<'a> CommonIrBodySink<'a> {
             }
             self.ir
                 .fn_params
-                .insert(function, FnParamInfo::names(names));
+                .insert(function, FnParamInfo::identities(identities));
             if let Some(plugin) = index.callable_behavior(callable.id).plugin_expression {
                 self.ir
                     .plugin_declaration_functions
@@ -1394,15 +1394,17 @@ impl<'a> CommonIrBodySink<'a> {
             };
             *slot = Some(value);
         }
-        let names = self
+        let identities = self
             .ir
             .fn_params
             .get(&function)
-            .map(|info| info.names.clone())
+            .map(|info| info.identities.clone())
             .unwrap_or_default();
-        self.ir
-            .fn_params
-            .insert(function, FnParamInfo::defaults(names, defaults));
+        self.ir.fn_params.insert(function, {
+            let mut info = FnParamInfo::identities(identities);
+            info.defaults = Some(defaults);
+            info
+        });
         Ok(())
     }
 }

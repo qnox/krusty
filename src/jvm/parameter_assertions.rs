@@ -24,16 +24,11 @@ fn realize_function(ir: &mut IrFile, function: FunId) {
     else {
         return;
     };
-    let names = ir.param_names(function).unwrap_or(&[]).to_vec();
     let declared_nullable = ir
         .fn_param_declared_nullable
         .get(&function)
         .cloned()
         .unwrap_or_default();
-    let extension_receiver = ir
-        .extension_receiver_fns
-        .contains(&function)
-        .then(|| ir.fn_context_counts.get(&function).copied().unwrap_or(0));
     let checks = &mut ir.functions[function as usize].param_checks;
     checks.resize(parameters.len(), None);
     for (ordinal, ty) in parameters.into_iter().enumerate() {
@@ -43,11 +38,7 @@ fn realize_function(ir: &mut IrFile, function: FunId) {
         {
             continue;
         }
-        checks[ordinal] = if extension_receiver == Some(ordinal) {
-            Some("<this>".to_owned())
-        } else {
-            names.get(ordinal).cloned()
-        };
+        checks[ordinal] = Some(crate::ir::IrParameterCheck::NonNull);
     }
 }
 

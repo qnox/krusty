@@ -1,68 +1,166 @@
-//! Function-parameter names, defaults, and compiler-generated provenance.
+//! Function-parameter identity, defaults, and compiler-generated provenance.
 
 use super::{ExprId, FunId, IrFile};
 
+/// What one physical common-IR parameter means to the Kotlin declaration.
+///
+/// This is deliberately independent of every target spelling. In particular, captures, receivers,
+/// and unnamed context parameters do not acquire JVM `$...`, `<this>`, or positional names here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IrParameterRole {
+    Value,
+    ContextValue,
+    ContextReceiver { ordinal: u32 },
+    ExtensionReceiver,
+    CapturedValue { ordinal: u32 },
+    CapturedReceiver { ordinal: u32 },
+    PropertySetterValue,
+    Generated(IrGeneratedParameterRole),
+}
+
+/// A compiler-created parameter's semantic job. Targets own any physical spelling and flags.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IrGeneratedParameterRole {
+    Positional { ordinal: u32 },
+    Continuation,
+    HolderReceiver,
+    ValueClassCarrier,
+    AccessorValue { ordinal: u32 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IrParameterProvenance {
+    SourceDeclared,
+    CompilerGenerated,
+}
+
+/// Stable identity of one physical function parameter.
+///
+/// `source_name` is present only when the source or a generated-declaration producer published a
+/// semantic name. Its absence is a fact, not permission for a later phase to invent `pN`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IrParameterIdentity {
+    pub source_name: Option<String>,
+    pub role: IrParameterRole,
+    pub provenance: IrParameterProvenance,
+}
+
+impl IrParameterIdentity {
+    pub fn source(name: impl Into<String>) -> Self {
+        Self {
+            source_name: Some(name.into()),
+            role: IrParameterRole::Value,
+            provenance: IrParameterProvenance::SourceDeclared,
+        }
+    }
+
+    pub fn context_value(name: impl Into<String>) -> Self {
+        Self {
+            source_name: Some(name.into()),
+            role: IrParameterRole::ContextValue,
+            provenance: IrParameterProvenance::SourceDeclared,
+        }
+    }
+
+    pub fn context_receiver(ordinal: u32) -> Self {
+        Self {
+            source_name: None,
+            role: IrParameterRole::ContextReceiver { ordinal },
+            provenance: IrParameterProvenance::SourceDeclared,
+        }
+    }
+
+    pub fn extension_receiver() -> Self {
+        Self {
+            source_name: None,
+            role: IrParameterRole::ExtensionReceiver,
+            provenance: IrParameterProvenance::SourceDeclared,
+        }
+    }
+
+    pub fn captured_value(source_name: Option<String>, ordinal: u32) -> Self {
+        Self {
+            source_name,
+            role: IrParameterRole::CapturedValue { ordinal },
+            provenance: IrParameterProvenance::CompilerGenerated,
+        }
+    }
+
+    pub fn captured_receiver(ordinal: u32) -> Self {
+        Self {
+            source_name: None,
+            role: IrParameterRole::CapturedReceiver { ordinal },
+            provenance: IrParameterProvenance::CompilerGenerated,
+        }
+    }
+
+    pub fn generated(role: IrGeneratedParameterRole, source_name: Option<String>) -> Self {
+        Self {
+            source_name,
+            role: IrParameterRole::Generated(role),
+            provenance: IrParameterProvenance::CompilerGenerated,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IrParameterCheck {
+    NonNull,
+}
+
 #[derive(Clone, Default, Debug)]
 pub struct FnParamInfo {
-    pub names: Vec<String>,
+    pub identities: Vec<IrParameterIdentity>,
     pub defaults: Option<Vec<Option<ExprId>>>,
     /// The registered `defaults` serve only the `$default` stub. A call site must not reuse them to
     /// fill an omitted argument. This is set for extensions whose defaults are not all constant.
     pub stub_only: bool,
-    /// Parameter provenance parallel to `names`; absent tail entries are source-declared. JVM
-    /// lowering uses this semantic fact when choosing `MethodParameters` access flags.
-    compiler_generated: Vec<bool>,
 }
 
 impl FnParamInfo {
-    pub fn names(names: Vec<String>) -> Self {
+    pub fn source_names(names: Vec<String>) -> Self {
         Self {
-            names,
+            identities: names.into_iter().map(IrParameterIdentity::source).collect(),
             defaults: None,
             stub_only: false,
-            compiler_generated: Vec::new(),
         }
     }
 
-    pub fn defaults(names: Vec<String>, defaults: Vec<Option<ExprId>>) -> Self {
+    pub fn identities(identities: Vec<IrParameterIdentity>) -> Self {
         Self {
-            names,
-            defaults: Some(defaults),
+            identities,
+            defaults: None,
             stub_only: false,
-            compiler_generated: Vec::new(),
         }
+    }
+
+    pub fn source_defaults(names: Vec<String>, defaults: Vec<Option<ExprId>>) -> Self {
+        let mut info = Self::source_names(names);
+        info.defaults = Some(defaults);
+        info
     }
 
     /// [`Self::defaults`] with the stub-only marker set — see [`Self::stub_only`].
-    pub fn stub_only_defaults(names: Vec<String>, defaults: Vec<Option<ExprId>>) -> Self {
-        Self {
-            names,
-            defaults: Some(defaults),
-            stub_only: true,
-            compiler_generated: Vec::new(),
-        }
+    pub fn source_stub_only_defaults(names: Vec<String>, defaults: Vec<Option<ExprId>>) -> Self {
+        let mut info = Self::source_defaults(names, defaults);
+        info.stub_only = true;
+        info
     }
 
-    pub(crate) fn prepend_compiler_generated(&mut self, name: String) {
-        self.compiler_generated.resize(self.names.len(), false);
-        self.names.insert(0, name);
-        self.compiler_generated.insert(0, true);
+    pub(crate) fn prepend_generated(&mut self, identity: IrParameterIdentity) {
+        assert_eq!(
+            identity.provenance,
+            IrParameterProvenance::CompilerGenerated,
+            "a prepended generated parameter carries generated provenance"
+        );
+        self.identities.insert(0, identity);
     }
 
     pub(crate) fn mark_compiler_generated(&mut self, parameter: usize) {
-        assert!(
-            parameter < self.names.len(),
-            "parameter provenance needs a name"
-        );
-        self.compiler_generated.resize(self.names.len(), false);
-        self.compiler_generated[parameter] = true;
-    }
-
-    pub(crate) fn is_compiler_generated(&self, parameter: usize) -> bool {
-        self.compiler_generated
-            .get(parameter)
-            .copied()
-            .unwrap_or(false)
+        self.identities
+            .get_mut(parameter)
+            .expect("parameter provenance needs an identity")
+            .provenance = IrParameterProvenance::CompilerGenerated;
     }
 }
 
@@ -73,14 +171,17 @@ impl IrFile {
     /// but consumers must not branch on that origin. Presence is optional for functions that have
     /// no source/debug parameter surface; when present, the identities are complete and exactly
     /// parallel to the current semantic parameter list.
-    pub(crate) fn function_parameter_identities(&self, function: FunId) -> Option<&[String]> {
+    pub(crate) fn function_parameter_identities(
+        &self,
+        function: FunId,
+    ) -> Option<&[IrParameterIdentity]> {
         let source = self
             .fn_params
             .get(&function)
-            .map(|parameters| parameters.names.as_slice());
+            .map(|parameters| parameters.identities.as_slice());
         let generated = self
             .generated_function_publication(function)
-            .map(|publication| publication.parameter_names.as_slice());
+            .map(|publication| publication.parameter_identities.as_slice());
         assert!(
             source.is_none() || generated.is_none(),
             "one function has one owning parameter-identity contract"
@@ -96,10 +197,6 @@ impl IrFile {
             identities.len(),
             semantic_arity,
             "parameter identities exactly match semantic function arity"
-        );
-        assert!(
-            identities.iter().all(|identity| !identity.is_empty()),
-            "parameter identities are never empty"
         );
         Some(identities)
     }
@@ -132,7 +229,7 @@ mod tests {
         let source = add_function(&mut file, "source", 2);
         file.fn_params.insert(
             source,
-            FnParamInfo::names(["left", "right"].map(String::from).to_vec()),
+            FnParamInfo::source_names(["left", "right"].map(String::from).to_vec()),
         );
         let generated = add_function(&mut file, "generated", 1);
         file.publish_generated_members(
@@ -141,7 +238,7 @@ mod tests {
                 metadata_scope: IrGeneratedFunctionMetadataScope::Exclusive,
                 functions: vec![IrGeneratedFunctionPublication {
                     function: generated,
-                    parameter_names: vec!["value".to_string()],
+                    parameter_identities: vec![IrParameterIdentity::source("value")],
                     metadata: None,
                     debug: IrGeneratedDeclarationDebug::LocalsOnly,
                 }],
@@ -150,11 +247,16 @@ mod tests {
 
         assert_eq!(
             file.function_parameter_identities(source),
-            Some(&["left".to_string(), "right".to_string()][..])
+            Some(
+                &[
+                    IrParameterIdentity::source("left"),
+                    IrParameterIdentity::source("right"),
+                ][..]
+            )
         );
         assert_eq!(
             file.function_parameter_identities(generated),
-            Some(&["value".to_string()][..])
+            Some(&[IrParameterIdentity::source("value")][..])
         );
     }
 
@@ -163,8 +265,61 @@ mod tests {
     fn parameter_identity_view_rejects_partial_source_lists() {
         let mut file = IrFile::default();
         let function = add_function(&mut file, "partial", 2);
-        file.fn_params
-            .insert(function, FnParamInfo::names(vec!["onlyOne".to_string()]));
+        file.fn_params.insert(
+            function,
+            FnParamInfo::source_names(vec!["onlyOne".to_string()]),
+        );
         let _ = file.function_parameter_identities(function);
+    }
+
+    #[test]
+    fn parameter_roles_carry_source_identity_without_target_spelling() {
+        let identities = vec![
+            IrParameterIdentity::captured_value(Some("ledger".to_string()), 0),
+            IrParameterIdentity::captured_value(None, 1),
+            IrParameterIdentity::captured_receiver(0),
+            IrParameterIdentity::context_value("audit"),
+            IrParameterIdentity::context_receiver(1),
+            IrParameterIdentity::extension_receiver(),
+            IrParameterIdentity::source("entry"),
+            IrParameterIdentity::source("limit"),
+        ];
+        assert_eq!(
+            identities
+                .iter()
+                .map(|identity| identity.source_name.as_deref())
+                .collect::<Vec<_>>(),
+            [
+                Some("ledger"),
+                None,
+                None,
+                Some("audit"),
+                None,
+                None,
+                Some("entry"),
+                Some("limit"),
+            ]
+        );
+        assert_eq!(
+            identities
+                .iter()
+                .map(|identity| identity.role.clone())
+                .collect::<Vec<_>>(),
+            [
+                IrParameterRole::CapturedValue { ordinal: 0 },
+                IrParameterRole::CapturedValue { ordinal: 1 },
+                IrParameterRole::CapturedReceiver { ordinal: 0 },
+                IrParameterRole::ContextValue,
+                IrParameterRole::ContextReceiver { ordinal: 1 },
+                IrParameterRole::ExtensionReceiver,
+                IrParameterRole::Value,
+                IrParameterRole::Value,
+            ]
+        );
+        assert!(identities.iter().all(|identity| {
+            identity.source_name.as_deref().is_none_or(|name| {
+                !name.starts_with('$') && name != "<this>" && !name.starts_with('p')
+            })
+        }));
     }
 }

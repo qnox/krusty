@@ -443,7 +443,11 @@ pub(crate) fn lower_suspend(
         // uses it instead of the positional `p{n}` fallback. `@Metadata` describes the DECLARED
         // function (no continuation parameter — it reads only the leading names), so this is inert there.
         if let Some(info) = ir.fn_params.get_mut(&fid) {
-            info.names.push("$completion".to_string());
+            info.identities
+                .push(crate::ir::IrParameterIdentity::generated(
+                    crate::ir::IrGeneratedParameterRole::Continuation,
+                    None,
+                ));
         }
         // kotlinc emits NO `checkNotNullParameter` on a suspend fn: the state-machine RE-ENTRY call
         // (`foo(null, continuation)`) passes null for every value parameter (the real values live in
@@ -2979,7 +2983,7 @@ fn build_state_machine(
         let ir = &*flat.ir;
         let mut slot_name: std::collections::HashMap<u32, String> =
             std::collections::HashMap::new();
-        if let Some(names) = ir.param_names(fid) {
+        if let Some(names) = crate::jvm::parameter_names::function(ir, fid) {
             let function = &ir.functions[fid as usize];
             let this_off = u32::from(function.dispatch_receiver.is_some() && !function.is_static);
             for (i, nm) in names.iter().enumerate() {

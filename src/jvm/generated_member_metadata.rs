@@ -31,16 +31,21 @@ pub(super) fn functions(ir: &IrFile, publication: &IrGeneratedMemberPublication)
                 .or(member_semantic.map(|(_, ret)| *ret))
                 .unwrap_or(realized_ret);
             assert_eq!(
-                member.parameter_names.len(),
+                member.parameter_identities.len(),
                 params.len(),
                 "generated metadata parameter identities exactly match semantic arity"
             );
             let mut result = FnMeta::plain(
                 metadata.source_name.clone(),
                 member
-                    .parameter_names
+                    .parameter_identities
                     .iter()
-                    .cloned()
+                    .map(|identity| {
+                        identity
+                            .source_name
+                            .clone()
+                            .expect("generated metadata parameters carry semantic names")
+                    })
                     .zip(params.iter().copied())
                     .collect(),
                 ret,
@@ -172,7 +177,9 @@ mod tests {
             metadata_scope: IrGeneratedFunctionMetadataScope::Additive,
             functions: vec![IrGeneratedFunctionPublication {
                 function,
-                parameter_names: ["self", "output", "serialDesc"].map(String::from).to_vec(),
+                parameter_identities: ["self", "output", "serialDesc"]
+                    .map(crate::ir::IrParameterIdentity::source)
+                    .to_vec(),
                 metadata: Some(IrGeneratedFunctionMetadata {
                     source_name: "write$Self".to_string(),
                     visibility: Visibility::Internal,
@@ -223,7 +230,7 @@ mod tests {
             metadata_scope: IrGeneratedFunctionMetadataScope::Exclusive,
             functions: vec![IrGeneratedFunctionPublication {
                 function,
-                parameter_names: Vec::new(),
+                parameter_identities: Vec::new(),
                 metadata: Some(IrGeneratedFunctionMetadata {
                     source_name: "release".to_string(),
                     visibility: Visibility::Public,

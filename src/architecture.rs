@@ -432,6 +432,27 @@ mod tests {
     }
 
     #[test]
+    fn checked_fir_lowering_does_not_invent_parameter_spellings() {
+        for path in rust_files_under("src/fir_lower") {
+            let text = fs::read_to_string(&path).expect("read checked FIR lowerer");
+            for forbidden in [
+                "format!(\"$capture",
+                "format!(\"$this$",
+                "format!(\"$context_receiver_",
+                "\"$this$inline\"",
+                "\"<this>\".to_",
+                "format!(\"p{",
+            ] {
+                assert!(
+                    !text.contains(forbidden),
+                    "{} must publish typed parameter identity/provenance; the target owns `{forbidden}` formatting",
+                    path.display(),
+                );
+            }
+        }
+    }
+
+    #[test]
     fn module_symbols_uses_only_frontend_symbol_handoff_dependencies() {
         // `names` is a dependency-free leaf of Kotlin naming conventions (accessor spellings, the
         // package-vs-nesting internal-name split). Surfacing a top-level property needs its accessor

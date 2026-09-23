@@ -809,7 +809,7 @@ impl BodyLowering<'_> {
             let receiver = body.captures().len()
                 + body.implicit_receiver_captures().len()
                 + body.context_receiver_types().len();
-            param_checks[receiver] = Some("<this>".to_owned());
+            param_checks[receiver] = Some(crate::ir::IrParameterCheck::NonNull);
         }
         let source_name = body.debug_name().unwrap_or("$fir_lambda");
         let name = format!(
@@ -874,11 +874,11 @@ impl BodyLowering<'_> {
                 );
             }
         }
-        let parameter_names = local_function_debug_parameter_names(self.body, body);
+        let parameter_identities = local_function_parameter_identities(self.body, body);
         self.ir
             .fn_params
             .entry(function)
-            .or_insert_with(|| crate::ir::FnParamInfo::names(parameter_names));
+            .or_insert_with(|| crate::ir::FnParamInfo::identities(parameter_identities));
         if let Some(line) = local_function_debug_line(body) {
             self.ir.fn_decl_lines.insert(function, line);
         }
@@ -1008,7 +1008,7 @@ impl BodyLowering<'_> {
                 .get_mut(&function)
                 .expect("a lifted local function publishes its parameter identities first");
             assert_eq!(
-                parameters.names.len(),
+                parameters.identities.len(),
                 defaults.len(),
                 "local default arguments exactly match the lifted parameter contract"
             );
@@ -1136,13 +1136,16 @@ fn local_function_parameters(body: &FirBody) -> Vec<Ty> {
         .collect()
 }
 
-fn local_function_debug_parameter_names(enclosing: &FirBody, body: &FirBody) -> Vec<String> {
-    let mut names = body
+fn local_function_parameter_identities(
+    enclosing: &FirBody,
+    body: &FirBody,
+) -> Vec<crate::ir::IrParameterIdentity> {
+    let mut identities = body
         .captures()
         .iter()
         .enumerate()
         .map(|(ordinal, capture)| {
-            (capture.enclosing_depth == 0)
+            let source_name = (capture.enclosing_depth == 0)
                 .then(|| {
                     capture
                         .source
@@ -1150,41 +1153,55 @@ fn local_function_debug_parameter_names(enclosing: &FirBody, body: &FirBody) -> 
                         .and_then(|source| enclosing.debug_value_name(source))
                 })
                 .flatten()
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("$capture{ordinal}"))
+                .map(str::to_owned);
+            crate::ir::IrParameterIdentity::captured_value(
+                source_name,
+                u32::try_from(ordinal).expect("too many captured parameters"),
+            )
         })
         .collect::<Vec<_>>();
-    names.extend(
+    identities.extend(
         body.implicit_receiver_captures()
             .iter()
             .enumerate()
-            .map(|(ordinal, _)| format!("$this${ordinal}")),
+            .map(|(ordinal, _)| {
+                crate::ir::IrParameterIdentity::captured_receiver(
+                    u32::try_from(ordinal).expect("too many captured receiver parameters"),
+                )
+            }),
     );
     let context_value_count = body.context_value_count() as usize;
     for ordinal in 0..body.context_receiver_types().len() {
-        let name = (ordinal < context_value_count)
+        let source_name = (ordinal < context_value_count)
             .then(|| body.parameters().get(ordinal))
             .flatten()
             .and_then(|parameter| body.debug_value_name(parameter.value))
-            .map(str::to_owned)
-            .unwrap_or_else(|| format!("$context_receiver_{ordinal}"));
-        names.push(name);
+            .map(str::to_owned);
+        identities.push(match source_name {
+            Some(name) => crate::ir::IrParameterIdentity::context_value(name),
+            None => crate::ir::IrParameterIdentity::context_receiver(
+                u32::try_from(ordinal).expect("too many context receiver parameters"),
+            ),
+        });
     }
     if body.receiver_type().is_some() {
-        names.push("<this>".to_owned());
+        identities.push(crate::ir::IrParameterIdentity::extension_receiver());
     }
-    names.extend(
+    identities.extend(
         body.parameters()
             .iter()
             .skip(context_value_count)
-            .enumerate()
-            .map(|(ordinal, parameter)| {
+            .map(|parameter| {
                 body.debug_value_name(parameter.value)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| format!("p{ordinal}"))
+                    .map(crate::ir::IrParameterIdentity::source)
+                    .unwrap_or(crate::ir::IrParameterIdentity {
+                        source_name: None,
+                        role: crate::ir::IrParameterRole::Value,
+                        provenance: crate::ir::IrParameterProvenance::SourceDeclared,
+                    })
             }),
     );
-    names
+    identities
 }
 
 fn local_function_debug_line(body: &FirBody) -> Option<u32> {

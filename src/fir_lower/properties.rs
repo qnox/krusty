@@ -50,7 +50,6 @@ pub(super) fn named_context_parameters(
 pub(super) fn set_extension_accessor_parameter_names(
     index: &ResolvedModuleIndex,
     property: DeclarationId,
-    property_name: &str,
     setter: bool,
     function: FunId,
     ir: &mut IrFile,
@@ -61,26 +60,29 @@ pub(super) fn set_extension_accessor_parameter_names(
     let callable = index
         .callable_for_declaration(accessor)
         .ok_or(FirFileLoweringFailure::MissingCallable(accessor))?;
-    let mut names = (0..index.callable_parameter_name_count(callable.id))
+    let mut identities = (0..index.callable_parameter_name_count(callable.id))
         .map(|ordinal| {
             index
                 .callable_parameter_name(callable.id, ordinal as u32)
-                .map(str::to_owned)
+                .map(crate::ir::IrParameterIdentity::source)
                 .ok_or(FirFileLoweringFailure::MissingCallable(accessor))
         })
         .collect::<Result<Vec<_>, _>>()?;
     if callable.shape.extension_receiver.is_some() {
         let receiver_position = callable.shape.context_parameter_count as usize;
-        if receiver_position > names.len() {
+        if receiver_position > identities.len() {
             return Err(FirFileLoweringFailure::MissingCallable(accessor));
         }
-        names.insert(receiver_position, format!("$this${property_name}"));
+        identities.insert(
+            receiver_position,
+            crate::ir::IrParameterIdentity::extension_receiver(),
+        );
     }
-    if ir.functions[function as usize].params.len() != names.len() {
+    if ir.functions[function as usize].params.len() != identities.len() {
         return Err(FirFileLoweringFailure::MissingCallable(accessor));
     }
     ir.fn_params
-        .insert(function, crate::ir::FnParamInfo::names(names));
+        .insert(function, crate::ir::FnParamInfo::identities(identities));
     Ok(())
 }
 
@@ -620,16 +622,9 @@ fn materialize_top_level_property(
             None,
         )
     });
-    set_extension_accessor_parameter_names(index, declaration, &property_name, false, getter, ir)?;
+    set_extension_accessor_parameter_names(index, declaration, false, getter, ir)?;
     if let Some(setter) = setter {
-        set_extension_accessor_parameter_names(
-            index,
-            declaration,
-            &property_name,
-            true,
-            setter,
-            ir,
-        )?;
+        set_extension_accessor_parameter_names(index, declaration, true, setter, ir)?;
     }
     realizations.insert(
         property_id,
@@ -1111,9 +1106,17 @@ pub(super) fn add_accessor_function(
     });
     ir.fn_params.insert(
         function,
-        crate::ir::FnParamInfo::names(
+        crate::ir::FnParamInfo::identities(
             (0..parameter_count)
-                .map(|ordinal| format!("value{ordinal}"))
+                .map(|ordinal| {
+                    crate::ir::IrParameterIdentity::generated(
+                        crate::ir::IrGeneratedParameterRole::AccessorValue {
+                            ordinal: u32::try_from(ordinal)
+                                .expect("too many generated accessor parameters"),
+                        },
+                        None,
+                    )
+                })
                 .collect(),
         ),
     );
@@ -1139,9 +1142,17 @@ fn add_abstract_accessor_function(
     });
     ir.fn_params.insert(
         function,
-        crate::ir::FnParamInfo::names(
+        crate::ir::FnParamInfo::identities(
             (0..parameter_count)
-                .map(|ordinal| format!("value{ordinal}"))
+                .map(|ordinal| {
+                    crate::ir::IrParameterIdentity::generated(
+                        crate::ir::IrGeneratedParameterRole::AccessorValue {
+                            ordinal: u32::try_from(ordinal)
+                                .expect("too many generated accessor parameters"),
+                        },
+                        None,
+                    )
+                })
                 .collect(),
         ),
     );

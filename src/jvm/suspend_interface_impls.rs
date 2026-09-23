@@ -160,7 +160,10 @@ pub(crate) fn lower_suspend_interface_impls(ir: &mut IrFile) {
                 let declaration_info = implementation_info.clone();
                 implementation_info.defaults = None;
                 implementation_info.stub_only = false;
-                implementation_info.prepend_compiler_generated("$this".to_string());
+                implementation_info.prepend_generated(crate::ir::IrParameterIdentity::generated(
+                    crate::ir::IrGeneratedParameterRole::HolderReceiver,
+                    None,
+                ));
                 ir.fn_params.insert(fid, implementation_info);
                 ir.fn_params.insert(trampoline, declaration_info);
             }

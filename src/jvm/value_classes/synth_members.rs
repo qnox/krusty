@@ -303,7 +303,7 @@ pub(super) fn synth_value_members(
         if let Some(def) = constructor_default {
             ir.fn_params.insert(
                 cfid,
-                crate::ir::FnParamInfo::defaults(vec![fname.clone()], vec![Some(def)]),
+                crate::ir::FnParamInfo::source_defaults(vec![fname.clone()], vec![Some(def)]),
             );
         }
     }

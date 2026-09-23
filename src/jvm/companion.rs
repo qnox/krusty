@@ -427,7 +427,7 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
                     param_checks: vec![(candidate.ty.is_reference()
                         && !candidate.ty.is_nullable()
                         && !candidate.ty.is_ty_param())
-                    .then(|| "<set-?>".to_string())],
+                    .then_some(crate::ir::IrParameterCheck::NonNull)],
                 });
                 ir.fn_source_order.insert(setter, candidate.source_order);
                 setter
