@@ -7378,6 +7378,19 @@ and behavior is checked by RUNNING the emitted program.
   Kotlin's documented one.
   Tests: `tests/native_array_members_e2e.rs` (`an_array_renders_its_contents_deeply`).
 
+- **A defaulted stdlib argument arrives two ways, and neither is a value the program chose.** A
+  jar call leaves it OUT, because kotlinc has a `$default` synthetic to carry it; a klib call
+  materializes it as a CONSTANT argument, because a klib has no such synthetic. Both mean "the
+  program wrote nothing here", and reading the ARGUMENTS rather than the signature is what makes
+  them one answer. Anything else is a value the program did choose, asking for something the
+  runtime entry point does not do — `ignoreCase = true` asks about Unicode case folding, a
+  `startIndex` asks to skip a prefix — so such a call keeps declining with its own argument in
+  sight rather than having it dropped. The defaults are named where the check is made, because the
+  provider does not carry them to a backend: `default_values` is consumed during resolution and is
+  not on the callable the generator sees.
+  Tests: `tests/native_text_members_e2e.rs` (`text_finds_the_first_position_holding_any_unit`,
+  `a_chosen_start_index_declines_rather_than_being_dropped`).
+
 - **A TERMINAL member may be asked of a sequence; a lazy one may not.** Every walk this runtime
   has is eager, and what makes an eager `map` over a sequence wrong is the ANSWER it hands on — the
   transform would run for elements a later `first()` never asks for. `forEach` and `joinToString`

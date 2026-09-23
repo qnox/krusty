@@ -228,3 +228,41 @@ fun box(): String {
 "#;
     every_backend_agrees_with_kotlinc("native_text_to_char_array", source);
 }
+
+/// `s.indexOfAny(chars)`: the first position holding any of the units.
+///
+/// Its other two parameters — a start index and `ignoreCase` — are not values the runtime is
+/// given, so only a call that leaves both at their declared defaults reaches it. Those two arrive
+/// differently by provider: a jar call leaves them out, a klib call materializes each as a
+/// constant argument, and reading the ARGUMENTS rather than the signature makes them one answer.
+#[test]
+fn text_finds_the_first_position_holding_any_unit() {
+    let source = r#"
+fun box(): String {
+    if ("123a".indexOfAny("a".toCharArray()) != 3) return "fail hit"
+    if ("123".indexOfAny(charArrayOf('2', '3')) != 1) return "fail earliest"
+    if ("123".indexOfAny(charArrayOf('9')) != -1) return "fail miss"
+    if ("123".indexOfAny(charArrayOf()) != -1) return "fail none wanted"
+    if ("".indexOfAny(charArrayOf('1')) != -1) return "fail empty text"
+    // The FIRST position in the text, not the first wanted char's earliest position.
+    if ("ba".indexOfAny(charArrayOf('a', 'b')) != 0) return "fail order"
+    return "OK"
+}
+"#;
+    every_backend_agrees_with_kotlinc("native_text_index_of_any", source);
+}
+
+/// A start index the program DID choose asks to skip a prefix, which the runtime entry point does
+/// not do — so the call declines with its own argument still in sight rather than ignoring it.
+#[test]
+fn a_chosen_start_index_declines_rather_than_being_dropped() {
+    let source = r#"
+fun box(): String = if ("aba".indexOfAny(charArrayOf('a'), 1) == 2) "OK" else "fail"
+"#;
+    assert_eq!(
+        kotlinc_box_result(source),
+        "OK",
+        "unexpected kotlinc result"
+    );
+    expect_native_decline(source, "native_text_index_of_any_start", "indexOfAny");
+}

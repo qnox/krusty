@@ -801,6 +801,8 @@ kt_char kt_string_last(KRef self);
 kt_char kt_string_single(KRef self);
 /* `s.toCharArray()`: the text's UTF-16 units as a `CharArray`. */
 KRef kt_string_to_char_array(KRef self);
+/* `s.indexOfAny(chars)`: the first position holding any of them, or -1. */
+kt_int kt_string_index_of_any_char(KRef self, KRef chars);
 /* `c in s`: a single unit rather than one text inside another, which `kt_string_contains` asks. */
 kt_boolean kt_string_contains_char(KRef self, kt_char value);
 /* `s.toInt()` / `s.toLong()` and their `OrNull` forms. The parse is Kotlin's: an optional sign,

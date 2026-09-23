@@ -3076,6 +3076,33 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                                 return self.convert(produced, Some(answer), *ret);
                             }
                         }
+                        // `s.indexOfAny(chars)`: the first position holding any of the units.
+                        // Its other two parameters — a start index and `ignoreCase` — are not
+                        // values the runtime is given, so a call reaches this only with both left
+                        // at what the declaration says; see `passes_only_its_defaults`.
+                        if super::super::intrinsics::is_index_of_any_chars(&owner, &name, params)
+                            && self.passes_only_its_defaults(
+                                args,
+                                1,
+                                &[IrConst::Int(0), IrConst::Boolean(false)],
+                            )
+                        {
+                            let operands =
+                                vec![self.reference(receiver)?, self.reference(args[0])?];
+                            if self.terminated {
+                                return Ok(None);
+                            }
+                            let produced = self.runtime_call(
+                                "kt_string_index_of_any_char",
+                                &[any(), any()],
+                                Ty::Int,
+                                &operands,
+                            )?;
+                            let Some(produced) = produced else {
+                                return Ok(None);
+                            };
+                            return self.convert(produced, Some(Ty::Int), *ret);
+                        }
                         // `s.startsWith(t)`, `s.endsWith(t)` and `t in s`, whose last parameter
                         // is Kotlin's `ignoreCase`. The default reaches here as a CONSTANT
                         // argument rather than as an absent one, so the case-sensitive form — the
@@ -3755,6 +3782,43 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(self
             .runtime_call("kt_equals", &[any(), any()], Ty::Boolean, &[left, right])?
             .expect("`kt_equals` returns a Boolean"))
+    }
+
+    /// Whether every operand from `required` onward is the declaration's own default, named here
+    /// as `expected`.
+    ///
+    /// A defaulted stdlib parameter reaches this backend one of two ways, and neither is a value
+    /// the program chose. A jar call leaves the argument OUT, because kotlinc has a `$default`
+    /// synthetic to carry it. A klib call materializes the default as a CONSTANT argument, because
+    /// a klib has no such synthetic to call. Both mean "the program wrote nothing here", and
+    /// reading the ARGUMENTS rather than the signature is what makes them one answer.
+    ///
+    /// Anything else is a value the program did choose, asking for something the runtime entry
+    /// point does not do — `ignoreCase = true` asks about Unicode case folding, a `startIndex`
+    /// asks to skip a prefix — so such a call keeps declining with its own argument in sight.
+    ///
+    /// The defaults are named by the CALLER rather than read from the declaration because the
+    /// provider does not carry them this far: `default_values` is consumed during resolution and
+    /// is not on the callable a backend sees. `lists::is_defaulted_join` spells out
+    /// `joinToString`'s six for the same reason; this is that check with the values passed in.
+    fn passes_only_its_defaults(
+        &self,
+        args: &[u32],
+        required: usize,
+        expected: &[IrConst],
+    ) -> bool {
+        if args.len() <= required {
+            return true;
+        }
+        if args.len() != required + expected.len() {
+            return false;
+        }
+        args.iter()
+            .skip(required)
+            .zip(expected)
+            .all(|(argument, default)| {
+                matches!(self.file.ir.expr(*argument), IrExpr::Const(written) if written == default)
+            })
     }
 
     /// Arguments coerced to the parameter carriers they are passed as.

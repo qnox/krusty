@@ -797,6 +797,26 @@ KRef kt_string_to_char_array(KRef self) {
     return array;
 }
 
+/* `s.indexOfAny(chars)`: the first position holding any of them, or -1.
+
+   The FIRST position, so the outer walk is over the TEXT and the inner over the wanted units. The
+   other nesting would answer the first wanted char's earliest position instead, which is a
+   different question whenever more than one of them occurs. */
+kt_int kt_string_index_of_any_char(KRef self, KRef chars) {
+    kt_int length = kt_string_length(self);
+    kt_int wanted = kt_length_of(chars);
+    const kt_char *units = (const kt_char *)((const KArray *)chars + 1);
+    for (kt_int at = 0; at < length; at++) {
+        kt_char unit = kt_string_get(self, at);
+        for (kt_int which = 0; which < wanted; which++) {
+            if (units[which] == unit) {
+                return at;
+            }
+        }
+    }
+    return -1;
+}
+
 /* `s.single()`: the one char of a text of length one. Kotlin raises `NoSuchElementException` for an
    empty text and `IllegalArgumentException` for a longer one — two different complaints, because
    "there is none" and "there is more than one" are different mistakes. */

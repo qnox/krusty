@@ -1348,6 +1348,27 @@ pub(super) fn scalar_member(
     }
 }
 
+/// `s.indexOfAny(chars)`, whose other two parameters — a start index and `ignoreCase` — the
+/// runtime does not answer and the CALLER therefore checks are at their declared defaults.
+///
+/// Not in [`scalar_member`]: that table carries every parameter, and these two are not values the
+/// runtime is given. The same reason [`case_sensitive_text_member`] is separate, and the same
+/// shape — only here there are two of them, which is what the general default check is for.
+pub(super) fn is_index_of_any_chars(owner: &str, name: &str, params: &[Ty]) -> bool {
+    if name != "indexOfAny" {
+        return false;
+    }
+    let owner = kotlin_owner(owner);
+    if declaration_package(owner) != "kotlin/text"
+        && !matches!(owner, "kotlin/String" | "kotlin/CharSequence")
+    {
+        return false;
+    }
+    // A `CharArray` of the units to look for. The overload taking a collection of STRINGS answers
+    // a different question and is not this one.
+    matches!(params.first(), Some(ty) if ty.non_null().array_elem() == Some(Ty::Char))
+}
+
 /// A `kotlin.text` member whose LAST parameter is Kotlin's `ignoreCase`, with the runtime entry
 /// point that answers the case-SENSITIVE form.
 ///
