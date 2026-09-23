@@ -1721,6 +1721,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `(receiver, args…) -> receiver.m(args)` — bound captures the receiver into the closure (so its
   arity is the method's), unbound takes the receiver as the first parameter. Only user-class methods
   (resolvable in the IR class table) and non-`Unit`/`Nothing` returns are modeled.
+- A reference to a builtin scalar member (`Int::times`, `1L::shl`, `Char::minus`, `Double::toInt`,
+  `Boolean::not`, `Int::compareTo`) denotes the same primitive operation a call of that declaration
+  does, with the same operand promotion (`Int.plus(Long)` adds `Long`s) — there is no JVM method to
+  reference. The reference keeps the selected declaration identity (reflection still reports `times`);
+  the JVM backend realizes the adapter body, or the reflective carrier's static helper, as the
+  declaration's operation, unboxing a platform/erased operand first. Operand carriers come from one
+  provider rule shared with checked FIR (`builtin_member_realization::primitive_binary_operands`).
+  Passed to an inline stdlib function (`w.reduce(Int::times)`), stored as a function value, bound, or
+  used as a `KFunction` (`tests/callable_ref_e2e.rs::builtin_scalar_member_references_realize_their_primitive_operations`).
 - Unbound top-level function references `::foo`: same `invokedynamic`/`LambdaMetafactory` lowering as a
   lambda, but the impl method handle points directly at the referenced function (no synthesized body).
   Exception: a `Unit`-returning `::foo` gets a synthesized wrapper `(params) -> { foo(params); Unit }`
