@@ -18,6 +18,12 @@ impl std::fmt::Display for PackageFragmentDecodeError {
 
 impl std::error::Error for PackageFragmentDecodeError {}
 
+impl PackageFragmentDecodeError {
+    pub(crate) fn into_parts(self) -> (usize, String) {
+        (self.offset, self.detail)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct KlibModuleHeader {
     pub(crate) module_name: String,
@@ -112,13 +118,13 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    fn absolute(&self) -> usize {
+    pub(crate) fn position(&self) -> usize {
         self.base + self.offset
     }
 
     fn error(&self, detail: impl Into<String>) -> PackageFragmentDecodeError {
         PackageFragmentDecodeError {
-            offset: self.absolute(),
+            offset: self.position(),
             detail: detail.into(),
         }
     }
