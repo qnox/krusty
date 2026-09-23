@@ -25,7 +25,10 @@ pub(crate) fn classify_classpath_entry(
         && path.file_name().is_some_and(|name| name == "ct.sym")
     {
         JvmClasspathEntryKind::CtSym
-    } else if path.is_file()
+    } else if !path.is_dir()
+        // The extension names an archive; only an actual directory overrides it. A path that does
+        // not exist yet keeps its archive kind, as it always did — what that path shares (the
+        // process-global inline-plan cache) must not change with whether the file is present.
         && path
             .extension()
             .and_then(|extension| extension.to_str())
@@ -69,7 +72,9 @@ impl JvmCompilationInputInventory {
         jdk_modules: Option<PathBuf>,
     ) -> Self {
         let common_expectation_klib = effective_classpath.iter().find_map(|entry| {
-            if classify_classpath_entry(entry, None) != JvmClasspathEntryKind::Archive {
+            if !entry.is_file()
+                || classify_classpath_entry(entry, None) != JvmClasspathEntryKind::Archive
+            {
                 return None;
             }
             let file_name = entry.file_name()?.to_str()?;
