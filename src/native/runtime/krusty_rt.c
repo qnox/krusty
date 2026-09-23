@@ -5402,8 +5402,6 @@ kt_long kt_mod_long(kt_long a, kt_long b) {
     return r;
 }
 
-/* Kotlin masks the shift count, so `1 shl 32` is `1`, not undefined. A right shift of a negative
-   value is implementation-defined in C, so the arithmetic shift is spelled out instead of assumed. */
 /* ---- unsigned integers ----------------------------------------------------------------------- */
 
 /* The wrapped bits are stored in the signed field of the matching width; only the descriptor says
@@ -5433,9 +5431,13 @@ KRef kt_box_ulong(kt_long value) {
     return object;
 }
 
+/* Unboxing a `null` is Kotlin's `NullPointerException`, the one `!!` raises. `kt_throw` records it
+   and RETURNS, so each of these returns too — falling through would read the value out of the null
+   just rejected. The zero is never read: the caller checks the pending slot first. */
 kt_byte kt_unbox_ubyte(KRef value) {
     if (value == NULL) {
         kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL));
+        return 0;
     }
     return value->as.byte_value;
 }
@@ -5443,6 +5445,7 @@ kt_byte kt_unbox_ubyte(KRef value) {
 kt_short kt_unbox_ushort(KRef value) {
     if (value == NULL) {
         kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL));
+        return 0;
     }
     return value->as.short_value;
 }
@@ -5450,6 +5453,7 @@ kt_short kt_unbox_ushort(KRef value) {
 kt_int kt_unbox_uint(KRef value) {
     if (value == NULL) {
         kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL));
+        return 0;
     }
     return value->as.int_value;
 }
@@ -5457,6 +5461,7 @@ kt_int kt_unbox_uint(KRef value) {
 kt_long kt_unbox_ulong(KRef value) {
     if (value == NULL) {
         kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL));
+        return 0;
     }
     return value->as.long_value;
 }
@@ -5525,6 +5530,8 @@ kt_long kt_rem_ulong(kt_long a, kt_long b) {
     return (kt_long)((uint64_t)a % (uint64_t)b);
 }
 
+/* Kotlin masks the shift count, so `1 shl 32` is `1`, not undefined. A right shift of a negative
+   value is implementation-defined in C, so the arithmetic shift is spelled out instead of assumed. */
 kt_int kt_shl_int(kt_int a, kt_int bits) { return (kt_int)((uint32_t)a << (bits & 31)); }
 
 kt_int kt_shr_int(kt_int a, kt_int bits) {
@@ -5676,8 +5683,6 @@ kt_int kt_compare_double(kt_double a, kt_double b) {
     return left == right ? 0 : (left < right ? -1 : 1);
 }
 
-/* ---- kotlin.io ----------------------------------------------------------------------------- */
-
 /* ---- exceptions ----------------------------------------------------------------------------
 
    A `Throwable` is an ordinary object with one reference field and a real `super` chain, which is
@@ -5759,17 +5764,22 @@ KT_THROWABLE_TYPE(kt_type_uninitialized_property_access_exception,
                   "kotlin.UninitializedPropertyAccessException", &kt_type_runtime_exception)
 
 KRef kt_throwable_new(const KType *type, KRef message) {
-    /* `message` stays in this parameter across the allocation: it is its root. */
-    KThrowable *thrown = (KThrowable *)kt_gc_allocate(type, sizeof(KThrowable));
+    /* `message` stays in this parameter across the allocation: it is its root.
+
+       The size is the DESCRIPTOR's, not `KThrowable`'s: a subclass of `Throwable` lays its own
+       fields out after these two, and an object allocated at the base size would have them overrun
+       into whatever the heap put next. */
+    KThrowable *thrown = (KThrowable *)kt_gc_allocate(type, type->instance_size);
     thrown->message = message;
     thrown->cause = NULL;
     return (KRef)thrown;
 }
 
 /* `Throwable(message, cause)`. Both operands stay in their parameters across the allocation, for
-   the reason `message` alone does above: each is its own root. */
+   the reason `message` alone does above: each is its own root, and the size is the descriptor's for
+   the reason given there too. */
 KRef kt_throwable_new_with_cause(const KType *type, KRef message, KRef cause) {
-    KThrowable *thrown = (KThrowable *)kt_gc_allocate(type, sizeof(KThrowable));
+    KThrowable *thrown = (KThrowable *)kt_gc_allocate(type, type->instance_size);
     thrown->message = message;
     thrown->cause = cause;
     return (KRef)thrown;
@@ -5795,24 +5805,6 @@ KRef kt_throwable_message(KRef self) { return ((KThrowable *)self)->message; }
 
 KRef kt_throwable_cause(KRef self) { return ((KThrowable *)self)->cause; }
 
-/* `assertFailsWith<T> { … }` when the block did not throw what it had to.
-
-   Kotlin's own wording, in two shapes: `message` is a PREFIX followed by ". " when the caller
-   supplied one, and `was` is the exception actually caught or NULL when the block completed. The
-   class is named by its descriptor, so it reads `kotlin.IllegalStateException` where kotlin-test
-   on the JVM reads `class java.lang.IllegalStateException` — the same difference every other
-   report on this target already carries, since these are Kotlin's classes and not the JVM's. */
-void kt_assert_failed_to_throw(KRef message, const KType *expected, KRef was) {
-    KRef text = message == NULL ? kt_string_utf8("", 0)
-                                : kt_string_plus(message, kt_string_utf8(". ", 2));
-    text = kt_string_plus(text, kt_string_utf8("Expected an exception of class ", 31));
-    text = kt_string_plus(text, kt_string_utf8(expected->name, expected->name_length));
-    text = kt_string_plus(text, kt_string_utf8(" to be thrown, but was ", 23));
-    text = kt_string_plus(text, was == NULL ? kt_string_utf8("completed successfully.", 23)
-                                            : kt_to_string(was));
-    kt_throw(kt_throwable_new(&kt_type_assertion_error, text));
-}
-
 /* Reading a `lateinit` property before anything assigned it. Kotlin's exception and Kotlin's
    wording; the guard is at the READ, which is where kotlinc puts it too, because the field being
    null is the only evidence there is. */
@@ -5822,22 +5814,31 @@ void kt_uninitialized_property(KRef name) {
     kt_throw(kt_throwable_new(&kt_type_uninitialized_property_access_exception, message));
 }
 
-/* An uncaught throw. Until a `try` exists to catch one, every throw is uncaught by construction —
-   a file containing a `try` is declined whole — so reporting and exiting here IS the propagation,
-   and it is what Kotlin does with an exception nothing handles. The exit code matches the one a
-   failed cast already uses, which is the JVM backend's for an abnormal end. */
+/* Every string literal interned so far, in one growable list. The list is the ROOT that keeps them
+   alive, rather than each literal's slot being a root of its own: the collector's global roots are
+   a fixed table shared with every top-level property, and a program's distinct literals can
+   outnumber it. A slot need not be traced to stay valid, because the collector does not move what
+   it keeps. */
+static KRef kt_literals;
+
 /* A string LITERAL, interned. Kotlin promises that equal literals are the same object — `"a" ===
    "a"` is true, and a function returning a literal answers the identical string every call — so a
    literal cannot allocate where it is written. `slot` is a static one per distinct text, filled on
-   first use and traced from then on.
+   first use.
 
-   The root is registered BEFORE the allocation rather than after: the slot is reachable from that
-   moment, holding NULL until the string exists, and a collection triggered by this very allocation
-   finds a root it can trace rather than one it has not been told about. */
+   The list's slot is registered as a root BEFORE the list is allocated rather than after: it is
+   reachable from that moment, holding NULL until the list exists, and a collection triggered by
+   this very allocation finds a root it can trace rather than one it has not been told about. The
+   new string is a root in `text` across the allocation that adds it to the list. */
 KRef kt_string_literal(const char *bytes, kt_int length, KRef *slot) {
     if (*slot == NULL) {
-        kt_gc_add_global_root((void **)slot);
-        *slot = kt_string_utf8(bytes, length);
+        if (kt_literals == NULL) {
+            kt_gc_add_global_root((void **)&kt_literals);
+            kt_literals = kt_mutable_list_with_capacity(0);
+        }
+        KRef text = kt_string_utf8(bytes, length);
+        kt_mutable_list_add(kt_literals, text);
+        *slot = text;
     }
     return *slot;
 }
@@ -5855,6 +5856,22 @@ static KRef kt_assert_prefix(KRef message) {
 
 static void kt_assert_fail(KRef text) {
     kt_throw(kt_throwable_new(&kt_type_assertion_error, text));
+}
+
+/* `assertFailsWith<T> { … }` when the block did not throw what it had to. `was` is the exception
+   actually caught, or NULL when the block completed.
+
+   The class is named by its descriptor, so it reads `kotlin.IllegalStateException` where kotlin-test
+   on the JVM reads `class java.lang.IllegalStateException` — the same difference every other
+   report on this target already carries, since these are Kotlin's classes and not the JVM's. */
+void kt_assert_failed_to_throw(KRef message, const KType *expected, KRef was) {
+    KRef text = kt_string_plus(kt_assert_prefix(message),
+                               kt_string_utf8("Expected an exception of class ", 31));
+    text = kt_string_plus(text, kt_string_utf8(expected->name, (kt_int)expected->name_length));
+    text = kt_string_plus(text, kt_string_utf8(" to be thrown, but was ", 23));
+    text = kt_string_plus(text, was == NULL ? kt_string_utf8("completed successfully.", 23)
+                                            : kt_to_string(was));
+    kt_assert_fail(text);
 }
 
 void kt_assert_equals(KRef expected, KRef actual, KRef message) {
@@ -5941,13 +5958,16 @@ kt_boolean kt_reference_equals(KRef self, KRef other) {
 }
 
 kt_int kt_reference_hash_code(KRef self) {
-    /* Equal references must hash alike, so the hash is built from exactly what equality reads. */
-    kt_int hash = (kt_int)(uintptr_t)self->header.type->reference_target;
+    /* Equal references must hash alike, so the hash is built from exactly what equality reads. The
+       arithmetic is on the unsigned ring, where it wraps as Kotlin's `Int` does: a code address
+       times 31 leaves the signed range for nearly every address, and signed overflow is undefined
+       in C, which would leave two equal references free to hash differently. */
+    uint32_t hash = (uint32_t)(uintptr_t)self->header.type->reference_target;
     KRef receiver = kt_reference_receiver(self);
     if (receiver != NULL) {
-        hash = hash * 31 + kt_hash_code(receiver);
+        hash = 31u * hash + (uint32_t)kt_hash_code(receiver);
     }
-    return hash;
+    return (kt_int)hash;
 }
 
 /* The exception in flight, or NULL.
@@ -5964,8 +5984,7 @@ kt_int kt_reference_hash_code(KRef self) {
    is not a micro-optimization: a call clobbers the caller-saved registers, so putting one after
    every call doubles what a frame must keep alive across a call boundary, and the frames grow.
    A 100,000-deep recursion in the corpus overflowed its stack on exactly that. A load and a
-   branch is also what "How an exception propagates" in `docs/BUILD_AND_NATIVE_PLAN.md` costed the
-   design at. */
+   perfectly predicted branch per call that can throw is the whole price of this design. */
 KRef kt_pending;
 static kt_boolean kt_pending_root;
 
@@ -5977,8 +5996,11 @@ static void kt_pending_register(void) {
 }
 
 /* `throw e`: record it and RETURN. The caller's next act is the check below, which is what turns
-   the return into propagation; see "How an exception propagates" in `docs/BUILD_AND_NATIVE_PLAN.md`
-   for why this rather than unwind tables or `setjmp`. */
+   the return into propagation. Not unwind tables, because this target has no unwinder: it would
+   need emitted unwind information, a linker placing `.eh_frame` and a CFI interpreter in the
+   runtime before a single `try` ran. Not `setjmp`, because it returns twice and the code generator
+   cannot express that, so a value kept in a register across a `try` would be stale after the jump.
+   A pending slot is ordinary control flow, identical on every architecture. */
 void kt_throw(KRef thrown) {
     kt_pending_register();
     kt_pending = thrown;
@@ -6005,6 +6027,8 @@ void kt_check_uncaught(void) {
     kt_write(2, "\n", 1);
     kt_sys_exit(134);
 }
+
+/* ---- kotlin.io ----------------------------------------------------------------------------- */
 
 static void kt_emit(KRef value, bool newline) {
     kt_int length = 0;

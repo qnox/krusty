@@ -6133,6 +6133,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   serializer, then the type's own — through `decode[Nullable]SerializableElement` with `X`.
   Tests: `tests/property_serializer_decode_e2e.rs` (a non-derivable type, a nullable one, and a
   `String` whose serializer writes an `Int`, cross-checked against the reference compiler).
+- **Native runtime: exceptions and integer arithmetic.** `src/native/runtime/krusty_rt.c` raises
+  what Kotlin raises and does not stop there: `kt_throw` RECORDS the exception in the one pending
+  slot and returns, and the caller's check of that slot is the propagation. So every runtime entry
+  that raises must return right after (a null `UInt?` unboxed used to fall through and dereference
+  the null). Integer `/` and `%` by zero record `ArithmeticException: / by zero`; `MIN_VALUE / -1`
+  wraps; `mod` takes the divisor's sign; shift counts are masked to 5/6 bits; unsigned `/`, `%` and
+  `toString` read their operands unsigned; a callable reference hashes as `31 * target +
+  receiver.hashCode()` on the wrapping ring. Two DIVERGENCES from the JVM backend, both deliberate:
+  a runtime exception names Kotlin's class (`kotlin.ArithmeticException: / by zero`, and
+  `assertFailsWith` reads `Expected an exception of class kotlin.IllegalStateException …`) where the
+  JVM names `java.lang.…`; and an uncaught exception prints `Exception in thread "main" <toString>`
+  and ends the program with status 134, this target's code for every abnormal end, where the JVM
+  exits with 1. String literals are interned through one runtime-owned table, so their number is not
+  bounded by the collector's global-root table.
+  Tests: `tests/native_runtime_e2e.rs` (`integer_arithmetic_and_exceptions_answer_as_kotlin_does`,
+  `unboxing_a_null_unsigned_records_a_null_pointer_exception_and_returns`,
+  `equal_callable_references_hash_on_the_wrapping_ring`,
+  `string_literals_outnumbering_the_global_roots_stay_interned_and_alive`). The uncaught path's exit
+  status is not yet driven: a driver cannot observe its own exit, so it lands with the harness's
+  first test of a program that is meant to fail.
 - **Native maps and sets (`src/native/runtime/krusty_rt.c`).** A map is two parallel lists, keys
   in insertion order, with LINEAR lookup by `equals`; every spelling (`mapOf`, `hashMapOf`,
   `HashSet()`) answers the insertion-ordered `LinkedHashMap`/`LinkedHashSet`, since the unordered

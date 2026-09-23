@@ -24,7 +24,7 @@ use std::process::{Command, Output};
 /// leave the missing symbols unresolved (a driver that reaches one crashes, it does not pass). The
 /// tier that completes the runtime turns this on, and from then on a missing definition fails the
 /// link.
-const RUNTIME_COMPLETE: bool = false;
+const RUNTIME_COMPLETE: bool = true;
 
 /// Warnings a tier below the last one cannot help giving. Such a tier DECLARES the internal
 /// functions a later tier defines, and defines helpers only a later tier's code calls; the tier that
@@ -372,4 +372,29 @@ fn map_keys_and_entries_copy_without_comparing() {
 #[test]
 fn a_map_or_set_stops_where_an_element_member_threw() {
     run_driver("map_stops_at_a_raise");
+}
+
+#[test]
+fn unboxing_a_null_unsigned_records_a_null_pointer_exception_and_returns() {
+    run_driver("unsigned_unbox_null");
+}
+
+#[test]
+fn equal_callable_references_hash_on_the_wrapping_ring() {
+    run_driver("reference_hash_code");
+}
+
+#[test]
+fn string_literals_outnumbering_the_global_roots_stay_interned_and_alive() {
+    run_driver("string_literal_roots");
+}
+
+#[test]
+fn a_throwable_subclass_is_allocated_at_its_own_size() {
+    run_driver("throwable_subclass_size");
+}
+
+#[test]
+fn integer_arithmetic_and_exceptions_answer_as_kotlin_does() {
+    run_driver("arithmetic_and_exceptions");
 }
