@@ -5,7 +5,7 @@
 //! slot, a `long`/`double` occupies two, and nothing here needs to know which Kotlin variable a
 //! slot is currently realizing.
 
-use super::ControlGraph;
+use crate::jvm::classfile::bytecode_analysis::ControlGraph;
 use crate::jvm::inline::Insn;
 
 /// A set of local-variable slots.
@@ -177,8 +177,8 @@ impl LocalLiveness {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jvm::classfile::bytecode_analysis::Handler;
     use crate::jvm::inline::BranchTarget;
-    use crate::jvm::suspend::cps::Handler;
 
     fn plain(op: u8) -> Insn {
         Insn::Plain {

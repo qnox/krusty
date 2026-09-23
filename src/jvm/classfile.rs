@@ -7,11 +7,13 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub(crate) mod bytecode_analysis;
 mod control_flow;
 mod coroutine_markers;
 mod line_numbers;
 mod method_parameters;
 mod method_rewrite;
+mod temporaries;
 
 pub use coroutine_markers::{markers_in, CoroutineMarker, MARKER_LEN};
 

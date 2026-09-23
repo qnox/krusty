@@ -1,7 +1,7 @@
 //! Bytecode rewrites applied to a finished method when its class is written.
 //!
 //! kotlinc does not write its temporaries onto the operand stack while generating code; it writes
-//! them as locals and lets a bytecode pass fold them (see [`crate::jvm::temporaries`]). This is the
+//! them as locals and lets a bytecode pass fold them (see [`super::temporaries`]). This is the
 //! place krusty does the same. It runs when the class is written, because only then is every table
 //! final: several line and local-variable tables are attached after a method is added, and which
 //! values are temporaries depends on them. The method's instructions are decoded, rewritten and
@@ -15,10 +15,19 @@
 //! The rewritten body is only kept if the forward frame analysis still accepts it; otherwise the
 //! method is written exactly as emitted.
 
+use super::bytecode_analysis::{ControlGraph, FrameTypes, Handler, VerificationType};
+use super::temporaries::{self, Body};
 use super::{ClassWriter, CodeBuilder, LvtEntry, MethodInfo, VerifType};
 use crate::jvm::inline::{assemble, disassemble, insn_offsets_at, BranchTarget, Insn};
-use crate::jvm::suspend::cps::{ControlGraph, FrameTypes, Handler, VerificationType};
-use crate::jvm::temporaries::{self, Body};
+
+fn is_expression_null_check(owner: &str, name: &str, descriptor: &str) -> bool {
+    owner == "kotlin/jvm/internal/Intrinsics"
+        && descriptor == "(Ljava/lang/Object;Ljava/lang/String;)V"
+        && matches!(
+            name,
+            "checkNotNullExpressionValue" | "checkExpressionValueIsNotNull"
+        )
+}
 
 /// What a method keeps so it can be rewritten when its class is written: its builder (for the
 /// frames and the labels they are bound to) and the entry frame its stack map compresses against.
@@ -272,12 +281,8 @@ impl ClassWriter {
             },
             expression_null_check: &|method| {
                 self.methodref_parts(method)
-                    .is_some_and(|(owner, name, _)| {
-                        owner == "kotlin/jvm/internal/Intrinsics"
-                            && matches!(
-                                name,
-                                "checkNotNullExpressionValue" | "checkExpressionValueIsNotNull"
-                            )
+                    .is_some_and(|(owner, name, descriptor)| {
+                        is_expression_null_check(owner, name, descriptor)
                     })
             },
         };
@@ -329,6 +334,9 @@ impl ClassWriter {
             .collect();
         let new_offsets = insn_offsets_at(&new_insns, 0);
         let new_len = new_offsets[new_insns.len()];
+        if new_len > usize::from(u16::MAX) {
+            return None;
+        }
         // An original offset maps to where the instruction that began there now begins; a removed
         // instruction's offset to whatever follows it, as a label in front of it would.
         let map = |pc: usize| -> usize {
@@ -379,6 +387,9 @@ impl ClassWriter {
             .iter()
             .map(|&(start, end, handler, catch)| (map16(start), map16(end), map16(handler), catch))
             .collect();
+        if exceptions.iter().any(|&(start, end, _, _)| start >= end) {
+            return None;
+        }
         let lnt: Vec<(u16, u16)> = method
             .lnt
             .iter()
@@ -396,6 +407,11 @@ impl ClassWriter {
                 (name, desc, slot, start, len)
             })
             .collect();
+        if lvt.iter().any(|&(_, _, _, _, len)| len == Some(0)) {
+            // Kotlin's complete optimizer removes unused/empty LVT entries. This focused rewrite
+            // does not own debug-local deletion, so preserve the original method instead.
+            return None;
+        }
 
         // Entry state: `this` (instance methods) and the parameters, one entry per slot.
         let mut entry = Vec::new();
@@ -444,7 +460,7 @@ impl ClassWriter {
         let mut max_locals = entry.len();
         for insn in &new_insns {
             if let Some((slot, width)) = var_slot(insn) {
-                max_locals = max_locals.max(usize::from(slot + width));
+                max_locals = max_locals.max(usize::from(slot) + usize::from(width));
             }
         }
         for &(_, desc, slot, _, _) in &lvt {
@@ -467,5 +483,29 @@ impl ClassWriter {
             implicit_void_return_pc: method.implicit_void_return_pc.map(map16),
             frames,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_expression_null_check;
+
+    #[test]
+    fn expression_null_check_identity_includes_its_descriptor() {
+        assert!(is_expression_null_check(
+            "kotlin/jvm/internal/Intrinsics",
+            "checkNotNullExpressionValue",
+            "(Ljava/lang/Object;Ljava/lang/String;)V",
+        ));
+        assert!(!is_expression_null_check(
+            "kotlin/jvm/internal/Intrinsics",
+            "checkNotNullExpressionValue",
+            "(Ljava/lang/Object;)V",
+        ));
+        assert!(!is_expression_null_check(
+            "fixture/Intrinsics",
+            "checkNotNullExpressionValue",
+            "(Ljava/lang/Object;Ljava/lang/String;)V",
+        ));
     }
 }

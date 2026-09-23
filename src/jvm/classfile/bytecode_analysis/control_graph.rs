@@ -1,8 +1,8 @@
-//! The control-flow graph of a decoded method body, in instruction indices.
+//! The control-flow graph of a decoded JVM method body, in instruction indices.
 //!
 //! [`Insn`] already carries branch targets as instruction indices rather than byte offsets, so a
-//! graph built here survives any transform that inserts or removes instructions — which is the whole
-//! reason the coroutine transform can run on bytecode at all.
+//! graph built here survives transforms that insert or remove instructions. Finished-method
+//! rewrites and coroutine planning therefore share this target-level representation.
 
 use crate::jvm::inline::{BranchTarget, Insn};
 
@@ -44,6 +44,9 @@ impl ControlGraph {
         for (index, insn) in insns.iter().enumerate() {
             match insn {
                 Insn::Plain { op: 0xa9, .. } => return None, // ret
+                Insn::Plain { op: 0xc4, operands } if operands.first() == Some(&0xa9) => {
+                    return None
+                } // wide ret
                 Insn::Plain { op, .. } => {
                     if !is_terminator(*op) {
                         normal[index].push(index + 1);
@@ -85,7 +88,7 @@ impl ControlGraph {
             }
         }
         for entry in handlers {
-            if entry.handler > exit || entry.start > entry.end || entry.end > exit {
+            if entry.handler >= exit || entry.start >= entry.end || entry.end > exit {
                 return None;
             }
             for protected in exceptional.iter_mut().take(entry.end).skip(entry.start) {
@@ -230,6 +233,29 @@ mod tests {
         assert_eq!(graph.exceptional_successors(3), [] as [usize; 0]);
     }
 
+    #[test]
+    fn empty_protected_ranges_and_exit_handlers_are_refused() {
+        let insns = [plain(0xb1)];
+        assert!(ControlGraph::build(
+            &insns,
+            &[Handler {
+                start: 0,
+                end: 0,
+                handler: 0,
+            }]
+        )
+        .is_none());
+        assert!(ControlGraph::build(
+            &insns,
+            &[Handler {
+                start: 0,
+                end: 1,
+                handler: 1,
+            }]
+        )
+        .is_none());
+    }
+
     /// A spliced body's returns are redirected to `insns.len()` — one past the end — so that index
     /// is a legitimate branch target and must not be rejected as out of range.
     #[test]
@@ -245,6 +271,10 @@ mod tests {
     fn the_deprecated_subroutine_instructions_are_refused() {
         for insn in [
             plain(0xa9), // ret
+            Insn::Plain {
+                op: 0xc4,
+                operands: vec![0xa9, 0, 1], // wide ret 1
+            },
             Insn::Branch {
                 op: 0xa8,
                 target: BranchTarget::Internal(0),

@@ -1,8 +1,9 @@
-//! kotlinc's temporary-variable elimination over a finished method body.
+//! kotlinc's temporary-variable elimination over a finished JVM method body.
 //!
 //! kotlinc's JVM backend writes a temporary (an unnamed local with no `LocalVariableTable` entry) as
 //! an ordinary `store`/`load` pair, then a bytecode pass rewrites the pairs whose value can stay on
-//! the operand stack (`TemporaryVariablesEliminationTransformer`). Its rules are local and exact:
+//! the operand stack (`TemporaryVariablesEliminationTransformer`). This module implements the
+//! local store/load rules whose safety can be established from the finished class-file tables:
 //!
 //! - `xload; pop` (`pop2` for a two-word value) is removed;
 //! - a temporary never loaded is stored as a `pop`/`pop2` instead;
@@ -13,18 +14,21 @@
 //! - `astore t; aload t; ldc "…"; invokestatic Intrinsics.checkNotNullExpressionValue; aload t`
 //!   becomes `dup; ldc "…"; invokestatic …`.
 //!
-//! A value is a temporary when no `LocalVariableTable` range covers or begins right after its store,
+//! A value is a temporary when no `LocalVariableTable` range covers or begins after its store,
 //! it is not an exception handler's catch store, and every load it reaches reads only it. Patterns
-//! match RAW adjacency, as kotlinc's do: a line number or a branch target between the instructions
-//! defeats them.
+//! match raw adjacency, as kotlinc's do: a line number or a branch target between the instructions
+//! defeats them. Safe-call-chain reshaping and unused-LVT cleanup are separate kotlinc optimizations
+//! and are deliberately not approximated here; a body containing a safe-call input shape is left
+//! unchanged, while a rewrite that would create an empty debug-local range is rejected by the
+//! class-file boundary.
 //!
 //! This module decides the rewrite on the original instruction indices; the class-file writer
 //! applies it and keeps every offset-keyed table in step.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::bytecode_analysis::{ControlGraph, Handler};
 use crate::jvm::inline::{BranchTarget, Insn};
-use crate::jvm::suspend::cps::{ControlGraph, Handler};
 
 /// Where an instruction of the rewritten body sits relative to the original instructions. A label or
 /// line number that stood at original instruction `k` stays in front of `k`'s group:
@@ -168,6 +172,19 @@ const GETSTATIC: u8 = 0xb2;
 const LDC: u8 = 0x12;
 const LDC_W: u8 = 0x13;
 const INVOKESTATIC: u8 = 0xb8;
+const IFNULL: u8 = 0xc6;
+const IFNONNULL: u8 = 0xc7;
+
+/// Same 50 MiB-by-method complexity ceiling as kotlinc's optimizer. The product is deliberately
+/// conservative for this representation: a slot/store analysis cell is larger than one byte.
+const ANALYSIS_COMPLEXITY_LIMIT: usize = 50 * 1024 * 1024;
+
+fn analysis_within_limit(instructions: usize, slots: usize, candidates: usize) -> bool {
+    instructions
+        .checked_mul(slots)
+        .and_then(|cells| cells.checked_mul(candidates.max(1)))
+        .is_some_and(|cells| cells <= ANALYSIS_COMPLEXITY_LIMIT)
+}
 
 /// A local's value at a program point: which temporary stores it may hold.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -206,12 +223,20 @@ impl Held {
 fn temporaries(body: &Body, removed: &BTreeSet<usize>) -> Option<BTreeMap<usize, Vec<usize>>> {
     let insns = body.insns;
     let graph = ControlGraph::build(insns, body.handlers)?;
-    let mut max_slot = 0u16;
+    let mut slot_count = 0usize;
     for insn in insns {
         if let Some(VarOp::Load(kind, slot) | VarOp::Store(kind, slot)) = var_op(insn) {
-            max_slot = max_slot.max(slot + kind.words());
+            let end = usize::from(slot).checked_add(usize::from(kind.words()))?;
+            if end > usize::from(u16::MAX) {
+                return None;
+            }
+            slot_count = slot_count.max(end);
         } else if let Some(VarOp::Iinc(slot)) = var_op(insn) {
-            max_slot = max_slot.max(slot + 1);
+            let end = usize::from(slot).checked_add(1)?;
+            if end > usize::from(u16::MAX) {
+                return None;
+            }
+            slot_count = slot_count.max(end);
         }
     }
     let mut candidate = vec![false; insns.len()];
@@ -226,17 +251,46 @@ fn temporaries(body: &Body, removed: &BTreeSet<usize>) -> Option<BTreeMap<usize,
                 candidate[index] = false;
             }
         }
-        if let Some(index) = start.checked_sub(1) {
+        // The range-start label may follow checks or other instructions after the initializer.
+        // Walk backward to the first store this label can observe, stopping at another retained
+        // label or at an instruction that cannot fall through. This is the declaration identity
+        // carried by the LVT range; adjacency alone is not enough to find its initializer.
+        let mut cursor = start;
+        while let Some(index) = cursor.checked_sub(1) {
             if matches!(var_op(&insns[index]), Some(VarOp::Store(_, s)) if s == slot) {
                 candidate[index] = false;
+                break;
             }
+            let stops = body.arrivals[index]
+                || body.marks[index]
+                || matches!(
+                    &insns[index],
+                    Insn::Branch { op: 0xa7, .. }
+                        | Insn::BranchW { op: 0xc8, .. }
+                        | Insn::Plain {
+                            op: 0xac..=0xb1 | 0xbf,
+                            ..
+                        }
+                );
+            if stops {
+                break;
+            }
+            cursor = index;
         }
     }
     // A handler's catch store, and the stores right before a protected range, are not temporaries.
+    // The upstream pass also recognizes a catch store hidden behind reified-operation marker calls.
+    // Those calls have no typed representation here, so decline the whole rewrite instead of
+    // guessing which later ASTORE owns the exception.
     for handler in body.handlers {
-        if let Some(Some(VarOp::Store(..))) = insns.get(handler.handler).map(var_op) {
-            candidate[handler.handler] = false;
+        let catch_store = handler.handler;
+        if !matches!(
+            insns.get(catch_store).and_then(var_op),
+            Some(VarOp::Store(Kind::Reference, _))
+        ) {
+            return None;
         }
+        candidate[catch_store] = false;
         let mut index = handler.start;
         while let Some(previous) = index.checked_sub(1) {
             if !matches!(var_op(&insns[previous]), Some(VarOp::Store(..))) {
@@ -253,7 +307,14 @@ fn temporaries(body: &Body, removed: &BTreeSet<usize>) -> Option<BTreeMap<usize,
                 starts.entry(start).or_insert_with(Vec::new).push(slot);
                 starts
             });
-    let width = usize::from(max_slot) + 1;
+    let width = slot_count.max(1);
+    let candidate_count = candidate
+        .iter()
+        .filter(|&&is_candidate| is_candidate)
+        .count();
+    if !analysis_within_limit(insns.len(), width, candidate_count) {
+        return None;
+    }
     let mut before: Vec<Option<Vec<Held>>> = vec![None; insns.len() + 1];
     before[0] = Some(vec![Held::Unknown; width]);
     let mut loads: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
@@ -436,13 +497,62 @@ pub(crate) fn eliminate(body: &Body) -> Option<Rewrite> {
         if pair && working.raw_sequence(at, 2) {
             if let Placement::Original(load) = working.nodes[at].1 {
                 trivially_removed.insert(load);
+                if body.handlers.iter().any(|handler| handler.start == load) {
+                    // kotlinc first replaces the pair by `nop`, then retains it at a protected
+                    // region's start so the exception range cannot collapse.
+                    working.nodes[at].0 = plain(NOP);
+                    working.remove(&mut [at + 1]);
+                    at += 1;
+                    continue;
+                }
             }
             working.remove(&mut [at, at + 1]);
         } else {
             at += 1;
         }
     }
-    let changed_trivially = !trivially_removed.is_empty();
+    // Match kotlinc's second trivial-cleanup sweep. In the class file, every label that still
+    // matters is represented by an arrival or debug-table mark at an instruction group. A NOP is
+    // adjacent to a meaningful instruction on a side exactly when no such label separates them.
+    // A protected-range start is the sole exception: it retains its NOP to keep the range nonempty.
+    let mut removed_nop = false;
+    let mut at = 0;
+    while at < working.nodes.len() {
+        if opcode(&working.nodes[at].0) != Some(NOP) {
+            at += 1;
+            continue;
+        }
+        let group = working.nodes[at].1.group();
+        let protected_start = body.handlers.iter().any(|handler| handler.start == group);
+        let meaningful_before = at > 0 && !working.labelled(at);
+        let meaningful_after = at + 1 < working.nodes.len() && !working.labelled(at + 1);
+        if !protected_start && (meaningful_before || meaningful_after) {
+            working.remove(&mut [at]);
+            removed_nop = true;
+        } else {
+            at += 1;
+        }
+    }
+    // Safe-call rewriting runs after trivial NOP cleanup upstream. Detect that exact raw shape in
+    // the cleaned working list and preserve the original method rather than applying only half of
+    // the coupled transformation.
+    if (0..working.nodes.len().saturating_sub(1)).any(|at| {
+        working.raw_sequence(at, 2)
+            && matches!(
+                var_op(&working.nodes[at].0),
+                Some(VarOp::Load(Kind::Reference, _))
+            )
+            && matches!(
+                working.nodes[at + 1].0,
+                Insn::Branch {
+                    op: IFNULL | IFNONNULL,
+                    ..
+                }
+            )
+    }) {
+        return None;
+    }
+    let changed_trivially = !trivially_removed.is_empty() || removed_nop;
     let temporaries = temporaries(body, &trivially_removed)?;
     let mut changed = changed_trivially;
     for (store, loads) in temporaries {
@@ -566,7 +676,13 @@ mod tests {
         }
     }
 
-    fn rewrite(insns: &[Insn], arrivals: &[usize], marks: &[usize]) -> Option<Vec<Insn>> {
+    fn rewrite_with(
+        insns: &[Insn],
+        arrivals: &[usize],
+        marks: &[usize],
+        named: &[(usize, usize, u16)],
+        handlers: &[Handler],
+    ) -> Option<Vec<Insn>> {
         let mut arrival = vec![false; insns.len() + 1];
         for &index in arrivals {
             arrival[index] = true;
@@ -577,15 +693,19 @@ mod tests {
         }
         let body = Body {
             insns,
-            handlers: &[],
+            handlers,
             arrivals: &arrival,
             marks: &mark,
-            named: &[],
+            named,
             one_word_static: &|field| field == 1,
             string_constant: &|index| index == 7,
             expression_null_check: &|method| method == 9,
         };
         eliminate(&body).map(|rewrite| rewrite.nodes.into_iter().map(|(insn, _)| insn).collect())
+    }
+
+    fn rewrite(insns: &[Insn], arrivals: &[usize], marks: &[usize]) -> Option<Vec<Insn>> {
+        rewrite_with(insns, arrivals, marks, &[], &[])
     }
 
     const ALOAD_0: u8 = 0x2a;
@@ -609,6 +729,18 @@ mod tests {
             rewrite(&insns, &[], &[2]),
             Some(vec![op(ALOAD_0), op(ARETURN)])
         );
+    }
+
+    #[test]
+    fn a_named_local_initializer_is_found_past_non_intervening_instructions() {
+        let insns = [
+            op(ALOAD_0),
+            op(ASTORE_1),
+            op(0x03), // iconst_0
+            op(POP),
+            op(0xb1),
+        ];
+        assert_eq!(rewrite_with(&insns, &[], &[3], &[(3, 5, 1)], &[]), None);
     }
 
     #[test]
@@ -700,6 +832,108 @@ mod tests {
     fn a_load_discarded_at_once_is_removed() {
         let insns = [op(ALOAD_0), op(POP), op(0xb1)];
         assert_eq!(rewrite(&insns, &[], &[]), Some(vec![op(0xb1)]));
+    }
+
+    #[test]
+    fn a_load_discarded_at_a_protected_start_leaves_a_nop() {
+        let insns = [op(ALOAD_0), op(POP), op(0xb1), op(ASTORE_1), op(0xb1)];
+        let handlers = [Handler {
+            start: 0,
+            end: 2,
+            handler: 3,
+        }];
+        assert_eq!(
+            rewrite_with(&insns, &[], &[], &[], &handlers),
+            Some(vec![op(NOP), op(0xb1), op(ASTORE_1), op(0xb1)])
+        );
+    }
+
+    #[test]
+    fn a_load_discarded_at_a_debug_mark_moves_the_mark_to_what_follows() {
+        let insns = [op(ALOAD_0), op(POP), op(0xb1)];
+        assert_eq!(
+            rewrite_with(&insns, &[], &[0], &[], &[]),
+            Some(vec![op(0xb1)])
+        );
+    }
+
+    #[test]
+    fn an_unlabelled_nop_next_to_an_instruction_is_removed() {
+        let insns = [op(ALOAD_0), op(NOP), op(ARETURN)];
+        assert_eq!(
+            rewrite(&insns, &[], &[]),
+            Some(vec![op(ALOAD_0), op(ARETURN)])
+        );
+    }
+
+    #[test]
+    fn a_nop_separated_from_both_neighbors_by_labels_is_retained() {
+        let insns = [op(ALOAD_0), op(NOP), op(ARETURN)];
+        assert_eq!(rewrite(&insns, &[], &[1, 2]), None);
+    }
+
+    #[test]
+    fn a_safe_call_shape_is_left_for_the_complete_safe_call_transform() {
+        let insns = [
+            op(ALOAD_0),
+            Insn::Branch {
+                op: IFNONNULL,
+                target: BranchTarget::Internal(3),
+            },
+            op(0x01), // aconst_null
+            op(ARETURN),
+        ];
+        assert_eq!(rewrite(&insns, &[3], &[]), None);
+    }
+
+    #[test]
+    fn a_safe_call_exposed_by_nop_cleanup_is_still_left_unchanged() {
+        let insns = [
+            op(ALOAD_0),
+            op(NOP),
+            Insn::Branch {
+                op: IFNONNULL,
+                target: BranchTarget::Internal(4),
+            },
+            op(0x01), // aconst_null
+            op(ARETURN),
+        ];
+        assert_eq!(rewrite(&insns, &[4], &[]), None);
+    }
+
+    #[test]
+    fn a_wide_temporary_keeps_its_two_word_value_on_the_stack() {
+        let insns = [op(0x09), op(0x40), op(0x1f), op(0xad)]; // lconst_0; lstore_1; lload_1; lreturn
+        assert_eq!(rewrite(&insns, &[], &[]), Some(vec![op(0x09), op(0xad)]));
+    }
+
+    #[test]
+    fn a_catch_store_is_not_a_temporary() {
+        let insns = [op(0x01), op(ASTORE_1), op(ALOAD_1), op(ARETURN)];
+        let handlers = [Handler {
+            start: 0,
+            end: 1,
+            handler: 1,
+        }];
+        assert_eq!(rewrite_with(&insns, &[1], &[], &[], &handlers), None);
+    }
+
+    #[test]
+    fn an_unrecognized_catch_entry_declines_the_rewrite() {
+        let insns = [op(ALOAD_0), op(POP), op(0xb1)];
+        let handlers = [Handler {
+            start: 0,
+            end: 2,
+            handler: 2,
+        }];
+        assert_eq!(rewrite_with(&insns, &[], &[], &[], &handlers), None);
+    }
+
+    #[test]
+    fn analysis_complexity_overflow_and_oversize_are_refused() {
+        assert!(analysis_within_limit(10, 4, 3));
+        assert!(!analysis_within_limit(ANALYSIS_COMPLEXITY_LIMIT, 2, 1));
+        assert!(!analysis_within_limit(usize::MAX, 2, 2));
     }
 
     #[test]
