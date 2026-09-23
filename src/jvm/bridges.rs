@@ -209,9 +209,14 @@ fn superclass_method_bridges(
             continue;
         }
         let target_name = (bridge_name != target_name).then_some(target_name);
+        let parameter_identities = edge.implementation_parameter_identities.clone();
+        if parameter_identities.len() != base_params.len() {
+            return Err(SkipReason::Bridges);
+        }
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::Function,
             target_function: own_fid,
+            parameter_identities,
             name: bridge_name,
             erased_params: base_params,
             erased_ret: base_ret,
@@ -306,6 +311,7 @@ fn push_property_bridge(
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::PropertyGetter,
             target_function: None,
+            parameter_identities: Vec::new(),
             name: getter_name,
             erased_params: vec![],
             erased_ret: super_ret,
@@ -330,6 +336,7 @@ fn push_property_bridge(
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::PropertySetter,
             target_function: None,
+            parameter_identities: vec![crate::fir::ResolvedParameterIdentity::PropertySetterValue],
             name: sname,
             erased_params: vec![super_ty],
             erased_ret: Ty::Unit,

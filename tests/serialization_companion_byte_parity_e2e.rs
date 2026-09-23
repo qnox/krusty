@@ -72,8 +72,8 @@ fn kotlinc_plugin_jar(substring: &str) -> Option<PathBuf> {
 pub(super) struct ReferenceComparison {
     pub(super) reference: String,
     pub(super) krusty: String,
-    reference_bytes: Vec<u8>,
-    krusty_bytes: Vec<u8>,
+    pub(super) reference_bytes: Vec<u8>,
+    pub(super) krusty_bytes: Vec<u8>,
 }
 
 /// Build one class with the reference serialization plugin and with krusty.

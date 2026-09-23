@@ -3038,6 +3038,7 @@ pub struct IrFunctionOverride {
     pub applied_parameters: Vec<Ty>,
     pub applied_result: Ty,
     pub implementation_parameters: Vec<Ty>,
+    pub implementation_parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
     pub implementation_result: Ty,
     pub suspend: bool,
     pub depth: u32,

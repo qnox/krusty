@@ -11147,12 +11147,12 @@ fn emit_method_inner_with_holder(
     // stable and reflection/debug tooling still expects `$completion` (plus the declared receiver and
     // arguments) in the LocalVariableTable.
     if e.record_locals || ir.suspend_funs.contains(&fid) || holder_receiver.is_some() {
-        let generated_parameters = ir.generated_function_publication(fid);
-        if let Some(publication) = generated_parameters {
+        let parameter_identities = ir.function_parameter_identities(fid);
+        if let Some(identities) = parameter_identities {
             assert_eq!(
-                publication.parameter_names.len(),
+                identities.len(),
                 param_tys.len(),
-                "generated debug parameter identities exactly match physical arity"
+                "debug parameter identities exactly match physical arity"
             );
         }
         if instance {
@@ -11168,9 +11168,8 @@ fn emit_method_inner_with_holder(
         }
         let mut slot = u16::from(instance);
         for (i, t) in param_tys.iter().enumerate() {
-            let pname = generated_parameters
-                .map(|publication| publication.parameter_names[i].clone())
-                .or_else(|| ir.param_names(fid).and_then(|ns| ns.get(i).cloned()))
+            let pname = parameter_identities
+                .and_then(|identities| identities.get(i).cloned())
                 .or_else(|| f.param_checks.get(i).and_then(|n| n.clone()))
                 .unwrap_or_else(|| format!("p{i}"));
             let pdesc = local_variable_desc(*t);
