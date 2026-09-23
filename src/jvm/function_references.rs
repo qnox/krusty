@@ -93,6 +93,12 @@ fn realize_adapter_reference(
         crate::ir::IrCallableReferenceTarget::Local { owner, name } => {
             (owner, name.into(), owner.is_none())
         }
+        // Only the native backend builds one of these: on the JVM a reflective dependency
+        // reference keeps its checked node, so that this realization never has to invent an owner
+        // spelling for a declaration the provider owns.
+        crate::ir::IrCallableReferenceTarget::External { declaration } => {
+            return Err(FunctionReferenceRealizationTarget::External(declaration))
+        }
     };
     let adapted = reference.adaptation.is_some();
     let bound = reference.bound_receiver.is_some();

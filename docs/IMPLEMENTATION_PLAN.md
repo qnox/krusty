@@ -4307,3 +4307,21 @@ or splice rather than a successful run — a declined splice still runs correctl
 method being present for Java interop. That test also pins the library's JVM target at 25: string
 concatenation compiles to `invokedynamic` only from target 9, so on a lower target the concatenating
 body contains none and krusty splices it.
+
+## Native runtime — prebuilt with krusty, run on the host  ◐
+
+The native target links a user's program against a runtime written in freestanding C under
+`src/native/runtime/`. `build.rs` compiles it once, when krusty itself is built, for x86_64, aarch64
+and riscv64 with the host's clang (`KRUSTY_RUNTIME_CC` overrides it), so a user's build needs no C
+toolchain. Without clang krusty still builds; the native target then reports that it has no runtime.
+
+- The objects must not depend on how the host's clang was configured, because they are embedded and
+  linked into other people's programs: every target pins `-fno-stack-protector`,
+  `-fno-asynchronous-unwind-tables` and `-fno-unwind-tables`; x86_64 adds `-fcf-protection=none` and
+  riscv64 adds `-mno-relax`, since krusty's own linker relaxes nothing.
+- `_start` calls `kt_program_entry`; a program that returns from it exits with status 0.
+- `kt_sys_write` retries an interrupted write and a full non-blocking pipe, and stops silently on any
+  other error, as the JVM's `PrintStream` does.
+- Tests: `tests/native_runtime_e2e.rs` links each driver under `tests/native_runtime/` with every
+  runtime source using the host's clang and runs it; CI must have clang, a local build without it
+  skips with a message.
