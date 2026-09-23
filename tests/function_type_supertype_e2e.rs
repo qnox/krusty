@@ -105,9 +105,10 @@ fn a_function_type_is_not_a_function_of_an_unrelated_result() {
     val l: () -> String = { \"x\" }\n\
     val ints: Function<Int> = l\n\
 }\n"]);
-    assert!(
-        !assignment.is_empty(),
-        "`() -> String` must not be assignable to `Function<Int>`"
+    assert_eq!(
+        assignment,
+        ["initializer type mismatch: expected 'Function<Int>', actual '() -> String'."],
+        "complete assignment diagnostics"
     );
     let argument =
         common::front_end_diagnostics_files_with_stdlib(&["fun takesInts(f: Function<Int>) {}\n\
@@ -115,8 +116,9 @@ fun f() {\n\
     val l: () -> String = { \"x\" }\n\
     takesInts(l)\n\
 }\n"]);
-    assert!(
-        !argument.is_empty(),
-        "`() -> String` must not be passed for a `Function<Int>` parameter"
+    assert_eq!(
+        argument,
+        ["argument type mismatch: actual type is '() -> String', but 'Function<Int>' was expected."],
+        "complete argument diagnostics"
     );
 }
