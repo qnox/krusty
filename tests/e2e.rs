@@ -1701,6 +1701,8 @@ mod value_class_e2e;
 mod value_class_init_validate_e2e;
 #[path = "value_class_map_key_e2e.rs"]
 mod value_class_map_key_e2e;
+#[path = "value_class_member_order_e2e.rs"]
+mod value_class_member_order_e2e;
 #[path = "value_class_nullable_widen_return_e2e.rs"]
 mod value_class_nullable_widen_return_e2e;
 #[path = "value_class_param_generic_return_e2e.rs"]

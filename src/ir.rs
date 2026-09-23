@@ -2513,6 +2513,10 @@ pub struct IrFile {
     /// Methods kotlinc marks `ACC_SYNTHETIC` — currently a value class's `box-impl`/`unbox-impl` (the
     /// compiler-manufactured box adapters). The JVM backend ORs `0x1000` for a `FunId` in this set.
     pub synthetic_methods: std::collections::HashSet<u32>,
+    /// Exact generated JVM value-class representation methods and their classfile order after the
+    /// private primary constructor. The JVM value-class pass records the function identities when
+    /// it creates them; emission must not recover their roles from generated method spellings.
+    pub(crate) jvm_value_class_representation_order: std::collections::HashMap<u32, u8>,
     /// Methods kotlinc marks `ACC_BRIDGE` (0x40) — e.g. a `@Serializable` serializer's
     /// `typeParametersSerializers`. The JVM backend ORs `0x40` for a `FunId` in this set.
     pub bridge_methods: std::collections::HashSet<u32>,

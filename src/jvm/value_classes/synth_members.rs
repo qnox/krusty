@@ -227,6 +227,7 @@ pub(super) fn synth_value_members(
         let body = ret_block(ir, g);
         if let Some(fid) = add_inst(ir, "unbox-impl", vec![], u_ir, body) {
             ir.synthetic_methods.insert(fid);
+            ir.jvm_value_class_representation_order.insert(fid, 2);
         }
     }
     // box-impl(U): X  — `new X(u)`. Also ACC_SYNTHETIC.
@@ -245,6 +246,7 @@ pub(super) fn synth_value_members(
         let body = ret_block(ir, new);
         let fid = add_static(ir, "box-impl", vec![u_ir], x_ir, body);
         ir.synthetic_methods.insert(fid);
+        ir.jvm_value_class_representation_order.insert(fid, 1);
     }
     // constructor-impl(U): U  — runs the `init { … }` block (side effects/validation), then returns the
     // arg. The init runs HERE, not in `box-impl`/`<init>`: `box-impl` only wraps an already-built value, so
@@ -287,6 +289,7 @@ pub(super) fn synth_value_members(
         stmts.push(ir.add_expr(IrExpr::Return(Some(arg))));
         let body = ir.add_expr(IrExpr::Block { stmts, value: None });
         let cfid = add_static(ir, "constructor-impl", vec![u_ir], u_ir, body);
+        ir.jvm_value_class_representation_order.insert(cfid, 0);
         crate::jvm::method_parameters::record_function(ir, cfid, &[&fname], &[]);
         // Unlike a source value-class member converted to `member-impl`, this generated function's
         // carrier is its declared constructor parameter, not a former dispatch receiver. Keeping an
@@ -353,6 +356,7 @@ pub(super) fn synth_value_members(
         let body = ret_block(ir, cmp);
         let function = add_static(ir, "equals-impl0", vec![u_ir, u_ir], bool_ir, body);
         crate::jvm::method_parameters::record_function(ir, function, &["p1", "p2"], &[]);
+        ir.jvm_value_class_representation_order.insert(function, 3);
     }
     // kotlinc emits the logic in a static `<name>-impl(U)` operating on the unboxed value, and the
     // instance method delegates to it (`toString()` → `toString-impl(this.field)`). The instance methods
@@ -610,6 +614,8 @@ pub(super) fn synth_value_members(
                 .collect::<Vec<_>>();
             crate::jvm::method_parameters::record_function(ir, constructor, &names, &[]);
             ir.fn_source_order.insert(constructor, sc.source_order);
+            // `public static`, non-final — like the primary's `constructor-impl`.
+            ir.open_methods.insert(constructor);
         }
     }
     true

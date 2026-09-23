@@ -53,7 +53,9 @@ mod when;
 
 use super::method_parameters::OwnerConstructorPrefix;
 use inline_body_emission::collect_body_var_types;
-use member_schedule::{source_ordered_members, SourceOrderedMember};
+use member_schedule::{
+    source_ordered_members, split_around_primary_constructor, SourceOrderedMember,
+};
 use property_reference_values::{box_property_reference_value, value_class_boundary_conversion};
 use secondary_constructor::SecondaryConstructorEmitter;
 
@@ -5268,6 +5270,130 @@ fn emit_declared_property_accessors(
     }
 }
 
+/// What emitting one member of a class's source schedule needs besides the writer.
+struct ScheduledMemberEmission<'a> {
+    ir: &'a IrFile,
+    class: &'a crate::ir::IrClass,
+    fq_name: &'a str,
+    facade: &'a str,
+    signature_formatter: &'a JvmSignatureFormatter<'a>,
+    param_assertions: bool,
+    env: &'a EmitEnv<'a>,
+    markers: &'a std::collections::HashSet<u32>,
+}
+
+/// Emit one member of the class's source schedule: a property's accessors (and its annotation
+/// marker), a secondary constructor, or a method with its access bridges and `$default` stub.
+fn emit_scheduled_member(
+    emission: &ScheduledMemberEmission<'_>,
+    member: SourceOrderedMember<'_>,
+    cw: &mut ClassWriter,
+) {
+    let ScheduledMemberEmission {
+        ir,
+        class: c,
+        fq_name,
+        facade,
+        signature_formatter,
+        param_assertions,
+        env,
+        markers,
+    } = *emission;
+    let fid = match member {
+        SourceOrderedMember::Property(property) => {
+            emit_declared_property_accessor(
+                ir,
+                c,
+                property,
+                fq_name,
+                cw,
+                signature_formatter,
+                param_assertions,
+            );
+            // The property's own annotations ride a synthetic marker method, which kotlinc emits
+            // directly after that property's accessors — it has no source order of its own.
+            if let Some(&marker) = ir
+                .property_annotation_markers
+                .get(&(c.fq_name_id(), property.name.clone()))
+            {
+                // The marker is STATIC (kotlinc's shape): no `this` slot.
+                emit_method(ir, marker, fq_name, facade, cw, false, env);
+            }
+            return;
+        }
+        SourceOrderedMember::Function(fid)
+            if markers.contains(&fid) || standalone_method_is_elided(ir, fid, env) =>
+        {
+            return;
+        }
+        SourceOrderedMember::Function(fid) => fid,
+        SourceOrderedMember::SecondaryConstructor(ordinal, constructor) => {
+            // Each `<init>(p)` delegates to an exact checked target, then runs its body. A
+            // `super(…)`-reaching body already includes the class initialization steps.
+            SecondaryConstructorEmitter {
+                ir,
+                class: c,
+                owner: fq_name,
+                facade,
+                env,
+                writer: cw,
+                owner_prefix: &OwnerConstructorPrefix::none(),
+            }
+            .emit(ordinal, constructor);
+            return;
+        }
+    };
+    let f = &ir.functions[fid as usize];
+    if f.body.is_some() {
+        // A `static` member (e.g. a value class's `box-impl`/`constructor-impl`) emits with no
+        // `this` slot; an ordinary member is an instance method.
+        emit_method(ir, fid, fq_name, facade, cw, !f.is_static, env);
+        if env
+            .run
+            .private_member_access_bridges
+            .borrow()
+            .contains(&fid)
+        {
+            access_bridges::emit_private_member_access_bridge(ir, fid, fq_name, cw, false);
+        }
+        if ir.function_reference_access_bridges.contains(&fid) {
+            access_bridges::emit_function_reference_access_bridge(ir, fid, fq_name, cw, false);
+        }
+    } else {
+        cw.add_abstract_method_sig(
+            0x0001 | 0x0400,
+            &f.name,
+            &ir_method_desc(&f.params, &f.ret),
+            method_signature(signature_formatter, ir, fid, f).as_deref(),
+        );
+    }
+    // A method with default-valued parameters gets a `<name>$default(…, mask, marker)` synthetic stub
+    // (the JVM realization of default arguments). A STATIC method (a value class's `constructor-impl`)
+    // has no `self`, so it uses the facade-style stub keyed on the class as owner; an instance member
+    // uses the self-carrying variant.
+    if let Some(defaults) = ir.param_defaults(fid) {
+        if f.is_static {
+            // A constructor's `$default` marker is `DefaultConstructorMarker` (kotlinc's ctor ABI),
+            // NOT the plain `Object` a function `$default` uses — the value class's `constructor-impl`.
+            emit_facade_default_stub(
+                ir,
+                fid,
+                fq_name,
+                cw,
+                defaults,
+                env,
+                if f.name == "constructor-impl" && !ir.class_static_local_functions.contains(&fid) {
+                    Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker")
+                } else {
+                    Ty::obj("java/lang/Object")
+                },
+            );
+        } else {
+            emit_default_stub(ir, fid, fq_name, facade, cw, defaults, env, false);
+        }
+    }
+}
+
 /// The `$annotations` marker methods emitted with their property's accessors, by fid. kotlinc emits a
 /// marker directly after the accessors of the property it describes, not after every property's — so
 /// the class's method loop must skip a marker it already wrote here.
@@ -5817,6 +5943,31 @@ fn emit_class(
         c.ctor_param_count,
         c.explicit_param_stores,
     );
+    let serialization_constructor = ir.generated_secondary_constructor_by_owner(
+        c.fq_name_id(),
+        crate::ir::IrSecondaryConstructorRole::SerializationDeserialization,
+    );
+    let markers = property_annotation_marker_fids(ir, c);
+    let member_emission = ScheduledMemberEmission {
+        ir,
+        class: c,
+        fq_name: &fq_name,
+        facade,
+        signature_formatter: &signature_formatter,
+        param_assertions: opts.param_assertions,
+        env,
+        markers: &markers,
+    };
+    // A value class's declared members and `Any` overrides precede its private primary `<init>`,
+    // which its generated representation members follow; every other class starts with `<init>`.
+    let (before_primary, after_primary) = split_around_primary_constructor(
+        ir,
+        c,
+        source_ordered_members(ir, c, serialization_constructor),
+    );
+    for member in before_primary {
+        emit_scheduled_member(&member_emission, member, &mut cw);
+    }
     // A class with NO primary constructor emits no primary `<init>` — every `<init>` comes from a
     // secondary constructor (below). Otherwise emit the primary `<init>` here.
     if c.has_primary_ctor {
@@ -6048,7 +6199,11 @@ fn emit_class(
             // anonymous class, so treating that semantic capture like a declared value-class
             // parameter would make the only reachable constructor private.
             0x0000
-        } else if c.is_singleton() || c.is_value || value_param_ctor || c.is_sealed {
+        } else if c.is_value {
+            // A value class is never constructed through `new` outside its own `box-impl`; kotlinc
+            // marks the private primary synthetic as well.
+            0x1002
+        } else if c.is_singleton() || value_param_ctor || c.is_sealed {
             0x0002
         } else {
             // A DECLARED protected constructor reaches the JVM method too (kotlinc emits `<init>`
@@ -6160,112 +6315,8 @@ fn emit_class(
         }
     } // end `if c.has_primary_ctor`
 
-    let serialization_constructor = ir.generated_secondary_constructor_by_owner(
-        c.fq_name_id(),
-        crate::ir::IrSecondaryConstructorRole::SerializationDeserialization,
-    );
-    let ordered = source_ordered_members(ir, c, serialization_constructor);
-    let markers = property_annotation_marker_fids(ir, c);
-    for member in ordered {
-        let fid = match member {
-            SourceOrderedMember::Property(property) => {
-                emit_declared_property_accessor(
-                    ir,
-                    c,
-                    property,
-                    &fq_name,
-                    &mut cw,
-                    &signature_formatter,
-                    opts.param_assertions,
-                );
-                // The property's own annotations ride a synthetic marker method, which kotlinc emits
-                // directly after that property's accessors — it has no source order of its own.
-                if let Some(&marker) = ir
-                    .property_annotation_markers
-                    .get(&(c.fq_name_id(), property.name.clone()))
-                {
-                    // The marker is STATIC (kotlinc's shape): no `this` slot.
-                    emit_method(ir, marker, &fq_name, facade, &mut cw, false, env);
-                }
-                continue;
-            }
-            SourceOrderedMember::Function(fid)
-                if markers.contains(&fid) || standalone_method_is_elided(ir, fid, env) =>
-            {
-                continue;
-            }
-            SourceOrderedMember::Function(fid) => fid,
-            SourceOrderedMember::SecondaryConstructor(ordinal, constructor) => {
-                // Each `<init>(p)` delegates to an exact checked target, then runs its body. A
-                // `super(…)`-reaching body already includes the class initialization steps.
-                SecondaryConstructorEmitter {
-                    ir,
-                    class: c,
-                    owner: &fq_name,
-                    facade,
-                    env,
-                    writer: &mut cw,
-                    owner_prefix: &OwnerConstructorPrefix::none(),
-                }
-                .emit(ordinal, constructor);
-                continue;
-            }
-        };
-        let f = &ir.functions[fid as usize];
-        if f.body.is_some() {
-            // A `static` member (e.g. a value class's `box-impl`/`constructor-impl`) emits with no
-            // `this` slot; an ordinary member is an instance method.
-            emit_method(ir, fid, &fq_name, facade, &mut cw, !f.is_static, env);
-            if env
-                .run
-                .private_member_access_bridges
-                .borrow()
-                .contains(&fid)
-            {
-                access_bridges::emit_private_member_access_bridge(
-                    ir, fid, &fq_name, &mut cw, false,
-                );
-            }
-            if ir.function_reference_access_bridges.contains(&fid) {
-                access_bridges::emit_function_reference_access_bridge(
-                    ir, fid, &fq_name, &mut cw, false,
-                );
-            }
-        } else {
-            cw.add_abstract_method_sig(
-                0x0001 | 0x0400,
-                &f.name,
-                &ir_method_desc(&f.params, &f.ret),
-                method_signature(&signature_formatter, ir, fid, f).as_deref(),
-            );
-        }
-        // A method with default-valued parameters gets a `<name>$default(…, mask, marker)` synthetic stub
-        // (the JVM realization of default arguments). A STATIC method (a value class's `constructor-impl`)
-        // has no `self`, so it uses the facade-style stub keyed on the class as owner; an instance member
-        // uses the self-carrying variant.
-        if let Some(defaults) = ir.param_defaults(fid) {
-            if f.is_static {
-                // A constructor's `$default` marker is `DefaultConstructorMarker` (kotlinc's ctor ABI),
-                // NOT the plain `Object` a function `$default` uses — the value class's `constructor-impl`.
-                emit_facade_default_stub(
-                    ir,
-                    fid,
-                    &fq_name,
-                    &mut cw,
-                    defaults,
-                    env,
-                    if f.name == "constructor-impl"
-                        && !ir.class_static_local_functions.contains(&fid)
-                    {
-                        Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker")
-                    } else {
-                        Ty::obj("java/lang/Object")
-                    },
-                );
-            } else {
-                emit_default_stub(ir, fid, &fq_name, facade, &mut cw, defaults, env, false);
-            }
-        }
+    for member in after_primary {
+        emit_scheduled_member(&member_emission, member, &mut cw);
     }
     // The exact serialization-plugin deserialization constructor emits after every declared member
     // (`write$Self$main` included) and before `<clinit>`, which is kotlinc's member order for it.
