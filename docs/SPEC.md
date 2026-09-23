@@ -6099,6 +6099,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `codegen/box/inlineClasses/boxResultInlineClassOfConstructorCallGeneric.kt` and
   `codegen/box/primitiveTypes/kt36952_identityEqualsWithBooleanInLocalFunction.kt`.
 
+- **An unsigned zero initializer is a JVM default like any other zero.** kotlinc omits a
+  property's declaration store when its value is the one the field already holds, and that is
+  observable: a base constructor that dispatches to an override runs before the subclass's
+  initializers, so a value the override wrote survives the omitted store and is wiped by a kept one.
+  `0u`, `0uL` and the `UByte`/`UShort` zeros are their carrier's zero, so they are omitted too —
+  krusty kept them and reset what the override wrote.
+  Tests: `tests/unsigned_default_store_e2e.rs` (cross-checked against the reference compiler) and
+  `jvm::property_storage::tests::an_unsigned_zero_is_a_jvm_default`.
 - **A property's `@Serializable(with = X::class)` decodes through `X`, as it encodes through it.**
   `serialize` and `childSerializers` consult the property's explicit serializer ahead of its type;
   `deserialize` did not. A property whose type has no derivable serializer made the whole

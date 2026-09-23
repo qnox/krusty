@@ -1469,30 +1469,10 @@ fn builtin_descriptor(sig: &GenericSig) -> String {
 /// parameter's declared upper bound; an unlisted one is `Any?`, matching the `@Metadata`
 /// generic-signature decoder. JVM erasure is derived separately by [`builtin_erased`].
 pub(super) fn builtin_ty(t: &super::metadata::BuiltinTy, bounds: &HashMap<String, Ty>) -> Ty {
-    use super::metadata::BuiltinTy;
-    let ty = match t {
-        BuiltinTy::Class { internal, args, .. } => {
-            let args = args
-                .iter()
-                .map(|argument| builtin_ty(argument, bounds))
-                .collect();
-            super::metadata::gsig_from_kotlin_class(internal, args, false, 0)
-        }
-        BuiltinTy::Param { name, .. } => {
-            let bound = bounds
-                .get(name)
-                .copied()
-                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-            Ty::ty_param(name, bound)
-        }
-        BuiltinTy::InProjection(inner) => Ty::in_projection(builtin_ty(inner, bounds)),
-        BuiltinTy::OutProjection(inner) => Ty::out_projection(builtin_ty(inner, bounds)),
-    };
-    if t.nullable() {
-        Ty::nullable(ty)
-    } else {
-        ty
-    }
+    crate::metadata::semantic::semantic_ty(
+        &super::metadata::builtin_bridge::ty_to_common(t),
+        bounds,
+    )
 }
 
 /// The declared upper bound of each type parameter, keyed by name. Bounds are decoded with an EMPTY
@@ -4195,16 +4175,6 @@ impl Classpath {
                 .insert(internal_id, found.clone());
         }
         found
-    }
-
-    /// Exact JVM value-class declaration facts for one dependency classifier. This is a physical
-    /// realization query: overload selection and Kotlin type inference have already completed.
-    pub(super) fn value_class_declaration(
-        &self,
-        internal: TypeName,
-    ) -> Option<super::value_class_declarations::ValueClassDeclaration> {
-        let class = self.find_name(internal)?;
-        super::value_class_declarations::from_class_info(&class)
     }
 
     /// JVM storage for an already-resolved Kotlin singleton classifier. FIR/common IR carry only
