@@ -154,6 +154,8 @@ mod callable_ref_unresolved_e2e;
 mod cannot_infer_cascade_e2e;
 #[path = "catch_annotation_comma_e2e.rs"]
 mod catch_annotation_comma_e2e;
+#[path = "chained_plus_element_join_e2e.rs"]
+mod chained_plus_element_join_e2e;
 #[path = "char_literal_diagnostics_e2e.rs"]
 mod char_literal_diagnostics_e2e;
 #[path = "checker_operator_methods_e2e.rs"]
