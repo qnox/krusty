@@ -2103,6 +2103,13 @@ pub struct ClassSig {
     /// Resolved classifier declaration annotations, projected to the stable module index before
     /// Pass 2 so plugins and semantic checks never revisit source occurrences.
     pub annotations: Vec<TypeName>,
+    /// Resolved CLASS arguments of those annotations, by annotation ordinal — the identity behind
+    /// `@Serializable(with = X::class)`. Resolved here, with the annotation's own name and through
+    /// the same classifier rules, because no later phase may recover it from a spelling.
+    pub annotation_class_arguments: Vec<(u32, TypeName)>,
+    /// Exact identities of plugin-generated nested classifiers. The generating frontend extension
+    /// publishes these with the source header; backends never infer them from annotations or names.
+    pub generated_nested_classifiers: Vec<crate::types::GeneratedClassifierFact>,
     pub props: Vec<(String, Ty, bool)>, // backing-field properties (name, type, is_var)
     pub declared_props: HashMap<String, DeclaredPropertySig>,
     /// Context-parameter properties are overloadable by their context shape and may share a name
@@ -2288,6 +2295,8 @@ impl ClassSig {
             source_decl: Some(source_decl),
             visibility,
             annotations: Vec::new(),
+            annotation_class_arguments: Vec::new(),
+            generated_nested_classifiers: Vec::new(),
             props: Vec::new(),
             declared_props: HashMap::new(),
             contextual_props: HashMap::new(),
@@ -10844,6 +10853,16 @@ pub struct TypeInfo {
     /// For a resolved classpath member, extension, or top-level call, maps callee parameter slots to
     /// source arguments. `None` means the target default-call ABI fills that slot.
     pub resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
+    /// The LITERAL a call site passes for an omitted defaulted parameter, for a dependency callable
+    /// whose provider states the default as a constant.
+    ///
+    /// A target default-call ABI is one way to realize an omitted default and not the only one. The
+    /// JVM has a `$default` synthetic to name; a klib has none, and its default lives in the
+    /// library's IR as an expression. When that expression is a CONSTANT the call site can simply
+    /// pass it — a constant has no side effects and depends on no other argument, which is exactly
+    /// what makes this equivalent to the callee filling it in. Anything else stays unrealizable.
+    pub resolved_library_default_literals:
+        HashMap<ExprId, Vec<(usize, crate::libraries::DefaultValue)>>,
     /// Plain named arguments that the selected call mapping bound as an ENTIRE vararg array. This is
     /// a semantic call fact, not something lowering may infer by comparing instantiated `Ty` values:
     /// generic inference can represent the call-site array and selected parameter with different type
@@ -19032,6 +19051,12 @@ impl<'a> Checker<'a> {
             })
             .collect::<Vec<_>>();
 
+        // Keep the value facet selected for the expected classifier. The declaration owner is not
+        // necessarily this singleton: a companion may inherit `of` from an ordinary base class.
+        // The receiver therefore has to travel independently from the selected callable identity.
+        let companion_dispatch =
+            classifier.and_then(|classifier| self.classifier_singleton_value(classifier));
+
         // The expected classifier's companion operator is the first language strategy. Its raw
         // declarations enter the same applicability and overload-selection engine as an ordinary
         // call; only declarations explicitly marked `operator` are eligible for this syntax.
@@ -19141,10 +19166,22 @@ impl<'a> Checker<'a> {
                 }
                 self.record_selected_sam_arguments(args, &selected.applied_params());
                 let result = selected.callable.ret;
-                self.resolved_calls.insert(
-                    call,
-                    ResolvedCall::Companion(selected.member_with_return(result)),
-                );
+                let mut member = selected.member_with_return(result);
+                // An `operator fun of` is an ordinary member of the classifier's value facet, and
+                // this syntax writes no receiver expression to carry that instance. Keep the
+                // already-resolved singleton independently of the declaration owner: an inherited
+                // operator's owner is its base class, not the companion object that dispatches it.
+                if member.singleton_dispatch.is_none()
+                    && member.implicit_classifier_callable.is_none()
+                {
+                    member.singleton_dispatch = companion_dispatch.map(|singleton| {
+                        Box::new(crate::libraries::SingletonDispatch {
+                            classifier: singleton.classifier,
+                        })
+                    });
+                }
+                self.resolved_calls
+                    .insert(call, ResolvedCall::Companion(member));
                 return result;
             }
             Some(CallableCandidateSelection::MissingContext(_)) => {
@@ -19440,11 +19477,12 @@ impl<'a> Checker<'a> {
                     .map(|(candidate, ..)| candidate.clone())
                     .collect::<Vec<_>>();
                 provisional_candidates.extend(candidates.iter().cloned());
-                record_anonymous_construction_captures(
+                let _ = record_anonymous_construction_captures(
                     self.file,
                     call,
                     &self.anonymous_lexical_scope,
                     &provisional_candidates,
+                    true,
                     SelectedLocalCallableCaptures {
                         calls: &self.resolved_calls,
                         expressions: &self.expr_lowers,
@@ -19482,13 +19520,21 @@ impl<'a> Checker<'a> {
                 }
                 selected_receiver_candidates.extend(candidates);
                 candidates = selected_receiver_candidates;
-                // Remove every unused provisional receiver. This remains inside capture
-                // discovery; the authoritative body check consumes only this exact stable list.
-                record_anonymous_construction_captures(
+                // Finalize away receiver rungs the scratch body did not select. Pending inference
+                // remains provisional so an incomplete revisit cannot discard an established
+                // field.
+                let storage_field_remap = record_anonymous_construction_captures(
                     self.file,
                     call,
                     &self.anonymous_lexical_scope,
                     &candidates,
+                    self.postponed_argument_depth != 0
+                        || candidates.iter().any(|candidate| {
+                            candidate.ty.mentions_pending()
+                                || candidate
+                                    .delegate_storage
+                                    .is_some_and(|storage| storage.mentions_pending())
+                        }),
                     SelectedLocalCallableCaptures {
                         calls: &self.resolved_calls,
                         expressions: &self.expr_lowers,
@@ -19496,6 +19542,30 @@ impl<'a> Checker<'a> {
                     },
                     &mut self.discovered_anonymous_captures,
                 );
+                // Descendants were checked while every addressable receiver rung occupied a
+                // provisional field. Rewrite their exact `ClassStorage` coordinates through the
+                // finalized field permutation instead of replaying the class body. Rechecking the
+                // whole subtree here doubles the work at every nesting level (and is exponential
+                // for deeply nested anonymous objects); the structural owner edge identifies the
+                // only constructions whose storage owner is this declaration.
+                if !remap_direct_anonymous_class_storage_captures(
+                    declaration,
+                    &self.anonymous_lexical_scope,
+                    &storage_field_remap,
+                    &mut self.discovered_anonymous_captures,
+                ) {
+                    self.diags.error(
+                        span,
+                        "anonymous capture storage identity was removed during finalization",
+                    );
+                    return Ty::Error;
+                }
+                if let Some(mut captures) = self.discovered_anonymous_captures.remove(&declaration)
+                {
+                    self.extend_anonymous_superclass_captures(scope, declaration, &mut captures);
+                    self.discovered_anonymous_captures
+                        .insert(declaration, captures);
+                }
                 return self.anonymous_object_type(scope, declaration);
             }
             let captures = self
@@ -37808,6 +37878,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_constant_receivers: HashMap::new(),
         resolved_enum_entries: HashMap::new(),
         resolved_call_arg_slots: HashMap::new(),
+        resolved_library_default_literals: HashMap::new(),
         resolved_whole_array_vararg_args: std::collections::HashSet::new(),
         platform_narrowings: HashMap::new(),
         synthetic_ext_calls: HashMap::new(),
@@ -38179,11 +38250,12 @@ fn record_anonymous_construction_captures(
     construction: ExprId,
     lexical_scope: &AnonymousLexicalClassScope,
     candidates: &[AnonymousCaptureCandidate],
+    preserve_missing: bool,
     selected_local_callables: SelectedLocalCallableCaptures<'_>,
     captures: &mut HashMap<DeclId, Vec<AnonymousObjectCapture>>,
-) {
+) -> Vec<Option<u32>> {
     let Some(&declaration) = file.anonymous_object_classes.get(&construction) else {
-        return;
+        return Vec::new();
     };
     let bound = anonymous_body_bound_value_names(file, declaration);
     crate::trace_compiler!(
@@ -38264,37 +38336,88 @@ fn record_anonymous_construction_captures(
         "anonymous capture selection declaration={declaration:?} captures={selected:?}",
     );
     // Postponed generic-lambda checking may revisit the same construction while one receiver type
-    // is temporarily `Pending`. Capture discovery is monotonic: a provisional revisit must never
-    // replace the exact symbolic type recorded by the earlier check, because this table crosses the
-    // retained-inline boundary and no pending semantic type may reach checked FIR.
+    // is temporarily `Pending`. A provisional revisit must neither replace the exact symbolic type
+    // recorded by the earlier check nor renumber an established capture field. Descendant
+    // constructions can already carry one of these ordinals as their resolved `ClassStorage`
+    // source, so retain the established order while discovery is provisional. The returned field
+    // permutation lets direct descendants update their exact storage coordinates after unused
+    // receiver rungs are removed. This table crosses the retained-inline boundary and no pending
+    // semantic type may reach checked FIR.
+    let mut field_remap = Vec::new();
     if let Some(previous) = captures.get(&declaration) {
-        for capture in &mut selected {
-            if !capture.ty.mentions_pending()
-                && capture
+        field_remap.resize(previous.len(), None);
+        let mut pending = selected;
+        selected = Vec::with_capacity(previous.len().max(pending.len()));
+        for (previous_field, exact) in previous.iter().enumerate() {
+            let Some(position) = pending
+                .iter()
+                .position(|capture| capture.name == exact.name && capture.source == exact.source)
+            else {
+                if preserve_missing {
+                    field_remap[previous_field] = u32::try_from(selected.len()).ok();
+                    selected.push(exact.clone());
+                }
+                continue;
+            };
+            let mut capture = pending.remove(position);
+            capture.shared_cell |= exact.shared_cell;
+            if (capture.ty.mentions_pending()
+                || capture
+                    .storage_ty
+                    .is_some_and(|storage| storage.mentions_pending()))
+                && !exact.ty.mentions_pending()
+                && exact
                     .storage_ty
                     .is_none_or(|storage| !storage.mentions_pending())
             {
-                continue;
+                capture.ty = exact.ty;
+                capture.storage_ty = exact.storage_ty;
             }
-            let Some(exact) = previous.iter().find(|exact| {
-                exact.name == capture.name
-                    && exact.source == capture.source
-                    && !exact.ty.mentions_pending()
-                    && exact
-                        .storage_ty
-                        .is_none_or(|storage| !storage.mentions_pending())
-            }) else {
-                continue;
-            };
-            capture.ty = exact.ty;
-            capture.storage_ty = exact.storage_ty;
+            field_remap[previous_field] = u32::try_from(selected.len()).ok();
+            selected.push(capture);
         }
+        selected.extend(pending);
     }
     crate::trace_compiler!(
         "resolve",
         "anonymous captures selected declaration={declaration:?} captures={selected:?}",
     );
     captures.insert(declaration, selected);
+    field_remap
+}
+
+/// Translate storage ordinals recorded by direct anonymous children while `owner` still exposed
+/// its provisional receiver prefix. The lexical-owner graph is the authoritative relationship:
+/// deeper descendants read storage from their immediate classifier, whose own finalization remaps
+/// them independently.
+fn remap_direct_anonymous_class_storage_captures(
+    owner: DeclId,
+    lexical_scope: &AnonymousLexicalClassScope,
+    storage_fields: &[Option<u32>],
+    captures: &mut HashMap<DeclId, Vec<AnonymousObjectCapture>>,
+) -> bool {
+    let direct_children = lexical_scope
+        .owners
+        .iter()
+        .filter_map(|(&declaration, &candidate_owner)| {
+            (candidate_owner == owner).then_some(declaration)
+        })
+        .collect::<Vec<_>>();
+    for declaration in direct_children {
+        let Some(child_captures) = captures.get_mut(&declaration) else {
+            continue;
+        };
+        for capture in child_captures {
+            let AnonymousObjectCaptureSource::ClassStorage { field } = &mut capture.source else {
+                continue;
+            };
+            let Some(Some(finalized_field)) = storage_fields.get(*field as usize) else {
+                return false;
+            };
+            *field = *finalized_field;
+        }
+    }
+    true
 }
 
 fn install_anonymous_object_captures(
@@ -39583,6 +39706,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_constant_receivers,
         resolved_enum_entries,
         resolved_call_arg_slots,
+        resolved_library_default_literals,
         resolved_whole_array_vararg_args,
         platform_narrowings,
         synthetic_ext_calls,
@@ -39918,6 +40042,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_constant_receivers,
         resolved_enum_entries,
         resolved_call_arg_slots,
+        resolved_library_default_literals,
         resolved_whole_array_vararg_args,
         platform_narrowings,
         synthetic_ext_calls,
@@ -39976,9 +40101,14 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
                 };
                 let explicit_receiver = crate::ast::explicit_call_receiver(file, expression)
                     .map(|receiver| (receiver, info.ty(receiver)));
+                let implicit_receiver = info
+                    .implicit_receiver_selections
+                    .get(&expression)
+                    .map(|selected| selected.ty);
                 Some(crate::plugins::FrontendSelectedCall {
                     expression,
                     explicit_receiver,
+                    implicit_receiver,
                     owner,
                     name,
                     params,
@@ -40908,6 +41038,9 @@ struct Checker<'a> {
     resolved_constant_receivers: HashMap<ExprId, ExprId>,
     resolved_enum_entries: HashMap<ExprId, ResolvedEnumEntry>,
     resolved_call_arg_slots: HashMap<ExprId, Vec<Option<ExprId>>>,
+    /// See [`TypeInfo::resolved_library_default_literals`].
+    resolved_library_default_literals:
+        HashMap<ExprId, Vec<(usize, crate::libraries::DefaultValue)>>,
     resolved_whole_array_vararg_args: std::collections::HashSet<ExprId>,
     /// See [`TypeInfo::platform_narrowings`].
     platform_narrowings: HashMap<ExprId, PlatformNarrowing>,
@@ -41845,6 +41978,17 @@ impl<'a> Checker<'a> {
                 result.unsupported.get_or_insert(name);
                 continue;
             };
+            let source = match local.origin {
+                ReceiverFnValueOrigin::ClassStorage(field)
+                | ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } => {
+                    AnonymousObjectCaptureSource::ClassStorage { field }
+                }
+                ReceiverFnValueOrigin::Local
+                | ReceiverFnValueOrigin::DispatchProperty { .. }
+                | ReceiverFnValueOrigin::TopLevelProperty => {
+                    AnonymousObjectCaptureSource::LexicalValue
+                }
+            };
             result.values.push(AnonymousObjectCapture {
                 // Smart-cast state is a fact about this control-flow point, not the type of a
                 // mutable cell captured by a separately checked classifier body.
@@ -41863,7 +42007,7 @@ impl<'a> Checker<'a> {
                 .is_shared_cell(),
                 storage_ty: local.delegate_storage_ty,
                 name,
-                source: AnonymousObjectCaptureSource::LexicalValue,
+                source,
                 receiver_label: None,
                 lexical_shadow_depth: 0,
                 capture_dependency: None,
@@ -49072,6 +49216,44 @@ impl<'a> Checker<'a> {
         Span::new(span.hi.saturating_sub(name.len() as u32), span.hi)
     }
 
+    /// The literal each omitted defaulted parameter takes, or `None` when the provider cannot say.
+    ///
+    /// Every omitted slot must be answered: a call that can fill three of four omitted parameters
+    /// is a call that cannot be made, and half an answer here would pass the callee a value it
+    /// never declared. The value must also FIT the parameter it fills — a provider that decoded a
+    /// constant of the wrong shape is a provider that is wrong about the declaration, and passing
+    /// it would be a silently miscompiled argument rather than a diagnosis.
+    fn library_default_literals(
+        &self,
+        call: ExprId,
+        selected: &crate::libraries::FunctionInfo,
+    ) -> Option<Vec<(usize, crate::libraries::DefaultValue)>> {
+        let slots = self.resolved_call_arg_slots.get(&call)?;
+        // Provider defaults are parallel to VALUE parameters. Context parameters are supplied
+        // independently and must not shift this declaration-owned table.
+        let parameters = selected.value_params();
+        if selected.context_count > selected.call_sig.param_names.len() {
+            return None;
+        }
+        let context_count = selected.context_count;
+        let value_call_sig = selected.call_sig.suffix(context_count);
+        let mut literals = Vec::new();
+        for (parameter, argument) in slots.iter().enumerate() {
+            if argument.is_some() || value_call_sig.vararg_index == Some(parameter) {
+                continue;
+            }
+            let value = selected.default_values.get(parameter)?.clone()?;
+            if !self
+                .resolver()
+                .default_literal_fits(&value, *parameters.get(parameter)?)
+            {
+                return None;
+            }
+            literals.push((parameter, value));
+        }
+        (!literals.is_empty()).then_some(literals)
+    }
+
     fn call_callee_name_span(&self, call: ExprId) -> Span {
         let Expr::Call { callee, .. } = self.file.expr(call) else {
             return self.span(call);
@@ -49705,6 +49887,13 @@ impl<'a> Checker<'a> {
             } else if selected.flags.inline.can_inline() {
                 selected.callable.default_call = true;
                 selected.callable.inline = crate::libraries::InlineKind::MustInline;
+            } else if let Some(literals) = self.library_default_literals(call, &selected) {
+                // The provider states each omitted default as a CONSTANT, so the call site passes
+                // it. A constant has no side effects and depends on no other argument, which is
+                // what makes this the same call the callee's own default-filling would have made —
+                // and it needs no `$default` symbol, which is the one thing a klib cannot name.
+                self.resolved_library_default_literals
+                    .insert(call, literals);
             } else {
                 self.diags.error(
                     self.call_callee_name_span(call),
@@ -73753,6 +73942,12 @@ impl<'a> Checker<'a> {
             // return here from rechecked operands erased `Set<String>` back to raw `Set` whenever a
             // postponed nested producer still exposed its private type variable.
             callable.ret = selected.callable.ret;
+            // The realization above may have been direct only because the provider states each
+            // omitted default as a constant. Record them, so checked FIR materializes the same
+            // values the direct shape was built on.
+            if let Some(literals) = self.library_default_literals(e, &selected) {
+                self.resolved_library_default_literals.insert(e, literals);
+            }
             let collection_types = callable.inline_body_plan.as_deref().and_then(|plan| {
                 let crate::libraries::InlineBodyPlan::CollectionTransform {
                     lambda_parameter, ..

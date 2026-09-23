@@ -100,6 +100,7 @@ pub(crate) fn run_backend_passes(
     run_backend_passes_after_plugins(
         ir,
         facade,
+        classifiers,
         classifiers.module().source_value_classes(),
         classifiers.module().metadata_readable_value_classes(),
         classpath,
@@ -111,6 +112,7 @@ pub(crate) fn run_backend_passes(
 fn run_backend_passes_after_plugins(
     ir: &mut crate::ir::IrFile,
     facade: &str,
+    classifiers: &dyn crate::types::ClassifierFactSource,
     module_value_classes: &std::collections::HashMap<crate::types::TypeName, Ty>,
     module_readable_value_classes: &std::collections::HashSet<crate::types::TypeName>,
     classpath: &crate::jvm::classpath::Classpath,
@@ -154,7 +156,7 @@ fn run_backend_passes_after_plugins(
     crate::jvm::value_classes::apply_override_final_drop(ir);
     if !crate::jvm::value_classes::lower_value_classes(
         ir,
-        classpath,
+        classifiers,
         module_value_classes,
         module_readable_value_classes,
         &mut facts.bridge_return_adaptations,
@@ -180,6 +182,8 @@ fn run_backend_passes_after_plugins(
     ) {
         return Err(SkipReason::Suspend);
     }
+    // After the suspend transform: the body moved onto the static is the finished state machine.
+    crate::jvm::suspend_interface_impls::lower_suspend_interface_impls(ir);
     crate::jvm::ir_emit::realize_lambda_impl_names(ir);
     crate::jvm::ir_emit::mark_must_inline_lambdas(ir);
     crate::jvm::ir_emit::reparent_lambda_impls(ir);
@@ -463,6 +467,7 @@ fn checked_module_inner_class_resolver(
                 abstract_class: shape.is_abstract,
                 final_class: !shape.is_abstract && !shape.is_extensible,
             }),
+        module.generated_classifiers().iter(),
         cp,
     )
 }
@@ -479,8 +484,9 @@ struct InnerModuleClassifier {
     final_class: bool,
 }
 
-fn module_inner_class_resolver_from_shapes(
+fn module_inner_class_resolver_from_shapes<'a>(
     classes: impl IntoIterator<Item = InnerModuleClassifier>,
+    generated: impl IntoIterator<Item = &'a crate::types::GeneratedClassifierFact>,
     cp: std::rc::Rc<crate::jvm::classpath::Classpath>,
 ) -> crate::jvm::classfile::InnerClassResolver {
     const PUBLIC: u16 = 0x0001;
@@ -492,6 +498,7 @@ fn module_inner_class_resolver_from_shapes(
     const ABSTRACT: u16 = 0x0400;
     const ANNOTATION: u16 = 0x2000;
     const ENUM: u16 = 0x4000;
+    const SYNTHETIC: u16 = 0x1000;
 
     let classes = classes.into_iter().collect::<Vec<_>>();
     let module_names = classes
@@ -549,6 +556,41 @@ fn module_inner_class_resolver_from_shapes(
             },
         );
     }
+    for class in generated {
+        let visibility = match class.visibility {
+            crate::types::Visibility::Protected => PROTECTED,
+            crate::types::Visibility::Private => PRIVATE,
+            _ => PUBLIC,
+        };
+        let mut access = visibility | if class.captures_outer { 0 } else { STATIC };
+        match class.kind {
+            crate::types::GeneratedClassifierKind::Annotation => {
+                access |= INTERFACE | ABSTRACT | ANNOTATION;
+            }
+            crate::types::GeneratedClassifierKind::Interface => {
+                access |= INTERFACE | ABSTRACT;
+            }
+            crate::types::GeneratedClassifierKind::Enum => access |= ENUM,
+            crate::types::GeneratedClassifierKind::Class => {}
+        }
+        if class.is_abstract {
+            access |= ABSTRACT;
+        }
+        if class.is_final {
+            access |= FINAL;
+        }
+        if class.compiler_generated {
+            access |= SYNTHETIC;
+        }
+        source.insert(
+            class.classifier.render(),
+            crate::jvm::classfile::InnerClassDetails {
+                outer: Some(class.lexical_owner.render()),
+                name: Some(class.source_name.to_string()),
+                access,
+            },
+        );
+    }
     let classpath = classpath_inner_class_resolver(cp);
     std::rc::Rc::new(move |internal: &str| {
         source
@@ -572,7 +614,13 @@ pub fn classpath_inner_class_resolver(
                 Some(crate::jvm::classfile::InnerClassDetails {
                     outer: entry.outer.clone(),
                     name: entry.name.clone(),
-                    access: entry.access,
+                    // ACC_SYNTHETIC does NOT cross the compilation boundary. kotlinc knows a class
+                    // is compiler-generated only while it is compiling it; a class read back from
+                    // the classpath is just a declaration, and the row it writes for one omits the
+                    // bit even though that class's OWN row carries it. Measured on a generated
+                    // `$serializer`: 0x1019 in the module that declares it, 0x0019 in every module
+                    // that only references it.
+                    access: entry.access & !0x1000,
                 })
             })
             .or_else(|| {

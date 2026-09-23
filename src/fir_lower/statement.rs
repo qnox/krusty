@@ -287,6 +287,7 @@ impl BodyLowering<'_> {
         let mut fields = Vec::with_capacity(captures.len());
         let mut arguments = Vec::with_capacity(captures.len());
         for (field, capture) in captures.iter().enumerate() {
+            let field = u32::try_from(field).expect("too many captured class fields");
             let value = match &capture.source {
                 FirLocalClassCaptureSource::Value(source) => {
                     self.ir.add_expr(IrExpr::GetValue(self.value_slot(*source)))
@@ -358,7 +359,7 @@ impl BodyLowering<'_> {
                 ty: capture.ty.get(),
                 declared_ty: None,
                 is_field: true,
-                field_index: Some(u32::try_from(field).expect("too many captured class fields")),
+                field_index: Some(field),
                 has_default: false,
                 is_vararg: false,
                 type_param: None,
@@ -369,14 +370,15 @@ impl BodyLowering<'_> {
                     .then(|| capture.name.to_string())
                     .filter(|_| !capture.ty.get().is_nullable()),
             });
+            if let Some(identity) = capture.capture_identity {
+                self.ir
+                    .class_capture_identities
+                    .insert((class, field), identity);
+            }
             if capture.shared_cell {
-                self.ir.shared_class_capture_fields.insert(
-                    (
-                        class,
-                        u32::try_from(field).expect("too many captured class fields"),
-                    ),
-                    capture.ty.get(),
-                );
+                self.ir
+                    .shared_class_capture_fields
+                    .insert((class, field), capture.ty.get());
             }
         }
         let class = &mut self.ir.classes[class as usize];
