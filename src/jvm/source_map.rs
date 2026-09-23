@@ -171,9 +171,12 @@ impl SourceMap {
         }
         out.push_str("*L\n");
         for range in &self.ranges {
-            out.push_str(&format!(
-                "{}#{},{}:{}\n",
-                range.input_start, range.file, range.count, range.output_start
+            out.push_str(&line_row(
+                range.input_start,
+                range.file,
+                range.count,
+                range.output_start,
+                1,
             ));
         }
         // The debug stratum names only the owning file: every inlined range is reported at the line
@@ -182,14 +185,39 @@ impl SourceMap {
         out.push_str(&format!("+ 1 {}\n{}\n", owner.name, owner.path));
         out.push_str("*L\n");
         for site in &self.call_sites {
-            out.push_str(&format!(
-                "{}#1:{},{}\n",
-                site.call_line, site.output_start, site.count
+            // The debug stratum fixes the file and repeat count at 1. Its output-line increment is
+            // the inlined region's size; like the repeat count, an increment of 1 is omitted.
+            out.push_str(&line_row(
+                site.call_line,
+                1,
+                1,
+                site.output_start,
+                site.count,
             ));
         }
         out.push_str("*E\n");
         Some(out)
     }
+}
+
+/// One `*L` row. JSR-045 omits a repeat count or output-line increment when it is 1. The reference
+/// compiler follows that: a single mapped line is `1#2:3`, never `1#2,1:3,1`.
+fn line_row(
+    input_start: u16,
+    file: u16,
+    repeat_count: u16,
+    output_start: u16,
+    output_increment: u16,
+) -> String {
+    let repeat_count = match repeat_count {
+        1 => String::new(),
+        count => format!(",{count}"),
+    };
+    let output_increment = match output_increment {
+        1 => String::new(),
+        increment => format!(",{increment}"),
+    };
+    format!("{input_start}#{file}{repeat_count}:{output_start}{output_increment}\n")
 }
 
 #[cfg(test)]
