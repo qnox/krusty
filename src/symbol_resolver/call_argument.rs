@@ -131,9 +131,45 @@ impl CallArgKind {
         matches!(self, Self::OmittedDefault)
     }
 
+    /// Whether a nested generic call's RESULT is fixed by its own inputs — a formal in its return
+    /// type that its receiver or a parameter also mentions — rather than only by what an enclosing
+    /// expectation supplies.
+    ///
+    /// `xs.map { B(it) }` qualifies: `R` appears in the transform parameter, so the provisional
+    /// `List<B>` is real evidence about the argument and not a placeholder. `ArrayList()` and
+    /// `emptySet()` do not: their result variables have no input to come from, so their provisional
+    /// reads as the declared bound (`ArrayList<Any>`) or stays free (`Set<T>`), and treating either
+    /// as evidence discards the element type the expectation would have supplied.
+    pub(crate) fn result_is_input_constrained(&self) -> bool {
+        let Self::ExpectedTypeCallable { provisional, generic_sig } = self else {
+            return false;
+        };
+        // A provisional that still mentions a type parameter is not determined: `"OK" to
+        // emptySet()` reads as `Pair<String, B>` because its own argument supplied nothing for
+        // `B`. Only the enclosing expectation can finish it, so it is not evidence about this
+        // call — which is what letting it through regressed.
+        if provisional.mentions_ty_param() {
+            return false;
+        }
+        generic_sig
+            .formals
+            .iter()
+            .filter(|formal| {
+                crate::types::ty_mentions_param(generic_sig.ret, std::slice::from_ref(*formal))
+            })
+            .any(|formal| {
+                generic_sig.receiver.is_some_and(|receiver| {
+                    crate::types::ty_mentions_param(receiver, std::slice::from_ref(formal))
+                }) || generic_sig.params.iter().any(|parameter| {
+                    crate::types::ty_mentions_param(*parameter, std::slice::from_ref(formal))
+                })
+            })
+    }
+
     /// Whether this argument has a final semantic type that may constrain a call's declaration
     /// variables. An unresolved lambda is shaped by the candidate first; a rechecked/materialized
     /// lambda participates like every other typed expression.
+    ///
     pub(crate) fn contributes_type_to_inference(&self) -> bool {
         !self.is_expected_type_callable()
             && !self.is_omitted_default()
@@ -202,24 +238,10 @@ impl CallArgKind {
         src: &dyn SymbolSource,
         parameter: Ty,
     ) -> bool {
-        let Self::ExpectedTypeCallable { generic_sig, .. } = self else {
+        if !self.is_expected_type_callable() {
             return false;
-        };
-        let result_formals = generic_sig
-            .formals
-            .iter()
-            .filter(|formal| {
-                crate::types::ty_mentions_param(generic_sig.ret, std::slice::from_ref(*formal))
-            })
-            .collect::<Vec<_>>();
-        let constrained_by_input = result_formals.iter().any(|formal| {
-            generic_sig.receiver.is_some_and(|receiver| {
-                crate::types::ty_mentions_param(receiver, std::slice::from_ref(*formal))
-            }) || generic_sig.params.iter().any(|parameter| {
-                crate::types::ty_mentions_param(*parameter, std::slice::from_ref(*formal))
-            })
-        });
-        !constrained_by_input && self.binds_result_to(src, parameter)
+        }
+        !self.result_is_input_constrained() && self.binds_result_to(src, parameter)
     }
 }
 
