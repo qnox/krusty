@@ -2513,18 +2513,23 @@ KRef kt_list_get(KRef list, kt_int index) {
     KRef elements = ((const KList *)list)->elements;
     kt_int size = kt_list_size(list);
     if (index < 0 || index >= size) {
+        /* `kt_throw` records the exception and comes back, so the read it forbids is skipped here:
+           past the storage it would answer whatever lies there as an element. */
         kt_index_out_of_bounds(index, size);
+        return NULL;
     }
     return kt_elements_of(elements)[index];
 }
 
 /* `first()` and `last()`. Kotlin raises `NoSuchElementException` on an empty list, with its own
    wording, rather than answering NULL — a list of a nullable element type has a perfectly good
-   NULL first element and the two must stay distinguishable. */
+   NULL first element and the two must stay distinguishable. The NULL each answers after raising is
+   no element: the caller finds the exception pending and never reads it. */
 KRef kt_list_first(KRef list) {
     if (kt_list_size(list) == 0) {
         kt_throw(kt_throwable_new(&kt_type_no_such_element_exception,
                                   kt_string_utf8("List is empty.", 14)));
+        return NULL;
     }
     return kt_elements_of(((const KList *)list)->elements)[0];
 }
@@ -2534,6 +2539,7 @@ KRef kt_list_last(KRef list) {
     if (size == 0) {
         kt_throw(kt_throwable_new(&kt_type_no_such_element_exception,
                                   kt_string_utf8("List is empty.", 14)));
+        return NULL;
     }
     return kt_elements_of(((const KList *)list)->elements)[size - 1];
 }
@@ -2569,10 +2575,16 @@ KRef kt_mutable_list_new(void) {
     return (KRef)list;
 }
 
-/* `ArrayList(initialCapacity)`. The capacity is a hint and nothing observable depends on it, so an
-   invalid one is not a failure here — Kotlin's own throws, which this target will do once a
-   `catch` exists to see the difference. */
+/* `ArrayList(initialCapacity)`. The capacity is a hint and nothing observable depends on a valid
+   one, but a NEGATIVE one is an error Kotlin raises, with the JVM's wording, and a program may catch
+   it. */
 KRef kt_mutable_list_with_capacity(kt_int capacity) {
+    if (capacity < 0) {
+        KRef message = kt_string_plus(kt_string_utf8("Illegal Capacity: ", 18),
+                                      kt_to_string(kt_box_int(capacity)));
+        kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception, message));
+        return NULL;
+    }
     KRef list = kt_mutable_list_new();
     if (capacity > 0) {
         ((KMutableList *)list)->elements = kt_array_new(&kt_type_array, capacity);
@@ -2620,20 +2632,49 @@ kt_boolean kt_mutable_list_add(KRef self, KRef value) {
    result the caller has to remember to drop. */
 void kt_mutable_list_plus_assign(KRef self, KRef value) { kt_mutable_list_add(self, value); }
 
+/* Whether an exception is in flight. `kt_throw` records one and comes back, so every walk below
+   that asks an iterator for an element or calls back into emitted code looks here before it uses
+   the answer: after a raise the answer is a NULL that is no element, and the walk has to end so the
+   exception reaches its caller. Kotlin's own walks are ordinary loops, which a throw leaves at once;
+   one that went on would hand the NULL to the next step and call the program's lambda again. */
+static kt_boolean kt_raised(void) { return kt_pending_exception() != NULL; }
+
 /* `list += elements`, where the right-hand side is something to walk. Kotlin has one `plusAssign`
    per shape of that — an `Iterable`, an `Array`, a `Sequence` — and each appends every element in
-   order, which is the one walk this runtime already knows how to do. */
+   order, which is the one walk this runtime already knows how to do.
+
+   A LIST argument is copied by index up to the size it had when the call began, because that is
+   what Kotlin's `addAll` of a collection does: it takes the argument's elements out first. That is
+   what makes `xs.addAll(xs)` double the list, where walking `xs` with an iterator while appending
+   to it would see its own list modified at the second step. */
 void kt_mutable_list_add_all(KRef self, KRef elements) {
+    if (elements != NULL
+        && (elements->header.type == &kt_type_list || kt_is_mutable_list(elements))) {
+        kt_int count = kt_list_size(elements);
+        for (kt_int at = 0; at < count; at++) {
+            kt_mutable_list_add(self, kt_list_get(elements, at));
+        }
+        return;
+    }
     KRef iterator = kt_iterable_iterator(elements);
     while (kt_iterator_has_next(iterator)) {
-        kt_mutable_list_add(self, kt_iterator_next(iterator));
+        KRef element = kt_iterator_next(iterator);
+        if (kt_raised()) {
+            return;
+        }
+        kt_mutable_list_add(self, element);
     }
 }
 
 KRef kt_mutable_list_set(KRef self, kt_int index, KRef value) {
     KMutableList *list = (KMutableList *)self;
+    /* Returns straight after raising, as `add(index, e)` and `removeAt` below do: `kt_throw` records
+       the exception and comes back, and the write it forbids would land outside the elements --
+       over the storage's length for -1, past its end for an index beyond the capacity. Kotlin
+       leaves the list untouched. */
     if (index < 0 || index >= list->size) {
         kt_index_out_of_bounds(index, list->size);
+        return NULL;
     }
     KRef *slot = &kt_elements_of(list->elements)[index];
     KRef previous = *slot;
@@ -2645,6 +2686,7 @@ void kt_mutable_list_add_at(KRef self, kt_int index, KRef value) {
     KMutableList *list = (KMutableList *)self;
     if (index < 0 || index > list->size) {
         kt_index_out_of_bounds(index, list->size);
+        return;
     }
     kt_mutable_list_reserve(self);
     KRef *elements = kt_elements_of(list->elements);
@@ -2660,6 +2702,7 @@ KRef kt_mutable_list_remove_at(KRef self, kt_int index) {
     KMutableList *list = (KMutableList *)self;
     if (index < 0 || index >= list->size) {
         kt_index_out_of_bounds(index, list->size);
+        return NULL;
     }
     KRef *elements = kt_elements_of(list->elements);
     KRef removed = elements[index];
@@ -2741,6 +2784,13 @@ typedef struct KWalk {
     KObjectHeader header;
     KRef over;
     kt_int at;
+    /* For a `String` only, where the chars iterator keeps its PLACE in the text: the byte offset of
+       the next unit, and the trailing surrogate owed when the last unit handed out was the leading
+       half of a pair (zero when none is, as in `KUnits`). Finding unit `at` from the first byte on
+       every step made walking a string quadratic in its length. A string's text never changes, so
+       the place stays valid; a builder's can, and a builder is walked by index instead. */
+    kt_int byte_at;
+    kt_char trailing;
 } KWalk;
 
 static const uint32_t kt_walk_offsets[] = {offsetof(KWalk, over)};
@@ -2787,7 +2837,37 @@ static KRef kt_walk_of(const KType *type, KRef over) {
     KWalk *walk = (KWalk *)kt_gc_allocate(type, sizeof(KWalk));
     walk->over = over;
     walk->at = 0;
+    walk->byte_at = 0;
+    walk->trailing = 0;
     return (KRef)walk;
+}
+
+/* Whether the chars iterator has a unit left, and the next one. A `String` is walked from the
+   place the iterator keeps, through the same decoder `compareTo` uses; anything else -- a builder,
+   text the program wrote -- by index against its length, which is what Kotlin's own
+   `CharSequence.iterator()` does and what sees a write made to a builder mid-walk. */
+static kt_boolean kt_chars_has_next(const KWalk *walk) {
+    if (walk->over->header.type == &kt_type_string) {
+        return walk->trailing != 0 || walk->byte_at < walk->over->as.string.byte_length;
+    }
+    return walk->at < kt_string_length(walk->over);
+}
+
+/* The caller has asked `kt_chars_has_next` first. */
+static kt_char kt_chars_next(KWalk *walk) {
+    kt_int at = walk->at;
+    walk->at = at + 1;
+    if (walk->over->header.type != &kt_type_string) {
+        return kt_string_get(walk->over, at);
+    }
+    KUnits units = kt_units_of(walk->over);
+    units.at = walk->byte_at;
+    units.pending = walk->trailing;
+    kt_char unit = 0;
+    (void)kt_units_next(&units, &unit);
+    walk->byte_at = units.at;
+    walk->trailing = (kt_char)units.pending;
+    return unit;
 }
 
 /* One element of an array, boxed by the descriptor the ARRAY carries — the only thing that knows
@@ -2884,6 +2964,10 @@ kt_boolean kt_array_is_not_empty(KRef array) { return !kt_array_is_empty(array);
    exists. */
 KRef kt_iterable_to_typed_array(KRef iterable) {
     KRef list = kt_iterable_to_list(iterable);
+    /* A walk that raised answered no list, and its exception is the caller's to see. */
+    if (kt_raised()) {
+        return NULL;
+    }
     kt_int length = kt_list_size(list);
     KRef array = kt_array_new(&kt_type_array, length);
     for (kt_int index = 0; index < length; index++) {
@@ -2979,7 +3063,7 @@ KRef kt_array_content_to_string(KRef array) {
 static kt_boolean kt_walk_has_next(KRef iterator) {
     const KWalk *walk = (const KWalk *)iterator;
     if (iterator->header.type == &kt_type_chars_iterator) {
-        return walk->at < kt_string_length(walk->over);
+        return kt_chars_has_next(walk);
     }
     return walk->at < kt_length_of(walk->over);
 }
@@ -2993,11 +3077,11 @@ static kt_long kt_walk_next_long(KRef iterator) {
     if (!kt_walk_has_next(iterator)) {
         KT_FAIL("krusty: no more elements in this iterator\n");
     }
+    if (iterator->header.type == &kt_type_chars_iterator) {
+        return kt_chars_next(walk);
+    }
     kt_int at = walk->at;
     walk->at = at + 1;
-    if (iterator->header.type == &kt_type_chars_iterator) {
-        return kt_string_get(walk->over, at);
-    }
     const KType *type = walk->over->header.type;
     const void *elements = (const void *)((const KArray *)walk->over + 1);
     if (type == &kt_type_byte_array) {
@@ -3104,7 +3188,9 @@ static kt_boolean kt_indexed_value_equals(KRef self, KRef other) {
 
 static kt_int kt_indexed_value_hash_code(KRef self) {
     const KIndexedValue *indexed = (const KIndexedValue *)self;
-    return indexed->index * 31 + kt_hash_code(indexed->value);
+    /* On the unsigned ring, as `kt_list_hash_code` computes: Kotlin's `Int` wraps, and C's signed
+       overflow is undefined rather than a wrap. */
+    return (kt_int)((uint32_t)indexed->index * 31u + (uint32_t)kt_hash_code(indexed->value));
 }
 
 static KRef kt_indexed_value_to_string(KRef self) {
@@ -3260,13 +3346,8 @@ kt_boolean kt_iterator_has_next(KRef iterator) {
     if (iterator != NULL && iterator->header.type == &kt_type_list_iterator) {
         return kt_list_iterator_has_next(iterator);
     }
-    if (iterator != NULL && iterator->header.type == &kt_type_array_iterator) {
-        const KWalk *walk = (const KWalk *)iterator;
-        return walk->at < kt_length_of(walk->over);
-    }
-    if (iterator != NULL && iterator->header.type == &kt_type_chars_iterator) {
-        const KWalk *walk = (const KWalk *)iterator;
-        return walk->at < kt_string_length(walk->over);
+    if (kt_walk_is(iterator)) {
+        return kt_walk_has_next(iterator);
     }
     if (iterator != NULL && iterator->header.type == &kt_type_indexing_iterator) {
         return kt_iterator_has_next(((const KIndexingIterator *)iterator)->source);
@@ -3339,12 +3420,15 @@ static kt_int kt_iterable_size(KRef iterable) {
     kt_long step = bounds->step;
     uint64_t span = step > 0 ? (uint64_t)bounds->last - (uint64_t)bounds->first
                              : (uint64_t)bounds->first - (uint64_t)bounds->last;
-    uint64_t magnitude = (uint64_t)(step > 0 ? step : -step);
-    uint64_t count = span / magnitude + 1u;
-    if (count > (uint64_t)INT32_MAX) {
+    uint64_t magnitude = step > 0 ? (uint64_t)step : (uint64_t)0 - (uint64_t)step;
+    /* The count is the number of steps plus one, and the cap is tested on the STEPS: the full
+       64-bit span with a step of one is 2^64 - 1 steps, and adding the one wraps the count to zero,
+       which would pass the cap and collect the whole range as an empty list. */
+    uint64_t steps = span / magnitude;
+    if (steps >= (uint64_t)INT32_MAX) {
         KT_FAIL("krusty: a range too long to collect\n");
     }
-    return (kt_int)count;
+    return (kt_int)(steps + 1u);
 }
 
 /* `xs.map { … }`: one new list, the transform applied to each element in order.
@@ -3364,7 +3448,15 @@ KRef kt_iterable_map(KRef iterable, KRef transform) {
         KRef growing = kt_mutable_list_new();
         KRef walk = kt_iterable_iterator(iterable);
         while (kt_iterator_has_next(walk)) {
-            kt_mutable_list_add(growing, kt_invoke_one(transform, kt_iterator_next(walk)));
+            KRef element = kt_iterator_next(walk);
+            if (kt_raised()) {
+                return NULL;
+            }
+            KRef mapped = kt_invoke_one(transform, element);
+            if (kt_raised()) {
+                return NULL;
+            }
+            kt_mutable_list_add(growing, mapped);
         }
         return kt_frozen(growing, 0);
     }
@@ -3372,7 +3464,15 @@ KRef kt_iterable_map(KRef iterable, KRef transform) {
     KRef result = kt_list_of(elements);
     KRef iterator = kt_iterable_iterator(iterable);
     for (kt_int i = 0; i < size; i++) {
-        kt_elements_of(elements)[i] = kt_invoke_one(transform, kt_iterator_next(iterator));
+        KRef element = kt_iterator_next(iterator);
+        if (kt_raised()) {
+            return NULL;
+        }
+        KRef mapped = kt_invoke_one(transform, element);
+        if (kt_raised()) {
+            return NULL;
+        }
+        kt_elements_of(elements)[i] = mapped;
     }
     return result;
 }
@@ -3387,9 +3487,13 @@ KRef kt_iterable_join_to_string(KRef iterable) {
             joined = kt_string_plus(joined, separator);
         }
         first = 0;
+        KRef element = kt_iterator_next(iterator);
+        if (kt_raised()) {
+            return NULL;
+        }
         /* `kt_to_string` and not the element itself: `joinToString` renders each element the way
            `"$element"` would, through whatever `toString` the element's own type answers with. */
-        joined = kt_string_plus(joined, kt_to_string(kt_iterator_next(iterator)));
+        joined = kt_string_plus(joined, kt_to_string(element));
     }
     return joined;
 }
@@ -3398,7 +3502,14 @@ KRef kt_iterable_join_to_string(KRef iterable) {
 void kt_iterable_for_each(KRef iterable, KRef action) {
     KRef iterator = kt_iterable_iterator(iterable);
     while (kt_iterator_has_next(iterator)) {
-        kt_invoke_one(action, kt_iterator_next(iterator));
+        KRef element = kt_iterator_next(iterator);
+        if (kt_raised()) {
+            return;
+        }
+        (void)kt_invoke_one(action, element);
+        if (kt_raised()) {
+            return;
+        }
     }
 }
 
@@ -3425,6 +3536,11 @@ static KRef kt_invoke_two(KRef function, KRef first, KRef second) {
    pointer across one: each step re-reads through the list. */
 kt_int kt_comparator_compare(KRef comparator, KRef left, KRef right) {
     KRef answer = kt_invoke_two(comparator, left, right);
+    /* A comparator that THREW answered nothing too, and that is the program's exception, which its
+       caller must see; the zero is no ordering and the sort below stops on it. */
+    if (kt_raised()) {
+        return 0;
+    }
     if (answer == NULL) {
         KT_FAIL("krusty: a comparator answered nothing\n");
     }
@@ -3438,7 +3554,11 @@ void kt_list_sort_with(KRef list, KRef comparator) {
         while (hole > 0) {
             KRef previous = kt_list_get(list, hole - 1);
             KRef current = kt_list_get(list, hole);
-            if (kt_comparator_compare(comparator, previous, current) <= 0) {
+            kt_int order = kt_comparator_compare(comparator, previous, current);
+            if (kt_raised()) {
+                return;
+            }
+            if (order <= 0) {
                 break;
             }
             (void)kt_mutable_list_set(list, hole - 1, current);
@@ -3458,9 +3578,27 @@ static KRef kt_invoke_three(KRef function, KRef first, KRef second, KRef third) 
 }
 
 /* Whether a predicate answered true for an element. The answer arrives BOXED, because a function
-   value's `invoke` hands back a reference whatever its declared return type is. */
+   value's `invoke` hands back a reference whatever its declared return type is.
+
+   A predicate that threw answered NULL, which is no Boolean to unbox: this answers false for it,
+   and every caller asks `kt_raised` before it reads anything into the answer. */
 static kt_boolean kt_holds(KRef predicate, KRef element) {
-    return kt_unbox_boolean(kt_invoke_one(predicate, element));
+    KRef answer = kt_invoke_one(predicate, element);
+    if (kt_raised()) {
+        return 0;
+    }
+    return kt_unbox_boolean(answer);
+}
+
+/* The next element of a walk and whether the predicate holds for it, or false when either raised --
+   which `kt_raised` then tells the caller. The shared step of every walk below that asks a
+   predicate. */
+static kt_boolean kt_next_holds(KRef iterator, KRef predicate, KRef *element) {
+    *element = kt_iterator_next(iterator);
+    if (kt_raised()) {
+        return 0;
+    }
+    return kt_holds(predicate, *element);
 }
 
 /* `xs.any { … }`, `xs.all { … }` and `xs.none { … }` — one walk, three readings of it. Each stops
@@ -3469,8 +3607,12 @@ static kt_boolean kt_holds(KRef predicate, KRef element) {
 kt_boolean kt_iterable_any(KRef iterable, KRef predicate) {
     KRef iterator = kt_iterable_iterator(iterable);
     while (kt_iterator_has_next(iterator)) {
-        if (kt_holds(predicate, kt_iterator_next(iterator))) {
+        KRef element = NULL;
+        if (kt_next_holds(iterator, predicate, &element)) {
             return 1;
+        }
+        if (kt_raised()) {
+            return 0;
         }
     }
     return 0;
@@ -3479,7 +3621,8 @@ kt_boolean kt_iterable_any(KRef iterable, KRef predicate) {
 kt_boolean kt_iterable_all(KRef iterable, KRef predicate) {
     KRef iterator = kt_iterable_iterator(iterable);
     while (kt_iterator_has_next(iterator)) {
-        if (!kt_holds(predicate, kt_iterator_next(iterator))) {
+        KRef element = NULL;
+        if (!kt_next_holds(iterator, predicate, &element)) {
             return 0;
         }
     }
@@ -3504,6 +3647,9 @@ kt_int kt_iterable_count(KRef iterable) {
     kt_int counted = 0;
     while (kt_iterator_has_next(iterator)) {
         (void)kt_iterator_next(iterator);
+        if (kt_raised()) {
+            return 0;
+        }
         counted++;
     }
     return counted;
@@ -3513,8 +3659,12 @@ kt_int kt_iterable_count_matching(KRef iterable, KRef predicate) {
     KRef iterator = kt_iterable_iterator(iterable);
     kt_int counted = 0;
     while (kt_iterator_has_next(iterator)) {
-        if (kt_holds(predicate, kt_iterator_next(iterator))) {
+        KRef element = NULL;
+        if (kt_next_holds(iterator, predicate, &element)) {
             counted++;
+        }
+        if (kt_raised()) {
+            return 0;
         }
     }
     return counted;
@@ -3549,8 +3699,12 @@ static KRef kt_iterable_filtered(KRef iterable, KRef predicate, kt_boolean keep)
     KRef growing = kt_mutable_list_new();
     KRef iterator = kt_iterable_iterator(iterable);
     while (kt_iterator_has_next(iterator)) {
-        KRef element = kt_iterator_next(iterator);
-        if (kt_holds(predicate, element) == keep) {
+        KRef element = NULL;
+        kt_boolean holds = kt_next_holds(iterator, predicate, &element);
+        if (kt_raised()) {
+            return NULL;
+        }
+        if (holds == keep) {
             kt_mutable_list_add(growing, element);
         }
     }
@@ -3571,9 +3725,12 @@ KRef kt_iterable_filter_not(KRef iterable, KRef predicate) {
 KRef kt_iterable_first_or_null(KRef iterable, KRef predicate) {
     KRef iterator = kt_iterable_iterator(iterable);
     while (kt_iterator_has_next(iterator)) {
-        KRef element = kt_iterator_next(iterator);
-        if (kt_holds(predicate, element)) {
+        KRef element = NULL;
+        if (kt_next_holds(iterator, predicate, &element)) {
             return element;
+        }
+        if (kt_raised()) {
+            return NULL;
         }
     }
     return NULL;
@@ -3582,9 +3739,13 @@ KRef kt_iterable_first_or_null(KRef iterable, KRef predicate) {
 KRef kt_iterable_first_matching(KRef iterable, KRef predicate) {
     KRef iterator = kt_iterable_iterator(iterable);
     while (kt_iterator_has_next(iterator)) {
-        KRef element = kt_iterator_next(iterator);
-        if (kt_holds(predicate, element)) {
+        KRef element = NULL;
+        if (kt_next_holds(iterator, predicate, &element)) {
             return element;
+        }
+        /* The predicate's own exception, which must not be replaced by the one below. */
+        if (kt_raised()) {
+            return NULL;
         }
     }
     kt_throw(kt_throwable_new(
@@ -3599,8 +3760,12 @@ KRef kt_iterable_last_matching(KRef iterable, KRef predicate) {
     KRef found = NULL;
     kt_boolean any = 0;
     while (kt_iterator_has_next(iterator)) {
-        KRef element = kt_iterator_next(iterator);
-        if (kt_holds(predicate, element)) {
+        KRef element = NULL;
+        kt_boolean holds = kt_next_holds(iterator, predicate, &element);
+        if (kt_raised()) {
+            return NULL;
+        }
+        if (holds) {
             found = element;
             any = 1;
         }
@@ -3619,7 +3784,14 @@ KRef kt_iterable_fold(KRef iterable, KRef initial, KRef operation) {
     KRef accumulator = initial;
     KRef iterator = kt_iterable_iterator(iterable);
     while (kt_iterator_has_next(iterator)) {
-        accumulator = kt_invoke_two(operation, accumulator, kt_iterator_next(iterator));
+        KRef element = kt_iterator_next(iterator);
+        if (kt_raised()) {
+            return NULL;
+        }
+        accumulator = kt_invoke_two(operation, accumulator, element);
+        if (kt_raised()) {
+            return NULL;
+        }
     }
     return accumulator;
 }
@@ -3631,7 +3803,13 @@ void kt_iterable_for_each_indexed(KRef iterable, KRef action) {
     kt_int index = 0;
     while (kt_iterator_has_next(iterator)) {
         KRef element = kt_iterator_next(iterator);
+        if (kt_raised()) {
+            return;
+        }
         (void)kt_invoke_two(action, kt_box_int(index), element);
+        if (kt_raised()) {
+            return;
+        }
         index++;
     }
 }
@@ -3643,7 +3821,11 @@ static KRef kt_iterable_snapshot(KRef iterable, kt_boolean reversed) {
     KRef growing = kt_mutable_list_new();
     KRef iterator = kt_iterable_iterator(iterable);
     while (kt_iterator_has_next(iterator)) {
-        kt_mutable_list_add(growing, kt_iterator_next(iterator));
+        KRef element = kt_iterator_next(iterator);
+        if (kt_raised()) {
+            return NULL;
+        }
+        kt_mutable_list_add(growing, element);
     }
     return kt_frozen(growing, reversed);
 }
@@ -3659,9 +3841,16 @@ KRef kt_iterable_sorted_with(KRef iterable, KRef comparator) {
     KRef growing = kt_mutable_list_new();
     KRef iterator = kt_iterable_iterator(iterable);
     while (kt_iterator_has_next(iterator)) {
-        (void)kt_mutable_list_add(growing, kt_iterator_next(iterator));
+        KRef element = kt_iterator_next(iterator);
+        if (kt_raised()) {
+            return NULL;
+        }
+        (void)kt_mutable_list_add(growing, element);
     }
     kt_list_sort_with(growing, comparator);
+    if (kt_raised()) {
+        return NULL;
+    }
     return kt_frozen(growing, 0);
 }
 
@@ -3672,7 +3861,11 @@ kt_int kt_iterable_index_of(KRef iterable, KRef value) {
     KRef iterator = kt_iterable_iterator(iterable);
     kt_int at = 0;
     while (kt_iterator_has_next(iterator)) {
-        if (kt_equals(kt_iterator_next(iterator), value)) {
+        KRef element = kt_iterator_next(iterator);
+        if (kt_raised()) {
+            return -1;
+        }
+        if (kt_equals(element, value)) {
             return at;
         }
         at++;
@@ -3692,20 +3885,34 @@ kt_boolean kt_iterable_contains(KRef iterable, KRef value) {
 static KRef kt_iterable_walked_into(KRef iterable, KRef growing) {
     KRef iterator = kt_iterable_iterator(iterable);
     while (kt_iterator_has_next(iterator)) {
-        kt_mutable_list_add(growing, kt_iterator_next(iterator));
+        KRef element = kt_iterator_next(iterator);
+        if (kt_raised()) {
+            return growing;
+        }
+        kt_mutable_list_add(growing, element);
     }
     return growing;
 }
 
 KRef kt_iterable_plus_element(KRef iterable, KRef element) {
     KRef growing = kt_iterable_walked_into(iterable, kt_mutable_list_new());
+    if (kt_raised()) {
+        return NULL;
+    }
     kt_mutable_list_add(growing, element);
     return kt_frozen(growing, 0);
 }
 
 KRef kt_iterable_plus_all(KRef iterable, KRef tail) {
     KRef growing = kt_iterable_walked_into(iterable, kt_mutable_list_new());
-    return kt_frozen(kt_iterable_walked_into(tail, growing), 0);
+    if (kt_raised()) {
+        return NULL;
+    }
+    growing = kt_iterable_walked_into(tail, growing);
+    if (kt_raised()) {
+        return NULL;
+    }
+    return kt_frozen(growing, 0);
 }
 
 /* `xs.sumOf { … }`. Kotlin declares one per width the selector may answer, and the answer's TYPE
@@ -3713,13 +3920,25 @@ KRef kt_iterable_plus_all(KRef iterable, KRef tail) {
    sight, and each unboxes what `invoke` hands back at the width its own name says. Summing at one
    width and narrowing afterwards would not do: `Int` addition wraps and `Long` addition does not,
    and a program that sums to an overflow is entitled to Kotlin's answer. */
+/* The selector's answer for the next element, or NULL when the walk or the selector raised --
+   which `kt_raised` then tells the caller, before it unboxes anything. */
+static KRef kt_select_next(KRef iterator, KRef selector) {
+    KRef element = kt_iterator_next(iterator);
+    if (kt_raised()) {
+        return NULL;
+    }
+    return kt_invoke_one(selector, element);
+}
+
 kt_int kt_iterable_sum_of_int(KRef iterable, KRef selector) {
     KRef iterator = kt_iterable_iterator(iterable);
     kt_int total = 0;
     while (kt_iterator_has_next(iterator)) {
-        total = (kt_int)((uint32_t)total
-                         + (uint32_t)kt_unbox_int(kt_invoke_one(selector,
-                                                                kt_iterator_next(iterator))));
+        KRef selected = kt_select_next(iterator, selector);
+        if (kt_raised()) {
+            return 0;
+        }
+        total = (kt_int)((uint32_t)total + (uint32_t)kt_unbox_int(selected));
     }
     return total;
 }
@@ -3728,9 +3947,11 @@ kt_long kt_iterable_sum_of_long(KRef iterable, KRef selector) {
     KRef iterator = kt_iterable_iterator(iterable);
     kt_long total = 0;
     while (kt_iterator_has_next(iterator)) {
-        total = (kt_long)((uint64_t)total
-                          + (uint64_t)kt_unbox_long(kt_invoke_one(selector,
-                                                                  kt_iterator_next(iterator))));
+        KRef selected = kt_select_next(iterator, selector);
+        if (kt_raised()) {
+            return 0;
+        }
+        total = (kt_long)((uint64_t)total + (uint64_t)kt_unbox_long(selected));
     }
     return total;
 }
@@ -3739,7 +3960,11 @@ kt_double kt_iterable_sum_of_double(KRef iterable, KRef selector) {
     KRef iterator = kt_iterable_iterator(iterable);
     kt_double total = 0.0;
     while (kt_iterator_has_next(iterator)) {
-        total += kt_unbox_double(kt_invoke_one(selector, kt_iterator_next(iterator)));
+        KRef selected = kt_select_next(iterator, selector);
+        if (kt_raised()) {
+            return 0.0;
+        }
+        total += kt_unbox_double(selected);
     }
     return total;
 }
@@ -3751,23 +3976,30 @@ KRef kt_iterator_next(KRef iterator) {
     if (iterator->header.type == &kt_type_list_iterator) {
         return kt_list_iterator_next(iterator);
     }
-    if (iterator->header.type == &kt_type_array_iterator) {
+    if (kt_walk_is(iterator)) {
+        /* Asked before the read, because neither read checks: an array's element past the end is
+           whatever follows the storage, and a string's raises the wrong exception. Kotlin's
+           iterators raise `NoSuchElementException`. */
+        if (!kt_walk_has_next(iterator)) {
+            kt_throw(kt_throwable_new(&kt_type_no_such_element_exception, NULL));
+            return NULL;
+        }
         KWalk *walk = (KWalk *)iterator;
+        if (iterator->header.type == &kt_type_chars_iterator) {
+            return kt_box_char(kt_chars_next(walk));
+        }
         kt_int at = walk->at;
         walk->at = at + 1;
         return kt_array_element(walk->over, at);
-    }
-    if (iterator->header.type == &kt_type_chars_iterator) {
-        KWalk *walk = (KWalk *)iterator;
-        kt_int at = walk->at;
-        walk->at = at + 1;
-        return kt_box_char(kt_string_get(walk->over, at));
     }
     if (iterator->header.type == &kt_type_indexing_iterator) {
         KIndexingIterator *counting = (KIndexingIterator *)iterator;
         /* The element is fetched BEFORE the index is bumped, and it stays in a local across the
            allocation below so the collector sees it as a root. */
         KRef element = kt_iterator_next(counting->source);
+        if (kt_raised()) {
+            return NULL;
+        }
         kt_int at = counting->at;
         counting->at = at + 1;
         return kt_indexed_value(at, element);
