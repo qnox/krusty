@@ -1700,11 +1700,17 @@ static const kt_fn kt_range_vtable[] = {(kt_fn)kt_range_equals, (kt_fn)kt_range_
 
 /* A range type or a range iterator: the shape fixes the instance size, and the table decides the
    three `kotlin.Any` members. A range answers all three by its bounds, as Kotlin's declarations do;
-   an iterator is an ordinary object that answers by identity, as Kotlin's own iterators do. */
+   an iterator is an ordinary object that answers by identity, as Kotlin's own iterators do. The
+   fields are named rather than listed, so every field this does not mention is zero by rule and
+   not by position: a positional list shifts when `KType` gains a field, and `-Wextra` rejects one
+   that stops short of the last. */
 #define KT_RANGE_TYPE(identifier, kotlin_name, shape, table)                                       \
-    const KType identifier = {kotlin_name, sizeof(kotlin_name) - 1, sizeof(shape), 0,              \
-                              0,           NULL,                    &kt_type_any,                  \
-                              table, 3, 0};
+    const KType identifier = {.name = kotlin_name,                                                 \
+                              .name_length = sizeof(kotlin_name) - 1,                              \
+                              .instance_size = sizeof(shape),                                      \
+                              .super = &kt_type_any,                                               \
+                              .vtable = table,                                                     \
+                              .vtable_length = 3};
 
 KT_RANGE_TYPE(kt_type_int_range, "kotlin.ranges.IntRange", KRange, kt_range_vtable)
 KT_RANGE_TYPE(kt_type_long_range, "kotlin.ranges.LongRange", KRange, kt_range_vtable)
@@ -1728,11 +1734,6 @@ static kt_boolean kt_range_below(kt_boolean unsigned_bounds, kt_long a, kt_long 
     return unsigned_bounds ? (uint64_t)a < (uint64_t)b : a < b;
 }
 
-
-/* The last element a walk from `first` by `step` actually reaches, which is what `last` holds; see
-   the note on `KRange`. Both differences are taken at 64 bits, and the quotient truncates toward
-   zero, which is what makes one expression serve an ascending and a descending walk: the numerator
-   and the step always share a sign here, so the count is non-negative either way. */
 /* `a` reduced modulo `c` into `0 until c`, for `c > 0`. C's `%` answers the sign of `a`, which is
    the wrong half of the line for the difference below. */
 static kt_long kt_floor_mod(kt_long a, kt_long c) {
@@ -1796,16 +1797,26 @@ static kt_long kt_range_last_element(kt_boolean unsigned_bounds, kt_long first, 
     return last + kt_difference_modulo(first, last, -step);
 }
 
-static KRef kt_range_new_stepped(const KType *type, kt_long first, kt_long last, kt_long step) {
+static KRef kt_range_allocate(const KType *type, kt_long first, kt_long last, kt_long step,
+                              kt_boolean progression) {
     KRange *range = (KRange *)kt_gc_allocate(type, sizeof(KRange));
     range->first = first;
     range->last = kt_range_last_element(kt_range_unsigned(type), first, last, step);
     range->step = step;
+    range->progression = progression;
     return (KRef)range;
 }
 
+/* A progression: what `step`, `downTo` and `reversed()` answer. It is one even when its step is
+   `1` — `1..3 step 1` renders `1..3 step 1` — which is why the flag is kept rather than read off
+   the step. */
+static KRef kt_range_new_stepped(const KType *type, kt_long first, kt_long last, kt_long step) {
+    return kt_range_allocate(type, first, last, step, true);
+}
+
+/* A range: what `..` and `until` answer. */
 static KRef kt_range_new(const KType *type, kt_long first, kt_long last) {
-    return kt_range_new_stepped(type, first, last, 1);
+    return kt_range_allocate(type, first, last, 1, false);
 }
 
 KRef kt_int_range(kt_int first, kt_int last) {
@@ -1857,17 +1868,19 @@ KRef kt_char_range_until(kt_char first, kt_char last) {
 }
 
 /* The unsigned half-open forms. The minimum an unsigned type wraps at is ZERO, not its signed
-   minimum, so that is the bound `until` answers the empty range for. */
+   minimum, so that is the bound `until` answers the empty range for. And the empty range answered
+   is not the signed types' `1..0`: `UIntRange.EMPTY` is `UInt.MAX_VALUE..UInt.MIN_VALUE`, and
+   `ULongRange.EMPTY` the same pair at 64 bits, which `first` and `toString` both show. */
 KRef kt_uint_range_until(kt_int first, kt_int last) {
     if ((uint32_t)last == 0) {
-        return kt_uint_range(1, 0);
+        return kt_uint_range((kt_int)UINT32_MAX, 0);
     }
     return kt_uint_range(first, (kt_int)((uint32_t)last - 1));
 }
 
 KRef kt_ulong_range_until(kt_long first, kt_long last) {
     if ((uint64_t)last == 0) {
-        return kt_ulong_range(1, 0);
+        return kt_ulong_range((kt_long)UINT64_MAX, 0);
     }
     return kt_ulong_range(first, (kt_long)((uint64_t)last - 1));
 }
@@ -1885,8 +1898,6 @@ kt_long kt_range_first(KRef range) { return ((const KRange *)range)->first; }
 
 kt_long kt_range_last(KRef range) { return ((const KRange *)range)->last; }
 
-/* `value in range`. The bounds were stored at 64 bits with the element type's own signedness, so
-   the caller widens the same way and one comparison serves all three. */
 /* Membership in a range OR a progression, which Kotlin answers by walking and this answers in
    constant time with the same result.
 
@@ -1898,7 +1909,11 @@ kt_long kt_range_last(KRef range) { return ((const KRange *)range)->last; }
 
    `last` is already the last element REACHED (see `KRange`), so an EMPTY range fails the bounds
    test for every value and needs no case of its own. A plain range steps by 1, where the
-   step test is always true. */
+   step test is always true.
+
+   The bounds were stored at 64 bits with the element type's own signedness, and the caller widens
+   the value the same way, so both tests read all five integral types once they read the unsigned
+   two as unsigned. */
 kt_boolean kt_range_contains(KRef range, kt_long value) {
     const KRange *self = (const KRange *)range;
     kt_boolean unsigned_bounds = kt_range_unsigned(range->header.type);
@@ -1914,38 +1929,69 @@ kt_boolean kt_range_contains(KRef range, kt_long value) {
             return false;
         }
     }
-    /* Taken on the ring rather than the line, so an unsigned walk and a descending one are the
-       same expression: the value is reached iff it is congruent to `first` modulo the step. */
-    return kt_difference_modulo(value, self->first, step > 0 ? step : -step) == 0;
+    /* Taken on the ring rather than the line, so an ascending walk and a descending one are the
+       same expression: the value is reached iff it is congruent to `first` modulo the step. On the
+       UNSIGNED ring for the unsigned two, as `kt_range_last_element` does it: a `ULong` above 2^63
+       reads as a negative `kt_long`, whose signed residue is a different number, so
+       `9223372036854775809uL in (0uL..ULong.MAX_VALUE step 3)` would answer false. */
+    kt_long magnitude = step > 0 ? step : -step;
+    if (unsigned_bounds) {
+        return kt_difference_modulo_unsigned((uint64_t)value, (uint64_t)self->first,
+                                             (uint64_t)magnitude)
+               == 0;
+    }
+    return kt_difference_modulo(value, self->first, magnitude) == 0;
 }
 
-/* Two ranges are equal when both are empty, or when both bounds match -- and only within one range
-   type: `1..3` is an `IntRange` and never equals the `LongRange` of the same bounds. */
+/* Two are equal when both are empty, or when both bounds match -- and only within one element
+   type: `1..3` is an `IntRange` and never equals the `LongRange` of the same bounds. A progression
+   compares its step as well, so `10 downTo 1` is not `10..1`, and `1..9 step 2` is not
+   `1..9 step 4`.
+
+   The two classes do not answer each other symmetrically, and Kotlin's do not either: `IntRange`
+   subclasses `IntProgression`, so a progression's `equals` accepts a range (`(1..3 step 1) ==
+   (1..3)` is true), while a range's accepts only a range (`(1..3) == (1..3 step 1)` is false). */
 static kt_boolean kt_range_equals(KRef self, KRef other) {
     if (other == NULL || other->header.type != self->header.type) {
         return false;
     }
     const KRange *a = (const KRange *)self;
     const KRange *b = (const KRange *)other;
+    if (!a->progression && b->progression) {
+        return false;
+    }
     if (kt_range_empty(a) && kt_range_empty(b)) {
         return true;
     }
-    return a->first == b->first && a->last == b->last;
+    return a->first == b->first && a->last == b->last && (!a->progression || a->step == b->step);
 }
 
-/* Kotlin's own: `-1` for an empty range, else `31 * first + last`, with each bound folded through
-   its own `hashCode` first -- which for a `Long` is the two halves xored together. */
+/* A 64-bit bound or step folded the way `Long.hashCode` folds it: the two halves xored together.
+   Only the low 32 bits of any sum of these matter, and those depend only on the low 32 bits of
+   each part, so folding first and summing at 32 bits answers what Kotlin's `Long` sum and
+   `toInt()` do. */
+static uint32_t kt_range_fold(kt_long value) {
+    return (uint32_t)((uint64_t)value ^ ((uint64_t)value >> 32));
+}
+
+/* Kotlin's own: `-1` for an empty one; `31 * first + last` for a range, and
+   `31 * (31 * first + last) + step` for a progression; each part folded through its own type's
+   `hashCode` first, which for `Long` and `ULong` is `kt_range_fold` and for the narrower types is
+   the value itself. */
 static kt_int kt_range_hash_code(KRef self) {
     const KRange *range = (const KRange *)self;
     if (kt_range_empty(range)) {
         return -1;
     }
-    if (self->header.type == &kt_type_long_range || self->header.type == &kt_type_ulong_range) {
-        kt_int first = (kt_int)(range->first ^ (kt_long)((uint64_t)range->first >> 32));
-        kt_int last = (kt_int)(range->last ^ (kt_long)((uint64_t)range->last >> 32));
-        return (kt_int)(31u * (uint32_t)first + (uint32_t)last);
+    kt_boolean wide =
+        self->header.type == &kt_type_long_range || self->header.type == &kt_type_ulong_range;
+    uint32_t first = wide ? kt_range_fold(range->first) : (uint32_t)range->first;
+    uint32_t last = wide ? kt_range_fold(range->last) : (uint32_t)range->last;
+    uint32_t hash = 31u * first + last;
+    if (range->progression) {
+        hash = 31u * hash + (wide ? kt_range_fold(range->step) : (uint32_t)range->step);
     }
-    return (kt_int)(31u * (uint32_t)range->first + (uint32_t)range->last);
+    return (kt_int)hash;
 }
 
 /* A range's iterator: the bounds again, plus the one bit that makes the LAST step terminate
@@ -2093,7 +2139,11 @@ kt_long kt_range_iterator_next(KRef iterator) {
     if (value == self->last) {
         self->has_next = false;
     } else {
-        self->next = value + self->step;
+        /* Added on the unsigned ring, which is exact for every type here: the result is the next
+           element, which the walk reaches and so fits. Only the arithmetic has to be told so — a
+           `ULong` walk from `Long.MAX_VALUE` to the next value is a SIGNED overflow in `kt_long`,
+           undefined behaviour, however right the bits it usually produces. */
+        self->next = (kt_long)((uint64_t)value + (uint64_t)self->step);
     }
     return value;
 }
@@ -2246,16 +2296,16 @@ static const kt_fn kt_comparable_range_vtable[] = {(kt_fn)kt_comparable_range_eq
                                                    (kt_fn)kt_comparable_range_hash_code,
                                                    (kt_fn)kt_comparable_range_to_string};
 
-const KType kt_type_comparable_range = {"kotlin.ranges.ComparableRange",
-                                        sizeof("kotlin.ranges.ComparableRange") - 1,
-                                        sizeof(KComparableRange),
-                                        2,
-                                        0,
-                                        kt_comparable_range_offsets,
-                                        &kt_type_any,
-                                        kt_comparable_range_vtable,
-                                        3,
-                                        0};
+const KType kt_type_comparable_range = {
+    .name = "kotlin.ranges.ComparableRange",
+    .name_length = sizeof("kotlin.ranges.ComparableRange") - 1,
+    .instance_size = sizeof(KComparableRange),
+    .reference_count = 2,
+    .reference_offsets = kt_comparable_range_offsets,
+    .super = &kt_type_any,
+    .vtable = kt_comparable_range_vtable,
+    .vtable_length = 3,
+};
 
 KRef kt_comparable_range(KRef start, KRef end) {
     KComparableRange *range =
@@ -2283,8 +2333,8 @@ KRef kt_comparable_range_start(KRef range) { return ((const KComparableRange *)r
 KRef kt_comparable_range_end(KRef range) { return ((const KComparableRange *)range)->end; }
 
 /* Kotlin's own three, which are `ClosedRange`'s documented contract: two empty ranges are equal
-   whatever their bounds, `-1` hashes an empty one, and an empty range renders as an EMPTY string
-   rather than as its bounds. */
+   whatever their bounds, and `-1` hashes an empty one. `toString` is `"$start..$endInclusive"`
+   whether or not the range is empty, as `ComparableRange`'s own is. */
 static kt_boolean kt_comparable_range_equals(KRef self, KRef other) {
     if (other == NULL || other->header.type != &kt_type_comparable_range) {
         return false;
@@ -2313,21 +2363,38 @@ static KRef kt_comparable_range_to_string(KRef self) {
 }
 
 
-/* `"$first..$last"`, with a `CharRange`'s bounds rendered as the characters they are. */
+/* Append `count` bytes of `text` at `out`, answering how many were written. */
+static kt_int kt_range_put(char *out, const char *text, kt_int count) {
+    memcpy(out, text, (size_t)count);
+    return count;
+}
+
+/* `"$first..$last"` for a range. A progression names its step as well, and a descending one is
+   written the way it is built: `"$first..$last step $step"`, or `"$first downTo $last step
+   ${-step}"`. A `CharRange`'s bounds render as the characters they are and an unsigned range's
+   as unsigned numbers; the step is a signed `Int` or `Long` whatever the element type. */
 static KRef kt_range_to_string(KRef self) {
     const KRange *range = (const KRange *)self;
     kt_boolean chars = self->header.type == &kt_type_char_range;
     kt_boolean unsigned_bounds = kt_range_unsigned(self->header.type);
-    KByteArray *buffer = kt_bytes_new(48);
+    kt_boolean descending = range->progression && range->step < 0;
+    /* Two 20-digit bounds, " downTo " and " step ", and a 19-digit step. */
+    KByteArray *buffer = kt_bytes_new(80);
     char *out = kt_bytes_of(buffer);
     kt_int length = chars ? kt_render_char((kt_char)range->first, out)
                     : unsigned_bounds ? kt_render_ulong((uint64_t)range->first, out)
                                       : kt_render_long(range->first, out);
-    out[length++] = '.';
-    out[length++] = '.';
+    length += descending ? kt_range_put(out + length, " downTo ", 8)
+                         : kt_range_put(out + length, "..", 2);
     length += chars ? kt_render_char((kt_char)range->last, out + length)
               : unsigned_bounds ? kt_render_ulong((uint64_t)range->last, out + length)
                                 : kt_render_long(range->last, out + length);
+    if (range->progression) {
+        length += kt_range_put(out + length, " step ", 6);
+        /* The magnitude: a step is never `Long.MIN_VALUE` (see `kt_range_last_element`), so the
+           negation cannot overflow. */
+        length += kt_render_long(descending ? -range->step : range->step, out + length);
+    }
     return kt_string_of((KRef)buffer, kt_bytes_of(buffer), length);
 }
 
@@ -2344,9 +2411,17 @@ kt_int kt_array_copy_into(KRef destination, kt_int at, KRef source) {
         KT_FAIL("krusty: a spread of null\n");
     }
     kt_int length = ((const KArray *)source)->length;
+    kt_int capacity = ((const KArray *)destination)->length;
     uint32_t stride = destination->header.type->element_size;
-    if (at < 0 || length < 0 || at + length > ((const KArray *)destination)->length) {
-        kt_index_out_of_bounds(at + length, ((const KArray *)destination)->length);
+    /* The end is taken at 64 bits: `at + length` in `kt_int` overflows for a start near
+       `Int.MAX_VALUE`, which is undefined behaviour and in practice wraps negative and passes. */
+    if (at < 0 || length < 0 || (kt_long)at + length > capacity) {
+        /* The index reported is the first one the copy would write outside the array: the start
+           when that is below it, else the first past its end. The RETURN matters: the exception is
+           recorded, not raised, so falling through would copy past the destination's end and over
+           whatever the heap holds next, before anything reads the exception. */
+        kt_index_out_of_bounds(at < 0 ? at : capacity, capacity);
+        return at;
     }
     memcpy((char *)(KArray *)destination + sizeof(KArray) + (size_t)at * stride,
            (const char *)(const KArray *)source + sizeof(KArray), (size_t)length * stride);

@@ -131,3 +131,28 @@ fn a_write_to_a_full_non_blocking_pipe_keeps_writing() {
         "the payload arrives in order"
     );
 }
+
+#[test]
+fn a_ulong_progression_across_two_to_the_63_contains_its_members() {
+    run_driver("range_contains_unsigned");
+}
+
+#[test]
+fn a_progression_renders_compares_and_hashes_with_its_step() {
+    run_driver("range_progression_members");
+}
+
+#[test]
+fn an_empty_unsigned_until_is_the_declared_empty_range() {
+    run_driver("range_unsigned_until_empty");
+}
+
+#[test]
+fn a_ulong_walk_across_two_to_the_63_steps_without_signed_overflow() {
+    run_driver("range_iterator_ulong_crosses_sign");
+}
+
+#[test]
+fn a_spread_copy_that_does_not_fit_throws_and_writes_nothing() {
+    run_driver("array_copy_into_bounds");
+}
